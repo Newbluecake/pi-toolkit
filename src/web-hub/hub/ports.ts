@@ -17,6 +17,8 @@
  * per §11's "改签名 ⇒ 回到 W1 文件重新过 typecheck + 契约测试".
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
+import type { KdfShape } from "./kdf.js";
+import type { KdfUpgrader } from "./kdf-upgrade.js";
 import type { AgentCard, HistoryPayload } from "../protocol/http-contract.js";
 import type { AvatarInfo, AvatarPath } from "../protocol/avatar.js";
 import type {
@@ -128,6 +130,8 @@ export interface LanFrontendDeps {
   approval?: LoginApprovalPort;
   /** Core registration for the late-bound Feishu decision sink. Cleared on dispose. */
   onLoginCore?(core: LanLoginCore | undefined): void;
+  /** #66: KDF timing/dummy target (see `KdfPolicy`); absent = v0.10 behaviour. */
+  kdfPolicy?: KdfPolicy;
   cfg: HubLanConfig;
   store: LanStorePort; // §4
   kdf: KdfPort; // §5.1
@@ -321,8 +325,9 @@ export interface LanSessionRecord {
  * narrow lookup rather than widening `LanSessionRecord` itself, since
  * `initialPasswordInUse` has nothing to do with session validity and every
  * *other* `touchSession` call site (SSE open/subscribe/unsubscribe/history,
- * §4.2) has no use for it. `initialPasswordInUse` is `users.initial_password
- * IS NOT NULL` (§5.2: "只要初始密码还在使用").
+ * §4.2) has no use for it. `initialPasswordInUse` is
+ * `initial_created_at IS NOT NULL OR initial_password IS NOT NULL` (#66 D4: the plaintext is wiped
+ * at the first login, but the generated password is still the account's password until a change).
  */
 export interface LanUserSummary {
   username: string;
@@ -332,7 +337,25 @@ export interface LanUserSummary {
 export type DeleteLanUserResult =
   { ok: true; userId: number } | { ok: false; reason: "not-found" | "primary" | "last-user" };
 
+export interface KdfRow {
+  n: number;
+  r: number;
+  p: number;
+  salt: Uint8Array;
+  hash: Uint8Array;
+}
+export interface PasswordRehashInput {
+  userId: number;
+  old: KdfRow;
+  next: KdfRow;
+}
+export type PasswordRehashResult = { ok: true } | { ok: false; reason: "stale" };
+
 export interface LanStorePort extends LanSecurityStorePort {
+  /** #66: immutable open-time writer verdict; absent on legacy fakes means writes stay legacy. */
+  readonly hardening?: { readonly writerActive: boolean };
+  /** Upgrade-only CAS. Never bumps epoch, removes sessions or changes initial_* fields. */
+  rehashPassword?(input: PasswordRehashInput, opts?: PortOptions): Promise<PasswordRehashResult>;
   /** Local admin only. Bounded projection (at most 256 accounts; overflow refuses). */
   listUsers(now: number, opts?: PortOptions): Promise<import("../protocol/messages.js").LanAccountSummary[]>;
   /** Refusal checks and CASCADE deletion share one transaction. */
@@ -382,7 +405,18 @@ export interface LanStorePort extends LanSecurityStorePort {
     input: { username: string; kdf: "scrypt"; n: number; r: number; p: number; salt: Uint8Array; hash: Uint8Array },
     opts?: PortOptions,
   ): Promise<void>;
-  markInitialLogin(username: string, ip: string, at: number, opts?: PortOptions): Promise<void>;
+  /**
+   * #66 D4: records the first initial-password login AND wipes the plaintext in one statement
+   * (`WHERE initial_password IS NOT NULL`, no epoch condition). `cleared` is whether this call did
+   * the wipe; legacy fakes may still resolve void.
+   */
+  markInitialLogin(username: string, ip: string, at: number, opts?: PortOptions): Promise<{ cleared: boolean } | void>;
+  /** #66 D4: coalesced fire-and-forget WAL TRUNCATE after a wipe; a failure raises a status warning. */
+  requestCheckpointTruncate?(): void;
+  /** #66: store-raised `LanStatus.warnings` tokens (currently `initial-password-residue`). */
+  warnings?(): readonly string[];
+  /** Fires when `warnings()` changed; returns the unsubscribe. */
+  onWarningsChanged?(cb: () => void): () => void;
   purgeExpired(now: number, opts?: PortOptions): Promise<number>;
 }
 
@@ -400,6 +434,20 @@ export interface KdfParams {
 
 export interface KdfPort {
   run(password: string, params: KdfParams, opts?: PortOptions): Promise<Uint8Array>;
+  /**
+   * #66 D6 timing compensation: ONE pool acquisition runs the real computation (`params`) and then a
+   * compensation computation (`pad`), resolving with the REAL result only after both finish. Optional
+   * so legacy fakes keep working — callers fall back to two `run` calls.
+   */
+  runPadded?(password: string, params: KdfParams, pad: KdfParams, opts?: PortOptions): Promise<Uint8Array>;
+}
+
+/**
+ * #66: the KDF shape every login/verify is timed against (`max(write target, strongest stored)`).
+ * Absent ⇒ the v0.10 shape (`KDF_LEGACY`, N=2^15). Supplied by the LAN store assembly.
+ */
+export interface KdfPolicy {
+  readonly verifyTarget: KdfShape;
 }
 
 // ---------------------------------------------------------------------------
@@ -1073,6 +1121,9 @@ export interface WorktreeGraphRoutes {
   readonly mode: "on" | "loopback";
   /** `GET /api/worktree-graph` — the one endpoint (§3; `X-PWH: 1` required). */
   handle(req: IncomingMessage, res: ServerResponse, query: URLSearchParams, io: PreviewRouteIo): Promise<void>;
+  /** `GET /api/worktree-graph/files` (`wtgraph.files.v1`) — one served commit's changed files.
+   * Optional so test doubles keep compiling; absent ⇒ the path answers like any unknown path. */
+  handleFiles?(req: IncomingMessage, res: ServerResponse, query: URLSearchParams, io: PreviewRouteIo): Promise<void>;
   /** Idempotent; aborts every active request and single-flight Gl execution ("hub-close"), ≤1 s. */
   dispose(reason: "close" | "startup-failure", deadline: ReqDeadline): Promise<void>;
 }
@@ -1225,13 +1276,15 @@ export interface LanSessionListRecord extends LanSessionRecord {
 export interface Lan2faState {
   state: "none" | "enrolled" | "inconsistent";
   totp: boolean;
+  /** Internal only; absent means usable. Never included in strict tfa status wire. */
+  totpUsable?: boolean;
   feishu: boolean;
   recoveryLeft: number;
   factorGen: number;
   repairNeeded?: string;
 }
 export type LanFactorVerdict =
-  { ok: true; recoveryLeft?: number } | { ok: false; reason: "bad" | "replay" | "stale" | "none" };
+  { ok: true; recoveryLeft?: number } | { ok: false; reason: "bad" | "replay" | "stale" | "none" | "unavailable" };
 export interface CreateSessionCheckedInput {
   userId: number;
   expectedEpoch: number;
@@ -1338,9 +1391,13 @@ export interface LanLoginCore {
   dispose(): void;
 }
 export interface LanLoginCoreDeps {
+  /** Login only (not privacy verification); owned/disposed by the HTTP frontend. */
+  kdfUpgrader?: KdfUpgrader;
   /** false keeps password completion usable until the second-factor UI is integrated. */
   secondFactorEnabled?: boolean;
   onCorruptKdfParams?: (username: string, reason: string) => void;
+  /** #66: KDF timing/dummy target (see `KdfPolicy`); absent = v0.10 behaviour. */
+  kdfPolicy?: KdfPolicy;
   store: LanStorePort;
   kdf: KdfPort;
   limiter: LoginLimiterPort & { isFresh?(ip: string): boolean };

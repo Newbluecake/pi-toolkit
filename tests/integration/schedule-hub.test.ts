@@ -22,7 +22,7 @@ import type { RunOutcome } from "../../src/core/types.js";
  * schedule service, real outbox) × a fake Feishu (HTTP + pbbp2 websocket fakes) × REAL agent-side pieces
  * (S1 ledger, A0 agent + router/coordinator, A1 background executor) talking over the hub's real unix socket.
  *
- *   SC2  create → approve → background run → report + pendingReports → `sched_changed` → hub discovers →
+ *   SC2  create → background run → report + pendingReports → `sched_changed` → hub discovers →
  *        Feishu final message → receipt → `sched_receipts` frame → agent removes the pending index entry.
  *   SC5  an OFFLINE session whose cron occurrences were missed (S1 sweep) → the hub's startup reconcile pushes ONE
  *        merged 「已错过」 card with the right count; nothing is pushed twice.
@@ -245,7 +245,7 @@ describe("scheduled reports × real hub child × fake Feishu", () => {
     }, 20);
     closers.add(async () => void clearInterval(poll));
 
-    // ---- AI creates, the user approves (S2: approval = defHash), a background run executes and reports
+    // ---- AI creates (takes effect at once), a background run executes and reports
     const created = await createTask(
       ports,
       {

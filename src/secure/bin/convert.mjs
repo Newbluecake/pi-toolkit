@@ -2211,7 +2211,11 @@ export async function recoverConvert(s, { ports, ctx }) {
   return { done: remaining.length === 0, remaining, lines };
 }
 
-const LEASE_RELEASE_WAIT = Object.freeze({ budgetMs: 3000, stepMs: 100 });
+// #69: 3 s proved too small on a loaded machine — the gocryptfs daemon's exit after
+// `fusermount3 -u` trails by only ~30 ms normally (measured), but heavy load (CI 4-worker runs)
+// produced rollback failures with the lease still held at the 3 s cap. 15 s keeps the same
+// fail-closed behaviour (still `held` ⇒ keep the vault, report incomplete) with headroom.
+const LEASE_RELEASE_WAIT = Object.freeze({ budgetMs: 15_000, stepMs: 100 });
 
 /**
  * After an unmount the lease flock is released only when the gocryptfs process actually exits, which can

@@ -12,9 +12,12 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI, ExtensionCommandContext, RegisteredCommand } from "@earendil-works/pi-coding-agent";
 import {
+  createCommandCaptureEngine,
   isFeishuInvocation,
   isWebInvocation,
+  webCmdIdOf,
   wrapCommandApi,
+  type CaptureInvocation,
   type CommandCapturePort,
 } from "../../src/commands/capture.js";
 import { wireWebHub } from "../../src/web-hub/agent/index.js";
@@ -344,5 +347,90 @@ describe("wrapCommandApi — captured ctx source markers (2026-10-22 fabric ruli
     expect(seen[0]).toBe(localCtx);
     expect(isWebInvocation(seen[0] as ExtensionCommandContext)).toBe(false);
     expect(isFeishuInvocation(seen[0] as ExtensionCommandContext)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #30 reload-result plan §1 D1 — the capture proxy's synthetic `webCmdId`
+
+const COMMAND_CTX = {
+  mode: "tui",
+  hasUI: true,
+  cwd: "/tmp",
+  ui: { notify: () => undefined },
+} as unknown as ExtensionCommandContext;
+
+function invocation(cmdId: string): CaptureInvocation {
+  return {
+    cmdId,
+    reqId: "req-1",
+    origin: { listener: "loopback", ip: "127.0.0.1", reqId: "abcdef0123456789" },
+    name: "mycmd",
+    args: "",
+    deadlineAt: Date.now() + 10_000,
+  };
+}
+
+describe("#30 webCmdIdOf — capture-proxy attribution (D1)", () => {
+  it("a claimed (web) invocation's proxy reports its cmdId; the raw ctx stays untouched", () => {
+    const engine = createCommandCaptureEngine();
+    let seen: { id?: string; web: boolean } | undefined;
+    let handler: ((a: string, x: ExtensionCommandContext) => unknown) | undefined;
+    const pi = wrapCommandApi(
+      {
+        registerCommand(_n: string, c: { handler: (a: string, x: ExtensionCommandContext) => unknown }) {
+          handler = c.handler;
+        },
+      } as unknown as ExtensionAPI,
+      () => engine,
+    );
+    pi.registerCommand("mycmd", {
+      description: "d",
+      handler: (_a: string, ctx: ExtensionCommandContext) => {
+        seen = { id: webCmdIdOf(ctx), web: isWebInvocation(ctx) };
+      },
+    } as never);
+    engine.arm(invocation("cmd-web-000000000001"));
+    handler!("", COMMAND_CTX);
+    expect(seen).toEqual({ id: "cmd-web-000000000001", web: true });
+    expect(webCmdIdOf(COMMAND_CTX)).toBeUndefined(); // the value lives on the proxy only
+  });
+
+  it("the synthetic property is non-enumerable (ownKeys pass through to the raw ctx)", () => {
+    const engine = createCommandCaptureEngine();
+    let keys: string[] = [];
+    let seen: string | undefined;
+    const pi = wrapCommandApi(
+      {
+        registerCommand(_n: string, c: { handler: (a: string, x: ExtensionCommandContext) => unknown }) {
+          handler = c.handler;
+        },
+      } as unknown as ExtensionAPI,
+      () => engine,
+    );
+    let handler: ((a: string, x: ExtensionCommandContext) => unknown) | undefined;
+    pi.registerCommand("mycmd", {
+      description: "d",
+      handler: (_a: string, ctx: ExtensionCommandContext) => {
+        keys = Object.keys(ctx as object);
+        seen = webCmdIdOf(ctx);
+      },
+    } as never);
+    engine.arm(invocation("cmd-web-000000000023"));
+    handler!("", COMMAND_CTX);
+    expect(seen).toBe("cmd-web-000000000023");
+    expect(keys).not.toContain("webCmdId");
+  });
+
+  it("a raw TUI ctx has no webCmdId — the attribution boundary (A3)", () => {
+    expect(webCmdIdOf(COMMAND_CTX)).toBeUndefined();
+    expect(isWebInvocation(COMMAND_CTX)).toBe(false);
+  });
+
+  it("webCmdIdOf ignores a non-string or empty synthetic value", () => {
+    expect(webCmdIdOf({ webCmdId: "" } as never)).toBeUndefined();
+    expect(webCmdIdOf({ webCmdId: 42 } as never)).toBeUndefined();
+    expect(webCmdIdOf({} as never)).toBeUndefined();
+    expect(webCmdIdOf({ webCmdId: "cmd-1" } as never)).toBe("cmd-1");
   });
 });

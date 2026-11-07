@@ -15,6 +15,10 @@ const quota = {
   scope5h: "5h",
   scopeWeek: "week",
   resetSuffix: "{clock} reset",
+  // 2026-11-03 费用折算（形态 B：挂在重置文案旁）：纯符号 token，两语言同形；
+  // Unpriced 变体的 `+` = 区间内有目录价缺失的用量，和是下界。
+  costSuffix: "≈{amount}",
+  costSuffixUnpriced: "≈{amount}+",
   pillAriaBase: "Subscription quota: {provider} {scope} {pct}%",
   pillAriaReset: "Subscription quota: {provider} {scope} {pct}%, resets {clock}",
   "provider.zai-coding-cn": "GLM",
@@ -31,7 +35,7 @@ const quota = {
   etaMinutes: "{n} min",
   etaHours: "{h} h",
   etaHoursMinutes: "{h}h {m}m",
-  etaWarn: "At current rate, exhausts in about {duration}",
+  etaWarn: "Exhausts in ~{duration}",
   footerSampledBy: "Sampled by the main session",
   footerUpdatedAt: "Updated {clock}",
   emptyNote: "No subscription quota data yet",
@@ -40,6 +44,7 @@ const quota = {
   // symmetric pair; protocol/model ids (droid-standard, droid/glm-…) stay lowercase everywhere.
   "provider.droid-standard": "Droid Std",
   "provider.droid-core": "Droid Core",
+  "provider.opencode-go": "OpenCode Go",
   scopeMonth: "month",
   overageCore: "Overage policy: Std → Core",
   overageCoreExhausted: "Overage policy: Std → Core (Core exhausted)",

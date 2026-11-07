@@ -1,3 +1,4 @@
+import { xsWebCommandArgs } from "@protocol/xs-web-command.js";
 /**
  * Password-mode (LAN) `HubTransport`/`PasswordTransport` adapter (vue-plan.md v2.1 §3.4, §5.2 —
  * P1). A thin wrapper around `@logic/password-client.js`'s `createPasswordClient` — never
@@ -51,7 +52,7 @@ import type {
   WtDiffOutcome,
 } from "./types.js";
 import type { WtDiffFileList, WtDiffFilePayload } from "@protocol/worktree-diff.js";
-import type { WtGraphPayload } from "@protocol/worktree-graph.js";
+import type { WtGraphCommitFiles, WtGraphPayload } from "@protocol/worktree-graph.js";
 
 export type PasswordTransportDeps = Parameters<typeof createPasswordClient>[0];
 
@@ -166,6 +167,15 @@ export function createPasswordTransport(deps: PasswordTransportDeps): PasswordTr
     runPage: <T = unknown>(agentKey: string, runId: string, before: string, limit?: number) =>
       client.runPage(agentKey, runId, before, limit) as Promise<RunPageResult<T>>,
     command: (req) => client.command(req) as Promise<CmdOutcome>,
+    xsActivate: (req) =>
+      client.command({
+        agentKey: req.agentKey,
+        id: req.id,
+        op: "command",
+        name: "fabric",
+        args: xsWebCommandArgs(req),
+        ...(req.expect ? { expect: req.expect } : {}),
+      }) as Promise<CmdOutcome>,
     dialog: (req) => client.dialog(req) as Promise<CmdOutcome>,
     login: (username, password) => client.login(username, password),
     submitSecondFactor: (body) => client.submitSecondFactor(body),
@@ -238,6 +248,9 @@ export function createPasswordTransport(deps: PasswordTransportDeps): PasswordTr
       // (`isRestAuthEndpoint` covers `/api/worktree-graph` by prefix) — never inside the
       // client, so nothing double-fires.
       graph: (req, opts) => client.worktreeGraph.graph(req, opts) as Promise<WtDiffOutcome<WtGraphPayload>>,
+      // wtgraph.files.v1: same prefix-rule 401 reporting (`/api/worktree-graph/files?…`).
+      commitFiles: (req, opts) =>
+        client.worktreeGraph.commitFiles(req, opts) as Promise<WtDiffOutcome<WtGraphCommitFiles>>,
     } satisfies WorktreeGraphTransport,
     // sysload plan §7.1/§7.3/§10 (package P4): thin cast over the logic client's `loadTop` —
     // 401 ⇒ onConn("auth") is reported by the fetch wrapper above (`REST_AUTH_PATHS` has an

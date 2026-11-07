@@ -1,0 +1,11 @@
+## Memory (proj) — 2 topic(s) · 3 block(s)
+
+### User rules (always on)
+- [general.002] 主会话只调度（2026-11-03 用户令）。
+- [general.001] 验收优先 deepseek-flash（2026-11-05 用户令）。（已到期，待用户确认）
+
+Topics (relevant blocks are injected automatically; read one with memory view <topic>):
+- general · 2 blocks · 1 expired
+- quota · 1 blocks · 1 expired
+
+<!-- pi-toolkit:memory proj -->

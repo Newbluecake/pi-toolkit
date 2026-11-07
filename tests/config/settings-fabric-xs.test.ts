@@ -1,11 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import {
-  DEFAULT_SETTINGS,
-  effectiveReceive,
-  isValidXsSessionId,
-  loadSettings,
-  parseFabricCrossSessionSettings,
-} from "../../src/config/settings.js";
+import { DEFAULT_SETTINGS, loadSettings } from "../../src/config/settings.js";
+import { effectiveReceive, isValidXsSessionId } from "../../src/fabric/xs/receive.js";
+import { parseFabricCrossSessionSettings } from "../../src/fabric/settings.js";
 
 /** fabric phase-2 XS0 (phase2-plan §4.1/§5.2/§5.3 #14): the `fabric.crossSession.*` leaves. */
 const defaults = DEFAULT_SETTINGS.fabric.crossSession;
@@ -40,6 +36,8 @@ describe("fabric.crossSession settings (phase2 §4.1)", () => {
         maxPendingPerTarget: 3,
         lateGraceS: 600,
       },
+      // #21 plan §1 D9 (user ruling): default on — effective only while xs ∧ reply ∧ wake
+      askRedirect: { enabled: true, timeoutS: 600, maxPerRun: 2 },
       // channel-plan §6.4 (CH0)
       channels: {
         enabled: true,
@@ -48,7 +46,9 @@ describe("fabric.crossSession settings (phase2 §4.1)", () => {
         broadcast: { outPerHour: 6, minIntervalS: 60, wakeOutPerHour: 2, maxRecipients: 16, wakeMaxRecipients: 4 },
       },
       // alias-plan §3.6 (AL0b)
-      alias: { enabled: true, offlineLeaseH: 168, coolMin: 10, takeMinOfflineMin: 10 },
+      alias: { enabled: true, offlineLeaseH: 168, coolMin: 10, takeMinOfflineMin: 10, autoFromCwd: true },
+      // fabric-xs-activation plan §3 P0 — key presence IS the hub-side gate
+      activation: { enabled: true },
     });
   });
 

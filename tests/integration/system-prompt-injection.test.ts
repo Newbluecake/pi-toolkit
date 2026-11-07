@@ -250,6 +250,9 @@ describe("wiring: available agent types are injected into the system prompt", ()
     // `before_provider_request`/`before_provider_headers`/`tool_execution_start`/
     // `tool_execution_end`/`message_end`/`thinking_level_select`/`session_compact_failed`
     // join this pre-guard set too (switch_context boundary drafts + child keepalive).
+    // fast (wireFastChild, pre-guard child receiver): `provider_stream_event` joins this
+    // set too — the child receiver observes stream events for the latest-observed tier;
+    // no command/UI/tool/host in a child session.
     expect(child.handlers.has("agent_end")).toBe(true);
     const childHook = child.handlers.get("before_agent_start")?.[0];
     expect(childHook!({ systemPrompt: "BASE" }, {})).toBeUndefined(); // present but inert (no sections registered)
@@ -272,6 +275,7 @@ describe("wiring: available agent types are injected into the system prompt", ()
         "agent_before_settle",
         "before_provider_request",
         "before_provider_headers",
+        "provider_stream_event",
         "tool_execution_start",
         "tool_execution_end",
         "message_end",

@@ -131,5 +131,12 @@ export interface FleetArchive {
   archive(kind: "run" | "bash", id: string, label: string): void;
   /** Unarchive (never needs the toast — the row just reappears). */
   unarchive(kind: "run" | "bash", id: string): void;
+  /** 2026-10-28 (fleet bash 「(+N more)」 must be displayable or archivable): archive the omitted
+   *  tail of this session's terminal bash jobs in one batch. `n` is the count the user clicked
+   *  on (informational — the agent re-derives and re-counts the actual set, and the drawer's
+   *  toast reports the agent's answer). The provider reports the outcome itself (toast), so the
+   *  caller need not await it. Optional so a control handle without the op (older build) keeps
+   *  the marker as plain text. */
+  archiveOmitted?(n: number): void | Promise<void>;
 }
 export const FLEET_ARCHIVE: InjectionKey<FleetArchive> = Symbol("web-hub-fleet-archive");

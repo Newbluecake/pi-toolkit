@@ -9,10 +9,10 @@
   Row shape mirrors the tree's terminal rows, dimmed: icon / optional type badge / title +
   @label / cost / time range. No per-row fold, no transcript open button (the run-open entry
   stays on the tree; an archived row is intentionally read-only display). Expand state is a
-  plain local ref (TodoPanel/WorktreePanel precedent — never persisted).
+  plain local ref (TasksPanel/WorktreePanel precedent — never persisted).
 -->
 <script setup lang="ts">
-import { computed, inject, ref } from "vue";
+import { computed, inject, ref, watch } from "vue";
 import type { FleetRowWire } from "@protocol/messages.js";
 import { useI18n } from "../../composables/useI18n.js";
 import AppIcon from "../../icons/AppIcon.vue";
@@ -29,6 +29,10 @@ const props = defineProps<{ rows: readonly FleetRowWire[]; set: ArchiveSet }>();
 const { t } = useI18n();
 const arch = inject(FLEET_ARCHIVE, null);
 const open = ref(false);
+/** fleet-fill-budget: the drawer re-balances when the archived list opens/closes (its rows sit in
+ *  the agents half; ResizeObserver on `.tree-scroll` never fires for a content-only change). */
+const emit = defineEmits<{ "update:open": [open: boolean] }>();
+watch(open, (v) => emit("update:open", v));
 
 function nameOf(row: FleetRowWire): string {
   return String(row.title ?? row.label ?? row.type ?? row.runId);

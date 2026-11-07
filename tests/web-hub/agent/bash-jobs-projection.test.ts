@@ -9,7 +9,9 @@ import {
   BASH_JOBS_WIRE_BUDGET_BYTES,
   bashJobsLightFingerprint,
   bashJobsWireBytes,
+  omittedTerminalJobIds,
   projectBashJobs,
+  projectBashJobsDetail,
   selectJobs,
   type BashJobsTails,
 } from "../../../src/web-hub/agent/bash-jobs.js";
@@ -358,5 +360,134 @@ describe("bashJobsLightFingerprint — D3-1", () => {
     const records = [job("b_a"), job("b_b")];
     const fp = (rs: readonly JobRecord[], at: number) => bashJobsLightFingerprint(selectJobs(rs, at, noRetention), at);
     expect(fp(records, NOW)).not.toBe(fp([records[0]!], NOW));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 2026-10-28 rework: `omitted` is archive-aware. The invariant that makes the `(+N more)` button
+// honest — what the op archives IS what the wire counts — is pinned over a seeded random sweep so
+// a future change to the caps, the ladder or the archive input cannot silently re-split them.
+// ---------------------------------------------------------------------------
+describe("archive-aware omitted (2026-10-28)", () => {
+  /** Fixed-seed LCG (numerical-recipes constants) — deterministic across runs and machines. */
+  function lcg(seed: number): () => number {
+    let x = seed >>> 0;
+    return () => {
+      x = (Math.imul(x, 1664525) + 1013904223) >>> 0;
+      return x / 0x1_0000_0000;
+    };
+  }
+
+  it("omitted counts only terminal, unarchived rows off the wire; running overflow is separate", () => {
+    const records: JobRecord[] = [];
+    for (let i = 0; i < 22; i++) records.push(job(`b_r${String(i).padStart(2, "0")}`, { createdAt: NOW - i }));
+    for (let i = 0; i < 5; i++) records.push(terminal(`b_t${i}`, { endedAt: NOW - i }));
+    const out = selectJobs(records, NOW, noRetention);
+    expect(out.rows).toHaveLength(20);
+    expect(out.rowsOverflowRunning).toBe(2);
+    expect(out.omitted).toBe(5);
+    expect(out.omittedIds).toEqual(["b_t0", "b_t1", "b_t2", "b_t3", "b_t4"]);
+    // Archiving two of them shrinks `omitted` by exactly two; the running overflow is untouched.
+    const out2 = selectJobs(records, NOW, noRetention, new Set(["b_t0", "b_t4"]));
+    expect(out2.omitted).toBe(3);
+    expect(out2.omittedIds).toEqual(["b_t1", "b_t2", "b_t3"]);
+    expect(out2.rowsOverflowRunning).toBe(2);
+  });
+
+  it("an archived row that IS on the wire changes nothing about omitted (it keeps its slot)", () => {
+    const records = Array.from({ length: 14 }, (_, i) =>
+      terminal(`b_t${String(i).padStart(2, "0")}`, { endedAt: NOW - i }),
+    );
+    const plain = projectBashJobs(records, undefined, NOW, noRetention)!;
+    const hidden = projectBashJobs(records, undefined, NOW, noRetention, new Set(["b_t00", "b_t01"]))!;
+    expect(hidden.rows.map((r) => r.id)).toEqual(plain.rows.map((r) => r.id)); // rows identical
+    expect(hidden.omitted).toBe(2);
+    expect(plain.omitted).toBe(2);
+  });
+
+  it("no archived input ⇒ wire identical to the pre-archive-aware projection (no new keys)", () => {
+    const records = [...Array.from({ length: 3 }, (_, i) => job(`b_r${i}`, { createdAt: NOW - i })), terminal("b_t0")];
+    const wire = projectBashJobs(records, undefined, NOW, noRetention)!;
+    expect(Object.keys(wire).sort()).toEqual(["failed", "rows", "running", "sampledAt", "total"]);
+    expect(projectBashJobs(records, undefined, NOW, noRetention, new Set())).toEqual(wire);
+  });
+
+  it("rowsOverflowRunning appears only when running rows were actually pushed out", () => {
+    const records = Array.from({ length: 21 }, (_, i) =>
+      job(`b_r${String(i).padStart(2, "0")}`, { createdAt: NOW - i }),
+    );
+    const wire = projectBashJobs(records, undefined, NOW, noRetention)!;
+    expect(wire.rowsOverflowRunning).toBe(1);
+    expect(wire.omitted).toBeUndefined(); // never mixed into `omitted`
+    expect(projectBashJobs(records.slice(0, 20), undefined, NOW, noRetention)!.rowsOverflowRunning).toBeUndefined();
+  });
+
+  it("INVARIANT (seeded sweep): omittedTerminalJobIds ≡ omitted (cap + byte ladder); ids are terminal, unarchived, off-wire", () => {
+    const rand = lcg(0x5eed_0c0a);
+    const pick = (n: number): number => Math.floor(rand() * n);
+    const fat = "\u0001".repeat(200); // JSON-escapes ×6 ⇒ pushes the D6 byte ladder into pass ⑤
+    for (let iter = 0; iter < 300; iter++) {
+      const nRun = pick(30);
+      const nTerm = pick(30);
+      const useFat = rand() < 0.3;
+      const records: JobRecord[] = [];
+      for (let i = 0; i < nRun; i++) {
+        records.push(
+          job(`r${String(i).padStart(3, "0")}`, { createdAt: NOW - 1_000 * i, ...(useFat ? { command: fat } : {}) }),
+        );
+      }
+      for (let i = 0; i < nTerm; i++) {
+        records.push(
+          terminal(`t${String(i).padStart(3, "0")}`, {
+            endedAt: NOW - 1_000 * i,
+            createdAt: NOW - 5_000 - 1_000 * i,
+            ...(useFat ? { command: fat } : {}),
+          }),
+        );
+      }
+      // Random archive subset over ALL ids (including ones that are running — archived set is only
+      // ever consulted for terminal rows, so those must be inert).
+      const archived = new Set(records.filter(() => rand() < 0.3).map((r) => r.jobId));
+      const d = projectBashJobsDetail(records, undefined, NOW, noRetention, archived);
+      const omitted = d.wire?.omitted ?? 0;
+      expect(d.omittedIds.length, `iter ${iter}`).toBe(omitted);
+      expect(new Set(d.omittedIds).size).toBe(d.omittedIds.length); // no duplicates
+      const onWire = new Set((d.wire?.rows ?? []).map((r) => String(r.id)));
+      for (const id of d.omittedIds) {
+        const rec = records.find((r) => r.jobId === id)!;
+        expect(rec.status, `iter ${iter} ${id}`).not.toBe("running");
+        expect(archived.has(id)).toBe(false);
+        expect(onWire.has(id)).toBe(false);
+      }
+      if (d.wire !== undefined) {
+        expect(bashJobsWireBytes(d.wire)).toBeLessThanOrEqual(BASH_JOBS_WIRE_BUDGET_BYTES);
+        // Conservation: every record is on the wire, omitted, archived-and-off-wire, or running overflow.
+        const archivedOff = records.filter(
+          (r) => r.status !== "running" && archived.has(r.jobId) && !onWire.has(r.jobId),
+        ).length;
+        expect(d.wire.rows.length + omitted + archivedOff + (d.wire.rowsOverflowRunning ?? 0), `iter ${iter}`).toBe(
+          d.wire.total,
+        );
+      }
+      // `omittedTerminalJobIds` is the same single pass: its length ALWAYS equals the wire's `omitted`
+      // — cap stage and byte ladder alike (the fat-command inputs drive pass ⑤).
+      expect(omittedTerminalJobIds(records, NOW, noRetention, archived)).toEqual([...d.omittedIds]);
+      expect(omittedTerminalJobIds(records, NOW, noRetention, archived)).toHaveLength(omitted);
+      // The cap-stage slice alone (`selectJobs`) is a prefix of it, and equals it when nothing was byte-dropped.
+      const sel = selectJobs(records, NOW, noRetention, archived);
+      expect(sel.omittedIds.length).toBe(sel.omitted);
+      expect([...d.omittedIds].slice(0, sel.omitted)).toEqual([...sel.omittedIds]);
+      if (!useFat) expect(sel.omitted).toBe(omitted);
+      // Archiving everything omitted ⇒ re-projection reports zero.
+      const after = projectBashJobsDetail(
+        records,
+        undefined,
+        NOW,
+        noRetention,
+        new Set([...archived, ...d.omittedIds]),
+      );
+      expect(after.wire?.omitted, `iter ${iter}`).toBeUndefined();
+      expect(after.omittedIds).toEqual([]);
+    }
   });
 });

@@ -6,6 +6,14 @@ export interface Watchdog {
   arm(runId: RunId, generation?: Generation): void;
   disarm(runId: RunId, generation?: Generation): void;
   tick(now: number): void;
+  /**
+   * Structured-output repair turn (plan §2.4): the session-wide budget this
+   * watchdog actually enforces (settings.budget, NOT the per-run budget).
+   * The runner reads it to bound the repair window by the EARLIER of the run
+   * budget and the watchdog budget. Optional so existing fake watchdogs
+   * stay valid; purely read-only — tick() logic is untouched.
+   */
+  readonly budget?: DeadlineBudget;
 }
 export interface WatchdogDeps {
   clock: Clock;
@@ -33,6 +41,10 @@ export class EventWatchdog implements Watchdog {
   private readonly armed = new Map<RunId, Generation>();
   private timer: TimerHandle | undefined;
   private readonly tickMs: number;
+  /** plan §2.4: the budget every tick() due computation uses — exposed read-only for the runner's repair-window arithmetic. */
+  get budget(): DeadlineBudget {
+    return this.deps.budget;
+  }
   constructor(private readonly deps: WatchdogDeps) {
     this.tickMs = deps.tickMs ?? 1000;
   }

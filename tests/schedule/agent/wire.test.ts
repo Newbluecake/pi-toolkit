@@ -365,3 +365,40 @@ describe("disposed-epoch registry (process global, FIFO-capped)", () => {
     expect(g[Symbol.for("pi-subagent:sched-disposed-epochs")]).toBeInstanceOf(Set);
   });
 });
+
+describe("ScheduleAgent.onChanged (#61)", () => {
+  it("fires on every local ledger write signal, unsubscribes, survives a throwing listener, and is cleared on dispose", () => {
+    const dir = join(mkTmp(), "schedules");
+    const warns: string[] = [];
+    const agent = createScheduleAgent({
+      ctx: { sessionManager: { getSessionId: () => SID, getEntries: () => [] } } as never,
+      mode: { kind: "interactive", arm: true },
+      sessionId: SID,
+      self: self(),
+      dir,
+      plain: true,
+      inVault: () => false,
+      clock: new FakeClock(T0),
+      warn: (m) => void warns.push(m),
+      router: undefined,
+    });
+    agents.push(agent);
+    let a = 0;
+    let b = 0;
+    agent.onChanged(() => {
+      throw new Error("bad listener");
+    });
+    const offA = agent.onChanged(() => void a++);
+    agent.onChanged(() => void b++);
+    agent.changed();
+    expect([a, b]).toEqual([1, 1]);
+    expect(warns.some((w) => w.includes("bad listener"))).toBe(true);
+    offA();
+    agent.changed();
+    expect([a, b]).toEqual([1, 2]);
+    agent.dispose();
+    agent.changed();
+    expect([a, b]).toEqual([1, 2]);
+    expect(agent.onChanged(() => void a++)()).toBeUndefined(); // disposed: inert unsubscribe
+  });
+});

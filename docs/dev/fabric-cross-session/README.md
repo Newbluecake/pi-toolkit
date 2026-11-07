@@ -22,6 +22,8 @@ mailbox, tree routing, per-link throttle. `message_agent` is scoped to subagents
 `src/runtime/tool-scope.ts`; routing relations come from the agent type's `can_message`
 frontmatter (default: parent only).
 
+**消息 kind（#34 起）**：`report`（子→父/祖先，注入对方模型上下文；请教、汇报、steer 的 ack/report 回复都用它）、`progress`（发给 root 时仅 TUI 展示）、`directive`（仅父→子）、`result`（子任务结果）、`dead_letter`（内部）。#34 把旧名 `finding` 彻底改为 `report`，这是 I10 的用户批准例外（2026-11-05），范围仅限：`message_agent` schema 的 kind 常量、持久化 `FabricRecord.kind`、context-message 正文首行 `[fabric <kind> …]`（随通用 `custom_message.content` 上 wire）、设置键、`steer_subagent` 两处 description 的词汇；PROTO/caps/`StatusInfo`/`xs_*`/`thr_*` 帧、WireEntry 字段与 `subagent:fabric` customType 均不变。不兼容：不做读侧归一化；stack 重建时，未投递的持久化记录如果 kind 不在当前集合（主要是旧值 `finding`），即置 `dropped`（`terminalReason:"unknown_kind"`），不发 dead letter，告警一行；pump、resume 候选与 trigger、WakeService 调度、`parkRetryAt` 都排除未知 kind：永不投递、永不注入、永不排定时器。冻结物：`fabric-wake-off-golden.json`、`fabric-xs-off-golden.json`、`message-agent-wake-schema-golden.json` 各改一行（kind anyOf const），手工申报式更新，未再生。设置键 `fabric.findingQuota` 同步改为 `fabric.reportQuota`（默认 10，旧键不再读取，静默忽略）。
+
 ## Wake phase 1
 
 **Wake phase 1 (in-tree only; `docs/dev/fabric-cross-session/plan.md` v3, packages S0/F0/W1–W6/G, reports
@@ -32,10 +34,13 @@ off — is on; read once at stack build, non-live). With wake on, `message_agent
 — never regenerate it — and C-P4): omitted = legacy byte-for-byte, `false` = deliver-only (to a finished run: **park**,
 pending until TTL or until a resume carries it; needs inbox durability `disk`/`session-memory`, `stack-memory` ⇒ legacy
 `target_gone` + `parkUnavailable`), `true` = wake (expensive; progress ⇒ `invalid_wake`). Wake to root is exactly the legacy
-steer+`triggerTurn` call (no new unmanaged root run path in phase 1). **Causal level** (`wake-level.ts`): `diag.wakeLevel`
+steer+`triggerTurn` call (no new unmanaged root run path in phase 1). **#61 production root admission now adds
+an independent user-arrival window for explicit child reports; see “Root wake budget” below.** **Causal level** (`wake-level.ts`): `diag.wakeLevel`
 (reducer input `wake_level`, monotonic, persisted with the terminal entry; root level in `subagent:wake-level`); only
 proven human input resets root (`wake-input.ts`'s `input` hook; runs never reset); an effective wake hop needs
-`level+1 ≤ maxLevel` else it silently downgrades to deliver-only (`level_limit`). **Successor coalescing**
+`level+1 ≤ maxLevel` else it silently downgrades to deliver-only (`level_limit`) on the legacy policy / non-root
+revive path. Production explicit root wakes use #61's window instead of the sender-level/per-run root gate;
+child levels and non-root revive gates are unchanged. **Successor coalescing**
 (`SpawnService.resumeOwners`/`successorOf`, mailbox `waitingFor`/`drainSession`): a message for a finished run whose
 session chain already has a successor waits for it (pending_start) or is redirect-steered into it (durable
 `steerAttempt`; a steer timeout/restart ⇒ audited consume, never a retry). **Revive** (`WakeService.revive`, the single
@@ -80,13 +85,26 @@ invocations via `isFeishuInvocation`, derived from the hub-internal `ip:"feishu"
 marker); web prompt text carrying `/fabric <mutation>` is likewise refused (defense-in-depth
 so prompt text can never bypass the policy gate). status/blocks stay read-only. Joined
 receive defaults to `wake` (`fabric.crossSession.receive`, `allowFrom`); fork/copy never inherits
-membership, even with autoJoin. `message_session` omits wake = deliver-only; `wake:true` alone may
+membership, even with autoJoin. **`/new` (and its web 「清空」 twin) DOES inherit** (2026-10-27 fix,
+`new-session-channels-fix.md`): the outgoing stack's explicit membership snapshot (channel pref, receive
+pref, blocklist, joinedAt) rides a consume-once `Symbol.for("pi-subagent:xs-membership-handoff")` slot from
+`session_shutdown{reason:"new"}` into the next stack, which `adopt()`s it (re-persisted under the NEW
+sessionId, so `/reload` keeps it) and it suppresses autoJoin exactly like a restored entry — an explicit
+leave therefore survives `/new` too. A pristine (never-touched) membership stashes nothing, so autoJoin
+behaviour for fresh sessions is unchanged. **Aliases follow `/new` too (#72 AF7, section 「Force takeover…」 below) — only `/new`; fork never inherits an alias.** `message_session` omits wake = deliver-only; `wake:true` alone may
 start a turn through `RootWakeController` (no steer), gated by `fabric.wake.enabled`, causal level,
-capability, goal and quotas. Unknown host capability downgrades to deliver-only until real runtime
-shape evidence; root deadline `fabric.wake.rootRunMaxS` (default 900s) starts at dispatch, including
+capability (`absent` ⇒ `host_unsupported` deliver-only; `unknown` ⇒ **optimistic dispatch** since
+wake-unknown-optimistic 2026-11: the first run is authorized by BAS or aborted at its first
+`context` sight before any provider request on verified-shape hosts 1.0.4/1.1.0/1.4.0 — legacy
+conformance + C-X12 gates; other shapes degrade to a bounded supervised run; `woke:true` means
+"dispatch accepted", same as `start_deferred`, not a provider-request guarantee), goal and quotas.
+root deadline `fabric.wake.rootRunMaxS` (default 900s) starts at dispatch, including
 pre-start compaction. Token authorization and dedup survive /reload; marked unauthorized/expired
 triggers abort before their first provider request (B1); human handover only after proven own-run
-start. Mutation fences (compaction/tree/switch/web_exec/topic_switch) reject ALL ingress; goal
+start. Peer-upgrade gates: C-X1…C-X12 with real pi, **plus** the self-gated legacy conformance
+(`PI_TOOLKIT_LEGACY_PI_DIR=… npx vitest run tests/conformance/fabric-xs-legacy.test.ts` against
+unpacked pi 1.0.4 and 1.1.0 — local only, never in CI) — run both before any pi peer bump.
+Mutation fences (compaction/tree/switch/web_exec/topic_switch) reject ALL ingress; goal
 only downgrades wake. A 30s stuck warning never opens a fence; input/run-start is NOT completion
 evidence (r3 M1); local `/fabric fence reset` is the manual escape. M2 effects: before-send
 cancellation/origin change = `none`; after-send no verdict = `unknown`, received remote evidence
@@ -125,7 +143,15 @@ retried on event-driven flush points + 30 s fallback, dropped at `lateUntil` and
 re-owed). **@session mention** (`src/mention/session.ts`, `fabric/xs/directory.ts`): `@session:<ref|name>` explicit form and
 a bare `@name` (R6 priority: subagent/real file path win; path-shaped never; a bare-name cache miss triggers one throttled
 directory refresh); not joined / xs off ⇒ passes through untouched; a human-origin reply wakes per receive mode and
-cross-session messages are user-visible (RX7 — do not hard-code the old R4 "display only"). Settings
+cross-session messages are user-visible (RX7 — do not hard-code the old R4 "display only"). **Handled-input
+report (2026-11-04 fix)**: `installMentionInput` answers pi `{action:"handled"}` only after calling the optional
+`MentionRouteDeps.onHandled` once with the raw `event.text` (`wire.ts` injects
+`webHubRef.current?.noteInputHandled`) — a handled answer short-circuits pi's input chain, so without the report the
+web-hub prompt ledger's `dispatched` entry would decay to `unconfirmed(unobserved)` ("sent · unconfirmed") although the
+mention router really applied the message; `CommandHandler.onInputHandled` flips the session/owner-scoped
+`findDispatchedByText` match to `consumed` (miss/ambiguity ⇒ no-op, never a guessed cmdId). Gates:
+`tests/web-hub/agent/commands-input-handled.test.ts`, `tests/mention/mention.test.ts` (onHandled block),
+`tests/integration/fabric-xs-mention.test.ts` (31 s ctl check). Settings
 `fabric.crossSession.reply.{enabled,defaultTimeoutS,maxTimeoutS,maxPending,maxPendingPerTarget,lateGraceS}` (frozen at
 stack build; `timeoutS` above the max is clamped). Visibility: `/agent status` adds
 `xs replies p<pending>/<max> i<inbox> to<timedOut> late<n> rej<n> owed<n> drop<n> · ledger n/64` (absent when reply is
@@ -220,6 +246,88 @@ before any pi peer bump). The three off goldens and `tests/fixtures/legacy-xs-v0
 (hand-deleted file ⇒ fresh table, display name equal to an unreachable alias, >20 aliases truncate list, cooling only mitigates stale-list mis-sends,
 `lost` notice once per process, preview discloses holder cwd/offline time).
 
+**Force takeover + cwd-basename auto alias (#72, `alias-force-default-plan.md` r2 — the 「用户拍板」 and 「r2 修订对照表」 at its end override the
+body; packages AF0–AF4/AFU/AFW/AF6/AF7, reports `AF*-report.md`)**: everything above stays; this layer is additive and
+gated on the cap `xs.alias.v2` (both surfaces, same condition as v1, declared right after it; no PROTO bump).
+
+- **`--force`**: `/fabric alias <名> --force` is PREVIEW ONLY and mutually exclusive with `--take`/`--take=<t>`/`--clear` (any combination or
+  `--force=x` ⇒ usage error, zero requests). Unlike `--take` it works on an ONLINE or just-offline holder. TUI: `ctx.ui.confirm` (title
+  `强制抢占别名「x」？`, detail names the holder's cwd, 「（自动认领）」 when the record's `origin` is `auto`, online / offline time, and that later
+  messages re-route); web/RPC: the same text ending with the unchanged fixed `XS_ALIAS_TAKE_CONFIRM_RE` line. Execution is the existing
+  `--take=<token>`; the token carries `mode:"force"` + `presenceKey` (`on` | `off:<offlineSince>`), a mode=take token never executes as force and vice
+  versa, every outcome consumes it. A `--take` refusal (`online`/`recent`) or a `set` on a taken name appends the `--force` pointer when the hub is v2
+  (D5). Hub order in the transaction: token + `R.sessionId===H` + `R.rev` + presence + `notifiable(H)` re-checked at execute AND before rename.
+- **Presence is three-state** (hub read-time): `xs-online` (an effective xs member) / `linked` (connected, phase≠stale, same sessionId, but no xs
+  member — xs off, or not yet published) / `offline`. `take`, lease expiry and `offlineSince` still look at xs-online only (the 10-minute rule is
+  unchanged); `linked` exists for force. `notifiable(H)` = offline, or xs-online with EVERY effective member declaring `xs.alias.v2`; linked ⇒ never.
+  Unnotifiable ⇒ `E_XS_ALIAS_TAKE{unnotifiable}` (「持有会话在线但无法实时通知…请待其离线 ≥10 分钟后用 --take」); only `--take` remains.
+- **Real-time notice**: after the commit (also a wedged rename that lands late; never a late failure) the hub pushes `xs_alias_evt{sessionId,at}` — no
+  alias text — to every v2 effective member of the evicted session; the agent only answers it with a `get` reconcile, which yields `lost{taken, forced:true}`
+  and the one-shot 「别名…已被其他会话强制抢占（对方已人工确认）」 notice (same per-process `(sid, lost.at)` dedup as the plain lost notice; `StatusInfo`
+  is untouched, `publishStatus()` clears the card's `@alias`). The tombstone (`taken`, optional `forced:true`) remains the fallback if the push is lost.
+- **Auto alias** (`fabric.crossSession.alias.autoFromCwd`, default **true**, non-live, agent-side only — never written into the hub config; it is the only
+  crossSession key in `/agent settings`): after a `get` that was applied and says `none`, a main session that is joined, not `decided`, on a v2 hub,
+  derives `deriveAliasFromDirName(cwd basename)` (NFKC → illegal code points to `-` → trim → ≤16 clusters/≤48 bytes; `/`, `$HOME`, tmpdir, reserved
+  prefixes such as this repo's `pi-toolkit` and id-like names are SKIPPED, never prefixed/suffixed/stripped) and sends `intent:"auto"`. The hub only
+  CREATES a record (`origin:"auto"`): refused (`TAKEN`, a synchronous pre-check that does not use the queue) while the name has any held record (expired
+  included) or live cooling, or while the session owns a held/live-cooling record or a tombstone younger than 30 days. Dedup key
+  `(connGen, sessionId, membershipEpoch)`; `BUSY{queue|io}` retried once after 1–5 s (unref'd, `clampSpanMs`); one-shot success notice through its own
+  process set `pi-subagent:xs-alias-auto-noticed` (≤32). Sub-sessions have no xs bridge and never auto; secure (D8) forces xs off.
+  `/fabric status`: `alias @x held (auto) · lease …` and `alias - · auto skip:<off|decided|not-joined|dir|invalid|taken|busy>` (English tokens). With
+  `autoFromCwd=false` or a non-v2 hub the status lines are byte-identical to the v1 build.
+- **「decided」mark**: custom session entry `subagent:xs-alias-decided {v:1,sessionId,at,via:set|clear|take|force|inherit}`, read from
+  `sessionManager.getEntries()` (NOT `getBranch()`: `/tree` must not undo a human decision; a fork's copied entries carry the old sid and are ignored).
+  Written BEFORE the xs_req leaves (memory flag + `appendEntry`; a failing append is swallowed and a throwing `markDecided` never blocks the write)
+  by `set`, `clear` (also on a session with no alias — the explicit 「关闭目录名自动别名」), and by TUI-confirmed or `--take=<token>` execution;
+  failed human writes count too (D6). Reads, previews, a cancelled confirm and Feishu do not. Survives `/reload`, resume and hub restart.
+- **`/new` handoff (AF7, D3)**: `/new` and the web 「清空」 (same `session_shutdown{reason:"new"}`) move the held alias to the new session id; fork and resume never do.
+  - _Agent_: at shutdown (`stashMembershipHandoff` → `stashAliasHandoff`, `fabric/xs/alias-handoff.ts`) the outgoing session's held alias (read **by explicit sid** from the bridge cache — the fence hook has
+    already detached the stack, so `current()` cannot see it) and its decided mark go into ONE consume-once `Symbol.for("pi-subagent:xs-alias-handoff")` slot (TTL 60 s, nothing to carry ⇒ nothing stashed).
+    `beginSessionStart` always clears the slot and adopts it only for `reason:"new"` ∧ a different sid. The decided mark is re-written for the new sid as `via:"inherit"` (so `/reload` keeps it, and
+    `aliasHumanDecided` — any human set/clear/take/force on the new session — cancels a still-pending handoff). The alias becomes `aliasHandoff().pending(sid)` (expires after 120 s).
+  - _Bridge_ (`agent/xs.ts` reconcile ①, before auto): after an APPLIED `state:"none"` get, hub ∋ `xs.alias.v2`, ONE `{alias, intent:"handoff", prevSessionId}` per `/new` (settled before the frame goes out;
+    a concurrent reconcile cannot auto-claim meanwhile). It works with `autoFromCwd=false` (a continuation, not an auto-claim) and is silent on success. ANY failure — stale, BAD_FRAME from a hub that
+    predates AF7, BUSY, UNKNOWN, link loss — falls straight through to the ordinary auto path (which the inherited decided mark still suppresses). A v1 hub gets nothing; hub offline at `/new` ⇒ no frame, the
+    pending expires, the old name stays on the old sid until take/force (R22).
+  - _Hub anti-forgery_ (I10): `members.predecessorOf(agentKey)` is the **hub's own observation** on that one socket — `onInvalidate("detached")` remembers the departing sid (a `/new` reaches the hub as
+    `session_detached` → `session(new)` → `xs_member(new)`), `onSession`/`onMember` with another sid write `{from, to, at}` before the old record is dropped; one slot per agentKey, TTL 120 s, memory only, cleared by
+    any non-detach invalidation (socket down/closed/reclaimed) and by a successful handoff. The frame's `prevSessionId` is only compared with that edge, never trusted: another socket has no edge, a socket
+    with its own succession can only name its own predecessor. On top of the edge `store.handoff` requires (plan time AND again right before rename) `held(prev)` of exactly that alias, `prev`
+    **offline** (neither xs-online on another socket nor `linked`), and the requester holding nothing yet. Transfer = in place (`rev+1`, `origin` kept, cwd label refreshed, no tombstone for prev, no cooling, prev's and
+    the new sid's tombstones dropped). Every refusal is `E_XS_ALIAS_TAKE{stale}`; queue/IO trouble stays BUSY/UNKNOWN. A pre-v2 requester gets `E_XS_BAD_FRAME`.
+- **Invariants** (extend alias-plan r4 §3.1): **I5′** (replaces I5 「online holder is never taken」) — someone else's held record moves only by human
+  `take` (holder xs-offline ≥ takeMin), human `force`, `set` over an EXPIRED record, or (AF7) `handoff`; `take`/`force` re-check the token tuple at
+  execute and before rename, and **an online holder can be forced only if it is notifiable**. **I7** — `auto` only creates; it never edits, moves or
+  demotes a record (step G is a no-op for it). **I8** — decided is write-before-send, so a human op always lands after an in-flight auto (FIFO per
+  connection). **I9** — a committed force pushes `xs_alias_evt` to each v2 member of the evicted session; push failure never rolls back. **I10** — `handoff`
+  (AF7) moves a name only along a same-connection predecessor edge ≤120 s old, from an `offline` previous session, without tombstone/cooling.
+- **r4 §5.2 revised**: it is no longer true that an evicted holder is always offline. A `send` pins the full sessionId at resolve time; if a force lands
+  between resolve and send the message still goes to the holder it was resolved to (online ⇒ delivered; offline ⇒ `NO_TARGET`) — never to the new holder.
+- **Mixed fleets** (additive wire; old keys never change): new agent × v1 hub ⇒ no `intent` frame is ever sent (a `xs_req` with unknown fields would be
+  dropped whole by the old hub's strict schema), auto/force are off locally (`--force` ⇒ 「hub 不支持强制抢占，需 /webhub restart」), `--take`/`set`/
+  delivery unchanged; old agent × new hub ⇒ the hub writes it no new keys and pushes nothing, it cannot be forced while online, and when it comes back
+  it gets the legacy `lost{taken}` (no `forced`). The file keeps `version:1` with optional `origin`/`forced` keys only; an older hub reads such a file
+  without degrading (and drops the keys at its next write).
+- **Gates**: `tests/integration/fabric-xs-alias-v2.test.ts` (AF6: real hub child × 3 stacks; fixture knobs `XW_CWD`, `XW_TUI_CONFIRM`, `XW_STRIP_V2`,
+  `XW_HUB_STRIP_V2` in `helpers/fabric-xs-process.ts` strip `xs.alias.v2` from the peer's own handshake caps so the other side sees a pre-v2 agent/hub
+  on the wire), `fabric-xs-alias-wiring.test.ts` (real `activate()` × fake hub socket), `tests/web-hub/hub/xs-aliases-v2*.test.ts`,
+  `xs-alias-v2-router.test.ts`, `tests/web-hub/agent/xs-alias-auto.test.ts`, `tests/fabric/xs-alias-{auto,decided,suggest}.test.ts`,
+  `tests/commands/fabric-xs-alias.test.ts`. `tests/config/__corpus__/setting-specs-pin.json` gained exactly the `autoFromCwd` spec on purpose and
+  `settings-corpus.json` was regenerated (only `"autoFromCwd"` differs).
+- **Accepted residuals** (plan §11 R14–R23, plus what the packages found): **R14** common directory names (`web`, `app`) become a hub-global alias for the
+  first session in; **R15** after a force, a sender holding a stale list/mention cache addresses the new holder (resolved-before-force messages still
+  go to the old one); **R16** the decided mark is per process until the other process of the same session sees it; **R17** a human clear made before this
+  upgrade left no mark, so after cooling that session may auto once (run `--clear` again); **R18** a hub downgrade drops `origin`/`forced` at its next
+  write (display only); **R19** an old agent or an xs-off-but-linked holder cannot be forced while online, only taken after 10 offline minutes, with no
+  real-time notice; **R20** auto never takes an expired record, so an abandoned session keeps its basename until a human sets/takes/forces; **R21**
+  restart claim storms may answer BUSY — one retry, then the next hello; **R22** (AF7) the `/new` window is hub-memory only; **R23** the push is best effort
+  — an evicted session that never reattaches shows a stale local `/fabric status`/card `@alias` until the next hello_ack, attach or status reconcile
+  (hub data, addressing and delivery are already correct). Also: the audit records a forced execution as `take` (force vs take indistinguishable;
+  `force-preview` is distinct, and no alias text/token/cwd is ever logged); an old hub's `/fabric status` has no `auto skip:hub-cap` (AF4 chose
+  byte-identity with the v1 build over the plan's suffix); a `--take` refusal shows the `--force` pointer even when the holder will turn out
+  unnotifiable (the next command then explains); a force token executed after `/reload` (or evicted from the 32-entry hint map) is logged as `via:"take"` in
+  the decided mark (both mark decided; the hub enforces the real mode).
+
 ## Web UI：Channels
 
 **Channels in the web UI (channel-plan §7, CHU/CHU-b)**: all gated on hub caps ∋ `xs.channel.v1` (absent ⇒ UI byte-identical). AgentCard shows a
@@ -239,6 +347,390 @@ DetailDock untouched). `composables/useTrackedCommand.ts` is the only path that 
 `queryOnly` and unwraps `data.output`, 15 s timeout/dialog close/session switch drop late results (never undoes the command). `ChannelsDialog.vue`
 (titled 「频道与别名」) has an alias area: live `normalizeAlias` pre-validation, ≤3 suggestion chips (others' taken ones greyed from pushed
 `status.xs.alias`), save/clear/take (take: preview → token parsed from that one output → confirm dialog with countdown → execute), no optimistic
-update. AgentCard chip order `kind → state → xs badge → @alias → #channels → unread` (alias cut at 8 grapheme clusters, title = full);
+update. AgentCard chip order `kind → state → xs badge → @alias → #channels → unread` (alias shown whole — cap = protocol max 16 clusters since 2026-10-27, title = full);
 DetailHeader shows `@alias` opening the dialog; the `@` panel matches/shows alias but still inserts `session:<ref>`; `logic/xsMessage.ts` reads
 ` alias="…"` from the first line independently of field order. Design: `docs/dev/fabric-cross-session/alias-plan.md` §7.
+
+**Force takeover + cwd chip in the web UI (#72 AFU)**: everything is gated on hub caps ∋ `xs.alias.v2` (the UI mirrors the cap as
+`XS_ALIAS_V2_CAP` in `agentCardModel.ts`; no v2 ⇒ the dialog and chips are byte-identical to the v1 build). When the 「尝试抢占」 preview is refused as
+online/recent (`TAKE_REJECT_FORCE_RE` on the two fixed refusal sentences) the dialog shows a danger button 「强制抢占…」 under the echo. Clicking runs
+`alias <名> --force`, parses the token from THAT command's output with the unchanged `parseTakeConfirm`, and reuses the existing confirm dialog
+(holder cwd / online state / 「自动认领」 + 5-minute countdown); execution is `--take=<token>`. A refused force (e.g. `unnotifiable`) only echoes — no
+button; the offer follows the input (changing the name drops it) and is re-checked against the live caps at render time (`forceOffer`, two-layer v2
+gate). `webCommandPolicy.fabric=confirm` ⇒ the generic confirm appears once for the preview and once for the execution. The cwd suggestion chip uses
+`deriveAliasFromDirName` (only when v2), so the chip equals what auto-claim would pick (`My Project` → `my-project`; reserved/id-like ⇒ no chip). Two
+i18n keys (`alias.force`, `alias.forceAria`) live in the lazy `i18n/alias-extra.ts`, not `detail.ts`. Gate: `tests/web-hub/ui/alias-ui.test.ts`; the
+end-to-end web path is `tests/integration/fabric-xs-alias-v2.test.ts` ⑤.
+
+## Request progress / host human delegation (#14 P2, staged)
+
+The frozen gate is `xsOn ∧ fabric.crossSession.activation.enabled` (default true).
+`fabric/xs/activate.ts` now supplies P1's `activationEnabled` bridge port: main agents
+advertise `xs.state.v1` and emit the hub `activation:true` config key. P3b registers
+`wake_session` under activationOn; its separate `xs.activate.v1` cap requires frozen
+local wake enabled. Query survives wake-off; activate fails closed on missing caps. `/fabric status` consumes both receiver
+progress and the source mirror; no rows means no added line. B1 runs before the P1
+context observer, including controller-less natural turns.
+
+P2's host-only `human-grant.ts` stores pure provenance under
+`Symbol.for("pi-subagent:xs-human-grants")`: 64 live inputs, lazy <=30 min expiry,
+256 invocation/context references per grant, no live capacity eviction. Input is not
+a turn-wide boolean: a signed TUI/RPC input, or a once-only policy-admitted web
+cmd/owner proof, must enter context as the actual host-observed user message before
+an exact toolCallId can resolve it. Queued input never upgrades the old assistant's
+calls. Extension notifications, topic-switch replay, Feishu and model `source`/meta
+are not signing paths. Missing/copy-transformed context identity fails closed.
+Same-sid reload does not let a new owner take over old calls; new/fork/switch revoke.
+The web proof park is pure data, cap64, 5 min, scoped/ambiguity-safe and consumed
+once; command disposal/boundary clears that owner's unused proofs.
+
+One qualified `expectReply` with omitted wake reserves the grant after address,
+receivability and size checks. Commit is **before** send/re-entry; unknown or throw
+keeps it consumed, proven none allows only the same call/target retry. Explicit
+true/false and replyTo take precedence, no grant crosses xs, no quota or causal
+level reset is added. The same ref can follow real spawn edges: stack's admission
+hook records the edge; the host Agent tool result connects the exact invocation
+and returned childRunId. Neither result text nor prompt/model metadata grants an
+edge. P2c injects only a host-owned `message_session` SDK tool into an authorized
+child; ordinary/readonly/excluded/noTools/secure/external/off children remain inert.
+Children acquire no xs membership, connection, caps or bridge of their own.
+
+The bridge's send port correlates progress only by the **original send rid** while
+that send is live; sourceRid is never a tool parameter or model payload. A confirmed
+relation exposes `XsSendOutcome.track{messageId,activationKey?}` and `progress`;
+no matching state/off/old-cap/capacity fallback means no invented track. Local wake
+marks overlay the source view without incrementing receiver revisions. The source
+res, tool JSON/hint and new-cap mention result retain the first stop reason
+(`pair_wake_rate` explains the existing default 2/h pair quota). `woke` is dispatch
+acceptance, not `started`; unknown never causes a second body send. The synchronous
+web mention branch marks its exact cmdId consumed; the shared mention subscription
+uses session/owner-unique dispatched input matching and preserves onHandled once.
+Legacy/off command results and notice text retain their old shape.
+
+P2b's hub resolve stamps `target.xsState` only for the actual target socket when
+hub/source/target all support state; missing proof never defaults a delegated wake.
+P2c's activation-local human-runtime façade is passed only at the PiSessionDriver
+constructor. It binds a real admitted childRunId to a unique driver owner, observes
+exact SDK context/tool_call/tool_result events, and proxies the shared main sender.
+Root Agent result races get one unref'd, clamped 1s wait (cap64), only after an
+already proven potential parent and real spawn edge. No proof means no wait/tool.
+For blocking nested Agent, a per-activation AsyncLocalStorage carries only the
+exact captured SDK execute InvocationRef to nested driver creation; the recorded
+admission edge still must agree. No model argument or guessed parent is authority.
+The source session/epoch and child lifetime are checked after address resolve;
+child causal level is read live at the wake decision and maxed with root, never
+reset. Per-run allowlists gain only this host SDK tool, never readonly provenance.
+Dispose/abort/agent_end/branch changes and committed child switch boundary entries
+end that run's references while preserving already live descendants. New owners
+cannot take over old child bindings. Switch/fork/start/shutdown detach synchronously
+clears local binding closures and waiters and disables ALS; a generation guard
+refuses a waiter resumed across detach. No callbacks/senders/SDK sessions enter the
+global grant park (child owners are bounded pure data).
+
+**Remaining staged work:** tracked wire downgrade continuity, activation tools,
+audit/UI and their gates belong to the protocol/router/P3 owners, not P2c. The new
+SDK tests use real Agent tools and PiSessionDriver sessions with scripted providers;
+only admission/transport ports are controlled, not a full SpawnService/network test.
+
+Tests: `tests/fabric/xs-{human-grant,sender-human-grant}.test.ts`,
+`tests/web-hub/agent/{xs-state-bridge,commands-mention-session}.test.ts` plus the
+unchanged default-on fabric/reply/mention/inbox/wake wiring regression suites;
+`tests/runtime/human-runtime.test.ts` and
+`tests/integration/fabric-xs-human-child-runtime.test.ts` pin P2c owner/lifecycle
+and actual SDK child/blocking+background nested consumption.
+P2 adds input/message_start/tool_call/tool_result registrations before the existing
+B1 hook; P5 must refresh the declared B-tier governance trace, never A-tier goldens.
+
+## P3b manual activation wiring
+
+`createXsActivationPort` shares the sender's exact live source/epoch and current root
+causal level. `XS_ACTIVATION_TOOL_NAMES` is a separate opt-in collision set; legacy
+`XS_MAIN_TOOL_NAMES` stays unchanged. `/fabric status` adds an activation ready/off
+line only while activation is on. Children/secure/off do not get a new tool.
+
+Both browser transports implement `xsActivate` over the EXISTING authenticated
+`/api/cmd` command.v1 path: `fabric __xs {action,messageId,activationKey?}`. No new
+HTTP endpoint/op/CSRF exception. The internal handler validates bounded exact JSON,
+checks current session and fabric allow/confirm/deny policy before looking up the
+port, refuses Feishu, and directly calls the host port — never sends model input,
+resends body, signs a human grant or records raw key args in command history.
+Web omits target: the hub's already pinned relation selects it and revalidates
+source/caps/key/current policy/delivery/claim/quotas. The model tool still requires
+the original target in its unchanged schema. Query is strictly receipt-only; a miss
+never activates. New activate thenables are bounded and timeout/rejection is cached
+unknown/query-only, never retryable none; resume/read semantics remain unchanged.
+
+P3b also makes the formerly dormant UI action surface safe: query/activate have
+separate action-aware singleflights; server control-attempt outcomes are retained
+in the existing bounded session/key-scoped seed store, separately from body phase,
+revision and first wake-stop evidence. Unknown/accepted/already_active only offer
+query, quota backoff comes only from the server, and stale/wrong-session/key results
+are ignored. These local hints are non-persistent and NEVER authorization; refresh
+still relies on the hub's message-level tombstone to prevent another charge/wake.
+No lifecycle/status/reconnect event executes an action.
+
+Receipt/activate audit uses the existing key whitelist/order, with no body/key/
+controller token. The inherited pending audit op union is retained because P3 router
+calls already require it. The declared B-tier trace update is only wake_session in
+main-all-on and thread-main, counts +1; child/off/secure and phase2 traces unchanged.
+Tests: `tests/web-hub/agent/xs-web-command.test.ts`, bridge/transport/UI xs suites,
+`tests/integration/fabric-xs-activate-session.test.ts` (real command router + xs
+relay/bridges/stacks, controlled HTTP-auth admission, both token/password adapters).
+
+## P5 gates and acceptance (#14 closure)
+
+Implementation state: P0–P4 are in; P5 adds **no feature**, only gates. Test knobs live in
+`tests/integration/helpers/fabric-xs-process.ts` (debug only; the committed default is activation
+ON on both sides — the helper hub now carries `crossSession.activation: true`, so the nine XsHarness
+suites run against the new hub unchanged): `XW_ACTIVATION_OFF` (agent config off), `XW_HUB_ACTIVATION_OFF`
+(hub key absent), `XW_STRIP_STATE` / `XW_HUB_STRIP_STATE` (wire-only removal of `xs.state.v1` and `xs.activate.v1`
+from `hello` / `hello_ack`). Never commit a suite that pins them to dodge a failure.
+
+- **C-X13** (`tests/conformance/fabric-xs.test.ts`): `delivered` comes from the synchronous leaf write, `started`
+  only from a later model turn's `context` that exposes the delivered custom message with `details.xid` (pi fact the
+  observer relies on); rows never carry body/sender session id; wake reasons are `[a-z0-9_:]{1,48}` tokens;
+  details/token/xid/`activateFor` never reach the provider payload.
+- **C-X14 / C-X14b**: real pi + Controller + progress bag + activation receiver: expired / unconfirmed ⇒ refused with
+  zero provider work; one accepted activation ⇒ exactly one fixed body-free marker, B1 `authorized`, one provider
+  request, the original body entry stays ONE; repeat ⇒ `already_active`, no second turn; key/token/session id absent
+  from the payload; a host that loses the custom shape (no BAS) aborts the marker before the provider and the body is
+  not re-sent as fallback.
+- **Mixed versions** (`tests/integration/fabric-xs-activation-compat.test.ts`, real hub × 2 stacks): six old/new
+  combinations (old/old, old hub×new agent, new hub×old agent, wire-hidden caps on either side, new/new). Old-side
+  combinations keep the pre-feature `xs_deliver` key set/order and never invent `track`/`progress`; new/new exposes
+  `track.messageId` and only appends keys.
+- Registry/trace/corpus: `tests/fixtures/governance/activate-trace.json` and the setting-specs pin were refreshed by
+  the packages that changed them (wake_session registration, input/tool_call wiring, the `activation.enabled` spec);
+  P5 changes none. A-tier fixtures are untouched.
+
+Accepted residuals: no cross-process exactly-once; hub/pi restart or a full relation bag ⇒ tracking `unavailable`
+(never reconstructed from disk); activate never auto-runs and is quota-bound (`pair_wake_rate` ⇒ retryAfter, original
+key only); the C-X conformance suites run on the current pi only — legacy pi 1.0.4/1.1.0 reruns need
+`PI_TOOLKIT_LEGACY_PI_DIR` and were not run in this package.
+
+## Idle deliver-only warning & timeout phase (#20)
+
+Design: `../xs-idle-wake-warning/plan.md` r3 D1–D6; package reports `A-report.md` / `B-report.md`.
+The main-session `message_session` tool appends the fixed Chinese advice only when the activate-frozen
+`idleWakeAdvice` gate is true (xs + activation + local wake) and the final outcome is a new non-reply,
+`sent/applied`, pending expectReply, `wake.requested:false`, no downgrade, not woken, with track/key,
+and phase absent or delivered. Sender/outcome/details/schema/tool descriptions do not change.
+In the current receiver implementation, a first new non-reply deliver-only `applied` verdict proves
+idle **at the receiver's pre-write sample**, a matching leaf and successful fence verification;
+`unknown` does NOT prove busy (leaf mismatch/fence failure may happen while idle). Dedup can replay
+historical applied; new hub sends use new xids. There is no hub busy field or additional round trip.
+Advice says not to resend a delivered body; use the original receipt with `wake_session` action
+`activate` instead (only proven none permits a new body send). Human default-wake upgrades and existing
+downgrade hints do not duplicate this warning; children/wake-off/missing track intentionally omit it.
+
+Visibility is deliberately limited: warning is tool **text** (model + transcript ToolCard), not details
+or `StatusInfo.xsRequests`; mention/details-only control-plane consumers do not see it. Timeout notices
+are session custom messages, visible in the transcript and on the next provider request.
+
+NoticeGate reads source mirror progress **synchronously and read-only by requester sid + requestId**.
+No receipt request, hub round trip, await, publish, revision mutation or new timer occurs in lookup;
+flush keeps its single synchronous admission/write/verify block and shares one content across wake and
+quiet paths. `progressPhaseOf` fails closed on activation off, missing hub state cap, wrong/currently
+switched mirror sid, missing row, non-live observation (offline/expired/unavailable) or conflicting
+phases for duplicate requestIds. Unknown/replied/absent/throwing ports preserve pre-#20 notice bytes;
+invalidation and dropped-summary copy is untouched. Existing off golden fixtures remain frozen and
+wire fields/caps/PROTO are unchanged (I9/I10).
+
+Only live observations add these exact English line suffixes: ` · last seen queued`,
+` · last seen delivered`, ` · started seen`. These are **last observed facts**, NOT assertions about
+what the recipient is doing now. Only delivered/started rows append their fixed Chinese explanation
+(delivered first); queued-only notices add no advice. Delivered explains that started evidence may be
+late/missing and offers original-track activation in grace (already started ⇒ no-op), never body resend.
+Started explains context inclusion was observed but a reply has not arrived; grace replies still land.
+Notices name `track.messageId/activationKey` but never include sid/xid/messageId/activationKey **values**.
+
+Gates: notice fixed-old-byte/exact-copy/synchronous-call-stack tests; bridge live/non-live/read-only/
+conflicting-row tests; real stack + relay tests for the 2000-message context scan limit and dropped
+started pushes; real activate-built timeout and old-target/old-hub expectReply timeout byte differentials.
+**C-X15** (`tests/conformance/fabric-xs.test.ts`, real pi + AnthropicStub) covers delivered AND started
+in wake requests and quiet notices in a later natural turn, asserting exact prose/markers and absence
+of injected sid/xid/messageId/activationKey sentinels. Run alongside C-X1…C-X14, bridge legacy gates,
+stack teardown, nine XsHarness suites, governance/mention and all three untouched off goldens.
+
+Accepted residuals: receiver sample/write re-entry or later human/goal/schedule activity can make idle
+advice a false positive (non-blocking, “大概率” only). The 2000-message scan or a lost started push may
+leave a **live** mirror on delivered; read-only lookup cannot detect that omission, hence observation
+wording and activation's started no-op. Expiry retains the farthest phase but overrides observation,
+so expired rows are unknown. A stuck target/active wake/quota can refuse activation. Child/wake-off/
+legacy/capacity fallback advice is intentionally absent. With local wake disabled but activation still
+on, delivered timeout advice may offer activate which returns an explicit refusal; this is accepted,
+not a new wake gate. No cross-process exactly-once or reconstructed tracking promise is added.
+
+## Ask redirect (#21)
+
+**Ask redirect (#21)** (`docs/dev/xs-ask-redirect/`, packages A/B1/B2/B3): in a trusted delegated turn (a
+`message_session`+`expectReply`+`wake` dispatch that captured `askOrigin` on the wake ledger, BAS-bound),
+the host redirects `ask_user` to the requester: the ask becomes a NEW expectReply+wake message (q2) through
+the real sender; the answer arrives mid-run as a deliver-only write, the stack's host-write tap resolves the
+blocked tool, and `ask_user` returns the D8 answered text naming the ORIGINAL replyTo for the final result.
+Gate (frozen per activate): `xsOn ∧ reply.enabled ∧ wake.enabled ∧ fabric.crossSession.askRedirect.enabled`
+(default **on**; `timeoutS` 60..3600, `maxPerRun` 1..2, hard ceiling 2); secure keeps `xsOn` false ⇒ off
+(I11). The wiring is ONE line in `src/index.ts` (`redirect: () => holder.current?.xs?.askRedirect`, only
+while `xs.askRedirectOn`) — off/absent ⇒ ask_user is byte-identical (I9); print mode still HEADLESS.
+**Invariants**: origin trust comes only from the dispatch-time host-write tap (D3 — pi custom messages carry
+no writer auth; a reply-revived run can never masquerade as a fresh delegation); admission is billed on the
+wake-ledger record (`askUsed` = billed+in-flight, refund only for provably-unsent `none`; per-token FIFO
+with `pairMinIntervalMs`); the caller waits under `min(t0+timeoutS, runDeadline−60s, originDueAt−60s)`;
+send outcomes classify through the ordered D7 rules (`unknown` ⇒ wait, never resend; `applied ∧
+wakeDowngraded` ⇒ `not_woken` immediate return). **Gates**: T11 (`tests/integration/fabric-xs-ask-redirect-
+session.test.ts`, real AgentSessions — THE launch gate), wiring (`fabric-xs-ask-redirect-wiring.test.ts`),
+hub subprocess harness (`fabric-xs-ask-redirect.test.ts`)（T12，后续项，尚未建立；上线门禁是 T11）, C-X16
+(answer-write ordering premise), plus B1/B2 unit suites. **Residual risks**: the answer body appears TWICE (tool result + the standalone xs message —
+the text says "do not answer it again", R1); the wait counts against the delegating run's `rootRunMaxS`
+(default 900s — raise it for heavy delegation, R2); `handed:true` (human takeover) ⇒ O-class local dialog;
+an ask whose q2 meets a BUSY requester is deferred deliver-only (the wake may be lost — the D7 `queued`
+wait then runs to its deadline; the deterministic tests gate the ask on requester idleness). **Harness
+notes**: the T11 rig clock must be live (`Object.defineProperty(r.clock, "t", …)` — a frozen rig clock
+expires every frame after 5s), and the rig-vs-bridge member limits must match (the bridge republishes
+`xs_member`; a default 30s pair interval silently overrides the rig's).
+
+## Decision requests (#61 P0 · kernel landed, unwired)
+
+`docs/dev/fabric-decision-wake/plan.md` (r2, default-ON ruling). **P0 shipped the pure kernel
+only — no production wiring: no hooks, no tool fields, no stack/index changes. "Default on"
+grants nothing by itself.** `fabric.wake.decisionRequests` (default `true`, explicit `false`
+opt-out, 9th wake leaf, non-live) is parsed/spec'd/pinned; effective = `fabric.enabled ∧
+wake.enabled ∧ this leaf` and is only ever read by the P2 host wiring.
+
+- **Human proof port** (`src/fabric/decision-input.ts`): the ONLY authority that opens a
+  decision window is a host-observed `{sessionId, owner, inputId, provenance:"web_prompt"}`
+  (exact key set — text/role/source can never forge it); one epoch per distinct inputId, replay
+  never re-opens, bounded dedup fails closed, freeze on switch/new/fork/dispose. **Offline
+  capability evidence** (`tests/conformance/fabric-decision-input.test.ts`, real SDK + real
+  command handler): the TUI submit loop (`interactive-mode.js` → `session.prompt(text)`, no
+  options) and an arbitrary in-process `prompt()` produce **byte-identical** `input` events with
+  no unique id; generic RPC (`rpc-mode.js` prompt/steer/follow_up, all `source:"rpc"`, client
+  id) is equally indistinguishable ⇒ **both entries are provenance_unavailable — decision wake
+  is deliver-only there until the SDK exposes a trusted submission callback** (reported to
+  Root; NOT claimed supported). The web command prompt IS provable (server-side cmdId dedup +
+  digest + origin, Feishu skipped, one-shot `noteWebProof` before exactly one `sendUserMessage`)
+  — but today's proof registration is gated on xs human-enhancement; **P2 must add an
+  independent tree-only callback (decision wake must never require xs on)**.
+- **Ledger kernel** (`src/fabric/decision-wake.ts`): single-session bounded request ledger
+  (TTL 15 min, ≤32 pending, ≤256 entries/owner incl. tombstones, 2 activations per human
+  window / 1 per child), lazy activation (first legal request checkpoints proof+reservation
+  BEFORE any send; 0 writes/0 timers/0 budget while unused), publish-before-grant epoch
+  advances, at-most-once body with conservative consumption — **every dispatch attempt (body /
+  wake / reply) is persisted BEFORE the host call**, so a mid-send crash restores the body as
+  `unknown` and a reply as `reply_unknown` (slot kept, NO second steer, wake blocked; a repeated
+  id or repeated correlated resolve only reports the recorded snapshot); an attempt-persist
+  failure means 0 host call; prepare-fail is conservative fail-closed (attempt already counted,
+  no retry entry); post-dispatch none/unknown consume, never refunded, `effect_none` vs
+  `unknown` kept distinct, never "Root processed"), correlated `resolve` only (normal steer
+  resolves nothing; `reply_unknown` keeps the slot but blocks further decision wake),
+  child/owner/generation/running gates, full revoke set (child terminal, root abort, session
+  switch/new/fork, dispose), reload restores the activated high-watermark (never washed;
+  queued+attempted restores as `unknown`), one optional clamped nearest-deadline timer.
+- **Causal isolation (Root ruling a)**: the ledger has NO CausalLevel reference and never calls
+  `onDelivered`; sends go through a dedicated port; `FabricRecord.decision` (pure optional
+  metadata, `src/core/message.ts`) rides records whose persisted base `wake` is always
+  `false`. Root 0 stays 0, an L4 child stays L4, unrelated spawns inherit the old root level.
+- Gates: `tests/fabric/{decision-input,decision-wake}.test.ts` (tier1),
+  `tests/conformance/fabric-decision-input.test.ts` (tier2), updated pins in
+  `tests/config/{fabric-wake-settings,settings-corpus,setting-specs-pin}.test.ts` (the 8-leaf
+  pins legitimately became 9-leaf; the corpus is projected, NOT regenerated). P1 (delivery) and
+  P2 (host/tool/web producer) wiring stay open per the plan's DAG.
+
+## Root wake budget (#61 · production source wiring, not live activation)
+
+`src/fabric/root-wake-budget.ts` remains a pure activation-local policy closure. The production
+`buildFabric` now constructs one budget with an exact stack-private owner, the real session ID,
+and **internal constant `ROOT_WAKE_LIMIT = 2`**. No new settings key, tool parameter/description,
+SDK patch, proof/ticket, timer, poller or external platform. Effective gate remains
+`fabric.enabled ∧ fabric.wake.enabled`. This is source integration only: installing/reloading or
+enabling a running process is NOT part of this change; an already running process is unaffected.
+The old DecisionWakeLedger / strong-input prototype above remains unwired/frozen and its SDK
+route remains paused; its provenance-unavailable statements do not govern this smaller flow.
+
+### Admission and delivery
+
+- Only explicit `wake:true` reaches the optional router `WakePolicy.rootAdmission` seam, after
+  existing sender/tree permission, progress-invalid-wake, body quota and root inbox checks.
+  The seam receives host sender/kind/level and the generated immutable `messageKey`. A rejected
+  envelope never reserves. Production root admission replaces the old **root** sender-level /
+  per-run wake gate; high-level live children are not rejected by `level_limit`. Non-root
+  revive, causal propagation and spawn inheritance remain unchanged. Effective root starts
+  still contribute to the existing `wakeSent` diagnostic/non-root revive quota input.
+- Host state uses both `ctx.isIdle()` and `ctx.hasPendingMessages()`: non-idle ⇒ busy/running,
+  idle+pending ⇒ starting, idle+no pending ⇒ idle. Missing, throwing or non-boolean evidence ⇒
+  `unknown`, always deliver-only. These are SDK host-state observations, not model metadata.
+- Busy/running/starting ⇒ queue, **zero window charge**, even without a window or at the limit.
+  Idle within a current user window ⇒ synchronous reservation, `used++`, request one wake.
+  An idle burst's later message sees the outstanding reservation and queues without charge.
+  Limit/no window/unknown ⇒ deliver-only; body is still subject to ordinary delivery rules.
+- Queue/admission plans retain only key/from/action/reservation and attempt flags, not another
+  body. At dispatch the state is re-read. For a currently active run, pi 1.5 requires
+  `{deliverAs:"steer",triggerTurn:true}` to inject the body into that run's next turn: false
+  would only append after the current turn and would not steer. **This busy call does not
+  start a second run**, as the real-SDK starting/streaming tests assert. A queued plan that
+  finds idle/starting/unknown at dispatch never promotes itself to a fresh wake. Only an
+  admitted `requestWake` may start from observed idle. A replayed explicit loud record with no
+  current-stack plan is delivered quietly, not granted a new authorization.
+- Receipts use the existing optional `wake` / `wakeDowngraded` slots. New additive strings are
+  prefixed `root_` (`root_busy`, `root_reserved`, `root_limit`, `root_no_window`, `root_unknown`,
+  etc. from the pure policy). Busy receipts say `wake:false`: queued into an existing run, not
+  another activation. `wake:true` means requested, **not proof that a provider turn started or
+  Root processed it**. Accepted/delivered remain distinct. Old reason meanings are unchanged.
+- Omitted wake is deliberately **still legacy steer+triggerTurn:true**, without this new
+  admission; it is not a quota workaround to recommend. Explicit false stays quiet. Absent
+  `rootAdmission` preserves legacy router level/per-run policy. Wake off retains the previous
+  tool/schema and call shape; no frozen fixtures were changed or regenerated.
+
+### User-arrival window and teardown
+
+- `src/index.ts` passes the current stack's same `wake.rootBudget` facade into the already
+  registered wake-input hook; no new registrations or registration-order changes. On accepted
+  **TUI `interactive`** input, or extension input attributed as `web_prompt` through the
+  existing late-bound `attributeInput` port, the hook both observes the original arrival event
+  object and calls existing `resetRoot`. Opening a window does not depend on a numeric causal
+  change: used=0/root=0 and successive real arrivals still open new windows.
+- The budget WeakSet deduplicates the **same event object**, weakly held. A rewrapped event
+  is not the same arrival identity; there is no cross-process/external replay proof. Machine
+  RPC, un-attributed extension/topic-switch/goal continuations, child/tool/completion events
+  and user-role/text wrappers do not reset the budget. The shared legacy classifier is NOT
+  changed: RPC continues its old causal-level-only reset, but never opens this budget.
+  Web attribution is the existing port, not a new authentication layer.
+- The pure policy reserves only on `requestWake`. Production clears the exact reservation
+  through the **existing mailbox `level.onDelivered(record,channel)` callback**, matched on
+  root target, sender, key and successful host send attempt. Its new `delivered` event means
+  **host dispatch/delivery bookkeeping confirmation, not an observed SDK `agent_start`**.
+  No extra lifecycle hooks are registered. Failed send or missing delivery confirmation keeps
+  the reservation and consumed count; no refund, key deletion or automatic body resend.
+  Repeated bookkeeping for an already attempted key cannot send/start twice in that stack.
+- Mailbox's existing inbox-dispose exit also disposes this exact budget owner and clears the
+  local plans, before the existing WakeService disposal. No new teardown step or ordering.
+  Old facade calls cannot reopen a disposed window.
+- **No production window persistence.** Rebuild/reload/new stack starts with **no window**,
+  even for the same SID, and is conservatively deliver-only while idle until a new trusted
+  user arrival. Busy messages can still queue. Reload does not gift quota. The pure module's
+  optional snapshot API remains available for tests/future work, but is not a production
+  recovery path; restored exact-key authority is never reconstructed from counts.
+
+### Evidence and remaining limits
+
+`tests/fabric/root-wake-admission.test.ts` covers production construction, gates, missing/throwing
+host evidence, reservation failure, off/legacy behavior and disposal;
+`tests/fabric/wake-input.test.ts` covers original-object arrival dedup, zero-count resets and
+machine negatives; `tests/fabric/root-wake-budget.test.ts` includes matched `delivered` / stale
+reservation / same-key tests. `tests/integration/fabric-wake-arrival.test.ts` is real pi 1.5
+`createAgentSession` + the production message_agent tool/router/mailbox with an own/tmp
+DefaultResourceLoader, isolated HOME and scripted fake provider (zero network/paid API): idle
+2-start limit and third body, an actual SDK child invoking the registered production tool,
+streaming and before-agent-start coalescing, simultaneous idle
+requests, same-key delivery-bookkeeping retry, rebuild, TUI/Web/machine inputs and unknown state.
+Integration is already tier2 by the directory manifest; the new pure tests need no special tier
+registration. Existing C-P1…C-P5 and the off/schema goldens remain gates.
+
+This is not a decision-request ledger, cross-session wake redesign, TODO restore, memory scope
+change, or SDK consumer-proof implementation. The void `pi.sendMessage` API confirms host
+acceptance only; asynchronous SDK/provider failure cannot be promoted into a success claim.
+At-most-once attempt flags are stack-local, not a new crash-durable delivery ledger. Lost wake
+opportunities on unknown state, missing confirmations, reload or a busy→idle race are accepted
+fail-closed outcomes, not a promise of immediate Root processing. SDK `isIdle` also includes
+manual compaction; this getter pair does not independently distinguish compaction from run
+startup. No new compaction fence or lifecycle observation hook is introduced or certified here.

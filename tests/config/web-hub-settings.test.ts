@@ -5,13 +5,8 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  DEFAULT_SETTINGS,
-  loadSettings,
-  loadWebHubLanSettingsWarnings,
-  parseWebHubLanValidation,
-  parseWebHubSettings,
-} from "../../src/config/settings.js";
+import { DEFAULT_SETTINGS, loadSettings, loadWebHubLanSettingsWarnings } from "../../src/config/settings.js";
+import { parseWebHubLanValidation, parseWebHubSettings } from "../../src/web-hub/agent/settings.js";
 import {
   currentOf,
   defaultOf,
@@ -48,6 +43,8 @@ describe("web-hub settings", () => {
       quota: true,
       load: true,
       archiveAfterMin: 30,
+      archiveKeepRuns: 6,
+      archiveKeepBash: 5,
       lan: {
         enabled: false,
         port: 7879,
@@ -60,8 +57,8 @@ describe("web-hub settings", () => {
       spawn: {
         enabled: false,
         roots: [],
-        maxProcesses: 4,
-        maxPerPrincipal: 2,
+        maxProcesses: 10,
+        maxPerPrincipal: 10,
         ratePerMinute: 3,
         maxLifetimeMinutes: 720,
         registerTimeoutS: 30,
@@ -143,6 +140,8 @@ describe("web-hub settings", () => {
       quota: true,
       load: true,
       archiveAfterMin: 30,
+      archiveKeepRuns: 6,
+      archiveKeepBash: 5,
       lan: lanDefaults,
       spawn: spawnDefaults,
       proxy: proxyDefaults,
@@ -623,8 +622,8 @@ describe("webHub.spawn.* (web-hub-spawn plan §SP2 / arch §6.2)", () => {
     expect(spawnDefaults).toEqual({
       enabled: false,
       roots: [],
-      maxProcesses: 4,
-      maxPerPrincipal: 2,
+      maxProcesses: 10,
+      maxPerPrincipal: 10,
       ratePerMinute: 3,
       maxLifetimeMinutes: 720,
       registerTimeoutS: 30,
@@ -829,7 +828,7 @@ describe("webHub.spawn.* (web-hub-spawn plan §SP2 / arch §6.2)", () => {
     });
     // defaults surfaced in the editor (csv array → joined string)
     expect(defaultOf(SETTING_SPECS["webHub.spawn.roots"]!)).toBe("");
-    expect(defaultOf(SETTING_SPECS["webHub.spawn.maxProcesses"]!)).toBe(4);
+    expect(defaultOf(SETTING_SPECS["webHub.spawn.maxProcesses"]!)).toBe(10);
     expect(defaultOf(SETTING_SPECS["webHub.spawn.lan"]!)).toBe("off");
     // every description notes the /reload + /webhub restart dance (plan §SP2)
     for (const key of keys) {
@@ -965,5 +964,31 @@ describe("webHub.cmdHistory (web-hub-cmd-history plan §4.9, A1)", () => {
     expect(parseWebHubSettings({ cmdHistory: true }).cmdHistory).toBe(true);
     expect(parseWebHubSettings({ cmdHistory: "no" }).cmdHistory).toBe(true);
     expect(parseWebHubSettings({ cmdHistory: 0 }).cmdHistory).toBe(true);
+  });
+});
+
+// #59: shared spec drives the text settings command and TUI settings editor.
+describe("webHub archive keep counts", () => {
+  it.each([
+    ["archiveKeepRuns", 6],
+    ["archiveKeepBash", 5],
+  ] as const)("validates %s in both parser and editable spec", (leaf, fallback) => {
+    const key = `webHub.${leaf}`;
+    const spec = SETTING_SPECS[key]!;
+    expect(isKnownSettingKey(key)).toBe(true);
+    expect(spec).toMatchObject({ kind: "number", path: key, min: 0, integer: true });
+    expect(defaultOf(spec)).toBe(fallback);
+    expect(currentOf(DEFAULT_SETTINGS, spec)).toBe(fallback);
+    expect(spec.live).toBeUndefined();
+    for (const value of [0, 1, 12]) {
+      expect(parseWebHubSettings({ [leaf]: value })[leaf]).toBe(value);
+      expect(parseSettingValue(spec, String(value))).toEqual({ ok: true, stored: value, live: value });
+    }
+    for (const value of [-1, 1.5, Number.NaN, Infinity, "6", null]) {
+      expect(parseWebHubSettings({ [leaf]: value })[leaf]).toBe(fallback);
+    }
+    for (const value of ["-1", "1.5", "NaN", "Infinity"]) {
+      expect(parseSettingValue(spec, value).ok).toBe(false);
+    }
   });
 });

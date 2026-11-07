@@ -53,7 +53,7 @@ import {
   type BackgroundCompletionHub,
   type SendCompletion,
 } from "../../src/service/background-completions.js";
-import { formatBashJobNotification } from "../../src/stack.js";
+import { formatBashJobNotification } from "../../src/bash/notify.js";
 import { mockTui, stubTheme } from "../ask-user/fixtures.js";
 import {
   createTuiHarness,

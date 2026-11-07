@@ -69,8 +69,9 @@ export function truncateMarkdownPreview(
  * `details.kind === "digest"` first and read `items`; otherwise read the
  * single-delivery payload. Compatibility fields on a digest are not semantic.
  */
-export function formatSingle(p: DeliveryPayload, ctx?: { stats?: string }): string {
+export function formatSingle(p: DeliveryPayload, ctx?: { stats?: string; threadLine?: string }): string {
   const stats = ctx?.stats;
+  const threadLine = ctx?.threadLine;
   const tail = p.failReason ?? (p.textPreview || undefined);
   const preview = tail ? truncateMarkdownPreview(tail) : undefined;
   const multiline = preview?.text.includes("\n") ?? false;
@@ -87,21 +88,45 @@ export function formatSingle(p: DeliveryPayload, ctx?: { stats?: string }): stri
   // (byte-identical to the pre-markdown behavior).
   const hintText = `${RESULT_TOOL_NAME} "${p.runId.slice(0, 8)}" for full output`;
   const hint = preview?.truncated ? (multiline ? `\n\n— ${hintText}` : ` — ${hintText}`) : "";
+  // fabric-thread arch r3 §5.3 (P3): the frozen terminal summary line — appended ONLY when the
+  // run ever held a subscription (no frozen record ⇒ the notification stays byte-identical).
+  // English tokens per the UI text language split (inline marker line).
+  const thread = threadLine !== undefined ? (multiline ? `\n\n${threadLine}` : `\n${threadLine}`) : "";
   return (
     `Subagent ${who} ${p.status}` +
     (stats ? ` — ${stats}` : "") +
     (preview ? `: ${preview.text}` : "") +
     degradedTail +
-    hint
+    hint +
+    thread
   );
 }
 
-export function formatDigest(items: readonly DeliveryPayload[], ctx?: { stats?: Record<string, string> }): string {
+export function formatDigest(
+  items: readonly DeliveryPayload[],
+  ctx?: { stats?: Record<string, string>; threadLines?: Record<string, string> },
+): string {
   const lines = [`${items.length} subagents settled:`];
   for (const item of items) {
     const who = item.label ? `"${item.label}" (#${item.runId.slice(0, 8)})` : `#${item.runId.slice(0, 8)}`;
     const stats = ctx?.stats?.[item.key];
     lines.push(`✓ ${who}${stats ? ` — ${stats}` : ""}`);
+    const threadLine = ctx?.threadLines?.[item.key];
+    if (threadLine !== undefined) lines.push(`  ${threadLine}`);
   }
   return lines.join("\n");
+}
+
+/**
+ * fabric-thread arch r3 §5.3 ① (P3): the frozen terminal summary rendered into a completion
+ * notification — English inline tokens per the UI language split. `subs` counts the subscriptions
+ * still live at settle time (routed/replies/handbacks are lifetime totals).
+ */
+export function formatThreadSummaryLine(summary: {
+  subs: number;
+  routed: number;
+  replies: number;
+  handbacks: number;
+}): string {
+  return `thread subs ${summary.subs} · routed ${summary.routed} · replies ${summary.replies} · handback ${summary.handbacks}`;
 }

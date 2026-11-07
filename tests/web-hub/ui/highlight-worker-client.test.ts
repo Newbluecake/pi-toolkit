@@ -133,6 +133,35 @@ describe("highlight-worker-client (P5 §5.3)", () => {
     await expect(c.result).resolves.toMatchObject({ status: "spans" });
   });
 
+  it("onTimeout:'plain' (2026-11-03 flood fix): the deadline settles EVERY pending request with its own outcome", async () => {
+    const { client, lastWorker, reset } = makeClient(15);
+    const a = client.request("x", "typescript"); // default: fallback (frozen §5.3 contract)
+    const w1 = lastWorker();
+    reset();
+    const b = client.request("y", "typescript", { onTimeout: "plain" });
+    const c = client.request("z", "typescript", { onTimeout: "plain", maxTokens: 20_000 });
+    await expect(a.result).resolves.toEqual({ status: "fallback" });
+    // the terminated worker took the queue down with it — per-request timeout outcomes
+    await expect(b.result).resolves.toEqual({ status: "plain" });
+    await expect(c.result).resolves.toEqual({ status: "plain" });
+    expect(w1.terminated).toBe(1);
+    expect(client.unavailable).toBe(false); // still non-sticky — the worker rebuilds lazily
+    const d = client.request("w", "typescript");
+    lastWorker().emitMessage({ kind: "spans", id: 4, ...spansPayload() });
+    await expect(d.result).resolves.toMatchObject({ status: "spans" });
+  });
+
+  it("onTimeout:'plain' does NOT touch the sticky paths — error/messageerror still resolve fallback (K10 degrade)", async () => {
+    const { client, lastWorker } = makeClient();
+    const a = client.request("x", "typescript", { onTimeout: "plain" });
+    lastWorker().emitEvent("error");
+    await expect(a.result).resolves.toEqual({ status: "fallback" });
+    expect(client.unavailable).toBe(true);
+    await expect(client.request("y", "typescript", { onTimeout: "plain" }).result).resolves.toEqual({
+      status: "fallback",
+    });
+  });
+
   it("STICKY: a throwing constructor kills the worker path for the process", async () => {
     let calls = 0;
     const client = createHighlightWorkerClient({

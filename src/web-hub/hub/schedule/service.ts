@@ -26,10 +26,13 @@
  */
 import type { HubEvent, HubLog } from "../ports.js";
 import {
+  SCHED_HASH_RE,
   SCHED_HUB_CAP,
+  SCHED_REQ_ID_RE,
   SCHED_RUN_ACK_WAIT_MS,
   SCHED_RUN_TTL_MS,
   SCHED_SESSION_ID_RE,
+  SCHED_TASK_ID_RE,
   type HubScheduleConfig,
   type SchedAgentFrame,
   type SchedulesPayloadWire,
@@ -39,7 +42,6 @@ import type { HubFrame } from "../../protocol/messages.js";
 import { compileTask } from "../../../schedule/core/occurrence.js";
 import { occurrencesBetween } from "../../../schedule/core/cron.js";
 import {
-  isApproved,
   isTerminalRunState,
   defHash,
   isExecutable,
@@ -76,7 +78,6 @@ export const SCHED_OBSERVE_DELAY_MS = 60_000 + 30_000;
 export const SCHED_OBSERVE_CATCHUP_MS = 10 * 60_000;
 export const SCHED_FULL_SCAN_INTERVAL_MS = 60_000;
 export const SCHED_OBSERVE_CANDIDATES_MAX = 16;
-
 export interface RegistryLike {
   list(): readonly { agentKey: string; session?: { sessionId: string; name?: string }; cwd?: string }[];
   isConnected(agentKey: string): boolean;
@@ -150,6 +151,8 @@ export interface ScheduleCounters {
   persistFailures: number;
   scanTimeouts: number;
   scanTruncated: number;
+  /** Deprecated offers and decision acknowledgements tolerated and discarded. */
+  offersDropped: number;
 }
 
 export interface ScheduleStatus {
@@ -258,6 +261,7 @@ export function createScheduleService(deps: ScheduleServiceDeps): ScheduleCoordi
     persistFailures: 0,
     scanTimeouts: 0,
     scanTruncated: 0,
+    offersDropped: 0,
   };
   let pendingSeen = 0;
 
@@ -344,7 +348,10 @@ export function createScheduleService(deps: ScheduleServiceDeps): ScheduleCoordi
       }
     }
     if (complete) {
-      for (const sid of [...states.keys()]) if (!seen.has(sid)) states.delete(sid);
+      for (const sid of [...states.keys()])
+        if (!seen.has(sid)) {
+          states.delete(sid);
+        }
       for (const sid of [...degradedSessions.keys()]) if (!seen.has(sid)) degradedSessions.delete(sid);
     }
   };
@@ -870,7 +877,6 @@ export function createScheduleService(deps: ScheduleServiceDeps): ScheduleCoordi
             form: task.form,
             when: whenText(state, task.id),
             enabled: task.enabled,
-            approved: isApproved(task),
             defHash: defHash(task),
             ...(nextAt === undefined ? {} : { nextAt }),
             ...(lastRun === undefined ? {} : { lastStatus: lastRun.state }),
@@ -937,21 +943,33 @@ export function createScheduleService(deps: ScheduleServiceDeps): ScheduleCoordi
     },
     onAgentFrame(agentKey: string, frame: SchedAgentFrame): void {
       counters.frames++;
-      if (frame.t === "sched_changed") {
-        void rescanSession(frame.sessionId);
-        return;
-      }
-      if (frame.t === "sched_bound") {
-        try {
-          boundTap?.(agentKey, frame.runKey);
-        } catch (err) {
-          log.error("web-hub schedule: sched_bound tap threw", { error: String(err) });
+      // Exhaustive by `t` (#61): an unknown/new frame is NEVER mistaken for a run ack.
+      switch (frame.t) {
+        case "sched_changed":
+          void rescanSession(frame.sessionId);
+          return;
+        case "sched_bound":
+          try {
+            boundTap?.(agentKey, frame.runKey);
+          } catch (err) {
+            log.error("web-hub schedule: sched_bound tap threw", { error: String(err) });
+          }
+          return;
+        case "sched_run_ack":
+          // resolves the port's run() waiter (§7.4).
+          if (frame.result === "started") settleRun(frame.reqId, { kind: "started" });
+          else settleRun(frame.reqId, { kind: "refused", reason: frame.reason ?? "refused" });
+          return;
+        case "sched_offers":
+        case "sched_decide_ack":
+          counters.offersDropped++;
+          return;
+        default: {
+          const unreachable: never = frame;
+          void unreachable; // a future frame type must be routed explicitly above
+          return;
         }
-        return;
       }
-      // sched_run_ack resolves the port's run() waiter (§7.4).
-      if (frame.result === "started") settleRun(frame.reqId, { kind: "started" });
-      else settleRun(frame.reqId, { kind: "refused", reason: frame.reason ?? "refused" });
     },
     bindDelivery(d: ScheduleDelivery | undefined): void {
       delivery = d;

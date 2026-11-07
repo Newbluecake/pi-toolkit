@@ -67,6 +67,13 @@ import {
   type XsWakeDowngraded,
 } from "../../protocol/xs.js";
 import { XS_ALIAS_TAKE_TOKEN_RE } from "../../protocol/xs-alias.js";
+import {
+  XS_ACTIVATE_AGENT_CAP,
+  XS_STATE_AGENT_CAP,
+  type XsActivateAckFrame,
+  type XsStateFrame,
+} from "../../protocol/xs-activation.js";
+import { createXsActivationService, type XsActivationService } from "./activation.js";
 import { auditXs, type XsAuditRecord } from "../audit.js";
 import type { HubLog } from "../ports.js";
 import type { Registry } from "../registry.js";
@@ -116,6 +123,10 @@ const RESERVED_PREFIXES = ["r_", "@", "wf_"] as const;
 export interface XsRouter {
   /** Never throws. `reply` is called at most once per request (and may be called after an await). */
   handle(agentKey: string, frame: XsReqFrame, reply: (res: XsResFrame) => void): void;
+  /** fabric-xs-activation P1: agent→hub push frames that never enter the registry — `xs_state`
+   *  (receiver evidence; verified + forwarded to the source) and `xs_activate_ack` (P3 pending
+   *  match; P1 issues none, diagnostic only). No reply semantics on either. */
+  onAgentFrame(agentKey: string, frame: XsStateFrame | XsActivateAckFrame): void;
   /** An oversize (>16 KiB) xs_req the decoder refused: answer `E_XS_TOO_LARGE` iff `rid` is sane. */
   rejectTooLarge(agentKey: string, raw: unknown, reply: (res: XsResFrame) => void): void;
   /** `xs_late_ack` counter (acks that arrived after the hub already settled/timed out). */
@@ -143,6 +154,9 @@ export interface XsRouterDeps {
   /** feishu-xs-mirror P2: advisory observer of quiet (not-woken) deliveries; called on a microtask
    *  AFTER the sender's reply + audit + limits settle. Absent ⇒ behaviour/bytes unchanged. */
   onQuietDelivered?: XsQuietObserver;
+  /** fabric-xs-activation P1: the relation bag, built iff `HubConfig.crossSession.activation`
+   *  exists (key-absence-is-off ⇒ no relations, no receipt op, no state forwarding). */
+  activation?: XsActivationService;
 }
 
 function trimSlash(p: string): string {
@@ -174,6 +188,9 @@ function reservedAddress(to: string): boolean {
   return RESERVED_PREFIXES.some((p) => t.startsWith(p));
 }
 
+/** Audit `reason` / dispatch key of an `op:"alias"` request (alias-force-default adds the last three). */
+type AliasSub = "get" | "set" | "clear" | "preview" | "take" | "auto" | "force-preview" | "handoff";
+
 type Resolved =
   | { kind: "one"; member: XsEffectiveMember }
   | { kind: "unavailable" }
@@ -189,10 +206,21 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
   let lateAckCount = 0;
 
   const refOf = (sessionId: string): string => sessionId.slice(0, REF_LEN);
+  /** fabric-xs-activation P1: the socket's hello caps ∋ `xs.state.v1` (three-end negotiation leg). */
+  const stateCapable = (key: string): boolean => {
+    try {
+      return registry.xsView(key)?.caps.includes(XS_STATE_AGENT_CAP) === true;
+    } catch {
+      return false;
+    }
+  };
   const aliasStore = deps.aliases;
   /** §3.6: `aliasUsable(m) = aliasAdvertised ∧ m.aliasCapable` (ready/wedged/disabled alike). */
   const aliasUsable = (m: XsEffectiveMember): boolean =>
     aliasStore !== undefined && aliasStore.advertised && m.aliasCapable;
+  /** Alias-force-default (#72): `aliasUsable ∧ caps ∋ xs.alias.v2` — the only requesters that may send `intent` and be
+   *  written the v2 reply keys (`origin`, `lost.forced`, preview `online`/`auto`). */
+  const aliasV2Usable = (m: XsEffectiveMember): boolean => aliasUsable(m) && m.aliasV2Capable;
   /** §5.1 degraded guard: a table exists but is not trusted (never advertised) ∧ the requester is
    *  alias-capable. A hub without a table (key absent) never guards. */
   const aliasGuarded = (m: XsEffectiveMember): boolean =>
@@ -304,6 +332,15 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
    * "preview"` ⇒ take preview; `alias` + `take:<token>` ⇒ take. get and preview count against
    * `listPerMin`; writes are bounded by the store's own queue/budget. Audit lines carry the sub-op
    * and the code only — never the alias text, the token or the cwd label.
+   *
+   * Alias-force-default (#72, AF2): a requester that declared `xs.alias.v2` may add `intent`:
+   * `{alias, intent:"auto"}` ⇒ auto-claim (requires `joined`); `{alias, take:"preview", intent:"force"}` ⇒
+   * force preview; `{alias, take:<token>[, intent:"force"]}` ⇒ execute (the token's `mode` decides, a
+   * present `intent:"force"` is ignored); `{alias, intent:"handoff", prevSessionId}` ⇒ `/new` handoff (AF7, I10: the store
+   * only moves the record when this hub itself saw THIS socket go prevSessionId → the requester's sid; every refusal is
+   * `E_XS_ALIAS_TAKE{stale}`, and a success consumes the succession edge). Every other combination — `intent`/`prevSessionId` from
+   * a requester without v2, `intent` with `clear`, `prevSessionId` without `handoff`, `intent:"auto"` with
+   * `take` — is `E_XS_BAD_FRAME`, before anything reaches the store.
    */
   function handleAlias(
     agentKey: string,
@@ -316,7 +353,10 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
     const store = aliasStore!;
     const from = self.sessionId;
     const take = frame.take;
-    const sub: "get" | "set" | "clear" | "preview" | "take" =
+    const v2 = aliasV2Usable(self);
+    const intent = frame.intent;
+    // Sub-op: `intent` (v2) refines the legacy field-derived choice. `handoff` is the AF7 `/new` handoff.
+    const legacySub: "get" | "set" | "clear" | "preview" | "take" =
       take !== undefined
         ? take === XS_ALIAS_TAKE_PREVIEW
           ? "preview"
@@ -326,9 +366,27 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
           : frame.alias !== undefined
             ? "set"
             : "get";
+    const sub: AliasSub =
+      intent === "auto"
+        ? "auto"
+        : intent === "handoff"
+          ? "handoff"
+          : intent === "force" && legacySub === "preview"
+            ? "force-preview"
+            : legacySub;
+    const intentMalformed =
+      (intent !== undefined || frame.prevSessionId !== undefined) &&
+      (!v2 ||
+        frame.clear !== undefined ||
+        (frame.prevSessionId !== undefined && intent !== "handoff") ||
+        (intent === "handoff" &&
+          (frame.alias === undefined || frame.prevSessionId === undefined || take !== undefined)) ||
+        (intent === "auto" && (frame.alias === undefined || take !== undefined || !self.joined)) ||
+        (intent === "force" && (frame.alias === undefined || take === undefined)));
     const malformed =
+      intentMalformed ||
       (frame.clear !== undefined && (frame.clear !== true || frame.alias !== undefined || take !== undefined)) ||
-      ((sub === "preview" || sub === "take") && frame.alias === undefined) ||
+      ((sub === "preview" || sub === "take" || sub === "force-preview") && frame.alias === undefined) ||
       (sub === "take" && !XS_ALIAS_TAKE_TOKEN_RE.test(take!));
     const fail = (code: string, effect: "none" | "unknown"): void => {
       res({ ok: false, code, effect });
@@ -348,14 +406,22 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
       const w = xsAliasFailureWire(f);
       fail(w.code, w.effect);
     };
-    const requester: XsAliasRequester = { sessionId: self.sessionId, epoch: self.epoch, agentKey };
-    if (sub === "get" || sub === "preview") {
+    const requester: XsAliasRequester = {
+      sessionId: self.sessionId,
+      epoch: self.epoch,
+      agentKey,
+      ...(v2 ? { v2: true } : {}),
+    };
+    if (sub === "get" || sub === "preview" || sub === "force-preview") {
       if (!limits.admitList(agentKey, self.limits)) return fail("E_XS_RATE_LIMITED", "none");
       if (sub === "get") {
         res({ ok: true, alias: store.get(requester) });
         return okLine();
       }
-      const p = store.takePreview(requester, frame.alias!);
+      const p =
+        sub === "force-preview"
+          ? store.forcePreview(requester, frame.alias!)
+          : store.takePreview(requester, frame.alias!);
       if (!p.ok) return failure(p.failure);
       res({ ok: true, alias: p.res });
       return okLine();
@@ -365,12 +431,17 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
     const pending: Promise<XsAliasWriteResult> =
       sub === "set"
         ? store.set(requester, frame.alias!, cwdLabel)
-        : sub === "clear"
-          ? store.clear(requester)
-          : store.take(requester, frame.alias!, take!, cwdLabel);
+        : sub === "auto"
+          ? store.autoClaim(requester, frame.alias!, cwdLabel)
+          : sub === "handoff"
+            ? store.handoff(requester, frame.alias!, frame.prevSessionId!, cwdLabel)
+            : sub === "clear"
+              ? store.clear(requester)
+              : store.take(requester, frame.alias!, take!, cwdLabel);
     pending
       .then((out) => {
         if (!out.ok) return failure(out.failure);
+        if (sub === "handoff") members.clearPredecessor(agentKey); // the edge is single-use
         res({ ok: true, alias: out.res });
         okLine();
       })
@@ -475,6 +546,100 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
         hubLimits: { hubSendsPerMin: deps.hubSendsPerMin, expiresMs: XS_EXPIRES_MS, deliverMs: XS_HUB_DELIVER_MS },
       });
       audit({ op: "info", fromSession: self.sessionId, outcome: "ok" });
+      return;
+    }
+
+    // fabric-xs-activation plan §3 P1: the read-only progress query. Requires the relation bag
+    // (built iff the hub config carries `crossSession.activation`); a service-less hub answers
+    // E_XS_OFF — only a state-capable agent ever sends the op, so this is purely defensive.
+    if (frame.op === "receipt") {
+      if (deps.activation === undefined || typeof frame.messageId !== "string" || frame.messageId === "") {
+        refuse("E_XS_OFF", {}, self.sessionId);
+        return;
+      }
+      // arch §4.6: a query is a pure read — it only spends the `listPerMin` read budget.
+      if (!limits.admitList(agentKey, self.limits)) {
+        refuse("E_XS_RATE_LIMITED", {}, self.sessionId);
+        return;
+      }
+      deps.activation.receipt(
+        agentKey,
+        self,
+        {
+          messageId: frame.messageId,
+          ...(frame.activationKey !== undefined ? { activationKey: frame.activationKey } : {}),
+        },
+        (body) => {
+          if (body.ok) res({ ok: true });
+          else res({ ok: false, code: body.code ?? "E_XS_NOT_TRACKED", effect: "none" });
+          audit({
+            op: "receipt",
+            fromSession: self.sessionId,
+            ...(body.ok
+              ? { outcome: "ok" as const }
+              : { outcome: "error" as const, ...(body.code !== undefined ? { code: body.code } : {}) }),
+          });
+        },
+      );
+      return;
+    }
+    // fabric-xs-activation P3 (arch §4.4–§4.6): idempotent relation-level activation. Requires
+    // the relation bag (hub `crossSession.activation` key) AND a requester that is itself
+    // activate-capable (the agent only sends the op to a hub advertising `xs.activate.v1`;
+    // a cap-less requester is refused like a service-less hub).
+    if (frame.op === "activate") {
+      const requesterCaps = (() => {
+        try {
+          return registry.xsView(agentKey)?.caps ?? [];
+        } catch {
+          return [] as readonly string[];
+        }
+      })();
+      if (
+        deps.activation === undefined ||
+        !requesterCaps.includes(XS_ACTIVATE_AGENT_CAP) ||
+        typeof frame.messageId !== "string" ||
+        frame.messageId === "" ||
+        typeof frame.activationKey !== "string" ||
+        frame.activationKey === "" ||
+        frame.text !== undefined
+      ) {
+        refuse("E_XS_OFF", {}, self.sessionId);
+        return;
+      }
+      deps.activation.activate(
+        agentKey,
+        self,
+        {
+          ...(frame.to !== undefined ? { to: frame.to } : {}),
+          messageId: frame.messageId,
+          activationKey: frame.activationKey,
+          ...(frame.level !== undefined ? { level: frame.level } : {}),
+        },
+        (body) => {
+          if (!body.ok) {
+            res({ ok: false, code: body.code, effect: "none" });
+            audit({ op: "activate", fromSession: self.sessionId, outcome: "error", code: body.code });
+            return;
+          }
+          const a = body.activation;
+          res({
+            ok: true,
+            effect: a.effect,
+            ...(a.reason !== undefined ? { reason: a.reason } : {}),
+            ...(a.wakeDowngraded !== undefined ? { wakeDowngraded: a.wakeDowngraded as XsWakeDowngraded } : {}),
+            activation: a,
+          });
+          audit({
+            op: "activate",
+            xid: a.messageId,
+            fromSession: self.sessionId,
+            outcome: a.effect,
+            reason: a.status,
+            ms: now() - started,
+          });
+        },
+      );
       return;
     }
 
@@ -606,8 +771,16 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
           res({ ok: true, candidates: r.candidates });
           audit({ op: "resolve", fromSession: self.sessionId, outcome: "ok", reason: "ambiguous" });
           return;
-        case "one":
-          res({ ok: true, target: targetOf(r.member) });
+        case "one": {
+          // P2b: TARGET capability is read from its actual hello, never a status/card.
+          // Missing service or either legacy peer leaves resolve byte-identical.
+          const target = {
+            ...targetOf(r.member),
+            ...(deps.activation !== undefined && stateCapable(agentKey) && stateCapable(r.member.agentKey)
+              ? { xsState: true }
+              : {}),
+          };
+          res({ ok: true, target });
           audit({
             op: "resolve",
             fromSession: self.sessionId,
@@ -615,6 +788,7 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
             outcome: "ok",
           });
           return;
+        }
       }
     }
 
@@ -717,6 +891,24 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
     }
     // ⑤⑥ stamp + deliver (from here on NOTHING is `none` unless the receiver says so — r3 M2)
     const ticket = admit.ticket;
+    // fabric-xs-activation P1: relation registration (three-end `xs.state.v1` negotiation — the
+    // hub key is present (deps.activation) ∧ BOTH sockets declared the agent cap). Bag full or
+    // any leg absent ⇒ the OLD path (no key, no tracking) — never a send failure (arch §4.5).
+    if (deps.activation !== undefined && stateCapable(agentKey) && stateCapable(target.agentKey)) {
+      const registered = deps.activation.registerSend({
+        messageId: xid,
+        sourceAgentKey: agentKey,
+        sourceSessionId: self.sessionId,
+        sourceRid: frame.rid,
+        targetAgentKey: target.agentKey,
+        targetSessionId: target.sessionId,
+        ...(frame.expect !== undefined
+          ? { expect: { requestId: frame.expect.requestId, timeoutMs: frame.expect.timeoutMs } }
+          : {}),
+        wakeRequested: !isReply && frame.wake === true,
+      });
+      if (registered.ok) deps.activation.pushInitial(registered.relation);
+    }
     const deliver = build(admit.wake, "pending");
     const settleOut = (
       effect: "applied" | "none" | "unknown",
@@ -828,6 +1020,18 @@ export function createXsRouter(deps: XsRouterDeps): XsRouter {
       }
     },
 
+    onAgentFrame(agentKey, frame) {
+      // fabric-xs-activation P1: agent-server routes the push frames here; a service-less hub
+      // (activation off) keeps the old registry-ignore behaviour — nothing happens at all.
+      if (closed || deps.activation === undefined) return;
+      try {
+        if (frame.t === "xs_state") deps.activation.onState(agentKey, frame);
+        else deps.activation.onActivateAck(agentKey, frame);
+      } catch {
+        log.warn("xs activation agent frame failed", { code: "E_XS_INTERNAL", t: frame.t });
+      }
+    },
+
     rejectTooLarge(_agentKey, raw, reply) {
       if (closed) return;
       const rid = raw !== null && typeof raw === "object" ? (raw as Record<string, unknown>)["rid"] : undefined;
@@ -912,8 +1116,9 @@ export function hubXsAliasParamsOf(crossSession: HubCrossSessionConfig | undefin
 /** The binding table + its late-bound presence/liveness ports (members are built by the relay). */
 export interface XsAliasBinding {
   readonly store: XsAliasStore;
-  /** Called once by {@link createXsRelay}. Before it, nobody is online and no requester is live. */
-  attach(members: XsMembers): void;
+  /** Called once by {@link createXsRelay}. Before it, nobody is online and no requester is live. `registry` (alias-force-default,
+   *  #72) feeds `isLinked` and the `xs_alias_evt` push; absent ⇒ nobody is `linked` and nothing is pushed. */
+  attach(members: XsMembers, registry?: Pick<Registry, "list" | "xsView" | "send">): void;
 }
 
 /** Built by `hub.ts` BEFORE the cap array (load must decide `xs.alias.v1`), and loaded there. */
@@ -927,6 +1132,7 @@ export function createXsAliasBinding(deps: {
   randomHex?: (bytes: number) => string;
 }): XsAliasBinding {
   let members: XsMembers | undefined;
+  let registry: Pick<Registry, "list" | "xsView" | "send"> | undefined;
   const store = createXsAliasStore({
     stateDir: deps.stateDir,
     params: deps.params,
@@ -936,6 +1142,32 @@ export function createXsAliasBinding(deps: {
       const e = members.effective(r.agentKey);
       return e !== undefined && e.sessionId === r.sessionId && e.epoch === r.epoch && e.aliasCapable;
     },
+    // §2 `linked`: a live-ish registry record carrying this sessionId that is NOT an effective xs member
+    // (the store only asks after `isOnline` said no). Read-only, bounded by the registry size.
+    isLinked: (sid) => {
+      if (registry === undefined) return false;
+      for (const v of registry.list()) {
+        const x = registry.xsView(v.agentKey);
+        if (x !== undefined && x.connected && x.phase !== "stale" && x.sessionId === sid) return true;
+      }
+      return false;
+    },
+    // I10 (AF7): the succession edge the member table recorded for THIS requester's socket — never the frame's word.
+    isSuccessor: (r, prev) => {
+      if (members === undefined || r.agentKey === undefined) return false;
+      const e = members.predecessorOf(r.agentKey);
+      return e !== undefined && e.from === prev && members.sessionOf(r.agentKey) === r.sessionId;
+    },
+    allMembersV2: (sid) => members?.effectiveAll().every((m) => m.sessionId !== sid || m.aliasV2Capable) ?? false,
+    // I9: after a force committed, nudge every v2 effective member of the holder session. Best effort — a failed
+    // `send` is not rolled back (the tombstone is the safety net, R23).
+    onForcedCommit: (e) => {
+      if (members === undefined || registry === undefined) return;
+      for (const m of members.effectiveAll()) {
+        if (m.sessionId !== e.holderSessionId || !m.aliasV2Capable) continue;
+        registry.send(m.agentKey, { t: "xs_alias_evt", sessionId: e.holderSessionId, at: e.at });
+      }
+    },
     ...(deps.log === undefined ? {} : { log: deps.log }),
     ...(deps.now === undefined ? {} : { now: deps.now }),
     ...(deps.fs === undefined ? {} : { fs: deps.fs }),
@@ -944,8 +1176,9 @@ export function createXsAliasBinding(deps: {
   });
   return {
     store,
-    attach(m) {
+    attach(m, r) {
       members = m;
+      registry = r;
     },
   };
 }
@@ -1017,7 +1250,13 @@ export function createXsRelay(deps: {
   });
   const limits = createXsLimits({ now: deps.now, hubSendsPerMin });
   const aliasStore = deps.aliases?.store;
-  deps.aliases?.attach(members);
+  deps.aliases?.attach(members, deps.registry);
+  // fabric-xs-activation P1: the relation bag exists iff `HubConfig.crossSession.activation`
+  // (key-absence-is-off — no relations, no receipt op, no state forwarding; hub byte-identical).
+  const activation =
+    deps.config.crossSession.activation === true
+      ? createXsActivationService({ registry: deps.registry, members, limits, log: deps.log, now: deps.now })
+      : undefined;
   router = createXsRouter({
     registry: deps.registry,
     members,
@@ -1030,6 +1269,7 @@ export function createXsRelay(deps: {
     ...(deps.config.crossSession.channels === undefined ? {} : { channels: deps.config.crossSession.channels }),
     ...(aliasStore === undefined ? {} : { aliases: aliasStore }),
     ...(deps.onQuietDelivered === undefined ? {} : { onQuietDelivered: deps.onQuietDelivered }),
+    ...(activation === undefined ? {} : { activation }),
   });
   deps.registry.setXsObserver(aliasStore === undefined ? members.observer : withPresenceFeed(members, aliasStore));
   const r = router;
@@ -1040,6 +1280,7 @@ export function createXsRelay(deps: {
     ...(aliasStore === undefined ? {} : { aliases: aliasStore }),
     dispose() {
       r.dispose();
+      activation?.dispose();
       deps.registry.setXsObserver(undefined);
       aliasStore?.close();
     },

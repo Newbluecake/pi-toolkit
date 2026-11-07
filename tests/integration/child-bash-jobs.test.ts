@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_SETTINGS, type AgentSettings } from "../../src/config/settings.js";
-import { bashJobsEnabled, checkBashToolReturnLag, scheduleBashJobRecovery } from "../../src/stack.js";
+import { bashJobsEnabled, checkBashToolReturnLag, scheduleBashJobRecovery } from "../../src/bash/host.js";
 import { computeHoldCap, HOLD_MIN_MS, MARGIN_HOLD_MS, W_HOLD_MS, wireChildBashJobs } from "../../src/bash/child.js";
 import {
   getChildBashRegistry,
@@ -1204,5 +1204,41 @@ describe.skipIf(!posix)("todo #30: resume of an already-settled child session mu
     expect(r2.isError).not.toBe(true);
     expect(JSON.stringify(r2)).not.toContain("run is ending");
     expect(registry.isSealed(sessionId)).toBe(false);
+  }, 10_000);
+});
+
+// ── stripAnsi 包：child 接线（A/B 两点都随 wireChildBashJobs 的设置快照） ──────
+
+describe.skipIf(!posix)("wireChildBashJobs stripAnsi wiring", () => {
+  const CMD = "printf 'a\\033[31mred\\033[0mb\\n'";
+
+  function resultText(result: unknown): string {
+    const content = (result as { content: { type: string; text?: string }[] }).content;
+    return content.map((part) => (part.type === "text" ? (part.text ?? "") : "")).join("");
+  }
+
+  it("child bash output is cleaned by default (tool A point + manager B point share the snapshot)", async () => {
+    const { pi, tools } = fakePi();
+    const sessionId = randomUUID();
+    const dir = tmpDir();
+    wireChildBashJobs(pi, { settings: settingsWith({}, dir) });
+    const bash = tools.get("bash")!;
+    const text = resultText(
+      await bash.execute("call-1", { command: CMD }, undefined, undefined, fakeCtx(sessionId, dir)),
+    );
+    expect(text).toContain("aredb");
+    expect(text).not.toContain("\x1b");
+  }, 10_000);
+
+  it("stripAnsi:false keeps the raw bytes in the child session too", async () => {
+    const { pi, tools } = fakePi();
+    const sessionId = randomUUID();
+    const dir = tmpDir();
+    wireChildBashJobs(pi, { settings: settingsWith({ stripAnsi: false }, dir) });
+    const bash = tools.get("bash")!;
+    const text = resultText(
+      await bash.execute("call-1", { command: CMD }, undefined, undefined, fakeCtx(sessionId, dir)),
+    );
+    expect(text).toContain("\x1b[31mred\x1b[0m");
   }, 10_000);
 });

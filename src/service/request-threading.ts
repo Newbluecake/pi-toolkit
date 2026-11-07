@@ -48,6 +48,9 @@ const THREADED = [
  * (this table is what a reviewer should read when a new field shows up here):
  */
 const NOT_THREADED = [
+  "agentToolDispatch", // Host Agent-tool convention, consumed only by admission floor; not runtime/diag/journal/wire.
+  "memorySeed", // #39 host-only snapshot; transfer explicitly to SessionSpec.memorySeed, never raw runner/worker/journal data (P2).
+  "fastSeed", // Fast control-plane seed; P3 must explicitly transfer to SessionSpec.fastSeed, never a ResolvedSpawnRequest runner field; P4a contract only
   "runId", // supplied directly as RunnerSpec.runId / ResolvedSpawnRequest.runId
   "type", // resolved to RunnerSpec.type (AgentTypeConfig) before this layer
   "prompt", // assembled by buildPrompt(spec), not passed through raw
@@ -73,6 +76,8 @@ const NOT_THREADED = [
   // consult A/B instrumentation plan (§4/§5 P1b): consumed by the adapter to pick renderStructuredForHost's
   // preset at settle time; the resolved `schema` field (already classified above) still carries the real JSON Schema.
   "schemaPreset",
+  // #68: consumed by spawn admission only (resume without `schema` inherits the target run's schema); never reaches the runner.
+  "inheritSchema",
   // P0-r (todo #22 optimize-plan §7.0 point 5): consumed by the runtime adapter to decide
   // readonlyDomain (tool set / policy / provenance / customTools narrowing); the runner never
   // sees this field verbatim — it only ever executes the toolScope the adapter already built.

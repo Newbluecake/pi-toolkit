@@ -203,15 +203,15 @@ describe("todo/nudge: Task* touch zeroes all counters", () => {
 describe("todo/nudge: buildNudgeText", () => {
   it("omits a zero-count evidence clause", () => {
     const text = buildNudgeText({ e1: 0, e2: 1, e3: 6 }, [{ id: 1, subject: "Do the thing" }]);
-    expect(text).not.toContain("完成");
-    expect(text).toContain("1 次 git 提交");
+    expect(text).not.toContain("后台完成通知");
+    expect(text).toContain("1 次 git 写操作");
     expect(text).toContain("已过 6 轮");
   });
 
   it("includes only non-zero clauses when several are zero", () => {
     const text = buildNudgeText({ e1: 0, e2: 0, e3: 20 }, [{ id: 1, subject: "x" }]);
-    expect(text).not.toContain("git 提交");
-    expect(text).not.toContain("agent/workflow");
+    expect(text).not.toContain("git 写操作");
+    expect(text).not.toContain("后台完成通知");
     expect(text).toContain("已过 20 轮");
   });
 

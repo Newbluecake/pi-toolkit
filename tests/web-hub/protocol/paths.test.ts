@@ -66,6 +66,7 @@ describe("resolveHubPaths", () => {
       stoppedFile: "/home/u/.pi/agent/web-hub/stopped",
       rotateIntentFile: "/home/u/.pi/agent/web-hub/rotate.intent",
       dbFile: "/home/u/.pi/agent/web-hub/hub.db",
+      totpKeyFile: "/home/u/.local/state/pi-webhub/totp.key",
       policies: { stateDir: STATE_DIR_POLICY, socketDir: STATE_DIR_POLICY },
     });
   });

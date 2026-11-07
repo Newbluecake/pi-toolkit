@@ -27,12 +27,28 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
 
-const REPO = join(import.meta.dirname, "..", "..");
-const HELPER = join(REPO, "src", "secure", "bin", "helper.mjs");
+/** SRC = where this checkout's product source and fixtures physically are. */
+const SRC = join(import.meta.dirname, "..", "..");
+/**
+ * REPO = the physical package layout root. When SRC/node_modules is a symlink into another checkout's
+ * node_modules (worktrees), the pi package really lives under that checkout, so REPO is its parent.
+ */
+function layoutRoot(src: string): string {
+  const nm = join(src, "node_modules");
+  const real = realpathSync(nm);
+  const root = nm !== real && basename(real) === "node_modules" ? dirname(real) : src;
+  const pkg = join(root, "node_modules", "@earendil-works", "pi-coding-agent");
+  if (realpathSync(pkg) !== pkg) {
+    throw new Error(`unsupported node_modules layout: ${pkg} resolves to ${realpathSync(pkg)} (e.g. npm link)`);
+  }
+  return root;
+}
+const REPO = layoutRoot(SRC);
+const HELPER = join(SRC, "src", "secure", "bin", "helper.mjs");
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- plain-JS module, no typings by design
 const H: any = await import(pathToFileURL(HELPER).href);
 const PI_PKG = join(REPO, "node_modules", "@earendil-works", "pi-coding-agent");
@@ -63,7 +79,7 @@ interface ParityFixture {
   mountinfo: { name: string; mountinfo: string; realMnt: string; realCipher: string; expect: string }[];
 }
 const PARITY: ParityFixture = JSON.parse(
-  readFileSync(join(REPO, "tests", "fixtures", "secure-contract-parity.json"), "utf8"),
+  readFileSync(join(SRC, "tests", "fixtures", "secure-contract-parity.json"), "utf8"),
 ) as ParityFixture;
 
 describe("contract parity (shared fixture with src/secure/config.ts)", () => {
@@ -1139,5 +1155,203 @@ describe("review #5/#6: settings file writes are locked, and never through a sym
     symlinkSync("/tmp/whatever", join(home, ".pi", "agent", ".pi-subagent.json.lock"));
     expect(() => H.registerVault("acme", { dir: "/d", mnt: "/l" }, { home })).toThrow();
     expect(existsSync(join(home, ".pi", "agent", "pi-subagent.json"))).toBe(false);
+  });
+});
+
+describe("settings-rename P1: launcher settings location (default legacy name, agentDir tiers)", () => {
+  const w = (f: string, v = "{}") => {
+    mkdirSync(join(f, ".."), { recursive: true });
+    writeFileSync(f, v);
+  };
+
+  it("no settings anywhere ⇒ the LEGACY name in the default dir (拍板②); lock name fixed", () => {
+    const home = tmp("ps-sf-");
+    expect(H.settingsFilePath(home, {})).toBe(join(home, ".pi", "agent", "pi-subagent.json"));
+    expect(H.settingsLockPath(home, {})).toBe(join(home, ".pi", "agent", ".pi-subagent.json.lock"));
+    expect(H.settingsFilePath(home, { PI_CODING_AGENT_DIR: "" })).toBe(H.settingsFilePath(home, {}));
+    expect(H.settingsFilePath(home, { PI_CODING_AGENT_DIR: join(home, ".pi", "agent") + "/" })).toBe(
+      H.settingsFilePath(home, {}),
+    );
+    expect(H.settingsFilePath(home, { PI_CODING_AGENT_DIR: "relative/dir" })).toBe(H.settingsFilePath(home, {}));
+  });
+
+  it("the new name wins when present; a dangling compat link also points at the new name", () => {
+    const home = tmp("ps-sf-");
+    const agent = join(home, ".pi", "agent");
+    w(join(agent, "pi-toolkit.json"));
+    expect(H.settingsFilePath(home, {})).toBe(join(agent, "pi-toolkit.json"));
+    const home2 = tmp("ps-sf-");
+    mkdirSync(join(home2, ".pi", "agent"), { recursive: true });
+    symlinkSync("pi-toolkit.json", join(home2, ".pi", "agent", "pi-subagent.json"));
+    expect(H.settingsFilePath(home2, {})).toBe(join(home2, ".pi", "agent", "pi-toolkit.json"));
+  });
+
+  it("env agentDir: its own file when present, else inherited from the default dir, else created in it as LEGACY", () => {
+    const home = tmp("ps-sf-");
+    const P = join(home, "custom-agent");
+    const env = { PI_CODING_AGENT_DIR: P };
+    mkdirSync(P, { recursive: true });
+    expect(H.settingsFilePath(home, env)).toBe(join(P, "pi-subagent.json")); // nothing anywhere
+    expect(H.settingsLockPath(home, env)).toBe(join(P, ".pi-subagent.json.lock"));
+    w(join(home, ".pi", "agent", "pi-subagent.json"));
+    expect(H.settingsFilePath(home, env)).toBe(join(home, ".pi", "agent", "pi-subagent.json")); // inherited
+    expect(H.settingsLockPath(home, env)).toBe(join(home, ".pi", "agent", ".pi-subagent.json.lock"));
+    w(join(P, "pi-toolkit.json"));
+    expect(H.settingsFilePath(home, env)).toBe(join(P, "pi-toolkit.json")); // isolated once P has a file
+  });
+
+  it("loadSecureConfig keeps its exact default shape and reads the resolved file", () => {
+    const home = tmp("ps-sf-");
+    w(
+      join(home, ".pi", "agent", "pi-toolkit.json"),
+      JSON.stringify({ secure: { vaults: { acme: { dir: "/d/a", mnt: "/m/a" } } } }),
+    );
+    const r = H.loadSecureConfig(home, {});
+    expect(Object.keys(r).sort()).toEqual(["cfg", "file"]);
+    expect(r.file).toBe(join(home, ".pi", "agent", "pi-toolkit.json"));
+    expect(r.cfg.vaults.map((v: { name: string }) => v.name)).toEqual(["acme"]);
+  });
+});
+
+// ── #28: symlinked ancestors of <dir> (docs/dev/secure-symlink/plan.md §3.1) ──
+describe("#28 physical mount spelling under symlinked ancestors", () => {
+  /** L1: home/.local/share → data/share (a physical root; dir lives under the link). */
+  function l1(opts: { linkShare?: boolean } = {}) {
+    const root = realpathSync(tmp("ps-sym-"));
+    const home = join(root, "home");
+    mkdirSync(join(home, ".local"), { recursive: true, mode: 0o700 });
+    mkdirSync(join(root, "data", "share"), { recursive: true, mode: 0o700 });
+    if (opts.linkShare !== false) symlinkSync(join(root, "data", "share"), join(home, ".local", "share"));
+    const dir = join(home, ".local", "share", "pi-toolkit-secure", "acme");
+    const v = H.deriveVault("acme", dir, join(home, "secure", "acme"));
+    H.createLayout(v, { home });
+    writeFileSync(join(v.cipher, "gocryptfs.conf"), "{}");
+    return { root, home, v };
+  }
+  const mi = (mnt: string, src: string, fsType = "fuse.gocryptfs") =>
+    `40 25 0:40 / ${mnt} rw,nosuid,nodev shared:40 - ${fsType} ${src} rw\n`;
+
+  it("physicalPaths matrix: L0 plain / L1 symlinked ancestor / L2 dir via link prefix", () => {
+    const l0 = l1({ linkShare: false });
+    expect(H.physicalPaths(l0.v).realCipher).toBe(l0.v.cipher);
+    const { v } = l1();
+    const pp = H.physicalPaths(v);
+    expect(pp.realCipher).not.toBe(v.cipher);
+    expect(pp.realCipher).toBe(join(realpathSync(v.dir), "cipher"));
+    expect(pp.realMnt).toBe(v.mnt);
+    // L2: dir spelled through a symlinked prefix of the temp root itself
+    const root = realpathSync(tmp("ps-sym2-"));
+    mkdirSync(join(root, "real", "vault", "cipher"), { recursive: true, mode: 0o700 });
+    symlinkSync(join(root, "real"), join(root, "alias"));
+    const v2 = H.deriveVault("acme", join(root, "alias", "vault"), join(root, "secure", "acme"));
+    expect(H.physicalPaths(v2).realCipher).toBe(join(root, "real", "vault", "cipher"));
+    expect(H.physicalPaths(v2).realCipher).not.toBe(v2.cipher);
+  });
+  it("L3 <dir> itself a symlink ⇒ checkLayout refuses; L4 <mnt> parent a symlink ⇒ ancestor problems", () => {
+    const { root, home, v } = l1({ linkShare: false });
+    const moved = join(root, "moved");
+    renameSync(v.dir, moved);
+    symlinkSync(moved, v.dir);
+    expect(H.checkLayout(v, { home }).problems.join()).toMatch(/不得是符号链接/);
+    const root4 = realpathSync(tmp("ps-sym4-"));
+    mkdirSync(join(root4, "home", "elsewhere"), { recursive: true, mode: 0o700 });
+    symlinkSync(join(root4, "home", "elsewhere"), join(root4, "home", "secure"));
+    const v4 = H.deriveVault("acme", join(root4, "v"), join(root4, "home", "secure", "acme"));
+    expect(H.mntAncestorProblems(v4).length).toBeGreaterThan(0);
+  });
+  it("plainMountSpawnTail is the exact argv; leaseChainArgs ends with it", () => {
+    const tail = H.plainMountSpawnTail("/c", "/m");
+    expect(tail[0]).toBe(`gocryptfs`); // (template literal: not a D4 mount-marker hit)
+    expect(tail.slice(1)).toEqual(["-nonempty", "--", "/c", "/m"]);
+    expect(tail).toHaveLength(5);
+    expect(H.leaseChainArgs("/l", tail).slice(-tail.length)).toEqual(tail);
+  });
+  it("verdict: lexical source ⇒ foreign, physical ⇒ mounted, other vault's physical cipher ⇒ foreign; parity with config.ts", async () => {
+    const { v } = l1();
+    const { realMnt, realCipher } = H.physicalPaths(v);
+    const { vaultMountState } = await import("../../src/secure/config.js");
+    const other = join(realpathSync(tmp("ps-sym-o-")), "cipher");
+    for (const [src, want] of [
+      [v.cipher, "foreign"],
+      [realCipher, "mounted"],
+      [other, "foreign"],
+    ] as const) {
+      const text = mi(realMnt, src);
+      expect(H.vaultMountState(text, realMnt, realCipher)).toBe(want);
+      expect(vaultMountState(text, realMnt, realCipher)).toBe(want);
+    }
+  });
+
+  describe("race boundary (plan §1.2): what is and is not detectable", () => {
+    function probeSide(v: unknown, text: string): string {
+      const pp = H.physicalPaths(v);
+      return H.vaultMountState(text, pp.realMnt, pp.realCipher);
+    }
+    function verifySide(v: { mnt: string }, text: string): "ok" | "throws" {
+      const parent = statSync(dirname(v.mnt));
+      const pin = {
+        fd: 3,
+        dev: 0,
+        ino: 0,
+        path: v.mnt,
+        parent: { dev: parent.dev, ino: parent.ino },
+        closed: true, // finally must not close a real fd
+      };
+      try {
+        H.verifyMountPointIdentity(v, pin, {
+          readMountinfo: () => text,
+          readlink: () => v.mnt,
+          stat: (p: string) => (p === v.mnt ? { dev: H.devFromMajMin(0, 40) } : statSync(p)),
+        });
+        return "ok";
+      } catch {
+        return "throws";
+      }
+    }
+    function retarget(home: string, to: string) {
+      rmSync(join(home, ".local", "share"));
+      symlinkSync(to, join(home, ".local", "share"));
+    }
+    function sibling(root: string) {
+      mkdirSync(join(root, "data2", "share", "pi-toolkit-secure", "acme", "cipher"), { recursive: true, mode: 0o700 });
+      return join(root, "data2", "share");
+    }
+
+    it("R1: a lexical-chain symlink retargeted after the physical path was computed ⇒ foreign / refused", () => {
+      const { root, home, v } = l1();
+      const p0 = H.physicalPaths(v).realCipher;
+      const text = mi(v.mnt, p0);
+      expect(probeSide(v, text)).toBe("mounted");
+      expect(verifySide(v, text)).toBe("ok");
+      retarget(home, sibling(root));
+      expect(H.physicalPaths(v).realCipher).not.toBe(p0);
+      expect(probeSide(v, text)).toBe("foreign");
+      expect(verifySide(v, text)).toBe("throws");
+    });
+    it("R2 (known gap, README residual): swapping the physical cipher dir keeps the string ⇒ NOT detected", () => {
+      const { v } = l1();
+      const p0 = H.physicalPaths(v).realCipher;
+      const text = mi(v.mnt, p0);
+      const before = statSync(p0);
+      renameSync(p0, `${p0}.orig`);
+      mkdirSync(p0, { mode: 0o700 });
+      const after = statSync(p0);
+      expect([after.dev, after.ino]).not.toEqual([before.dev, before.ino]);
+      expect(H.physicalPaths(v).realCipher).toBe(p0);
+      expect(probeSide(v, text)).toBe("mounted");
+      expect(verifySide(v, text)).toBe("ok");
+      // When cipher identity proof is added, flip these two expectations together with the README.
+    });
+    it("R3: retarget then restore before the re-check ⇒ mounted again", () => {
+      const { root, home, v } = l1();
+      const original = join(root, "data", "share");
+      const p0 = H.physicalPaths(v).realCipher;
+      const text = mi(v.mnt, p0);
+      retarget(home, sibling(root));
+      expect(probeSide(v, text)).toBe("foreign");
+      retarget(home, original);
+      expect(probeSide(v, text)).toBe("mounted");
+      expect(verifySide(v, text)).toBe("ok");
+    });
   });
 });

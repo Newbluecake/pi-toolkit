@@ -4,6 +4,8 @@ import { createClientAllowGuard } from "../../../src/web-hub/hub/client-allow.js
  * `api-worktree-diff.test.ts`:
  * - loopback: not-enabled fallback byte-identical (401 unauth / 404 authed), CSRF 403;
  * - LAN: `mode:"loopback"` ⇒ 404 byte-identical to not-enabled; `mode:"on"` ⇒ dispatched;
+ * - LAN files: the commit-files fork of the same LAN branch — loopback ⇒ 404, on ⇒ handleFiles
+ *   (proven by its 409 E_STALE_CTX, which the graph handle never emits);
  * - the /proc gate (same gate as wtdiff, §0.2/§3): with `previewProcFdAvailable` forced false, a
  *   real `startHub` declares NO `wtgraph.v1` on either cap surface and wires NO `worktreeGraph`
  *   dep — byte-identical to not-enabled.
@@ -18,7 +20,12 @@ import { createHttpFrontend } from "../../../src/web-hub/hub/http.js";
 import { startHub } from "../../../src/web-hub/hub/hub.js";
 import { createWorktreeGraphRoutes } from "../../../src/web-hub/hub/worktree-graph/routes.js";
 import { denyCtxOf } from "../../../src/web-hub/hub/preview/admit.js";
-import { WTGRAPH_PATH, parseWtGraphPayload } from "../../../src/web-hub/protocol/worktree-graph.js";
+import {
+  WTGRAPH_FILES_PATH,
+  WTGRAPH_PATH,
+  parseWtGraphCommitFiles,
+  parseWtGraphPayload,
+} from "../../../src/web-hub/protocol/worktree-graph.js";
 import { PROTO, WTGRAPH_HUB_CAP, WTGRAPH_MERGED_HUB_CAP } from "../../../src/web-hub/protocol/version.js";
 import type { AgentView, HubEvent, HttpFrontend } from "../../../src/web-hub/hub/ports.js";
 import type { FrontendDeps, FrontendFactory } from "../../../src/web-hub/hub/ports.js";
@@ -79,6 +86,10 @@ function wtgraphRoutes(mode: "on" | "loopback" = "on", mergedEnabled = false) {
 
 function gq(wt = LINKED): string {
   return `${WTGRAPH_PATH}?agentKey=${encodeURIComponent(AGENT)}&sessionId=${encodeURIComponent(SESSION)}&wt=${encodeURIComponent(wt)}`;
+}
+
+function fq(h = HEAD_SHA1, wt = LINKED): string {
+  return `${WTGRAPH_FILES_PATH}?agentKey=${encodeURIComponent(AGENT)}&sessionId=${encodeURIComponent(SESSION)}&wt=${encodeURIComponent(wt)}&h=${h}`;
 }
 
 function createBaseDeps(dir: string): FrontendDeps & { paths: ReturnType<typeof testHubPaths> } {
@@ -213,6 +224,69 @@ describe("loopback /api/worktree-graph — the §2.6/§3 matrix", () => {
   });
 });
 
+describe("loopback /api/worktree-graph/files — wtgraph.files.v1 over real HTTP", () => {
+  it("dispatches to handleFiles: unserved oid ⇒ 409 before any git; after a graph pull ⇒ 200 parser-clean", async () => {
+    const w = wtgraphRoutes("on");
+    w.fx.runner.setHandler((call) => {
+      const j = call.argv.join(" ");
+      if (j.includes("--git-common-dir")) return okRun("/w/repo/.git\n");
+      if (j.includes("worktree list --porcelain")) return okRun(w.fx.porcelain);
+      if (call.argv.includes("for-each-ref")) return okRun(grStdout([MAIN_REF]));
+      if (call.argv.includes("--date-order")) return okRun(glStdout([{ h: HEAD_SHA1, p: [], an: "a", at: 1, s: "s" }]));
+      if (call.argv.includes("--get-regexp")) return { code: 1, stdout: "", stdoutCapped: false, stderr: "" };
+      if (call.argv.includes("--no-walk"))
+        return okRun(`:000000 100644 ${"0".repeat(40)} ${"0".repeat(40)} A\0new.txt\0` + "2\t0\tnew.txt\0");
+      return { code: 128, stdout: "", stdoutCapped: false, stderr: "unexpected" };
+    });
+    const tmp = makeTmp("pwh-api-wtgf-");
+    const deps = createBaseDeps(tmp.dir);
+    deps.worktreeGraph = w.routes;
+    const fe = createHttpFrontend(deps);
+    const port = (await fe.listen()).port;
+    const cookie = await login(port, deps.paths.tokenFile);
+    cleanups.push(async () => {
+      await fe.close();
+      tmp.cleanup();
+    });
+    const fq = `${WTGRAPH_FILES_PATH}?agentKey=${encodeURIComponent(AGENT)}&sessionId=${encodeURIComponent(SESSION)}&wt=${encodeURIComponent(LINKED)}&h=${HEAD_SHA1}`;
+    const headers = { Cookie: cookie, "X-PWH": "1" };
+    const csrf = await rawRequest(port, { method: "GET", path: fq, headers: { Cookie: cookie } });
+    expect(csrf.status).toBe(403);
+    const stale = await rawRequest(port, { method: "GET", path: fq, headers });
+    expect(stale.status).toBe(409);
+    expect(JSON.parse(stale.body)).toEqual({ error: "E_STALE_CTX", reason: "commit" });
+    expect(w.fx.runner.calls.some((c) => c.argv.includes("--no-walk"))).toBe(false);
+    expect((await rawRequest(port, { method: "GET", path: gq(), headers })).status).toBe(200);
+    const ok = await rawRequest(port, { method: "GET", path: fq, headers });
+    expect(ok.status).toBe(200);
+    expect(ok.headers["cache-control"]).toBe("no-store");
+    expect(parseWtGraphCommitFiles(JSON.parse(ok.body), Buffer.byteLength(ok.body))?.entries).toEqual([
+      { path: "new.txt", status: "A", add: 2, del: 0 },
+    ]);
+  });
+
+  it("a routes object without handleFiles leaves the path on the original fall-through (authed ⇒ 404)", async () => {
+    const tmp = makeTmp("pwh-api-wtgf2-");
+    const deps = createBaseDeps(tmp.dir);
+    const full = wtgraphRoutes("on").routes;
+    deps.worktreeGraph = { mode: full.mode, handle: full.handle, dispose: full.dispose };
+    const fe = createHttpFrontend(deps);
+    const port = (await fe.listen()).port;
+    const cookie = await login(port, deps.paths.tokenFile);
+    cleanups.push(async () => {
+      await fe.close();
+      tmp.cleanup();
+    });
+    const r = await rawRequest(port, {
+      method: "GET",
+      path: `${WTGRAPH_FILES_PATH}?h=${HEAD_SHA1}`,
+      headers: { Cookie: cookie, "X-PWH": "1" },
+    });
+    expect(r.status).toBe(404);
+    expect(r.body).toBe('{"error":"E_NOT_FOUND"}');
+  });
+});
+
 describe("loopback /api/worktree-graph?merged=1 — the M phase over real HTTP", () => {
   async function mergedHttp(mergedEnabled: boolean) {
     const w = wtgraphRoutes("on", mergedEnabled);
@@ -259,9 +333,12 @@ describe("loopback /api/worktree-graph?merged=1 — the M phase over real HTTP",
   });
 });
 
+type WtgraphFx = ReturnType<typeof wtgraphRoutes>["fx"];
+type LanKit = { port: number; cookie: Promise<string>; cleanup: Promise<void>; fx: WtgraphFx };
+
 async function lanKit(
-  opts: { mode?: "on" | "loopback"; mergedEnabled?: boolean } = {},
-): Promise<{ port: number; cookie: Promise<string>; cleanup: Promise<void> }> {
+  opts: { mode?: "on" | "loopback"; mergedEnabled?: boolean; onFixture?: (fx: WtgraphFx) => void } = {},
+): Promise<LanKit> {
   const dir = mkdtempSync(join(tmpdir(), "pwh-lan-wtg-"));
   let fe: HttpFrontend | undefined;
   try {
@@ -280,9 +357,9 @@ async function lanKit(
 
 async function lanKitBody(
   dir: string,
-  opts: { mode?: "on" | "loopback"; mergedEnabled?: boolean },
+  opts: { mode?: "on" | "loopback"; mergedEnabled?: boolean; onFixture?: (fx: WtgraphFx) => void },
   onFrontend: (fe: HttpFrontend) => void,
-): Promise<{ port: number; cookie: Promise<string>; cleanup: Promise<void> }> {
+): Promise<LanKit> {
   const log = captureLog();
   const clock = { now: () => Date.now() };
   const agents = new Map<string, AgentView>();
@@ -294,11 +371,9 @@ async function lanKitBody(
   const lanStore = fakeLanStore();
   const cfg: HubLanConfig = { port: await freePort(), extraHosts: [], trustProxyFrom: [], externalOrigins: [] };
   let lastStatus: LanStatus = { state: "starting" };
-  const { fx, routes } = (() => {
-    const w = wtgraphRoutes(opts.mode ?? "on", opts.mergedEnabled ?? false);
-    return { fx: w.fx, routes: w.routes };
-  })();
-  void fx;
+  const w = wtgraphRoutes(opts.mode ?? "on", opts.mergedEnabled ?? false);
+  opts.onFixture?.(w.fx);
+  const routes = w.routes;
   const fe = createHttpFrontend({
     config: { v: 1, home: dir, port: 0, idleExitMinutes: 10, pluginVersion: "0.0.0-test", buildId: "b1" },
     paths: testHubPaths(join(dir, "state")),
@@ -346,6 +421,7 @@ async function lanKitBody(
   if (status.state !== "on") throw new Error(`LAN failed: ${JSON.stringify(status)}`);
   return {
     port: status.port,
+    fx: w.fx,
     cookie: (async () => {
       seedLanUser(lanStore, { id: 1, username: "alice", password: "correct-horse-battery" });
       const r = await lanPostJson(status.port, "/api/login", { username: "alice", password: "correct-horse-battery" });
@@ -399,6 +475,48 @@ describe("LAN /api/worktree-graph — the mode gate", () => {
     // empty scripted runner ⇒ C1a exit nonzero ⇒ the route pipeline maps it to 403 not-repo
     expect(dispatched.status).toBe(403);
     expect(dispatched.body).toBe('{"error":"E_WTDIFF_DENIED","reason":"not-repo"}');
+  });
+});
+
+describe("LAN /api/worktree-graph/files — the wtgraph.files.v1 mode gate", () => {
+  it('mode "loopback": LAN answers 404 BYTE-IDENTICALLY to not-enabled', async () => {
+    const k = await lanKit({ mode: "loopback" });
+    cleanups.push(() => k.cleanup());
+    const cookie = await k.cookie;
+    const r = await lanRequest(k.port, { method: "GET", path: fq(), headers: { Cookie: cookie, "X-PWH": "1" } });
+    expect(r.status).toBe(404);
+    expect(r.body).toBe('{"error":"E_NOT_FOUND"}');
+  });
+
+  it('mode "on": LAN dispatches into handleFiles (CSRF before auth; unserved oid ⇒ 409 E_STALE_CTX)', async () => {
+    const k = await lanKit({
+      mode: "on",
+      onFixture: (fx) => {
+        // admission only (C1a + worktree list): everything else is "unexpected" — and must not
+        // run, because the served-window gate answers before any git-phase spawn
+        fx.runner.setHandler((call) => {
+          const j = call.argv.join(" ");
+          if (j.includes("--git-common-dir")) return okRun("/w/repo/.git\n");
+          if (j.includes("worktree list --porcelain")) return okRun(fx.porcelain);
+          return { code: 128, stdout: "", stdoutCapped: false, stderr: "unexpected" };
+        });
+      },
+    });
+    cleanups.push(() => k.cleanup());
+    const cookie = await k.cookie;
+    const noPwh = await lanRequest(k.port, { method: "GET", path: fq(), headers: { Cookie: cookie } });
+    expect(noPwh.status).toBe(403);
+    expect(noPwh.body).toBe('{"error":"E_CSRF"}');
+    const dispatched = await lanRequest(k.port, {
+      method: "GET",
+      path: fq(),
+      headers: { Cookie: cookie, "X-PWH": "1" },
+    });
+    // 409 E_STALE_CTX{reason:"commit"} is the files route's OWN answer (the graph handle never
+    // says it) — the unserved-oid window gate fired, so this reached handleFiles, not handle.
+    expect(dispatched.status).toBe(409);
+    expect(JSON.parse(dispatched.body)).toEqual({ error: "E_STALE_CTX", reason: "commit" });
+    expect(k.fx.runner.calls.some((c) => c.argv.includes("--no-walk"))).toBe(false);
   });
 });
 

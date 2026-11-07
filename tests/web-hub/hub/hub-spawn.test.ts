@@ -68,14 +68,14 @@ class FakeChild extends EventEmitter {
 /** A pid `/proc/<pid>` will never have in the test env (past the default pid_max). */
 const FAKE_PID = 4_000_000;
 
-/** Real tmp launcher tree satisfying SP7's init check (v1.0.0 ∈ SUPPORTED_PI_RANGE,
+/** Real tmp launcher tree satisfying SP7's init check (v1.5.0 ∈ SUPPORTED_PI_RANGE,
  * which is pinned to this package's pi peer range — NOT arch.md's prose "0.87.x"). */
 function launcherFixture(root: string): readonly [string, string] {
   const pkgDir = `${root}/node_modules/@earendil-works/pi-coding-agent`;
   mkdirSync(pkgDir, { recursive: true });
   writeFileSync(
     `${pkgDir}/package.json`,
-    JSON.stringify({ name: "@earendil-works/pi-coding-agent", version: "1.0.0" }),
+    JSON.stringify({ name: "@earendil-works/pi-coding-agent", version: "1.5.0" }),
   );
   writeFileSync(`${pkgDir}/cli.js`, "// test launcher entry\n");
   return [process.execPath, `${pkgDir}/cli.js`];
@@ -477,10 +477,10 @@ describe("hub assembly × managed spawn (plan §SP10)", () => {
   it("SP13: managedBusy folds the first-prompt sending count into the supersede quiet gate (wiring pin)", async () => {
     // `busyCount` alone misses the window where a live record's first prompt is still sending
     // (agent not busy YET) — a hub replacement there ends the session mid-delivery. The wiring
-    // is one expression in hub.ts; behavioral halves are pinned by first-prompt.test.ts
+    // is one expression in assembly-runtime.ts; behavioral halves are pinned by first-prompt.test.ts
     // (sendingCount semantics) and supersede.test.ts (managedBusy blocks quiet), so this pins
     // the composition itself against silent removal.
-    const src = readFileSync("src/web-hub/hub/hub.ts", "utf8");
+    const src = readFileSync("src/web-hub/hub/assembly-runtime.ts", "utf8");
     const m = /managedBusy:\s*\(\)\s*=>[^\n]+/.exec(src);
     expect(m).toBeDefined();
     expect(m![0]).toContain("busyCount()");
@@ -520,7 +520,7 @@ describe("hub assembly × managed spawn (plan §SP10)", () => {
   });
 
   it("web-hub-spawn-restore D9/§10.4 wiring pin: onPrevAgentGone ⇒ registry.remove(prevKey, {allowConnected:true}); veto file wired", () => {
-    const src = readFileSync("src/web-hub/hub/hub.ts", "utf8");
+    const src = readFileSync("src/web-hub/hub/assembly-spawn.ts", "utf8");
     expect(src).toMatch(
       /onPrevAgentGone:\s*\(_spawnId, prevAgentKey\)\s*=>\s*\{\s*registry\.remove\(prevAgentKey, \{ allowConnected: true \}\);/,
     );

@@ -16,6 +16,8 @@ import {
 import { createBashJobTool, formatGraceLine } from "../../src/bash/job-tool.js";
 import { createSetModelTool } from "../../src/tools/set-model-tool.js";
 import { createExtendTimeoutTool } from "../../src/tools/extend-timeout-tool.js";
+import { createSetCompactThresholdTool } from "../../src/compact-hint/threshold-tool.js";
+import { STRUCTURED_REPAIR_PROMPT } from "../../src/core/structured-repair.js";
 
 function collectDescriptions(schema: unknown, out: string[] = []): string[] {
   if (!schema || typeof schema !== "object") return out;
@@ -47,6 +49,9 @@ function tools() {
     createBashJobTool({ manager: () => undefined }),
     createSetModelTool({}),
     createExtendTimeoutTool({ query: {} as never }),
+    // compact-hint's threshold tool is model-facing too; held to the same
+    // no-internal-vocabulary bar (see its dedicated rename-hygiene gate below).
+    createSetCompactThresholdTool({ getState: () => undefined, compactToolEnabled: () => true }),
   ];
 }
 
@@ -64,6 +69,16 @@ describe("model-facing tool strings", () => {
       const strings = [tool.description, tool.promptSnippet, ...collectDescriptions(tool.parameters)];
       for (const value of strings) expect(value).not.toMatch(/[§]|architecture/);
     }
+  });
+
+  /**
+   * Structured-output repair turn (plan §3.5): the repair prompt is the one
+   * model-facing string this feature adds — same no-internal-vocabulary bar
+   * as the tool descriptions above (and pure ASCII, matching §3.1).
+   */
+  it("the structured-output repair prompt is model-facing clean (ASCII, no internal vocabulary)", () => {
+    expect(STRUCTURED_REPAIR_PROMPT).toMatch(/^[\x00-\x7F]*$/);
+    expect(STRUCTURED_REPAIR_PROMPT).not.toMatch(/[§]|architecture|watchdog|reducer|adapter|runner/);
   });
 
   it("documents Agent label acceptance for run_id parameters", () => {
@@ -101,8 +116,11 @@ describe("model-facing tool strings", () => {
       "same grace and extension rules",
       "budget.totalGraceS",
       "in seconds",
-      "default 90",
-      "2× timeout_s",
+      "default 600",
+      "2× T",
+      "default 1800",
+      "are raised",
+      "effective total T",
       "budget.maxTotalFactor",
       "absolute deadline",
       "extend.enabled=false",
@@ -142,7 +160,8 @@ describe("model-facing tool strings", () => {
   it("states that a blocking wait prevents new user input", () => {
     const [agent, result] = tools();
     const bashJob = tools().find((tool) => tool.name === "bash_job")!;
-    expect(result.description).toMatch(/user cannot send new input/);
+    // the consequence is spelled once, on the `wait` parameter (asserted next); the description only points there
+    expect(result.description).toMatch(/wait: true blocks .* only a fallback — see the wait parameter/);
     expect(collectDescriptions(result.parameters).join(" ")).toMatch(/user\s+cannot type a new message/);
     expect(agent.description).toMatch(/monopolizes the agent loop/);
     expect(bashJob.description).toMatch(/user cannot send new input/);
@@ -295,6 +314,27 @@ describe("bash deadline strings (bash-timeout-grace T17)", () => {
 });
 
 /**
+ * Rename hygiene: set_compact_threshold is a model-facing surface too
+ * (description + promptSnippet + guidelines + parameter docs). After the
+ * pi-subagent → pi-toolkit package rename its strings must carry the new
+ * name only — same forbidden-word gate as the bash deadline strings above.
+ */
+describe("compact threshold tool strings (rename hygiene)", () => {
+  const tool = () => createSetCompactThresholdTool({ getState: () => undefined, compactToolEnabled: () => true });
+
+  it("carries no internal vocabulary or the pre-rename package name", () => {
+    const strings = [tool().description, tool().promptSnippet, ...(tool().promptGuidelines ?? [])].filter(
+      (value): value is string => typeof value === "string",
+    );
+    strings.push(...collectDescriptions(tool().parameters));
+    for (const value of strings) {
+      expect(value).not.toMatch(/[§]|architecture/);
+      expect(value).not.toMatch(/pi-subagent|plan\.md|child-registry/);
+    }
+  });
+});
+
+/**
  * consult A/B instrumentation plan P2: the nested Agent tool's surface is
  * FROZEN — its params JSON and description stay byte-for-byte identical to
  * the pre-P2 golden (child sessions must not see the new analytics
@@ -316,7 +356,7 @@ describe("Agent surface split (top-level vs nested)", () => {
     const agent = tools().find((tool) => tool.name === "Agent")!;
     const params = JSON.stringify(agent.parameters);
     expect(params).toContain('"meta"');
-    expect(params).toContain("Analytics only — never shown to the subagent");
+    expect(params).toContain("Analytics-only dispatch metadata; never shown to the subagent");
     expect(params).not.toContain('"run_in_background"');
     // the preset hint rides the top-level schema field's description (raw
     // text, not the JSON-escaped form the serialized params would show)

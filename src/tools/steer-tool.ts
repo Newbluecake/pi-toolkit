@@ -14,19 +14,19 @@ const TERMINAL_STATUSES = new Set(["completed", "failed", "timed_out", "aborted"
  * Wrap a steer text with a reply-channel hint for the child (fabric on ⇒ it
  * owns a message_agent tool). Unlike the @mention framing (progress ⇒
  * display-only), the orchestrator must READ the answer, so the reply kind is
- * "finding" — the context channel (`subagent:fabric`, deliverAs steer,
+ * "report" — the context channel (`subagent:fabric`, deliverAs steer,
  * triggerTurn) that lands in the main model's context and wakes it.
  */
 export function frameSteerReply(text: string, reply: "ack" | "report"): string {
   const ask =
     reply === "ack"
-      ? '请先用 message_agent 工具回复主会话一条简短确认（to: "root", kind: "finding"）：已收到 + 你将如何调整（一两句话即可）。'
-      : '请先用 message_agent 工具回复主会话一份简明进度报告（to: "root", kind: "finding"，不超过 10 行），' +
+      ? '请先用 message_agent 工具回复主会话一条简短确认（to: "root", kind: "report"）：已收到 + 你将如何调整（一两句话即可）。'
+      : '请先用 message_agent 工具回复主会话一份简明进度报告（to: "root", kind: "report"，不超过 10 行），' +
         "包含四项：1) 已完成；2) 正在进行；3) 阻塞项（无则写「无」）；4) 预计完成时间/剩余工作（ETA）。";
   return (
     `[主会话 steer · 需${reply === "ack" ? "回复" : "进度报告"}] 以下是主会话通过 steer_subagent 发给你的指令。` +
     `${ask}该回复会进入主会话上下文；回复后继续当前任务。` +
-    `finding 消息受每 run 配额限制，超限会被丢弃：回复一次即可，不要重复发送。\n\n` +
+    `report 消息受每 run 配额限制，超限会被丢弃：回复一次即可，不要重复发送。\n\n` +
     `主会话指令：\n${text}`
   );
 }
@@ -50,10 +50,10 @@ export const SteerToolParams = Type.Object({
         'none (default): deliver the text as-is. "ack": the subagent first replies ONE short confirmation ' +
         '(received + how it will adjust). "report": it first replies a concise progress report ' +
         "(done so far / doing now / blockers / ETA, ≤10 lines). Replies are sent with message_agent " +
-        '(to "root", kind "finding") and arrive in your context as a subagent:fabric message after the ' +
+        '(to "root", kind "report") and arrive in your context as a subagent:fabric message after the ' +
         "subagent's next turn — end your turn instead of polling. Needs fabric (message_agent); without it, " +
-        "or for an external-agent run, the text is delivered verbatim (no reply). Findings are per-run quota " +
-        "limited (fabric.findingQuota, default 10) — a reply over quota is dropped.",
+        "or for an external-agent run, the text is delivered verbatim (no reply). Reports are per-run quota " +
+        "limited (fabric.reportQuota, default 10) — a reply over quota is dropped.",
     }),
   ),
 });
@@ -70,7 +70,7 @@ export function createSteerTool(deps: {
     label: "Steer Subagent",
     description:
       "Send a follow-up instruction to a currently running subagent started with the Agent tool. " +
-      'With reply="ack"/"report" the subagent also answers back once via message_agent (kind "finding") — ' +
+      'With reply="ack"/"report" the subagent also answers back once via message_agent (kind "report") — ' +
       "the answer arrives in your context as a subagent:fabric message, so end your turn instead of polling.",
     promptSnippet:
       "steer_subagent(run_id, text, reply?) - send a follow-up instruction to a running subagent; " +
@@ -96,7 +96,7 @@ export function createSteerTool(deps: {
       const runId = resolved?.ok ? resolved.runId : params.run_id;
       const reply = params.reply ?? "none";
       // reply≠none wraps the text so the child answers via message_agent
-      // (kind "finding" ⇒ the orchestrator's context, see frameSteerReply).
+      // (kind "report" ⇒ the orchestrator's context, see frameSteerReply).
       // Degrade to verbatim — mirroring the @mention fabric-off path — when
       // the child cannot have the tool: fabric disabled, or an external
       // (droid) run which never gets message_agent injected
@@ -141,7 +141,7 @@ export function createSteerTool(deps: {
       }
       const base = `Sent follow-up instruction to ${runRefText(runId, label)}.`;
       const resultText = framed
-        ? `${base} reply=${reply}: the subagent will send ONE message_agent reply (to "root", kind "finding") after its next turn — ` +
+        ? `${base} reply=${reply}: the subagent will send ONE message_agent reply (to "root", kind "report") after its next turn — ` +
           `it arrives in your context as a subagent:fabric message and wakes you, so end your turn now instead of waiting or polling.`
         : degradedReason
           ? `${base} ${degradedReason}，已按普通 steer 送达（文本原样转发，不会收到回复消息）。`

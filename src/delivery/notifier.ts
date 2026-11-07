@@ -1,4 +1,4 @@
-import type { Clock } from "../core/clock.js";
+import type { Clock, TimerHandle } from "../core/clock.js";
 import type { OutboxStore as CoreOutboxStore } from "../core/store.js";
 import type { DeliveryPayload, SendResult } from "../core/types.js";
 import { canonicalizeDeliveryKey, deliveryKey, type DeliveryKey } from "../core/delivery-key.js";
@@ -50,6 +50,13 @@ export interface Notifier {
   readonly stats: Record<DeliveryState, number>;
   readonly degraded: ReadonlyArray<{ key: DeliveryKey; reason: string; at: number }>;
   readonly ackedSuppressions: number;
+  /**
+   * Session shutdown (7b G10): cancel every pending retry timer and send nothing more. Idempotent. Records stay in
+   * the persisted outbox in their current state (a failed attempt is `pending`, anything enqueued later is still
+   * written) — the next stack's `reconcile()` redelivers them, exactly like a crash would. Permanent: a notifier
+   * belongs to one session stack.
+   */
+  dispose(): void;
 }
 
 export function createNotifier(options: NotifierOptions): Notifier {
@@ -68,6 +75,9 @@ export function createNotifier(options: NotifierOptions): Notifier {
   const state = new Map<DeliveryKey, PersistedDelivery>();
   const degraded: Array<{ key: string; reason: string; at: number }> = [];
   let suppressed = 0;
+  /** G10: retry timers still pending, so `dispose()` can cancel them. */
+  const retryTimers = new Set<TimerHandle>();
+  let disposed = false;
   const send: (p: DeliveryPayload) => SendResult | void =
     typeof options.sender === "function" ? options.sender : (p) => (options.sender as MessageSender).sendMessage(p);
   const willBuffer = (p: DeliveryPayload) =>
@@ -162,7 +172,13 @@ export function createNotifier(options: NotifierOptions): Notifier {
     const msg = error instanceof Error ? error.message : String(error);
     audit(next.key, nextState, msg);
     notify(next, nextState);
-    if (nextState === "pending") clock.setTimer(backoffMs * 2 ** Math.max(0, attempts - 1), () => attempt(next, round));
+    if (nextState === "pending" && !disposed) {
+      const handle = clock.setTimer(backoffMs * 2 ** Math.max(0, attempts - 1), () => {
+        retryTimers.delete(handle);
+        attempt(next, round);
+      });
+      retryTimers.add(handle);
+    }
   };
   const markBatched = (record: PersistedDelivery, round: number) => {
     if (state.get(record.key)?.state === "batched") return;
@@ -177,6 +193,7 @@ export function createNotifier(options: NotifierOptions): Notifier {
     notify(next, "batched");
   };
   const attempt = (record: PersistedDelivery, round: number) => {
+    if (disposed) return; // G10: the record is already persisted; the next stack's reconcile() owns the redelivery
     if (state.get(record.key)?.state === "consumed") return;
     const outbound = { ...record, reconcileRound: round };
     const preBuffer = willBuffer(outbound);
@@ -216,6 +233,11 @@ export function createNotifier(options: NotifierOptions): Notifier {
     attempt(next, next.reconcileRound);
   };
   return {
+    dispose() {
+      disposed = true;
+      for (const handle of retryTimers) clock.clearTimer(handle);
+      retryTimers.clear();
+    },
     enqueue(payload, opts) {
       const normalized = { ...payload, key: canonicalizeDeliveryKey(payload.key) };
       const current = state.get(normalized.key) ?? load().get(normalized.key);

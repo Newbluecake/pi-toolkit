@@ -45,6 +45,8 @@ describe("load turn_end wiring", () => {
     nextTransition = { gateCleared: true, provenRecovered: true };
     hook({}, { mode: "tui" } as never);
     expect(messages).toHaveLength(2);
-    expect(messages[1]?.content).toContain("ok");
+    expect(messages[1]?.content).toContain("[load 恢复]");
+    expect(messages[1]?.content).toContain("负载已回落");
+    expect(messages[1]?.content).not.toMatch(/\b(warn|crit)\b/);
   });
 });

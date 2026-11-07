@@ -35,6 +35,8 @@ const en = {
   takeExpired: "Expired — run the preview again.",
   takeConfirmRun: "Take",
   previewAria: "Take-over preview returned by the hub",
+  force: "Force take…",
+  forceAria: "Preview force-taking this alias from its current holder (they are notified in real time)",
 } satisfies Record<string, string>;
 
 const zh: Record<keyof typeof en, string> = {
@@ -62,6 +64,8 @@ const zh: Record<keyof typeof en, string> = {
   takeExpired: "已过期——请重新预览。",
   takeConfirmRun: "确认抢占",
   previewAria: "hub 返回的抢占预览",
+  force: "强制抢占…",
+  forceAria: "预览强制抢占该别名（对方会实时收到提示，需确认）",
 };
 
 export const ALIAS_EXTRA: Readonly<Record<"en" | "zh", Readonly<Record<string, string>>>> = { en, zh };

@@ -51,6 +51,15 @@ const transcript = {
   "tool.viewRendered": "Rendered",
   "tool.viewSource": "Source",
   "tool.viewToggleLabel": "Markdown view mode",
+  "tool.write.code": "Code",
+  "tool.write.raw": "Raw JSON",
+  "tool.write.received": "Received content",
+  "tool.write.copy": "Copy content",
+  "tool.write.expand": "Show all {n} lines",
+  "tool.write.viewLabel": "View mode",
+  "tool.write.ok": "Written successfully; standard output hidden",
+  "tool.write.resultShow": "Show raw output",
+  "tool.write.resultHide": "Hide raw output",
   // web-hub-mermaid plan §6.2 (P2): MermaidBlock chrome. Error-line texts are reason-mapped in
   // the component (`parse`/`render`/`timeout`/`output-invalid` share `mermaidError` + the
   // runtime's ≤160-char message; `unsupported` + a KaTeX-bearing message selects `mermaidMath`).
@@ -83,6 +92,11 @@ const transcript = {
   cmdNeedsTerminal: "These interactive steps need the terminal: {steps}",
   cmdInteractedTerminal: "Interacted in the terminal: {steps}",
   cmdCopy: "Copy output",
+  // task58 (web-hub-tokens-speed §6, Root-approved single key): the `12.4 tokens/s` chip's
+  // tooltip — disclosure copy for the client-observed metric. The chip text itself is a fixed
+  // English token (HUD convention), never localized.
+  generationSpeedTitle:
+    "Locally observed generation speed: output tokens over the window from the first to the last generation delta. Excludes first-token wait; not a GPU-throughput measure. Only complete, fully observed replies show a value.",
 } satisfies Record<string, string>;
 
 export default transcript;

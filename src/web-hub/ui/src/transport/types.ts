@@ -11,7 +11,7 @@ import type { Lan2faChallenge, LanFactorBody } from "@protocol/lan-2fa.js";
 import type { PreviewDims, PreviewDirListing, PreviewImageMime, PreviewProbeKind } from "@protocol/preview.js";
 import type { PreviewHtmlCapResponseBody } from "@protocol/preview-html.js";
 import type { WtDiffFileList, WtDiffFilePayload } from "@protocol/worktree-diff.js";
-import type { WtGraphPayload } from "@protocol/worktree-graph.js";
+import type { WtGraphCommitFiles, WtGraphPayload } from "@protocol/worktree-graph.js";
 import type { RunTxReason } from "@protocol/run-transcript.js";
 import type { AgentRemoveErrorReason } from "@protocol/http-contract.js";
 import type { AvatarDeleteOutcome, AvatarFetchOutcome, AvatarWriteOutcome } from "@protocol/avatar.js";
@@ -62,7 +62,7 @@ export interface TransportHooks {
 export interface CmdRequest {
   agentKey: string;
   id: string;
-  op: "prompt" | "abort" | "steer_subagent" | "abort_subagent" | "command" | "recall" | "archive";
+  op: "prompt" | "abort" | "steer_subagent" | "abort_subagent" | "command" | "recall" | "archive" | "archive_omitted";
   text?: string;
   deliver?: "steer" | "followUp";
   runId?: string;
@@ -78,6 +78,21 @@ export interface CmdRequest {
   set?: "archive" | "unarchive";
   expect?: { sessionId?: string };
   queryOnly?: true;
+}
+
+/** fabric-xs-activation plan §3 P4: the browser's activate/query action frame. `activate`
+ *  NEVER carries text (U6) — it targets an already-delivered messageId bound to its original
+ *  activationKey; `query` is strictly read-only. Optional per the frozen-transport
+ *  convention (test fakes / future transports may omit it). Both real adapters reuse
+ *  command.v1 /api/cmd with the internal fabric action; server policy/caps/key/eligibility
+ *  are rechecked, and no body is resent. Nothing ever auto-fires it. */
+export interface XsActivateRequest {
+  agentKey: string;
+  id: string;
+  action: "activate" | "query";
+  messageId: string;
+  activationKey?: string;
+  expect?: { sessionId?: string };
 }
 export interface DialogRequest {
   agentKey: string;
@@ -117,6 +132,10 @@ export interface HubTransport {
   runPage?<T = unknown>(agentKey: string, runId: string, before: string, limit?: number): Promise<RunPageResult<T>>;
   command(req: CmdRequest): Promise<CmdOutcome>;
   dialog(req: DialogRequest): Promise<CmdOutcome>;
+  /** fabric-xs-activation plan §3 P4 (arch §4.4): the activate/query call surface — see
+   *  {@link XsActivateRequest}. Optional (frozen-transport convention); absent ⇒ the request
+   *  area's action buttons never render. */
+  xsActivate?(req: XsActivateRequest): Promise<CmdOutcome>;
   /** web-hub-upload plan §1.2/§4.3 (package U4b): the chunked-upload endpoints. Optional so
    * test fakes / future transports can omit it — `useControl` only mounts the tray driver
    * (`ControlHandle.uploads`) when a transport provides one; both real adapters always do. */
@@ -830,6 +849,16 @@ export interface WorktreeGraphTransport {
     req: WtDiffScope & { readonly wt: string; readonly merged?: true },
     opts?: { readonly signal?: AbortSignal },
   ): Promise<WtDiffOutcome<WtGraphPayload>>;
+  /**
+   * wtgraph.files.v1: `GET /api/worktree-graph/files` — one commit's changed files (first-parent
+   * diff). Optional so pre-feature fakes keep compiling; the UI only calls it when the hub
+   * declared the cap (`GraphScope.files`). 409 `E_STALE_CTX{reason:"commit"}` means the oid is
+   * not in a graph window this hub served (hub restarted / window moved) — re-pull the graph.
+   */
+  commitFiles?(
+    req: WtDiffScope & { readonly wt: string; readonly h: string },
+    opts?: { readonly signal?: AbortSignal },
+  ): Promise<WtDiffOutcome<WtGraphCommitFiles>>;
 }
 
 // ---------------------------------------------------------------------------

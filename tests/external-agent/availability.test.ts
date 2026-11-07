@@ -8,7 +8,7 @@ import { systemClock } from "../../src/core/clock.js";
 import { classifiedInfo } from "../../src/core/errors.js";
 import { createInitialState } from "../../src/core/state-machine.js";
 import type { AgentTypeConfig, RunSnapshot, SpawnRequest } from "../../src/core/types.js";
-import { DEFAULT_EXTERNAL_AGENTS_SETTINGS } from "../../src/config/settings.js";
+import { DEFAULT_EXTERNAL_AGENTS_SETTINGS } from "../../src/external-agent/settings.js";
 import { formatAvailableModelsForPrompt } from "../../src/config/available-models.js";
 import { createExternalAgentsPort } from "../../src/external-agent/port.js";
 import type { ExternalSessionHandle } from "../../src/external-agent/types.js";

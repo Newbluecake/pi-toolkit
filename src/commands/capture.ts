@@ -502,6 +502,11 @@ function createCapturedCtx(
     get(target, property) {
       if (property === "webInvocation") return true;
       if (property === "feishuInvocation" && feishu) return true;
+      // #30 reload-result plan §1 D1: the hub command frame's id, read back by the deferred-reload
+      // command port (`webCmdIdOf`) to attribute reload lifecycle facts to the web request that
+      // caused them. Like `webInvocation` it is a read-only synthetic property (never enumerable
+      // — the proxy's ownKeys pass through to the raw ctx, so it appears in no snapshot).
+      if (property === "webCmdId") return cmdId;
       if (property === "ui")
         return createCapturedUi(
           Reflect.get(target, "ui", target) as ExtensionUIContext,
@@ -789,6 +794,16 @@ export function wrapCommandApi<T extends ExtensionAPI>(
 
 export function isWebInvocation(ctx: ExtensionCommandContext): boolean {
   return Boolean((ctx as unknown as { webInvocation?: unknown }).webInvocation);
+}
+
+/** #30 reload-result plan §1 D1: the web command frame id, iff `ctx` is a capture proxy claimed
+ * for a web invocation (the proxy's synthetic `webCmdId`). A raw ctx — a TUI/RPC invocation, or
+ * a web dispatch whose capture window already expired past the fallback TTL (A3) — reads as
+ * `undefined`, which is exactly the attribution boundary: facts without it are only recorded
+ * into an already-tracked reload lifecycle (Q1). */
+export function webCmdIdOf(ctx: ExtensionCommandContext): string | undefined {
+  const value = (ctx as unknown as { webCmdId?: unknown }).webCmdId;
+  return typeof value === "string" && value !== "" ? value : undefined;
 }
 
 /** 2026-10-22 fabric ruling: true only for a web-claimed invocation whose capture origin was the

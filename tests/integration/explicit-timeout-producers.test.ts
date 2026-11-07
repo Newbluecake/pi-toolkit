@@ -36,7 +36,13 @@ type Handler = (event: unknown, ctx: unknown) => unknown;
 type Sent = { message: { customType: string; content: string; details: any }; options?: { triggerTurn?: boolean } };
 type Cmd = { description: string; handler: (args: string, ctx: unknown) => Promise<void> };
 
+// One fake host instance is one pi session: real pi keeps the session id stable
+// for the whole session, so the fake must too. A per-instance counter keeps the
+// id unique across cases (no identity bleed between tests).
+let fakeSessionSeq = 0;
+
 function fakePi(branch: unknown[]) {
+  const sessionId = `explicit-timeout-producers-${++fakeSessionSeq}`;
   const handlers = new Map<string, Handler[]>();
   const tools = new Map<string, ToolDefinition>();
   const commands = new Map<string, Cmd>();
@@ -93,7 +99,7 @@ function fakePi(branch: unknown[]) {
     sessionManager: {
       getEntries: () => branch,
       getBranch: () => branch,
-      getSessionId: () => `explicit-timeout-producers-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      getSessionId: () => sessionId,
       getSessionFile: () => undefined,
     },
     modelRegistry: { getAvailable: () => [], find: () => undefined },
@@ -131,7 +137,7 @@ function writeSettings(home: string, extra: Record<string, unknown> = {}) {
     settingsPath,
     JSON.stringify(
       {
-        budget: { totalGraceS: 1, maxExtensions: 2, extendStepS: 0, abortGraceS: 0.05, reapS: 0.05 }, // factor stays the DEFAULT 2 (X1's 120s arithmetic); extendStepS 0 = legacy ceiling (factor-only)
+        budget: { minTotalS: 0, totalGraceS: 1, maxExtensions: 2, extendStepS: 0, abortGraceS: 0.05, reapS: 0.05 }, // factor stays the DEFAULT 2 (X1's 120s arithmetic); extendStepS 0 = legacy ceiling (factor-only)
         fleetWidget: false,
         quota: { enabled: false },
         ...extra,

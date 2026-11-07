@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildSlashText,
   classifyCommand,
+  classifyCommandStrict,
   listSlashCommands,
   parseSlashCommand,
   stripCommandArgs,
@@ -176,5 +177,36 @@ describe("stripCommandArgs (r1 #1 ② — flush-time args stripping per CURRENT 
     const input = frame();
     stripCommandArgs(input);
     expect(input.items[0]?.args).toEqual({ usage: "status", complete: true });
+  });
+});
+
+// #40: dispatch evidence must not borrow completion's fail-soft semantics.
+describe("strict unknown-slash classification", () => {
+  it("keeps the legacy classifier fail-soft while strict lookup fails closed", () => {
+    const broken: CommandsPort = {
+      getCommands: () => {
+        throw new Error("offline");
+      },
+    };
+    expect(classifyCommand(broken, "model")).toEqual({ kind: "builtin" });
+    expect(classifyCommandStrict(broken, "model")).toEqual({ state: "unavailable" });
+    for (const value of [undefined, null, {}, [null], [{ name: "x" }], [{ name: "x", source: 1 }]]) {
+      const bad = { getCommands: () => value } as unknown as CommandsPort;
+      expect(classifyCommandStrict(bad, "typo")).toEqual({ state: "unavailable" });
+    }
+    expect(classifyCommandStrict(undefined, "typo")).toEqual({ state: "unavailable" });
+  });
+  it("uses the complete, exact invocation name without case/suffix normalization", () => {
+    const full = port([
+      ...Array.from({ length: 450 }, (_, i) => ({ name: `x${i}`, source: "extension" as const })),
+      { name: "foo:2", source: "extension" },
+      { name: "名字", source: "prompt" },
+    ]);
+    expect(classifyCommandStrict(full, "x449")).toEqual({ state: "known", command: { kind: "extension" } });
+    expect(classifyCommandStrict(full, "foo:2").state).toBe("known");
+    expect(classifyCommandStrict(full, "名字").state).toBe("known");
+    for (const name of ["foo", "foo:1", "Model", "x449x"])
+      expect(classifyCommandStrict(full, name)).toEqual({ state: "unknown" });
+    expect(classifyCommandStrict(full, "model")).toEqual({ state: "known", command: { kind: "builtin" } });
   });
 });

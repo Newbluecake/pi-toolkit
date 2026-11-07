@@ -31,13 +31,13 @@ describe("W3 persistence capabilities / parking", () => {
     expect(inboxDurability(true, {})).toBe("session-memory");
   });
   it.each(["disk", "session-memory"] as const)(
-    "parks finding once in %s, enforces cap and dead-letters exactly at TTL",
+    "parks report once in %s, enforces cap and dead-letters exactly at TTL",
     (durability) => {
       const h = inboxRig({ durability });
       for (let i = 0; i < 8; i++) {
         const admitted = h.router.admit(sender, {
           to: target,
-          kind: "finding",
+          kind: "report",
           text: `payload ${i}`,
           generation: 1,
           wake: false,
@@ -57,7 +57,7 @@ describe("W3 persistence capabilities / parking", () => {
       expect(
         h.router.admit(sender, {
           to: target,
-          kind: "finding",
+          kind: "report",
           text: "overflow",
           generation: 1,
           wake: false,
@@ -78,7 +78,7 @@ describe("W3 persistence capabilities / parking", () => {
     const h = inboxRig({ durability: "stack-memory" });
     const result = h.router.admit(sender, {
       to: target,
-      kind: "finding",
+      kind: "report",
       text: "x",
       generation: 1,
       wake: false,
@@ -129,7 +129,7 @@ describe("W3 persistence capabilities / parking", () => {
     h.tree.markRunning(other);
     const a = h.router.admit(sender, {
       to: other,
-      kind: "finding",
+      kind: "report",
       text: "race",
       generation: 1,
       wake: false,
@@ -166,13 +166,13 @@ describe("W3 persistence capabilities / parking", () => {
       canMessage: ["mention"],
       level: h.level,
     });
-    await expect(channel.send("label", "finding", "quiet", false)).resolves.toMatchObject({
+    await expect(channel.send("label", "report", "quiet", false)).resolves.toMatchObject({
       ok: true,
       status: "accepted",
     });
     expect(spawn).not.toHaveBeenCalled();
     expect(h.wake.stats().parked).toBe(1);
-    await expect(channel.send("label", "finding", "legacy")).resolves.toMatchObject({ status: "resumed" });
+    await expect(channel.send("label", "report", "legacy")).resolves.toMatchObject({ status: "resumed" });
     expect(spawn).toHaveBeenCalledOnce();
     h.mailbox.dispose();
   });

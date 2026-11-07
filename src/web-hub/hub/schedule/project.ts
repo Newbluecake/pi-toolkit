@@ -10,7 +10,6 @@ import { nextOccurrence } from "../../../schedule/core/cron.js";
 import {
   defHash,
   isExecutable,
-  isPendingApproval,
   reportIdOf,
   SCHED_REPORT_MAX_AGE_MS,
   type RunRecord,
@@ -90,7 +89,7 @@ function taskProjection(task: ScheduleTask, state: ScheduleStateFile, deps: Proj
     task,
     defHash: hash,
     executable: isExecutable(task),
-    pendingApproval: isPendingApproval(task),
+    pendingApproval: false,
     ...(nextAt === undefined ? {} : { nextAt }),
     ...(degraded === undefined ? {} : { degraded }),
     totals: {

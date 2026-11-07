@@ -51,7 +51,6 @@ import { createSessionFence, type FenceEvent, type FencePorts, type SessionFence
 import {
   canonicalJson,
   defHash,
-  isApproved,
   isTerminalRunState,
   parseRunKey,
   SCHED_CAPABILITY_UNKNOWN_MAX_MS,
@@ -236,7 +235,7 @@ export interface MessageScheduler {
 export type ScheduleTrigger =
   { kind: "none" } | { kind: "quiet" } | { kind: "wake"; wake: "message" | "handoff" | "unknown"; token?: string };
 
-const QUIET_KINDS: ReadonlySet<unknown> = new Set(["result", "digest", "handoff-recap"]);
+const QUIET_KINDS: ReadonlySet<unknown> = new Set(["result", "digest", "handoff-recap", "confirm"]);
 
 /**
  * What a `before_agent_start` event says about OUR message type. `quiet` kinds never start a run;
@@ -759,7 +758,7 @@ export function createMessageScheduler(deps: MessageSchedulerDeps): MessageSched
 
   /**
    * Authorization is evaluated against the definition the run was bound to (`defHash` of the claim),
-   * not the queue-time snapshot: still approved, unchanged, and enabled — except an auto `once` task,
+   * not the queue-time snapshot: unchanged and enabled — except an auto `once` task,
    * which the claim itself disabled when it consumed the occurrence (that is not a pause).
    */
   const stillAuthorized = (
@@ -769,7 +768,7 @@ export function createMessageScheduler(deps: MessageSchedulerDeps): MessageSched
     needHandoff: boolean,
     claimed: ScheduleTask | undefined,
   ): t is ScheduleTask => {
-    if (t === undefined || defHash(t) !== expectHash || !isApproved(t)) return false;
+    if (t === undefined || defHash(t) !== expectHash) return false;
     if (needHandoff && t.bg?.handoff !== true) return false;
     if (t.enabled) return true;
     // `enabled:false` on an auto once task is what the claim itself wrote when it consumed the occurrence.

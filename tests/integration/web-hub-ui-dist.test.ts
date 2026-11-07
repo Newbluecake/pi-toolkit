@@ -11,8 +11,9 @@
  *
  * `fakeDeps()`'s `home` is always a fresh tmp dir (never the repo root itself) — `createAuth()`
  * writes a real token file under `<home>/state/`, which would otherwise pollute the checkout.
- * `packageUiDistDir()` (the "package" candidate) resolves off `ui-root.ts`'s own `import.meta.url`
- * regardless of `home`, so it always finds this checkout's real `dist/web-hub-ui/` either way.
+ * `packageUiDistDir()` (the "package" candidate) anchors on the nearest `package.json` named
+ * `pi-toolkit` rather than on a module URL's depth, so regardless of `home` it always finds this
+ * checkout's real `dist/web-hub-ui/`.
  */
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { readFile } from "node:fs/promises";

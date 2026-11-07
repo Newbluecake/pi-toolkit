@@ -27,7 +27,7 @@
   the `.metrics-summary` toggle and `detail.metricsToggleAria` went with it.
 
   2026-10 (user request 「红框部分支持收起，点击标题展开」): the info block under the titlebar
-  (SessionInfo / TodoPanel / WorktreePanel / CacheKeepalivePanel) collapses behind the title itself —
+  (SessionInfo / TasksPanel / WorktreePanel / CacheKeepalivePanel) collapses behind the title itself —
   the title text is wrapped in a disclosure <button> (h2 keeps `id="detail-title"`), the state
   is the browser-local `pwh_detail_head_collapsed` pref (global, fail-open to EXPANDED; see
   `composables/useDetailHeadCollapse.ts`), and the transient `<p>` notices stay outside the
@@ -55,6 +55,7 @@ import { useDetailHeadCollapse } from "../../composables/useDetailHeadCollapse.j
 import { useMedia } from "../../composables/useMedia.js";
 import { browserLocalStorage } from "../shell/themeStorage.js";
 import { managedFor, restoringKeys } from "../../logic/spawn.js";
+import { classifyRemoveError, removalTargetForAgent } from "../../logic/remove.js";
 import {
   foldTitlebar,
   TITLEBAR_FOLD_ORDER,
@@ -72,12 +73,12 @@ import { resumeAvailable, RESUME_DIALOG } from "@logic/resume.js";
 import SessionInfo from "./SessionInfo.vue";
 import StatusPill from "./StatusPill.vue";
 import HeaderOverflowMenu, { type HeaderOverflowItem } from "./HeaderOverflowMenu.vue";
-import TodoPanel from "./TodoPanel.vue";
+import TasksPanel from "./TasksPanel.vue";
 import WorktreePanel from "./WorktreePanel.vue";
 import GraphPanel from "./GraphPanel.vue";
 import { cacheKeepaliveOf } from "./cacheKeepaliveView.js";
 import { XS_CHANNEL_CAP, xsAliasOf, xsUnreadLabel, xsUnreadOf } from "../agents/agentCardModel.js";
-import { schedCapOn } from "../../logic/schedule.js";
+import { schedCapOn, schedSummaryOf, sessionProjectionOf } from "../../logic/schedule.js";
 import { worktreesOf } from "./worktreesView.js";
 
 const props = defineProps<DetailHeaderProps>();
@@ -122,12 +123,15 @@ const drawer = inject(SIDEBAR_DRAWER, null);
 const showBack = computed(() => props.narrow || drawer?.active.value === true);
 
 // ---------------------------------------------------------------------------
-// web-hub-privacy plan v2.1 (P2): the header lock button — the keyboard/备用 entrance next to
-// the card's hover affordance (v2.1 N1). 命名分离 (a pinned distinction): an UNMARKED session
-// gets 「隐私标记」 (persistent, calls `privacy.lock({locked:true})` — no password); a MARKED
+// web-hub-privacy plan v2.1 (P2), 2026-11-03 user decision: the header button is the
+// mark-STATE toggle (the card hover affordance's keyboard/备用 twin). An UNMARKED session
+// gets 「锁定」 (`privacy.lock({locked:true})` — persistent mark, no password); a MARKED
 // session being viewed (necessarily view-unlocked — otherwise the lock screen owns the pane
-// and this header isn't mounted) gets 「立即锁定」 (pure client-side view relock, no request).
-// Desktop band + `privacy.v1` cap only; no provider / no cap / phone band ⇒ no button at all.
+// and this header isn't mounted) gets 「解锁」, which opens the 取消标记 flow (`requestUnmark`:
+// LAN password dialog / loopback confirm — the same entry the card uses). The former
+// 「立即锁定」 manual view-relock entry is gone from the UI (`relock("manual")` stays
+// API-only in `usePrivacyLock`; route/idle/tab-hidden still relock). Desktop band +
+// `privacy.v1` cap only; no provider / no cap / phone band ⇒ no button at all.
 // ---------------------------------------------------------------------------
 const privacy = inject(PRIVACY_LOCK_CTX, null);
 const privacyMarked = computed(() => privacy?.isMarked(props.agent.key) ?? false);
@@ -141,7 +145,7 @@ const privacyError = computed(() => {
 
 function onPrivacyClick(): void {
   if (privacy === null) return;
-  if (privacyMarked.value) privacy.relock("manual");
+  if (privacyMarked.value) privacy.requestUnmark(props.agent.key);
   else void privacy.mark(props.agent.key);
 }
 
@@ -231,7 +235,98 @@ function onStopKeydown(ev: KeyboardEvent): void {
   }
 }
 
-onUnmounted(disarmStop);
+// ---------------------------------------------------------------------------
+// 「删除会话」 (2026-10-28 user ruling: the cards' corner × is gone, deletion lives here;
+// 2026-11-02 user ruling: no longer a PERMANENT ⋯ entry — it is a normal in-bar icon button
+// on wide bars and joins the issue-#41 fold set as the FIRST button to fold into 「⋯」 on
+// narrow bars; on touch screens it stays in the menu like the idle stop button, 防误触).
+// A removable session (managed record or offline card — `removalTargetForAgent`, the same
+// target the old card button used) gets the button/entry. Same two-step grammar as the stop
+// button from EITHER entrance: the button/menu item arms, an in-bar ✓/✕ pill confirms (4s
+// auto-cancel, Esc cancels, focus follows), then `hub.removeAgent(target)`. No optimistic
+// removal — the pane goes away only when the hub's broadcast lands; a failure shows the
+// classified reason.
+// ---------------------------------------------------------------------------
+const removeTarget = computed(() => removalTargetForAgent(props.agent, hub?.state.value.spawns ?? null));
+const delArmed = ref(false);
+const delBusy = ref(false);
+const delError = ref<string | null>(null);
+let delArmTimer: ReturnType<typeof setTimeout> | undefined;
+const delIdleBtn = ref<HTMLButtonElement | null>(null);
+const delOkBtn = ref<HTMLButtonElement | null>(null);
+const delPill = ref<HTMLElement | null>(null);
+/** in-flight = our own RPC OR the hub-confirmed pending delete (another tab / 202 state). */
+const delRemoving = computed(
+  () => delBusy.value || (removeTarget.value?.kind === "managed" && removeTarget.value.removing),
+);
+
+function disarmDelete(): void {
+  delArmed.value = false;
+  if (delArmTimer !== undefined) {
+    clearTimeout(delArmTimer);
+    delArmTimer = undefined;
+  }
+}
+
+/** Arm from EITHER entrance (inline button / ⋯ item): expand the confirm pill and hand focus
+ * to its ✓ control (the control that received the click is about to unmount/close). */
+function armDelete(): void {
+  if (removeTarget.value === null || delRemoving.value) return;
+  delError.value = null;
+  delArmed.value = true;
+  delArmTimer = setTimeout(autoDisarmDelete, STOP_ARM_MS);
+  void nextTick(() => delOkBtn.value?.focus());
+}
+
+/** ✕ — explicit cancel: disarm and give focus back to the idle icon button when it is in the
+ * bar (touch screens keep deletion menu-only — nothing to refocus there). */
+function cancelDelete(): void {
+  disarmDelete();
+  void nextTick(() => delIdleBtn.value?.focus());
+}
+
+/** 4s window elapsed: disarm, and if keyboard focus was inside the pill (which is about to
+ * unmount) hand it back to the idle button instead of dropping it to <body>. */
+function autoDisarmDelete(): void {
+  delArmTimer = undefined;
+  const active = typeof document === "undefined" ? null : document.activeElement;
+  const hadFocus = active !== null && delPill.value?.contains(active) === true;
+  disarmDelete();
+  if (hadFocus) void nextTick(() => delIdleBtn.value?.focus());
+}
+
+async function onDeleteSession(): Promise<void> {
+  const target = removeTarget.value;
+  if (target === null || delBusy.value) return;
+  disarmDelete();
+  const removeAgent = hub?.removeAgent;
+  if (removeAgent === undefined) {
+    delError.value = "unsupported";
+    return;
+  }
+  delBusy.value = true;
+  delError.value = null;
+  try {
+    const outcome = await removeAgent(
+      target.kind === "managed" ? { spawnId: target.spawnId } : { agentKey: props.agent.key },
+    );
+    if (!outcome.ok) delError.value = classifyRemoveError(outcome) ?? "network";
+  } finally {
+    delBusy.value = false;
+  }
+}
+
+function onDeleteKeydown(ev: KeyboardEvent): void {
+  if (ev.key === "Escape" && delArmed.value) {
+    ev.stopPropagation();
+    cancelDelete();
+  }
+}
+
+onUnmounted(() => {
+  disarmStop();
+  disarmDelete();
+});
 
 // ---------------------------------------------------------------------------
 // Web `/clear` quick button (2026-10 user request): starts a NEW session in the SAME pi
@@ -287,11 +382,11 @@ const channelsUsable = computed(() => {
 });
 
 // ---------------------------------------------------------------------------
-// scheduled-reports W1 (plan r3 §5.6): the 「定时」 button → lazy SchedulePanel. Gated ONLY on
-// the hub's sched.v1 cap + this card having a sessionId — deliberately NOT on the control
-// gate: the panel is read-only by default, and offline sessions stay readable (E3; write
-// buttons hide inside the panel/review). Mounted inside AgentDetail's tree, so a privacy
-// relock unmounts it with everything else (ResumeDialog precedent).
+// scheduled-reports W1 (plan r3 §5.6) + schedule-auto-approve r2 W2: the 「定时」 button →
+// lazy SchedulePanel, and the aggregated TasksPanel section below. Gated ONLY on the hub's
+// sched.v1 cap + this card having a sessionId — NOT on the control gate: the surfaces are
+// read-only by default (write buttons hide when offline, E3). Mounted inside AgentDetail's
+// tree, so a privacy relock unmounts them with everything else (ResumeDialog precedent).
 // ---------------------------------------------------------------------------
 const SchedulePanel = defineAsyncComponent(() => import("../schedule/SchedulePanel.vue"));
 const schedOpen = ref(false);
@@ -300,6 +395,25 @@ const schedSessionId = computed(() => {
   return typeof sid === "string" && sid !== "" ? sid : undefined;
 });
 const schedUsable = computed(() => schedCapOn(hub?.state.value.hub?.["caps"]) && schedSessionId.value !== undefined);
+
+// schedule-auto-approve r2 W2: the TasksPanel's sched inputs — the summary gates the panel
+// (undefined ⇒ no ⏰ segment, no sched section) and the raw projection carries the rows.
+const schedSummary = computed(() =>
+  schedSummaryOf(hub?.state.value.hub?.["caps"], hub?.state.value.schedules, schedSessionId.value),
+);
+const schedProj = computed(() =>
+  schedUsable.value ? sessionProjectionOf(hub?.state.value.schedules, schedSessionId.value) : undefined,
+);
+/** Write gate for the panel's pause/resume/rm (same gate as SchedulePanel's canWrite):
+ *  control surface on + commands on + the agent online. */
+const schedCanWrite = computed(
+  () =>
+    controlView !== null && controlView.enabled.value && controlView.commandsEnabled.value && props.agent.down !== true,
+);
+/** TasksPanel `open-run` ⇒ the fleet drawer's run view (FleetDrawer's selectRun precedent). */
+function onSchedOpenRun(runId: string): void {
+  hub?.selectRun?.(props.agent.key, runId);
+}
 
 // alias-plan r4 §7.2 (ALU): the held alias renders as a small `@alias` right after the title;
 // clicking it opens the same (lazily loaded) 「频道与别名」 dialog. Drawn only when the hub
@@ -348,7 +462,7 @@ const fpNoticeVisible = computed(() => fpNotice.value !== null && fpNotice.value
 
 // ---------------------------------------------------------------------------
 // 2026-10 (user request 「红框部分支持收起，点击标题展开」): the whole info block under the
-// titlebar — SessionInfo / TodoPanel / WorktreePanel / CacheKeepalivePanel — collapses behind the
+// titlebar — SessionInfo / TasksPanel / WorktreePanel / CacheKeepalivePanel — collapses behind the
 // title itself. The preference is browser-local (`pwh_detail_head_collapsed`, "1" = collapsed),
 // global (not per session) and fails open to EXPANDED, so the header stays byte-identical for
 // anyone who never toggles. The transient `<p>` notices above the block (stop error, first-
@@ -371,8 +485,9 @@ function onToggleHeadInfo(): void {
 // `.detail-titlebar`, fired per frame at most — RO callbacks are already frame-aligned, no
 // extra rAF) and let logic/headerFold.ts's pure `foldTitlebar` decide which right-side
 // buttons fold into the 「⋯」 menu, so the title never drops below its 96px clickable floor.
-// Fold priority: privacy → schedule → resume → channels → stop → clear. No measurement (SSR
-// first paint / RO unavailable / zero-layout) ⇒ empty fold state ⇒ the pre-feature DOM.
+// Fold priority: delete → privacy → schedule → resume → channels → stop → clear (「删除会话」
+// lowest-frequency, added 2026-11-02). No measurement (SSR first paint / RO unavailable /
+// zero-layout) ⇒ empty fold state ⇒ the pre-feature DOM.
 // ---------------------------------------------------------------------------
 const titlebarEl = ref<HTMLElement | null>(null);
 const foldState = ref<TitlebarFoldState>({ folded: [], aliasGlyph: false, pillDot: false });
@@ -383,6 +498,10 @@ let aliasFullCache = 0;
 let pillFullCache = 0;
 
 function isFolded(id: TitlebarFoldId): boolean {
+  // Touch screens: the IDLE stop icon and 「删除会话」 are always folded into the 「⋯」 menu
+  // (a swipe / tap on the title area too easily hits a bare destructive icon — 防误触). The
+  // armed/busy pills never go through this (their own v-ifs), so confirm/busy stay in the bar.
+  if ((id === "stop" || id === "delete") && coarsePointer.value) return true;
   return foldState.value.folded.includes(id);
 }
 
@@ -394,8 +513,13 @@ function presentFoldIds(): TitlebarFoldId[] {
   if (schedUsable.value) present.add("schedule");
   if (resumeUsable.value) present.add("resume");
   if (channelsUsable.value) present.add("channels");
-  if (managed.value !== undefined && !stopArmed.value && !stopStopping.value) present.add("stop");
+  if (managed.value !== undefined && !stopArmed.value && !stopStopping.value && !coarsePointer.value)
+    present.add("stop"); // coarse: always folded, nothing to measure
   if (clearUsable.value) present.add("clear");
+  // 「删除会话」 (2026-11-02): a normal foldable button now — measured like the rest, folded
+  // first (TITLEBAR_FOLD_ORDER). Coarse pointers keep it menu-only, exactly like idle stop.
+  if (removeTarget.value !== null && !delArmed.value && !delRemoving.value && !coarsePointer.value)
+    present.add("delete"); // coarse: always folded, nothing to measure
   return TITLEBAR_FOLD_ORDER.filter((id) => present.has(id));
 }
 
@@ -523,8 +647,8 @@ const overflowItems = computed<HeaderOverflowItem[]>(() => {
   if (privacyButton.value && isFolded("privacy"))
     out.push({
       id: "privacy",
-      icon: "lock",
-      label: privacyMarked.value ? t("privacy.lockLabel") : t("privacy.markLabel"),
+      icon: privacyMarked.value ? "unlock" : "lock",
+      label: privacyMarked.value ? t("privacy.unlockLabel") : t("privacy.markLabel"),
       checked: privacyMarked.value,
     });
   if (managed.value !== undefined && !stopArmed.value && !stopStopping.value && isFolded("stop"))
@@ -535,6 +659,19 @@ const overflowItems = computed<HeaderOverflowItem[]>(() => {
       danger: true,
       separatorBefore: out.length > 0,
     });
+  // 「删除会话」 (2026-11-02): in the menu only while FOLDED (narrow bar / touch) — a wide bar
+  // shows the inline icon button instead and mounts no ⋯ at all when nothing else folded.
+  if (removeTarget.value !== null && !delArmed.value && isFolded("delete")) {
+    const busy = delRemoving.value;
+    out.push({
+      id: "delete",
+      icon: busy ? "loader" : "x",
+      label: busy ? t("agents.removing") : t("detail.deleteSessionLabel"),
+      danger: true,
+      busy,
+      separatorBefore: out.length > 0,
+    });
+  }
   return out;
 });
 
@@ -554,6 +691,9 @@ function onOverflowRun(id: string): void {
       break;
     case "privacy":
       onPrivacyClick();
+      break;
+    case "delete":
+      armDelete();
       break;
     case "stop":
       // Menu already closed; arm the two-step confirm — the ✓/✕ pill surfaces IN THE BAR
@@ -693,21 +833,22 @@ function onOverflowRun(id: string): void {
         <AppIcon name="clock" class="icon" />
         <span class="head-btn-label" aria-hidden="true">{{ t("resume.openLabel") }}</span>
       </button>
-      <!-- web-hub-privacy P2: 隐私标记 (unmarked → persistent mark) vs 立即锁定 (marked +
-           viewing → view relock) — the two names never mix (plan v2.1 N1 命名分离). -->
+      <!-- web-hub-privacy P2, 2026-11-03: the mark-STATE toggle — 「锁定」 (unmarked →
+           persistent mark) vs 「解锁」 (marked + viewing → 取消标记 flow, the card affordance's
+           twin); icons follow the ACTION (lock/unlock — the AgentCard pair). -->
       <button
         v-if="privacyButton && !isFolded('privacy')"
         class="btn btn-ghost privacy-head-btn"
         data-fold="privacy"
         :class="{ 'is-marked': privacyMarked }"
         type="button"
-        :title="privacyMarked ? t('privacy.lockNow') : t('privacy.mark')"
-        :aria-label="privacyMarked ? t('privacy.lockNowAria') : t('privacy.markAria')"
+        :title="privacyMarked ? t('privacy.unmarkTitle') : t('privacy.mark')"
+        :aria-label="privacyMarked ? t('privacy.unlockAria') : t('privacy.markAria')"
         @click="onPrivacyClick"
       >
-        <AppIcon name="lock" class="icon" />
+        <AppIcon :name="privacyMarked ? 'unlock' : 'lock'" class="icon" />
         <span class="head-btn-label" aria-hidden="true">{{
-          privacyMarked ? t("privacy.lockLabel") : t("privacy.markLabel")
+          privacyMarked ? t("privacy.unlockLabel") : t("privacy.markLabel")
         }}</span>
       </button>
       <!-- web-hub-spawn SP12 (arch §9.1) — 2026-10 variant-A redesign (user-picked mockup
@@ -740,7 +881,7 @@ function onOverflowRun(id: string): void {
           {{ t("spawn.stopSessionStopping") }}
         </span>
         <span
-          v-else
+          v-else-if="stopArmed"
           ref="stopPill"
           class="spawn-stop-armed"
           role="group"
@@ -770,6 +911,59 @@ function onOverflowRun(id: string): void {
           </button>
         </span>
       </template>
+      <!-- 「删除会话」 (2026-11-02): the idle entry is a normal in-bar icon button on wide bars
+           (same spawn-stop-btn grammar — 危险 hover tint, ✓/✕ arm pill identical from either
+           entrance); it folds FIRST into 「⋯」 on narrow bars and is menu-only on touch. The
+           armed ✓/✕ pill (reuses the stop pill's look) + in-flight status live IN THE BAR and
+           never fold. -->
+      <button
+        v-if="removeTarget !== null && !delArmed && !delRemoving && !isFolded('delete')"
+        ref="delIdleBtn"
+        class="spawn-stop-btn detail-del-btn"
+        type="button"
+        data-fold="delete"
+        :title="t('detail.deleteSessionLabel')"
+        :aria-label="t('detail.deleteSessionLabel')"
+        @click="armDelete"
+        @keydown="onDeleteKeydown"
+      >
+        <AppIcon name="x" class="icon" />
+        <span class="head-btn-label" aria-hidden="true">{{ t("detail.deleteSessionLabel") }}</span>
+      </button>
+      <span
+        v-if="delArmed"
+        ref="delPill"
+        class="spawn-stop-armed detail-del-pill"
+        role="group"
+        :aria-label="t('detail.deleteSessionGroupAria')"
+        @keydown="onDeleteKeydown"
+      >
+        <button class="spawn-stop-armed-confirm" type="button" @click="onDeleteSession">
+          {{ t("agents.removeConfirm") }}
+        </button>
+        <span class="spawn-stop-armed-sep" aria-hidden="true"></span>
+        <button
+          ref="delOkBtn"
+          class="spawn-stop-armed-ok"
+          type="button"
+          :aria-label="t('detail.deleteSessionConfirmAria')"
+          @click="onDeleteSession"
+        >
+          <AppIcon name="check" class="icon-sm" />
+        </button>
+        <button
+          class="spawn-stop-armed-no"
+          type="button"
+          :aria-label="t('spawn.stopSessionCancelAria')"
+          @click="cancelDelete"
+        >
+          <AppIcon name="x" class="icon-sm" />
+        </button>
+      </span>
+      <span v-else-if="delRemoving" class="spawn-stop-busy detail-del-busy" role="status">
+        <AppIcon name="loader" class="icon-sm spin" />
+        {{ t("agents.removing") }}
+      </span>
       <!-- issue #41: the 「⋯」 overflow menu receives the measured-out low-frequency buttons
            (logic/headerFold.ts); mounted only while ≥1 action is folded, so a wide bar's DOM
            stays byte-identical to the pre-feature markup. Sits BEFORE the trailing state chips
@@ -791,6 +985,9 @@ function onOverflowRun(id: string): void {
 
     <p v-if="privacyError" class="privacy-head-error" role="alert">
       {{ t(privacyError.key, { code: privacyError.code }) }}
+    </p>
+    <p v-if="delError" class="spawn-stop-note detail-del-note" role="alert">
+      {{ t("agents.removeFailed", { reason: t(`agents.removeErr.${delError}`) }) }}
     </p>
     <p v-if="stopError" class="spawn-stop-note" role="alert">
       {{ t("spawn.stopSessionFailed", { code: stopError }) }}
@@ -816,9 +1013,20 @@ function onOverflowRun(id: string): void {
         :subagent-cost-usd="status?.subagentCostUsd"
       />
 
-      <!-- todo-web T4: the main session's task list, mirrored onto `agent.todo` by the status
-           reducer; the panel renders nothing when the wire is absent or empty. -->
-      <TodoPanel v-if="agent.todo" :todo="agent.todo" />
+      <!-- todo-web T4 + schedule-auto-approve r2 W2: the aggregated tasks panel — the todo
+           section (status-reducer mirror on `agent.todo`) plus the sched section when
+           `schedSummaryOf` finds this session's schedule projection. Renders when EITHER
+           side has content; each section additionally hides itself when its own input is
+           empty. -->
+      <TasksPanel
+        v-if="(agent.todo?.tasks.length ?? 0) > 0 || schedSummary !== undefined"
+        :todo="agent.todo"
+        :sched-summary="schedSummary"
+        :sched-proj="schedProj"
+        :can-write="schedCanWrite"
+        @open-run="onSchedOpenRun"
+        @open-schedule="schedOpen = true"
+      />
 
       <!-- worktree-web W4: git worktrees of the session cwd's repo, straight from
            `status.worktrees`; renders nothing when the wire is absent or has zero rows.

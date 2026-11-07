@@ -6,7 +6,7 @@
  * rules in plain JS; the two never import each other. Parity is enforced by the
  * shared fixture `tests/fixtures/secure-contract-parity.json`, run against both.
  *
- * Contract (settings file `pi-subagent.json`, key `secure`):
+ * Contract (settings file `pi-toolkit.json` — legacy `pi-subagent.json` stays a read fallback / compat symlink, #54 — key `secure`):
  *   { "secure": { "enabled"?: boolean (default true),
  *                 "vaults": { "<name>": { "dir"?: "<abs|~/…>", "mnt"?: "<abs|~/…>" } } } }
  * - name: /^[a-z0-9][a-z0-9_-]{0,31}$/

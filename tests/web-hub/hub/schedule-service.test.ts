@@ -1327,3 +1327,35 @@ describe("r2 #13: pendingUnknown overflow is counted and visible", () => {
     expect(svc.status().counters.unknownDropped).toBeGreaterThanOrEqual(1);
   });
 });
+
+describe("deprecated wire tolerance", () => {
+  it("discards old offers and decision acknowledgements without publishing or sending frames", async () => {
+    const root = tmp();
+    const reg = fakeRegistry();
+    const t = task();
+    delete t.approval;
+    writeStore(root, "session-legacy", (s) => {
+      s.tasks.push(t);
+    });
+    const svc = service(root, reg, T(13));
+    await svc.rescanAll();
+    const before = JSON.stringify(svc.snapshot());
+    const publishes = svc.status().counters.publishes;
+    const sent = reg.sent.length;
+    svc.onAgentFrame("old-agent", {
+      t: "sched_offers",
+      sessionId: "session-legacy",
+      open: [{ offerId: "offer-legacy-abcdef", taskId: t.id, defHash: defHash(t), expiresAt: T(14) }],
+      closed: [],
+    });
+    svc.onAgentFrame("old-agent", { t: "sched_decide_ack", reqId: "req-legacy-abcdef", result: "approved" });
+    expect(svc.status().counters.offersDropped).toBe(2);
+    expect(svc.status().counters.publishes).toBe(publishes);
+    expect(JSON.stringify(svc.snapshot())).toBe(before);
+    expect(reg.sent).toHaveLength(sent);
+    expect(svc.port()).not.toHaveProperty("offers");
+    expect(svc.port()).not.toHaveProperty("decide");
+    expect(svc.port()).not.toHaveProperty("ledgerTask");
+    expect(svc.port()).not.toHaveProperty("offersSeen");
+  });
+});

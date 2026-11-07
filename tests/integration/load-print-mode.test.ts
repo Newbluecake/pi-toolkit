@@ -26,7 +26,7 @@ const runBounded = (args: readonly string[]): Promise<{ code: number | null; std
 describe("sysload print mode", () => {
   it("does not leave a sampling timer keeping the process alive", async () => {
     const result = await runBounded([
-      'import { parseLoadSettings } from "./src/config/settings.ts"; import { createLoadActivation } from "./src/sysload/activation.ts"; const a=createLoadActivation({settings:parseLoadSettings({})}); a.start({mode:"print"}); console.log("exited");',
+      'import { parseLoadSettings } from "./src/sysload/settings.ts"; import { createLoadActivation } from "./src/sysload/activation.ts"; const a=createLoadActivation({settings:parseLoadSettings({})}); a.start({mode:"print"}); console.log("exited");',
     ]);
     expect(result.code).toBe(0);
     expect(result.stdout).toContain("exited");

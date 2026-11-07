@@ -1,0 +1,173 @@
+{
+  "note": "threads-on × rebind-off golden (rebind-plan r3 §7 A16), captured before the rebind wire/settings/cap changes. Never regenerate to fix a diff.",
+  "mainSessionTools": [
+    "web_search",
+    "web_fetch",
+    "TaskCreate",
+    "TaskList",
+    "TaskGet",
+    "TaskUpdate",
+    "TaskDelete",
+    "memory",
+    "ask_user",
+    "thread",
+    "Agent",
+    "get_run_result",
+    "list_subagents",
+    "steer_subagent",
+    "set_model",
+    "abort_subagent",
+    "extend_subagent_timeout",
+    "switch_context",
+    "set_compact_threshold",
+    "bash",
+    "bash_job",
+    "SubagentWorkflow"
+  ],
+  "commands": [
+    "tasklist",
+    "mem",
+    "cache-ttl",
+    "thread",
+    "goal",
+    "agent",
+    "task",
+    "pi-hud-refresh",
+    "watch",
+    "feishu-test",
+    "resume-recent",
+    "clear",
+    "title",
+    "topic-switch"
+  ],
+  "threadTool": {
+    "description": "Manage Feishu thread subscriptions: while a run holds an ACTIVE subscription for a thread, that thread's further events are steered DIRECTLY to the run (no main-session turn). subscribe requires a direct-dispatch run in {queued, starting, running} and the thread handle; `h:\"origin\"` resolves the thread the current turn's Feishu prompt came from. Re-subscribing the same (run, thread) is idempotent (updates the scope). Subscriptions end automatically when the run settles.",
+    "parameters": {
+      "type": "object",
+      "required": ["action"],
+      "properties": {
+        "action": {
+          "description": "list: current threads + subscriptions. subscribe: route a thread's further events to a run. unsubscribe: end one subscription.",
+          "anyOf": [
+            {
+              "const": "list",
+              "type": "string"
+            },
+            {
+              "const": "subscribe",
+              "type": "string"
+            },
+            {
+              "const": "unsubscribe",
+              "type": "string"
+            }
+          ]
+        },
+        "run": {
+          "description": "subscribe: target direct-dispatch run — the full run id, a unique run id prefix, or the run's @label.",
+          "type": "string"
+        },
+        "h": {
+          "description": "subscribe/unsubscribe: thread handle `fs:…` (15 chars, from a routed event's display line or `list`). subscribe alternatively accepts the literal \"origin\" — the thread of the Feishu prompt(s) this turn started from.",
+          "type": "string"
+        },
+        "scope": {
+          "description": "subscribe: the run's responsibility statement (≤200 chars) — quoted in every event wrapper so the worker can judge \"in scope or handback\". Defaults to the run's label.",
+          "type": "string"
+        },
+        "subId": {
+          "description": "unsubscribe: the subscription id from `list` (t1, t2, …).",
+          "type": "string"
+        }
+      }
+    }
+  },
+  "threadCommand": {
+    "description": "Thread 订阅直通：查看/建立/解除「飞书群话题 → 直派 subagent」的事件订阅（fabric.threads）。",
+    "usage": "用法：/thread status · /thread drop <subId> · /thread sub <run> <h|origin> [职责说明]（h 形如 fs:xxxxxxxxxxxx）"
+  },
+  "wiring": {
+    "hello": {
+      "t": "hello",
+      "proto": {
+        "major": 1,
+        "minor": 2
+      },
+      "pluginVersion": "0.0.0-golden",
+      "buildId": "golden-build",
+      "agentId": "<agentId>",
+      "epoch": "<uuid>",
+      "kind": "tui",
+      "launcher": ["<node>", "/nonexistent/pi"],
+      "cwd": "<tmp>",
+      "caps": [
+        "ev.v1",
+        "fleet.v1",
+        "snapshot.v1",
+        "branch.v1",
+        "runtx.v1",
+        "runtx.lan.v1",
+        "cmd.v1",
+        "dialog.v1",
+        "command.v1",
+        "cmd.args.v1",
+        "upload.v1",
+        "upload.lan.v1",
+        "hold.v1",
+        "thr.v1"
+      ]
+    },
+    "slotSequence": ["session", "status", "fleet", "dialogs", "ctl", "commands", "status", "ctl", "commands"],
+    "statusFrame": {
+      "t": "status",
+      "leafId": "e1",
+      "busy": false,
+      "pending": false,
+      "contextUsage": {
+        "tokens": 1000,
+        "contextWindow": 200000,
+        "percent": 0.5
+      },
+      "costUsd": 0,
+      "features": ["resume.v1"]
+    },
+    "hubConfig": {
+      "v": 1,
+      "home": "<tmp>",
+      "port": 0,
+      "idleExitMinutes": 10,
+      "pluginVersion": "0.0.0-golden",
+      "buildId": "golden-build",
+      "launcher": ["<node>", "/nonexistent/pi"],
+      "preview": "on",
+      "cmdArgs": "all",
+      "feishuBot": {
+        "allowGroups": true,
+        "groupRootTopics": false,
+        "notify": "bound",
+        "securityAlerts": true,
+        "xsMirror": true,
+        "spawnScope": "known",
+        "debounceMs": 1500,
+        "staleMessageS": 300,
+        "files": {
+          "outbound": "auto",
+          "inbound": true,
+          "maxInboundMiB": 30
+        },
+        "threads": {
+          "handbackWindowMin": 10,
+          "startTimeoutMin": 8,
+          "retainMin": 15,
+          "replyPerThreadPerMin": 6,
+          "replyPerThreadPerHour": 60
+        }
+      }
+    }
+  },
+  "cmdThreadMeta": {
+    "h": "fs:YlzxLqc_CDhc",
+    "label": "ProjTopic",
+    "sentAt": 1790000000123
+  }
+}

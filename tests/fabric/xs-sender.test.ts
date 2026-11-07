@@ -3,6 +3,7 @@ import {
   createXsSender,
   detectXsToolCollisions,
   XS_MAIN_TOOL_NAMES,
+  XS_ACTIVATION_TOOL_NAMES,
   type XsHubPort,
   type XsPortListArgs,
   type XsPortReply,
@@ -850,4 +851,11 @@ describe("sender reply — legacy sends are untouched", () => {
     expect(out.replyTo).toBeUndefined();
     expect(JSON.stringify(out)).not.toContain(B_ID);
   });
+});
+
+it("P3 activation collisions are a separate opt-in set; legacy main names stay frozen", () => {
+  expect(XS_MAIN_TOOL_NAMES).toEqual(["list_sessions", "message_session"]);
+  expect(XS_ACTIVATION_TOOL_NAMES).toEqual(["wake_session"]);
+  expect(detectXsToolCollisions(["wake_session"])).toEqual([]);
+  expect(detectXsToolCollisions(["wake_session"], { activation: true })).toEqual(["wake_session"]);
 });

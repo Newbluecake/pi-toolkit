@@ -23,6 +23,7 @@ import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { acquireGocryptfsTestLock } from "./gocryptfs-test-lock.js";
+import { awaitNoForeignGocryptfs } from "./private-real-harness.js";
 
 const REPO = join(import.meta.dirname, "..", "..");
 const HELPER = join(REPO, "src", "secure", "bin", "helper.mjs");
@@ -587,6 +588,32 @@ describe.skipIf(!HAVE_FLOCK || !which("script"))(
       30_000,
     );
 
+    // userns-free twin of the test above (runs on AppArmor-restricted CI): a record WITHOUT `ns`
+    // (P1 never got that far) is judged by lease + supervisor liveness only, so a plain `sleep`
+    // holding the lease under flock is a sufficient live "mounting" instance — same gate
+    // (plainMountPrivateGate ⇒ BUSY 76), same "before any prompt / no gocryptfs call" claims.
+    it("--global never bypasses mutual exclusion (no userns needed): a live ns-less private record blocks it 76", async () => {
+      writeSettings({ acme: { private: true } });
+      const c = holder("flock", [v.lease, "sleep", "60"]);
+      const flockPid = c.pid!;
+      let sup: { pid: number; start: number } | undefined;
+      for (const end = Date.now() + 5_000; !sup && Date.now() < end; await sleep(20)) {
+        const kids = readFileSync(`/proc/${flockPid}/task/${flockPid}/children`, "utf8").trim().split(/\s+/);
+        const pid = Number(kids[0]);
+        if (pid && readFileSync(`/proc/${pid}/comm`, "utf8").trim() === "sleep") sup = liveIdentity(pid);
+      }
+      expect(sup, "lease holder did not start").toBeDefined();
+      // pure verdict first: live supervisor + held lease + no ns ⇒ a blocking (non-stale) state
+      writeRecord({ phase: "mounting", supervisor: sup, gocryptfs: sup, pi: sup });
+      const st = await H.privateInstanceState(v);
+      expect(st.state).toBe("mounting");
+      const r = await cli("unlock acme --global", { tty: true });
+      expect(r.code, r.text).toBe(76);
+      expect(r.text).toMatch(/--private 实例正在挂载（mounting）/);
+      expect(r.text).not.toMatch(/Password|口令/);
+      expect(existsSync(join(root, "gocryptfs-calls.log"))).toBe(false);
+    }, 30_000);
+
     it("lock: --lazy --kill together is a usage error; --kill on an ordinary vault notes and runs the old path", async () => {
       expect((await cli("lock acme --lazy --kill")).code).toBe(2);
       const k = await cli("lock acme --kill");
@@ -694,15 +721,28 @@ describe.skipIf(!HAVE_FLOCK || !HAVE_USERNS || !which("script"))(
     }, 30_000);
 
     it("--kill: TERM to the verified supervisor, then waits for the instance to go (stale ⇒ released) ⇒ 0", async () => {
-      const f = await fakeInstance();
-      writeRecord({ phase: "session", supervisor: f.sup, pi: f.sup, ns: { mnt: f.nsMnt, user: f.nsUser } });
-      const k = await cli("lock acme --kill");
-      expect(k.code, k.text).toBe(0);
-      expect(k.out).toMatch(new RegExp(`已通知监督进程（pid ${f.sup.pid}）结束会话并收尾`));
-      expect(existsSync(`/proc/${f.sup.pid}`)).toBe(false);
+      // #69: the fake supervisor is a bare `sleep` — after the TERM it dies at once, its mount-ns
+      // id is freed, and under a parallel full-suite run the kernel may hand the SAME ns id to a
+      // concurrent real private session; the re-judge then sees members it cannot prove (recorded
+      // supervisor is dead) and fails closed (75, record kept). That is the designed ns-recycling
+      // safeguard, not a kill-path defect: TERM already landed (pid gone). Retry the whole scenario
+      // with a fresh fake instance, bounded; any OTHER outcome fails immediately.
+      let f: Awaited<ReturnType<typeof fakeInstance>> | undefined;
+      let k: Awaited<ReturnType<typeof cli>> | undefined;
+      for (let attempt = 0; attempt < 4; attempt++) {
+        f = await fakeInstance();
+        writeRecord({ phase: "session", supervisor: f.sup, pi: f.sup, ns: { mnt: f.nsMnt, user: f.nsUser } });
+        k = await cli("lock acme --kill");
+        if (k.code === 0) break;
+        if (k.code === 75 && k.text.includes("未经证明的进程") && attempt < 3) continue;
+        break;
+      }
+      expect(k!.code, k!.text).toBe(0);
+      expect(k!.out).toMatch(new RegExp(`已通知监督进程（pid ${f!.sup.pid}）结束会话并收尾`));
+      expect(existsSync(`/proc/${f!.sup.pid}`)).toBe(false);
       expect(existsSync(recordFile())).toBe(false);
       expect(spawnSync("flock", ["-n", v.lease, "true"]).status).toBe(0);
-    }, 30_000);
+    }, 90_000);
 
     it("--kill never signals a recycled identity: wrong starttime ⇒ nothing signalled, re-judged", async () => {
       const f = await fakeInstance();
@@ -726,8 +766,11 @@ const HAVE_REAL =
 describe.skipIf(!HAVE_REAL)("N2 real: command surface against real --private instances", () => {
   let releaseGocryptfsLock: (() => void) | undefined;
   beforeAll(async () => {
-    releaseGocryptfsLock = await acquireGocryptfsTestLock();
-  }, 250_000);
+    // 590 s like launcher-convert's per-test acquisition (#69): under a parallel full-suite run the
+    // cross-file gocryptfs lock can stay queued behind another file's long real block for minutes;
+    // the previous default (240 s acquire / 250 s hook) timed out the whole block occasionally.
+    releaseGocryptfsLock = await acquireGocryptfsTestLock(590_000);
+  }, 600_000);
   afterAll(() => releaseGocryptfsLock?.());
   const PW = "TESTPASS-fake-not-a-secret";
 
@@ -862,20 +905,6 @@ setTimeout(() => process.exit(Number(process.env.FAKE_PI_EXIT ?? 0)), Number(pro
       await sleep(50);
     }
   }
-  async function awaitNoForeignGocryptfs(ctx: { skip: () => void }, mine: string): Promise<void> {
-    const end = Date.now() + 60_000;
-    for (;;) {
-      const foreign = readFileSync("/proc/self/mountinfo", "utf8")
-        .split("\n")
-        .filter((l) => l.includes(" - fuse.gocryptfs ") && !l.split(" ")[4]!.startsWith(mine + "/"));
-      if (!foreign.length) return;
-      if (Date.now() >= end) {
-        ctx.skip();
-        return;
-      }
-      await sleep(500);
-    }
-  }
 
   it("during a session: status shows it, plain unlock 76 without a prompt, lock 76 with the pi pid; exit cleans up", async (ctx) => {
     const e = setup();
@@ -916,11 +945,28 @@ setTimeout(() => process.exit(Number(process.env.FAKE_PI_EXIT ?? 0)), Number(pro
     const run = tty(e, "run acme --private -- hi", { FAKE_PI_SLEEP: "60000" });
     await untilPhase(e, "session");
     const piPid = recordOf(e).pi.pid;
-    const t0 = Date.now();
-    const k = plain(e, "lock acme --kill");
-    expect(k.code, k.text).toBe(0);
-    expect(Date.now() - t0).toBeLessThan(12_000);
-    expect(k.text).not.toMatch(/外部收尾/);
+    // #69: `lock --kill` first judges the instance via a /proc scan that FAILS CLOSED (76
+    // scan-incomplete) when a same-uid non-dumpable process turns out to be INSIDE the instance
+    // lineage (r3.2 lineage rule: lineage-EXTERNAL ones — a concurrent suite's transient
+    // setuid fusermount3, an ssh session — are judged OUT and skipped) — correct product
+    // behaviour on a busy machine, not a kill-path failure. A refused attempt signals nothing,
+    // so a bounded retry is safe.
+    let k: ReturnType<typeof plain> | undefined;
+    for (let attempt = 0; attempt < 10; attempt++) {
+      const t0 = Date.now();
+      k = plain(e, "lock acme --kill");
+      if (k.code === 0) {
+        expect(Date.now() - t0).toBeLessThan(12_000);
+        break;
+      }
+      if (k.code === 76 && k.text.includes("scan-incomplete") && attempt < 9) {
+        await sleep(300);
+        continue;
+      }
+      break;
+    }
+    expect(k!.code, k!.text).toBe(0);
+    expect(k!.text).not.toMatch(/外部收尾/);
     const r = await run;
     expect(r.code, r.text).toBe(143);
     expect(existsSync(`/proc/${piPid}`)).toBe(false);

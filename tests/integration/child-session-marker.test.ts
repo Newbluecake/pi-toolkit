@@ -37,6 +37,7 @@ import { PiSessionDriver, SUBAGENT_CHILD_CUSTOM_TYPE } from "../../src/runtime/s
 import type { SessionHandle } from "../../src/runtime/session-driver.js";
 import { createRunFileReader } from "../../src/web-hub/hub/run-file-reader.js";
 import { collectSubagentSessions } from "../../src/session-nav/subagent-sessions.js";
+import { memoryDirFor } from "../../src/memory/paths.js";
 
 const posix = process.platform !== "win32";
 const REPO_ROOT = resolve(dirname(new URL(import.meta.url).pathname), "../..");
@@ -148,6 +149,12 @@ function redirectEnv(s: Scratch): void {
     if (prevHome === undefined) delete process.env.HOME;
     else process.env.HOME = prevHome;
   });
+  const prevMemoryRoot = process.env.ARMORY_MEMORY_ROOT;
+  process.env.ARMORY_MEMORY_ROOT = join(s.root, "memory");
+  envRestore.push(() => {
+    if (prevMemoryRoot === undefined) delete process.env.ARMORY_MEMORY_ROOT;
+    else process.env.ARMORY_MEMORY_ROOT = prevMemoryRoot;
+  });
 }
 
 /** Claim the host key so the extension's activate() takes the CHILD branch (a real child session
@@ -202,6 +209,12 @@ describe.skipIf(!posix)("H0 child-session marker: real driver create (M1)", () =
     redirectEnv(s);
     s.settingsJson([REPO_ROOT]); // regular installation shape: settings.json lists THIS package
     claimHostKey(); // child-session branch for the extension's activate()
+    // No scoped-memory binding is passed by this standalone driver. Project
+    // memory must still be rendered, not gated on a session/Hub owner.
+    const memoryDir = memoryDirFor(s.cwd);
+    mkdirSync(memoryDir, { recursive: true });
+    const projectFact = "Child marker regression: project core remains available without scoped binding.";
+    writeFileSync(join(memoryDir, "core.md"), `# Core\n\n${projectFact}\n`);
 
     const runtime = fakeModelRuntime(fakeModel(), ["child answer"]);
     const { file } = await createChildSession({ cwd: s.cwd, runtime, prompt: "child task" });
@@ -222,6 +235,8 @@ describe.skipIf(!posix)("H0 child-session marker: real driver create (M1)", () =
     expect(sectionLines.length).toBeGreaterThanOrEqual(1);
     const sectionEntry = JSON.parse(sectionLines[0]!);
     expect(Object.keys(sectionEntry.data.sections)).toEqual(["pi_project_memory"]);
+    expect(sectionEntry.data.sections.pi_project_memory.snapshot).toContain(projectFact);
+    expect(JSON.stringify(runtime.requestMessages[0])).toContain(projectFact);
 
     // --- first user message on the REAL persisted branch, with the marker as ancestor
     const reopened = SessionManager.open(file);

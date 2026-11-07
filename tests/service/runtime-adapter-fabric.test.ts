@@ -207,7 +207,7 @@ describe("message_agent generation probe (regression)", () => {
         // when the store is guaranteed to hold no snapshot for this run.
         handle.prompt = async () => {
           try {
-            await tool!.execute("tc1", { to: "root", kind: "finding", text: "mid-run hello" });
+            await tool!.execute("tc1", { to: "root", kind: "report", text: "mid-run hello" });
           } catch (err) {
             toolError = err;
           }

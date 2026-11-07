@@ -10,16 +10,18 @@
  */
 
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { createCompactHintHook, type CompactHintState, type Stack } from "../../src/stack.js";
+import { createCompactHintHook, type CompactHintState } from "../../src/compact-hint/hook.js";
+import type { Stack } from "../../src/stack.js";
 import { wireDynamicThreshold, type DynamicRuntime } from "../../src/compact-hint/dynamic/wire.js";
 import { readTelemetryLines } from "../../src/compact-hint/dynamic/telemetry-store.js";
 import { MARKER_TTL_MS } from "../../src/compact-hint/dynamic/telemetry.js";
-import { DEFAULT_DYNAMIC_THRESHOLD_SETTINGS } from "../../src/config/settings.js";
+import { DEFAULT_DYNAMIC_THRESHOLD_SETTINGS } from "../../src/compact-hint/settings.js";
 import activate from "../../src/index.js";
+import { resetSettingsFilesIn } from "./helpers/home-sandbox.js";
 
 const HOST_KEY = Symbol.for("pi-subagent:host");
 
@@ -418,21 +420,47 @@ describe("T-D3-PRINT / T-D3-CHILD / T-D3-RPC (P1-5 / R2-3)", () => {
     }
     expect((hintsOf(rig)[0]?.details as { thresholdPercent: number }).thresholdPercent).toBe(39);
   });
+  /** Child activation (HOST_KEY already claimed) with the given settings file
+   *  content (removed afterwards so later cases' legacy settings file is not
+   *  shadowed). Returns the recorded `pi.on` handlers. */
+  function activateChild(settings: object | undefined): Map<string, unknown[]> {
+    const settingsPath = join(fakeHome, ".pi", "agent", "pi-toolkit.json");
+    if (settings !== undefined) {
+      mkdirSync(dirname(settingsPath), { recursive: true });
+      writeFileSync(settingsPath, JSON.stringify(settings));
+    }
+    try {
+      (globalThis as Record<symbol, unknown>)[HOST_KEY] = { activatedAt: Date.now() };
+      const handlers = new Map<string, unknown[]>();
+      const pi = {
+        registerTool() {},
+        registerCommand() {},
+        on(event: string, handler: unknown) {
+          handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+        },
+        sendMessage() {},
+        appendEntry() {},
+        events: { on: () => () => undefined, emit: () => undefined },
+        exec: async () => ({ code: 0, stdout: "", stderr: "", killed: false }),
+      } as unknown as ExtensionAPI;
+      activate(pi);
+      return handlers;
+    } finally {
+      rmSync(settingsPath, { force: true });
+    }
+  }
+  it("CHILD (jev on by default): memory's pre-guard jev gate is the only tool_call handler a child registers", () => {
+    // memory is pre-guard (child sessions keep it) and memory.jev.childSessions
+    // defaults to true (jev-arch §8), so the jev gate's tool_call is by design.
+    const withJev = activateChild(undefined);
+    delete (globalThis as Record<symbol, unknown>)[HOST_KEY];
+    const withoutJev = activateChild({ memory: { jev: { enabled: false } } });
+    expect(withJev.get("tool_call")?.length).toBe(1);
+    expect(withoutJev.has("tool_call")).toBe(false);
+  });
   it("CHILD: HOST_KEY 已认领的激活不注册动态事件 handler（子会话惰性）", () => {
-    (globalThis as Record<symbol, unknown>)[HOST_KEY] = { activatedAt: Date.now() };
-    const handlers = new Map<string, unknown[]>();
-    const pi = {
-      registerTool() {},
-      registerCommand() {},
-      on(event: string, handler: unknown) {
-        handlers.set(event, [...(handlers.get(event) ?? []), handler]);
-      },
-      sendMessage() {},
-      appendEntry() {},
-      events: { on: () => () => undefined, emit: () => undefined },
-      exec: async () => ({ code: 0, stdout: "", stderr: "", killed: false }),
-    } as unknown as ExtensionAPI;
-    activate(pi);
+    // jev off isolates this case from memory's (pre-guard, by-design) jev gate.
+    const handlers = activateChild({ memory: { jev: { enabled: false } } });
     // 我们的动态事件 handler 全部在 guard 之后：子会话激活一个都不注册。
     // （session_compact/model_select 另有 sysprompt hub 的 pre-guard 合法注册，
     //  不能按事件名断言缺席——改用行为：子会话永不建栈 ⇒ 事件不产生任何遥测。）
@@ -642,7 +670,7 @@ describe("T-D3-DISPOSE (P1-4) + T-D3-TOOLCALL-PASSTHRU（activate 级）", () =>
       // mode=off ⇒ runtime 不构造 ⇒ handler 首行判空 ⇒ 无遥测
       expect(existsSync(agentTelemetryPath())).toBe(false);
     } finally {
-      rmSync(settingsPath, { force: true });
+      resetSettingsFilesIn(dirname(settingsPath));
     }
   });
 });

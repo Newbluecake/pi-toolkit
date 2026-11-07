@@ -1,0 +1,515 @@
+{
+  "v": 1,
+  "set": "recall",
+  "note": "J0 质量评测集·召回 40 例（jev-plan §4 J0；人工脱敏：无 token/密钥/邮箱/内网地址；代理一律 http://proxy.example:7897）。expected=true 表示该条目应被召回（p≥0.7），false 表示不应（含指代型消息与前缀误召反例、core 重复注入反例）。",
+  "cases": [
+    {
+      "id": "r01",
+      "message": "帮我把 dev 推到 GitHub，顺便跑一下全量测试",
+      "entry": {
+        "file": "pitfalls-git.md",
+        "label": "rule · git",
+        "excerpt": "GitHub 直连不通 ⇒ 走代理 export https_proxy=http://proxy.example:7897；gh / git push / curl github 一律带上"
+      },
+      "expected": true
+    },
+    {
+      "id": "r02",
+      "message": "那发版呢？",
+      "previous_message": "帮我把 dev 推到 GitHub，顺便跑一下全量测试",
+      "entry": {
+        "file": "core.md",
+        "label": "rule · release · user rule",
+        "excerpt": "发版规则：默认 patch；feat ≥50 才 minor；BREAKING 才 major；发版前须确认 GitHub CI 绿"
+      },
+      "expected": true
+    },
+    {
+      "id": "r03",
+      "message": "跑全量测试会不会很久？怕超时",
+      "entry": {
+        "file": "pitfalls-runtime.md",
+        "label": "pitfall · runtime",
+        "excerpt": "长命令一律 timeout，全量 timeout 280 npx vitest run；测试里别用「N 次 setImmediate」当超时"
+      },
+      "expected": true
+    },
+    {
+      "id": "r04",
+      "message": "这个测试全量跑挂了但单跑能过，要修吗",
+      "entry": {
+        "file": "pitfalls-runtime.md",
+        "label": "pitfall · flake",
+        "excerpt": "已知高负载 flake（单独重跑能过）：tests/bash/process.test.ts 计时项、tests/web-hub/protocol/pid.test.ts 等"
+      },
+      "expected": true
+    },
+    {
+      "id": "r05",
+      "message": "给 memory 工具的参数 schema 换个写法，运行时和 devDep 哪个为准",
+      "entry": {
+        "file": "pitfalls-runtime.md",
+        "label": "pitfall · typebox",
+        "excerpt": "pi 运行时把 @sinclair/typebox 别名到 typebox 1.x，devDep 是 0.34 ⇒ 测运行时行为要 import \"typebox\""
+      },
+      "expected": true
+    },
+    {
+      "id": "r06",
+      "message": "帮我看看为什么 bash 里 $VAR 没有分词",
+      "entry": {
+        "file": "pitfalls-runtime.md",
+        "label": "pitfall · shell",
+        "excerpt": "bash 工具实际是 zsh：$VAR 不分词、无 declare -A、--include=*.ts 被 glob ⇒ 用 rg -g 或写脚本用 bash 跑；pkill -f 会杀自身"
+      },
+      "expected": true
+    },
+    {
+      "id": "r07",
+      "message": "子 agent 报 bash 没有 host view attached，怎么回事",
+      "entry": {
+        "file": "pitfalls-runtime.md",
+        "label": "pitfall · jiti",
+        "excerpt": "pi 用 jiti moduleCache:false 加载扩展 ⇒ 每个新子会话从磁盘读最新源码，宿主 stack 仍是上次 /reload 的代码；合入改契约的代码后必须 reload"
+      },
+      "expected": true
+    },
+    {
+      "id": "r08",
+      "message": "写个集成测试直接调 buildSessionStack",
+      "entry": {
+        "file": "pitfalls-runtime.md",
+        "label": "pitfall · test",
+        "excerpt": "调 buildSessionStack 的集成测试必须 sandboxHome()，否则本机真 key 发真请求"
+      },
+      "expected": true
+    },
+    {
+      "id": "r09",
+      "message": "我想给 WebHubControl 接口加个必填字段，typecheck 绿了测试挂了",
+      "entry": {
+        "file": "pitfalls-runtime.md",
+        "label": "pitfall · typecheck",
+        "excerpt": "tests/commands/ 不在 tsconfig.typecheck.json 的 include 里 ⇒ 改共享接口后必须实际跑 npx vitest run tests/commands/"
+      },
+      "expected": true
+    },
+    {
+      "id": "r10",
+      "message": "准备同时派两个写包，都改 settings.ts",
+      "entry": {
+        "file": "pitfalls-git.md",
+        "label": "pitfall · parallel",
+        "excerpt": "派 ≥2 个写包前必须真跑 node skills/dev-flow/scripts/conflict-check.mjs spec.json --cwd <repo>，不能凭肉眼；热点共享文件有交集时三选一：串行 / 先集中改共享面 / isolation:worktree"
+      },
+      "expected": true
+    },
+    {
+      "id": "r11",
+      "message": "基线对照怎么拿 origin/dev 的文件内容",
+      "entry": {
+        "file": "pitfalls-git.md",
+        "label": "rule · git",
+        "excerpt": "禁整树 git 操作；基线对照用 git show origin/dev:<path> 或 git diff -- <path>，不用 stash"
+      },
+      "expected": true
+    },
+    {
+      "id": "r12",
+      "message": "子 agent 又用了 git stash 怎么办",
+      "entry": {
+        "file": "pitfalls-git.md",
+        "label": "pitfall · stash",
+        "excerpt": "子 agent 会无视「禁 git stash」⇒ 收报告先 git stash list && git status --short；>2 写包同树用 isolation:worktree"
+      },
+      "expected": true
+    },
+    {
+      "id": "r13",
+      "message": "commit 的时候 pre-commit 把别人改的半个文件带进去了",
+      "entry": {
+        "file": "pitfalls-git.md",
+        "label": "pitfall · pre-commit",
+        "excerpt": ".githooks/pre-commit 会 prettier --write 后 git add 整个文件 ⇒ 同文件混有别人改动时先手动 prettier，git commit --no-verify"
+      },
+      "expected": true
+    },
+    {
+      "id": "r14",
+      "message": "帮我整理一下 pi-agent-123 的自动提交",
+      "entry": {
+        "file": "pitfalls-git.md",
+        "label": "procedure · squash",
+        "excerpt": "整理自动提交：从最新 master 新建 worktree 分支 → cherry-pick --no-commit → git rm --cached node_modules → 单个提交 → 全量门禁 → merge --ff-only → 删分支；绝不在旧基线上 git reset --soft master"
+      },
+      "expected": true
+    },
+    {
+      "id": "r15",
+      "message": "后台 dev agent 还在跑，我现在提交安全吗",
+      "entry": {
+        "file": "pitfalls-git.md",
+        "label": "pitfall · race",
+        "excerpt": "同树并发 dev agent 时的提交竞态：commit 前一刻 git diff --cached | grep 核对待提交内容的归属；改 UI 壳文件的包在跑时主会话别再手工改同文件"
+      },
+      "expected": true
+    },
+    {
+      "id": "r16",
+      "message": "下个版本该 patch 还是 minor？",
+      "previous_message": "CHANGELOG 我看了一遍，这版主要是修复和文档",
+      "entry": {
+        "file": "core.md",
+        "label": "rule · release · user rule",
+        "excerpt": "发版规则：默认 patch；feat ≥50 才 minor；BREAKING 才 major"
+      },
+      "expected": true
+    },
+    {
+      "id": "r17",
+      "message": "那次 v0.8.1 的教训是什么来着",
+      "previous_message": "我们聊聊发版流程的历史问题",
+      "entry": {
+        "file": "core.md",
+        "label": "rule · release · user rule",
+        "excerpt": "发版前须确认 GitHub CI 绿（v0.8.1 曾在 CI 红时发出）"
+      },
+      "expected": true
+    },
+    {
+      "id": "r18",
+      "message": "那这个决定也问一下用户？",
+      "previous_message": "方案里有个要不要新增依赖的取舍没定",
+      "entry": {
+        "file": "core.md",
+        "label": "rule · user rule",
+        "excerpt": "需要拍板的决策（多个方案选一、要不要做、范围取舍）一律用 ask_user 提问，推荐项放第一个并标 (Recommended)；能自己从代码判断的不问"
+      },
+      "expected": true
+    },
+    {
+      "id": "r19",
+      "message": "流式输出断了，怎么处理",
+      "entry": {
+        "file": "pitfalls.md",
+        "label": "rule · user rule",
+        "excerpt": "传输层故障（流中断/502/503/upstream）⇒ 直接 resume 换线续跑，不问；429 按路由换线；升 opus/用 fable 先问"
+      },
+      "expected": true
+    },
+    {
+      "id": "r20",
+      "message": "子 agent 遇到拿不准的事找谁",
+      "entry": {
+        "file": "core.md",
+        "label": "rule · consult",
+        "excerpt": "consult 停用：不挂 experts；子 agent 用 message_agent 问 root，主会话 steer 应答"
+      },
+      "expected": true
+    },
+    {
+      "id": "r21",
+      "message": "交接给下个 agent 时要带什么",
+      "previous_message": "这个探索任务上下文快满了",
+      "entry": {
+        "file": "multi-agent-experiments.md",
+        "label": "procedure · handoff",
+        "excerpt": "结构化交接（fileIndex + ruledOut + 核验纪律）：下游成本 −34~53%、游荡文件 −91~100%；已固化为仓库 skill skills/agent-handoff/"
+      },
+      "expected": true
+    },
+    {
+      "id": "r22",
+      "message": "quota 的注入为什么要用 sendMessage 而不是 systemPrompt",
+      "entry": {
+        "file": "quota.md",
+        "label": "rule · quota",
+        "excerpt": "用户决策（别推翻）：零定时器；注入走 sendMessage triggerTurn:false，禁 systemPrompt（打脏缓存前缀）"
+      },
+      "expected": true
+    },
+    {
+      "id": "r23",
+      "message": "GLM 那个额度接口有月度窗口吗",
+      "entry": {
+        "file": "quota.md",
+        "label": "fact · endpoint",
+        "excerpt": "端点契约：GLM quota/limit 裸 key 无 Bearer，data.limits 只有 5h/week 两个 unit；两家都没有月度窗口，别加 month scope"
+      },
+      "expected": true
+    },
+    {
+      "id": "r24",
+      "message": "缓存命中率怎么判断才准",
+      "previous_message": "我在看 cache-ttl 的保活策略效果",
+      "entry": {
+        "file": "cache-ttl.md",
+        "label": "pitfall · cache",
+        "excerpt": "判「命中」别用 cacheRead > 0：跨会话共享的 system/tools 块（约 11k tok）总命中；锚上一次前缀 × 0.5"
+      },
+      "expected": true
+    },
+    {
+      "id": "r25",
+      "message": "1h ttl 的条目到底能活多久",
+      "entry": {
+        "file": "cache-ttl.md",
+        "label": "fact · cache",
+        "excerpt": "1h 实际寿命：确认活到 23.2min、确认死亡只在 ≥27.5min；早期「只活 7–13.6min」是误判（前缀谱系分裂）"
+      },
+      "expected": true
+    },
+    {
+      "id": "r26",
+      "message": "web-hub 全部请求 500 了，ReferenceError",
+      "entry": {
+        "file": "pitfalls-runtime.md",
+        "label": "pitfall · hub",
+        "excerpt": "hub 进程是 jiti 从 src/ 实时加载的：正有包在编辑 hub 源码时 /webhub restart 会读到半成品模块图 ⇒ 别在这时重启"
+      },
+      "expected": true
+    },
+    {
+      "id": "r27",
+      "message": "用户说 web-hub 有 bug，第一步查什么",
+      "entry": {
+        "file": "pitfalls-runtime.md",
+        "label": "procedure · triage",
+        "excerpt": "排障先核对 hub 代码快照时间：ps -o lstart -p <hub pid> 对比相关提交时间——差几分钟就是旧代码在跑"
+      },
+      "expected": true
+    },
+    {
+      "id": "r28",
+      "message": "真机验收子会话的保活特性，用 pi -e 装本包行吗",
+      "entry": {
+        "file": "live-acceptance-tmux.md",
+        "label": "rule · acceptance",
+        "excerpt": "子会话专属特性真机验收必须用 pi install <repo> 或 settings packages 正规装配，禁止 pi -e——子会话只按 settings packages 重新发现扩展"
+      },
+      "expected": true
+    },
+    {
+      "id": "r29",
+      "message": "tmux 里的斜杠命令没生效",
+      "entry": {
+        "file": "live-acceptance-tmux.md",
+        "label": "pitfall · tmux",
+        "excerpt": "斜杠命令第一次 Enter 会被补全菜单吃掉 ⇒ 隔 ~1s 再补一次 Enter"
+      },
+      "expected": true
+    },
+    {
+      "id": "r30",
+      "message": "verifier 说门禁全没跑，为什么",
+      "previous_message": "我派了个只读验收 agent 去 /tmp/v-xxx",
+      "entry": {
+        "file": "pitfalls.md",
+        "label": "pitfall · verifier",
+        "excerpt": "verifier 是只读类型，常不执行 prompt 里的 git worktree add ⇒ 派验收前主会话自己先建好只读 worktree，prompt 里只让它 cd 进去跑"
+      },
+      "expected": true
+    },
+    {
+      "id": "r31",
+      "message": "reload 之后怎么查活跃的 run",
+      "entry": {
+        "file": "pitfalls.md",
+        "label": "procedure · fleet",
+        "excerpt": "list_subagents 工具已合入：reload 后派发前直接调用它查活跃 run / workflow / 空槽，不再手算"
+      },
+      "expected": true
+    },
+    {
+      "id": "r32",
+      "message": "workflow 的 agent() 传个未知键会怎样",
+      "entry": {
+        "file": "pitfalls.md",
+        "label": "fact · workflow",
+        "excerpt": "SubagentWorkflow agent() opts：未知键直接 reject；model/thinking 真透传；experts 支持；isolation:worktree 真隔离"
+      },
+      "expected": true
+    },
+    {
+      "id": "r33",
+      "message": "好，继续",
+      "entry": {
+        "file": "core.md",
+        "label": "rule · release · user rule",
+        "excerpt": "发版规则：默认 patch；feat ≥50 才 minor；BREAKING 才 major"
+      },
+      "expected": false
+    },
+    {
+      "id": "r34",
+      "message": "帮我把这个函数重命名一下",
+      "entry": {
+        "file": "core.md",
+        "label": "rule · release · user rule",
+        "excerpt": "发版规则：默认 patch；feat ≥50 才 minor；BREAKING 才 major"
+      },
+      "expected": false
+    },
+    {
+      "id": "r35",
+      "message": "git push 报 EOF 连不上",
+      "entry": {
+        "file": "quota.md",
+        "label": "fact · endpoint",
+        "excerpt": "端点契约：GLM quota/limit 裸 key 无 Bearer；两家都没有月度窗口"
+      },
+      "expected": false
+    },
+    {
+      "id": "r36",
+      "message": "删文件用通配符行不行",
+      "entry": {
+        "file": "pitfalls-runtime.md",
+        "label": "pitfall · cache",
+        "excerpt": "判「命中」别用 cacheRead > 0：跨会话共享的 system/tools 块总命中"
+      },
+      "expected": false
+    },
+    {
+      "id": "r37",
+      "message": "quota 的 HUD 行加个旋转图标吧",
+      "previous_message": "顺便把恢复倒计时的展示改了",
+      "entry": {
+        "file": "quota.md",
+        "label": "rule · quota",
+        "excerpt": "恢复倒计时用文字 token resets 2d11h（否决 ↻ 图标），取用完窗口 resetAt 最大值"
+      },
+      "expected": true
+    },
+    {
+      "id": "r38",
+      "message": "黄金文件能不能重新生成一下",
+      "entry": {
+        "file": "core.md",
+        "label": "rule · golden · user rule",
+        "excerpt": "A 级 golden 永不重生；任何 diff 都是行为变化，需要方案修订与 root 拍板，不是跑个环境变量"
+      },
+      "expected": true
+    },
+    {
+      "id": "r39",
+      "message": "现在几点了",
+      "entry": {
+        "file": "pitfalls-git.md",
+        "label": "procedure · squash",
+        "excerpt": "整理自动提交：cherry-pick --no-commit → 单个提交 → merge --ff-only → 删分支"
+      },
+      "expected": false
+    },
+    {
+      "id": "r40",
+      "message": "把这段散文润色一下，去掉 AI 味",
+      "entry": {
+        "file": "pitfalls.md",
+        "label": "rule · ui-text",
+        "excerpt": "UI 文案语言切分：紧凑行内标记只用英文 token（5h 62% · stale 12m），中文只出现在面向用户的散文块"
+      },
+      "expected": false
+    },
+    {
+      "id": "h01",
+      "message": "帮我把 dev 推到 GitHub",
+      "entry": {
+        "file": "pitfalls.md",
+        "label": "pitfall · format",
+        "excerpt": "prettier 会重排 markdown 表格对齐，按精确 oldText 编辑表格前先重读文件"
+      },
+      "expected": false
+    },
+    {
+      "id": "h02",
+      "message": "跑一下全量测试",
+      "entry": {
+        "file": "core.md",
+        "label": "rule · release",
+        "excerpt": "发版只在用户明确要求时做；patch 在 dev 分支发，minor/major 先 PR 到 master"
+      },
+      "expected": false
+    },
+    {
+      "id": "h03",
+      "message": "web-hub 全部请求 500 了，ReferenceError",
+      "entry": {
+        "file": "tasks.md",
+        "label": "fact · web-hub",
+        "excerpt": "web-hub 登录密码存储加固（scrypt 参数、TOTP 加密）排在下一个 minor 窗口"
+      },
+      "expected": false
+    },
+    {
+      "id": "h04",
+      "message": "quota 的 HUD 行加个旋转图标吧",
+      "entry": {
+        "file": "quota.md",
+        "label": "procedure · quota",
+        "excerpt": "新增 quota provider 需要写 adapter 并补 quota-kimi-zai 之外的 golden"
+      },
+      "expected": false
+    },
+    {
+      "id": "h05",
+      "message": "给 memory 工具加个 search 参数",
+      "entry": {
+        "file": "memory.md",
+        "label": "fact · memory",
+        "excerpt": "memory tidy 的事务写在 journal 里，/mem restore 可以回滚到整理前"
+      },
+      "expected": false
+    },
+    {
+      "id": "h06",
+      "message": "子 agent 报 bash 没有 host view attached，怎么回事",
+      "entry": {
+        "file": "dev-flow.md",
+        "label": "rule · dispatch",
+        "excerpt": "派单 dev 的 timeout_s 约 900，关键路径大包可给 1800"
+      },
+      "expected": false
+    },
+    {
+      "id": "h07",
+      "message": "帮我写个 commit message",
+      "entry": {
+        "file": "pitfalls-git.md",
+        "label": "rule · git",
+        "excerpt": "GitHub 直连不通 ⇒ 走代理 export https_proxy=http://proxy.example:7897；gh / git push / curl github 一律带上"
+      },
+      "expected": false
+    },
+    {
+      "id": "h08",
+      "message": "把 README 里的拼写错误改一下",
+      "entry": {
+        "file": "pitfalls.md",
+        "label": "pitfall · docs",
+        "excerpt": "AGENTS.md 有守卫测试钉着原文短语，改 AGENTS.md 后必须跑 tests/docs/agents-md.test.ts"
+      },
+      "expected": false
+    },
+    {
+      "id": "h09",
+      "message": "翻译一下这段英文",
+      "entry": {
+        "file": "core.md",
+        "label": "rule · workflow",
+        "excerpt": "所有开发任务必须遵循 dev-flow：打分定车道、按车道走闸门"
+      },
+      "expected": false
+    },
+    {
+      "id": "h10",
+      "message": "缓存命中率怎么突然掉了",
+      "entry": {
+        "file": "quota.md",
+        "label": "rule · quota",
+        "excerpt": "quota 告警阶梯 L1/L2/L3 对应 70%/80%/90% 用量"
+      },
+      "expected": false
+    }
+  ]
+}

@@ -43,7 +43,7 @@ describe("fabric seeded properties", () => {
         new FabricThrottle({ minIntervalMs: 0, rootMinIntervalMs: 0, backoffMs: 0 }),
         {
           maxPerRun: 100,
-          findingQuota: 100,
+          reportQuota: 100,
           directiveQuota: 100,
           deadLetterQuota: 100,
           maxChars: 100,
@@ -58,7 +58,7 @@ describe("fabric seeded properties", () => {
         try {
           const result = router.admit(sender, {
             to: "root",
-            kind: next() < 0.25 ? "progress" : "finding",
+            kind: next() < 0.25 ? "progress" : "report",
             text: `seed-${seed}-${i}`,
             generation: 1,
             canMessage: ["parent"],
@@ -79,7 +79,7 @@ describe("fabric seeded properties", () => {
         .flatMap((record) => record.ref?.keys ?? []);
       expect(new Set(deadRefs).size).toBe(deadRefs.length);
       for (const record of engine.select(
-        (r) => (r.kind === "finding" || r.kind === "directive") && ["dropped", "abandoned"].includes(r.state),
+        (r) => (r.kind === "report" || r.kind === "directive") && ["dropped", "abandoned"].includes(r.state),
       )) {
         if (record.rejected === undefined && record.terminalReason !== "policy")
           expect(record.deadLetter).toBeDefined();
@@ -89,7 +89,7 @@ describe("fabric seeded properties", () => {
   it("never authorizes a relation outside the matrix and keys always round-trip", () => {
     const next = random(0xfab1c);
     const relations: MessageRelation[] = ["self", "parent", "child", "ancestor", "descendant", "sibling", "unrelated"];
-    const kinds = ["progress", "finding", "directive", "result", "dead_letter"] as const;
+    const kinds = ["progress", "report", "directive", "result", "dead_letter"] as const;
     for (let i = 0; i < 500; i++) {
       const relation = relations[Math.floor(next() * relations.length)]!;
       const kind = kinds[Math.floor(next() * kinds.length)]!;
@@ -128,7 +128,7 @@ describe("fabric seeded properties", () => {
         new FabricThrottle({ minIntervalMs: 0, rootMinIntervalMs: 0, backoffMs: 0 }),
         {
           maxPerRun: 3,
-          findingQuota: 3,
+          reportQuota: 3,
           directiveQuota: 3,
           deadLetterQuota: 3,
           maxChars: 100,
@@ -142,7 +142,7 @@ describe("fabric seeded properties", () => {
       for (let i = 0; i < 20; i++) {
         const result = router.admit("r_ABCDEFGH", {
           to: "root",
-          kind: "finding",
+          kind: "report",
           text: String(next()),
           generation: 1,
           canMessage: ["parent"],

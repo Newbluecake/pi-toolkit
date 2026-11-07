@@ -80,7 +80,7 @@ describe("W4 successor wait marker", () => {
     startSuccessor(h);
     const admitted = h.router.admit(sender, {
       to: target,
-      kind: "finding",
+      kind: "report",
       text: "hello",
       generation: 1,
       wake: false,
@@ -207,7 +207,7 @@ describe("W4 drain into a running successor", () => {
     ] as const) {
       const result = h.router.admit(from, {
         to: target,
-        kind: "finding",
+        kind: "report",
         text,
         generation: 1,
         wake: false,

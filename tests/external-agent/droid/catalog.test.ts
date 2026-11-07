@@ -13,7 +13,7 @@ function mkTmp(prefix: string): string {
   tmpRoots.push(dir);
   return dir;
 }
-import { DEFAULT_EXTERNAL_AGENTS_SETTINGS } from "../../../src/config/settings.js";
+import { DEFAULT_EXTERNAL_AGENTS_SETTINGS } from "../../../src/external-agent/settings.js";
 import {
   binaryFingerprint,
   createDroidCatalog,

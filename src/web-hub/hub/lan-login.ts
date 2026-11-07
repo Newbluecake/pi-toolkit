@@ -69,6 +69,15 @@ interface UserWindows {
   recovery: Window;
 }
 
+/** Budget for the best-effort initial-password wipe on the login completion path. */
+const INITIAL_CLEAR_BUDGET_MS = 2_000;
+
+/** #66 D4: the generated password is still the account's password iff `initial_created_at` (or a
+ * legacy plaintext) is set — `setPassword` NULLs both. */
+export function initialPasswordInUse(user: Pick<LanUserRecord, "initialPassword" | "initialCreatedAt">): boolean {
+  return user.initialCreatedAt !== undefined || user.initialPassword !== undefined;
+}
+
 function digest(value: string): string {
   return createHash("sha256").update(value).digest("base64url");
 }
@@ -298,6 +307,40 @@ export function createLanLoginCore(deps: LanLoginCoreDeps): LanLoginCore {
     return !disposed && !io.signal.aborted && io.responseOpen() && !run?.revoked && (!ch || ch.state === "claimed");
   }
 
+  /**
+   * #66 D4: first successful sign-in with the auto-generated password records the login and
+   * wipes the plaintext in ONE store statement. Best-effort by design — a failure here must never
+   * turn an authenticated login into a 503 (the next login simply retries). Aborts/disposal are
+   * still honoured by the `live()` check that follows the call.
+   */
+  async function clearInitialPassword(
+    io: LoginIo,
+    user: LanUserRecord,
+    ip: string,
+    deadline: ReqDeadline,
+  ): Promise<void> {
+    try {
+      const out = await step(io, Math.min(deadline.remaining(), INITIAL_CLEAR_BUDGET_MS), (opts) =>
+        deps.store.markInitialLogin(user.username, ip, deps.now(), opts),
+      );
+      if (out !== undefined && out !== null && out.cleared === true) {
+        try {
+          deps.store.requestCheckpointTruncate?.();
+        } catch {
+          /* checkpoint is a fire-and-forget hardening step */
+        }
+      }
+    } catch (err) {
+      try {
+        // Only a normalised E_* code: raw store errors must never reach the log.
+        const code = /^E_[A-Z0-9_]{1,32}/.exec(portCode(err))?.[0] ?? "E_DB";
+        deps.log.warn("web-hub lan login: initial-password-clear-failed", { code });
+      } catch {
+        /* logging must not affect the login */
+      }
+    }
+  }
+
   /** The ONLY checked INSERT caller. Every pre-send failure revokes an inserted/late sid. */
   async function complete(
     user: LanUserRecord,
@@ -353,10 +396,7 @@ export function createLanLoginCore(deps: LanLoginCoreDeps): LanLoginCore {
       sid = inserted.sid;
       for (const hash of inserted.evicted) revokeHash(hash);
       if (!live(io, run, ch)) throw new Error("E_ABORTED");
-      if (user.initialPassword !== undefined)
-        await step(io, deadline.remaining(), (opts) =>
-          deps.store.markInitialLogin(user.username, ctx.clientIp, deps.now(), opts),
-        );
+      if (user.initialPassword !== undefined) await clearInitialPassword(io, user, ctx.clientIp, deadline);
       if (!live(io, run, ch)) throw new Error("E_ABORTED");
       // Frozen port is synchronous; wrapping also bounds a misbehaving thenable adapter.
       await step(io, deadline.remaining(), async () => {
@@ -402,7 +442,7 @@ export function createLanLoginCore(deps: LanLoginCoreDeps): LanLoginCore {
       let afterCalled = false;
       return {
         status: 200,
-        body: { ok: true, initialPassword: user.initialPassword !== undefined },
+        body: { ok: true, initialPassword: initialPasswordInUse(user) },
         headers: {
           "Set-Cookie": [formatLanCookie(sid, { secure: ctx.scheme === "https" }), factorCookie("", ctx, true)],
         },
@@ -463,7 +503,7 @@ export function createLanLoginCore(deps: LanLoginCoreDeps): LanLoginCore {
 
   async function newChallenge(
     user: LanUserRecord,
-    factor: { factorGen: number; totp: boolean; feishu: boolean; recoveryLeft: number },
+    factor: { factorGen: number; totp: boolean; totpUsable?: boolean; feishu: boolean; recoveryLeft: number },
     ctx: RequestContext,
     ua: string,
     knownAtGate: boolean,
@@ -495,7 +535,7 @@ export function createLanLoginCore(deps: LanLoginCoreDeps): LanLoginCore {
       expiresAt: deps.now() + L.challengeMs,
       attemptsLeft: L.attempts,
       state: "pending",
-      totp: factor.totp,
+      totp: factor.totp && factor.totpUsable !== false,
       recovery: factor.recoveryLeft > 0,
     };
     challenges.set(ch.idHash, ch);
@@ -638,6 +678,7 @@ export function createLanLoginCore(deps: LanLoginCoreDeps): LanLoginCore {
         const user = run.user!;
         const deadline = createReqDeadline(deps.now, L.postKdfMs);
         if (run.revoked || disposed) return error(401, "E_AUTH");
+        deps.kdfUpgrader?.maybeRehash(user, password); // fire-and-forget, before the second-factor gate
         const known = await step(io, deadline.remaining() - L.completionReserveMs, (opts) =>
           deps.store.isKnownIp(user.id, ctx.clientIp, deps.now(), NEW_IP_WINDOW_MS, opts),
         );
@@ -693,6 +734,7 @@ export function createLanLoginCore(deps: LanLoginCoreDeps): LanLoginCore {
           return body.method === "totp" ? deps.store.verifyTotp(input, opts) : deps.store.consumeRecovery(input, opts);
         });
         if (ch.state !== "verifying") return error(409, "E_2FA_EXPIRED");
+        if (!verified.ok && verified.reason === "unavailable") reservation.refund();
         auditLan2fa(deps.log, {
           phase: "verify",
           method: body.method,
@@ -703,6 +745,11 @@ export function createLanLoginCore(deps: LanLoginCoreDeps): LanLoginCore {
           left: ch.attemptsLeft,
         });
         if (!verified.ok) {
+          if (verified.reason === "unavailable") {
+            ch.state = "pending";
+            wakeApproval(ch);
+            return error(503, "E_DB");
+          }
           deps.limiter.fail(ctx.clientIp);
           ch.state = "pending";
           if (ch.attemptsLeft === 0) dead(ch, "attempts");

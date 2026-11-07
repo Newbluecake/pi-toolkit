@@ -23,6 +23,8 @@ const USER = {
   fabric: { enabled: true, crossSession: { enabled: true } },
   externalAgents: { droid: { enabled: true } },
   feishuNotify: { enabled: true },
+  memory: { scopes: { session: true, hub: true }, jev: { enabled: true } },
+  reflex: { enabled: true, drafts: { enabled: true } },
 };
 
 describe("loadSettings secure override (plan §2.4 step 2)", () => {
@@ -44,6 +46,13 @@ describe("loadSettings secure override (plan §2.4 step 2)", () => {
     expect(s.fabric.enabled).toBe(true); // tree fabric is not a D8 push
     expect(s.externalAgents.droid.enabled).toBe(false);
     expect(s.feishuNotify.enabled).toBe(false);
+    // jev-plan v2 §4 J3 (I11): secure/locked 域强制关闭 Jev，无论用户文件怎么写
+    expect(s.memory.jev.enabled).toBe(false);
+    expect(s.memory.scopes).toEqual({ session: true, hub: false });
+    // jev-reflex arch §4.1 (I11/D8): the R layer is forced off in secure/locked domains too
+    expect(s.reflex.enabled).toBe(false);
+    // #25 BA §4.6 (I11/D8): drafts belong to the same forced-off surface, whatever the file says
+    expect(s.reflex.drafts.enabled).toBe(false);
     // non-overridden siblings keep the user's / default values
     expect(s.bashJobs.retentionMs).toBe(loadSettings({}).bashJobs.retentionMs);
   });
@@ -55,6 +64,11 @@ describe("loadSettings secure override (plan §2.4 step 2)", () => {
     expect(s.bashJobs.dir).toBe("/user/bash-jobs");
     expect(s.fabric.crossSession.enabled).toBe(false);
     expect(s.feishuNotify.enabled).toBe(false);
+    expect(s.memory.jev.enabled).toBe(false);
+    expect(s.memory.scopes).toEqual({ session: true, hub: false });
+    expect(s.reflex.enabled).toBe(false);
+    // #25 (I11/D8): locked domains force drafts off too
+    expect(s.reflex.drafts.enabled).toBe(false);
   });
 
   it("never mutates DEFAULT_SETTINGS (overrides clone every nested object)", () => {
@@ -77,6 +91,7 @@ describe("loadSettings secure override (plan §2.4 step 2)", () => {
       expect(s.bashJobs.dir).toBe(join(v.state, "bash-jobs"));
       expect(s.workflow.journalDir).toBe(join(v.state, "workflows"));
       expect(s.feishuNotify.enabled).toBe(false);
+      expect(s.memory.scopes).toEqual({ session: true, hub: false });
     }
   });
 });

@@ -432,3 +432,165 @@ tr.is-merge .gg-sub {
     min-height: var(--gg-row, 32px);
   }
 }
+
+/* ---- commit files (wtgraph.files.v1): clickable rows + the detail row ----------------------
+ * Only rows carrying [data-toggle] (cap present) get the pointer/focus affordances. The detail
+ * row has NO data-row (the lane measurement skips it) and an auto height (overrides the fixed
+ * --gg-row pitch above); its left padding (inline, = SVG width) keeps the text clear of lanes. */
+.gg-table tr[data-toggle] {
+  cursor: pointer;
+}
+.gg-table tr[data-toggle]:hover > .gg-cell {
+  background: var(--c-surface-2);
+}
+.gg-table tr[data-toggle]:focus-visible {
+  outline: 2px solid var(--c-primary);
+  outline-offset: -2px;
+}
+.gg-table tr.is-open > .gg-cell {
+  background: var(--c-sunken);
+}
+
+.gg-table tr.gg-files-row {
+  height: auto;
+}
+
+.gg-files-cell {
+  padding-top: 2px;
+  padding-right: 4px;
+  padding-bottom: 6px;
+  font-size: var(--fs-xs);
+  color: var(--c-text-2);
+  vertical-align: top;
+  border-bottom: 1px dashed var(--c-border);
+}
+
+.gg-files-meta,
+.gg-files-state {
+  margin: 0;
+  padding: 2px 0;
+  color: var(--c-text-3);
+  font-size: var(--fs-2xs);
+  overflow-wrap: anywhere;
+}
+
+.gg-files-error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  padding: 2px 0;
+}
+.gg-files-error-title {
+  color: var(--c-danger);
+  font-weight: var(--fw-semibold);
+}
+.gg-files-error-text {
+  color: var(--c-text-2);
+  overflow-wrap: anywhere;
+}
+
+.gg-files-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  /* 2026-10-28 user: no nested scroller — the list grows to its full height and the PAGE
+   *  scrolls (the hub already truncates at WTGRAPH_FILES_MAX, so the worst case is bounded). */
+}
+
+.gg-file {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: calc(20px * var(--fs-scale, 1));
+  min-width: 0;
+}
+
+/* status badge — the wtdiff palette (diff.css .wtd-badge) */
+.gg-fst {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: calc(16px * var(--fs-scale, 1));
+  height: calc(16px * var(--fs-scale, 1));
+  border-radius: var(--r-xs);
+  font-family: var(--font-mono);
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-semibold);
+}
+.gg-fst.s-M,
+.gg-fst.s-T {
+  background: var(--c-warning-soft);
+  color: var(--c-warning-text);
+}
+.gg-fst.s-A {
+  background: var(--diff-add-soft);
+  color: var(--st-done);
+}
+.gg-fst.s-D {
+  background: var(--diff-del-soft);
+  color: var(--c-danger);
+}
+.gg-fst.s-R {
+  background: var(--c-info-soft);
+  color: var(--c-info);
+}
+
+.gg-fnum {
+  flex: none;
+  min-width: 9ch;
+  font-family: var(--font-mono);
+  font-size: var(--fs-2xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  color: var(--c-text-3);
+}
+.gg-fadd {
+  color: var(--st-done);
+}
+.gg-fdel {
+  margin-left: 4px;
+  color: var(--c-danger);
+}
+
+/* left-ellipsis: the file NAME (the tail) stays visible; the full path rides `title` */
+.gg-fpath {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--c-text);
+}
+
+.gg-spinner {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  margin-right: 6px;
+  vertical-align: -1px;
+  border: 2px solid var(--c-border);
+  border-top-color: var(--c-primary);
+  border-radius: 50%;
+  animation: gg-spin 0.9s linear infinite;
+}
+@keyframes gg-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .gg-spinner {
+    animation: none;
+  }
+}
+
+@media (max-width: 480px) {
+  .gg-fnum {
+    min-width: 0;
+  }
+}

@@ -110,8 +110,9 @@ Detailed guides live in [`docs/guide/`](docs/guide/) and are **written in Chines
 
 ## Configuration
 
-User settings file: `~/.pi/agent/pi-subagent.json` (historical file name kept; a missing or malformed file falls back to defaults and never throws).
+User settings file: `<agentDir>/pi-toolkit.json` (`<agentDir>` defaults to `~/.pi/agent` and follows `PI_CODING_AGENT_DIR` — see "PI_CODING_AGENT_DIR and this plugin" below; a missing or malformed file falls back to defaults and never throws).
 
+- The legacy name `pi-subagent.json` is migrated automatically by the main session on upgrade: the contents are published as `pi-toolkit.json` and the old name is kept as a compatibility symlink to it, so older plugin / pi-secure versions keep reading and writing through the link. If both files exist with diverging contents (e.g. `sed -i` turned the link back into a regular file), `pi-toolkit.json` wins and a visible warning is shown — **edit `pi-toolkit.json`**. Hosts without `flock` (commonly macOS) do not migrate; they keep using the old name with full functionality.
 - `/agent settings` opens an interactive editor (↑↓ select, Enter edit, Space toggle booleans, `r` reset to default; changes persist immediately). For scripts use `/agent settings list` / `set <key> <value>` / `reset <key>`.
 - **Time fields normally use integer seconds** (keys end in `S`, e.g. `budget.idleS`); legacy millisecond keys are migrated on first load. Exception: `feishuBot.debounceMs` below remains in milliseconds and is not migrated.
 - Per-module keys and defaults are in the matching guide (Chinese).
@@ -147,7 +148,7 @@ Top-level enable switches (defaults in the comments):
 
 ### Feishu bot settings (optional)
 
-These are **top-level** `feishuBot.*` keys in `pi-subagent.json`, not `webHub.feishuBot`. Changes require `/reload` then `/webhub restart`. Requires `webHub.enabled:true` and control enabled. [Setup, commands and security](docs/dev/feishu-bot/README.md) · [real-tenant checklist](docs/dev/feishu-bot/acceptance.md) (Chinese). **One app connects to one hub**; concurrent connections split events.
+These are **top-level** `feishuBot.*` keys in the settings file (`pi-toolkit.json`), not `webHub.feishuBot`. Changes require `/reload` then `/webhub restart`. Requires `webHub.enabled:true` and control enabled. [Setup, commands and security](docs/dev/feishu-bot/README.md) · [real-tenant checklist](docs/dev/feishu-bot/acceptance.md) (Chinese). **One app connects to one hub**; concurrent connections split events.
 
 | Key                             | Default   | Meaning                                                                               |
 | ------------------------------- | --------- | ------------------------------------------------------------------------------------- |
@@ -162,6 +163,32 @@ These are **top-level** `feishuBot.*` keys in `pi-subagent.json`, not `webHub.fe
 | `feishuBot.files.inbound`       | `true`    | Accept inbound image/file attachments.                                                |
 | `feishuBot.files.maxInboundMiB` | `30`      | Parses 1–100 MiB; effective ceiling is 30 MiB with shared upload limits.              |
 | `feishuBot.securityAlerts`      | `true`    | LAN security alerts: new-IP logins, allowlist denials, revoked sessions, 2FA changes. |
+
+## PI_CODING_AGENT_DIR and this plugin
+
+pi's agent directory can be moved with `PI_CODING_AGENT_DIR` (default `~/.pi/agent`). This plugin's settings file and traffic DB follow it; the rest of the state stays under home:
+
+| State                                                       | Follows the agentDir?                                                                                                         |
+| ----------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| Settings file `pi-toolkit.json`                             | Yes (with inheritance, see below)                                                                                             |
+| `traffic.db`                                                | Yes (with inheritance; pinned to `~/.pi/agent` while the external pi-traffic-record is still installed, so both write one DB) |
+| bash-jobs, quota-state, cache-ttl measurements and evidence | Yes (as before)                                                                                                               |
+| memory, workflows journal                                   | No (each has its own override)                                                                                                |
+| Web Hub state, UI, uploads, socket                          | No (one hub per uid)                                                                                                          |
+| `feishu-notify.json`, `~/.local/share/pi-toolkit-secure`    | No                                                                                                                            |
+
+- **Inheritance**: when the variable is set but `$PI_CODING_AGENT_DIR` holds no settings file, reads and writes fall back to `~/.pi/agent` (identical to before the upgrade; the editor title and `/agent settings list` mark it `inherited from ~/.pi/agent`). To isolate, drop a `pi-toolkit.json` (even `{}`) into `$PI_CODING_AGENT_DIR` — from then on that directory is used. Nothing is auto-copied: copying would fork `secure.vaults` and tokens into two silently diverging copies. Same rule for `traffic.db`.
+- **A relative variable value is ignored** (falls back to the default directory with a one-time warning): pi resolves a relative value against each process's own cwd, while the pi-secure launcher does `cd /` first, so the two would inevitably disagree; pi's own session directories drift with cwd under such a value anyway — unsupported. On Windows creating a symlink needs privileges; when migration is skipped the old name keeps working.
+- **`traffic.db` is never copied or moved** (SQLite has `-wal`/`-shm`; an external recorder may be writing). To move it to a new agentDir: run `/record off` in every running pi, exit them all, then `mv ~/.pi/agent/records "$PI_CODING_AGENT_DIR"/`.
+- **One agentDir per hub**: the hub is one per uid with its state fixed under `~/.pi/agent`; web-spawned sessions use the hub's own agentDir (inherited from the session that started it). `/webhub status` flags a mismatch; `/webhub restart` from the desired environment to switch.
+- **pi-secure and pi must run under the same environment**: pi started via `pi-secure run` inherits the launcher's environment, so they agree; setting the variable only in pi's wrapper causes a mismatch (`pi-secure status` and `/secure status` both print the settings path and source actually used). A `PI_CODING_AGENT_DIR` pointing inside a vault is unsupported (the registry would hide inside the vault it describes): the plugin judges locked and the launcher refuses with exit code 78.
+
+## Downgrade and rollback
+
+- **Back to the old file-name layout**: exit all pi processes, then `mv ~/.pi/agent/pi-toolkit.json ~/.pi/agent/pi-subagent.json` (old and new versions both accept the old name; a later upgrade re-migrates and recreates the compat symlink).
+- **Both settings files present and diverged** (e.g. `sed -i` or an editor's atomic save turned the compat link back into a regular file): `pi-toolkit.json` wins, with a visible warning; merge the changes you need into `pi-toolkit.json`, then delete or rename `pi-subagent.json`. If the two files' `secure` sections disagree, the secure domain fails closed (status bar `secure:invalid`; the launcher refuses run/unlock) — merge and restart.
+- **An outdated pi-secure launcher**: if `~/.local/bin/pi-secure` points at an older checkout, its settings writes (init / convert / import registration, `--resume` / `--abort`) are refused after migration because the file "is a symlink" (fail-closed, recoverable). Repoint it: `ln -sf <this repo>/src/secure/bin/pi-secure ~/.local/bin/pi-secure`; the `mv` above works as a temporary remedy. pi-secure is released together with the plugin — keep the link on the same checkout as the plugin; `/secure status` detects an outdated launcher on PATH and prints this command.
+- **traffic**: the rename and the agentDir-following never move the DB, so rollback needs no data operation.
 
 ## Scheduled tasks (schedule)
 
@@ -244,6 +271,8 @@ Puts a project and all of its session records into a gocryptfs-encrypted directo
   ```
 
   Once a vault is configured, `/secure status` inside a session prints this install line too (the command is not registered when no vault is configured).
+
+  pi-secure is released together with the plugin: the link must point at the launcher inside the current plugin checkout, never at an older one (an outdated launcher does not know the new settings file name `pi-toolkit.json` and its writes are refused after migration; `/secure status` detects this and the fix command is under "Downgrade and rollback").
 
 ### Init
 
@@ -336,11 +365,11 @@ Security boundary (same wording as `pi-secure --help`):
 | Exit code 77                               | Password wrong 3 times (1s/2s/4s backoff); run the command again                                                                                                                            |
 | Exit code 73                               | Another pi-secure is mounting/unmounting (mount.lock is held); retry later                                                                                                                  |
 | Status bar `secure:locked`, input blocked  | The session is LOCKED: vault not mounted, session and vault disagree, or a cross-domain open. Reopen as prompted (e.g. `pi-secure run acme -C sub`); LOCKED never auto-exits, `/quit` works |
-| Status bar `secure:invalid`                | The `secure` section of `pi-subagent.json` cannot be parsed: fix the JSON and restart pi                                                                                                    |
+| Status bar `secure:invalid`                | The `secure` section of the settings file (`pi-toolkit.json`) cannot be parsed, or the old and new settings files' `secure` sections disagree: fix / merge and restart pi                   |
 
 ## Traffic recording (traffic)
 
-Records provider requests and responses (including stream chunks) into a local SQLite DB — `~/.pi/agent/records/traffic.db`, the same database the standalone pi-traffic-record plugin used, so history, rewrite rules and counters carry over automatically. jq rewrite rules plus a hardened web viewer / replayer. Off by default; recording needs Node ≥22.13 (`node:sqlite`); off means zero wiring, zero IO. Design doc (Chinese): [traffic-merge plan](docs/dev/traffic-merge/plan.md); real-machine checklist: [acceptance](docs/dev/traffic-merge/acceptance.md).
+Records provider requests and responses (including stream chunks) into a local SQLite DB (default `~/.pi/agent/records/traffic.db`, follows `PI_CODING_AGENT_DIR` — see "PI_CODING_AGENT_DIR and this plugin"), the same database the standalone pi-traffic-record plugin used, so history, rewrite rules and counters carry over automatically. jq rewrite rules plus a hardened web viewer / replayer. Off by default; recording needs Node ≥22.13 (`node:sqlite`); off means zero wiring, zero IO. Design doc (Chinese): [traffic-merge plan](docs/dev/traffic-merge/plan.md); real-machine checklist: [acceptance](docs/dev/traffic-merge/acceptance.md).
 
 - `/record on | off | status`, registered in interactive main sessions only. print / json modes record but never start the web service or replay; the web command path asks for confirmation on `on`.
 - Requests are attributed by a one-shot ticket header (minted in the headers hook, stripped at the fetch trampoline — providers never see it). Rewriting only touches provably-attributed requests; anything unprovable is sent verbatim and counted `unattributed`. Rewrite whitelist: anthropic-messages / openai-completions / openai-responses (codex WS handshakes bypass fetch, so codex sessions are recorded but never rewritten).
@@ -356,7 +385,7 @@ Records provider requests and responses (including stream chunks) into a local S
 | `traffic.web.host`      | `"127.0.0.1"` | Bind address; `"0.0.0.0"` opts into LAN (see the risk below).                                                 |
 | `traffic.web.port`      | `4177`        | First port, auto-increments for up to 20 tries.                                                               |
 
-None of these keys is live: edit the settings file, then `/reload`. The DB path is fixed at `~/.pi/agent/records/traffic.db`; it does not follow `PI_CODING_AGENT_DIR` and is not configurable.
+None of these keys is live: edit the settings file, then `/reload`. The DB path follows `PI_CODING_AGENT_DIR` (with a `~/.pi/agent` inherited fallback; pinned to home while the external pi-traffic-record is still installed so both write one DB — see "PI_CODING_AGENT_DIR and this plugin") and is not configurable.
 
 ### Data scope
 
@@ -371,7 +400,7 @@ Enabled recording includes **child-agent traffic** by default: `/goal` verifiers
 1. Run `/record off` in every running pi.
 2. Upgrade pi-toolkit.
 3. Remove `"../../ai/pi-traffic-record"` from `packages` in `~/.pi/agent/settings.json` (and `~/.pi/agent/extensions/traffic-dump.ts` if you installed it).
-4. Set `"traffic": { "enabled": true }` in `~/.pi/agent/pi-subagent.json` (or use `/agent settings`); for LAN also add `"web": { "host": "0.0.0.0" }`.
+4. Set `"traffic": { "enabled": true }` in `~/.pi/agent/pi-toolkit.json` (or use `/agent settings`); for LAN also add `"web": { "host": "0.0.0.0" }`.
 5. **Restart pi** (`/reload` alone is not enough).
 6. Verify: there is exactly one `/record`; the `/record status` counts match those from before the migration (the DB, rules and engine settings carry over); the web history is browsable.
 7. Roll back: set `traffic.enabled=false` and add the package back (while another process still runs the old version, both can share the same DB; the schema is unchanged).

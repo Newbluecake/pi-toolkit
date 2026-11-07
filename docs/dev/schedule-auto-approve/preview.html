@@ -1,0 +1,1546 @@
+<!doctype html>
+<html lang="zh-CN" class="theme-dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>schedule-auto-approve · UI 预览</title>
+    <style>
+      /* ============================================================
+ * schedule-auto-approve 静态预览（plan.md §2-D6 / §3-P4/P5）
+ * 自包含：仅内联 CSS + 内联 SVG，无任何外网依赖。
+ * 视觉 token 逐字取自 src/web-hub/ui/src/styles/tokens.css 的 dark 块；
+ * 组件语法沿用 todo.css / schedule.css / composer-todo.css / primitives.css。
+ * 紧凑标记用英文 token，说明 prose 用中文（项目 UI 文本语言规则）。
+ * ========================================================== */
+
+      :root {
+        color-scheme: dark;
+        --c-bg: #0d1417;
+        --c-surface: #141c20;
+        --c-surface-2: #192328;
+        --c-sunken: #10171a;
+        --c-border: #243037;
+        --c-border-strong: #33424a;
+        --c-text: #e4ecee;
+        --c-text-2: #b6c3c8;
+        --c-text-3: #8d9da4;
+        --c-primary: #3ccbb9;
+        --c-primary-hover: #5fd8c8;
+        --c-primary-soft: #12302d;
+        --c-on-primary: #062522;
+        --c-on-primary-soft: #8ae6d9;
+        --c-accent: #a98bf5;
+        --c-accent-soft: #231c3a;
+        --c-focus: #5fd8c8;
+        --c-success: #4cc77e;
+        --c-success-soft: #13291c;
+        --c-warning: #e5a93d;
+        --c-warning-soft: #2a2112;
+        --c-warning-border: #4a3a1c;
+        --c-warning-text: #f0c77a;
+        --c-danger: #f2767a;
+        --c-danger-soft: #2e1719;
+        --c-danger-border: #52282b;
+        --c-info: #72a7f5;
+        --c-info-soft: #16243a;
+        --st-running: #3ccbb9;
+        --st-running-soft: #12302d;
+        --st-idle: #8d9da4;
+        --st-idle-soft: #1b2428;
+        --st-done: #4cc77e;
+        --st-done-soft: #13291c;
+        --st-failed: #f2767a;
+        --st-failed-soft: #2e1719;
+        --font-sans:
+          system-ui, -apple-system, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
+          "Noto Sans CJK SC", sans-serif;
+        --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+        --fs-2xs: 11px;
+        --fs-xs: 12px;
+        --fs-sm: 13px;
+        --fs-md: 14px;
+        --fs-lg: 16px;
+        --fs-xl: 18px;
+        --lh-tight: 1.25;
+        --lh-snug: 1.4;
+        --lh-body: 1.55;
+        --fw-regular: 400;
+        --fw-medium: 500;
+        --fw-semibold: 600;
+        --sp-1: 4px;
+        --sp-2: 8px;
+        --sp-3: 12px;
+        --sp-4: 16px;
+        --sp-5: 20px;
+        --sp-6: 24px;
+        --r-xs: 4px;
+        --r-sm: 6px;
+        --r-md: 10px;
+        --r-lg: 14px;
+        --r-pill: 999px;
+        --shadow-1: none;
+        --shadow-3: 0 12px 32px -8px rgb(0 0 0 / 0.6);
+        --dur-base: 180ms;
+        --ease-out: cubic-bezier(0.2, 0.7, 0.2, 1);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        background: var(--c-bg);
+        color: var(--c-text);
+        font-family: var(--font-sans);
+        font-size: var(--fs-md);
+        line-height: var(--lh-body);
+      }
+
+      /* ---------------- 预览页骨架（不属于被预览的 UI） ---------------- */
+
+      .page {
+        max-width: 1440px;
+        margin: 0 auto;
+        padding: 32px 24px 96px;
+      }
+
+      .page-head h1 {
+        margin: 0 0 4px;
+        font-size: var(--fs-xl);
+        font-weight: var(--fw-semibold);
+      }
+
+      .page-head .sub {
+        margin: 0;
+        color: var(--c-text-3);
+        font-size: var(--fs-sm);
+      }
+
+      .prose {
+        max-width: 860px;
+        color: var(--c-text-2);
+        font-size: var(--fs-sm);
+      }
+      .prose code {
+        font-family: var(--font-mono);
+        font-size: var(--fs-xs);
+        color: var(--c-on-primary-soft);
+        background: var(--c-surface-2);
+        border: 1px solid var(--c-border);
+        border-radius: var(--r-xs);
+        padding: 0 4px;
+      }
+
+      .section {
+        margin-top: 48px;
+      }
+
+      .section > h2 {
+        margin: 0 0 4px;
+        font-size: var(--fs-lg);
+        font-weight: var(--fw-semibold);
+      }
+
+      .section > .why {
+        max-width: 860px;
+        margin: 0 0 16px;
+        color: var(--c-text-3);
+        font-size: var(--fs-sm);
+      }
+
+      .frame-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 24px;
+        align-items: flex-start;
+      }
+
+      .frame {
+        border: 1px dashed var(--c-border-strong);
+        border-radius: var(--r-lg);
+        padding: 0;
+        overflow: hidden;
+        background: var(--c-bg);
+      }
+
+      .frame-label {
+        margin: 0 0 6px;
+        color: var(--c-text-3);
+        font-size: var(--fs-2xs);
+        font-weight: var(--fw-semibold);
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .frame-body {
+        padding: 12px;
+      }
+
+      .mock-annot {
+        margin: 8px 0 0;
+        color: var(--c-text-3);
+        font-size: var(--fs-xs);
+      }
+
+      /* ---------------- primitives（primitives.css 语法） ---------------- */
+
+      .chip {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--sp-1);
+        min-height: 20px;
+        padding: 1px 6px;
+        border: 1px solid var(--c-border);
+        border-radius: var(--r-sm);
+        background: var(--c-surface);
+        color: var(--c-text-3);
+        font-size: var(--fs-2xs);
+        font-weight: var(--fw-semibold);
+        letter-spacing: 0.02em;
+        line-height: 1;
+        white-space: nowrap;
+      }
+
+      .chip-mono {
+        font-family: var(--font-mono);
+        font-weight: var(--fw-medium);
+        letter-spacing: 0;
+      }
+
+      .icon-sm {
+        width: 14px;
+        height: 14px;
+        flex: none;
+        display: inline-block;
+        vertical-align: -2px;
+      }
+
+      .spin {
+        animation: spin 1.2s linear infinite;
+      }
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+
+      /* ---------------- detail 头部环境（模拟 DetailHeader 上下文） ---------------- */
+
+      .mock-detail {
+        background: var(--c-surface);
+        border: 1px solid var(--c-border);
+        border-radius: var(--r-md);
+        padding: 10px 12px;
+      }
+
+      .mock-detail-title {
+        display: flex;
+        align-items: center;
+        gap: var(--sp-2);
+        min-width: 0;
+      }
+
+      .mock-detail-title .name {
+        font-size: var(--fs-md);
+        font-weight: var(--fw-semibold);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .mock-detail-meta {
+        margin: 2px 0 0;
+        color: var(--c-text-3);
+        font-size: var(--fs-2xs);
+        font-variant-numeric: tabular-nums;
+      }
+
+      /* ---------------- TasksPanel（todo.css summary 语法 + schedule.css 行语法） ---------------- */
+
+      .tasks-panel {
+        margin-top: var(--sp-1);
+      }
+
+      .todo-sum {
+        display: flex;
+        align-items: center;
+        gap: var(--sp-2);
+        width: 100%;
+        min-width: 0;
+        min-height: 20px;
+        margin: 0 -6px;
+        padding: 4px 6px;
+        border: 0;
+        border-radius: var(--r-sm);
+        background: none;
+        color: var(--c-text-3);
+        font-family: var(--font-sans);
+        font-size: var(--fs-xs);
+        cursor: pointer;
+        text-align: left;
+      }
+
+      .todo-sum:hover {
+        background: var(--c-surface-2);
+      }
+      .todo-sum .icon-sm:first-child {
+        flex: none;
+      }
+
+      .todo-sum-text {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .todo-sum .chev {
+        margin-left: auto;
+        flex: none;
+        transition: transform var(--dur-base) var(--ease-out);
+      }
+
+      .tasks-panel[data-open="true"] .todo-sum .chev {
+        transform: rotate(90deg);
+      }
+
+      /* 展开体：两分区 */
+      .tasks-body {
+        padding: var(--sp-1) 6px 0;
+      }
+
+      .tasks-sec + .tasks-sec {
+        margin-top: var(--sp-2);
+      }
+
+      .tasks-sec-title {
+        margin: 0 0 2px;
+        font-size: var(--fs-2xs);
+        font-weight: var(--fw-semibold);
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        color: var(--c-text-3);
+      }
+
+      .tasks-sec-title .n {
+        font-variant-numeric: tabular-nums;
+      }
+
+      .todo-list {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+      }
+
+      .todo-item {
+        display: flex;
+        align-items: flex-start;
+        gap: var(--sp-2);
+        padding: 3px 0;
+      }
+
+      .todo-ico {
+        flex: none;
+        margin-top: 2px;
+        color: var(--c-text-3);
+      }
+      .todo-item[data-status="in_progress"] .todo-ico {
+        color: var(--st-running);
+      }
+      .todo-item[data-status="completed"] .todo-ico {
+        color: var(--st-done);
+      }
+      .todo-item[data-status="completed"] .todo-subject {
+        color: var(--c-text-3);
+        text-decoration: line-through;
+      }
+
+      .todo-body {
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+      }
+      .todo-subject {
+        color: var(--c-text);
+        font-size: var(--fs-sm);
+        overflow-wrap: anywhere;
+      }
+      .todo-desc {
+        color: var(--c-text-3);
+        font-size: var(--fs-xs);
+        overflow-wrap: anywhere;
+      }
+      .todo-blocked {
+        color: var(--c-warning-text);
+        font-size: var(--fs-xs);
+      }
+
+      .todo-more,
+      .todo-done {
+        padding: 3px 0 3px calc(14px + var(--sp-2));
+        color: var(--c-text-3);
+        font-size: var(--fs-xs);
+      }
+
+      /* 定时任务分区行（ScheduleRows）—— 名称 / when / 下次运行 / 状态 chip / 最近 run / 操作 */
+
+      .sched-rows {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+      }
+
+      .sched-row {
+        display: flex;
+        align-items: flex-start;
+        gap: var(--sp-2);
+        padding: 5px 0;
+        border-top: 1px solid var(--c-border);
+      }
+
+      .sched-row:first-child {
+        border-top: 0;
+      }
+
+      .sched-row-body {
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+        flex: 1;
+      }
+
+      .sched-row-head {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        min-width: 0;
+      }
+
+      .sched-row-name {
+        min-width: 0;
+        font-size: var(--fs-sm);
+        font-weight: var(--fw-semibold);
+        color: var(--c-text);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .sched-row[data-enabled="false"] .sched-row-name {
+        color: var(--c-text-3);
+      }
+
+      .sched-row-meta {
+        margin: 1px 0 0;
+        color: var(--c-text-3);
+        font-size: var(--fs-xs);
+        overflow-wrap: anywhere;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .sched-row-meta .sep {
+        color: var(--c-border-strong);
+        margin: 0 2px;
+      }
+
+      .sched-row-run {
+        margin: 1px 0 0;
+        font-size: var(--fs-2xs);
+        color: var(--c-text-3);
+        font-variant-numeric: tabular-nums;
+      }
+
+      .sched-row-run a {
+        color: var(--c-info);
+        text-decoration: none;
+      }
+
+      .sched-row-run a:hover {
+        text-decoration: underline;
+      }
+
+      .sched-row-run .ok {
+        color: var(--st-done);
+        font-weight: var(--fw-semibold);
+      }
+      .sched-row-run .fail {
+        color: var(--st-failed);
+        font-weight: var(--fw-semibold);
+      }
+
+      /* 状态 chip：running / paused */
+      .chip[data-st="running"] {
+        background: var(--st-running-soft);
+        color: var(--st-running);
+        border-color: transparent;
+      }
+      .chip[data-st="paused"] {
+        background: var(--st-idle-soft);
+        color: var(--st-idle);
+        border-color: transparent;
+      }
+
+      .sched-row-acts {
+        display: flex;
+        align-items: center;
+        gap: 2px;
+        flex: none;
+      }
+
+      .icon-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 24px;
+        height: 24px;
+        padding: 0;
+        border: 0;
+        border-radius: var(--r-sm);
+        background: transparent;
+        color: var(--c-text-3);
+        cursor: pointer;
+      }
+
+      .icon-btn:hover {
+        background: var(--c-surface-2);
+        color: var(--c-text-2);
+      }
+      .icon-btn.danger:hover {
+        background: var(--c-danger-soft);
+        color: var(--c-danger);
+      }
+
+      .tasks-foot {
+        margin-top: 2px;
+        padding: 3px 0 0;
+        text-align: right;
+      }
+
+      .tasks-foot a {
+        color: var(--c-text-3);
+        font-size: var(--fs-xs);
+        text-decoration: none;
+      }
+
+      .tasks-foot a:hover {
+        color: var(--c-text-2);
+        text-decoration: underline;
+      }
+
+      /* ---------------- composer 环境（control.css / composer-todo.css 语法） ---------------- */
+
+      .mock-composer-zone {
+        position: relative;
+        padding-top: 30px; /* 给绝对定位 chip 留位 */
+      }
+
+      .mock-composer-input {
+        position: relative;
+        border: 1px solid var(--c-border-strong);
+        border-radius: var(--r-md);
+        background: var(--c-surface);
+        padding: 8px 12px;
+      }
+
+      .mock-composer-input .placeholder {
+        color: var(--c-text-3);
+        font-size: var(--fs-md);
+      }
+
+      .composer-bottom {
+        display: flex;
+        align-items: center;
+        gap: var(--sp-2);
+        max-height: 24px;
+        margin-top: 4px;
+      }
+
+      .composer-chip-model {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        min-height: 15px;
+        padding: 0 6px;
+        border: 1px solid var(--c-border);
+        border-radius: var(--r-pill);
+        background: var(--c-surface-2);
+        color: var(--c-text-2);
+        font-size: var(--fs-2xs);
+        font-weight: var(--fw-semibold);
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+      }
+
+      /* 聚合 chip：一个容器两段（✓ todo / ⏰ 定时），沿用 .composer-todo-external 语法 */
+
+      .composer-tasks-external {
+        position: absolute;
+        top: -24px;
+        left: 0;
+        z-index: 1;
+        display: inline-flex;
+      }
+
+      .composer-tasks-btn {
+        display: inline-flex;
+        align-items: center;
+        min-height: 15px;
+        border: 1px solid var(--c-border);
+        border-radius: var(--r-pill);
+        background: var(--c-surface-2);
+        color: var(--c-text-2);
+        font-family: var(--font-sans);
+        font-size: var(--fs-2xs);
+        font-weight: var(--fw-semibold);
+        font-variant-numeric: tabular-nums;
+        line-height: var(--lh-tight);
+        cursor: pointer;
+        white-space: nowrap;
+        position: relative;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+        padding: 0;
+      }
+
+      .composer-tasks-btn:hover {
+        border-color: var(--c-border-strong);
+        background: var(--c-sunken);
+      }
+      .composer-tasks-btn[aria-expanded="true"] {
+        border-color: var(--c-border-strong);
+        background: var(--c-sunken);
+      }
+
+      .seg {
+        display: inline-flex;
+        align-items: center;
+        gap: 3px;
+        padding: 0 6px;
+        min-height: 15px;
+      }
+
+      .seg + .seg {
+        border-left: 1px solid var(--c-border);
+      }
+
+      .seg .n {
+        font-variant-numeric: tabular-nums;
+      }
+
+      .seg.live .icon-sm {
+        color: var(--st-running);
+      }
+
+      .composer-tasks-badge {
+        position: absolute;
+        top: -6px;
+        right: -6px;
+        min-width: 16px;
+        height: 16px;
+        padding: 0 4px;
+        border-radius: 8px;
+        background: #6ee7b7;
+        color: #1a3a2a;
+        font-size: 10px;
+        font-weight: 700;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        line-height: 1;
+      }
+
+      .composer-tasks-btn[aria-expanded="true"] .composer-tasks-badge {
+        display: none;
+      }
+
+      /* 展开面板：in-flow 在输入卡上方，两分区；定时分区只读 */
+
+      .composer-tasks-panel {
+        display: flex;
+        flex-direction: column;
+        margin-bottom: var(--sp-1);
+        /* 底部 20px：输入卡左上 chip 绝对定位 top:-24px 会探入面板下缘 11px，
+     留白让它落在空白区而不是内容上（与真实实现的避让一致）。 */
+        padding: var(--sp-1) var(--sp-2) 20px;
+        border: 1px solid var(--c-border);
+        border-radius: var(--r-md);
+        background: var(--c-surface);
+      }
+
+      .composer-tasks-head {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: var(--sp-2);
+        margin: 0;
+        padding: 2px 0;
+      }
+
+      .composer-tasks-title {
+        color: var(--c-text-2);
+        font-size: var(--fs-xs);
+        font-weight: var(--fw-semibold);
+      }
+      .composer-tasks-done {
+        color: var(--c-text-3);
+        font-size: var(--fs-xs);
+        font-variant-numeric: tabular-nums;
+      }
+
+      .composer-tasks-panel .tasks-sec {
+        margin-top: 2px;
+      }
+      .composer-tasks-panel .sched-row {
+        padding: 4px 0;
+      }
+      .composer-tasks-panel .sched-row-run {
+        margin-top: 0;
+      }
+
+      .readonly-note {
+        margin: 2px 0 0;
+        color: var(--c-text-3);
+        font-size: var(--fs-2xs);
+      }
+
+      /* 移动端 frame */
+      .frame-mobile {
+        width: 390px;
+      }
+      .frame-desktop-sm {
+        width: 560px;
+      }
+      .frame-desktop-lg {
+        width: 720px;
+      }
+
+      @media (max-width: 720px) {
+        .frame-mobile,
+        .frame-desktop-sm,
+        .frame-desktop-lg {
+          width: 100%;
+        }
+      }
+
+      .state-label {
+        margin: 20px 0 8px;
+        color: var(--c-text-3);
+        font-size: var(--fs-2xs);
+        font-weight: var(--fw-semibold);
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="page">
+      <header class="page-head">
+        <h1>schedule-auto-approve · Web UI 预览</h1>
+        <p class="sub">plan.md §2-D6 / §3-P4·P5 的视觉稿 · 纯静态、无外网依赖 · 2026-11-04</p>
+      </header>
+
+      <p class="prose" style="margin-top: 12px">
+        新语义下 AI 创建/修改的定时任务<b>自动批准、立即生效</b>，不再有批准页。 聚合原则：定时任务与 Todo 在 detail
+        面板与输入框左上角 chip <b>分区同屏</b>；运行实例仍跳 subagent/fleet 详情，不混成 todo。 紧凑标记（chip / 状态 /
+        时间）用英文 token，说明性文字用中文。
+      </p>
+
+      <!-- ============================================================
+       A · 推荐方案：detail 中统一 TasksPanel
+       ============================================================ -->
+      <section class="section" id="a">
+        <h2>A · 推荐：detail 统一 TasksPanel（Todo 分区 + 定时任务分区）</h2>
+        <p class="why">
+          一条合并 summary（<code>Tasks 3/8 · 2 active · ⏰ 2</code>）作为扫视面；展开后两个分区。
+          定时任务分区每行：名称 · when 文本 · next 相对时间 · 状态 chip（running / paused）· 最近 run（可点跳 fleet）。
+          操作列：暂停/继续、删除。分区尾部「详情 »」打开既有 SchedulePanel 全功能对话框。
+        </p>
+
+        <p class="state-label">A1 · 折叠 summary（desktop）</p>
+        <div class="frame-row">
+          <div>
+            <p class="frame-label">desktop · 720px</p>
+            <div class="frame frame-desktop-lg">
+              <div class="frame-body">
+                <div class="mock-detail">
+                  <div class="mock-detail-title">
+                    <span class="name">pi-toolkit · schedule-auto-approve</span>
+                    <span class="chip chip-mono">sonnet</span>
+                  </div>
+                  <p class="mock-detail-meta">ctx 38% · $1.24 · 12m</p>
+                  <section class="tasks-panel" data-open="false">
+                    <button class="todo-sum" type="button" aria-expanded="false">
+                      <svg
+                        class="icon-sm"
+                        viewBox="0 0 16 16"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.6"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                      >
+                        <path d="M3 8.5 6.5 12 13 4.5" />
+                      </svg>
+                      <span class="todo-sum-text">Tasks 3/8 · 2 active · ⏰ 2</span>
+                      <svg
+                        class="icon-sm chev"
+                        viewBox="0 0 16 16"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.6"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                      >
+                        <path d="M6 4l4 4-4 4" />
+                      </svg>
+                    </button>
+                  </section>
+                </div>
+                <p class="mock-annot">折叠态与今天 TodoPanel 完全同构，summary 末尾追加 ⏰ 定时任务总数。</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <p class="state-label">A2 · 展开：两分区（desktop 720px / mobile 390px）</p>
+        <div class="frame-row">
+          <div>
+            <p class="frame-label">desktop · 720px</p>
+            <div class="frame frame-desktop-lg">
+              <div class="frame-body">
+                <div class="mock-detail">
+                  <section class="tasks-panel" data-open="true">
+                    <button class="todo-sum" type="button" aria-expanded="true">
+                      <svg
+                        class="icon-sm"
+                        viewBox="0 0 16 16"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.6"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                      >
+                        <path d="M3 8.5 6.5 12 13 4.5" />
+                      </svg>
+                      <span class="todo-sum-text">Tasks 3/8 · 2 active · ⏰ 2</span>
+                      <svg
+                        class="icon-sm chev"
+                        viewBox="0 0 16 16"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.6"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                      >
+                        <path d="M6 4l4 4-4 4" />
+                      </svg>
+                    </button>
+
+                    <div class="tasks-body">
+                      <!-- Todo 分区：行结构原样搬迁 TodoPanel -->
+                      <div class="tasks-sec">
+                        <p class="tasks-sec-title">待办 <span class="n">8</span></p>
+                        <ul class="todo-list">
+                          <li class="todo-item" data-status="in_progress">
+                            <svg
+                              class="icon-sm todo-ico spin"
+                              viewBox="0 0 16 16"
+                              fill="none"
+                              stroke="currentColor"
+                              stroke-width="1.6"
+                              stroke-linecap="round"
+                            >
+                              <path d="M8 2a6 6 0 1 1-6 6" />
+                            </svg>
+                            <span class="todo-body">
+                              <span class="todo-subject">#2 改写 schedule-confirm 集成测试</span>
+                              <span class="todo-desc"
+                                >schedule-auto-approve.test.ts · 真 agent stack × fake pi × fake hub</span
+                              >
+                            </span>
+                          </li>
+                          <li class="todo-item" data-status="pending">
+                            <svg
+                              class="icon-sm todo-ico"
+                              viewBox="0 0 16 16"
+                              fill="none"
+                              stroke="currentColor"
+                              stroke-width="1.6"
+                              stroke-linecap="round"
+                              stroke-linejoin="round"
+                            >
+                              <circle cx="8" cy="8" r="6" />
+                              <path d="M8 5v3l2 2" />
+                            </svg>
+                            <span class="todo-body">
+                              <span class="todo-subject">#5 TasksPanel 聚合面板</span>
+                              <span class="todo-blocked">blocked by #3, #4</span>
+                            </span>
+                          </li>
+                          <li class="todo-item" data-status="completed">
+                            <svg
+                              class="icon-sm todo-ico"
+                              viewBox="0 0 16 16"
+                              fill="none"
+                              stroke="currentColor"
+                              stroke-width="1.6"
+                              stroke-linecap="round"
+                              stroke-linejoin="round"
+                            >
+                              <path d="M3 8.5 6.5 12 13 4.5" />
+                            </svg>
+                            <span class="todo-body"><span class="todo-subject">#1 账本 approval.auto 落地</span></span>
+                          </li>
+                          <li class="todo-done">✓ 3 done</li>
+                          <li class="todo-more">(+2 more)</li>
+                        </ul>
+                      </div>
+
+                      <!-- 定时任务分区（ScheduleRows） -->
+                      <div class="tasks-sec">
+                        <p class="tasks-sec-title">定时任务 <span class="n">2</span></p>
+                        <ul class="sched-rows">
+                          <li class="sched-row" data-enabled="true">
+                            <span class="sched-row-body">
+                              <span class="sched-row-head">
+                                <span class="sched-row-name">daily-standup-digest</span>
+                                <span class="chip" data-st="running"
+                                  ><svg
+                                    class="icon-sm spin"
+                                    viewBox="0 0 16 16"
+                                    fill="none"
+                                    stroke="currentColor"
+                                    stroke-width="1.8"
+                                    stroke-linecap="round"
+                                  >
+                                    <path d="M8 2a6 6 0 1 1-6 6" /></svg
+                                  >running</span
+                                >
+                              </span>
+                              <span class="sched-row-meta"
+                                >cron 0 9 * * * · Asia/Shanghai <span class="sep">·</span> next 10h 24m</span
+                              >
+                              <span class="sched-row-run"
+                                >last <span class="ok">ok</span> 1d ago · <a href="#">run r_7f3 »</a></span
+                              >
+                            </span>
+                            <span class="sched-row-acts">
+                              <button class="icon-btn" type="button" title="pause" aria-label="pause">
+                                <svg class="icon-sm" viewBox="0 0 16 16" fill="currentColor">
+                                  <rect x="4" y="3" width="3" height="10" rx="1" />
+                                  <rect x="9" y="3" width="3" height="10" rx="1" />
+                                </svg>
+                              </button>
+                              <button class="icon-btn danger" type="button" title="delete" aria-label="delete">
+                                <svg
+                                  class="icon-sm"
+                                  viewBox="0 0 16 16"
+                                  fill="none"
+                                  stroke="currentColor"
+                                  stroke-width="1.5"
+                                  stroke-linecap="round"
+                                >
+                                  <path
+                                    d="M2.5 4h11M6.5 4V2.8A.8.8 0 0 1 7.3 2h1.4a.8.8 0 0 1 .8.8V4M4 4l.7 9.2a1 1 0 0 0 1 .8h4.6a1 1 0 0 0 1-.8L12 4"
+                                  />
+                                </svg>
+                              </button>
+                            </span>
+                          </li>
+                          <li class="sched-row" data-enabled="false">
+                            <span class="sched-row-body">
+                              <span class="sched-row-head">
+                                <span class="sched-row-name">weekly-report-feishu</span>
+                                <span class="chip" data-st="paused">paused</span>
+                              </span>
+                              <span class="sched-row-meta"
+                                >cron 0 18 * * 5 · Asia/Shanghai <span class="sep">·</span> paused</span
+                              >
+                              <span class="sched-row-run"
+                                >last <span class="fail">failed</span> 4d ago · <a href="#">run r_2c1 »</a></span
+                              >
+                            </span>
+                            <span class="sched-row-acts">
+                              <button class="icon-btn" type="button" title="resume" aria-label="resume">
+                                <svg class="icon-sm" viewBox="0 0 16 16" fill="currentColor">
+                                  <path
+                                    d="M5 3.2v9.6c0 .8.9 1.3 1.6.9l7-4.8a1 1 0 0 0 0-1.8l-7-4.8c-.7-.4-1.6.1-1.6.9Z"
+                                  />
+                                </svg>
+                              </button>
+                              <button class="icon-btn danger" type="button" title="delete" aria-label="delete">
+                                <svg
+                                  class="icon-sm"
+                                  viewBox="0 0 16 16"
+                                  fill="none"
+                                  stroke="currentColor"
+                                  stroke-width="1.5"
+                                  stroke-linecap="round"
+                                >
+                                  <path
+                                    d="M2.5 4h11M6.5 4V2.8A.8.8 0 0 1 7.3 2h1.4a.8.8 0 0 1 .8.8V4M4 4l.7 9.2a1 1 0 0 0 1 .8h4.6a1 1 0 0 0 1-.8L12 4"
+                                  />
+                                </svg>
+                              </button>
+                            </span>
+                          </li>
+                        </ul>
+                        <p class="tasks-foot"><a href="#">详情 »</a></p>
+                      </div>
+                    </div>
+                  </section>
+                </div>
+                <p class="mock-annot">
+                  running 行 = 有非终态 run（图标旋转）；paused 行名称与 meta 降灰，操作变为「继续」。run 链接点击 =
+                  hub.selectRun 跳 fleet。
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <p class="frame-label">mobile · 390px</p>
+            <div class="frame frame-mobile">
+              <div class="frame-body">
+                <div class="mock-detail">
+                  <section class="tasks-panel" data-open="true">
+                    <button class="todo-sum" type="button" aria-expanded="true">
+                      <svg
+                        class="icon-sm"
+                        viewBox="0 0 16 16"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.6"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                      >
+                        <path d="M3 8.5 6.5 12 13 4.5" />
+                      </svg>
+                      <span class="todo-sum-text">Tasks 3/8 · 2 active · ⏰ 2</span>
+                      <svg
+                        class="icon-sm chev"
+                        viewBox="0 0 16 16"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.6"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                      >
+                        <path d="M6 4l4 4-4 4" />
+                      </svg>
+                    </button>
+                    <div class="tasks-body">
+                      <div class="tasks-sec">
+                        <p class="tasks-sec-title">待办 <span class="n">8</span></p>
+                        <ul class="todo-list">
+                          <li class="todo-item" data-status="in_progress">
+                            <svg
+                              class="icon-sm todo-ico spin"
+                              viewBox="0 0 16 16"
+                              fill="none"
+                              stroke="currentColor"
+                              stroke-width="1.6"
+                              stroke-linecap="round"
+                            >
+                              <path d="M8 2a6 6 0 1 1-6 6" />
+                            </svg>
+                            <span class="todo-body"
+                              ><span class="todo-subject">#2 改写 schedule-confirm 集成测试</span></span
+                            >
+                          </li>
+                          <li class="todo-more">(+7 more)</li>
+                        </ul>
+                      </div>
+                      <div class="tasks-sec">
+                        <p class="tasks-sec-title">定时任务 <span class="n">2</span></p>
+                        <ul class="sched-rows">
+                          <li class="sched-row" data-enabled="true">
+                            <span class="sched-row-body">
+                              <span class="sched-row-head">
+                                <span class="sched-row-name">daily-standup-digest</span>
+                                <span class="chip" data-st="running"
+                                  ><svg
+                                    class="icon-sm spin"
+                                    viewBox="0 0 16 16"
+                                    fill="none"
+                                    stroke="currentColor"
+                                    stroke-width="1.8"
+                                    stroke-linecap="round"
+                                  >
+                                    <path d="M8 2a6 6 0 1 1-6 6" /></svg
+                                  >running</span
+                                >
+                              </span>
+                              <span class="sched-row-meta">cron 0 9 * * * · next 10h</span>
+                              <span class="sched-row-run"
+                                >last <span class="ok">ok</span> 1d ago · <a href="#">run r_7f3 »</a></span
+                              >
+                            </span>
+                            <span class="sched-row-acts">
+                              <button class="icon-btn" type="button" aria-label="pause">
+                                <svg class="icon-sm" viewBox="0 0 16 16" fill="currentColor">
+                                  <rect x="4" y="3" width="3" height="10" rx="1" />
+                                  <rect x="9" y="3" width="3" height="10" rx="1" />
+                                </svg>
+                              </button>
+                              <button class="icon-btn danger" type="button" aria-label="delete">
+                                <svg
+                                  class="icon-sm"
+                                  viewBox="0 0 16 16"
+                                  fill="none"
+                                  stroke="currentColor"
+                                  stroke-width="1.5"
+                                  stroke-linecap="round"
+                                >
+                                  <path
+                                    d="M2.5 4h11M6.5 4V2.8A.8.8 0 0 1 7.3 2h1.4a.8.8 0 0 1 .8.8V4M4 4l.7 9.2a1 1 0 0 0 1 .8h4.6a1 1 0 0 0 1-.8L12 4"
+                                  />
+                                </svg>
+                              </button>
+                            </span>
+                          </li>
+                          <li class="sched-row" data-enabled="false">
+                            <span class="sched-row-body">
+                              <span class="sched-row-head">
+                                <span class="sched-row-name">weekly-report-feishu</span>
+                                <span class="chip" data-st="paused">paused</span>
+                              </span>
+                              <span class="sched-row-meta">cron 0 18 * * 5 · paused</span>
+                              <span class="sched-row-run"
+                                >last <span class="fail">failed</span> 4d ago · <a href="#">run r_2c1 »</a></span
+                              >
+                            </span>
+                            <span class="sched-row-acts">
+                              <button class="icon-btn" type="button" aria-label="resume">
+                                <svg class="icon-sm" viewBox="0 0 16 16" fill="currentColor">
+                                  <path
+                                    d="M5 3.2v9.6c0 .8.9 1.3 1.6.9l7-4.8a1 1 0 0 0 0-1.8l-7-4.8c-.7-.4-1.6.1-1.6.9Z"
+                                  />
+                                </svg>
+                              </button>
+                              <button class="icon-btn danger" type="button" aria-label="delete">
+                                <svg
+                                  class="icon-sm"
+                                  viewBox="0 0 16 16"
+                                  fill="none"
+                                  stroke="currentColor"
+                                  stroke-width="1.5"
+                                  stroke-linecap="round"
+                                >
+                                  <path
+                                    d="M2.5 4h11M6.5 4V2.8A.8.8 0 0 1 7.3 2h1.4a.8.8 0 0 1 .8.8V4M4 4l.7 9.2a1 1 0 0 0 1 .8h4.6a1 1 0 0 0 1-.8L12 4"
+                                  />
+                                </svg>
+                              </button>
+                            </span>
+                          </li>
+                        </ul>
+                        <p class="tasks-foot"><a href="#">详情 »</a></p>
+                      </div>
+                    </div>
+                  </section>
+                </div>
+                <p class="mock-annot">
+                  移动端 meta 去掉 tz，保留 cron 与 next；操作按钮保持 24px 图标位（coarse pointer 下实现侧升到 36px）。
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================================================
+       B · 输入框左上角聚合 chip
+       ============================================================ -->
+      <section class="section" id="b">
+        <h2>B · 输入框左上按钮：✓ Todo 计数 + ⏰ 定时任务计数</h2>
+        <p class="why">
+          单一 chip 容器内两段：<code>✓ {open}</code>（现有语义：pending+in_progress）与
+          <code>⏰ {任务数}</code>（该会话任务总数，有 live run 时图标旋转）。
+          任一段有内容即显示；<code>queueAbove</code>（steer/held）时整体隐藏——既有规则不变。 hover/click
+          展开合并面板，同样两分区；composer 内定时分区<b>只读</b>（无操作按钮），最近 run 仍可点击跳转。
+        </p>
+
+        <p class="state-label">B1 · chip 折叠（desktop 560px / mobile 390px）</p>
+        <div class="frame-row">
+          <div>
+            <p class="frame-label">desktop · 560px</p>
+            <div class="frame frame-desktop-sm">
+              <div class="frame-body">
+                <div class="mock-composer-zone">
+                  <div class="mock-composer-input">
+                    <div class="composer-tasks-external">
+                      <button class="composer-tasks-btn" type="button" aria-expanded="false" aria-label="tasks">
+                        <span class="seg">
+                          <svg
+                            class="icon-sm"
+                            viewBox="0 0 16 16"
+                            fill="none"
+                            stroke="currentColor"
+                            stroke-width="1.6"
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                          >
+                            <path d="M3 8.5 6.5 12 13 4.5" />
+                          </svg>
+                          <span class="n">3</span>
+                        </span>
+                        <span class="seg live">
+                          <svg
+                            class="icon-sm spin"
+                            viewBox="0 0 16 16"
+                            fill="none"
+                            stroke="currentColor"
+                            stroke-width="1.5"
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                          >
+                            <circle cx="8" cy="9" r="5.5" />
+                            <path d="M8 6.5V9l1.8 1.2M6.5 1.5h3" />
+                          </svg>
+                          <span class="n">2</span>
+                        </span>
+                        <span class="composer-tasks-badge">5</span>
+                      </button>
+                    </div>
+                    <div class="placeholder">发消息给 agent…</div>
+                    <div class="composer-bottom">
+                      <span class="composer-chip-model">sonnet ▾</span>
+                    </div>
+                  </div>
+                </div>
+                <p class="mock-annot">
+                  ⏰ 段图标旋转 = 有 run 正在执行；badge 数字 = ✓ open + ⏰ 总数。右上 badge
+                  展开面板时隐藏（现有语法）。
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <p class="frame-label">mobile · 390px</p>
+            <div class="frame frame-mobile">
+              <div class="frame-body">
+                <div class="mock-composer-zone">
+                  <div class="mock-composer-input">
+                    <div class="composer-tasks-external">
+                      <button class="composer-tasks-btn" type="button" aria-expanded="false" aria-label="tasks">
+                        <span class="seg">
+                          <svg
+                            class="icon-sm"
+                            viewBox="0 0 16 16"
+                            fill="none"
+                            stroke="currentColor"
+                            stroke-width="1.6"
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                          >
+                            <path d="M3 8.5 6.5 12 13 4.5" />
+                          </svg>
+                          <span class="n">3</span>
+                        </span>
+                        <span class="seg">
+                          <svg
+                            class="icon-sm"
+                            viewBox="0 0 16 16"
+                            fill="none"
+                            stroke="currentColor"
+                            stroke-width="1.5"
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                          >
+                            <circle cx="8" cy="9" r="5.5" />
+                            <path d="M8 6.5V9l1.8 1.2M6.5 1.5h3" />
+                          </svg>
+                          <span class="n">2</span>
+                        </span>
+                        <span class="composer-tasks-badge">5</span>
+                      </button>
+                    </div>
+                    <div class="placeholder">发消息给 agent…</div>
+                    <div class="composer-bottom">
+                      <span class="composer-chip-model">sonnet ▾</span>
+                    </div>
+                  </div>
+                </div>
+                <p class="mock-annot">无 live run 时 ⏰ 图标静止。</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <p class="state-label">B2 · 展开面板：两分区（desktop 560px / mobile 390px）</p>
+        <div class="frame-row">
+          <div>
+            <p class="frame-label">desktop · 560px</p>
+            <div class="frame frame-desktop-sm">
+              <div class="frame-body">
+                <div class="mock-composer-zone">
+                  <div class="composer-tasks-panel" role="region" aria-readonly="true">
+                    <p class="composer-tasks-head">
+                      <span class="composer-tasks-title">Tasks</span>
+                      <span class="composer-tasks-done">3 done</span>
+                    </p>
+                    <div class="tasks-sec">
+                      <p class="tasks-sec-title">待办 <span class="n">3 open</span></p>
+                      <ul class="todo-list">
+                        <li class="todo-item" data-status="in_progress">
+                          <svg
+                            class="icon-sm todo-ico spin"
+                            viewBox="0 0 16 16"
+                            fill="none"
+                            stroke="currentColor"
+                            stroke-width="1.6"
+                            stroke-linecap="round"
+                          >
+                            <path d="M8 2a6 6 0 1 1-6 6" />
+                          </svg>
+                          <span class="todo-body"
+                            ><span class="todo-subject">#2 改写 schedule-confirm 集成测试</span></span
+                          >
+                        </li>
+                        <li class="todo-item" data-status="pending">
+                          <svg
+                            class="icon-sm todo-ico"
+                            viewBox="0 0 16 16"
+                            fill="none"
+                            stroke="currentColor"
+                            stroke-width="1.6"
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                          >
+                            <circle cx="8" cy="8" r="6" />
+                            <path d="M8 5v3l2 2" />
+                          </svg>
+                          <span class="todo-body">
+                            <span class="todo-subject">#5 TasksPanel 聚合面板</span>
+                            <span class="todo-blocked">blocked by #3, #4</span>
+                          </span>
+                        </li>
+                        <li class="todo-more">(+1 more)</li>
+                      </ul>
+                    </div>
+                    <div class="tasks-sec">
+                      <p class="tasks-sec-title">定时任务 <span class="n">2</span></p>
+                      <ul class="sched-rows">
+                        <li class="sched-row" data-enabled="true">
+                          <span class="sched-row-body">
+                            <span class="sched-row-head">
+                              <span class="sched-row-name">daily-standup-digest</span>
+                              <span class="chip" data-st="running"
+                                ><svg
+                                  class="icon-sm spin"
+                                  viewBox="0 0 16 16"
+                                  fill="none"
+                                  stroke="currentColor"
+                                  stroke-width="1.8"
+                                  stroke-linecap="round"
+                                >
+                                  <path d="M8 2a6 6 0 1 1-6 6" /></svg
+                                >running</span
+                              >
+                            </span>
+                            <span class="sched-row-meta">cron 0 9 * * * · next 10h</span>
+                            <span class="sched-row-run"
+                              >last <span class="ok">ok</span> 1d ago · <a href="#">run r_7f3 »</a></span
+                            >
+                          </span>
+                        </li>
+                        <li class="sched-row" data-enabled="false">
+                          <span class="sched-row-body">
+                            <span class="sched-row-head">
+                              <span class="sched-row-name">weekly-report-feishu</span>
+                              <span class="chip" data-st="paused">paused</span>
+                            </span>
+                            <span class="sched-row-meta">cron 0 18 * * 5 · paused</span>
+                            <span class="sched-row-run"
+                              >last <span class="fail">failed</span> 4d ago · <a href="#">run r_2c1 »</a></span
+                            >
+                          </span>
+                        </li>
+                      </ul>
+                      <p class="readonly-note">定时分区只读；暂停/删除在 detail 面板操作。</p>
+                    </div>
+                  </div>
+                  <div class="mock-composer-input">
+                    <div class="composer-tasks-external">
+                      <button class="composer-tasks-btn" type="button" aria-expanded="true" aria-label="tasks">
+                        <span class="seg">
+                          <svg
+                            class="icon-sm"
+                            viewBox="0 0 16 16"
+                            fill="none"
+                            stroke="currentColor"
+                            stroke-width="1.6"
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                          >
+                            <path d="M3 8.5 6.5 12 13 4.5" />
+                          </svg>
+                          <span class="n">3</span>
+                        </span>
+                        <span class="seg live">
+                          <svg
+                            class="icon-sm spin"
+                            viewBox="0 0 16 16"
+                            fill="none"
+                            stroke="currentColor"
+                            stroke-width="1.5"
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                          >
+                            <circle cx="8" cy="9" r="5.5" />
+                            <path d="M8 6.5V9l1.8 1.2M6.5 1.5h3" />
+                          </svg>
+                          <span class="n">2</span>
+                        </span>
+                      </button>
+                    </div>
+                    <div class="placeholder">发消息给 agent…</div>
+                    <div class="composer-bottom">
+                      <span class="composer-chip-model">sonnet ▾</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <p class="frame-label">mobile · 390px</p>
+            <div class="frame frame-mobile">
+              <div class="frame-body">
+                <div class="mock-composer-zone">
+                  <div class="composer-tasks-panel" role="region" aria-readonly="true">
+                    <p class="composer-tasks-head">
+                      <span class="composer-tasks-title">Tasks</span>
+                      <span class="composer-tasks-done">3 done</span>
+                    </p>
+                    <div class="tasks-sec">
+                      <p class="tasks-sec-title">待办 <span class="n">3 open</span></p>
+                      <ul class="todo-list">
+                        <li class="todo-item" data-status="in_progress">
+                          <svg
+                            class="icon-sm todo-ico spin"
+                            viewBox="0 0 16 16"
+                            fill="none"
+                            stroke="currentColor"
+                            stroke-width="1.6"
+                            stroke-linecap="round"
+                          >
+                            <path d="M8 2a6 6 0 1 1-6 6" />
+                          </svg>
+                          <span class="todo-body"
+                            ><span class="todo-subject">#2 改写 schedule-confirm 集成测试</span></span
+                          >
+                        </li>
+                        <li class="todo-item" data-status="pending">
+                          <svg
+                            class="icon-sm todo-ico"
+                            viewBox="0 0 16 16"
+                            fill="none"
+                            stroke="currentColor"
+                            stroke-width="1.6"
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                          >
+                            <circle cx="8" cy="8" r="6" />
+                            <path d="M8 5v3l2 2" />
+                          </svg>
+                          <span class="todo-body"><span class="todo-subject">#5 TasksPanel 聚合面板</span></span>
+                        </li>
+                        <li class="todo-more">(+1 more)</li>
+                      </ul>
+                    </div>
+                    <div class="tasks-sec">
+                      <p class="tasks-sec-title">定时任务 <span class="n">2</span></p>
+                      <ul class="sched-rows">
+                        <li class="sched-row" data-enabled="true">
+                          <span class="sched-row-body">
+                            <span class="sched-row-head">
+                              <span class="sched-row-name">daily-standup-digest</span>
+                              <span class="chip" data-st="running"
+                                ><svg
+                                  class="icon-sm spin"
+                                  viewBox="0 0 16 16"
+                                  fill="none"
+                                  stroke="currentColor"
+                                  stroke-width="1.8"
+                                  stroke-linecap="round"
+                                >
+                                  <path d="M8 2a6 6 0 1 1-6 6" /></svg
+                                >running</span
+                              >
+                            </span>
+                            <span class="sched-row-meta">cron 0 9 * * * · next 10h</span>
+                            <span class="sched-row-run"
+                              >last <span class="ok">ok</span> 1d ago · <a href="#">run r_7f3 »</a></span
+                            >
+                          </span>
+                        </li>
+                        <li class="sched-row" data-enabled="false">
+                          <span class="sched-row-body">
+                            <span class="sched-row-head">
+                              <span class="sched-row-name">weekly-report-feishu</span>
+                              <span class="chip" data-st="paused">paused</span>
+                            </span>
+                            <span class="sched-row-meta">cron 0 18 * * 5 · paused</span>
+                            <span class="sched-row-run"
+                              >last <span class="fail">failed</span> 4d ago · <a href="#">run r_2c1 »</a></span
+                            >
+                          </span>
+                        </li>
+                      </ul>
+                      <p class="readonly-note">定时分区只读；暂停/删除在 detail 面板操作。</p>
+                    </div>
+                  </div>
+                  <div class="mock-composer-input">
+                    <div class="composer-tasks-external">
+                      <button class="composer-tasks-btn" type="button" aria-expanded="true" aria-label="tasks">
+                        <span class="seg">
+                          <svg
+                            class="icon-sm"
+                            viewBox="0 0 16 16"
+                            fill="none"
+                            stroke="currentColor"
+                            stroke-width="1.6"
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                          >
+                            <path d="M3 8.5 6.5 12 13 4.5" />
+                          </svg>
+                          <span class="n">3</span>
+                        </span>
+                        <span class="seg live">
+                          <svg
+                            class="icon-sm spin"
+                            viewBox="0 0 16 16"
+                            fill="none"
+                            stroke="currentColor"
+                            stroke-width="1.5"
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                          >
+                            <circle cx="8" cy="9" r="5.5" />
+                            <path d="M8 6.5V9l1.8 1.2M6.5 1.5h3" />
+                          </svg>
+                          <span class="n">2</span>
+                        </span>
+                      </button>
+                    </div>
+                    <div class="placeholder">发消息给 agent…</div>
+                    <div class="composer-bottom">
+                      <span class="composer-chip-model">sonnet ▾</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </body>
+</html>

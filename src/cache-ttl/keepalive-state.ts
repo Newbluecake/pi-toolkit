@@ -1718,7 +1718,7 @@ export interface KeepaliveCostModel {
   cacheWrite?: number;
   /** pi-ai's OUTPUT rate ($ per million tokens) — only the late-usage ping cost estimate reads it. */
   output?: number;
-  tiers?: KeepaliveCostTier[];
+  tiers?: KeepaliveCostTier[] | undefined;
 }
 
 export const FALLBACK_WINDOW_CAP = 11;

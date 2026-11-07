@@ -8,12 +8,11 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   DEFAULT_SETTINGS,
-  DEFAULT_TRAFFIC_SETTINGS,
   loadSettings,
   loadSettingsFromFile,
-  parseTrafficSettings,
   readSettingsNoMigrate,
 } from "../../src/config/settings.js";
+import { DEFAULT_TRAFFIC_SETTINGS, parseTrafficSettings } from "../../src/traffic/settings.js";
 import { resetSecureDomainForTests } from "../../src/secure/domain.js";
 import { freezeDomain, makeFakeVault, type FakeVault } from "../secure/helpers.js";
 

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_SETTINGS, loadSettings, parseCompactSettings } from "../../src/config/settings.js";
+import { DEFAULT_SETTINGS, loadSettings } from "../../src/config/settings.js";
+import { parseCompactSettings } from "../../src/compact-hint/settings.js";
 
 const defaults = DEFAULT_SETTINGS.compact;
 

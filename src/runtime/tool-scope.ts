@@ -162,11 +162,19 @@ export interface ToolScopeEnforcer {
 export function buildToolScopePolicy(opts: {
   tools?: readonly string[];
   granted?: readonly string[];
+  /** fabric-thread arch \u00a79.2 (ruling #12): PER-RUN extra reserved names (a feature-on run
+   *  passes ["thread"] \u2014 the per-run reservation strips a same-named MCP/late-registered tool
+   *  from runs it was not injected into; runtime-adapter grants it where the child tool IS
+   *  injected). The GLOBAL RESERVED_TOOL_NAMES stays frozen (the fabric-xs-off golden pins it);
+   * while the feature is off callers pass NOTHING \u2014 an absent (or empty) `extraReserved`
+   *  yields exactly the pre-feature policy. No module-scope mutable state (I4). */
+  extraReserved?: readonly string[];
   /** P0-r (\u00a77.0 point 6b): attached to the returned policy verbatim (see ToolScopePolicy.provenance). */
   provenance?: ReadonlyMap<string, string>;
 }): ToolScopePolicy {
   const grantedSet = new Set(opts.granted ?? []);
-  const deny = new Set(RESERVED_TOOL_NAMES.filter((n) => !grantedSet.has(n)));
+  const extra = opts.extraReserved ?? [];
+  const deny = new Set([...RESERVED_TOOL_NAMES, ...extra].filter((n) => !grantedSet.has(n)));
   return {
     ...(opts.tools ? { allow: new Set([...opts.tools, ...grantedSet]) } : {}),
     deny,

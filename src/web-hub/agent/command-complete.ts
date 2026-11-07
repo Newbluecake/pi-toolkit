@@ -63,6 +63,7 @@ export interface AutocompleteProviderLike {
 }
 
 export interface CommandCompleteDeps {
+  memoryScopes?: boolean;
   commands: CommandsPort | undefined;
   /** The shared `argCompleters` Map `wrapCommandApi` fills (§4.4) — by reference, same
    *  pattern as `ownedCommandNames`; unset ⇒ no S-own source. */
@@ -157,6 +158,7 @@ function normalize(
   kind: CommandKindLike,
   rawItems: unknown,
   overrides: Record<string, CommandPolicy> | undefined,
+  memoryScopes?: boolean,
 ): { items: OkItems; truncated: boolean } {
   const list = Array.isArray(rawItems) ? rawItems : [];
   const out: OkItems = [];
@@ -188,6 +190,7 @@ function normalize(
       name,
       args: valueB,
       kind,
+      ...(memoryScopes ? { memoryScopes: true } : {}),
       ...(overrides !== undefined ? { overrides } : {}),
     });
     if (effectivePolicy(decision, false) === "deny") continue;
@@ -272,6 +275,7 @@ export function createCommandComplete(deps: CommandCompleteDeps): CommandComplet
       name: frame.name,
       args: "",
       kind: classified.kind,
+      ...(deps.memoryScopes ? { memoryScopes: true } : {}),
       ...(deps.overrides !== undefined ? { overrides: deps.overrides } : {}),
     });
     if (effectivePolicy(base, false) === "deny") return errReply(rid, "E_COMMAND_DENIED", false);
@@ -316,7 +320,7 @@ export function createCommandComplete(deps: CommandCompleteDeps): CommandComplet
       }
       if (timedOut) return errReply(rid, "E_DEADLINE", true);
       if (disposed) return errReply(rid, "E_UNSUPPORTED", false);
-      const { items, truncated } = normalize(frame.name, classified.kind, raw, deps.overrides);
+      const { items, truncated } = normalize(frame.name, classified.kind, raw, deps.overrides, deps.memoryScopes);
       return okReply(rid, items, useTui ? "tui" : "own", truncated);
     } finally {
       inflight = Math.max(0, inflight - 1);

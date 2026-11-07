@@ -518,8 +518,8 @@ describe("reference pinning + TTL (§2.6 v3 #8)", () => {
     const pin = store.pinForPrompt({ principal: P1, text: promptFor([res]) });
     expect(pin.ok).toBe(true);
     if (!pin.ok) return;
+    const refBefore = clock.now(); // captured BEFORE settle: referencedAt = now() at settle time
     store.settlePins(pin.token, "referenced");
-    const refBefore = clock.now();
     expect(await store.flushReferences([res.id], dl())).toBe("ok");
     const meta = readJson(`${root}/s-sess123/${res.id}/meta.json`) as UploadMetaV1;
     expect(meta.referencedAt).toBeGreaterThanOrEqual(refBefore); // real clock: settle ≤ flush read

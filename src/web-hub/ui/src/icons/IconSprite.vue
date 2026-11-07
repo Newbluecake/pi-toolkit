@@ -185,5 +185,23 @@
       />
     </symbol>
     <symbol id="i-x" viewBox="0 0 24 24"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11" /></symbol>
+    <!-- schedule TasksPanel row actions (2026-11-04, schedule-auto-approve r2 W2): filled
+         pause bars / play triangle (same own-fill grammar as i-stop), outline trash (lucide
+         trash-2 stroke family). -->
+    <symbol id="i-pause" viewBox="0 0 24 24">
+      <path d="M7.5 5h3v14h-3zM13.5 5h3v14h-3z" fill="currentColor" stroke="none" />
+    </symbol>
+    <symbol id="i-play" viewBox="0 0 24 24">
+      <path
+        d="M8.5 5.6v12.8c0 .8.9 1.3 1.6.9l10-6.4a1.05 1.05 0 0 0 0-1.8l-10-6.4c-.7-.4-1.6.1-1.6.9z"
+        fill="currentColor"
+        stroke="none"
+      />
+    </symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24">
+      <path
+        d="M3 6h18M8 6V4.5A1.5 1.5 0 0 1 9.5 3h5A1.5 1.5 0 0 1 16 4.5V6M19 6l-.9 13.1A2 2 0 0 1 16.1 21H7.9a2 2 0 0 1-2-1.9L5 6M10 11v6M14 11v6"
+      />
+    </symbol>
   </svg>
 </template>

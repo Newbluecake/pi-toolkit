@@ -41,6 +41,7 @@ import {
   WTDIFF_HUB_CAP,
   WTGRAPH_HUB_CAP,
   WTGRAPH_MERGED_HUB_CAP,
+  WTGRAPH_FILES_HUB_CAP,
   PREVIEW_HTML_HUB_CAP,
 } from "../../../src/web-hub/protocol/version.js";
 import { config, connectClient, hello, tmpDirs } from "./helpers.js";
@@ -204,6 +205,7 @@ describe("hub assembly × preview caps (PV3, §4.7)", () => {
       ...(previewProcFdAvailable() ? [PREVIEW_DIR_HUB_CAP] : []),
       ...(previewProcFdAvailable() ? [WTDIFF_HUB_CAP] : []),
       ...(previewProcFdAvailable() ? [WTGRAPH_HUB_CAP, WTGRAPH_MERGED_HUB_CAP] : []),
+      ...(previewProcFdAvailable() ? [WTGRAPH_FILES_HUB_CAP] : []),
       // web-hub-html-preview plan v2 §4: preview.html.v1 rides the same gate + /proc probe tail.
       ...(previewProcFdAvailable() ? [PREVIEW_HTML_HUB_CAP] : []),
     ]);
@@ -233,6 +235,7 @@ describe("hub assembly × preview caps (PV3, §4.7)", () => {
       ...(previewProcFdAvailable() ? [PREVIEW_DIR_HUB_CAP] : []),
       ...(previewProcFdAvailable() ? [WTDIFF_HUB_CAP] : []),
       ...(previewProcFdAvailable() ? [WTGRAPH_HUB_CAP, WTGRAPH_MERGED_HUB_CAP] : []),
+      ...(previewProcFdAvailable() ? [WTGRAPH_FILES_HUB_CAP] : []),
       // web-hub-html-preview plan v2 §4: preview.html.v1 rides the same gate + /proc probe tail.
       ...(previewProcFdAvailable() ? [PREVIEW_HTML_HUB_CAP] : []),
       PREVIEW_LAN_HUB_CAP,
@@ -261,7 +264,7 @@ describe("hub assembly × preview dispose wiring (§4.5.1)", () => {
     const closeBody = src.slice(src.indexOf("hub closing"));
     const at = {
       spawn: closeBody.indexOf("spawnSup.shutdown"),
-      preview: closeBody.indexOf('previewRoutes.dispose("close"'),
+      preview: closeBody.indexOf('previewRoutes!.dispose("close"'),
       fe: closeBody.indexOf("fe.close"),
     };
     expect(at.spawn).toBeGreaterThan(-1);
@@ -401,8 +404,8 @@ describe("hub assembly × worktree-diff wiring (D3, §1.6)", () => {
     const closeBody = src.slice(src.indexOf("hub closing"));
     const at = {
       spawn: closeBody.indexOf("spawnSup.shutdown"),
-      preview: closeBody.indexOf('previewRoutes.dispose("close"'),
-      wtdiff: closeBody.indexOf('worktreeDiffRoutes.dispose("close"'),
+      preview: closeBody.indexOf('previewRoutes!.dispose("close"'),
+      wtdiff: closeBody.indexOf('worktreeDiffRoutes!.dispose("close"'),
       fe: closeBody.indexOf("fe.close"),
     };
     expect(at.spawn).toBeGreaterThan(-1);

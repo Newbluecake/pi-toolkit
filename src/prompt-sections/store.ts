@@ -20,7 +20,14 @@ export interface PromptSectionsEntryV1 {
 
 export type ReadBackReason = "startup" | "reload" | "new" | "resume" | "fork" | "tree";
 
-const NAMES: readonly SectionName[] = ["pi_project_memory", "pi_subagent_types", "pi_subagent_models", "pi_schedules"];
+const NAMES: readonly SectionName[] = [
+  "pi_project_memory",
+  "pi_subagent_types",
+  "pi_subagent_models",
+  "pi_schedules",
+  "pi_session_memory",
+  "pi_hub_memory",
+];
 
 /**
  * Session scoping (plan r3 §5.3): sections named in `names` are tied to `sessionId`. `sessionId`

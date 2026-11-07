@@ -1,7 +1,9 @@
 /**
  * web-hub on-disk layout (plan §1.3.1 — frozen interface, S1-W1 接口包).
  *
- * State lives under `<home>/.pi/agent/web-hub/`. Unix domain socket paths are
+ * State lives under `<home>/.pi/agent/web-hub/`.
+ * Hub state never follows `PI_CODING_AGENT_DIR`; the hub's agentDir only drives
+ * session discovery and the env of spawned children. Unix domain socket paths are
  * capped by the kernel sockaddr limit, so `hub.sock` has a fallback chain
  * (arch §3 状态目录): `<stateDir>/hub.sock` → `$XDG_RUNTIME_DIR/pi-webhub.sock`
  * → `/tmp/pi-webhub-<uid>/hub.sock`. Only the socket moves; hub.json / token /
@@ -47,7 +49,9 @@
 import { Buffer } from "node:buffer";
 import { constants as fsConstants } from "node:fs";
 import { chmod, lstat, mkdir, realpath, stat } from "node:fs/promises";
-import { fileURLToPath } from "node:url";
+import { join, sep } from "node:path";
+
+import { packageRoot } from "./package-root.js";
 
 export const SOCKET_PATH_MAX_BYTES = 100;
 
@@ -112,6 +116,8 @@ export interface HubPaths {
   rotateIntentFile?: string;
   policies: { readonly stateDir: DirPolicy; readonly socketDir: DirPolicy };
   dbFile: string; // §4.1
+  /** #66 P6, outside the .pi tree; optional for older assembly fakes. */
+  totpKeyFile?: string;
 }
 
 export interface HubPathsEnv {
@@ -159,26 +165,34 @@ export function webHubStateDir(home: string): string {
   return `${home}/.pi/agent/web-hub`;
 }
 
-/**
- * The Vue UI build shipped inside the package itself (vue-plan.md §2.1 candidate 1,
- * P5a). Resolved relative to this module's own file URL so it stays correct
- * regardless of the process cwd or whether this package is consumed via `jiti`
- * (pi's git-install path) or from `dist/` (npm). `paths.ts` lives at
- * `src/web-hub/protocol/paths.ts`; three levels up is the package root, so
- * `../../../dist/web-hub-ui/` resolves to `<packageRoot>/dist/web-hub-ui/`.
- */
-export function packageUiDistDir(): string {
-  return fileURLToPath(new URL("../../../dist/web-hub-ui/", import.meta.url));
+/** Fixed home-derived key location; deliberately ignores XDG_STATE_HOME. */
+export function webHubTotpKeyFile(home: string): string {
+  return `${home}/.local/state/pi-webhub/totp.key`;
 }
 
 /**
- * web-hub-version plan §3.1: the package root (`<packageRoot>/`, with a trailing slash stripped
- * by `fileURLToPath`'s normal form). Same derivation as `packageUiDistDir` — three levels up from
- * this file; `hub/version-info.ts` reads CHANGELOG.md / package.json / git from here.
+ * The Vue UI build shipped inside the package itself (vue-plan.md §2.1 candidate 1,
+ * P5a). Anchored on the package root by *content* (`protocol/package-root.ts`, the I8
+ * mirror of `core/package-root.ts`) so it stays correct regardless of the process cwd and
+ * of how this module is loaded (`jiti` from `src/`, `dist/`, or a single esbuild bundle
+ * where `import.meta.url` carries no depth at all).
+ *
+ * **Contract: the trailing separator is part of the return value.** Callers and
+ * `tests/web-hub/protocol/paths-trusted.test.ts` assert `…/dist/web-hub-ui/`;
+ * `join(packageRoot(), "dist", "web-hub-ui")` would strip it, so it is appended explicitly.
+ * The trailing-separator form is deliberately NOT merged with `packageRootDir()`'s stripped form.
+ */
+export function packageUiDistDir(): string {
+  return `${join(packageRoot(), "dist", "web-hub-ui")}${sep}`;
+}
+
+/**
+ * web-hub-version plan §3.1: the package root, **without** a trailing separator.
+ * Same anchor as `packageUiDistDir` (by content, not by depth); `hub/version-info.ts` reads
+ * CHANGELOG.md / package.json / git from here.
  */
 export function packageRootDir(): string {
-  const p = fileURLToPath(new URL("../../../", import.meta.url));
-  return p.length > 1 && p.endsWith("/") ? p.slice(0, -1) : p;
+  return packageRoot();
 }
 
 /**
@@ -186,8 +200,8 @@ export function packageRootDir(): string {
  * P5a). Version-specific subdirectories (`<webHubUiDir(home)>/<hubVersion>/`) are
  * populated by hand (release zip unpacked by the user) or by
  * `scripts/release/package-web-ui.sh`; this function only resolves the parent.
- * Same `home` as `webHubStateDir` — hub always uses `<home>/.pi/agent`, never
- * `PI_CODING_AGENT_DIR`.
+ * Same `home` as `webHubStateDir` — hub state never follows `PI_CODING_AGENT_DIR`;
+ * the hub's agentDir only drives session discovery and the env of spawned children.
  */
 export function webHubUiDir(home: string): string {
   return `${home}/.pi/agent/web-hub-ui`;
@@ -267,6 +281,7 @@ export function resolveHubPaths(env: HubPathsEnv): HubPaths {
     stoppedFile: `${stateDir}/stopped`,
     rotateIntentFile: `${stateDir}/rotate.intent`,
     dbFile: `${stateDir}/hub.db`,
+    totpKeyFile: webHubTotpKeyFile(env.home),
     policies: { stateDir: STATE_DIR_POLICY, socketDir: policyFor(socketDir, stateDir, env.xdgRuntimeDir) },
   };
 }

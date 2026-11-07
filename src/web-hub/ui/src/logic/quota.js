@@ -171,24 +171,61 @@ function normPct(w) {
   return Number.isFinite(w.usedPct) ? w.usedPct : 0;
 }
 
+/** True when the window carries a showable account cost: `costUsd` a finite number — the
+ * same defensive read `costText` applies (missing/non-finite renders nothing), so the merge
+ * and the render never disagree about what "has cost" means. @param {QuotaWindowWire} w */
+function hasCost(w) {
+  return typeof w.costUsd === "number" && Number.isFinite(w.costUsd);
+}
+
 /**
  * Per-scope WORST-of synthesis for the GLM pair (2026-10-14 user ruling: 「glm和glm国际在web上
  * 不用区分展示了，只展示glm就行」 — the web NEVER distinguishes the two, so the pair merges
  * unconditionally and the merged row shows the worse reading per scope): for each of `5h`/`week`,
  * the worse of the two members' windows — level desc, then usedPct desc, the same comparison
- * `worstWindow` uses everywhere else; a scope only one side has is taken as-is; exact ties
- * keep the CN side's window (CN windows are compared first). Each merged window is the chosen
- * side's window OBJECT, so its `resetAt`/`etaMs` always come from the side that supplied the
- * percentages — a merged row never mixes one side's numbers with the other's clocks.
+ * `worstWindow` uses everywhere else; a scope only one side has is taken as-is. Each merged
+ * window is the chosen side's window OBJECT, so its `resetAt`/`etaMs` always come from the side
+ * that supplied the percentages — a merged row never mixes one side's numbers with the other's
+ * clocks.
+ *
+ * Cost rule (2026-11-04 F1, the old-peer-frame fix): both members carry the SAME account-total
+ * cost (`accountWindowCost` writes it on BOTH wire rows), but a peer predating the cost
+ * projection emits `costUsd` on one side only — and the old cn-first tie rule then picked the
+ * COSTLESS side on exact ties, silently dropping the cost from the merged row (and with
+ * `freshestQuota` alternating between old/new agents, the cost flickered in and out). Now:
+ *  - an exact tie (level AND usedPct) prefers the side that HAS the cost; neither/both have it
+ *    ⇒ the CN side's window as before (existing behavior byte-identical);
+ *  - when the chosen window lacks a finite `costUsd` but the other side has one, ONLY
+ *    `costUsd`/`costUnpriced` are borrowed onto a shallow copy — the chosen side's
+ *    usedPct/resetAt/etaMs stay put (same-source clocks; the other side's reset/ETA is never
+ *    moved over), and the two sides are NEVER summed in the UI (both are the account total —
+ *    adding would double-count).
  * @param {QuotaProviderWire} cn
  * @param {QuotaProviderWire} intl
  */
 function mergedGlmWindows(cn, intl) {
-  const all = [...cn.windows, ...intl.windows];
   const merged = [];
   for (const scope of ["5h", "week"]) {
-    const w = worstWindow(all.filter((x) => x.scope === scope));
-    if (w !== undefined) merged.push(w);
+    const cnW = worstWindow(cn.windows.filter((x) => x.scope === scope));
+    const intlW = worstWindow(intl.windows.filter((x) => x.scope === scope));
+    let w;
+    if (cnW === undefined) w = intlW;
+    else if (intlW === undefined) w = cnW;
+    else if (intlW.level > cnW.level || (intlW.level === cnW.level && normPct(intlW) > normPct(cnW))) w = intlW;
+    else if (cnW.level !== intlW.level || normPct(cnW) !== normPct(intlW)) w = cnW;
+    else w = hasCost(cnW) || !hasCost(intlW) ? cnW : intlW; // exact tie ⇒ prefer the cost side
+    if (w === undefined) continue;
+    // F1 backfill: borrow ONLY the cost fields from the other side of the same account.
+    const other = w === cnW ? intlW : cnW;
+    if (other !== undefined && !hasCost(w) && hasCost(other)) {
+      const copy = { ...w, costUsd: other.costUsd };
+      // The unpriced marker describes the AMOUNT shown, so it follows the borrowed value
+      // (a degenerate own marker without its own costUsd is dropped, never mixed).
+      if (other.costUnpriced === true) copy.costUnpriced = true;
+      else delete copy.costUnpriced;
+      w = copy;
+    }
+    merged.push(w);
   }
   return merged;
 }
@@ -364,7 +401,9 @@ export function pillGroups(quota) {
  * unchanged as its own single group). `skip` = the member that must NOT emit its own group/row
  * (the SECOND of the two in snapshot order); `source` = a SYNTHETIC provider with
  * `id:"zai-coding-cn"` (⇒ label "GLM") whose `windows` are the per-scope worst-of synthesis of
- * `mergedGlmWindows` (each window object keeps its own side's resetAt/etaMs), `level` = max over
+ * `mergedGlmWindows` (each window object keeps its own side's resetAt/etaMs; 2026-11-04 F1:
+ * exact ties prefer the cost-carrying side, and a chosen window without `costUsd` borrows ONLY
+ * the other side's costUsd/costUnpriced — see `mergedGlmWindows`), `level` = max over
  * those windows (the wire's own "provider 级 = 窗口 max" invariant, recomputed so a drifting
  * peer field can never win) and `stale` = the union of both members' flags — nothing renders
  * `source`'s flags directly, but they follow the same "something is wrong" union policy the

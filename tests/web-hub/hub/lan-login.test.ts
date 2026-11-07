@@ -3,6 +3,8 @@ import { createLanSessionsRoutes } from "../../../src/web-hub/hub/lan-sessions.j
 import { publicSessionId } from "../../../src/web-hub/hub/sid-hash.js";
 import { scryptSync } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createKdfUpgrader } from "../../../src/web-hub/hub/kdf-upgrade.js";
+import { KDF_PHASE2 } from "../../../src/web-hub/hub/kdf.js";
 import { createLanLoginCore } from "../../../src/web-hub/hub/lan-login.js";
 import { createAuthRevokeBus } from "../../../src/web-hub/hub/auth-revoke.js";
 import { createSecurityEventBus, type SecurityEvent } from "../../../src/web-hub/hub/security-events.js";
@@ -66,7 +68,11 @@ async function flush() {
 }
 const cores: LanLoginCore[] = [];
 let wall = 1_800_000_000_000;
-function setup(options: FakeLanStoreOptions = {}, initial = false) {
+function setup(
+  options: FakeLanStoreOptions = {},
+  initial = false,
+  kdfUpgrader?: import("../../../src/web-hub/hub/kdf-upgrade.js").KdfUpgrader,
+) {
   const store = fakeLanStore(options);
   const salt = new Uint8Array(16).fill(7);
   const user: LanUserRecord = {
@@ -108,8 +114,11 @@ function setup(options: FakeLanStoreOptions = {}, initial = false) {
   const kdf = fakeKdf();
   const admission = fakeKdfAdmission();
   const core = createLanLoginCore({
+    ...(kdfUpgrader === undefined ? {} : { kdfUpgrader }),
     store,
     kdf,
+    // #66: the fixture user is seeded at N=2^14 r=1 — time against that shape (no compensation run).
+    kdfPolicy: { verifyTarget: { n: 16384, r: 1, p: 1, keyLen: 32, saltBytes: 16 } },
     admission,
     limiter,
     approval,
@@ -891,21 +900,68 @@ describe("absolute deadlines and late-result isolation", () => {
     expect(h.store.sessionsBySidHash.size).toBe(0);
     expect((await h.core.waitApproval(token, context(), io().value)).body).toEqual({ error: "E_2FA_EXPIRED" });
   });
-  it("markInitialLogin is INSIDE completion deadline and failure revokes insert", async () => {
+  it("#66 D4: a hung markInitialLogin is bounded (2s) and the login still succeeds with its session", async () => {
     const h = setup({}, true);
     const dispatched = latch();
     vi.spyOn(h.store, "markInitialLogin").mockImplementation(async () => {
       dispatched.resolve();
       await new Promise<void>(() => {});
     });
+    const truncate = vi.fn();
+    (h.store as { requestCheckpointTruncate?: () => void }).requestCheckpointTruncate = truncate;
     const pending = h.password();
     await dispatched.promise;
     expect(h.store.sessionsBySidHash.size).toBe(1);
-    await vi.advanceTimersByTimeAsync(L.postKdfMs);
-    expect(await pending).toEqual({ status: 503, body: { error: "E_DEADLINE" } });
-    await flush();
-    expect(h.store.sessionsBySidHash.size).toBe(0);
-    expect(h.succeed).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(2_000);
+    const reply = await pending;
+    expect(reply.status).toBe(200);
+    expect(reply.body).toEqual({ ok: true, initialPassword: true });
+    expect(h.store.sessionsBySidHash.size).toBe(1);
+    expect(h.succeed).toHaveBeenCalledTimes(1);
+    expect(truncate).not.toHaveBeenCalled();
+    expect(h.log.warn).toHaveBeenCalledWith("web-hub lan login: initial-password-clear-failed", expect.anything());
+  });
+  it("#66 D4: a rejecting markInitialLogin never fails the login (only a warn; the secret never reaches the log)", async () => {
+    const h = setup({}, true);
+    vi.spyOn(h.store, "markInitialLogin").mockRejectedValue(new Error("E_DB: boom correct"));
+    const reply = await h.password();
+    expect(reply.status).toBe(200);
+    expect(h.store.sessionsBySidHash.size).toBe(1);
+    expect(h.succeed).toHaveBeenCalledTimes(1);
+    expect(h.log.warn).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(h.log.warn.mock.calls)).not.toContain("correct");
+  });
+  it("#66 D4: cleared:true requests exactly one checkpoint truncate; cleared:false / no plaintext does not", async () => {
+    const h = setup({}, true);
+    const truncate = vi.fn();
+    (h.store as { requestCheckpointTruncate?: () => void }).requestCheckpointTruncate = truncate;
+    expect((await h.password()).status).toBe(200);
+    expect(truncate).toHaveBeenCalledTimes(1);
+    // The fake wiped the plaintext: a second login re-reads the user and neither marks nor truncates.
+    const mark = vi.spyOn(h.store, "markInitialLogin");
+    const again = await h.password();
+    expect(again.status).toBe(200);
+    // Plaintext gone but `initialCreatedAt` is absent in this fixture ⇒ not "in use" any more.
+    expect(mark).not.toHaveBeenCalled();
+    expect(truncate).toHaveBeenCalledTimes(1);
+    const racing = setup({}, true);
+    const truncate2 = vi.fn();
+    (racing.store as { requestCheckpointTruncate?: () => void }).requestCheckpointTruncate = truncate2;
+    vi.spyOn(racing.store, "markInitialLogin").mockResolvedValue({ cleared: false });
+    expect((await racing.password()).status).toBe(200);
+    expect(truncate2).not.toHaveBeenCalled();
+  });
+  it("#66 D4: after the wipe the response still reports initialPassword:true via initialCreatedAt; a changed password reports false", async () => {
+    const h = setup({}, true);
+    const wiped = (await h.store.getUser("owner"))!;
+    const { initialPassword: _plain, ...rest } = wiped;
+    h.store.seedUser({ ...rest, initialCreatedAt: wall });
+    const mark = vi.spyOn(h.store, "markInitialLogin");
+    const reply = await h.password();
+    expect(reply.body).toEqual({ ok: true, initialPassword: true });
+    expect(mark).not.toHaveBeenCalled();
+    const changed = setup({}, false);
+    expect((await changed.password()).body).toEqual({ ok: true, initialPassword: false });
   });
   it("approval complete has total ≤23s even with dispatched INSERT ignoring abort", async () => {
     let block = false;
@@ -1289,5 +1345,140 @@ describe("verification rework regressions", () => {
     expect(h.store.sessionsBySidHash.size).toBe(0);
     expect(h.approval.close).toHaveBeenCalledWith(h.requests[0]!.challengeId, "deadline");
     expect(h.approval.close).not.toHaveBeenCalledWith(h.requests[0]!.challengeId, "revoked");
+  });
+});
+
+describe("#66 P2 login-only trigger", () => {
+  it("concurrent verified logins return sessions while the one shared upgrade remains pending", async () => {
+    let upgrade!: import("../../../src/web-hub/hub/kdf-upgrade.js").KdfUpgrader;
+    const h = setup({}, false, { maybeRehash: (user, pw) => upgrade.maybeRehash(user, pw), dispose() {} });
+    const gate = latch<Uint8Array>(),
+      run = vi.fn(() => gate.promise),
+      rehashPassword = vi.fn(async () => ({ ok: true as const }));
+    upgrade = createKdfUpgrader({
+      kdf: { run },
+      store: { rehashPassword },
+      log: h.log,
+      now: h.now,
+      target: KDF_PHASE2,
+    });
+    try {
+      const replies = await Promise.all([h.password(), h.password(context("192.168.1.11"))]);
+      expect(replies.map((r) => r.status)).toEqual([200, 200]);
+      await Promise.all(replies.map((r) => r.after?.()));
+      expect(h.store.sessionsBySidHash.size).toBe(2);
+      expect(run).toHaveBeenCalledTimes(1);
+      expect(rehashPassword).not.toHaveBeenCalled();
+      gate.resolve(new Uint8Array(32));
+      await flush();
+      expect(rehashPassword).toHaveBeenCalledTimes(1);
+      expect(h.store.sessionsBySidHash.size).toBe(2);
+    } finally {
+      upgrade.dispose();
+    }
+  });
+  it("triggers after match and before second-factor gate, never waits for background work", async () => {
+    const maybeRehash = vi.fn(),
+      h = setup({}, false, { maybeRehash, dispose: vi.fn() });
+    await h.enroll();
+    const gate = vi.spyOn(h.store, "isKnownIp").mockImplementation(async () => {
+      expect(maybeRehash).toHaveBeenCalledWith(h.user, "correct");
+      return false;
+    });
+    const r = await h.password();
+    expect(r.status).toBe(401);
+    expect(r.body).toMatchObject({ error: "E_2FA", methods: ["recovery", "feishu"] });
+    expect(maybeRehash).toHaveBeenCalledTimes(1);
+    expect(gate).toHaveBeenCalled();
+  });
+  it("does not trigger for wrong/missing users, revoked snapshots or disposed core", async () => {
+    const maybeRehash = vi.fn(),
+      h = setup({}, false, { maybeRehash, dispose: vi.fn() });
+    expect((await h.core.passwordLogin(context(), { username: "owner", password: "bad" }, UA, io().value)).status).toBe(
+      401,
+    );
+    expect(
+      (await h.core.passwordLogin(context(), { username: "missing", password: "correct" }, UA, io().value)).status,
+    ).toBe(401);
+    const wait = latch<Uint8Array>();
+    vi.spyOn(h.kdf, "run").mockReturnValueOnce(wait.promise);
+    const pending = h.password();
+    await flush();
+    h.core.onRevoke({ sel: { userId: h.user.id }, reason: "passwd" });
+    wait.resolve(h.user.hash);
+    await flush();
+    expect((await pending).status).toBe(401);
+    h.core.dispose();
+    expect((await h.password()).status).toBe(503);
+    expect(maybeRehash).not.toHaveBeenCalled();
+  });
+});
+
+describe("#66 P6 TOTP key unavailable is not a bad factor", () => {
+  it("missing-key challenge omits TOTP but recovery and Feishu stay available", async () => {
+    const h = setup({ totpStep: (_s, c, n) => (c === "111111" ? Math.floor(n / 30000) : undefined) });
+    await h.enroll(true);
+    const get = h.store.get2faState.bind(h.store);
+    vi.spyOn(h.store, "get2faState").mockImplementation(async (...args) => ({
+      ...(await get(...args)),
+      totpUsable: false,
+    }));
+    const ch = await h.challenge();
+    expect(ch.result.body).toMatchObject({ methods: ["recovery", "feishu"] });
+    expect(await h.core.submitFactor(ch.token, { method: "totp", code: "111111" }, ch.ctx, io().value)).toMatchObject({
+      status: 429,
+      body: { error: "E_2FA_METHOD_LOCKED" },
+    });
+    expect(h.fail).not.toHaveBeenCalled();
+    const codes = await h.store.regenRecovery(1, h.now());
+    // New generation: start a new challenge and prove the escape hatch completes a session.
+    const next = await h.challenge();
+    const res = await h.core.submitFactor(
+      next.token,
+      { method: "recovery", code: codes.recoveryCodes[0]! },
+      next.ctx,
+      io().value,
+    );
+    expect(res.status).toBe(200);
+  });
+  it("no usable TOTP/recovery/live Feishu returns existing 503 E_DB (not 2FA off)", async () => {
+    const h = setup();
+    await h.enroll();
+    vi.spyOn(h.store, "get2faState").mockResolvedValue({
+      state: "enrolled",
+      totp: true,
+      totpUsable: false,
+      feishu: false,
+      recoveryLeft: 0,
+      factorGen: 1,
+    });
+    const res = await h.password();
+    expect(res).toMatchObject({ status: 503, body: { error: "E_DB" } });
+    expect(h.fail).not.toHaveBeenCalled();
+  });
+  it("unavailable refunds BOTH budgets, remains pending, audits reason and never limiter.fail", async () => {
+    const h = setup({ totpStep: (_s, c, n) => (c === "111111" ? Math.floor(n / 30000) : undefined) });
+    await h.enroll(true);
+    const verify = vi.spyOn(h.store, "verifyTotp").mockResolvedValue({ ok: false, reason: "unavailable" });
+    const ch = await h.challenge();
+    for (let i = 0; i < L.methodAttempts + L.attempts + 2; i++)
+      expect(await h.core.submitFactor(ch.token, { method: "totp", code: "111111" }, ch.ctx, io().value)).toMatchObject(
+        { status: 503, body: { error: "E_DB" } },
+      );
+    expect(h.fail).not.toHaveBeenCalled();
+    expect(h.events.some((e) => e.type === "login-2fa-burst")).toBe(false);
+    const logs = JSON.stringify(h.log.info.mock.calls);
+    expect(logs).toContain('"reason":"unavailable"');
+    expect(logs).toContain(`"left":${L.attempts}`);
+    verify.mockResolvedValueOnce({ ok: false, reason: "bad" });
+    expect(await h.core.submitFactor(ch.token, { method: "totp", code: "111111" }, ch.ctx, io().value)).toMatchObject({
+      status: 401,
+      body: { attemptsLeft: L.attempts - 1 },
+    });
+    expect(h.fail).toHaveBeenCalledTimes(1);
+    verify.mockResolvedValueOnce({ ok: true });
+    expect((await h.core.submitFactor(ch.token, { method: "totp", code: "111111" }, ch.ctx, io().value)).status).toBe(
+      200,
+    );
   });
 });

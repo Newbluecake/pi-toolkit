@@ -6,11 +6,7 @@ import { mount } from "@vue/test-utils";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import StopButton from "../../../src/web-hub/ui/src/components/control/StopButton.vue";
 
-/**
- * `control/StopButton.vue` (control-plan.md v2.1 §7.4 — C5): two-step confirm — first click
- * arms (data-armed, aria-live announcement, queue note), second click emits `stop`; 4s
- * auto-revert and Esc disarm; nothing renders while the agent is idle.
- */
+/** Current-turn stop: primary pointer holds 700ms, keyboard/AT explicitly confirm. */
 
 const mounted: Array<ReturnType<typeof mount>> = [];
 afterEach(() => {
@@ -24,47 +20,53 @@ function mountStop(props: { busy: boolean; queueCount?: number }) {
   return wrapper;
 }
 
-describe("StopButton.vue (§7.4 two-step)", () => {
-  it("renders nothing while the agent is not busy", () => {
-    const w = mountStop({ busy: false });
-    expect(w.find(".stop-btn").exists()).toBe(false);
+describe("StopButton.vue (#47 hold / accessible confirmation)", () => {
+  it("renders nothing while idle", () => {
+    expect(mountStop({ busy: false }).find(".stop-btn").exists()).toBe(false);
   });
-
-  it("first click only arms (no emit, data-armed + live announcement); second click emits stop", async () => {
-    const w = mountStop({ busy: true });
-    await w.find(".stop-btn").trigger("click");
-    expect(w.emitted("stop")).toBeUndefined();
-    expect(w.find(".stop-btn").attributes("data-armed")).toBe("true");
-    expect(w.find(".stop-live").exists()).toBe(true);
-    await w.find(".stop-btn").trigger("click");
-    expect(w.emitted("stop")).toHaveLength(1);
-    expect(w.find(".stop-btn").attributes("data-armed")).toBeUndefined();
-  });
-
-  it("auto-reverts after 4s", async () => {
+  it("short pointer clicks never arm or emit; 700ms hold emits once", async () => {
     vi.useFakeTimers();
     const w = mountStop({ busy: true });
-    await w.find(".stop-btn").trigger("click");
-    expect(w.find(".stop-btn").attributes("data-armed")).toBe("true");
-    vi.advanceTimersByTime(4100);
-    await w.vm.$nextTick();
-    expect(w.find(".stop-btn").attributes("data-armed")).toBeUndefined();
-    await w.find(".stop-btn").trigger("click"); // arms again — no stale emit
+    await w.get(".stop-btn").trigger("click", { detail: 1 });
     expect(w.emitted("stop")).toBeUndefined();
+    expect(w.get(".stop-btn").attributes("data-armed")).toBeUndefined();
+    await w.get(".stop-btn").trigger("pointerdown", {
+      pointerId: 1,
+      pointerType: "mouse",
+      isPrimary: true,
+      button: 0,
+      clientX: 0,
+      clientY: 0,
+    });
+    vi.advanceTimersByTime(699);
+    expect(w.emitted("stop")).toBeUndefined();
+    vi.advanceTimersByTime(1);
+    expect(w.emitted("stop")).toHaveLength(1);
+    vi.advanceTimersByTime(10000);
+    expect(w.emitted("stop")).toHaveLength(1);
   });
-
-  it("Esc disarms without emitting", async () => {
+  it("release cancels without reviving a 4s armed window", async () => {
+    vi.useFakeTimers();
     const w = mountStop({ busy: true });
-    await w.find(".stop-btn").trigger("click");
-    await w.find(".stop-btn").trigger("keydown", { key: "Escape" });
-    expect(w.find(".stop-btn").attributes("data-armed")).toBeUndefined();
+    await w.get(".stop-btn").trigger("pointerdown", { pointerId: 1, pointerType: "mouse", isPrimary: true, button: 0 });
+    window.dispatchEvent(new PointerEvent("pointerup", { pointerId: 1 }));
+    vi.advanceTimersByTime(4100);
     expect(w.emitted("stop")).toBeUndefined();
   });
-
-  it("armed copy carries the K12 queue note when queueCount > 0", async () => {
+  it("semantic activation confirms explicitly; Esc cancels", async () => {
+    const w = mountStop({ busy: true });
+    await w.get(".stop-btn").trigger("click", { detail: 0 });
+    expect(w.get(".stop-confirm").attributes("role")).toBe("group");
+    expect(w.emitted("stop")).toBeUndefined();
+    await w.get(".stop-confirm").trigger("keydown", { key: "Escape" });
+    expect(w.find(".stop-confirm").exists()).toBe(false);
+  });
+  it("confirmation carries the preserved queue note", async () => {
     const w = mountStop({ busy: true, queueCount: 3 });
-    await w.find(".stop-btn").trigger("click");
-    expect(w.find(".stop-queue-note").text()).toContain("3");
+    await w.get(".stop-alternative").trigger("click");
+    expect(w.get(".stop-queue-note").text()).toContain("3");
+    await w.get(".stop-confirm .btn-danger").trigger("click");
+    expect(w.emitted("stop")).toHaveLength(1);
   });
 });
 

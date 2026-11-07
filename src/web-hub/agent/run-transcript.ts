@@ -10,9 +10,11 @@
  *  - run end: `tap.flush()` → gap → `run_end{lastSeq}` (never overtakes an unsent gap); an
  *    undelivered end goes to `endedPending` (cap `RUN_TX.endPendingMax`, TTL
  *    `RUN_TX.endPendingTtlMs`, retried on tick/link-up in gap-then-end order);
- *  - snapshot: synchronous `tap.flush()`, read `seq` as the watermark, then walk the branch
- *    tail → `projectSessionEntry` until `limit`/`maxBytes` (byte accounting identical to
- *    `snapshot.ts`'s `buildBranchReply`), reply `seq=watermark` + `tapId`;
+ *  - snapshot: synchronous `tap.flush()`, read `seq` as the watermark, then walk the RAW
+ *    branch tail newest-first, projecting lazily until `limit`/`maxBytes` (only the tail
+ *    window is ever projected — byte accounting identical to `snapshot.ts`'s
+ *    `buildBranchReply`, output byte-identical to "project all, then trim the head"),
+ *    reply `seq=watermark` + `tapId`;
  *  - terminal runs unconditionally take the deterministic file path (`sessionFile` +
  *    `finalLeafId`, else `not_persisted` / `leaf_unknown`), regardless of any live handle.
  *
@@ -263,35 +265,65 @@ export function createRunTranscripts(deps: {
         live = again;
         raw = [];
       }
-      const projected: WireEntry[] = [];
-      for (const r of raw) {
-        const e = projectSessionEntry(r);
-        if (e !== undefined) projected.push(e);
-      }
-      let head = projected.length; // candidates are projected[0..head-1]; `before` shrinks it
+      // Tail-window projection (2026-11 R1 defensive fix, same incident class as the hub-side
+      // refresh-slow rule): the branch is walked RAW, newest → oldest, projecting lazily —
+      // only the tail window (plus at most one budget-overflow probe and one hasMore probe) is
+      // ever projected, never the whole in-memory branch. The output stays byte-identical to
+      // the old "project all, then trim the head" semantics: identical byte accounting
+      // (JSON.stringify bytes +1 per line, as snapshot.ts's buildBranchReply), `truncated`
+      // set exactly on a budget overflow (the overflowing entry IS projected but not kept),
+      // and `hasMore` ⇔ a projectable entry exists strictly below the window.
+      let hi = raw.length; // candidates are raw[0..hi); `before` shrinks it
       if (f.before !== undefined) {
-        const at = projected.findIndex((e) => e.id === f.before);
+        // Locating `before` needs id compares only; a raw entry whose id matches is projected
+        // ONCE to confirm projectability (the old findIndex ran over the projected array, so
+        // only a PROJECTABLE entry could match, first/oldest one wins).
+        let at = -1;
+        for (let i = 0; i < raw.length; i++) {
+          const r = raw[i];
+          if (r === null || typeof r !== "object" || (r as Record<string, unknown>)["id"] !== f.before) continue;
+          if (projectSessionEntry(r) !== undefined) {
+            at = i;
+            break;
+          }
+        }
         if (at === -1) {
           replyErr(f, "leaf_missing");
           return;
         }
-        head = at;
+        hi = at;
       }
       const limit = Math.max(0, Math.floor(f.limit));
       const budget = Math.max(0, Math.min(f.maxBytes, RUN_TX.maxBytes));
-      // Tail walk, byte accounting identical to snapshot.ts's buildBranchReply (+1 per line).
+      const kept: WireEntry[] = []; // newest-first during the walk; reversed before the reply
       let used = 0;
-      let start = head;
       let truncated = false;
-      for (let i = head - 1; i >= 0 && start > head - limit; i--) {
-        const size = Buffer.byteLength(JSON.stringify(projected[i]), "utf8") + 1;
+      let i = hi - 1;
+      for (; i >= 0 && kept.length < limit; i--) {
+        const e = projectSessionEntry(raw[i]);
+        if (e === undefined) continue; // non-projectable entries are invisible to both algorithms
+        const size = Buffer.byteLength(JSON.stringify(e), "utf8") + 1;
         if (used + size > budget) {
           truncated = true;
           break;
         }
         used += size;
-        start = i;
+        kept.push(e);
       }
+      // hasMore: free on a budget break (the overflowing entry is below the window ⇒ true)
+      // and on walking off the head (nothing left ⇒ false); a limit stop pays one prefix
+      // scan — typically a single extra projection, non-projectable entries cost the guard
+      // checks only (an all-junk prefix degrades to the old full walk, never worse).
+      let hasMore = truncated;
+      if (!truncated) {
+        for (; i >= 0; i--) {
+          if (projectSessionEntry(raw[i]) !== undefined) {
+            hasMore = true;
+            break;
+          }
+        }
+      }
+      kept.reverse();
       const frame: RunTxReplyFrame = {
         t: "run_tx_reply",
         rid: f.rid,
@@ -301,9 +333,9 @@ export function createRunTranscripts(deps: {
         status: live.status,
         seq: rec?.seq ?? 0, // watermark; 0 (and no tapId) when no tap is attached (§3.1)
         watching: rec !== undefined,
-        entries: projected.slice(start, head),
+        entries: kept,
         truncated,
-        hasMore: start > 0,
+        hasMore,
       };
       if (rec !== undefined) {
         frame.tapId = rec.tapId;

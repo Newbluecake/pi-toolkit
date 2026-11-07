@@ -26,6 +26,8 @@ import type { AgentCardProps } from "../../contracts.js";
 import { scheduleBadgeOf, scheduleBadgeText } from "../../logic/schedule.js";
 import { HUB_CTX } from "../control/controlContext.js";
 import { PRIVACY_LOCK_CTX } from "../privacy/privacyContext.js";
+import { injectOutdatedReload } from "../../composables/useOutdatedReload.js";
+import { orFailReason } from "@logic/outdatedReload.js";
 
 const props = defineProps<AgentCardProps>();
 const i18n = useI18n();
@@ -66,8 +68,9 @@ const needsAnswer = computed(() => {
 
 // scheduled-reports W1 (plan r3 §5.6): the ⏰ badge — hub cap sched.v1 ∧ the hub-global
 // `schedules` slot carries this sessionId's projection with ≥1 task (or a degraded store).
-// `⏰<n>` normally; `⏰!` while any task is pendingApproval. Count-only — like the needsAnswer
-// badge it is NOT gated on the privacy lock (plan: 卡片保留 needsAnswer 徽标,内容解锁后才可见 —
+// `⏰<n>` count-only (approval/pending variant removed, schedule-auto-approve r2 §6-W1 —
+// legacy pendingApproval tasks count like any other). Like the needsAnswer badge it is NOT
+// gated on the privacy lock (plan: 卡片保留 needsAnswer 徽标,内容解锁后才可见 —
 // the count is metadata, the task content stays behind the lock/panel).
 const schedBadge = computed(() => {
   const agent = hub?.state.value.agents.get(props.card.key);
@@ -75,6 +78,52 @@ const schedBadge = computed(() => {
   const sid = typeof session?.sessionId === "string" ? session.sessionId : undefined;
   return scheduleBadgeOf(hub?.state.value.hub?.["caps"], hub?.state.value.schedules, sid);
 });
+
+// 2026-10-27 outdated chip 收敛：卡片上唯一的 outdated 表达就是这枚「需更新」chip（warning
+// 配色）。状态 pill 恢复真实状态（agentCardModel.statusLabelOf 不再返回 outdated 文案）。
+// chip 可点击：复用 #65 的 OrCoordinator（request 自动排队 / queued·parked 点击取消），
+// `.prevent.stop` 阻止外层 <a> 导航（与 privacy-lock-btn 同款）。无 provider（单测/独立
+// 挂载）⇒ 退化为纯展示 chip，点击无操作。
+const outdatedReload = injectOutdatedReload();
+const orPhase = computed(() => (props.card.outdated ? outdatedReload?.entryOf(props.card.key).phase : undefined));
+const orBusy = computed(() => {
+  const p = orPhase.value;
+  return p === "queued" || p === "sending" || p === "awaiting" || p === "parked";
+});
+// #23 P-A（D9）：failed 相的 chip 失败态——danger 配色、alert 图标、chipFailed 文案；
+// title/aria-label 为「{reason} — 点击重试」，点击行为不变（仍 request）。原因统一经
+// orFailReason（与横幅/汇总行/空态结果行同一来源）。
+const orFailed = computed(() => orPhase.value === "failed");
+const orFailText = computed(() => {
+  if (!orFailed.value || outdatedReload === undefined) return "";
+  const r = orFailReason(outdatedReload.entryOf(props.card.key));
+  return "key" in r ? t(r.key) : r.raw;
+});
+const orChipText = computed(() =>
+  orBusy.value ? t("outdated.chipQueued") : orFailed.value ? t("outdated.chipFailed") : t("outdated.chipNeedsUpdate"),
+);
+const orChipTitle = computed(() =>
+  orBusy.value
+    ? t("outdated.chipQueuedTitle")
+    : orFailed.value
+      ? t("outdated.chipFailedTitle", { reason: orFailText.value })
+      : t("outdated.chipTitle"),
+);
+/** #23 D9：失败态 danger 配色。SFC 内联 style 块被 source-scan 禁止、
+ * styles/outdated-reload.css 不在 #23 P-A 文件域——对象式 `:style`（`{` 起头，白名单形状；
+ * CSSOM 写入不受 CSP `style-src 'self'` 限制，与 DashboardView 的 layoutStyle 同款），颜色引
+ * tokens 变量；P-C 收口时可迁回 CSS。 */
+const CHIP_FAILED_STYLE = {
+  borderColor: "var(--c-danger-border)",
+  background: "var(--c-danger-soft)",
+  color: "var(--c-danger)",
+} as const;
+function onOutdatedClick(): void {
+  if (outdatedReload === undefined) return;
+  const p = outdatedReload.entryOf(props.card.key).phase;
+  if (p === "queued" || p === "parked") outdatedReload.cancelQueue(props.card.key);
+  else if (p === "idle" || p === "failed" || p === "done") outdatedReload.request(props.card.key);
+}
 
 // ---------------------------------------------------------------------------
 // web-hub-privacy plan v2.1 (P2): the 标记入口 — a lock affordance on the card. 锁定态常显
@@ -111,6 +160,16 @@ const managed = computed(() => managedFor(hub?.state.value.spawns ?? null, props
 // `restoring`; a freshly restored card shows `restored` for the stability window.
 const restoring = computed(() => restoringKeys(hub?.state.value.spawns ?? null).has(props.card.key));
 const restored = computed(() => managed.value !== undefined && isFreshlyRestored(managed.value));
+
+// Legacy independent cards cannot distinguish main busy from bash-promoted running.
+// Prefer explicit child activity; infer main activity only without a bash count.
+const activitySource = computed(() => {
+  const c = props.card;
+  if (c.down || c.stale || c.visualState === "offline" || c.visualState === "stale") return "none";
+  if (c.activitySource !== undefined) return c.activitySource;
+  const agent = c.runningSubCount > 0 || (c.visualState === "running" && c.runningBashCount === 0);
+  return agent ? "agent" : c.runningBashCount > 0 ? "bash" : "none";
+});
 
 const dotClass = computed(() => {
   switch (props.card.visualState) {
@@ -167,7 +226,9 @@ const kindLabel = computed(() => (props.card.kind === "rpc" ? "RPC" : "TUI"));
     :href="`#/agent/${encodeURIComponent(card.key)}`"
     :aria-current="selected ? 'page' : undefined"
     :data-st="card.visualState"
+    :data-activity-source="activitySource"
     :data-density="compact ? 'compact' : 'detailed'"
+    :data-outdated="card.outdated ? 'true' : undefined"
   >
     <!-- Compact (default): directory + run state (state pill, running sub-agent / background
          command counts, needs-answer) + @alias (+ unread badge) on row 1, title on row 2. Cost,
@@ -190,25 +251,36 @@ const kindLabel = computed(() => (props.card.kind === "rpc" ? "RPC" : "TUI"));
             <span
               v-if="card.statusLabel && !(needsAnswer && card.visualState === 'waiting')"
               class="pill pill-inline"
+              :class="{ 'sr-only': card.visualState === 'running' }"
               data-compact="state"
               :data-st="card.visualState"
             >
               <AppIcon v-if="card.visualState === 'waiting'" name="message" class="icon-sm" />
               <AppIcon v-else-if="card.visualState === 'offline'" name="unplug" class="icon-sm" />
-              <AppIcon v-else-if="card.outdated" name="info" class="icon-sm" />
               {{ card.statusLabel }}
             </span>
-            <!-- #65 outdated-reload（预览 §5）：落后会话的「需更新」chip（warning 配色）。
-                 statusLabel 只在非 running 时才让位给 outdated 文案，此 chip 与此无关、
-                 运行中也显示；点卡片进详情页即见顶部提示条（§1）。 -->
-            <span
+            <!-- #65 outdated-reload（预览 §5）+ 2026-10-27 chip 收敛：落后会话唯一的
+                 outdated 表达——紧凑「需更新」chip（warning 配色），tooltip 带完整说明；
+                 点击触发该会话 /agent reload（复用 OrCoordinator，运行中自动排队，
+                 排队中再点取消）。状态 pill 恢复真实状态，不再被 outdated 文案顶替。
+                 #23 D9：failed 相另 danger 配色 + alert 图标 + chipFailed 文案。 -->
+            <button
               v-if="card.outdated"
+              type="button"
               class="chip chip-outdated"
+              :class="{ 'chip-outdated-failed': orFailed }"
+              :style="orFailed ? CHIP_FAILED_STYLE : undefined"
               data-compact="outdated"
-              :title="t('outdated.chipNeedsUpdate')"
+              :title="orChipTitle"
+              :aria-label="orFailed ? orChipTitle : undefined"
+              @click.prevent.stop="onOutdatedClick"
             >
-              <AppIcon name="info" class="icon-sm" />{{ t("outdated.chipNeedsUpdate") }}
-            </span>
+              <AppIcon
+                :name="orBusy ? 'loader' : orFailed ? 'alert' : 'info'"
+                class="icon-sm"
+                :class="{ spin: orBusy }"
+              />{{ orChipText }}
+            </button>
             <span
               v-if="card.runningSubCount > 0"
               class="chip chip-run-count"
@@ -219,11 +291,12 @@ const kindLabel = computed(() => (props.card.kind === "rpc" ? "RPC" : "TUI"));
             >
             <span
               v-if="card.runningBashCount > 0"
-              class="chip chip-run-count"
+              class="chip chip-run-count agent-bash-activity"
               data-compact="bash"
               :title="t('agents.runningCount', { n: card.runningBashCount })"
               :aria-label="t('agents.runningCount', { n: card.runningBashCount })"
-              ><AppIcon name="terminal" class="icon-sm" /><span class="num">{{ card.runningBashCount }}</span></span
+              ><span class="agent-terminal-icon"><AppIcon name="terminal" class="icon-sm" /></span
+              ><span class="num">{{ card.runningBashCount }}</span></span
             >
             <span v-if="xsAlias" class="chip chip-xs-alias" translate="no" :title="`@${xsAlias}`">{{
               aliasChipText(xsAlias)
@@ -238,22 +311,17 @@ const kindLabel = computed(() => (props.card.kind === "rpc" ? "RPC" : "TUI"));
             >
               <AppIcon name="inbox" /><span class="num">{{ xsUnreadLabel(xsUnread) }}</span>
             </span>
-            <!-- scheduled-reports W1 (§5.6): ⏰ badge (count-only; `!` = 待确认). -->
+            <!-- scheduled-reports W1 (§5.6): ⏰ badge (count-only). -->
             <span
               v-if="schedBadge !== undefined"
               class="chip chip-sched"
               data-compact="sched"
-              :data-pending="schedBadge.pending ? 'true' : undefined"
               role="img"
               translate="no"
-              :title="t(schedBadge.pending ? 'agents.schedBadgePending' : 'agents.schedBadge', { n: schedBadge.count })"
-              :aria-label="
-                t(schedBadge.pending ? 'agents.schedBadgePending' : 'agents.schedBadge', { n: schedBadge.count })
-              "
+              :title="t('agents.schedBadge', { n: schedBadge.count })"
+              :aria-label="t('agents.schedBadge', { n: schedBadge.count })"
             >
-              <AppIcon name="clock" class="icon-sm" /><span class="num">{{
-                schedBadge.pending ? "!" : scheduleBadgeText(schedBadge.count)
-              }}</span>
+              <AppIcon name="clock" class="icon-sm" /><span class="num">{{ scheduleBadgeText(schedBadge.count) }}</span>
             </span>
           </span>
         </span>
@@ -278,10 +346,25 @@ const kindLabel = computed(() => (props.card.kind === "rpc" ? "RPC" : "TUI"));
           <Teleport :to="belowEl ?? 'body'" :disabled="!chipsBelow || !belowEl">
             <span ref="chipsEl" class="agent-chips">
               <span class="chip" translate="no">{{ kindLabel }}</span>
-              <!-- #65 outdated-reload（预览 §5）：「需更新」chip（warning 配色），状态类位置。 -->
-              <span v-if="card.outdated" class="chip chip-outdated" :title="t('outdated.chipNeedsUpdate')">
-                <AppIcon name="info" class="icon-sm" />{{ t("outdated.chipNeedsUpdate") }}
-              </span>
+              <!-- #65 outdated-reload（预览 §5）+ 2026-10-27 chip 收敛：「需更新」chip
+                   （warning 配色），状态类位置；点击触发单会话 /agent reload。
+                   #23 D9：failed 相另 danger 配色 + alert 图标 + chipFailed 文案。 -->
+              <button
+                v-if="card.outdated"
+                type="button"
+                class="chip chip-outdated"
+                :class="{ 'chip-outdated-failed': orFailed }"
+                :style="orFailed ? CHIP_FAILED_STYLE : undefined"
+                :title="orChipTitle"
+                :aria-label="orFailed ? orChipTitle : undefined"
+                @click.prevent.stop="onOutdatedClick"
+              >
+                <AppIcon
+                  :name="orBusy ? 'loader' : orFailed ? 'alert' : 'info'"
+                  class="icon-sm"
+                  :class="{ spin: orBusy }"
+                />{{ orChipText }}
+              </button>
               <span v-if="card.visualState === 'offline'" class="chip chip-stopped" translate="no">
                 {{ t("agents.stopped") }}
               </span>
@@ -332,23 +415,16 @@ const kindLabel = computed(() => (props.card.kind === "rpc" ? "RPC" : "TUI"));
               >
                 <AppIcon name="inbox" /><span class="num">{{ xsUnreadLabel(xsUnread) }}</span>
               </span>
-              <!-- scheduled-reports W1 (§5.6): ⏰ badge (count-only; `!` = 待确认). -->
+              <!-- scheduled-reports W1 (§5.6): ⏰ badge (count-only). -->
               <span
                 v-if="schedBadge !== undefined"
                 class="chip chip-sched"
-                :data-pending="schedBadge.pending ? 'true' : undefined"
                 role="img"
                 translate="no"
-                :title="
-                  t(schedBadge.pending ? 'agents.schedBadgePending' : 'agents.schedBadge', { n: schedBadge.count })
-                "
-                :aria-label="
-                  t(schedBadge.pending ? 'agents.schedBadgePending' : 'agents.schedBadge', { n: schedBadge.count })
-                "
+                :title="t('agents.schedBadge', { n: schedBadge.count })"
+                :aria-label="t('agents.schedBadge', { n: schedBadge.count })"
               >
-                <AppIcon name="clock" /><span class="num">{{
-                  schedBadge.pending ? "!" : scheduleBadgeText(schedBadge.count)
-                }}</span>
+                <AppIcon name="clock" /><span class="num">{{ scheduleBadgeText(schedBadge.count) }}</span>
               </span>
             </span>
           </Teleport>
@@ -428,25 +504,28 @@ const kindLabel = computed(() => (props.card.kind === "rpc" ? "RPC" : "TUI"));
             aria-hidden="true"
             >·</span
           >
-          <span
-            ><AppIcon name="terminal" class="icon-sm" /><span class="num">{{
-              t("agents.runningCount", { n: card.runningBashCount })
-            }}</span></span
+          <span class="agent-bash-activity"
+            ><span class="agent-terminal-icon"><AppIcon name="terminal" class="icon-sm" /></span
+            ><span class="num">{{ t("agents.runningCount", { n: card.runningBashCount }) }}</span></span
           >
         </template>
         <template v-if="card.statusLabel">
           <span
             v-if="
-              card.modelShort || card.contextPercent !== null || card.runningSubCount > 0 || card.runningBashCount > 0
+              card.visualState !== 'running' &&
+              (card.modelShort || card.contextPercent !== null || card.runningSubCount > 0 || card.runningBashCount > 0)
             "
             class="sep"
             aria-hidden="true"
             >·</span
           >
-          <span class="pill pill-inline" :data-st="card.visualState">
+          <span
+            class="pill pill-inline"
+            :class="{ 'sr-only': card.visualState === 'running' }"
+            :data-st="card.visualState"
+          >
             <AppIcon v-if="card.visualState === 'waiting'" name="message" class="icon-sm" />
             <AppIcon v-else-if="card.visualState === 'offline'" name="unplug" class="icon-sm" />
-            <AppIcon v-else-if="card.outdated" name="info" class="icon-sm" />
             {{ card.statusLabel }}
           </span>
         </template>

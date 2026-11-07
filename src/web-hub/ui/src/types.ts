@@ -51,7 +51,7 @@ export type { LoadTopOutcome };
 // default-model plan F1: the prefs outcome/wire shapes (SpawnRow/SettingsView consume them
 // through this single re-export, same no-second-import-path rule as above).
 export type { SpawnPrefsOutcome, SpawnPrefsWire };
-// todo-web §4 (T4): the detail TodoPanel's prop type. `import type` only — the protocol
+// todo-web §4 (T4): the detail TasksPanel's todo-section prop type. `import type` only — the protocol
 // module never becomes a runtime dependency of the UI bundle through this file.
 export type { TodoTaskWire, TodoWire };
 
@@ -144,8 +144,8 @@ export interface AgentState {
    * when nothing was omitted) — drives the “另有 N 个未列出” rows in `FleetTree`. */
   readonly fleetOmitted?: FleetOmittedWire;
   /** todo-web §4 (T4): the status reducer's mirror of `StatusInfo.todo` (the main session's
-   * task-list summary). Absent = no tasks / todo disabled / web-hub off — the detail header's
-   * TodoPanel renders nothing then. Optional per the frozen-types convention. */
+   * task-list summary). Absent = no tasks / todo disabled / web-hub off — the detail
+   * TasksPanel's todo section renders nothing then. Optional per the frozen-types convention. */
   readonly todo?: TodoWire;
   /** steer-recall plan §7 (P-ui): the ACCEPTED `status.held` snapshot rows (Y2 scope-gated,
    * U-MERGE tombstone-filtered, same-scope union — a row the newest snapshot dropped but no
@@ -399,6 +399,12 @@ export interface ControlHandle {
    *  row / bash row. No optimistic ctl item (the `queryCommand` precedent — the state change
    *  arrives via the next `status.archived` frame); the drawer owns its own undo toast. */
   setArchived(agentKey: string, kind: "run" | "bash", id: string, set: "archive" | "unarchive"): Promise<CmdOutcome>;
+  /** 2026-10-28 (fleet bash 「(+N more)」 must be displayable or archivable): archive the omitted
+   *  tail of a session's terminal bash jobs in one batch. Kind-only — the agent derives the id set
+   *  itself (the browser cannot see those rows). No optimistic ctl item, same as `setArchived`.
+   *  Optional per the frozen-handle convention (component fakes may omit it — the button then
+   *  stays hidden, which is also the no-provider render). */
+  archiveOmitted?(agentKey: string, kind: "bash"): Promise<CmdOutcome>;
   // `id` is optional (defaults to a freshly generated one inside `createControl`) — the caller
   // may instead generate it itself and pass it through, so it can be tracked synchronously
   // BEFORE the wire round-trip settles (acc32-B3 fix, see AgentDetail.vue's `onDialogAnswer`).
@@ -425,6 +431,18 @@ export interface ControlHandle {
    * Identify-only: never carries `expect`. Optional per the frozen-types convention (an older
    * handle/test fake without it renders the queue copy-only). */
   recall?(agentKey: string, target: string): Promise<CmdOutcome>;
+  /** fabric-xs-activation plan §3 P4 (arch §4.4): the cross-session activate/query action —
+   *  `activate` targets an already-delivered messageId with its ORIGINAL activationKey
+   *  (never text, U6); `query` is strictly read-only. SINGLEFLIGHT per business key
+   *  (`messageId|activationKey`) — a double-click returns the in-flight promise, so one
+   *  business key never bills twice; a NEW attempt after settle mints a fresh cmd id.
+   *  No optimistic ctl item (the `setArchived` precedent — the result arrives via the next
+   *  status frame). Optional per the frozen-handle convention: the method exists iff the
+   *  transport offers `xsActivate` — without it the request area's buttons never render. */
+  xsActivate?(
+    agentKey: string,
+    args: { action: "activate" | "query"; messageId: string; activationKey?: string },
+  ): Promise<CmdOutcome>;
   /** steer-recall §7: this tab's full original text for a sent/held cmdId (session-scoped,
    * per-agent capped); `undefined` when not retained (page reloaded / evicted / other tab's). */
   originalText?(agentKey: string, sessionId: string, cmdId: string): string | undefined;
@@ -811,6 +829,8 @@ export interface AgentCardView {
    * (`status.bashJobs` wire's `running` = non-terminal rows incl. staged, 「仍在跑」 semantics);
    * 0 (no/malformed/empty wire) ⇒ the terminal-icon segment is not rendered. */
   readonly runningBashCount: number;
+  /** Live activity halo target, independent of aggregate visualState/sort/counts. */
+  readonly activitySource?: "agent" | "bash" | "none";
   /** Pre-formatted `own [+ sub $x]` cost label (tabular-nums display string). */
   readonly costLabel: string;
   /** Hover breakdown (own + subagents) when subagents cost anything; the label itself is the total only. */

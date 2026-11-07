@@ -11,6 +11,11 @@
 //
 // Every exported function is pure or takes its side effects as parameters so tests can drive it;
 // the CLI dispatcher at the bottom only runs when this file is the process entry point.
+//
+// Layout: this file keeps the CLI dispatcher and the shared primitives (every exported function).
+// The `init` body, the `--private` command bodies and the in-namespace finalize steps live in
+// init.mjs / private.mjs / finalize.mjs; they import from here and are loaded only through lazy
+// `await import("./x.mjs")` below, so a copy of this file alone still runs the other commands.
 import { spawn, spawnSync } from "node:child_process";
 import { constants as fsc } from "node:fs";
 import fs from "node:fs";
@@ -289,7 +294,7 @@ export function pathWithin(p, root) {
 
 // ───────────────────────────── small fs helpers ─────────────────────────────
 
-function lstatOrNull(p) {
+export function lstatOrNull(p) {
   try {
     return fs.lstatSync(p);
   } catch {
@@ -438,13 +443,171 @@ function writeFileAtomic(file, text, mode) {
   }
 }
 
-// ───────────────────────────── user settings file (~/.pi/agent/pi-subagent.json) ─────────────────────────────
+// ───────────────────────────── user settings file (<agentDir>/pi-toolkit.json, legacy pi-subagent.json) ─────────────────────────────
+// Mirror of src/secure/settings-lock.ts (file-name resolution S0–S7, location, write-time heal) —
+// parity: tests/secure/settings-file-resolve.test.ts / settings-file-heal.test.ts. The launcher NEVER initiates the legacy→new
+// migration; it only completes an existing crash-window S6a (healSettingsFileLocked) before it writes.
+
+export const SETTINGS_FILE_NAME = "pi-toolkit.json";
+export const LEGACY_SETTINGS_FILE_NAME = "pi-subagent.json";
 
 export function homeDir() {
   return os.homedir();
 }
-export function settingsFilePath(home = homeDir()) {
-  return path.join(home, ".pi", "agent", "pi-subagent.json");
+
+function settingsProbe(p, lstat) {
+  try {
+    const st = lstat(p);
+    return { type: st.isSymbolicLink() ? "symlink" : st.isFile() ? "file" : "other", st };
+  } catch (e) {
+    return e && (e.code === "ENOENT" || e.code === "ENOTDIR") ? { type: "none" } : { type: "other" };
+  }
+}
+function settingsSameInode(a, b) {
+  return a.st !== undefined && b.st !== undefined && a.st.dev === b.st.dev && a.st.ino === b.st.ino;
+}
+function settingsTry(fn) {
+  try {
+    return fn();
+  } catch {
+    return undefined;
+  }
+}
+
+/** S0–S7 (plan §3.3). Pure read, never throws. deps: {lstat, readlink, realpath} test seams. */
+export function resolveSettingsFile(dir, deps = {}) {
+  const lstat = deps.lstat ?? ((p) => fs.lstatSync(p));
+  const readlink = deps.readlink ?? ((p) => fs.readlinkSync(p));
+  const realpath = deps.realpath ?? ((p) => fs.realpathSync(p));
+  const newPath = path.join(dir, SETTINGS_FILE_NAME);
+  const legacyPath = path.join(dir, LEGACY_SETTINGS_FILE_NAME);
+  const n = settingsProbe(newPath, lstat);
+  const l = settingsProbe(legacyPath, lstat);
+  const isCompatLink = () => {
+    const target = settingsTry(() => readlink(legacyPath));
+    if (target === SETTINGS_FILE_NAME || target === newPath) return true;
+    const rl = settingsTry(() => realpath(legacyPath));
+    const rn = settingsTry(() => realpath(newPath));
+    return rl !== undefined && rn !== undefined && rl === rn;
+  };
+  if (n.type !== "none") {
+    let legacy;
+    if (l.type === "none") legacy = "absent";
+    else if (l.type === "symlink") legacy = isCompatLink() ? "compat-link" : "conflict";
+    else if (l.type === "file" && n.type === "file" && settingsSameInode(n, l)) legacy = "same-inode";
+    else legacy = "conflict";
+    const legacyNewer =
+      legacy === "conflict" && l.type === "file" && n.st !== undefined && l.st !== undefined
+        ? l.st.mtimeMs > n.st.mtimeMs
+        : undefined;
+    return {
+      kind: "new",
+      path: newPath,
+      newPath,
+      legacyPath,
+      legacy,
+      ...(legacyNewer === undefined ? {} : { legacyNewer }),
+    };
+  }
+  if (l.type === "none") return { kind: "none", path: newPath, newPath, legacyPath, compatLinkDangling: false };
+  if (l.type === "symlink") {
+    const target = settingsTry(() => readlink(legacyPath));
+    if (target === SETTINGS_FILE_NAME || target === newPath)
+      return { kind: "none", path: newPath, newPath, legacyPath, compatLinkDangling: true };
+    return { kind: "legacy", path: legacyPath, newPath, legacyPath, legacyType: "symlink" };
+  }
+  return { kind: "legacy", path: legacyPath, newPath, legacyPath, legacyType: l.type === "file" ? "file" : "other" };
+}
+
+/** Directory tiers over the file-name level (default / agentDir / inherited, plan §3.3). */
+export function resolveSettingsLocation(agent, deps = {}) {
+  const primary = resolveSettingsFile(agent.dir, deps);
+  if (agent.source === "default") return { ...primary, scope: "default", agent };
+  if (primary.kind !== "none" || primary.compatLinkDangling) return { ...primary, scope: "agentDir", agent };
+  const home = resolveSettingsFile(agent.home, deps);
+  if (home.kind !== "none") return { ...home, scope: "inherited", agent };
+  return { ...primary, scope: "agentDir", agent };
+}
+
+const SETTINGS_LNK_RE = /^pi-subagent\.json\.[0-9a-f]{16}\.lnk$/;
+function settingsLnkSuffix() {
+  return `${process.pid.toString(16)}${Date.now().toString(16)}`.padStart(16, "0").slice(-16);
+}
+function settingsCleanupLnk(dir) {
+  let names;
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    if (!SETTINGS_LNK_RE.test(name)) continue;
+    const full = path.join(dir, name);
+    try {
+      if (fs.lstatSync(full).isSymbolicLink()) fs.unlinkSync(full);
+    } catch {
+      /* best effort */
+    }
+  }
+}
+
+/**
+ * LOCK-HELD ONLY (plan §3.4.1): completes a crash-window S6a (two names, ONE inode) into S5 — compat
+ * symlink swapped over the legacy name. Every other state is a no-op. Never throws.
+ * → "healed" | "reverted-to-legacy" | "noop" | "conflict". deps: {lstat, symlink, readlink, realpath}.
+ */
+export function healSettingsFileLocked(dir, deps = {}) {
+  try {
+    const lstat = deps.lstat ?? ((p) => fs.lstatSync(p));
+    const st = resolveSettingsFile(dir, deps);
+    if (!(st.kind === "new" && st.legacy === "same-inode")) return "noop";
+    settingsCleanupLnk(dir);
+    const newPath = path.join(dir, SETTINGS_FILE_NAME);
+    const legacyPath = path.join(dir, LEGACY_SETTINGS_FILE_NAME);
+    const lnk = path.join(dir, `pi-subagent.json.${settingsLnkSuffix()}.lnk`);
+    try {
+      (deps.symlink ?? ((t, p) => fs.symlinkSync(t, p)))(SETTINGS_FILE_NAME, lnk);
+    } catch {
+      if (settingsSameInode(settingsProbe(newPath, lstat), settingsProbe(legacyPath, lstat))) {
+        try {
+          fs.unlinkSync(newPath);
+        } catch {
+          return "noop";
+        }
+        return "reverted-to-legacy";
+      }
+      return "conflict";
+    }
+    const n = settingsProbe(newPath, lstat);
+    const l = settingsProbe(legacyPath, lstat);
+    if (!(n.type === "file" && l.type === "file" && settingsSameInode(n, l))) {
+      settingsTry(() => fs.unlinkSync(lnk));
+      return "conflict";
+    }
+    try {
+      fs.renameSync(lnk, legacyPath);
+    } catch {
+      settingsTry(() => fs.unlinkSync(lnk));
+      return "noop";
+    }
+    return "healed";
+  } catch {
+    return "noop";
+  }
+}
+
+/** The launcher's settings file: new name when it exists / is a dangling compat target, else the legacy
+ *  name — and with NO settings file at all the legacy name (拍板②: keeps the A′ golden byte-identical). */
+export function settingsFilePath(home = homeDir(), env = process.env) {
+  const loc = resolveSettingsLocation(resolveAgentDir(env, home));
+  if (loc.kind !== "none" || loc.compatLinkDangling) return loc.path;
+  return path.join(path.dirname(loc.newPath), LEGACY_SETTINGS_FILE_NAME);
+}
+
+/** Write-time heal + resolve, to be called INSIDE the settings lock before reading the target. */
+function healedSettingsFilePath(home, env = process.env) {
+  healSettingsFileLocked(path.dirname(settingsFilePath(home, env)));
+  return settingsFilePath(home, env);
 }
 
 /** {kind:"missing"} | {kind:"ok", value} | {kind:"error", message} */
@@ -463,17 +626,67 @@ export function readJsonFile(file) {
   }
 }
 
-export function loadSecureConfig(home = homeDir()) {
-  const file = settingsFilePath(home);
+/** First registered vault whose dir/mnt nests with the (env-selected) agentDir — lexical AND physical. */
+export function agentDirVaultOverlap(agentDir, vaults) {
+  const lex = path.resolve(agentDir);
+  const phys = realpathNearest(lex);
+  const nested = (a, b) => pathWithin(a, b) || pathWithin(b, a);
+  return vaults.find(
+    (v) =>
+      nested(lex, path.resolve(v.dir)) ||
+      nested(lex, path.resolve(v.mnt)) ||
+      nested(phys, realpathNearest(v.dir)) ||
+      nested(phys, path.join(realpathNearest(path.dirname(v.mnt)), path.basename(v.mnt))),
+  );
+}
+
+/**
+ * {file, cfg, readError?, agentProblem?}. S6b (two diverging settings files): their `secure` sections
+ * must agree, else an INVALID config (fail-closed ⇒ run/unlock exit 78). An env-selected agentDir
+ * nested with a registered vault ⇒ `agentProblem` (resolveVault refuses; status prints it).
+ */
+export function loadSecureConfig(home = homeDir(), env = process.env) {
+  const agent = resolveAgentDir(env, home);
+  const loc = resolveSettingsLocation(agent);
+  const file = loc.kind === "none" && !loc.compatLinkDangling ? settingsFilePath(home, env) : loc.path;
   const r = readJsonFile(file);
   if (r.kind === "error") return { file, readError: r.message, cfg: parseSecureConfig(undefined, home) };
-  return { file, cfg: parseSecureConfig(r.kind === "ok" ? r.value : undefined, home) };
+  if (loc.kind === "new" && loc.legacy === "conflict") {
+    const o = readJsonFile(loc.legacyPath);
+    if (o.kind === "error") return { file, readError: o.message, cfg: parseSecureConfig(undefined, home) };
+    if (o.kind === "ok") {
+      const secureOf = (x) => (x.kind === "ok" && isPlainObject(x.value) ? x.value.secure : undefined);
+      if (canonicalJson(secureOf(r)) !== canonicalJson(secureOf(o)))
+        return {
+          file,
+          cfg: {
+            present: true,
+            enabled: true,
+            valid: false,
+            vaults: [],
+            invalid: [],
+            error: `两份设置文件的 secure 段不一致：${loc.newPath} 与 ${loc.legacyPath}（请手动合并到 ${SETTINGS_FILE_NAME} 后删除或改名 ${LEGACY_SETTINGS_FILE_NAME}）`,
+          },
+        };
+    }
+  }
+  const cfg = parseSecureConfig(r.kind === "ok" ? r.value : undefined, home);
+  if (agent.source === "env" && cfg.valid && cfg.enabled) {
+    const hit = agentDirVaultOverlap(agent.dir, cfg.vaults);
+    if (hit)
+      return {
+        file,
+        cfg,
+        agentProblem: `PI_CODING_AGENT_DIR（${agent.dir}）位于保险库 ${hit.name} 内：不支持（设置登记会藏进它自己描述的保险库）`,
+      };
+  }
+  return { file, cfg };
 }
 
 export const SETTINGS_LOCK_NAME = ".pi-subagent.json.lock";
 export const SETTINGS_LOCK_WAIT_S = 10;
-export function settingsLockPath(home = homeDir()) {
-  return path.join(path.dirname(settingsFilePath(home)), SETTINGS_LOCK_NAME);
+export function settingsLockPath(home = homeDir(), env = process.env) {
+  return path.join(path.dirname(settingsFilePath(home, env)), SETTINGS_LOCK_NAME);
 }
 
 /**
@@ -551,8 +764,8 @@ export function registerVaultUnlocked(
     throw new Error(`保险库名不合法：${JSON.stringify(name)}（需匹配 ${VAULT_NAME_RE}）`);
   if (pending !== undefined && (typeof pending !== "string" || !PENDING_RE.test(pending)))
     throw new Error(`pending 须匹配 ${PENDING_RE}：${JSON.stringify(pending)}`);
-  const file = settingsFilePath(home);
-  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  fs.mkdirSync(path.dirname(settingsFilePath(home)), { recursive: true, mode: 0o700 });
+  const file = healedSettingsFilePath(home);
   const { st, root } = loadMutableSettings(file);
   const secure = { ...(root.secure ?? {}) };
   const vaults = mutableVaults(secure, file);
@@ -709,7 +922,7 @@ export function patchVaultEntryUnlocked(name, guard, patch, home = homeDir()) {
     throw new Error(`保险库名不合法：${JSON.stringify(name)}（需匹配 ${VAULT_NAME_RE}）`);
   assertTxnGuard(guard);
   assertTxnPatch(patch);
-  const file = settingsFilePath(home);
+  const file = healedSettingsFilePath(home);
   if (!lstatOrNull(file)) return { kind: "missing" }; // nothing claimed — never create for a patch
   const { st, root } = loadMutableSettings(file);
   const secure = { ...(root.secure ?? {}) };
@@ -743,7 +956,7 @@ export function removeVaultEntryUnlocked(name, guard, home = homeDir()) {
   if (typeof name !== "string" || !VAULT_NAME_RE.test(name))
     throw new Error(`保险库名不合法：${JSON.stringify(name)}（需匹配 ${VAULT_NAME_RE}）`);
   assertTxnGuard(guard, { requirePending: true });
-  const file = settingsFilePath(home);
+  const file = healedSettingsFilePath(home);
   if (!lstatOrNull(file)) return { kind: "missing" };
   const { st, root } = loadMutableSettings(file);
   const secure = { ...(root.secure ?? {}) };
@@ -803,16 +1016,17 @@ export function removeVaultEntry(name, guard, { home = homeDir(), lockWaitS = SE
  * {kind:"ok", vault, registered} | {kind:"error", code, message}. `allowUnregistered` (init only)
  * derives the default paths for a name that is not in settings yet.
  */
-export function resolveVault(name, { allowUnregistered = false, home = homeDir() } = {}) {
+export function resolveVault(name, { allowUnregistered = false, home = homeDir(), allowAgentInVault = false } = {}) {
   if (typeof name !== "string" || !VAULT_NAME_RE.test(name))
     return {
       kind: "error",
       code: EXIT.USAGE,
       message: `保险库名不合法：${JSON.stringify(name)}（需匹配 ${VAULT_NAME_RE}）`,
     };
-  const { file, cfg, readError } = loadSecureConfig(home);
+  const { file, cfg, readError, agentProblem } = loadSecureConfig(home);
   if (readError) return { kind: "error", code: EXIT.CONFIG, message: `设置文件无法读取：${readError}` };
   if (!cfg.valid) return { kind: "error", code: EXIT.CONFIG, message: `${file}：${cfg.error}` };
+  if (agentProblem && !allowAgentInVault) return { kind: "error", code: EXIT.CONFIG, message: agentProblem };
   const bad = cfg.invalid.find((x) => x.name === name);
   if (bad) return { kind: "error", code: EXIT.CONFIG, message: `${file}：secure.vaults.${name} 非法（${bad.reason}）` };
   const v = cfg.vaults.find((x) => x.name === name);
@@ -1083,7 +1297,7 @@ export function legacyRefusal(v) {
   );
 }
 
-function requireNewLayout(v) {
+export function requireNewLayout(v) {
   if (v.layout === "legacy") throw new CliError(EXIT.CONFIG, legacyRefusal(v));
 }
 
@@ -1361,7 +1575,7 @@ export function unclaimInitEntryUnlocked(name, written, before, home = homeDir()
     throw new Error(`保险库名不合法：${JSON.stringify(name)}（需匹配 ${VAULT_NAME_RE}）`);
   assertVaultEntryShape(written);
   if (before !== undefined && !isPlainObject(before)) throw new Error("before 须为对象");
-  const file = settingsFilePath(home);
+  const file = healedSettingsFilePath(home);
   if (!lstatOrNull(file)) return { kind: "missing" };
   const { st, root } = loadMutableSettings(file);
   const secure = { ...(root.secure ?? {}) };
@@ -2156,11 +2370,11 @@ export function auditParsedArgs(parsed, { cwd, sessionsRoot, home = homeDir(), p
 
 // ───────────────────────────── occupancy scan + finalize (§2.5) ─────────────────────────────
 
-const TIMEOUT = Symbol("timeout");
+export const TIMEOUT = Symbol("timeout");
 // REF'd on purpose: an unref'd sleep is the only thing alive during a retry back-off, and the
 // process would silently exit 0 mid-flow.
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-function deadlineRace(promise, deadline) {
+export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+export function deadlineRace(promise, deadline) {
   return new Promise((resolve, reject) => {
     const t = setTimeout(() => resolve(TIMEOUT), Math.max(0, deadline - Date.now()));
     t.unref();
@@ -2422,7 +2636,7 @@ export async function finalizeBounded(v, opts = {}) {
 
 // ───────────────────────────── swap / core / traffic-record detection (warn only) ─────────────────────────────
 
-function readTextOr(p, fallback) {
+export function readTextOr(p, fallback) {
   try {
     return fs.readFileSync(p, "utf8");
   } catch {
@@ -2475,10 +2689,27 @@ export function coreWarnings(corePattern) {
   return [];
 }
 
-function piAgentDir(home) {
-  const env = process.env.PI_CODING_AGENT_DIR;
-  if (env) return env === "~" ? home : env.startsWith("~/") ? path.join(home, env.slice(2)) : path.resolve(env);
-  return path.join(home, ".pi", "agent");
+// Mirror of src/core/agent-dir.ts — parity: tests/config/agent-dir-parity.test.ts.
+/** Lexical resolution only: no trim, realpath, I/O or pi imports. Relative values are unsupported. */
+export function resolveAgentDir(env, home) {
+  const H = path.join(home, ".pi", "agent");
+  const raw = env.PI_CODING_AGENT_DIR;
+  if (raw === undefined || raw === "") return { dir: H, home: H, source: "default" };
+  let expanded = raw === "~" ? home : raw.startsWith("~/") ? path.join(home, raw.slice(2)) : raw;
+  if (raw.startsWith("file://")) {
+    try {
+      expanded = fileURLToPath(raw);
+    } catch {
+      // Invalid file URLs are unsupported too; fall back without throwing.
+    }
+  }
+  if (!path.isAbsolute(expanded)) return { dir: H, home: H, source: "default", ignored: { raw, reason: "relative" } };
+  const dir = path.resolve(expanded);
+  return dir === H ? { dir: H, home: H, source: "default" } : { dir, home: H, source: "env" };
+}
+
+export function piAgentDir(home) {
+  return resolveAgentDir(process.env, home).dir;
 }
 
 /** Candidate install dirs for one pi package source (pi package-manager layout; best effort). */
@@ -2586,8 +2817,8 @@ export function preflight() {
 
 // ───────────────────────────── CLI ─────────────────────────────
 
-const err = (s) => process.stderr.write(`pi-secure: ${s}\n`);
-const out = (s) => process.stdout.write(`${s}\n`);
+export const err = (s) => process.stderr.write(`pi-secure: ${s}\n`);
+export const out = (s) => process.stdout.write(`${s}\n`);
 
 /** Typed CLI error — `.code` is the §6 exit code. V0 exports it so convert/import (V4/V5) and
  *  tests can branch on it (lock-busy 73, config 78, busy 76, bad password 77, …). */
@@ -2598,17 +2829,17 @@ export class CliError extends Error {
   }
 }
 
-function must(r) {
+export function must(r) {
   if (r.kind === "error") throw new CliError(r.code, r.message);
   return r;
 }
 
-function requirePrereqs() {
+export function requirePrereqs() {
   const p = preflight();
   if (!p.ok) throw new CliError(EXIT.PREREQ, `前置检查失败：\n  - ${p.problems.join("\n  - ")}`);
 }
 
-function requireTty(what) {
+export function requireTty(what) {
   if (!tty.isatty(0)) throw new CliError(EXIT.USAGE, `${what}需要在终端里输入口令（stdin 不是 TTY）`);
 }
 
@@ -2622,7 +2853,7 @@ export const CONVERT_USAGE_LINES = [
 
 // USAGE text (Q9: new lines allowed). PRIVATE_BOUNDARY_LONG is declared further down (const, TDZ):
 // usageText() reads it lazily so the order of declarations stays free.
-function usageText() {
+export function usageText() {
   return `用法：
   pi-secure init <name> [--path <挂载点>] [--private] [--fix-settings]
   pi-secure unlock <name> [--global]
@@ -2648,7 +2879,7 @@ ${PRIVATE_BOUNDARY_LONG}
 }
 
 /** Run gocryptfs with the TTY inherited; resolves to its exit code. */
-function runInherited(cmd, args, { timeoutMs } = {}) {
+export function runInherited(cmd, args, { timeoutMs } = {}) {
   return new Promise((resolve) => {
     const child = spawn(cmd, args, { stdio: "inherit", cwd: "/" });
     let timer;
@@ -2838,17 +3069,22 @@ async function cmdInnerMount(args) {
     throw new CliError(EXIT.CONFIG, `布局校验失败，拒绝挂载：\n  - ${lay.problems.join("\n  - ")}`);
   requireTty("解锁");
   const pin = pinMountPoint(v); // security review L0 #2: identity fixed right before mounting
+  // #28: gocryptfs writes its argv cipher verbatim as the mountinfo source, while every verdict
+  // (vaultMountState here / config.ts / the plugin) compares it with the PHYSICAL cipher. So mount with
+  // the physical spelling (symlinked ancestors of <dir> otherwise ⇒ self-mount judged foreign).
+  // Boundary (plan §1.2): fsname is only a label the mounter sets — this proves argv ≡ verdict spelling,
+  // NOT which inode gocryptfs opened; a physical-ancestor swap after realpath stays undetectable.
+  const { realCipher, realMnt } = physicalPaths(v);
+  if (realMnt !== pin.path) throw new CliError(EXIT.FAIL, "挂载点物理路径与固定时不一致，拒绝挂载");
   try {
     for (let attempt = 1; attempt <= PASSWORD_TRIES; attempt++) {
       mountPointPinStillValid(v, pin); // re-checked before EVERY attempt (incl. password retries)
       // Password: typed into gocryptfs directly (stdio inherited); we never see it.
       // §3.1: EVERY gocryptfs start runs under the lease — the shell opens + flocks fd 9 itself
       // (no CLOEXEC) and execs gocryptfs, whose daemon keeps holding it until unmount (NC2c).
-      const code = await runInherited(
-        "/bin/sh",
-        leaseChainArgs(v.lease, ["gocryptfs", "-nonempty", "--", v.cipher, v.mnt]),
-        { timeoutMs: MOUNT_ATTEMPT_TIMEOUT_MS },
-      );
+      const code = await runInherited("/bin/sh", leaseChainArgs(v.lease, plainMountSpawnTail(realCipher, realMnt)), {
+        timeoutMs: MOUNT_ATTEMPT_TIMEOUT_MS,
+      });
       if (code === LEASE_BUSY_CODE)
         throw new CliError(
           EXIT.BUSY,
@@ -2961,7 +3197,7 @@ function runPostMount(v, { fix = false, realMnt } = {}) {
     );
 }
 
-function printWarnings() {
+export function printWarnings() {
   for (const w of systemWarnings()) err(`警告：${w}`);
 }
 
@@ -3065,207 +3301,17 @@ async function cmdLock(args) {
   }
   if (pos.length !== 1) throw new CliError(EXIT.USAGE, usageText());
   if (lazy && kill) throw new CliError(EXIT.USAGE, "--lazy 与 --kill 不能同用");
-  const { vault: v } = must(resolveVault(pos[0]));
+  const { vault: v } = must(resolveVault(pos[0], { allowAgentInVault: true })); // locking stays possible
   // §3.7: private instances first; `none` ⇒ the original lock path below, output unchanged.
   if (v.layout !== "legacy") {
     const view = await freshView(v);
     const d = lockPrivateDecision(v, view, { lazy, kill });
-    if (d.action !== "plain") return await lockPrivate(v, view, d, { lazy, kill });
+    if (d.action !== "plain") return await (await import("./private.mjs")).lockPrivate(v, view, d, { lazy, kill });
     if (d.note) err(d.note);
   } else if (kill) err("--kill 只用于 --private 实例；按普通 lock 处理");
   const r = await finalizeBounded(v, { lazy });
   for (const l of r.lines) (r.code === 0 ? out : err)(l);
   return r.code;
-}
-
-async function cmdInit(args) {
-  let name;
-  let mntArg;
-  let fix = false;
-  let priv = false;
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i];
-    if (a === "--path") mntArg = args[++i];
-    else if (a.startsWith("--path=")) mntArg = a.slice(7);
-    else if (a === "--fix-settings") fix = true;
-    else if (a === "--private") priv = true;
-    else if (!name && !a.startsWith("-")) name = a;
-    else throw new CliError(EXIT.USAGE, usageText());
-  }
-  if (!name) throw new CliError(EXIT.USAGE, usageText());
-  const home = homeDir();
-  if (fix) {
-    if (mntArg !== undefined) throw new CliError(EXIT.USAGE, "--fix-settings 不与 --path 同用");
-    if (priv)
-      throw new CliError(
-        EXIT.USAGE,
-        `--fix-settings 不与 --private 同用（已登记库是否私有由 secure.vaults.${name}.private 决定）`,
-      );
-    const { vault: v } = must(resolveVault(name));
-    requireNewLayout(v); // §L.3
-    refuseUnfinished(v, { allowRelocate: true }); // §3.5: pending ⇒ 76
-    // convert-plan §3.4 (V6): a pending relocation turns --fix-settings into the controlled
-    // relocation entry. Without the marker the original paths below run unchanged.
-    if (v.relocate !== undefined) return await fixSettingsRelocate(v, home);
-    if (v.private === true) {
-      // §1.1: a private vault is fixed INSIDE its private ns (P1 setup mode), then unmounted.
-      const code = await runPrivate(v, { mode: "setup", fix: true });
-      if (code === EXIT.OK) out(`${name}：sessionDir 已对齐（在私有命名空间内完成，已卸载）`);
-      return code;
-    }
-    await unlockVault(v, { fix: true });
-    out(`${name}：sessionDir 已对齐；保险库保持挂载（pi-secure lock ${name} 卸载）`);
-    return EXIT.OK;
-  }
-  const r = must(resolveVault(name, { allowUnregistered: true }));
-  if (r.registered && r.vault.layout === "legacy") {
-    throw new CliError(EXIT.CONFIG, legacyRefusal(r.vault)); // §L.3: re-init over a legacy vault
-  }
-  // Security review V6 #2: never re-create over an unfinished convert/import (pending, malformed
-  // keys, relocate, or state files for this name) — and the registration below is a settings-lock
-  // CAS against exactly what was read here (absent ⇒ expectAbsent; present ⇒ the same raw entry).
-  refuseUnfinished(r.vault, { home });
-  const entryBefore = r.registered ? getVaultEntryRaw(name, home) : undefined;
-  if (lstatOrNull(r.vault.dir)) {
-    const lay = checkLayout(r.vault, {
-      mounted: (await probeMountState(r.vault)) !== "absent",
-      others: otherRegisteredVaults(r.vault),
-    });
-    throw new CliError(
-      EXIT.FAIL,
-      lay.problems.length
-        ? `${r.vault.dir} 已存在但布局不完整（上次 init 未完成？）：\n  - ${lay.problems.join("\n  - ")}\n${initCleanupHint(r.vault)}`
-        : `保险库 ${name} 已存在（${r.vault.dir}）。修正项目 sessionDir 用：pi-secure init ${name} --fix-settings`,
-    );
-  }
-  let v = r.vault;
-  if (mntArg !== undefined) {
-    // §L.1: --path is the MOUNT POINT location now (used to be the entry symlink).
-    const m = expandSecurePath(mntArg, home);
-    if (!m) throw new CliError(EXIT.USAGE, `--path 须为绝对路径或 ~/ 开头：${mntArg}`);
-    v = deriveVault(name, v.dir, m);
-  }
-  requirePrereqs();
-  if (priv) {
-    // Before anything is created: a host without usable user namespaces gets nothing half-made.
-    const pf = await privatePreflight();
-    if (!pf.ok)
-      throw new CliError(
-        EXIT.PREREQ,
-        `--private 前置检查失败，未创建任何东西：\n  - ${pf.problems.join("\n  - ")}\n  去掉 --private 仍可创建普通保险库`,
-      );
-  }
-  requireTty("init");
-  if (!tty.isatty(1))
-    throw new CliError(EXIT.USAGE, "init 会在终端打印 master key，stdout 必须是终端（不要重定向到文件/管道）");
-  // identities of what THIS run created, recorded at creation (review V6 round 2 + init cleanup)
-  const made = createLayout(v, { others: otherRegisteredVaults(v), hold: true });
-  const written = initWrittenEntry(v, priv);
-  // Registered BEFORE gocryptfs -init so an interrupted init shows up in `status` as incomplete.
-  // (N2 call site migrated to the V0 entry-object signature; the written bytes are identical.)
-  try {
-    registerVault(
-      name,
-      written,
-      entryBefore === undefined ? { home, expectAbsent: true } : { home, expectEntry: entryBefore },
-    );
-  } catch (e) {
-    // Lost the claim to a concurrent convert/import (or the entry changed since it was read):
-    // NOTHING is deleted (review V6 round 2) — the skeleton this run created is renamed aside
-    // (identity-checked, no-replace) so the winner's publish is not blocked; anything else stays.
-    closeInitHolds(made); // the set-aside path is rename-only and needs no held evidence
-    const r2 = await setAsideInitSkeleton(v, made);
-    const lines = [String(e && e.message), "  本次 init 未完成，未登记。"];
-    for (const m of r2.moved) lines.push(`  ${m.from} → ${m.to}`);
-    if (r2.moved.length) lines.push("  以上目录为本次创建的空骨架，核对后可自行删除。");
-    for (const k of r2.kept) lines.push(`  保留未动：${k.path}（${k.reason}）`);
-    if (r2.kept.length) lines.push(initCleanupHint(v));
-    throw new CliError(EXIT.CONFIG, lines.join("\n"));
-  }
-  out(
-    `即将创建保险库 ${name}：gocryptfs 会要求输入两次新口令，然后在终端打印 master key（只显示这一次，请抄下离线保存）。`,
-  );
-  // NOT -q: with -q gocryptfs 1.8 does not print the master key (P0 C1).
-  prepareInitCipher(v, made); // held cipher dir still empty + start time for the provenance check
-  const code = await runInherited("gocryptfs", ["-init", "--", v.cipher]);
-  recordInitCipher(v, made); // provable -init products only (success or failure)
-  const cleanup = () => removeInitVault(v, made, { written, before: entryBefore, home });
-  if (code !== 0) {
-    // init cleanup ① (user ruling 2026-10-24): nothing usable was created — remove it automatically
-    const r = await cleanup();
-    throw new CliError(
-      EXIT.FAIL,
-      [`gocryptfs -init 失败（exit ${code}）；清理本次创建的内容：`, ...formatInitCleanup(v, r)].join("\n"),
-    );
-  }
-  /** init cleanup ② (ruling): the first mount failed with 3 wrong passwords — ask (TTY only). */
-  const offerRemoval = async (what) => {
-    err(`${name}：${what}`);
-    const ok = tty.isatty(0)
-      ? /^(y|yes)$/i.test(
-          String(
-            await promptLine(
-              `是否删除刚创建的空保险库 ${name}？删除后刚才打印的 master key 作废，需要重新 pi-secure init ${name}。[y/N] `,
-            ),
-          ).trim(),
-        )
-      : false;
-    if (!ok) {
-      closeInitHolds(made);
-      err(
-        `已保留保险库 ${name}（已创建并登记${priv ? "为 --private" : ""}）：用正确的口令执行 pi-secure init ${name} --fix-settings 补齐目录与 sessionDir`,
-      );
-      return;
-    }
-    const r = await cleanup();
-    for (const l of [`${name}：按要求清理本次创建的内容：`, ...formatInitCleanup(v, r)]) err(l);
-  };
-  if (priv) {
-    // §1.1: first mount + dirs + sessionDir + unmount all happen inside the private ns (setup).
-    out(`首次私有挂载以建立目录结构（再输入一次口令；在私有命名空间内完成，结束后自动卸载）：`);
-    const code = await runPrivate(v, { mode: "setup" });
-    if (code === EXIT.BAD_PASSWORD) {
-      await offerRemoval(`首次私有挂载失败：口令连续错误 ${PASSWORD_TRIES} 次`);
-      return code;
-    }
-    closeInitHolds(made);
-    if (code !== EXIT.OK) {
-      err(
-        `${name}：首次私有挂载未完成（exit ${code}）。保险库已创建并登记为 --private；可再执行 pi-secure init ${name} --fix-settings 补齐目录与 sessionDir`,
-      );
-      return code;
-    }
-    printWarnings();
-    out(
-      [
-        `完成：私有保险库 ${name}（secure.vaults.${name}.private=true），挂载点 ${v.mnt}，项目放在 ${v.work}，会话落在 ${v.sessionDir}。`,
-        `master key 仍留在终端回滚里：现在执行 clear；若在 tmux 中再执行 tmux clear-history（尽力清理，不等于安全擦除）。`,
-        `之后：pi-secure run ${name}（默认 --private：明文只在本次 pi 的私有命名空间里可见）`,
-      ].join("\n"),
-    );
-    return EXIT.OK;
-  }
-  out(`首次解锁以建立目录结构（再输入一次口令）：`);
-  try {
-    await unlockVault(v);
-  } catch (e) {
-    if (!(e instanceof CliError) || e.code !== EXIT.BAD_PASSWORD) throw e;
-    await offerRemoval(`首次挂载失败：${e.message}`);
-    return EXIT.BAD_PASSWORD;
-  } finally {
-    closeInitHolds(made); // idempotent; nothing below needs the evidence (and finalize scans fds)
-  }
-  const f = await finalizeBounded(v);
-  for (const l of f.lines) (f.code === 0 ? out : err)(l);
-  printWarnings();
-  out(
-    [
-      `完成：挂载点 ${v.mnt}，项目放在 ${v.work}，会话落在 ${v.sessionDir}。`,
-      `master key 仍留在终端回滚里：现在执行 clear；若在 tmux 中再执行 tmux clear-history（尽力清理，不等于安全擦除）。`,
-      `之后：pi-secure run ${name}  或  pi-secure unlock ${name}`,
-    ].join("\n"),
-  );
-  return f.code === 0 ? EXIT.OK : f.code;
 }
 
 export async function describeVault(v, { scan = true, probe = probeMountState, unmappedUid } = {}) {
@@ -3421,7 +3467,7 @@ export async function txnStatusLines(home, vaults, { only } = {}) {
 }
 
 /** Other vaults from the settings file (for §L.1 position rules); empty on any read problem. */
-function otherRegisteredVaults(v) {
+export function otherRegisteredVaults(v) {
   const { cfg } = loadSecureConfig(homeDir());
   return cfg.valid ? cfg.vaults.filter((x) => x.name !== v.name) : [];
 }
@@ -3429,16 +3475,27 @@ function otherRegisteredVaults(v) {
 async function cmdStatus(args) {
   if (args.length > 1) throw new CliError(EXIT.USAGE, usageText());
   const home = homeDir();
-  const { file, cfg, readError } = loadSecureConfig(home);
+  const { file, cfg, readError, agentProblem } = loadSecureConfig(home);
   const p = preflight();
   out(`gocryptfs: ${p.version ? p.version.join(".") : "n/a"}${p.ok ? "" : "  (" + p.problems.join("; ") + ")"}`);
+  // settings-rename §3.6.1: path-source suffix ONLY off the default dir (default output is byte-identical)
+  const agentInfo = resolveAgentDir(process.env, home);
+  const settingsTag =
+    agentInfo.source === "env"
+      ? resolveSettingsLocation(agentInfo).scope === "inherited"
+        ? "  [inherited]"
+        : "  [agentDir: env]"
+      : "";
   out(
-    `settings: ${file}${readError ? `  ! ${readError}` : !cfg.valid ? `  ! ${cfg.error}` : cfg.present ? (cfg.enabled ? "" : "  secure.enabled=false") : "  (no secure section)"}`,
+    `settings: ${file}${settingsTag}${readError ? `  ! ${readError}` : !cfg.valid ? `  ! ${cfg.error}` : cfg.present ? (cfg.enabled ? "" : "  secure.enabled=false") : "  (no secure section)"}`,
   );
+  if (agentInfo.ignored)
+    out("  ! PI_CODING_AGENT_DIR 是相对路径，已忽略：插件设置与 traffic 仍在 ~/.pi/agent（不支持的配置）");
+  if (agentProblem) out(`  ! ${agentProblem}`);
   for (const bad of cfg.invalid) out(`  ! secure.vaults.${bad.name} invalid (${bad.reason})`);
   let vaults = cfg.vaults;
   if (args[0]) {
-    const r = resolveVault(args[0], { allowUnregistered: true });
+    const r = resolveVault(args[0], { allowUnregistered: true, allowAgentInVault: true });
     if (r.kind === "error") throw new CliError(r.code, r.message);
     vaults = [r.vault];
     if (!r.registered) out(`  ${args[0]}：未在设置中登记`);
@@ -3854,7 +3911,7 @@ export function leaseIdentitySync(v, uid = process.getuid()) {
 
 // ───────────────────────────── private.json (§3.2) ─────────────────────────────
 
-const HEX32_RE = /^[0-9a-f]{32}$/;
+export const HEX32_RE = /^[0-9a-f]{32}$/;
 const MAJMIN_RE = /^\d{1,10}:\d{1,10}$/;
 const NS_MNT_RE = /^mnt:\[\d{1,20}\]$/;
 const NS_USER_RE = /^user:\[\d{1,20}\]$/;
@@ -4015,7 +4072,7 @@ export async function readPrivateRecord(v, { deadline = Date.now() + PRIVATE_BUD
   return r === TIMEOUT ? { kind: "unknown" } : r;
 }
 
-function fsyncDirSync(dir) {
+export function fsyncDirSync(dir) {
   let fd;
   try {
     fd = fs.openSync(dir, fsc.O_RDONLY | fsc.O_DIRECTORY);
@@ -4069,11 +4126,6 @@ export function replacePrivateRecord(v, rec) {
     }
     throw e;
   }
-  fsyncDirSync(v.dir);
-}
-
-function deletePrivateRecordSync(v) {
-  fs.unlinkSync(privateRecordPath(v));
   fsyncDirSync(v.dir);
 }
 
@@ -4145,11 +4197,19 @@ export function parseStatusUids(text) {
  * ANOTHER uid whose ns link is unreadable (EACCES/EPERM) is skipped — it cannot be one of our
  * members without privileges over our userns; a SAME-uid process whose link is unreadable
  * (ptrace/LSM refusal, non-dumpable) is skipped ONLY when its starttime proves it predates
- * `minStart` (never a member, §3.3) — otherwise the scan is incomplete. `minStart` excludes processes started before
- * the supervisor (never its descendants, §3.3). Members carry {pid,start,ppid,user,comm}.
+ * `minStart` (never a member, §3.3) — otherwise, with `lineage`, it is judged by its ppid chain
+ * (`lineageVerdict` below, r3.2 scan-poison: by P-SP1 a lineage member stays readable to the
+ * ns-outer callers even when non-dumpable, so an unreadable process is OUTSIDE the lineage
+ * unless the walk proves IN; an LSM-refused member with a broken chain is residual R37) and is
+ * reported in `outside` (diagnostics only, the field is omitted when empty); WITHOUT `lineage`
+ * such a process makes the scan incomplete, exactly as before (finalize + legacy tests).
+ * `minStart` excludes processes started before the supervisor (never its descendants, §3.3).
+ * Members carry {pid,start,ppid,user,comm}.
  * `fsImpl` ({readdir, readlink, readFile}) is a test seam. `deniedMeans:"outside"` is reserved for
- * the supervisor's own in-ns finalize (see the inline note). Never returns an empty scan on doubt.
- * → {kind:"done", members} | {kind:"incomplete", reason}
+ * the supervisor's own in-ns finalize (see the inline note). `lineage` ({anchors:[{pid,start}…]})
+ * is reserved for the authoritative ns-OUTER callers (judge / release / outer terminate) and is
+ * never used inside the ns. Never returns an empty scan on doubt.
+ * → {kind:"done", members[, outside]} | {kind:"incomplete", reason}
  */
 export async function scanNsMembers(
   nsMnt,
@@ -4162,6 +4222,7 @@ export async function scanNsMembers(
     uid = process.getuid(),
     fsImpl = fsp,
     deniedMeans = "incomplete",
+    lineage,
   } = {},
 ) {
   const skip = new Set(exclude.map(Number));
@@ -4179,6 +4240,8 @@ export async function scanNsMembers(
     }
     if (names.length > maxEntries) return { kind: "incomplete", reason: `too-many ${names.length}` };
     const hits = [];
+    const deferred = []; // r3.2: same-uid unreadable processes awaiting the ppid-lineage walk
+    const outside = []; // r3.2: judged OUT — diagnostics only
     for (let i = 0; i < names.length; i += 64) {
       if (Date.now() >= deadline) return TIMEOUT;
       const batch = names.slice(i, i + 64);
@@ -4208,12 +4271,29 @@ export async function scanNsMembers(
           if (denied && deniedMeans === "outside") continue;
           if (denied && minStart !== undefined) {
             // Same uid but unreadable (non-dumpable: sd-pam, sshd session, setuid helpers…). Its
-            // starttime is world-readable: one that started BEFORE the supervisor can never be a
-            // counted member (§3.3), so it is safely skipped; anything newer ⇒ incomplete.
+            // starttime is world-readable (P-SP3): one that started BEFORE the supervisor can
+            // never be a counted member (§3.3), so it is safely skipped; anything newer is either
+            // deferred to the lineage walk (`lineage`, r3.2) or fails the scan (fail closed).
             const stR = await settle(fsImpl.readFile(path.join(procRoot, n, "stat"), "utf8"));
             if (stR.code && GONE_CODES.has(stR.code)) continue;
             const pst = stR.code ? undefined : parseProcStat(stR.value);
             if (pst && pst.start < minStart) continue;
+            if (pst && lineage) {
+              // r3.2 (scan-poison): `lineage` is reserved for the authoritative ns-OUTER callers
+              // (judge / release / outer terminate). P-SP1: an instance-lineage process stays
+              // readable to them even when non-dumpable, so an unreadable same-uid process is
+              // outside the lineage (P-SP2: sshd privileged split, setuid helpers — never
+              // members) or was refused by an LSM; the verdict is the ppid walk after the loop.
+              const commR = await settle(fsImpl.readFile(path.join(procRoot, n, "comm"), "utf8"));
+              deferred.push({
+                pid: Number(n),
+                start: pst.start,
+                ppid: pst.ppid,
+                comm: commR.code ? "?" : commR.value.trim(),
+                code: link.code,
+              });
+              continue;
+            }
             const comm = await settle(fsImpl.readFile(path.join(procRoot, n, "comm"), "utf8"));
             return {
               kind: "incomplete",
@@ -4223,6 +4303,29 @@ export async function scanNsMembers(
           return { kind: "incomplete", reason: `ns ${n} ${link.code}` };
         }
         if (link.value === nsMnt) hits.push(Number(n));
+      }
+    }
+    // r3.2 step 1.5: with every readable same-ns hit collected, judge the deferred unreadable
+    // processes by ppid lineage (`lineageVerdict`). IN ⇒ incomplete — by P-SP1 a lineage member
+    // should have been readable, so stay strict (`… in-lineage`); the walk's own doubt ⇒ the
+    // incomplete verdict as-is (fail closed); OUT ⇒ skipped and listed in `outside` (a process
+    // gone mid-rewalk holds no mount reference and needs no diagnostic). Residual R37: an
+    // LSM-refused lineage member whose ppid chain broke is judged OUT — deletion still requires
+    // the lease first (gocryptfs dead, FUSE gone).
+    if (deferred.length) {
+      const hitPids = new Set(hits); // pid-only compare errs toward IN
+      for (const d of deferred) {
+        const verdict = await lineageVerdict(d, {
+          anchors: lineage.anchors ?? [],
+          hitPids,
+          minStart,
+          procRoot,
+          fsImpl,
+          deadline,
+        });
+        if (verdict.kind === "in") return { kind: "incomplete", reason: `ns ${d.pid} ${d.comm} ${d.code} in-lineage` };
+        if (verdict.kind === "incomplete") return verdict;
+        if (verdict.via !== "gone") outside.push({ pid: d.pid, comm: d.comm });
       }
     }
     const members = [];
@@ -4249,10 +4352,104 @@ export async function scanNsMembers(
         comm: commR.code ? "?" : commR.value.trim(),
       });
     }
-    return { kind: "done", members };
+    return { kind: "done", members, ...(outside.length ? { outside } : {}) };
   })();
   const r = await deadlineRace(work, deadline).catch((e) => ({ kind: "incomplete", reason: String(e && e.message) }));
   return r === TIMEOUT ? { kind: "incomplete", reason: "timeout" } : r;
+}
+
+/**
+ * r3.2 (scan-poison fix, private-plan §3.3): the recorded pid+start anchors of a record —
+ * `supervisor`, `gocryptfs`, `pi` in that order, absent identities dropped. Pure extraction from
+ * `memberAuthorized` (behaviour unchanged); also the anchor list of every `lineage` scan.
+ */
+export function recordAnchors(rec) {
+  return ["supervisor", "gocryptfs", "pi"].map((k) => rec?.[k]).filter(Boolean);
+}
+
+/**
+ * r3.2 (scan-poison fix, private-plan §3.3): judge an unreadable same-uid process X by its ppid
+ * chain. Kernel premises: P-SP1 — P0 and every ns-outer caller sit in the initial userns and own
+ * `ns.user`, so by the userns owner rule they hold every capability inside the instance's userns
+ * lineage: a lineage member stays readable even when non-dumpable (PR_SET_DUMPABLE=0).
+ * P-SP2 — an unreadable same-uid process therefore has its mm OUTSIDE the lineage (sshd
+ * privileged split, setuid helpers, sd-pam — they can never become members) or was refused by an
+ * LSM. P-SP3 — /proc/<pid>/stat (ppid, starttime) stays world-readable for those processes.
+ * Walk X → ppid → …: hitting a recorded anchor (pid+start) or a readable ns member (pid only —
+ * errs toward IN) ⇒ {kind:"in", via}; an ancestor older than `minStart` or pid 1/0 ⇒
+ * {kind:"out"}; anything unreadable/unparsable/loopy/late ⇒ {kind:"incomplete", reason} (fail
+ * closed). A vanished ancestor, or a parent that started after its child (pid reuse), rewalks
+ * ONCE from X; if X itself is gone by then ⇒ {kind:"out", via:"gone"} — a dead process holds no
+ * mount reference, the same semantics as the main scan's GONE skip (review #3). Z-state
+ * ancestors are walked straight through (stat stays valid, review #4). Successful stat reads are
+ * memoized by pid within this one verdict: the scan window (≤2 s) is far below pid-reuse
+ * timescales (review #5).
+ */
+export async function lineageVerdict(
+  x,
+  {
+    anchors = [],
+    hitPids,
+    minStart,
+    procRoot = "/proc",
+    fsImpl = fsp,
+    deadline = Date.now() + PRIVATE_BUDGET.scanMs,
+    maxHops = 64,
+  } = {},
+) {
+  const memo = new Map();
+  const readStat = async (pid, fresh = false) => {
+    if (!fresh && memo.has(pid)) return memo.get(pid);
+    let text;
+    try {
+      text = await fsImpl.readFile(path.join(procRoot, String(pid), "stat"), "utf8");
+    } catch (e) {
+      const code = (e && e.code) || "EUNKNOWN";
+      return GONE_CODES.has(code) ? { gone: true } : { error: true, code };
+    }
+    const st = parseProcStat(text);
+    if (!st || !Number.isSafeInteger(st.ppid)) return { error: true, code: "unparsable" };
+    const r = { start: st.start, ppid: st.ppid };
+    memo.set(pid, r);
+    return r;
+  };
+  const isAnchor = (p) => anchors.some((a) => a?.pid === p.pid && a?.start === p.start);
+  for (let pass = 0; ; pass++) {
+    if (Date.now() >= deadline) return { kind: "incomplete", reason: "timeout" };
+    let cur;
+    if (pass === 0) cur = { pid: x.pid, start: x.start, ppid: x.ppid };
+    else {
+      // rewalk: X must still exist — a process that died mid-scan holds no mount reference
+      const again = await readStat(x.pid, true);
+      if (again.gone) return { kind: "out", via: "gone" };
+      if (again.error) return { kind: "incomplete", reason: `lineage ${x.pid} ${again.code}` };
+      cur = { pid: x.pid, start: again.start, ppid: again.ppid };
+    }
+    let rewalk = false;
+    for (let hops = 0; hops < maxHops; hops++) {
+      if (isAnchor(cur)) return { kind: "in", via: "anchor" };
+      if (hitPids?.has(cur.pid)) return { kind: "in", via: `member ${cur.pid}` };
+      if (cur.start < minStart) return { kind: "out" };
+      if (!Number.isSafeInteger(cur.ppid) || cur.ppid < 2) return { kind: "out" };
+      if (Date.now() >= deadline) return { kind: "incomplete", reason: "timeout" };
+      const p = await readStat(cur.ppid);
+      if (p.gone) {
+        // the ancestor vanished mid-walk: one rewalk from X, then fail closed
+        if (pass > 0) return { kind: "incomplete", reason: "lineage race" };
+        rewalk = true;
+        break;
+      }
+      if (p.error) return { kind: "incomplete", reason: `lineage ${cur.ppid} ${p.code}` };
+      if (p.start > cur.start) {
+        // a parent never starts after its child ⇒ the pid was reused: one rewalk, then fail closed
+        if (pass > 0) return { kind: "incomplete", reason: `lineage ${cur.ppid} reuse` };
+        rewalk = true;
+        break;
+      }
+      cur = { pid: cur.ppid, start: p.start, ppid: p.ppid };
+    }
+    if (!rewalk) return { kind: "incomplete", reason: "lineage depth" };
+  }
 }
 
 /**
@@ -4269,7 +4466,7 @@ export function memberAuthorized(rec, m, { chain, bootId } = {}) {
   const users = [rec.ns.user, rec.ns.innerUser].filter(Boolean);
   if (!users.includes(m.user)) return false;
   if (m.start < rec.supervisor.start) return false;
-  const anchors = ["supervisor", "gocryptfs", "pi"].map((k) => rec[k]).filter(Boolean);
+  const anchors = recordAnchors(rec);
   const isAnchor = (p) => anchors.some((a) => a.pid === p.pid && a.start === p.start);
   let cur = { pid: m.pid, start: m.start, ppid: m.ppid };
   for (let hops = 0; hops < 64 && cur; hops++) {
@@ -4350,8 +4547,9 @@ export function judgePrivateInstance(f) {
   return { state: "unknown", reason: "unclassified" };
 }
 
-/** Gather facts (all async, each ≤2 s) and judge. Never throws. */
-export async function privateInstanceState(v, { procRoot = "/proc", deadline, record: given, readFile } = {}) {
+/** Gather facts (all async, each ≤2 s) and judge. Never throws. `fsImpl` is a test seam for
+ * injecting /proc read faults into the ns scan (the `readFile` seam only covers identity reads). */
+export async function privateInstanceState(v, { procRoot = "/proc", deadline, record: given, readFile, fsImpl } = {}) {
   const idOpts = readFile ? { procRoot, readFile } : { procRoot }; // `readFile`: tests inject read faults
   const dl = () => deadline ?? Date.now() + PRIVATE_BUDGET.scanMs;
   const record = given ?? (await readPrivateRecord(v, { deadline: dl() }));
@@ -4371,7 +4569,14 @@ export async function privateInstanceState(v, { procRoot = "/proc", deadline, re
     // review N4-r2 #1: the supervisor is three-state; "unknown" counts as alive (session, never
     // orphan/orphan-ns, nothing signalled) and makes lock refuse
     supervisorState = rec.supervisor ? await identityState(rec.supervisor, idOpts) : "dead";
-    if (rec.ns) scan = await scanNsMembers(rec.ns.mnt, { procRoot, deadline: dl(), minStart: rec.supervisor?.start });
+    if (rec.ns)
+      scan = await scanNsMembers(rec.ns.mnt, {
+        procRoot,
+        deadline: dl(),
+        minStart: rec.supervisor?.start,
+        ...(fsImpl ? { fsImpl } : {}),
+        lineage: { anchors: recordAnchors(rec) },
+      });
     // a later scan that SEES the recorded P1 alive overrides any earlier negative reading
     const sup = rec.supervisor;
     if (sup && scan?.kind === "done" && scan.members.some((m) => m.pid === sup.pid && m.start === sup.start))
@@ -4721,6 +4926,11 @@ export function leaseChainArgs(lease, tail) {
   return ["-c", `exec 9<>"$1" && flock -n 9 || exit ${LEASE_BUSY_CODE}; shift; exec "$@"`, "sh", lease, ...tail];
 }
 
+/** #28: plain (non-private) mount argv tail — physical cipher/mnt, same spelling the verdicts compare. */
+export function plainMountSpawnTail(realCipher, realMnt) {
+  return ["gocryptfs", "-nonempty", "--", realCipher, realMnt];
+}
+
 export function nsRootTail(nodeBin = process.execPath, helper = selfPath()) {
   return [
     "unshare",
@@ -4836,105 +5046,6 @@ export async function privatePreflight(deps = {}) {
   return { ok: problems.length === 0, problems };
 }
 
-// ───────────────────────────── record subcommands (run under flock) ─────────────────────────────
-
-/** `__private-update <name> <instanceId> <patchJson>` — UNDER mount.lock. Prints {ok,record?}. */
-function cmdPrivateUpdate(name, instanceId, patchJson) {
-  const { vault: v } = must(resolveVault(name));
-  const cur = readPrivateRecordSync(v);
-  if (cur.kind === "none") return REC.NONE;
-  if (cur.kind !== "ok") return REC.CORRUPT;
-  let patch;
-  try {
-    patch = JSON.parse(patchJson);
-  } catch {
-    return EXIT.FAIL;
-  }
-  const r = applyRecordPatch(cur.record, instanceId, patch);
-  if (r.error === "mismatch") return REC.MISMATCH;
-  if (r.error) {
-    err(`记录更新被拒：${r.error}`);
-    return EXIT.FAIL;
-  }
-  replacePrivateRecord(v, r.record);
-  out(JSON.stringify({ ok: true }));
-  return REC.OK;
-}
-
-/**
- * `__private-release <name> <instanceId>` — the ONLY record deleter (I-P3). Runs while the caller's
- * flock holds mount.lease (proving every fd-9 holder exited) AND mount.lock; outside the ns.
- * Deletes iff instanceId matches ∧ (bootId differs ∨ the recorded ns has no member — complete scan).
- */
-async function cmdPrivateRelease(name, instanceId) {
-  const { vault: v } = must(resolveVault(name));
-  const cur = readPrivateRecordSync(v);
-  if (cur.kind === "none") return REC.NONE;
-  if (cur.kind !== "ok") return REC.CORRUPT;
-  const rec = cur.record;
-  if (rec.instanceId !== instanceId) return REC.MISMATCH;
-  if (rec.ns && rec.bootId === readBootIdSync()) {
-    const s = await scanNsMembers(rec.ns.mnt, {
-      deadline: Date.now() + PRIVATE_BUDGET.scanMs,
-      minStart: rec.supervisor?.start,
-    });
-    if (s.kind !== "done") {
-      out(JSON.stringify({ ok: false, incomplete: s.reason }));
-      return REC.INCOMPLETE;
-    }
-    if (s.members.length) {
-      out(JSON.stringify({ ok: false, members: s.members.slice(0, 16) }));
-      return REC.MEMBERS;
-    }
-  }
-  deletePrivateRecordSync(v);
-  out(JSON.stringify({ ok: true }));
-  return REC.OK;
-}
-
-/** §3.2 unique exception: the BUSY shell chain never built an ns ⇒ P0 drops its own `starting` record. */
-function cmdPrivateAbortStart(name, instanceId) {
-  const { vault: v } = must(resolveVault(name));
-  const cur = readPrivateRecordSync(v);
-  if (cur.kind === "none") return REC.NONE;
-  if (cur.kind !== "ok") return REC.CORRUPT;
-  const rec = cur.record;
-  if (rec.instanceId !== instanceId) return REC.MISMATCH;
-  if (rec.phase !== "starting" || rec.ns || rec.supervisor) return REC.MEMBERS;
-  deletePrivateRecordSync(v);
-  return REC.OK;
-}
-
-/**
- * `__private-terminate <name> <instanceId> <budgetMs>` — UNDER mount.lock (instanceId re-checked
- * inside the lock, I-P4). Signals ONLY recorded identities and ns members whose ns id and
- * starttime (≥ supervisor.start) are re-verified right before each signal. Non-gocryptfs members
- * first (TERM → ≤2 s → KILL), then gocryptfs (TERM → ≤2 s → KILL). Never calls fusermount (I-P7).
- */
-async function cmdPrivateTerminate(name, instanceId, budgetMs) {
-  const { vault: v } = must(resolveVault(name));
-  const cur = readPrivateRecordSync(v);
-  if (cur.kind === "none") return REC.NONE;
-  if (cur.kind !== "ok") return REC.CORRUPT;
-  const rec = cur.record;
-  if (rec.instanceId !== instanceId) return REC.MISMATCH;
-  if (rec.bootId !== readBootIdSync()) {
-    out(JSON.stringify({ ok: true, killed: [], remaining: [] }));
-    return REC.OK;
-  }
-  // review N4-r2 #1: outer cleanup presupposes a DEAD supervisor — re-proved here, under mount.lock
-  if (rec.supervisor) {
-    const ss = await identityState(rec.supervisor);
-    if (ss !== "dead") {
-      out(JSON.stringify({ ok: false, killed: [], remaining: [], supervisor: ss }));
-      return REC.SUPERVISOR;
-    }
-  }
-  const r = await terminateInstance(rec, { deadline: Date.now() + Math.max(500, Number(budgetMs) || 0) });
-  out(JSON.stringify(r));
-  return r.ok ? REC.OK : REC.MEMBERS;
-}
-
 /** Signal one process iff it still is `who` (pid+start, and mnt ns / user ns ∈ userNs when given). */
 export function signalVerified(
   who,
@@ -4980,6 +5091,7 @@ export async function terminateInstance(
         minStart,
         ...(uid !== undefined ? { uid } : {}),
         ...(fsImpl ? { fsImpl } : {}),
+        lineage: { anchors: recordAnchors(rec) },
       });
       if (s.kind !== "done") return { incomplete: s.reason, set };
       // Review N1 #2: only PROVEN members (memberAuthorized) enter the termination set.
@@ -5032,90 +5144,6 @@ export async function terminateInstance(
   if (final.incomplete) return { ok: false, incomplete: final.incomplete, killed, remaining: [] };
   const remaining = [...final.set.values()].map((m) => ({ pid: m.pid, comm: m.comm }));
   return { ok: remaining.length === 0 && unverifiedSeen.length === 0, killed, remaining, unverified: unverifiedSeen };
-}
-
-/**
- * `__private-claim <name> <instanceId> <ownerPid> <ownerStart> <mode>` — UNDER mount.lock (§2.2-4).
- * Any doubt refuses. Writes the `starting` record with O_EXCL semantics.
- */
-async function cmdPrivateClaim(name, instanceId, ownerPid, ownerStart, mode = "run") {
-  const { vault: v, enabled } = must(resolveVault(name));
-  requireNewLayout(v);
-  void enabled;
-  if (!HEX32_RE.test(instanceId ?? "")) throw new CliError(EXIT.FAIL, "内部错误：instanceId 不合法");
-  // 1. global mountinfo for THIS vault
-  const st = await probeMountState(v);
-  if (st === "mounted")
-    throw new CliError(
-      EXIT.BUSY,
-      `${name} 已普通挂载（对所有同用户进程可见）。先 pi-secure lock ${name}，再 run --private；或去掉 --private`,
-    );
-  if (st === "foreign") throw new CliError(EXIT.FAIL, `${v.mnt} 上挂着别的文件系统（mountinfo 不符），拒绝挂载`);
-  if (st === "hung") throw new CliError(EXIT.DEADLINE, `${v.mnt} 的挂载探测超时（FUSE 卡住？），拒绝操作`);
-  // 2. Q10: another registered vault mounted globally would be copied into the new ns
-  const { cfg } = loadSecureConfig(homeDir());
-  for (const o of cfg.valid ? cfg.vaults : []) {
-    if (o.name === v.name) continue;
-    const ost = await probeMountState(o);
-    if (ost === "mounted" || ost === "stale")
-      throw new CliError(
-        EXIT.BUSY,
-        `保险库 ${o.name} 正全局挂载：私有命名空间会复制这个挂载，且无法在其中单独拆除，导致 ${o.name} 之后无法干净卸载。先 pi-secure lock ${o.name}`,
-      );
-    if (ost === "hung")
-      throw new CliError(EXIT.DEADLINE, `保险库 ${o.name} 的挂载探测超时，无法确认它是否全局挂载——拒绝 run --private`);
-  }
-  // 3. existing record ⇒ judge; only `stale` may be released (non-blocking lease: we hold mount.lock)
-  const li = leaseIdentitySync(v);
-  if (li.problem) throw new CliError(EXIT.CONFIG, `布局校验失败，拒绝挂载：\n  - ${li.problem}`);
-  const recNow = readPrivateRecordSync(v);
-  if (recNow.kind !== "none") {
-    const s = await privateInstanceState(v, { record: recNow });
-    if (s.state !== "stale") throw new CliError(EXIT.BUSY, describePrivateState(name, s, v));
-    const rel = releaseRecordHoldingMountLock(v, recNow.record.instanceId);
-    if (rel.kind !== "released")
-      throw new CliError(EXIT.BUSY, `${describePrivateState(name, s, v)}，但无法清理（${rel.kind}）——拒绝`);
-    err(`${name}：清理了失效的 --private 记录`);
-  }
-  // 4. lease (read-only probe)
-  const lease = await probeLease(li);
-  if (lease === "held") throw new CliError(EXIT.BUSY, describePrivateState(name, { state: "unrecorded" }, v));
-  if (lease !== "free") throw new CliError(EXIT.DEADLINE, `无法读取 /proc/locks 判断 ${name} 的挂载租约——拒绝`);
-  // 5. stale global mount: lease is free ⇒ no gocryptfs holds it ⇒ safe to clean
-  if (st === "stale") {
-    err(`${name}：发现失效挂载（守护进程已不在），先清理`);
-    spawnSync("fusermount3", ["-u", v.mnt], { stdio: "ignore", timeout: 5_000 });
-    if ((await probeMountState(v)) !== "absent")
-      throw new CliError(EXIT.FAIL, `无法清理失效挂载 ${v.mnt}：fusermount3 -uz ${v.mnt}`);
-  }
-  // 6. layout + sentinels (outside view must be pristine)
-  const lay = checkLayout(v, { mounted: false, others: otherRegisteredVaults(v) });
-  if (lay.problems.length)
-    throw new CliError(EXIT.CONFIG, `布局校验失败，拒绝挂载：\n  - ${lay.problems.join("\n  - ")}`);
-  const bootId = readBootIdSync();
-  if (!bootId) throw new CliError(EXIT.PREREQ, "无法读取 /proc/sys/kernel/random/boot_id");
-  const { realMnt, realCipher } = physicalPaths(v);
-  const rec = {
-    v: 3,
-    instanceId,
-    name,
-    phase: "starting",
-    mode: mode === "setup" ? "setup" : "run",
-    bootId,
-    createdAt: new Date().toISOString(),
-    realCipher,
-    realMnt,
-    lease: { dev: li.dev, ino: li.ino },
-    owner: { pid: Number(ownerPid), start: Number(ownerStart) },
-  };
-  if (parsePrivateRecord(JSON.stringify(rec)).kind !== "ok") throw new CliError(EXIT.FAIL, "内部错误：记录不合法");
-  try {
-    writePrivateRecordExclusive(v, rec);
-  } catch (e) {
-    if (e && e.code === "EEXIST") throw new CliError(EXIT.BUSY, `${name}：另一个 --private 实例抢先认领`);
-    throw new CliError(EXIT.FAIL, `无法写入 ${privateRecordPath(v)}：${e && e.message}`);
-  }
-  return EXIT.OK;
 }
 
 // ───────────────────────────── release protocol (§3.2) ─────────────────────────────
@@ -5280,177 +5308,9 @@ export async function outerPrivateCleanup(v, instanceId, { budgetMs = PRIVATE_BU
   return { code: EXIT.DEADLINE, lines };
 }
 
-// ───────────────────────────── external lock (§3.7) ─────────────────────────────
-
-const LOCK_WAIT_MS = 10_000;
-
 /** Re-read view (global probe + instance view). */
-async function freshView(v) {
+export async function freshView(v) {
   return vaultInstanceView(v, await probeMountState(v));
-}
-
-/**
- * Wait ≤ms for the instance `instanceId` to disappear (record gone / owned by a successor),
- * re-judging liveness about once a second. → {kind:"gone"} | {kind:"stale"|"orphan"|"timeout", view}
- */
-async function waitInstanceGone(v, instanceId, ms) {
-  const end = Date.now() + ms;
-  let nextJudge = Date.now() + 1_000;
-  for (;;) {
-    const r = await readPrivateRecord(v, { deadline: Date.now() + PRIVATE_BUDGET.scanMs });
-    if (r.kind === "none" || (r.kind === "ok" && r.record.instanceId !== instanceId)) return { kind: "gone" };
-    const last = Date.now() >= end;
-    if (last || Date.now() >= nextJudge) {
-      const view = await freshView(v);
-      if (view.state === "none" || (view.record && view.record.instanceId !== instanceId)) return { kind: "gone" };
-      if (view.state === "stale") return { kind: "stale", view };
-      if (view.state === "orphan" || view.state === "orphan-ns") return { kind: "orphan", view };
-      if (last) return { kind: "timeout", view };
-      nextJudge = Date.now() + 1_000;
-    }
-    await sleep(200);
-  }
-}
-
-/** §3.5 from `lock` (hard backstop outerCleanupMs + 0.5 s ⇒ 75). */
-async function lockOuter(v, instanceId) {
-  const hard = armHardExit(
-    PRIVATE_BUDGET.outerCleanupMs + PRIVATE_BUDGET.hardGraceMs,
-    `--private 外部收尾未完成（${v.name}），记录保留`,
-  );
-  try {
-    const c = await outerPrivateCleanup(v, instanceId);
-    for (const l of c.lines) (c.code === EXIT.OK ? out : err)(l);
-    if (c.code === EXIT.OK) out(`${v.name}：已终止并清理 --private 实例`);
-    return c.code;
-  } finally {
-    clearTimeout(hard);
-  }
-}
-
-/** Read /proc/<pid>/mountinfo of the supervisor (initial-ns caller; bounded). undefined = unreadable. */
-async function supervisorMountinfo(sup, procRoot = "/proc") {
-  const t = await deadlineRace(
-    fsp.readFile(path.join(procRoot, String(sup.pid), "mountinfo"), "utf8"),
-    Date.now() + PRIVATE_BUDGET.scanMs,
-  ).catch(() => TIMEOUT);
-  return typeof t === "string" && readProcStartSync(sup.pid, procRoot) === sup.start ? t : undefined;
-}
-
-/**
- * Execute a lockPrivateDecision. `depth` bounds re-judging (a state that changes under us is
- * re-dispatched at most once more).
- */
-async function lockPrivate(v, view, d, opts, depth = 0) {
-  const name = v.name;
-  const rec = view.record;
-  const rejudge = async (why) => {
-    const nv = await freshView(v);
-    const nd = lockPrivateDecision(v, nv, opts);
-    if (nd.action === "plain") {
-      out(`${name}：--private 实例已不在${why ? `（${why}）` : ""}`);
-      return EXIT.OK;
-    }
-    if (depth >= 1) {
-      err(`${name}：--private 实例状态在操作期间变化（${nv.state}），未完成；pi-secure status ${name}`);
-      return nd.action === "refuse" ? nd.code : EXIT.DEADLINE;
-    }
-    return lockPrivate(v, nv, nd, opts, depth + 1);
-  };
-  switch (d.action) {
-    case "refuse": {
-      err(d.text);
-      for (const h of view.holders ?? [])
-        err(`  持有者 pid ${h.pid} ${h.comm ?? "(已退出/不可读)"}（/proc/locks，只报告）`);
-      for (const m of view.classes?.unverified ?? [])
-        err(`  命名空间成员 pid ${m.pid} ${m.comm}（无法证明属于该实例，只报告、不终止）`);
-      return d.code;
-    }
-    case "release": {
-      const rel = await releaseRecord(v, rec.instanceId, { waitMs: 1_000 });
-      if (rel.kind === "released" || rel.kind === "none") {
-        out(`${name}：清理了失效的 --private 记录`);
-        return EXIT.OK;
-      }
-      if (rel.kind === "mismatch") return rejudge("记录已换成另一个实例");
-      if (depth >= 1) {
-        err(`${name}：无法清理失效的 --private 记录（${rel.kind}）；pi-secure status ${name}`);
-        return rel.kind === "timeout" || rel.kind === "lease-busy" ? EXIT.DEADLINE : EXIT.BUSY;
-      }
-      return rejudge();
-    }
-    case "outer":
-      if (d.degrade)
-        err(
-          `${name}：监督进程已不在，无法在私有命名空间内摘除挂载路径（--lazy 退化）：改为终止有证明归属的进程（含 gocryptfs）并清理记录`,
-        );
-      return lockOuter(v, rec.instanceId);
-    case "kill": {
-      const sup = rec.supervisor;
-      if (!sup || !signalVerified(sup, "SIGTERM", { nsMnt: rec.ns?.mnt }))
-        return depth >= 1 ? EXIT.BUSY : rejudge("监督进程已变化");
-      out(`${name}：已通知监督进程（pid ${sup.pid}）结束会话并收尾（≤10 s）…`);
-      const hard = armHardExit(LOCK_WAIT_MS + PRIVATE_BUDGET.scanMs * 2 + 2_000, `等待 --private 收尾超时（${name}）`);
-      let w;
-      try {
-        w = await waitInstanceGone(v, rec.instanceId, LOCK_WAIT_MS);
-      } finally {
-        clearTimeout(hard);
-      }
-      if (w.kind === "gone") {
-        out(`${name}：--private 会话已结束并收尾`);
-        return EXIT.OK;
-      }
-      if (w.kind === "stale") return lockPrivate(v, w.view, { action: "release" }, opts, depth + 1);
-      err(`${name}：${w.kind === "orphan" ? "监督进程已退出但收尾未完成" : "10 s 内未完成收尾"}，执行外部收尾`);
-      return lockOuter(v, rec.instanceId);
-    }
-    case "wait": {
-      out(`${name}：--private 实例正在收尾，等待（≤10 s）…`);
-      const hard = armHardExit(LOCK_WAIT_MS + PRIVATE_BUDGET.scanMs * 2 + 2_000, `等待 --private 收尾超时（${name}）`);
-      let w;
-      try {
-        w = await waitInstanceGone(v, rec.instanceId, LOCK_WAIT_MS);
-      } finally {
-        clearTimeout(hard);
-      }
-      if (w.kind === "gone") {
-        out(`${name}：--private 实例已收尾`);
-        return EXIT.OK;
-      }
-      if (w.kind === "stale") return lockPrivate(v, w.view, { action: "release" }, opts, depth + 1);
-      if (w.kind === "orphan") return lockPrivate(v, w.view, { action: "outer", degrade: opts.lazy }, opts, depth + 1);
-      err(`${name}：--private 实例 10 s 内仍未收尾（${w.view.state}）；稍后 pi-secure status ${name}`);
-      return EXIT.DEADLINE;
-    }
-    case "lazy": {
-      const sup = rec.supervisor;
-      const gone = (mi) => mi !== undefined && vaultMountState(mi, rec.realMnt, rec.realCipher) === "absent";
-      if (!sup) return rejudge();
-      if (gone(await supervisorMountinfo(sup))) {
-        out(`${name}：${LAZY_DETACHED_TEXT}`);
-        return EXIT.OK;
-      }
-      if (!signalVerified(sup, "SIGUSR2", { nsMnt: rec.ns?.mnt }))
-        return depth >= 1 ? EXIT.BUSY : rejudge("监督进程已变化");
-      const end = Date.now() + 3_000;
-      while (Date.now() < end) {
-        await sleep(100);
-        const mi = await supervisorMountinfo(sup);
-        if (mi === undefined && readProcStartSync(sup.pid) !== sup.start) return rejudge("监督进程已退出");
-        if (gone(mi)) {
-          out(`${name}：${LAZY_DETACHED_TEXT}`);
-          return EXIT.OK;
-        }
-      }
-      err(
-        `${name}：未能确认私有命名空间内的挂载路径已摘除（监督进程 pid ${sup.pid} 的 mountinfo 仍有该条目）；pi-secure status ${name}；要结束访问请用 --kill`,
-      );
-      return EXIT.DEADLINE;
-    }
-    default:
-      throw new CliError(EXIT.FAIL, `内部错误：未知 lock 动作 ${d.action}`);
-  }
 }
 
 // ───────────────────────────── P0 outcome table (§3.6) ─────────────────────────────
@@ -5521,7 +5381,7 @@ export async function webHubHint(home = homeDir(), { timeoutMs = 300 } = {}) {
 // ───────────────────────────── P0: run --private (§2.2) ─────────────────────────────
 
 /** P0 orchestration. Called by cmdRun after the shared checks + lexical audit. */
-async function runPrivate(v, { sub, piArgs, piBin, pkg, mode = "run", fix = false, relocateTxid } = {}) {
+export async function runPrivate(v, { sub, piArgs, piBin, pkg, mode = "run", fix = false, relocateTxid } = {}) {
   requirePrereqs();
   const pf = await privatePreflight();
   if (!pf.ok)
@@ -5759,70 +5619,6 @@ export async function relocateInNs(v, txid, realMnt, S, { runSteps } = {}) {
   }
 }
 
-// ───────────────────────────── worker (§2.6) ─────────────────────────────
-
-/** `__mount-work` (env PI_SECURE_WORK_SPEC): sync fs under the mount, isolated in a KILLable process. */
-async function cmdMountWork() {
-  let spec;
-  try {
-    spec = JSON.parse(process.env.PI_SECURE_WORK_SPEC ?? "");
-  } catch {
-    out(JSON.stringify({ ok: false, code: EXIT.FAIL, message: "worker spec 无效" }));
-    return EXIT.FAIL;
-  }
-  delete process.env.PI_SECURE_WORK_SPEC;
-  const delay = testWorkerDelayMs(spec?.op);
-  if (delay) await sleep(delay);
-  try {
-    const { vault: v } = must(resolveVault(spec.name));
-    const { realMnt } = physicalPaths(v);
-    if (spec.op === "readdir") {
-      fs.readdirSync(v.mnt);
-      out(JSON.stringify({ ok: true }));
-      return EXIT.OK;
-    }
-    if (spec.op === "verify") {
-      const pin = { ...spec.pin, fd: spec.pinFd, closed: true };
-      verifyMountPointIdentity(v, pin, { readlink: () => fs.readlinkSync(`/proc/${spec.pinPid}/fd/${spec.pinFd}`) });
-      out(JSON.stringify({ ok: true }));
-      return EXIT.OK;
-    }
-    if (spec.op === "post-mount") {
-      const notes = [];
-      ensureVaultDirs(v, { realMnt });
-      const r = syncProjectSettings(v, { fix: spec.fix === true });
-      if (r.kind === "conflict") throw new CliError(EXIT.CONFIG, r.message);
-      if (r.kind === "written") notes.push(`已写入 ${path.join(v.work, ".pi", "settings.json")} 的 sessionDir`);
-      if (r.kind === "fixed")
-        notes.push(
-          `已改写 sessionDir（原文件备份为 ${r.backup}${r.droppedOtherKeys ? "；原文件不是 JSON 对象，其余内容只在备份里" : ""}）`,
-        );
-      if (spec.mode === "setup") {
-        out(JSON.stringify({ ok: true, notes }));
-        return EXIT.OK;
-      }
-      const cwd = resolveRunCwd(v, spec.sub ?? undefined, { physical: true, realMnt });
-      const parseArgs = await loadPiParseArgs(spec.piPkg);
-      if (!parseArgsShapeOk(parseArgs))
-        throw new CliError(EXIT.REFUSED_ARGS, "pi parseArgs 的结果结构变了，参数审查无法保证，拒绝启动");
-      const a2 = auditParsedArgs(parseArgs(spec.piArgs ?? []), {
-        cwd,
-        sessionsRoot: path.join(realMnt, "state", "sessions"),
-        physical: true,
-      });
-      if (!a2.ok) throw new CliError(EXIT.REFUSED_ARGS, `参数被拒：${a2.reason}`);
-      verifyRunPaths(v, cwd, { realMnt });
-      out(JSON.stringify({ ok: true, cwd, notes }));
-      return EXIT.OK;
-    }
-    throw new CliError(EXIT.FAIL, `未知 worker op：${spec.op}`);
-  } catch (e) {
-    const code = e instanceof CliError ? e.code : EXIT.FAIL;
-    out(JSON.stringify({ ok: false, code, message: String((e && e.message) || e) }));
-    return code;
-  }
-}
-
 /** Run one worker op bounded by `ms` → {ok, code?, message?, …} (timeout ⇒ code 75). */
 export async function runWorker(spec, ms) {
   const w = workerSpawnSpec(spec);
@@ -5883,504 +5679,6 @@ export function inheritedMountProblems(mountinfo, { realMnt, others = [] }) {
     else if (e.mountPoint === realMnt) problems.push(`本库挂载点上已有挂载（${e.fsType}）`);
   }
   return problems;
-}
-
-/** Poll /proc/<pid>/ns/user until it differs from `outerUser` (the inner unshare ran) — ≤ maxMs. */
-async function waitInnerUserNs(pid, outerUser, maxMs = 1_000) {
-  const end = Date.now() + maxMs;
-  for (;;) {
-    const u = readNsLinkSync(pid, "user");
-    if (u && u !== outerUser) return u;
-    if (u === undefined || Date.now() >= end) return undefined;
-    await sleep(10);
-  }
-}
-
-async function cmdNsRoot() {
-  // stderr EIO (terminal gone) must never crash the supervisor (K13).
-  process.stderr.on("error", () => {});
-  process.stdout.on("error", () => {});
-  const say = (s) => {
-    try {
-      process.stderr.write(`pi-secure: ${s}\n`);
-    } catch {
-      /* EIO */
-    }
-  };
-  const S = {
-    stage: "init",
-    gocry: undefined, // ChildProcess
-    gocryId: undefined,
-    pi: undefined,
-    piId: undefined,
-    abort: false,
-    readyResolve: undefined,
-    lazyBusy: false,
-  };
-  // Signals FIRST (gocryptfs' SIGUSR1 would otherwise kill us — default action terminates).
-  process.on("SIGUSR1", () => S.readyResolve?.("usr1"));
-  // N2: SIGUSR2 (`lock --lazy`) is handled from the start too — `lock` may read phase:"session"
-  // the instant the record is written, before this process resumes; the default action would
-  // kill the supervisor. lazyDetach itself is a no-op outside the session stage.
-  process.on("SIGUSR2", () => {
-    if (S.onUsr2) S.onUsr2();
-    else if (S.stage === "launching") S.usr2Pending = true; // the race window right before "session"
-  });
-  const interrupt = () => {
-    S.onRelocAbort?.(); // V6: a running relocation worker is aborted (setup stage only)
-    if (S.stage === "mounting") {
-      S.abort = true;
-      signalVerified(S.gocryId ?? { pid: -1, start: -1 }, "SIGTERM"); // identity-checked (review N1 #4)
-    }
-  };
-  process.on("SIGINT", interrupt);
-  process.on("SIGQUIT", interrupt);
-  process.on("SIGHUP", () => {
-    try {
-      S.pi && S.pi.kill("SIGHUP");
-    } catch {
-      /* gone */
-    }
-  });
-  process.on("SIGTERM", () => {
-    S.abort = true;
-    S.onRelocAbort?.();
-    if (S.stage === "mounting") interrupt();
-    if (S.pi) {
-      try {
-        S.pi.kill("SIGTERM");
-      } catch {
-        /* gone */
-      }
-      const t = setTimeout(() => {
-        try {
-          S.pi?.kill("SIGKILL");
-        } catch {
-          /* gone */
-        }
-      }, PRIVATE_BUDGET.sessionKillGraceMs);
-      t.unref();
-    }
-  });
-
-  let spec;
-  try {
-    spec = JSON.parse(process.env.PI_SECURE_NS_SPEC ?? "");
-  } catch {
-    say("内部错误：缺少 ns 规格");
-    return EXIT.FAIL;
-  }
-  delete process.env.PI_SECURE_NS_SPEC;
-  const problems = nsRootSelfCheck({
-    uid: process.getuid(),
-    uidMap: readTextOr("/proc/self/uid_map", ""),
-    gidMap: readTextOr("/proc/self/gid_map", ""),
-    spec,
-  });
-  const { vault: v } = (() => {
-    const r = resolveVault(spec?.name);
-    return r.kind === "ok" ? r : { vault: undefined };
-  })();
-  if (!v) problems.push("无法解析保险库");
-  let rec;
-  if (v) {
-    const cur = readPrivateRecordSync(v);
-    if (cur.kind !== "ok") problems.push(`记录不可用（${cur.kind}）`);
-    else if (cur.record.instanceId !== spec.instanceId) problems.push("记录属于另一个实例");
-    else if (cur.record.phase !== "starting") problems.push(`记录阶段不是 starting（${cur.record.phase}）`);
-    else rec = cur.record;
-  }
-  // fd 9 must be the lease (dev/ino) AND this very description must hold the flock.
-  if (rec) {
-    let st;
-    try {
-      st = fs.fstatSync(9);
-    } catch {
-      problems.push("fd 9 不存在");
-    }
-    if (st) {
-      const { maj, min } = devMajMin(st.dev);
-      if (`${maj}:${min}` !== rec.lease.dev || st.ino !== rec.lease.ino) problems.push("fd 9 不是本库的 mount.lease");
-      else {
-        const self = await runBounded("flock", ["-n", "9"], {
-          deadline: Date.now() + 1_000,
-          stdio: ["ignore", "ignore", "ignore", "ignore", "ignore", "ignore", "ignore", "ignore", "ignore", 9],
-          killGraceMs: 200,
-          abandonMs: 200,
-        });
-        if (!(self.kind === "exit" && self.code === 0)) problems.push("fd 9 未持有租约锁");
-      }
-    }
-  }
-  if (problems.length) {
-    say(`私有命名空间自检失败，未挂载：${problems.join("；")}`);
-    return EXIT.FAIL; // never touches the record of another instance; P0 releases ours
-  }
-  const id = spec.instanceId;
-  const update = async (patch) => {
-    const r = await updateRecord(v, id, patch);
-    if (r !== "ok") S.abort = true;
-    return r;
-  };
-  const myStart = readProcStartSync(process.pid);
-  const nsMnt = readNsLinkSync("self", "mnt");
-  const nsUser = readNsLinkSync("self", "user");
-  if (
-    (await update({
-      phase: "mounting",
-      supervisor: { pid: process.pid, start: myStart },
-      ns: { mnt: nsMnt, user: nsUser },
-    })) !== "ok"
-  ) {
-    say("记录变迁失败（instanceId 不符或 mount.lock 超时），未挂载");
-    return EXIT.FAIL;
-  }
-  S.stage = "mounting";
-  const { realMnt, realCipher } = physicalPaths(v);
-  let failCode;
-  let failMsg;
-  let pin;
-  try {
-    // Review N1 #3: Q10 re-checked on what THIS namespace actually inherited (closes the window
-    // between the claim's global check and unshare). Unreadable ⇒ refuse.
-    const mi = await deadlineRace(
-      fsp.readFile("/proc/self/mountinfo", "utf8"),
-      Date.now() + PRIVATE_BUDGET.scanMs,
-    ).catch(() => TIMEOUT);
-    if (typeof mi !== "string") throw new CliError(EXIT.DEADLINE, "无法读取私有命名空间的 mountinfo，拒绝挂载");
-    const others = otherRegisteredVaults(v).map((o) => ({ name: o.name, realMnt: physicalPaths(o).realMnt }));
-    const inherited = inheritedMountProblems(mi, { realMnt, others });
-    if (inherited.length)
-      throw new CliError(
-        EXIT.BUSY,
-        `私有命名空间继承了不应存在的挂载，拒绝挂载（另一保险库在认领后被全局解锁？先 lock 它再试）：\n  - ${inherited.join("\n  - ")}`,
-      );
-    // Inside the userns every unmapped owner (root included) reads as the overflow uid, so the
-    // ancestor-chain rule cannot be evaluated here — the claim (initial ns, under mount.lock)
-    // already enforced it; everything else (dir/lease/sentinels/position) is re-checked here.
-    const lay = checkLayout(v, { mounted: false, others: otherRegisteredVaults(v), ancestors: false });
-    if (lay.problems.length)
-      throw new CliError(EXIT.CONFIG, `布局校验失败，拒绝挂载：\n  - ${lay.problems.join("\n  - ")}`);
-    pin = pinMountPoint(v);
-    let mounted = false;
-    for (let attempt = 1; attempt <= PASSWORD_TRIES && !mounted; attempt++) {
-      if (S.abort) throw new CliError(EXIT.FAIL, "已中止");
-      mountPointPinStillValid(v, pin);
-      const g = gocryptfsSpawnSpec(realCipher, realMnt, process.pid);
-      const child = spawn(g.cmd, g.args, g.opts);
-      S.gocry = child;
-      // Identity captured at spawn (review N1 #4): every later signal re-verifies pid+starttime.
-      const gStart = child.pid ? readProcStartSync(child.pid) : undefined;
-      S.gocryId = gStart === undefined ? undefined : { pid: child.pid, start: gStart };
-      const exited = new Promise((resolve) => {
-        child.on("error", () => resolve(127));
-        child.on("close", (c, sig) => resolve(c ?? (sig ? 128 + (os.constants.signals[sig] ?? 0) : 1)));
-      });
-      const ready = new Promise((resolve) => (S.readyResolve = resolve));
-      let attemptTimer;
-      const timeout = new Promise((resolve) => {
-        attemptTimer = setTimeout(() => resolve("timeout"), PRIVATE_BUDGET.mountAttemptMs);
-        attemptTimer.unref();
-      });
-      const first = await Promise.race([ready, exited.then((c) => ({ exit: c })), timeout]);
-      clearTimeout(attemptTimer);
-      S.readyResolve = undefined;
-      if (first === "timeout") {
-        termThenKill(S.gocryId, { graceMs: PRIVATE_BUDGET.mountKillGraceMs, exited });
-        await Promise.race([exited, sleep(PRIVATE_BUDGET.mountKillGraceMs + PRIVATE_BUDGET.mountAbandonMs)]);
-        throw new CliError(EXIT.DEADLINE, "gocryptfs 在 180 s 内未完成挂载（口令提示无人应答？）");
-      }
-      if (first !== "usr1") {
-        const code = first.exit;
-        S.gocry = undefined;
-        S.gocryId = undefined;
-        if (S.abort) throw new CliError(EXIT.FAIL, "已中止");
-        if (code === 12) {
-          if (attempt < PASSWORD_TRIES) {
-            say(`口令错误（${attempt}/${PASSWORD_TRIES}）`);
-            await sleep(RETRY_DELAYS_MS[attempt - 1]);
-            continue;
-          }
-          throw new CliError(EXIT.BAD_PASSWORD, `口令连续错误 ${PASSWORD_TRIES} 次`);
-        }
-        const why =
-          code === 10
-            ? "挂载点非空"
-            : code === 19
-              ? "挂载点不可写"
-              : code === 23
-                ? "gocryptfs.conf 无法读取"
-                : code >= 128
-                  ? "被中断"
-                  : `exit ${code}`;
-        throw new CliError(EXIT.FAIL, `gocryptfs 挂载失败（${why}）`);
-      }
-      // SIGUSR1 seen (Node cannot see the sender; the mountinfo + readdir checks below prove it).
-      S.gocryExited = exited;
-      mounted = true;
-    }
-    const readyDl = Date.now() + PRIVATE_BUDGET.readyMs;
-    let st = "absent";
-    while (Date.now() < readyDl) {
-      const mi = await fsp.readFile("/proc/self/mountinfo", "utf8").catch(() => "");
-      st = vaultMountState(mi, realMnt, realCipher);
-      if (st === "mounted") break;
-      await sleep(50);
-    }
-    if (st !== "mounted") throw new CliError(EXIT.FAIL, `gocryptfs 已就绪但 ns 内 mountinfo 不符（${st}）`);
-    const rd = await runWorker({ op: "readdir", name: v.name }, PRIVATE_BUDGET.readyMs);
-    if (!rd.ok) throw new CliError(rd.code ?? EXIT.FAIL, `挂载探活失败：${rd.message}`);
-    if (!S.gocryId) throw new CliError(EXIT.FAIL, "无法读取 gocryptfs 的进程身份");
-    const nextPhase = spec.mode === "setup" ? "setup" : "launching";
-    if ((await update({ phase: nextPhase, gocryptfs: S.gocryId })) !== "ok")
-      throw new CliError(EXIT.FAIL, "记录变迁失败，中止");
-    S.stage = nextPhase;
-    const vf = await runWorker(
-      {
-        op: "verify",
-        name: v.name,
-        pinPid: process.pid,
-        pinFd: pin.fd,
-        pin: { path: pin.path, dev: pin.dev, ino: pin.ino, parent: pin.parent },
-      },
-      PRIVATE_BUDGET.readyMs,
-    );
-    closeMountPointPin(pin);
-    if (!vf.ok) throw new CliError(vf.code ?? EXIT.FAIL, vf.message);
-    if (S.abort) throw new CliError(EXIT.FAIL, "已中止");
-    // convert-plan §3.4 (V6): setup mode carrying a relocation runs the fd-anchored relocation steps
-    // (archive.mjs, workers) on this RAW private mount instead of the path-based post-mount writes.
-    const pm =
-      spec.mode === "setup" && typeof spec.relocateTxid === "string"
-        ? await relocateInNs(v, spec.relocateTxid, realMnt, S)
-        : await runWorker(
-            {
-              op: "post-mount",
-              name: v.name,
-              mode: spec.mode,
-              fix: spec.fix === true,
-              sub: spec.sub ?? null,
-              piArgs: spec.piArgs ?? [],
-              piPkg: spec.piPkg,
-            },
-            PRIVATE_BUDGET.postMountMs,
-          );
-    for (const n of pm.notes ?? []) say(n);
-    if (!pm.ok) throw new CliError(pm.code ?? EXIT.FAIL, pm.message);
-    if (S.abort) throw new CliError(EXIT.FAIL, "已中止");
-    if (spec.mode !== "setup") {
-      const ps = innerPiSpawnSpec({
-        uid: spec.uid,
-        gid: spec.gid,
-        piBin: spec.piBin,
-        sessionDir: v.sessionDir,
-        piArgs: spec.piArgs ?? [],
-        cwd: pm.cwd,
-        env: piChildEnv(v, pm.cwd, process.env, { ns: true }),
-      });
-      const pi = spawn(ps.cmd, ps.args, ps.opts);
-      S.pi = pi;
-      const piExited = new Promise((resolve) => {
-        pi.on("error", (e) => {
-          say(`无法启动 pi：${e && e.message}`);
-          resolve(127);
-        });
-        pi.on("close", (c, sig) => resolve(c ?? (sig ? 128 + (os.constants.signals[sig] ?? 0) : 1)));
-      });
-      let piDone = false;
-      piExited.then(() => (piDone = true));
-      // Review N1 #5: the session (pi identity + its inner userns id) MUST be published before
-      // the open-ended wait. Any failure ⇒ stop the just-started pi (ChildProcess-guarded TERM,
-      // bounded KILL), then the normal bounded finalize with a failure code.
-      const ps0 = pi.pid ? readProcStartSync(pi.pid) : undefined;
-      if (ps0 !== undefined) S.piId = { pid: pi.pid, start: ps0 };
-      const innerUser = S.piId ? await waitInnerUserNs(pi.pid, nsUser) : undefined;
-      let published = "skipped";
-      if (!piDone) {
-        published =
-          S.piId && innerUser
-            ? await update({ phase: "session", pi: S.piId, ns: { mnt: nsMnt, user: nsUser, innerUser } })
-            : "identity";
-      }
-      if (published !== "ok" && published !== "skipped" && !piDone) {
-        say(
-          `会话身份登记失败（${published === "failed" ? "mount.lock 超时或写入失败" : published === "mismatch" ? "记录已不属于本实例" : "无法读取 pi 的进程身份"}），终止 pi 并收尾`,
-        );
-        S.abort = true;
-        try {
-          pi.kill("SIGTERM"); // ChildProcess.kill is a no-op once the child was reaped
-        } catch {
-          /* gone */
-        }
-        if (
-          (await Promise.race([piExited, sleep(PRIVATE_BUDGET.sessionKillGraceMs).then(() => TIMEOUT)])) === TIMEOUT
-        ) {
-          try {
-            pi.kill("SIGKILL");
-          } catch {
-            /* gone */
-          }
-          await Promise.race([piExited, sleep(1_000)]);
-        }
-        S.pi = undefined;
-        S.stage = "finalizing";
-        const fc = published === "failed" ? EXIT.DEADLINE : EXIT.FAIL;
-        await update({ phase: "finalizing", failCode: fc });
-        return await finalizeInNs(v, { realMnt, id, S, say, exitCode: fc });
-      }
-      S.stage = "session";
-      S.onUsr2 = () => void lazyDetach(v, realMnt, id, S, say);
-      if (S.usr2Pending) {
-        S.usr2Pending = false;
-        S.onUsr2();
-      }
-      const code = await piExited;
-      S.pi = undefined;
-      S.stage = "finalizing";
-      await update({ phase: "finalizing", piExit: { code } });
-      return await finalizeInNs(v, { realMnt, id, S, say, exitCode: code });
-    }
-  } catch (e) {
-    failCode = e instanceof CliError ? e.code : EXIT.FAIL;
-    failMsg = e instanceof CliError ? e.message : String((e && e.message) || e);
-  } finally {
-    closeMountPointPin(pin);
-  }
-  if (failMsg) say(failMsg);
-  S.stage = "finalizing";
-  const code = failCode ?? EXIT.OK;
-  await update({ phase: "finalizing", ...(failCode ? { failCode } : {}) });
-  return await finalizeInNs(v, { realMnt, id, S, say, exitCode: code });
-}
-
-async function lazyDetach(v, realMnt, id, S, say) {
-  if (S.lazyBusy || S.stage !== "session") return;
-  S.lazyBusy = true;
-  try {
-    const r = await runBounded("umount", ["-n", "-l", realMnt], {
-      deadline: Date.now() + 1_000,
-      killGraceMs: 200,
-      abandonMs: 200,
-    });
-    if (r.kind === "exit" && r.code === 0) {
-      await updateRecord(v, id, { lazyDetachedAt: new Date().toISOString() });
-      say(
-        "已在私有命名空间内摘除挂载路径。既有 cwd、已打开的文件和运行中的作业可能继续访问明文；插件会在下一次输入/工具调用时拒绝（LOCKED）",
-      );
-    }
-  } finally {
-    S.lazyBusy = false;
-  }
-}
-
-/**
- * §3.4 ns-internal finalize (P1): members TERM→KILL (≤3 rounds), umount -n (EBUSY ⇒ -l), wait /
- * TERM / KILL gocryptfs, verify, record inNsDone. NEVER deletes the record (I-P3). Budget 10 s,
- * hard backstop 10.5 s ⇒ exit 75.
- */
-async function finalizeInNs(v, { realMnt, id, S, say, exitCode }) {
-  const deadline = Date.now() + PRIVATE_BUDGET.finalizeInNsMs;
-  const hard = armHardExit(PRIVATE_BUDGET.finalizeInNsMs + PRIVATE_BUDGET.hardGraceMs, `ns 内收尾未完成（${v.name}）`);
-  const stall = testFinalizeStallMs();
-  if (stall) await sleep(stall); // TEST-ONLY (see testFinalizeStallMs): the hard backstop above still fires
-  const pending = [];
-  const nsMnt = readNsLinkSync("self", "mnt");
-  const myStart = readProcStartSync(process.pid);
-  const gocryPid = S.gocry?.pid;
-  const scan = () =>
-    scanNsMembers(nsMnt, {
-      deadline: Math.min(deadline, Date.now() + PRIVATE_BUDGET.scanMs),
-      minStart: myStart,
-      exclude: [process.pid, ...(gocryPid ? [gocryPid] : [])],
-      deniedMeans: "outside",
-    });
-  try {
-    // 2. members (re-verified per signal), at most 3 rounds, ≤3.5 s
-    const memberDl = Math.min(deadline, Date.now() + 3_500);
-    let listed = false;
-    const gocryKids = new Map();
-    for (let round = 0; round < 3; round++) {
-      const s = await scan();
-      if (s.kind !== "done") {
-        pending.push(`members:${s.reason}`);
-        break;
-      }
-      // gocryptfs' own helpers (its syslog `logger`, started because -notifypid marks it as the
-      // daemon child) belong to gocryptfs: they end with it — killing them first could SIGPIPE it.
-      for (const m of s.members) if (gocryPid && m.ppid === gocryPid) gocryKids.set(m.pid, m);
-      s.members = s.members.filter((m) => !gocryKids.has(m.pid));
-      if (!s.members.length) break;
-      if (!listed) {
-        say(`收尾：终止命名空间内遗留的进程（仅本次 ns 内启动的；外部启动的 tmux server 等不受影响）：`);
-        listed = true;
-      }
-      for (const m of s.members) {
-        say(`  pid ${m.pid} ${m.comm}`);
-        signalVerified(m, round === 0 ? "SIGTERM" : "SIGKILL", { nsMnt });
-      }
-      const waitEnd = Math.min(memberDl, Date.now() + (round === 0 ? 2_000 : 500));
-      while (Date.now() < waitEnd) {
-        if (s.members.every((m) => readProcStartSync(m.pid) !== m.start)) break;
-        await sleep(100);
-      }
-      for (const m of s.members) if (readProcStartSync(m.pid) === m.start) signalVerified(m, "SIGKILL", { nsMnt });
-      if (Date.now() >= memberDl) break;
-    }
-    // 3. umount inside the ns (private mounts are invisible to outer fusermount3)
-    if (S.gocry) {
-      const left = () => deadline - Date.now();
-      const u = await runBounded("umount", ["-n", realMnt], {
-        deadline: Date.now() + Math.min(2_000, Math.max(100, left() - 3_000)),
-        killGraceMs: 0,
-        abandonMs: 100,
-      });
-      if (!(u.kind === "exit" && u.code === 0)) {
-        const notMounted = u.kind === "exit" && /not mounted|未挂载/i.test(u.stderr);
-        if (!notMounted) {
-          const l = await runBounded("umount", ["-n", "-l", realMnt], {
-            deadline: Date.now() + 1_000,
-            killGraceMs: 0,
-            abandonMs: 100,
-          });
-          if (!(l.kind === "exit" && l.code === 0)) pending.push("umount");
-        }
-      }
-      // 4. gocryptfs (our direct child, -fg) exits once unmounted
-      const gone = await Promise.race([S.gocryExited ?? Promise.resolve(0), sleep(2_000).then(() => TIMEOUT)]);
-      if (gone === TIMEOUT && S.gocryId) {
-        signalVerified(S.gocryId, "SIGTERM");
-        const g2 = await Promise.race([S.gocryExited ?? Promise.resolve(0), sleep(500).then(() => TIMEOUT)]);
-        if (g2 === TIMEOUT) {
-          signalVerified(S.gocryId, "SIGKILL");
-          await Promise.race([S.gocryExited ?? Promise.resolve(0), sleep(300)]);
-        }
-      }
-      if (S.gocryId && readProcStartSync(S.gocryId.pid) === S.gocryId.start) pending.push("gocryptfs");
-    }
-    // 5. verify: no member left besides us (gocryptfs' helpers get ≤0.5 s to see EOF, then KILL)
-    let fin = await scan();
-    const isKid = (m) => gocryKids.get(m.pid)?.start === m.start;
-    if (fin.kind === "done" && fin.members.length && fin.members.every(isKid)) {
-      await sleep(500);
-      fin = await scan();
-      if (fin.kind === "done") for (const m of fin.members) signalVerified(m, "SIGKILL", { nsMnt });
-      if (fin.kind === "done" && fin.members.length) {
-        await sleep(200);
-        fin = await scan();
-      }
-    }
-    if (fin.kind !== "done") pending.push(`verify:${fin.reason}`);
-    else if (fin.members.length) pending.push(`members:${fin.members.map((m) => m.pid).join(",")}`);
-    const done = pending.length === 0;
-    await updateRecord(v, id, done ? { inNsDone: true } : { inNsDone: false, inNsPending: pending.slice(0, 16) });
-    if (!done) {
-      say(`ns 内收尾未完成（${pending.join("，")}），将由启动器做外部收尾`);
-      return EXIT.DEADLINE;
-    }
-    return exitCode;
-  } finally {
-    clearTimeout(hard);
-  }
 }
 
 // ───────────────────────────── V6: convert / export / import wiring ─────────────────────────────
@@ -6480,7 +5778,7 @@ function expandTilde(p, home) {
 async function cmdConvertEntry(args, cwd) {
   const C = await import("./convert.mjs");
   const home = homeDir();
-  const ctx = C.defaultConvertContext(process.env, { home, cwd });
+  const ctx = C.defaultConvertContext(process.env, { home, cwd, agentDir: piAgentDir(home) });
   return await C.cmdConvert(args, { ports: launcherPorts(home), ctx });
 }
 
@@ -6557,7 +5855,7 @@ export async function main(argv) {
     if (typeof cmd === "string" && !cmd.startsWith("__")) for (const l of testSeamWarnings()) err(l);
     switch (cmd) {
       case "init":
-        return await cmdInit(args);
+        return await (await import("./init.mjs")).cmdInit(args); // lazy: a copy of helper.mjs alone still runs the rest
       case "unlock":
         return await cmdUnlock(args);
       case "lock":
@@ -6577,20 +5875,22 @@ export async function main(argv) {
         return await cmdImportEntry(args, origCwd);
       case "__mount":
         return await cmdInnerMount(args);
+      // The --private command bodies live in private.mjs, loaded lazily (a copy of helper.mjs alone
+      // still runs every other command).
       case "__private-claim":
-        return await cmdPrivateClaim(args[0], args[1], args[2], args[3], args[4]);
+        return await (await import("./private.mjs")).cmdPrivateClaim(args[0], args[1], args[2], args[3], args[4]);
       case "__private-update":
-        return cmdPrivateUpdate(args[0], args[1], args[2]);
+        return (await import("./private.mjs")).cmdPrivateUpdate(args[0], args[1], args[2]);
       case "__private-release":
-        return await cmdPrivateRelease(args[0], args[1]);
+        return await (await import("./private.mjs")).cmdPrivateRelease(args[0], args[1]);
       case "__private-abort-start":
-        return cmdPrivateAbortStart(args[0], args[1]);
+        return (await import("./private.mjs")).cmdPrivateAbortStart(args[0], args[1]);
       case "__private-terminate":
-        return await cmdPrivateTerminate(args[0], args[1], args[2]);
+        return await (await import("./private.mjs")).cmdPrivateTerminate(args[0], args[1], args[2]);
       case "__ns-root":
-        return await cmdNsRoot();
+        return await (await import("./private.mjs")).cmdNsRoot();
       case "__mount-work":
-        return await cmdMountWork();
+        return await (await import("./private.mjs")).cmdMountWork();
       case "__register": {
         // internal: executed by registerVault() UNDER the settings flock (V0: + --expect-absent / --pending)
         try {

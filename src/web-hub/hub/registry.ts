@@ -28,7 +28,7 @@ import {
   type SessionInfo,
   type StatusInfo,
 } from "../protocol/messages.js";
-import { compareVersions, HOLD_CAP } from "../protocol/version.js";
+import { compareVersions, EPOCH_UP_CAP, HOLD_CAP } from "../protocol/version.js";
 import type { AgentView, HubBus, HubEvent, HubLog, RegistryView } from "./ports.js";
 import { pidAlive as defaultPidAlive } from "./singleton.js";
 import type { XsRecordView, XsRegistryObserver } from "./xs/members.js";
@@ -422,7 +422,16 @@ export function createRegistry(deps: {
         // the new epoch before it re-snapshots. Gated on the NEW hello caps so agents with the
         // feature off keep today's gap-only wire byte-for-byte; the stale branch below still
         // publishes its single agent_up unchanged (never a double).
-        const epochRefresh = epochChanged && prevPhase !== "stale" && existing.caps.includes(HOLD_CAP);
+        // #23 web-update-stuck plan §2.2 (D14): the gate now ALSO accepts `epoch.up.v1` — the
+        // cap an agent TAIL-appends exactly when its config keeps hold unwired (D13; default
+        // configs advertise hold.v1 and never carry it). Everything else is unchanged: same
+        // card-then-gap order, prevPhase!="stale" (the stale branch keeps its single agent_up),
+        // and an epoch-changing reclaim whose caps carry NEITHER string still publishes gap only
+        // (pre-feature agents keep the old wire — compat golden s1).
+        const epochRefresh =
+          epochChanged &&
+          prevPhase !== "stale" &&
+          (existing.caps.includes(HOLD_CAP) || existing.caps.includes(EPOCH_UP_CAP));
         if (prevPhase === "stale" || epochRefresh) publish({ type: "agent_up", agent: card(existing) });
         if (epochChanged) publish({ type: "gap", agentKey: existing.agentKey, fromSeq: 0 });
         // fleet-drawer plan §5.3 (F3b): a caps-set change on re-hello — the run-transcript

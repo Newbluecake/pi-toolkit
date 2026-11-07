@@ -65,6 +65,28 @@ describe("createWorkflowChildSpawner: model/thinking override forwarding", () =>
     expect(requests[0]).not.toHaveProperty("thinkingOverride");
   });
 
+  /**
+   * Structured-output repair turn (plan §3.3): workflow children never carry
+   * a `schema` key — that is what keeps them outside the repair-turn path
+   * entirely (the adapter only builds a repair spec for schema runs), so a
+   * workflow child can never spend an extra "repair" prompt.
+   */
+  it("never sets a schema key on the SpawnRequest (workflow children are never schema runs)", async () => {
+    const { service, requests } = fakeSpawnService();
+    const adapter = createWorkflowChildSpawner(service, fakeTypes());
+    await adapter.spawn({
+      type: "general",
+      prompt: "p",
+      label: "l",
+      deadlineAt: 5_000,
+      budgetOverride: { totalMs: 1_000 },
+    });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).not.toHaveProperty("schema");
+    expect(requests[0]).not.toHaveProperty("schemaPreset");
+    expect(requests[0]).not.toHaveProperty("inheritSchema");
+  });
+
   it("keeps the label/deadlineAt/budgetOverride forwarding intact alongside the new fields", async () => {
     const { service, requests } = fakeSpawnService();
     const adapter = createWorkflowChildSpawner(service, fakeTypes());

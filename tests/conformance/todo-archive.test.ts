@@ -31,7 +31,7 @@ import {
 } from "./agent-session-harness.js";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { wireTodo, type TodoWireResult } from "../../src/todo/index.js";
-import { replayState, STATE_ENTRY, type TodoState } from "../../src/todo/state.js";
+import { ARCHIVE_ENTRY, replayState, STATE_ENTRY, type TodoState } from "../../src/todo/state.js";
 
 afterEach(() => {
   disposeHarnessDirs();
@@ -104,8 +104,13 @@ const scriptedTextTurn = [
   { toolCall: false, build: (m: ReturnType<typeof fakeModel>) => assistantTextMsg(m, "next turn") },
 ];
 
-function countTodoEntries(branch: Array<Record<string, unknown>>): number {
+// todo-archive-split #92: the sweep persists TWO custom entries (archive package then narrowed
+// live snapshot), so the counters split by kind.
+function countLiveEntries(branch: Array<Record<string, unknown>>): number {
   return branch.filter((entry) => entry.type === "custom" && entry.customType === STATE_ENTRY).length;
+}
+function countArchiveEntries(branch: Array<Record<string, unknown>>): number {
+  return branch.filter((entry) => entry.type === "custom" && entry.customType === ARCHIVE_ENTRY).length;
 }
 
 async function runArchiveScenario(keepRecent: boolean): Promise<void> {
@@ -137,18 +142,28 @@ async function runArchiveScenario(keepRecent: boolean): Promise<void> {
       expect(completedTask.completedAt).toBeDefined();
       const branchBefore = session.sessionManager.getBranch() as Array<Record<string, unknown>>;
       const preCompactLeafId = branchBefore[branchBefore.length - 1]?.id as string;
-      const todoEntriesBefore = countTodoEntries(branchBefore);
+      const todoEntriesBefore = countLiveEntries(branchBefore);
       expect(todoEntriesBefore).toBeGreaterThanOrEqual(3); // 2 creates + 1 update persisted
+      expect(countArchiveEntries(branchBefore)).toBe(0); // pre-split: no archive packages yet
 
-      // ── 2. compact(): branch ends [compaction, todo custom entry]; #1 archived, #2 open ──
+      // ── 2. compact(): branch ends [compaction, archive package, live]; #1 archived, #2 open ──
+      // todo-archive-split §4.3 #2: the sweep persists pre {put:#1} → narrowed live.
       await session.compact();
       const branch = session.sessionManager.getBranch() as Array<Record<string, unknown>>;
       const compactionIdx = branch.map((entry) => entry.type).lastIndexOf("compaction");
       expect(compactionIdx).toBeGreaterThan(-1);
-      const archiveEntry = branch[branch.length - 1];
-      expect(archiveEntry?.type).toBe("custom");
-      expect(archiveEntry?.customType).toBe(STATE_ENTRY);
-      expect(branch.length - 1).toBe(compactionIdx + 1); // directly after the compaction entry
+      const archivePackage = branch[branch.length - 2];
+      expect(archivePackage?.type).toBe("custom");
+      expect(archivePackage?.customType).toBe(ARCHIVE_ENTRY);
+      expect(archivePackage?.data).toMatchObject({
+        v: 1,
+        put: [{ id: 1, status: "completed", archivedAt: expect.any(Number) }],
+      });
+      const liveEntry = branch[branch.length - 1];
+      expect(liveEntry?.type).toBe("custom");
+      expect(liveEntry?.customType).toBe(STATE_ENTRY);
+      expect((liveEntry?.data as { tasks: Array<{ id: number }> }).tasks.map((task) => task.id)).toEqual([2]);
+      expect(branch.length - 2).toBe(compactionIdx + 1); // both directly after the compaction entry
 
       const replayed = replayState(branch)!;
       const archivedTask = replayed.tasks.find((task) => task.id === 1)!;
@@ -157,16 +172,19 @@ async function runArchiveScenario(keepRecent: boolean): Promise<void> {
       const openTask = replayed.tasks.find((task) => task.id === 2)!;
       expect(openTask.status).toBe("pending");
       expect(openTask.archivedAt).toBeUndefined();
-      expect(countTodoEntries(branch)).toBe(todoEntriesBefore + 1); // exactly one archive snapshot
+      expect(countLiveEntries(branch)).toBe(todoEntriesBefore + 1); // exactly one sweep live snapshot
+      expect(countArchiveEntries(branch)).toBe(1); // and exactly one archive package
 
-      // ── 3. the archive entry contributes ZERO context messages ──
+      // ── 3. both new entry kinds contribute ZERO context messages ──
       const projection = session.sessionManager.buildSessionProjection() as {
         entries: Array<{ sourceEntry: Record<string, unknown>; messages: unknown[] }>;
         messages: unknown[];
       };
-      const projectedTodo = projection.entries.find((entry) => entry.sourceEntry === archiveEntry);
-      expect(projectedTodo).toBeDefined();
-      expect(projectedTodo!.messages).toHaveLength(0);
+      for (const sourceEntry of [archivePackage, liveEntry]) {
+        const projectedTodo = projection.entries.find((entry) => entry.sourceEntry === sourceEntry);
+        expect(projectedTodo).toBeDefined();
+        expect(projectedTodo!.messages).toHaveLength(0);
+      }
       expect(JSON.stringify(projection.messages)).toBe(capture.messagesBeforeArchiveJson);
 
       // ── 4. survives a real session-file reopen (parseSessionEntries + inMemory rebuild) ──
@@ -179,12 +197,13 @@ async function runArchiveScenario(keepRecent: boolean): Promise<void> {
       expect(reopenedArchived.archivedAt).toBe(archivedTask.archivedAt);
       expect(reopenedArchived.completedAt).toBe(archivedTask.completedAt);
 
-      // ── 5. another scripted turn + second compact(): succeeds, appends NO new todo entry ──
+      // ── 5. another scripted turn + second compact(): succeeds, NO new todo entry of either kind ──
       await session.prompt("two");
       await session.compact();
       const branchAfterSecond = session.sessionManager.getBranch() as Array<Record<string, unknown>>;
       expect(branchAfterSecond.some((entry) => entry.type === "compaction")).toBe(true);
-      expect(countTodoEntries(branchAfterSecond)).toBe(todoEntriesBefore + 1); // unchanged
+      expect(countLiveEntries(branchAfterSecond)).toBe(todoEntriesBefore + 1); // unchanged
+      expect(countArchiveEntries(branchAfterSecond)).toBe(1); // unchanged
       expect(snapshot().tasks.find((task) => task.id === 1)?.archivedAt).toBeDefined();
 
       // ── 6. navigateTree across the archive boundary flips the replayed state ──
@@ -194,8 +213,19 @@ async function runArchiveScenario(keepRecent: boolean): Promise<void> {
       expect(beforeArchive.tasks.find((task) => task.id === 1)?.status).toBe("completed");
       expect(beforeArchive.tasks.find((task) => task.id === 2)?.status).toBe("pending");
 
-      const archiveEntryId = archiveEntry?.id as string;
-      await session.navigateTree(archiveEntryId);
+      // Between the archive package and the narrowed live snapshot: the last live candidate is
+      // still the pre-sweep one (#1 completed, NOT archived) and it WINS the id conflict with the
+      // folded package — #1 shows up as an unarchived completed task (benign, §4.3 #2).
+      const archivePackageId = archivePackage?.id as string;
+      await session.navigateTree(archivePackageId);
+      const betweenEntries = snapshot();
+      const betweenTask = betweenEntries.tasks.find((task) => task.id === 1)!;
+      expect(betweenTask.status).toBe("completed");
+      expect(betweenTask.archivedAt).toBeUndefined(); // live wins over the archived copy
+
+      // Back on the swept leaf: archived again.
+      const liveEntryId = liveEntry?.id as string;
+      await session.navigateTree(liveEntryId);
       const afterArchive = snapshot();
       expect(afterArchive.tasks.find((task) => task.id === 1)?.archivedAt).toBeDefined();
     },

@@ -101,9 +101,10 @@ describe("AgentList.vue (vue-plan.md v2.1 §3.2, §5.2)", () => {
 
   it("agent card shows a status pill only when a statusLabel is present", () => {
     const withLabel = mount(AgentList, {
-      props: { cards: [card({ statusLabel: "Working" })], selectedKey: null, filter: "" },
+      props: { cards: [card({ statusLabel: "Waiting", visualState: "waiting" })], selectedKey: null, filter: "" },
     });
-    expect(withLabel.find(".agent-meta .pill-inline").text()).toBe("Working");
+    expect(withLabel.find(".agent-meta .pill-inline").text()).toBe("Waiting");
+    expect(withLabel.find(".agent-meta .pill-inline").classes()).not.toContain("sr-only");
 
     const withoutLabel = mount(AgentList, {
       props: { cards: [card({ statusLabel: null })], selectedKey: null, filter: "" },
@@ -215,7 +216,7 @@ describe("AgentCard.vue — running bash count segment (2026-10-15 会话列表�
   it("agent + bash 都在跑 ⇒ 两段都在,分隔符按段计数正确", () => {
     const wrapper = mount(AgentCard, {
       props: {
-        card: card({ runningSubCount: 3, runningBashCount: 2, statusLabel: "Working" }),
+        card: card({ runningSubCount: 3, runningBashCount: 2, statusLabel: "Waiting", visualState: "waiting" }),
         selected: false,
       },
     });
@@ -224,7 +225,7 @@ describe("AgentCard.vue — running bash count segment (2026-10-15 会话列表�
     expect(meta.find("use[href='#i-terminal']").exists()).toBe(true);
     expect(meta.text()).toContain("3 running");
     expect(meta.text()).toContain("2 running");
-    // model · 62% · 3 running · 2 running · Working ⇒ 4 个分隔符
+    // model · 62% · 3 running · 2 running · Waiting ⇒ 4 个分隔符
     expect(meta.findAll(".sep")).toHaveLength(4);
   });
 
@@ -237,7 +238,16 @@ describe("AgentCard.vue — running bash count segment (2026-10-15 会话列表�
 
     // statusLabel 段前的分隔判断不再把 bash 段计入(0):仅 sub 段 + status ⇒ 1 个分隔符
     const onlySub = mount(AgentCard, {
-      props: { card: card({ modelShort: "", contextPercent: null, runningBashCount: 0 }), selected: false },
+      props: {
+        card: card({
+          modelShort: "",
+          contextPercent: null,
+          runningBashCount: 0,
+          statusLabel: "Waiting",
+          visualState: "waiting",
+        }),
+        selected: false,
+      },
     });
     expect(onlySub.get(".agent-meta").findAll(".sep")).toHaveLength(1);
   });
@@ -245,14 +255,21 @@ describe("AgentCard.vue — running bash count segment (2026-10-15 会话列表�
   it("仅 bash 段 + statusLabel ⇒ statusLabel 前的分隔符把新段计入(不丢 ·)", () => {
     const wrapper = mount(AgentCard, {
       props: {
-        card: card({ modelShort: "", contextPercent: null, runningSubCount: 0, runningBashCount: 1 }),
+        card: card({
+          modelShort: "",
+          contextPercent: null,
+          runningSubCount: 0,
+          runningBashCount: 1,
+          statusLabel: "Waiting",
+          visualState: "waiting",
+        }),
         selected: false,
       },
     });
     const meta = wrapper.get(".agent-meta");
     // happy-dom 的 .text() 不在相邻 span 之间补空白:分隔符存在性由 .sep 计数断言
     expect(meta.text()).toContain("1 running");
-    expect(meta.text()).toContain("Working");
+    expect(meta.text()).toContain("Waiting");
     expect(meta.findAll(".sep")).toHaveLength(1);
   });
 });
@@ -913,6 +930,7 @@ describe("AgentCard.vue — managed `web` badge (SP12, arch §9.1)", () => {
  * fields rich enough for the target function).
  */
 import type { RemoveAgentOutcome, RemoveTarget } from "../../../src/web-hub/ui/src/types.js";
+import { useListDensity } from "../../../src/web-hub/ui/src/composables/useListDensity.js";
 import { setDetailedListForTests } from "./helpers/list-density.js";
 beforeEach(setDetailedListForTests);
 
@@ -944,142 +962,43 @@ function hubForRemove(opts: {
   };
 }
 
-describe("AgentList.vue — delete entry (web-hub-delete-session v2 §5.4)", () => {
-  it("an online, unmanaged card gets no delete button at all", () => {
-    const hub = hubForRemove({ agents: new Map([["agent-1", fullAgentState("agent-1")]]) });
-    const wrapper = mount(AgentList, {
+describe("AgentList.vue — no corner × on cards (2026-10-28: deletion moved to the detail header's ⋯ menu)", () => {
+  const mountOne = (hub: ReturnType<typeof hubForRemove>) =>
+    mount(AgentList, {
       props: { cards: [card()], selectedKey: null, filter: "" },
       global: { provide: { [HUB_CTX as symbol]: hub } },
     });
-    expect(wrapper.find(".remove-btn").exists()).toBe(false);
-  });
 
-  it("an offline card gets a delete button; two-step confirm calls removeAgent({agentKey})", async () => {
-    const calls: RemoveTarget[] = [];
-    const hub = hubForRemove({
-      agents: new Map([["agent-1", fullAgentState("agent-1", { down: true, card: { state: "stale" } })]]),
-      removeAgent: async (target) => {
-        calls.push(target);
-        return { ok: true, removed: true };
-      },
-    });
-    const wrapper = mount(AgentList, {
-      props: { cards: [card()], selectedKey: null, filter: "" },
-      global: { provide: { [HUB_CTX as symbol]: hub } },
-    });
-    const btn = wrapper.get(".remove-btn");
-    await btn.trigger("click"); // arm
-    expect(calls).toHaveLength(0);
-    await btn.trigger("click"); // confirm
-    await flushPromises();
-    expect(calls).toEqual([{ agentKey: "agent-1" }]);
-  });
-
-  it("a managed card (live/stopping/starting record) deletes by spawnId instead, with aria-kind managed", async () => {
-    const spawns: SpawnsPayload = {
-      items: [spawnRec({ state: "live", agentKey: "agent-1", spawnId: "sp9" })],
+  it("online, offline and managed (incl. removing) cards render no delete button and no `removable` class", () => {
+    const managedSpawns = (removing: boolean): SpawnsPayload => ({
+      items: [spawnRec({ state: "live", agentKey: "agent-1", spawnId: "sp9", removing })],
       active: 1,
       max: 4,
-    };
-    const calls: RemoveTarget[] = [];
-    const hub = hubForRemove({
-      agents: new Map([["agent-1", fullAgentState("agent-1")]]),
-      spawns,
-      removeAgent: async (target) => {
-        calls.push(target);
-        return { ok: true, removed: true };
-      },
     });
-    const wrapper = mount(AgentList, {
-      props: { cards: [card()], selectedKey: null, filter: "" },
-      global: { provide: { [HUB_CTX as symbol]: hub } },
-    });
-    const btn = wrapper.get(".remove-btn");
-    expect(btn.attributes("aria-label")).toBe("Stop and delete this web-started session (session file is kept)");
-    await btn.trigger("click");
-    await btn.trigger("click");
-    await flushPromises();
-    expect(calls).toEqual([{ spawnId: "sp9" }]);
+    const hubs = [
+      hubForRemove({ agents: new Map([["agent-1", fullAgentState("agent-1")]]) }),
+      hubForRemove({
+        agents: new Map([["agent-1", fullAgentState("agent-1", { down: true, card: { state: "stale" } })]]),
+      }),
+      hubForRemove({ agents: new Map([["agent-1", fullAgentState("agent-1")]]), spawns: managedSpawns(false) }),
+      hubForRemove({ agents: new Map([["agent-1", fullAgentState("agent-1")]]), spawns: managedSpawns(true) }),
+    ];
+    for (const hub of hubs) {
+      const wrapper = mountOne(hub);
+      expect(wrapper.find(".remove-btn").exists()).toBe(false);
+      expect(wrapper.find(".remove-wrap").exists()).toBe(false);
+      expect(wrapper.find("li.agent-item").classes()).not.toContain("removable");
+    }
   });
 
-  it("Esc disarms before the second click; no call is made", async () => {
-    const calls: RemoveTarget[] = [];
-    const hub = hubForRemove({
-      agents: new Map([["agent-1", fullAgentState("agent-1", { down: true })]]),
-      removeAgent: async (target) => {
-        calls.push(target);
-        return { ok: true, removed: true };
-      },
-    });
-    const wrapper = mount(AgentList, {
-      props: { cards: [card()], selectedKey: null, filter: "" },
-      global: { provide: { [HUB_CTX as symbol]: hub } },
-    });
-    const btn = wrapper.get(".remove-btn");
-    await btn.trigger("click"); // arm
-    expect(btn.attributes("aria-label")).toContain("Click again");
-    await btn.trigger("keydown", { key: "Escape" });
-    expect(btn.attributes("aria-label")).not.toContain("Click again");
-    await btn.trigger("click"); // this is now a FIRST click again (re-arm), not a confirm
-    await flushPromises();
-    expect(calls).toHaveLength(0);
-  });
-
-  it("a removing:true managed record disables the button and shows the removing note", () => {
+  it("a removing managed record still shows AgentCard's own 「removing」 chip", () => {
     const spawns: SpawnsPayload = {
       items: [spawnRec({ state: "stopping", agentKey: "agent-1", spawnId: "sp9", removing: true })],
       active: 1,
       max: 4,
     };
-    const hub = hubForRemove({ agents: new Map([["agent-1", fullAgentState("agent-1")]]), spawns });
-    const wrapper = mount(AgentList, {
-      props: { cards: [card()], selectedKey: null, filter: "" },
-      global: { provide: { [HUB_CTX as symbol]: hub } },
-    });
-    const btn = wrapper.get(".remove-btn");
-    expect(btn.attributes("disabled")).toBeDefined();
-    expect(wrapper.find(".remove-note").text()).toBe("removing…");
-    // AgentCard's own row1 chip also shows removing
+    const wrapper = mountOne(hubForRemove({ agents: new Map([["agent-1", fullAgentState("agent-1")]]), spawns }));
     expect(wrapper.find(".chip-removing").exists()).toBe(true);
-  });
-
-  it("a failed delete shows an inline error bucket derived from classifyRemoveError", async () => {
-    const hub = hubForRemove({
-      agents: new Map([["agent-1", fullAgentState("agent-1", { down: true })]]),
-      removeAgent: async () => ({ ok: false, error: "E_AGENT_ONLINE", reason: "online" }),
-    });
-    const wrapper = mount(AgentList, {
-      props: { cards: [card()], selectedKey: null, filter: "" },
-      global: { provide: { [HUB_CTX as symbol]: hub } },
-    });
-    const btn = wrapper.get(".remove-btn");
-    await btn.trigger("click");
-    await btn.trigger("click");
-    await flushPromises();
-    expect(wrapper.get(".remove-note").text()).toBe("Delete failed: the session is still online");
-  });
-
-  it("no removeAgent on the hub (older hub / test fake) ⇒ unsupported note, no throw", async () => {
-    const hub = hubForRemove({ agents: new Map([["agent-1", fullAgentState("agent-1", { down: true })]]) });
-    const wrapper = mount(AgentList, {
-      props: { cards: [card()], selectedKey: null, filter: "" },
-      global: { provide: { [HUB_CTX as symbol]: hub } },
-    });
-    const btn = wrapper.get(".remove-btn");
-    await btn.trigger("click");
-    await btn.trigger("click");
-    await flushPromises();
-    expect(wrapper.get(".remove-note").text()).toBe("Delete failed: hub does not support this, reload the page");
-  });
-
-  it("the button is never nested inside the card's <a> (buttons can't nest in anchors)", () => {
-    const hub = hubForRemove({ agents: new Map([["agent-1", fullAgentState("agent-1", { down: true })]]) });
-    const wrapper = mount(AgentList, {
-      props: { cards: [card()], selectedKey: null, filter: "" },
-      global: { provide: { [HUB_CTX as symbol]: hub } },
-    });
-    expect(wrapper.find("a.agent-card .remove-btn").exists()).toBe(false);
-    expect(wrapper.find("li.agent-item > .remove-wrap > .remove-btn").exists()).toBe(true);
   });
 });
 
@@ -1690,7 +1609,7 @@ describe("AgentList.vue — rename entry (web-hub-rename plan)", () => {
     expect(wrapper.find(".rename-input").exists()).toBe(true); // stays open for retry
   });
 
-  it("a live, web-managed card can show BOTH rename and remove buttons without overlap/conflict", () => {
+  it("a live, web-managed card shows the rename pencil and no corner remove button (deletion lives in the detail ⋯ menu)", () => {
     const spawns: SpawnsPayload = {
       items: [
         {
@@ -1707,9 +1626,9 @@ describe("AgentList.vue — rename entry (web-hub-rename plan)", () => {
     };
     const { wrapper } = mountWithAgent({}, { control: fakeControlHandle(), spawns });
     expect(wrapper.find(".rename-btn").exists()).toBe(true);
-    expect(wrapper.find(".remove-btn").exists()).toBe(true);
+    expect(wrapper.find(".remove-btn").exists()).toBe(false);
     expect(wrapper.find("li.agent-item").classes()).toContain("renamable");
-    expect(wrapper.find("li.agent-item").classes()).toContain("removable");
+    expect(wrapper.find("li.agent-item").classes()).not.toContain("removable");
   });
 });
 
@@ -1725,36 +1644,29 @@ describe("agents.css — rename pencil placement at the title line (2026-10-20 r
     resolve(fileURLToPath(import.meta.url), "../../../../src/web-hub/ui/src/styles/agents.css"),
     "utf8",
   );
-  /** Extracts the body of the `@supports (anchor-name…)` block (no nested-brace parser —
-   *  the block's own inner rules are matched individually off its raw substring). */
-  const supportsBlock = (() => {
-    const start = css.indexOf("@supports (anchor-name: --x) and (anchor-scope: --x)");
-    return start === -1 ? "" : css.slice(start, css.indexOf(".rename-btn {", start));
-  })();
   const rule = (selector: string): string => {
     const m = new RegExp(`${selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*\\{[^}]*\\}`).exec(css);
     return m?.[0] ?? "";
   };
 
-  it("anchor positioning is the primary technique, scoped per card so same-named anchors never collide", () => {
-    expect(supportsBlock).not.toBe("");
-    // anchor-scope on the <li> — without it every card's --rename-anchor collides and all
-    // pencils would snap to the LAST card's title.
-    expect(supportsBlock).toMatch(/\.agent-item\.renamable\s*\{[^}]*anchor-scope:\s*--rename-anchor/);
-    expect(supportsBlock).toMatch(/\.agent-session\s*\{[^}]*anchor-name:\s*--rename-anchor/);
-    // pencil: left edge at the title text's right edge, vertically centred on that line.
-    expect(supportsBlock).toMatch(/position-anchor:\s*--rename-anchor/);
-    expect(supportsBlock).toMatch(/top:\s*anchor\(center\)/);
-    expect(supportsBlock).toMatch(/left:\s*calc\(anchor\(right\) \+ 4px\)/);
-    // no -100% translate any more: the editing form must never leave the card
+  it("one layout for every browser: no CSS-anchor branch, pencil pinned at the card's right edge", () => {
+    // NOTE: CSS-text-level regression guard only — it does not cover real layout (see the
+    // playwright measurements in the task report). user ruling 2026-10-28: supporting and non-supporting browsers render the same layout —
+    // there is no @supports/anchor rule left that could make them differ.
+    expect(css).not.toMatch(/@supports\s*\(anchor-name/);
+    expect(css).not.toMatch(/anchor-scope|anchor-name|position-anchor|anchor\(/);
+    const pin = rule(".agent-item .rename-wrap");
+    expect(pin).toMatch(/position:\s*absolute/);
+    expect(pin).toMatch(/right:\s*calc\(var\(--sp-3\) - 6px\)/);
+    // no -100% translate: the editing form must never leave the card
     expect(css).not.toMatch(/translate\(-100%/);
   });
 
-  it("the title shrink-wraps its text and reserves the pencil's width (max-width)", () => {
+  it("the title reserves the pencil's width (max-width)", () => {
     const session = rule(".agent-item.renamable > .agent-card .agent-session");
-    expect(session).toMatch(/justify-self:\s*start/); // anchor(right) = TEXT end, not the stretched grid box
+    expect(session).toMatch(/justify-self:\s*start/);
     expect(session).toMatch(/max-width:\s*calc\(100% - var\(--rename-hit\) - 8px\)/);
-    // `.removable`'s 60px right reservation must not push the anchor box past the text end.
+    // `.removable`'s 60px right reservation is replaced by the pencil's own.
     expect(session).toMatch(/padding-right:\s*0/);
   });
 
@@ -1763,7 +1675,7 @@ describe("agents.css — rename pencil placement at the title line (2026-10-20 r
     // primitives.css floors every `.btn` at 44×44 on coarse pointers — the reservation must
     // cover the real rendered size, not the 24px ideal.
     expect(css).toMatch(
-      /@media \(pointer: coarse\)\s*\{\s*\.agent-item\.renamable\s*\{\s*(?:\/\*[\s\S]*?\*\/\s*)*--rename-hit:\s*44px;\s*--remove-col:\s*48px;\s*\}\s*\}/,
+      /@media \(pointer: coarse\)\s*\{\s*\.agent-item\.renamable\s*\{\s*(?:\/\*[\s\S]*?\*\/\s*)*--rename-hit:\s*44px;\s*\}\s*\}/,
     );
     expect(rule("\n.rename-btn")).toMatch(/width:\s*var\(--rename-hit, 24px\)/);
     expect(rule("\n.rename-btn")).toMatch(/height:\s*var\(--rename-hit, 24px\)/);
@@ -1773,19 +1685,24 @@ describe("agents.css — rename pencil placement at the title line (2026-10-20 r
     const edit = rule(".agent-item.renamable > .rename-wrap.is-editing");
     expect(edit).toMatch(/left:\s*15px/);
     expect(edit).toMatch(/right:\s*13px/);
-    expect(rule(".agent-item.renamable.removable > .rename-wrap.is-editing")).toMatch(
-      /right:\s*calc\(13px \+ var\(--remove-col\)\)/,
-    );
     expect(rule(".agent-item .rename-wrap.is-editing .rename-input")).toMatch(/flex:\s*1/);
     expect(rule(".agent-item .rename-wrap.is-editing .rename-input")).toMatch(/max-width:\s*none/);
   });
 
-  it("removable: title reservation and fallback pin both leave the delete button's column free", () => {
-    expect(rule(".agent-item.renamable.removable > .agent-card .agent-session")).toMatch(
-      /max-width:\s*calc\(100% - var\(--rename-hit\) - 8px - var\(--remove-col\)\)/,
+  it("no delete-column leftovers: every card's pencil sits at the same right edge (no --remove-col offsets)", () => {
+    expect(css).not.toMatch(/--remove-col|--remove-reach|\.removable/);
+    expect(rule(".agent-item .rename-wrap")).toMatch(/right:\s*calc\(var\(--sp-3\) - 6px\)/);
+  });
+
+  it("pencil vertical offset is the playwright-measured one: 9px compact, 14px detailed (+ lock variants)", () => {
+    expect(rule(".agent-item .rename-wrap")).toMatch(/top:\s*calc\(9px \+ 31\.8px \* var\(--fs-scale, 1\)\)/);
+    expect(rule(".agent-item:has(.privacy-lock-btn) .rename-wrap")).toMatch(/top:\s*calc\(9px \+ max\(/);
+    expect(rule('.agent-item:has(.agent-card[data-density="detailed"]) .rename-wrap')).toMatch(
+      /top:\s*calc\(14px \+ 31\.8px/,
     );
-    expect(rule(".agent-item.removable .rename-wrap")).toMatch(/var\(--remove-col/);
-    expect(rule(".agent-item.renamable")).toMatch(/--remove-col:\s*44px/);
+    expect(rule('.agent-item:has(.agent-card[data-density="detailed"] .privacy-lock-btn) .rename-wrap')).toMatch(
+      /top:\s*calc\(14px \+ max\(/,
+    );
   });
 
   it("pencil box is as tall as the title line (+5px): never touches the next row", () => {
@@ -1977,16 +1894,13 @@ describe("AgentList.vue — spawn-relaunch (offline managed card)", () => {
     expect(fake.calls).toHaveLength(0);
   });
 
-  it("the row's own × button still works inside a relaunchable row (click is NOT intercepted)", async () => {
+  it("an offline relaunchable row has no × (deletion moved to the detail menu); no click-through to relaunch", async () => {
     const fake = relaunchHub("a-off", { items: [terminalSpawnRec("a-off")], active: 0, max: 4 });
     const wrapper = mount(AgentList, {
       props: { cards: [offCard("a-off")], selectedKey: null, filter: "" },
       global: { provide: { [HUB_CTX_KEY as symbol]: fake.hub } },
     });
-    // the offline row gets the RemoveButton (removalTargetForAgent ⇒ offline); clicking it must
-    // arm the delete, never relaunch
-    const btn = wrapper.get(".remove-btn");
-    await btn.trigger("click");
+    expect(wrapper.find(".remove-btn").exists()).toBe(false);
     await flushPromises();
     expect(fake.calls).toHaveLength(0);
     expect(window.location.hash).toBe("");
@@ -2084,5 +1998,162 @@ describe("AgentList.vue — restore order-stability (restoring 卡不换组)", (
       global: { provide: { [HUB_CTX_KEY as symbol]: hub } },
     });
     expect(wrapper.find("li.agent-group").exists()).toBe(true); // sank back into 过期与离线
+  });
+});
+
+describe("AgentCard.vue — running label is screen-reader only (#43)", () => {
+  it("detailed: running ⇒ sr-only label, dot + badges stay, exactly 3 separators (no trailing one)", () => {
+    const w = mount(AgentCard, {
+      props: { card: card({ runningSubCount: 4, runningBashCount: 1 }), selected: false },
+    });
+    const pill = w.get(".pill-inline");
+    expect(pill.classes()).toContain("sr-only");
+    expect(pill.text()).toBe("Working");
+    expect(w.find(".dot").exists()).toBe(true);
+    expect(w.text()).toContain("4 running");
+    expect(w.text()).toContain("1 running");
+    // model · 62% · 4 running · 1 running (· Working omitted)
+    expect(w.get(".agent-meta").findAll(".sep")).toHaveLength(3);
+  });
+
+  it("compact: [data-compact=state] is sr-only with the label kept; sub/bash count nodes correct", () => {
+    // density is restored to detailed by the file-level beforeEach(setDetailedListForTests)
+    useListDensity({ storage: { getItem: () => null, setItem: () => undefined } }).setDensity("compact");
+    const w = mount(AgentCard, {
+      props: { card: card({ runningSubCount: 4, runningBashCount: 1 }), selected: false },
+    });
+    const state = w.get("[data-compact=state]");
+    expect(state.classes()).toContain("sr-only");
+    expect(state.text()).toBe("Working");
+    expect(w.find(".dot").exists()).toBe(true);
+    expect(w.get("[data-compact=sub] .num").text()).toBe("4");
+    expect(w.get("[data-compact=bash] .num").text()).toBe("1");
+  });
+
+  it("compact: non-running state pill stays visible (no sr-only)", () => {
+    useListDensity({ storage: { getItem: () => null, setItem: () => undefined } }).setDensity("compact");
+    const w = mount(AgentCard, {
+      props: { card: card({ visualState: "stale", statusLabel: "Stale" }), selected: false },
+    });
+    expect(w.get("[data-compact=state]").classes()).not.toContain("sr-only");
+  });
+});
+
+// #46: list aggregate running still includes bash; activity must not infer main busy from it.
+describe("left AgentCard activity source (#46)", () => {
+  const cases = [
+    { name: "main", busy: true, sub: 0, bash: 0, expected: "agent", visual: "running" },
+    { name: "child", busy: false, sub: 1, bash: 0, expected: "agent", visual: "running" },
+    { name: "bash", busy: false, sub: 0, bash: 1, expected: "bash", visual: "running" },
+    { name: "both", busy: true, sub: 1, bash: 1, expected: "agent", visual: "running" },
+    { name: "main + child", busy: true, sub: 1, bash: 0, expected: "agent", visual: "running" },
+    { name: "idle", busy: false, sub: 0, bash: 0, expected: "none", visual: "idle" },
+    { name: "offline", busy: true, sub: 1, bash: 1, down: true, expected: "none", visual: "offline" },
+    { name: "stale", busy: true, sub: 1, bash: 1, stale: true, expected: "none", visual: "stale" },
+    { name: "waiting main", busy: true, sub: 0, bash: 0, waiting: true, expected: "none", visual: "waiting" },
+    { name: "waiting child", busy: true, sub: 1, bash: 1, waiting: true, expected: "agent", visual: "waiting" },
+    { name: "waiting bash", busy: true, sub: 0, bash: 1, waiting: true, expected: "bash", visual: "waiting" },
+    {
+      name: "waiting stale",
+      busy: true,
+      sub: 1,
+      bash: 1,
+      waiting: true,
+      stale: true,
+      expected: "none",
+      visual: "waiting",
+    },
+  ];
+  function view(c: (typeof cases)[number]) {
+    const a = agentStateWithBash(bashWire(c.bash));
+    return toAgentCardView(
+      {
+        ...a,
+        card: { state: c.stale ? "stale" : "live" } as unknown as AgentState["card"],
+        down: c.down ?? false,
+        prompts: c.waiting ? [{}] : [],
+        status: { ...a.status, busy: c.busy },
+        fleet: Array.from({ length: c.sub }, () => ({ status: "running", terminal: false })),
+      } as unknown as AgentState,
+      keyT,
+    );
+  }
+  for (const density of ["compact", "detailed"] as const) {
+    it.each(cases)(`${density}: $name — model + rendered source`, (c) => {
+      useListDensity({ storage: { getItem: () => null, setItem: () => undefined } }).setDensity(density);
+      const v = view(c);
+      expect(v.visualState).toBe(c.visual);
+      expect(v.activitySource).toBe(c.expected);
+      // Old snapshots retain their honest counts and grouping flags; only halos stop.
+      expect(v.runningSubCount).toBe(c.sub);
+      expect(v.runningBashCount).toBe(c.bash);
+      expect(v.stale).toBe(c.visual === "stale");
+      expect(v.down).toBe(c.down ?? false);
+      const w = mount(AgentCard, { props: { card: v, selected: false } });
+      expect(w.attributes("data-density")).toBe(density);
+      expect(w.attributes("data-activity-source")).toBe(c.expected);
+      expect(w.findAll(".agent-terminal-icon")).toHaveLength(c.bash > 0 ? 1 : 0);
+      expect(w.findAll(".agent-bash-activity")).toHaveLength(c.bash > 0 ? 1 : 0);
+      if (c.bash > 0) {
+        // #51: the breathing anchor contains BOTH foreground pieces, never the whole meta row.
+        const segment = w.get(".agent-bash-activity");
+        expect(segment.get(".agent-terminal-icon").element.parentElement).toBe(segment.element);
+        expect(segment.get(".num").element.parentElement).toBe(segment.element);
+        expect(segment.text()).toBe(density === "compact" ? String(c.bash) : `${c.bash} running`);
+        expect(segment.classes()).not.toContain("agent-meta");
+        if (density === "compact") {
+          expect(segment.attributes("data-compact")).toBe("bash");
+          expect(segment.attributes("aria-label")).toBe("1 running");
+        }
+      }
+      if (c.visual === "running")
+        expect(w.get(density === "compact" ? "[data-compact=state]" : ".pill-inline").classes()).toContain("sr-only");
+      w.unmount();
+    });
+    it(`${density}: reused card transitions never retain an old source`, async () => {
+      useListDensity({ storage: { getItem: () => null, setItem: () => undefined } }).setDensity(density);
+      const w = mount(AgentCard, { props: { card: view(cases[0]!), selected: false } });
+      for (const c of [...cases, cases[0]!]) {
+        await w.setProps({ card: view(c) });
+        expect(w.attributes("data-activity-source")).toBe(c.expected);
+      }
+      w.unmount();
+    });
+  }
+  it("legacy cards are conservative: ambiguous running+bash is bash-only; child count wins", () => {
+    for (const [over, source] of [
+      [{ runningSubCount: 0, runningBashCount: 1 }, "bash"],
+      [{ runningSubCount: 1, runningBashCount: 1 }, "agent"],
+      [{ runningSubCount: 0, runningBashCount: 0 }, "agent"],
+      [{ runningSubCount: 0, runningBashCount: 0, visualState: "waiting" }, "none"],
+    ] as const) {
+      const w = mount(AgentCard, { props: { card: card(over), selected: false } });
+      expect(w.attributes("data-activity-source")).toBe(source);
+      w.unmount();
+    }
+  });
+  it("activity CSS keeps the dot radial but the whole bash segment rectangular, foreground steady and reduced motion static", () => {
+    const css = readFileSync(
+      resolve(fileURLToPath(import.meta.url), "../../../../src/web-hub/ui/src/styles/agents.css"),
+      "utf8",
+    );
+    const activity = css.slice(css.indexOf("/* #46:"));
+    expect(activity).toContain(".agent-card .dot::after");
+    expect(activity).toContain("content: none");
+    expect(activity).toContain("radial-gradient(circle");
+    expect(activity).not.toContain(".agent-terminal-icon::after");
+    expect(activity).toContain("isolation: isolate");
+    const bashBackground = activity.match(
+      /\.agent-card\[data-activity-source="bash"\] \.agent-bash-activity::after \{([^}]+)\}/g,
+    )!;
+    expect(bashBackground[1]).toContain("inset: 0");
+    expect(bashBackground[1]).toContain("border-radius: inherit");
+    expect(bashBackground[1]).toContain("background: var(--st-running, var(--c-primary))");
+    expect(bashBackground[1]).toContain("z-index: -1");
+    expect(activity).toContain("agent-card-activity 3.2s");
+    expect(activity).toContain("@media (prefers-reduced-motion: reduce)");
+    expect(activity.slice(activity.indexOf("@media"))).toContain("animation: none");
+    const frames = activity.slice(activity.indexOf("@keyframes"), activity.indexOf("@media"));
+    expect(frames).not.toMatch(/transform|box-shadow|width|height/);
   });
 });

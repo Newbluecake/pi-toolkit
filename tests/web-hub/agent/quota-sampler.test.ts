@@ -236,6 +236,24 @@ describe("projectQuota — pools mode (P7wa, §9A.4)", () => {
     expect(Value.Check(QuotaWireSchema, wire)).toBe(true);
   });
 
+  it("opencode-go follows the same cap gate: kept in pools mode (month window intact), dropped in legacy mode", () => {
+    const opencode = verdict({
+      provider: "opencode-go",
+      level: 1,
+      windows: [
+        window({ scope: "5h", usedPct: 12, level: 0 }),
+        window({ scope: "week", usedPct: 56, level: 1 }),
+        window({ scope: "month", usedPct: 3, level: 0, resetAt: 9_000 }),
+      ],
+    });
+    const pooled = projectQuota([opencode, kimi], 5_000, { pools: true })!;
+    expect(pooled.providers.map((p) => p.id)).toEqual(["opencode-go", "kimi-coding"]);
+    expect(pooled.providers[0]!.windows.map((w) => w.scope)).toEqual(["5h", "week", "month"]);
+    expect(Value.Check(QuotaWireSchema, pooled)).toBe(true);
+    const legacy = projectQuota([opencode, kimi], 5_000)!;
+    expect(legacy.providers.map((p) => p.id)).toEqual(["kimi-coding"]);
+  });
+
   it("billing carries exactly D20's fields: overage + cents, gateOpen only when true", () => {
     const closed = droidVerdict({ billing: billing({ gateOpen: false }) });
     const wClosed = projectQuota([closed], 0, { pools: true })!;
@@ -394,5 +412,106 @@ describe("quotaFingerprint — pools additions (P7wa, §9A.4)", () => {
     const mk = (at: number) =>
       projectQuota([droid()], at, { pools: true, problems: [{ family: "droid", status: 402 }] })!;
     expect(quotaFingerprint(mk(1_000))).toBe(quotaFingerprint(mk(61_000)));
+  });
+});
+
+// 2026-11-03 费用折算（形态 B）：opts.cost 视图 ⇒ QuotaWindowWire.costUsd/costUnpriced，
+// fingerprint 按分四舍五入纳入；无 cost 视图 ⇒ 窗口键缺席（上方既有断言逐字节钉死）。
+describe("projectQuota 费用折算（costUsd）", () => {
+  const costView = (entries: Record<string, { usd: number; unpriced: boolean } | undefined>) => ({
+    complete: true,
+    costInWindow: (provider: string, _s: number, _e: number) => entries[provider],
+  });
+
+  it("cost 视图命中 ⇒ 窗口带 costUsd；无 resetAt / 无数据 ⇒ 键缺席（legacy/pools 两路同规）", () => {
+    const v = verdict({
+      windows: [
+        window({ scope: "5h", resetAt: 5_000_000 }),
+        window({ scope: "week" }), // 无 resetAt
+      ],
+    });
+    const cost = costView({ "zai-coding-cn": { usd: 12.3, unpriced: true } });
+    // quotaWindowCost 对同一 provider 的所有窗口都返回同一值（mock 不区分区间）——5h 窗带钱、
+    // week 窗无 resetAt 不带。
+    const legacy = projectQuota([v], 1_000, { cost })!;
+    expect(legacy.providers[0]?.windows[0]?.costUsd).toBe(12.3);
+    expect(legacy.providers[0]?.windows[0]?.costUnpriced).toBe(true);
+    expect(legacy.providers[0]?.windows[1]?.costUsd).toBeUndefined();
+    const pools = projectQuota([v], 1_000, { pools: true, cost })!;
+    expect(pools.providers[0]?.windows[0]?.costUsd).toBe(12.3);
+    // 无 cost 视图 ⇒ 两个键都缺席
+    const bare = projectQuota([v], 1_000)!;
+    expect(bare.providers[0]?.windows[0]).not.toHaveProperty("costUsd");
+    expect(bare.providers[0]?.windows[0]).not.toHaveProperty("costUnpriced");
+  });
+
+  it("带 costUsd 的 legacy 投影仍通过旧 hub schema（open schema，不丢帧）", () => {
+    const v = verdict({ windows: [window({ resetAt: 5_000_000 })] });
+    const wire = projectQuota([v], 1_000, { cost: costView({ "zai-coding-cn": { usd: 1, unpriced: false } }) })!;
+    expect(Value.Check(LEGACY_QUOTA_WIRE_SCHEMA, wire)).toBe(true);
+  });
+
+  it("fingerprint：跨分位变化 ⇒ 变；分内抖动 ⇒ 不变；unpriced 翻转 ⇒ 变", () => {
+    const v = verdict({ windows: [window({ resetAt: 5_000_000 })] });
+    const fp = (usd: number, unpriced = false) =>
+      quotaFingerprint(projectQuota([v], 1_000, { cost: costView({ "zai-coding-cn": { usd, unpriced } }) }));
+    expect(fp(12.3001)).toBe(fp(12.3049)); // 都四舍五入到 12.3
+    expect(fp(12.3)).not.toBe(fp(12.31)); // 跨分
+    expect(fp(12.3)).not.toBe(fp(12.3, true)); // unpriced 翻转
+    expect(fp(12.3)).not.toBe(quotaFingerprint(projectQuota([v], 1_000))); // 出现/消失
+  });
+});
+
+// 2026-11-04 GLM 账号费用别名（quota-sampler accountWindowCost）：zai/zai-coding-cn 是同一
+// GLM 账号的两个端点，cost bucket 按 JSONL 实际调用的 provider 归属——只有一侧有 bucket 时
+// 双侧 verdict 都要能取到同一费用；双侧都有则相加；非 GLM provider 行为不变。
+describe("projectQuota 费用折算 — GLM 账号别名", () => {
+  const costView = (entries: Record<string, { usd: number; unpriced: boolean } | undefined>) => ({
+    complete: true,
+    costInWindow: (provider: string, _s: number, _e: number) => entries[provider],
+  });
+  // 双侧 verdict（同一窗口形状；mock costInWindow 不区分区间）
+  const cn = verdict({ provider: "zai-coding-cn", windows: [window({ resetAt: 5_000_000 })] });
+  const intl = verdict({ provider: "zai", windows: [window({ resetAt: 5_000_000 })] });
+
+  it("只有 zai bucket ⇒ 双侧 verdict（含 cn 单独出行）都带同一 costUsd——cn 不因自己无 bucket 而缺角", () => {
+    const cost = costView({ zai: { usd: 12.3, unpriced: false } });
+    for (const v of [cn, intl]) {
+      const wire = projectQuota([v], 1_000, { cost })!;
+      expect(wire.providers[0]?.windows[0]?.costUsd).toBe(12.3);
+      expect(wire.providers[0]?.windows[0]).not.toHaveProperty("costUnpriced");
+    }
+  });
+
+  it("双侧 bucket ⇒ usd 相加；unpriced 取 OR；都 priced ⇒ 不带 unpriced 键", () => {
+    const mixed = costView({
+      "zai-coding-cn": { usd: 1.2, unpriced: false },
+      zai: { usd: 3.4, unpriced: true },
+    });
+    const wire = projectQuota([intl], 1_000, { cost: mixed })!;
+    expect(wire.providers[0]?.windows[0]?.costUsd).toBeCloseTo(4.6);
+    expect(wire.providers[0]?.windows[0]?.costUnpriced).toBe(true);
+    const priced = costView({
+      "zai-coding-cn": { usd: 1, unpriced: false },
+      zai: { usd: 2, unpriced: false },
+    });
+    const both = projectQuota([cn], 1_000, { cost: priced })!;
+    expect(both.providers[0]?.windows[0]?.costUsd).toBe(3);
+    expect(both.providers[0]?.windows[0]).not.toHaveProperty("costUnpriced");
+  });
+
+  it("双侧都无 bucket ⇒ 键缺席（undefined 语义不因别名改变）", () => {
+    const cost = costView({ "kimi-coding": { usd: 9.9, unpriced: false } });
+    const wire = projectQuota([cn], 1_000, { cost })!;
+    expect(wire.providers[0]?.windows[0]).not.toHaveProperty("costUsd");
+    expect(wire.providers[0]?.windows[0]).not.toHaveProperty("costUnpriced");
+  });
+
+  it("非 GLM provider 只取自身 bucket——zai 费用不外溢（行为逐字节不变）", () => {
+    const cost = costView({ zai: { usd: 12.3, unpriced: false }, "kimi-coding": { usd: 7.7, unpriced: true } });
+    const kimi = verdict({ provider: "kimi-coding", windows: [window({ resetAt: 5_000_000 })] });
+    const wire = projectQuota([kimi], 1_000, { cost })!;
+    expect(wire.providers[0]?.windows[0]?.costUsd).toBe(7.7);
+    expect(wire.providers[0]?.windows[0]?.costUnpriced).toBe(true);
   });
 });

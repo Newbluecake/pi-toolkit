@@ -34,7 +34,13 @@ const STATUS_KEY = Symbol.for("pi-subagent:background-status");
 type Handler = (event: unknown, ctx: unknown) => unknown;
 type Sent = { message: { customType: string; content: string; details: any }; options?: { triggerTurn?: boolean } };
 
+// One fake host instance is one pi session: real pi keeps the session id stable
+// for the whole session, so the fake must too. A per-instance counter keeps the
+// id unique across cases (no identity bleed between tests).
+let fakeSessionSeq = 0;
+
 function fakePi(branch: unknown[]) {
+  const sessionId = `explicit-timeout-e2e-${++fakeSessionSeq}`;
   const handlers = new Map<string, Handler[]>();
   const tools = new Map<string, ToolDefinition>();
   const sent: Sent[] = [];
@@ -90,7 +96,7 @@ function fakePi(branch: unknown[]) {
     sessionManager: {
       getEntries: () => branch,
       getBranch: () => branch,
-      getSessionId: () => `explicit-timeout-e2e-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      getSessionId: () => sessionId,
       getSessionFile: () => undefined,
     },
     modelRegistry: { getAvailable: () => [], find: () => undefined },
@@ -129,7 +135,15 @@ function writeSettings(home: string, extra: Record<string, unknown> = {}) {
         // shape both the explicit-timeout and default-budget paths.
         // extendStepS: 0（legacy）——本文件的 E1 算术锁 factor 项硬顶（H = 3·T）
         // 与旧式单笔全额 grant；step 项/单笔钳位由 core/runtime/workflow 单测覆盖。
-        budget: { totalGraceS: 1, maxExtensions: 2, maxTotalFactor: 3, extendStepS: 0, abortGraceS: 0.05, reapS: 0.05 },
+        budget: {
+          minTotalS: 0,
+          totalGraceS: 1,
+          maxExtensions: 2,
+          maxTotalFactor: 3,
+          extendStepS: 0,
+          abortGraceS: 0.05,
+          reapS: 0.05,
+        },
         fleetWidget: false,
         quota: { enabled: false },
         ...extra,
@@ -207,6 +221,10 @@ function makeHandle(dir: string, hang: () => boolean) {
     getActiveTools: () => [],
     getLastAssistantText: () => "hello from subagent",
     getUsage: () => undefined,
+    // Real PiSessionHandle exposes the child's live branch (session-driver
+    // §4.1); the nested memory-seed capture reads it via peekRunBranch, so a
+    // fake handle without it makes every nested spawn fail admission.
+    getBranchEntries: () => [],
   };
 }
 function stubDriver(hang: () => boolean) {
@@ -437,7 +455,7 @@ describe("nested Agent timeout_s (N1-N3, real injected tool)", () => {
     writeAgentFiles(home);
     // G=2s, factor 4 (H=4s): the grace window outlives T by a wide margin.
     writeSettings(home, {
-      budget: { totalGraceS: 2, maxExtensions: 2, maxTotalFactor: 4, abortGraceS: 0.05, reapS: 0.05 },
+      budget: { minTotalS: 0, totalGraceS: 2, maxExtensions: 2, maxTotalFactor: 4, abortGraceS: 0.05, reapS: 0.05 },
     });
     const branch: unknown[] = [];
     const host = fakePi(branch);
@@ -515,7 +533,7 @@ describe("nested Agent timeout_s (N1-N3, real injected tool)", () => {
   it("N2: the MAIN session extends the grandchild by run id mid-grace — it outlives its original grace end", async () => {
     writeAgentFiles(home);
     writeSettings(home, {
-      budget: { totalGraceS: 2, maxExtensions: 2, maxTotalFactor: 4, abortGraceS: 0.05, reapS: 0.05 },
+      budget: { minTotalS: 0, totalGraceS: 2, maxExtensions: 2, maxTotalFactor: 4, abortGraceS: 0.05, reapS: 0.05 },
     });
     const branch: unknown[] = [];
     const host = fakePi(branch);
@@ -570,7 +588,7 @@ describe("nested Agent timeout_s (N1-N3, real injected tool)", () => {
   it("N3: run_in_background nested variant — silent, terminal at T+G; parent abort leaves no orphan", async () => {
     writeAgentFiles(home);
     writeSettings(home, {
-      budget: { totalGraceS: 1, maxExtensions: 2, maxTotalFactor: 4, abortGraceS: 0.05, reapS: 0.05 },
+      budget: { minTotalS: 0, totalGraceS: 1, maxExtensions: 2, maxTotalFactor: 4, abortGraceS: 0.05, reapS: 0.05 },
     });
     const branch: unknown[] = [];
     const host = fakePi(branch);

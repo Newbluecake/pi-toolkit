@@ -13,7 +13,7 @@
 <script setup lang="ts">
 import { computed, provide } from "vue";
 import type { AssistantView } from "./entries.js";
-import { formatDateTime, formatUsd } from "../../format.js";
+import { formatDateTime, formatTokenSpeed, formatUsd } from "../../format.js";
 import { useI18n } from "../../composables/useI18n.js";
 import AppIcon from "../../icons/AppIcon.vue";
 import { PATH_REFERENCES_SUSPENDED } from "../preview/previewContext.js";
@@ -32,6 +32,11 @@ const timeLabel = computed(() =>
     : formatDateTime(props.assistant.timestamp, i18n.lang === "zh" ? "zh-CN" : "en-US"),
 );
 const costLabel = computed(() => (props.assistant.costUsd === undefined ? "" : formatUsd(props.assistant.costUsd)));
+// task58 (web-hub-tokens-speed §6): `12.4 tokens/s` — independent of cost (either may show
+// alone), fixed unit, one decimal. Streaming NEVER shows a number (plan: "streaming 无数字") —
+// `entries.ts` already resolves no core for the streaming bubble; this guard keeps the chip
+// off even if a core ever rode along, and formatTokenSpeed hides anything invalid.
+const speedLabel = computed(() => (props.assistant.streaming ? "" : formatTokenSpeed(props.assistant.generation)));
 
 // §4.6 流式抑制: plain text while streaming, one re-scan when the message settles.
 provide(
@@ -60,7 +65,7 @@ provide(
       </div>
       <template v-for="(b, i) in assistant.blocks" :key="i">
         <ThinkingBlock
-          v-if="b.kind === 'thinking'"
+          v-if="b.kind === 'thinking' && b.text.trim() !== ''"
           :text="b.text"
           :live="assistant.streaming && i === assistant.blocks.length - 1"
         />
@@ -71,8 +76,9 @@ provide(
       <span v-if="assistant.streaming" class="caret" aria-hidden="true"></span>
       <TxError v-if="assistant.errorText" :text="assistant.errorText" />
       <span v-if="truncated" class="badge badge-trunc">{{ t("transcript.truncated") }}</span>
-      <div v-if="costLabel" class="msg-meta">
-        <span>{{ costLabel }}</span>
+      <div v-if="costLabel || speedLabel" class="msg-meta">
+        <span v-if="costLabel">{{ costLabel }}</span>
+        <span v-if="speedLabel" class="tx-speed" :title="t('transcript.generationSpeedTitle')">{{ speedLabel }}</span>
       </div>
     </div>
   </article>

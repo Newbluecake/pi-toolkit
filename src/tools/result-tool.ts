@@ -298,16 +298,13 @@ export function createResultTool(deps: {
       "Agent tool, /task or a scheduled task, or a SubagentWorkflow (wf_…) — progress while it runs, the full " +
       `outcome (for a workflow, plus its children's spend) once it is terminal. (Formerly named ${LEGACY_RESULT_TOOL_NAME}.) ` +
       "Every such run pushes a completion notification on terminal state, so the normal flow is: continue other " +
-      "work (or end your turn), then call this tool without wait once the notification arrives. Set wait: true " +
-      "to block until the run finishes (up to wait_ms) — while it blocks, the user cannot send new input, so " +
-      "avoid it whenever anything else could proceed (ending your turn counts); it is a fallback for when an " +
-      "expected notification never arrived. Terminal results include the run's wall-clock " +
+      "work (or end your turn), then call this tool without wait once the notification arrives. wait: true " +
+      "blocks until the run finishes (up to wait_ms) and is only a fallback — see the wait parameter. Terminal results include the run's wall-clock " +
       "duration (text trailer and details.durationMs), so post-completion reads still expose how long it ran. " +
       "Long result text is capped by resultMaxChars with a session-file path for reading the full transcript. " +
       "Reading a result never consumes the run, so checking is safe — but rapid repeated polling of the " +
       "same run returns a warning; await the completion notification instead. " +
-      "A wait that times out tells you how to proceed; repeated timeouts on the same run escalate that " +
-      "guidance (raise wait_ms, or stop blocking and await the notification).",
+      "A wait that times out tells you how to proceed.",
     promptSnippet: `${RESULT_TOOL_NAME}(run_id, wait?, wait_ms?) - check a background run's status/result (subagent, scheduled task or workflow)`,
     parameters: ResultToolParams,
     /**

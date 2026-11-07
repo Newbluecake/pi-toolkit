@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseLoadSettings } from "../../src/config/settings.js";
+import { parseLoadSettings } from "../../src/sysload/settings.js";
 import { evaluateLoadGate } from "../../src/sysload/gate.js";
 import { buildLoadEscalationText } from "../../src/sysload/render.js";
 import type { LoadVerdict } from "../../src/sysload/types.js";

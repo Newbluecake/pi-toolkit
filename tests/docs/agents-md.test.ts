@@ -32,6 +32,9 @@ describe("AGENTS.md guard", () => {
     expect(s).toContain("npm run test:conformance");
     expect(s).toContain("PI_TOOLKIT_DROID_CONFORMANCE=1");
     const suites = [
+      "agent-dir",
+      "memory-jev-channels",
+      "unknown-slash-text",
       "cmd-history",
       "droid-protocol",
       "fabric-wake",
@@ -50,6 +53,13 @@ describe("AGENTS.md guard", () => {
       checked++;
     }
     expect(checked).toBeGreaterThan(5);
+    for (const id of ["C-X1–C-X16", "C-X12b/C-X14b", "C-J1–C-J16", "C-J7/C-J8/C-J15"]) {
+      expect(s, `${id} missing from checklist`).toContain(id);
+    }
+    const xs = readFileSync(join(ROOT, "tests/conformance/fabric-xs.test.ts"), "utf8");
+    for (const id of ["C-X12b", "C-X14b", "C-X16"]) expect(xs).toContain(id);
+    const jev = readFileSync(join(ROOT, "tests/conformance/memory-jev-channels.test.ts"), "utf8");
+    expect(jev).toContain("C-J16");
   });
 
   it("K3: peer bump checklist names pi-compat and the exact peer ranges from package.json", () => {
@@ -57,13 +67,35 @@ describe("AGENTS.md guard", () => {
     expect(s).toContain("src/adapters/pi-compat.ts");
     const pkg = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")) as {
       peerDependencies: Record<string, string>;
+      devDependencies: Record<string, string>;
+      peerDependenciesMeta: Record<string, { optional: boolean }>;
+      dependencies?: Record<string, string>;
     };
     const names = Object.keys(pkg.peerDependencies).filter((n) => n.startsWith("@earendil-works/"));
     expect(names.length).toBe(3);
     for (const n of names) {
       expect(s, `${n} range drifted from package.json`).toContain(pkg.peerDependencies[n]!);
       expect(s).toContain(n);
+      expect(pkg.peerDependencies[n]).toBe(">=1.5.0 <1.6.0");
+      expect(pkg.devDependencies[n]).toBe("1.5.0");
+      expect(pkg.peerDependenciesMeta[n]?.optional).toBe(true);
     }
+  });
+
+  it("current baseline documents the breaking floor without widening tested patches", () => {
+    const s = section("pi peer bump checklist");
+    for (const text of [
+      "Breaking Change",
+      "pi 1.0–1.4 are no longer supported",
+      'TESTED_PI_RANGE = "1.5.0 - 1.5.0"',
+      "1.5.1 remain untested and warn",
+    ])
+      expect(s).toContain(text);
+    const readme = readFileSync(join(ROOT, "README.md"), "utf8");
+    for (const text of [">=1.5.0 <1.6.0", "Breaking Change", "1.5.1"]) expect(readme).toContain(text);
+    const pkg = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));
+    expect(pkg.dependencies ?? {}).toEqual({});
+    expect(pkg.peerDependencies["@sinclair/typebox"]).toBe("*");
   });
 
   it("K4: frozen-artifact tables list every A/A′ golden and each exists on disk", () => {
@@ -135,5 +167,8 @@ describe("AGENTS.md guard", () => {
     const dirs = readdirSync(join(ROOT, "src")).filter((n) => statSync(join(ROOT, "src", n)).isDirectory());
     expect(dirs.length).toBeGreaterThan(30);
     for (const d of dirs) expect(s, `src/${d}/ not in the layout table`).toContain(`src/${d}/`);
+    const fastRow = s.split("\n").filter((line) => line.startsWith("| `src/fast/`"));
+    expect(fastRow).toHaveLength(1);
+    expect(fastRow[0]).toContain("docs/dev/fast-command/README.md");
   });
 });

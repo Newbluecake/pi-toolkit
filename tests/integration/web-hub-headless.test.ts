@@ -7,7 +7,8 @@
  *  A. REAL HUB CHILD PROCESSES (H1–H3): `spawnHub` + pi's bundled jiti — the exact production
  *     fork path from `agent/launcher.ts`, with `PI_WEBHUB_CONFIG` carrying a spawn-enabled
  *     `HubConfig` whose `launcher` points at a fixture tree (`node_modules/@earendil-works/
- *     pi-coding-agent/package.json` v1.0.2 + a `pi.mjs` copy of `fixtures/fake-rpc-pi.mjs`) so
+ *     pi-coding-agent/package.json` at `SUPPORTED_PI_RANGE.min` + a `pi.mjs` copy of
+ *     `fixtures/fake-rpc-pi.mjs`) so
  *     SP7's launcher version chain runs for real. Orphan/ladder semantics need the hub PROCESS
  *     to die — nothing in-process can reproduce that. Skipped when pi's bundled jiti is not
  *     resolvable (CI without the dev dependency) or off Linux (spawn is Linux-only, fail-closed).
@@ -49,7 +50,7 @@ import { startHub, type RunningHub } from "../../src/web-hub/hub/hub.js";
 import type { HubConfig, HubLanConfig } from "../../src/web-hub/hub/ports.js";
 import { hasNodeSqlite } from "../../src/web-hub/hub/db.js";
 import { resolveHubPaths, webHubSpawnFiles } from "../../src/web-hub/protocol/paths.js";
-import { STDERR_FILE_MAX } from "../../src/web-hub/protocol/spawn.js";
+import { STDERR_FILE_MAX, SUPPORTED_PI_RANGE } from "../../src/web-hub/protocol/spawn.js";
 import type {
   HubSpawnConfig,
   SpawnsPayload,
@@ -71,6 +72,11 @@ const PI_CLI = resolve("node_modules/@earendil-works/pi-coding-agent/dist/cli.js
 const HUB_MAIN = resolve("src/web-hub/hub/main.ts");
 const FAKE_PI = resolve("tests/integration/fixtures/fake-rpc-pi.mjs");
 const IS_LINUX = process.platform === "linux";
+// Real hub children are started/restored while other heavy suites share the CPU (CI runners, or a
+// local run of several files at once). Wait deadlines for hub-child readiness / restore are widened by
+// this factor; the readiness SIGNALS are unchanged, so a passing run is no slower and only a real
+// hang costs the longer cap.
+const SLOW = 3;
 
 // ---------------------------------------------------------------------------
 // shared helpers
@@ -131,13 +137,21 @@ function findReaperPid(hubPid: number): number | undefined {
   return undefined;
 }
 
-/** Fixture launcher tree satisfying SP7's version chain: a pi-named package v1.0.2 + a .mjs entry. */
+/**
+ * The pi version the fake launcher's package claims. It must sit inside `SUPPORTED_PI_RANGE`:
+ * the shared fixture impersonates a SUPPORTED host, so SP7's init check passes and every spawn
+ * reaches the behaviour under test. Rejection of unsupported versions is covered on purpose by
+ * `tests/web-hub/hub/spawn/launcher-check.test.ts`, not here.
+ */
+const FAKE_PI_HOST_VERSION = SUPPORTED_PI_RANGE.min;
+
+/** Fixture launcher tree satisfying SP7's version chain: a pi-named package at a supported version + a .mjs entry. */
 function fakeLauncher(root: string): readonly [string, string] {
   const pkgDir = join(root, "node_modules", "@earendil-works", "pi-coding-agent");
   mkdirSync(pkgDir, { recursive: true });
   writeFileSync(
     join(pkgDir, "package.json"),
-    JSON.stringify({ name: "@earendil-works/pi-coding-agent", version: "1.0.2" }),
+    JSON.stringify({ name: "@earendil-works/pi-coding-agent", version: FAKE_PI_HOST_VERSION }),
   );
   const entry = join(pkgDir, "pi.mjs");
   copyFileSync(FAKE_PI, entry);
@@ -265,7 +279,7 @@ describe.skipIf(!IS_LINUX || PLAN === undefined)("web-hub headless e2e — real 
         const { pid } = hubJsonOf(home);
         return pid !== undefined && pid !== excludePid && pidAlive(pid);
       },
-      15_000,
+      15_000 * SLOW,
       `child hub up (exclude ${excludePid ?? "-"})`,
     );
     const { pid, port } = hubJsonOf(home);
@@ -1471,7 +1485,7 @@ describe.skipIf(!IS_LINUX || PLAN === undefined)(
           const { pid } = hubJsonOf(home);
           return pid !== undefined && pid !== excludePid && pidAlive(pid);
         },
-        15_000,
+        15_000 * SLOW,
         `child hub up (exclude ${excludePid ?? "-"})`,
       );
       const { pid, port } = hubJsonOf(home);
@@ -2068,7 +2082,7 @@ describe.skipIf(!IS_LINUX || PLAN === undefined)(
           const { pid } = hubJsonOf(home);
           return pid !== undefined && pid !== excludePid && pidAlive(pid);
         },
-        15_000,
+        15_000 * SLOW,
         `child hub up (exclude ${excludePid ?? "-"})`,
       );
       const { pid, port } = hubJsonOf(home);
@@ -2117,185 +2131,201 @@ describe.skipIf(!IS_LINUX || PLAN === undefined)(
       sandbox = undefined;
     });
 
-    it("HR2: hub SIGKILL (reaper alive), slow-exit child ⇒ restored live; at most ONE pi process per spawnId at every 50ms sample (L6); old pid ended", async () => {
-      sandbox = sandboxHome();
-      const home = sandbox.home;
-      const hub = await bootHub(home);
-      const cwd = projDir(home, "proj", ["--ignore-eof"]);
-      const spawnId = await spawnIt(hub, cwd);
-      const r1 = await waitRestoreRec(
-        hub.stateDir,
-        spawnId,
-        (r) => r.state === "live" && r.sessionId !== undefined,
-        15_000,
-        "live",
-      );
-      const oldPid = r1.pid!;
-      extraPids.add(oldPid);
-      let maxProcs = 0;
-      const sampler = setInterval(() => {
-        maxProcs = Math.max(maxProcs, spawnIdProcs(spawnId).length);
-      }, 50);
-      try {
+    it(
+      "HR2: hub SIGKILL (reaper alive), slow-exit child ⇒ restored live; at most ONE pi process per spawnId at every 50ms sample (L6); old pid ended",
+      async () => {
+        sandbox = sandboxHome();
+        const home = sandbox.home;
+        const hub = await bootHub(home);
+        const cwd = projDir(home, "proj", ["--ignore-eof"]);
+        const spawnId = await spawnIt(hub, cwd);
+        const r1 = await waitRestoreRec(
+          hub.stateDir,
+          spawnId,
+          (r) => r.state === "live" && r.sessionId !== undefined,
+          15_000 * SLOW,
+          "live",
+        );
+        const oldPid = r1.pid!;
+        extraPids.add(oldPid);
+        let maxProcs = 0;
+        const sampler = setInterval(() => {
+          maxProcs = Math.max(maxProcs, spawnIdProcs(spawnId).length);
+        }, 50);
+        try {
+          crash(hub);
+          const hub2 = await bootHub(home, hub.pid);
+          const r2 = await waitRestoreRec(
+            hub2.stateDir,
+            spawnId,
+            (r) => r.state === "live" && r.pid !== undefined && r.pid !== oldPid,
+            25_000 * SLOW,
+            "restored live after crash",
+          );
+          extraPids.add(r2.pid!);
+          expect(pidAlive(oldPid)).toBe(false);
+          expect(r2.restore).toMatchObject({ attempts: 1 });
+          expect(r2.sessionId).toBe(r1.sessionId);
+          await new Promise((r) => setTimeout(r, 500));
+        } finally {
+          clearInterval(sampler);
+        }
+        expect(maxProcs).toBeGreaterThanOrEqual(1);
+        expect(maxProcs).toBeLessThanOrEqual(1);
+      },
+      60_000 * SLOW,
+    );
+
+    it(
+      "HR5b: veto written, then hub SIGKILL ⇒ next boot does NOT restore (legacy orphan path) and consumes the veto",
+      async () => {
+        sandbox = sandboxHome();
+        const home = sandbox.home;
+        const hub = await bootHub(home);
+        const cwd = projDir(home, "proj");
+        const spawnId = await spawnIt(hub, cwd);
+        const r1 = await waitRestoreRec(
+          hub.stateDir,
+          spawnId,
+          (r) => r.state === "live" && r.sessionId !== undefined,
+          15_000 * SLOW,
+          "live",
+        );
+        expect(writeRestoreVetoSync(hub.stateDir)).toEqual({ ok: true });
         crash(hub);
+        await waitPidGone(r1.pid, 5_000, "child exits on EOF");
         const hub2 = await bootHub(home, hub.pid);
+        await waitRestoreRec(hub2.stateDir, spawnId, (r) => r.endReason === "orphan", 10_000 * SLOW, "legacy recovery");
+        expect(existsSync(webHubSpawnFiles(hub2.stateDir).restoreVeto)).toBe(false);
+        expect(restoreRecOf(hub2.stateDir, spawnId)!.restore).toBeUndefined();
+        expect(forkArgvs(cwd)).toHaveLength(1);
+      },
+      45_000 * SLOW,
+    );
+
+    it(
+      "HR6: crash right after every restore ⇒ attempts 1,2,3 land on disk; the 4th boot gives up with failure exhausted (legacy recovery)",
+      async () => {
+        sandbox = sandboxHome();
+        const home = sandbox.home;
+        let hub = await bootHub(home);
+        const cwd = projDir(home, "proj");
+        const spawnId = await spawnIt(hub, cwd);
+        let rec = await waitRestoreRec(
+          hub.stateDir,
+          spawnId,
+          (r) => r.state === "live" && r.sessionId !== undefined,
+          15_000 * SLOW,
+          "live",
+        );
+        for (let n = 1; n <= 3; n++) {
+          const prevPid = rec.pid;
+          crash(hub);
+          hub = await bootHub(home, hub.pid);
+          rec = await waitRestoreRec(
+            hub.stateDir,
+            spawnId,
+            (r) => r.state === "live" && r.pid !== prevPid && r.restore?.attempts === n,
+            25_000 * SLOW,
+            `restore #${n} live`,
+          );
+          expect(forkArgvs(cwd)).toHaveLength(n + 1);
+        }
+        crash(hub);
+        hub = await bootHub(home, hub.pid);
+        const last = await waitRestoreRec(
+          hub.stateDir,
+          spawnId,
+          (r) => r.restore?.failure === "exhausted",
+          15_000 * SLOW,
+          "exhausted",
+        );
+        expect(last).toMatchObject({ state: "exited", endReason: "orphan", restore: { attempts: 3 } });
+        await new Promise((r) => setTimeout(r, 1_000));
+        expect(forkArgvs(cwd)).toHaveLength(4); // no 4th restore fork
+      },
+      120_000 * SLOW,
+    );
+
+    it(
+      "HR7: double-team safety — TERM/KILL-ignoring child + live old reaper ⇒ old ended, the restored child never receives a signal, agent_removed{old key}; doctored starttime ⇒ no signal to that pid, normal fork",
+      async () => {
+        sandbox = sandboxHome();
+        const home = sandbox.home;
+        const hub = await bootHub(home);
+        const cwd = projDir(home, "proj", ["--ignore-eof", "--ignore-term"]);
+        const spawnId = await spawnIt(hub, cwd);
+        const r1 = await waitRestoreRec(
+          hub.stateDir,
+          spawnId,
+          (r) => r.state === "live" && r.sessionId !== undefined,
+          15_000 * SLOW,
+          "live",
+        );
+        const oldPid = r1.pid!;
+        extraPids.add(oldPid);
+        const oldKey = await ownerKey(hub, spawnId);
+        expect(oldKey).toBeDefined();
+        crash(hub);
+        const hub2 = await bootHub(home, hub.pid); // inside the old reaper's 5s grace
+        const sse = await openSse(hub2.port, { cookie: hub2.cookie });
+        sseConns.push(sse);
         const r2 = await waitRestoreRec(
           hub2.stateDir,
           spawnId,
           (r) => r.state === "live" && r.pid !== undefined && r.pid !== oldPid,
-          25_000,
-          "restored live after crash",
+          30_000 * SLOW,
+          "restored live",
         );
-        extraPids.add(r2.pid!);
-        expect(pidAlive(oldPid)).toBe(false);
-        expect(r2.restore).toMatchObject({ attempts: 1 });
-        expect(r2.sessionId).toBe(r1.sessionId);
-        await new Promise((r) => setTimeout(r, 500));
-      } finally {
-        clearInterval(sampler);
-      }
-      expect(maxProcs).toBeGreaterThanOrEqual(1);
-      expect(maxProcs).toBeLessThanOrEqual(1);
-    }, 60_000);
-
-    it("HR5b: veto written, then hub SIGKILL ⇒ next boot does NOT restore (legacy orphan path) and consumes the veto", async () => {
-      sandbox = sandboxHome();
-      const home = sandbox.home;
-      const hub = await bootHub(home);
-      const cwd = projDir(home, "proj");
-      const spawnId = await spawnIt(hub, cwd);
-      const r1 = await waitRestoreRec(
-        hub.stateDir,
-        spawnId,
-        (r) => r.state === "live" && r.sessionId !== undefined,
-        15_000,
-        "live",
-      );
-      expect(writeRestoreVetoSync(hub.stateDir)).toEqual({ ok: true });
-      crash(hub);
-      await waitPidGone(r1.pid, 5_000, "child exits on EOF");
-      const hub2 = await bootHub(home, hub.pid);
-      await waitRestoreRec(hub2.stateDir, spawnId, (r) => r.endReason === "orphan", 10_000, "legacy recovery");
-      expect(existsSync(webHubSpawnFiles(hub2.stateDir).restoreVeto)).toBe(false);
-      expect(restoreRecOf(hub2.stateDir, spawnId)!.restore).toBeUndefined();
-      expect(forkArgvs(cwd)).toHaveLength(1);
-    }, 45_000);
-
-    it("HR6: crash right after every restore ⇒ attempts 1,2,3 land on disk; the 4th boot gives up with failure exhausted (legacy recovery)", async () => {
-      sandbox = sandboxHome();
-      const home = sandbox.home;
-      let hub = await bootHub(home);
-      const cwd = projDir(home, "proj");
-      const spawnId = await spawnIt(hub, cwd);
-      let rec = await waitRestoreRec(
-        hub.stateDir,
-        spawnId,
-        (r) => r.state === "live" && r.sessionId !== undefined,
-        15_000,
-        "live",
-      );
-      for (let n = 1; n <= 3; n++) {
-        const prevPid = rec.pid;
-        crash(hub);
-        hub = await bootHub(home, hub.pid);
-        rec = await waitRestoreRec(
-          hub.stateDir,
-          spawnId,
-          (r) => r.state === "live" && r.pid !== prevPid && r.restore?.attempts === n,
-          25_000,
-          `restore #${n} live`,
+        const newPid = r2.pid!;
+        extraPids.add(newPid);
+        await waitPidGone(oldPid, 15_000 * SLOW, "old child ended (TERM ignored ⇒ verified KILL)");
+        await sse.waitFor(
+          (e) => e.event === "agent_removed" && (e.data as { agentKey?: string }).agentKey === oldKey,
+          10_000 * SLOW,
         );
-        expect(forkArgvs(cwd)).toHaveLength(n + 1);
-      }
-      crash(hub);
-      hub = await bootHub(home, hub.pid);
-      const last = await waitRestoreRec(
-        hub.stateDir,
-        spawnId,
-        (r) => r.restore?.failure === "exhausted",
-        15_000,
-        "exhausted",
-      );
-      expect(last).toMatchObject({ state: "exited", endReason: "orphan", restore: { attempts: 3 } });
-      await new Promise((r) => setTimeout(r, 1_000));
-      expect(forkArgvs(cwd)).toHaveLength(4); // no 4th restore fork
-    }, 120_000);
+        await new Promise((r) => setTimeout(r, 6_000)); // old reaper's TERM(5s)/KILL(8s) window passes
+        expect(pidAlive(newPid)).toBe(true);
+        expect(diagSignals(cwd, newPid)).toEqual([]);
 
-    it("HR7: double-team safety — TERM/KILL-ignoring child + live old reaper ⇒ old ended, the restored child never receives a signal, agent_removed{old key}; doctored starttime ⇒ no signal to that pid, normal fork", async () => {
-      sandbox = sandboxHome();
-      const home = sandbox.home;
-      const hub = await bootHub(home);
-      const cwd = projDir(home, "proj", ["--ignore-eof", "--ignore-term"]);
-      const spawnId = await spawnIt(hub, cwd);
-      const r1 = await waitRestoreRec(
-        hub.stateDir,
-        spawnId,
-        (r) => r.state === "live" && r.sessionId !== undefined,
-        15_000,
-        "live",
-      );
-      const oldPid = r1.pid!;
-      extraPids.add(oldPid);
-      const oldKey = await ownerKey(hub, spawnId);
-      expect(oldKey).toBeDefined();
-      crash(hub);
-      const hub2 = await bootHub(home, hub.pid); // inside the old reaper's 5s grace
-      const sse = await openSse(hub2.port, { cookie: hub2.cookie });
-      sseConns.push(sse);
-      const r2 = await waitRestoreRec(
-        hub2.stateDir,
-        spawnId,
-        (r) => r.state === "live" && r.pid !== undefined && r.pid !== oldPid,
-        30_000,
-        "restored live",
-      );
-      const newPid = r2.pid!;
-      extraPids.add(newPid);
-      await waitPidGone(oldPid, 15_000, "old child ended (TERM ignored ⇒ verified KILL)");
-      await sse.waitFor(
-        (e) => e.event === "agent_removed" && (e.data as { agentKey?: string }).agentKey === oldKey,
-        10_000,
-      );
-      await new Promise((r) => setTimeout(r, 6_000)); // old reaper's TERM(5s)/KILL(8s) window passes
-      expect(pidAlive(newPid)).toBe(true);
-      expect(diagSignals(cwd, newPid)).toEqual([]);
-
-      // ---- round 2: doctored starttime, no reaper left to signal anyone ----
-      const cwd2 = projDir(home, "proj2", ["--ignore-eof", "--ignore-term"]);
-      const spawn2 = await spawnIt(hub2, cwd2);
-      const q1 = await waitRestoreRec(
-        hub2.stateDir,
-        spawn2,
-        (r) => r.state === "live" && r.sessionId !== undefined,
-        15_000,
-        "live 2",
-      );
-      const child2 = q1.pid!;
-      extraPids.add(child2);
-      await waitUntil(() => findReaperOf(hub2.pid) !== undefined, 8_000, "hub2 reaper visible");
-      kill9(findReaperOf(hub2.pid));
-      crash(hub2);
-      await waitUntil(() => !pidAlive(hub2.pid), 3_000, "hub2 dead");
-      const file = webHubSpawnFiles(hub2.stateDir).spawnsJson;
-      const raw = JSON.parse(readFileSync(file, "utf8")) as { records: RestoreStored[] };
-      const doctored = raw.records.find((r) => r.spawnId === spawn2)!;
-      doctored.procStartTicks = (doctored.procStartTicks ?? 0) + 40;
-      writeFileSync(file, JSON.stringify(raw));
-      const hub3 = await bootHub(home, hub2.pid);
-      const q2 = await waitRestoreRec(
-        hub3.stateDir,
-        spawn2,
-        (r) => r.state === "live" && r.pid !== undefined && r.pid !== child2,
-        30_000,
-        "doctored record restored (pid judged reused ⇒ confirmed)",
-      );
-      extraPids.add(q2.pid!);
-      await new Promise((r) => setTimeout(r, 3_000));
-      expect(pidAlive(child2)).toBe(true); // L5: verify failed ⇒ never signaled
-      expect(diagSignals(cwd2, child2)).toEqual([]);
-      for (const r of readSpawnsJson(hub3.stateDir) as RestoreStored[]) {
-        if (r.state === "live" && r.pid !== undefined) extraPids.add(r.pid);
-      }
-    }, 150_000);
+        // ---- round 2: doctored starttime, no reaper left to signal anyone ----
+        const cwd2 = projDir(home, "proj2", ["--ignore-eof", "--ignore-term"]);
+        const spawn2 = await spawnIt(hub2, cwd2);
+        const q1 = await waitRestoreRec(
+          hub2.stateDir,
+          spawn2,
+          (r) => r.state === "live" && r.sessionId !== undefined,
+          15_000 * SLOW,
+          "live 2",
+        );
+        const child2 = q1.pid!;
+        extraPids.add(child2);
+        await waitUntil(() => findReaperOf(hub2.pid) !== undefined, 8_000, "hub2 reaper visible");
+        kill9(findReaperOf(hub2.pid));
+        crash(hub2);
+        await waitUntil(() => !pidAlive(hub2.pid), 3_000, "hub2 dead");
+        const file = webHubSpawnFiles(hub2.stateDir).spawnsJson;
+        const raw = JSON.parse(readFileSync(file, "utf8")) as { records: RestoreStored[] };
+        const doctored = raw.records.find((r) => r.spawnId === spawn2)!;
+        doctored.procStartTicks = (doctored.procStartTicks ?? 0) + 40;
+        writeFileSync(file, JSON.stringify(raw));
+        const hub3 = await bootHub(home, hub2.pid);
+        const q2 = await waitRestoreRec(
+          hub3.stateDir,
+          spawn2,
+          (r) => r.state === "live" && r.pid !== undefined && r.pid !== child2,
+          30_000 * SLOW,
+          "doctored record restored (pid judged reused ⇒ confirmed)",
+        );
+        extraPids.add(q2.pid!);
+        await new Promise((r) => setTimeout(r, 3_000));
+        expect(pidAlive(child2)).toBe(true); // L5: verify failed ⇒ never signaled
+        expect(diagSignals(cwd2, child2)).toEqual([]);
+        for (const r of readSpawnsJson(hub3.stateDir) as RestoreStored[]) {
+          if (r.state === "live" && r.pid !== undefined) extraPids.add(r.pid);
+        }
+      },
+      150_000 * SLOW,
+    );
   },
 );

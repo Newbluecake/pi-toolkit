@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { createLoadActivation } from "../../../../src/sysload/activation.ts";
 import { IoLedger, withIoLease } from "../../../../src/sysload/io-ledger.ts";
 import { scanTop } from "../../../../src/sysload/top.ts";
-import { parseLoadSettings } from "../../../../src/config/settings.ts";
+import { parseLoadSettings } from "../../../../src/sysload/settings.ts";
 
 const mode = process.argv[2] ?? "activation";
 const fifo = join(tmpdir(), `pi-toolkit-sysload-${process.pid}.fifo`);

@@ -1,0 +1,6 @@
+## Memory (proj) — 1 topic(s) · 3 block(s)
+
+Topics (relevant blocks are injected automatically; read one with memory view <topic>):
+- quota — sections: Dispatch, Fallback · 3 blocks
+
+<!-- pi-toolkit:memory proj -->

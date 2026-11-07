@@ -156,4 +156,43 @@ describe("context-switch/session-facts", () => {
     });
     expect(provider({})).toEqual({ runs: ["run-cccc — queued/queued"] });
   });
+
+  // todo-archive-split #92 §8.4 reader regression: a SPLIT-format branch (narrowed live snapshot
+  // + claude-code-todo-archive packages, cross-storage edge authoritative on the archive side)
+  // must flow through the SAME replayState choke point — session-facts needs zero code changes.
+  it("lists open todos from a split-format branch (live snapshot + archive package with a reattached edge)", () => {
+    const now = 1000;
+    const liveOpen = {
+      id: 2,
+      subject: "分离存储回归",
+      description: "desc",
+      status: "in_progress",
+      blocks: [],
+      blockedBy: [], // cross edge to archived #1 is STRIPPED here (OD1-c)
+      createdAt: 10,
+      updatedAt: 20,
+    };
+    const archived = {
+      id: 1,
+      subject: "前置任务",
+      description: "desc",
+      status: "completed",
+      blocks: [2], // authoritative copy of the cross edge lives here
+      blockedBy: [],
+      createdAt: 1,
+      updatedAt: 2,
+      completedAt: 2,
+      archivedAt: now,
+    };
+    const branch = [
+      { type: "custom", customType: "claude-code-todo-archive", data: { v: 1, put: [archived] } },
+      { type: "custom", customType: STATE_ENTRY, data: { v: 1, nextId: 3, tasks: [liveOpen] } },
+    ];
+    const ctx = { sessionManager: { getBranch: () => branch } };
+    const facts = collectSessionFacts(stack({}), ctx, settings);
+    // Only the OPEN task is listed (the archived one is folded in but completed) — and the
+    // replay must have merged the package (otherwise #2 would be the sole task anyway, but
+    // a broken merge would return undefined or drop #2's reattached edge).
+    expect(facts.todos).toEqual(["#2 分离存储回归 [in_progress]"]);
+  });
 });

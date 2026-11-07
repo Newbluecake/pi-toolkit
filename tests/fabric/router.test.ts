@@ -9,7 +9,7 @@ import { FabricRouter } from "../../src/fabric/router.js";
 
 const config = {
   maxPerRun: 2,
-  findingQuota: 2,
+  reportQuota: 2,
   directiveQuota: 2,
   deadLetterQuota: 1,
   maxChars: 100,
@@ -48,7 +48,7 @@ const original = (patch: Partial<FabricRecord> = {}): FabricRecord => ({
   key: "r_ABCDEFGH:r_12345678:1:1" as FabricRecord["key"],
   from: "r_ABCDEFGH",
   to: "r_12345678",
-  kind: "finding",
+  kind: "report",
   seq: 1,
   generation: 1,
   payload: { text: "failure" },
@@ -112,7 +112,7 @@ function makeRouter(store: OutboxStore<FabricRecord>, now = 1, deadLetterQuota =
 }
 
 describe("fabric router", () => {
-  it("allows a nested child to send progress and findings to its parent by default", () => {
+  it("allows a nested child to send progress and reports to its parent by default", () => {
     const { router, engine } = setup();
     const progress = router.admit("r_ABCDEFGH", {
       to: "root",
@@ -120,14 +120,14 @@ describe("fabric router", () => {
       text: "progress",
       generation: 1,
     });
-    const finding = router.admit("r_ABCDEFGH", {
+    const report = router.admit("r_ABCDEFGH", {
       to: "root",
-      kind: "finding",
-      text: "finding",
+      kind: "report",
+      text: "report",
       generation: 1,
     });
     expect(progress.ok).toBe(true);
-    expect(finding.ok).toBe(true);
+    expect(report.ok).toBe(true);
     expect(engine.select((record) => record.state === "pending")).toHaveLength(2);
   });
 
@@ -157,7 +157,7 @@ describe("fabric router", () => {
       { ...config, senderLabel: (from) => (from === "r_ABCDEFGH" ? "secreview:-secure-V6-wiring" : undefined) },
       () => 1,
     );
-    const admitted = router.admit("r_ABCDEFGH", { to: "root", kind: "finding", text: "x", generation: 1 });
+    const admitted = router.admit("r_ABCDEFGH", { to: "root", kind: "report", text: "x", generation: 1 });
     expect(admitted.ok).toBe(true);
     const [record] = engine.select(() => true);
     expect(record!.fromLabel).toBe("secreview:-secure-V6-wiring");
@@ -170,14 +170,14 @@ describe("fabric router", () => {
     const { router, engine } = setup();
     const first = router.admit("r_ABCDEFGH", {
       to: "root",
-      kind: "finding",
+      kind: "report",
       text: "one",
       generation: 1,
       canMessage: ["parent"],
     });
     const second = router.admit("r_12345678", {
       to: "root",
-      kind: "finding",
+      kind: "report",
       text: "two",
       generation: 1,
       canMessage: ["parent"],
@@ -323,6 +323,45 @@ describe("fabric router", () => {
     expect(a.ok && engine.get(a.key)?.state).toBe("consumed");
     expect(b.ok).toBe(true);
   });
+
+  it("keeps a resumed run's authorization intact once its old run id is tombstoned (#33 resume shape)", () => {
+    // The resume of a settled session gets a NEW run id registered under root; the old id is tombstoned.
+    // Pin that the fresh id authorizes exactly like any root child: directive up is refused, report up is admitted.
+    const engine = createDeliveryEngine<FabricRecord, FabricRecord["state"]>({
+      store: new MemoryOutboxStore<FabricRecord>(),
+      allowed: {
+        pending: ["claimed", "consumed", "dropped", "abandoned"],
+        claimed: ["pending", "delivered", "consumed", "dropped"],
+        delivered: [],
+        consumed: [],
+        dropped: [],
+        abandoned: [],
+      },
+      memoryOnly: new Set(["claimed"]),
+      memoryOnlyFields: ["claimToken"],
+      now: () => 1,
+    });
+    const tree = new FabricTree();
+    tree.append("root", "r_0DD9ER01");
+    tree.markRunning("r_0DD9ER01");
+    tree.tombstone("r_0DD9ER01", 1, 100);
+    tree.append("root", "r_NEW9ER02");
+    tree.markRunning("r_NEW9ER02");
+    const router = new FabricRouter(
+      engine,
+      tree,
+      new FabricThrottle({ minIntervalMs: 0, rootMinIntervalMs: 0, backoffMs: 0 }),
+      config,
+      () => 1,
+    );
+
+    expect(router.targetState("r_NEW9ER02")).toBe("running");
+    expect(() => router.admit("r_NEW9ER02", { to: "root", kind: "directive", text: "x", generation: 1 })).toThrow(
+      "message not authorized",
+    );
+    const report = router.admit("r_NEW9ER02", { to: "root", kind: "report", text: "x", generation: 1 });
+    expect(report.ok).toBe(true);
+  });
 });
 
 describe("fabric router mention admission", () => {
@@ -331,7 +370,7 @@ describe("fabric router mention admission", () => {
     expect(() =>
       router.admit("r_ABCDEFGH", {
         to: "r_12345678",
-        kind: "finding",
+        kind: "report",
         text: "x",
         generation: 1,
         canMessage: ["mention"],
@@ -343,7 +382,7 @@ describe("fabric router mention admission", () => {
     expect(() =>
       router.admit("r_ABCDEFGH", {
         to: "r_NESTED01",
-        kind: "finding",
+        kind: "report",
         text: "x",
         generation: 1,
         canMessage: ["mention"],
@@ -354,7 +393,7 @@ describe("fabric router mention admission", () => {
     expect(() =>
       router.admit("r_ABCDEFGH", {
         to: "r_12345678",
-        kind: "finding",
+        kind: "report",
         text: "x",
         generation: 1,
         canMessage: ["mention"],
@@ -364,21 +403,21 @@ describe("fabric router mention admission", () => {
   });
   it("rejects missing permission and directive/result/self mention routes", () => {
     const { router } = setup();
-    for (const kind of ["finding", "directive", "result"] as const)
+    for (const kind of ["report", "directive", "result"] as const)
       expect(() =>
         router.admit("r_ABCDEFGH", {
           to: "r_12345678",
           kind,
           text: "x",
           generation: 1,
-          canMessage: kind === "finding" ? ["parent"] : ["mention"],
+          canMessage: kind === "report" ? ["parent"] : ["mention"],
           route: { kind: "mention", label: "x", target: "r_12345678" },
         }),
       ).toThrow("message not authorized");
     expect(() =>
       router.admit("r_12345678", {
         to: "r_12345678",
-        kind: "finding",
+        kind: "report",
         text: "x",
         generation: 1,
         canMessage: ["mention"],
@@ -400,7 +439,7 @@ describe("fabric router mention admission", () => {
     expect(
       router.admit(sender, {
         to: "r_12345678",
-        kind: "finding",
+        kind: "report",
         text: "x",
         generation: 1,
         canMessage: ["mention"],
@@ -412,7 +451,7 @@ describe("fabric router mention admission", () => {
     const { router, engine } = setup();
     const result = router.admit("r_ABCDEFGH", {
       to: "r_12345678",
-      kind: "finding",
+      kind: "report",
       text: "x",
       generation: 1,
       canMessage: ["mention"],

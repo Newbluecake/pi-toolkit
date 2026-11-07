@@ -437,3 +437,28 @@ describe("command-complete — per-item policy (§4.3 #7)", () => {
     expect(r.source).toBe("tui");
   });
 });
+
+describe("#39 completion reuses scoped execution policy", () => {
+  it("filters writes even with allow override while keeping readonly items", async () => {
+    const cc = createCommandComplete({
+      commands: { getCommands: () => [{ name: "mem", description: "memory", source: "extension" }] },
+      own: () =>
+        ownMap({
+          mem: () =>
+            ["session list", "session add raw", "hub trash", "hub adopt", "hub rm rule.123"].map((value) => ({
+              value,
+              label: value,
+            })),
+        }),
+      tui: () => undefined,
+      mode: "toolkit",
+      memoryScopes: true,
+      overrides: { mem: "allow" },
+    });
+    const answer = await cc.answer(req("mem"));
+    expect(answer.ok).toBe(true);
+    if (!answer.ok) throw Error("expected readonly completion");
+    expect(answer.items.map((item) => item.value)).toEqual(["session list", "hub trash"]);
+    cc.dispose();
+  });
+});

@@ -40,7 +40,7 @@ function treeRouter(rootInboxCap: number): FabricRouter {
     new FabricThrottle({ minIntervalMs: 0, rootMinIntervalMs: 0, backoffMs: 0 }),
     {
       maxPerRun: 20,
-      findingQuota: 10,
+      reportQuota: 10,
       directiveQuota: 5,
       deadLetterQuota: 5,
       maxChars: 2000,
@@ -54,7 +54,7 @@ function treeRouter(rootInboxCap: number): FabricRouter {
 }
 
 function treeDeliver(router: FabricRouter, text: string) {
-  return router.admit("r_ABCDEFGH", { to: "root", kind: "finding", text, generation: 1 });
+  return router.admit("r_ABCDEFGH", { to: "root", kind: "report", text, generation: 1 });
 }
 
 describe("xs-inbox: release rules (§8.4)", () => {

@@ -224,7 +224,11 @@ const trailingFields = {
 const topLevelTrailingFields = {
   schema: Type.Optional(
     Type.Unknown({
-      description: SCHEMA_FIELD_DESCRIPTION + ' Or pass the preset name "verdict/v1" for verifier/reviewer verdicts.',
+      description:
+        SCHEMA_FIELD_DESCRIPTION +
+        ' Or pass the preset name "verdict/v1" for verifier/reviewer verdicts.' +
+        " When resuming a run that had a schema and you pass none, the original run's schema (and host re-validation) is reused; " +
+        "pass a different schema to override it, or null to resume without any schema.",
     }),
   ),
   meta: Type.Optional(
@@ -232,29 +236,41 @@ const topLevelTrailingFields = {
       {
         lane: Type.Optional(
           Type.Union([Type.Literal("L0"), Type.Literal("L1"), Type.Literal("L2"), Type.Literal("L3")], {
-            description: "Dev-flow lane of this dispatch (L0 direct edit .. L3 complex).",
+            description: "Dev-flow lane (L0 direct edit .. L3 complex).",
           }),
         ),
         packageId: Type.Optional(
           Type.String({
-            description:
-              "Id of the work package this dispatch belongs to. Use the SAME id for every dispatch of a package (initial work, rework, re-dispatch).",
+            description: "Work package id; use the SAME id for every dispatch of a package (rework included).",
           }),
         ),
-        feature: Type.Optional(Type.String({ description: "Optional feature id this dispatch belongs to." })),
+        feature: Type.Optional(Type.String({ description: "Feature id." })),
       },
       {
         additionalProperties: false,
-        description:
-          "Optional dispatch metadata for analytics: lane, package id, feature. " +
-          "Analytics only — never shown to the subagent, never added to its prompt, and it does not change how the run executes.",
+        description: "Analytics-only dispatch metadata; never shown to the subagent, does not change execution.",
       },
     ),
   ),
 };
 
 /** Top-level (main-session) Agent tool parameters — always background, no `run_in_background`. */
-export const AgentToolParams = Type.Object({ ...leadingFields, ...topLevelTrailingFields });
+const topTimeoutDescription =
+  "Optional total wall-clock budget for this run in seconds (1–604800). Values below the host budget.minTotalS floor " +
+  "(default 1800 seconds) are raised, including explicit short values; the floor also applies without timeout_s and on resumes. " +
+  "It follows the same grace and extension rules as the default budget: budget.totalGraceS, in seconds, default 600. " +
+  "Use the effective total T after merging and applying the floor, not raw timeout_s: the default ceiling is max(2× T, T + 3h) " +
+  "(budget.maxTotalFactor, budget.maxExtensions and budget.extendStepS); each extension adds at most budget.extendStepS " +
+  "(default 3600s). An earlier absolute deadline still wins. With extensions disabled (extend.enabled=false) the timeout is a hard cap " +
+  "at effective T. Phase watchdogs, abort and parent lifecycle may stop it sooner: this is not a guaranteed lifetime. " +
+  "Inside a subagent the grace window is silent and there is no extension tool there. Runs the system starts with a fixed deadline " +
+  "(/goal verifier, RPC, workflow children) and /task are outside this Agent-tool floor. A fixed-policy resume still has no grace. " +
+  "Use extend_subagent_timeout on a grace notice, or abort_subagent to stop immediately.";
+export const AgentToolParams = Type.Object({
+  ...leadingFields,
+  timeout_s: Type.Optional(Type.Integer({ minimum: 1, maximum: 604_800, description: topTimeoutDescription })),
+  ...topLevelTrailingFields,
+});
 export type AgentToolParams = Static<typeof AgentToolParams>;
 
 /** Nested delegation Agent tool parameters — blocking by default, opt-in `run_in_background`. */
@@ -358,7 +374,9 @@ const TOP_LEVEL_DESCRIPTION =
   "enter a new command until it returns). Independent tasks can be dispatched in parallel: issue several " +
   "Agent calls in the same message. Use steer_subagent to send a follow-up instruction to a still-running one; " +
   "abort_subagent stops a running subagent. " +
-  DESCRIPTION_TAIL;
+  DESCRIPTION_TAIL +
+  " Agent-tool budgets have a configured minimum (budget.minTotalS, default 1800 seconds): short timeout_s values are raised. " +
+  "Default grace is 600 seconds; ceilings use effective T after the floor. Earlier absolute/phase deadlines, abort and parent lifecycle still apply; fixed resumes have no grace. /task and programmatic spawns are excluded.";
 
 function nestedDescription(allowedTypes: readonly string[]): string {
   return (
@@ -401,7 +419,9 @@ function prepareSpawn(
   // capability (its description does not mention it, no test locks it).
   let schema: JsonSchema | undefined;
   let schemaPreset: SchemaPresetId | undefined;
-  if (params.schema !== undefined) {
+  // #68: `schema: null` on a resume = explicit opt-out of schema inheritance (no schema at all).
+  const optOutInherit = params.schema === null && params.resume !== undefined;
+  if (params.schema !== undefined && !optOutInherit) {
     const preset = resolveSchemaPreset(params.schema);
     if (preset !== undefined) {
       schema = preset.schema;
@@ -444,6 +464,7 @@ function prepareSpawn(
   // sanitized label. Spawn admission drops it when it matches the label.
   const displayTitle = captureDisplayTitle(params.description);
   const baseRequest: SpawnRequest = {
+    agentToolDispatch: true,
     type: params.subagent_type,
     prompt: params.prompt,
     label: params.description,
@@ -464,6 +485,8 @@ function prepareSpawn(
       : {}),
     ...(params.isolation ? { isolation: params.isolation } : {}),
     ...(schema !== undefined ? { schema } : {}),
+    // #68: resume without any `schema` argument ⇒ spawn admission inherits the resumed run's schema.
+    ...(params.resume && params.schema === undefined ? { inheritSchema: true as const } : {}),
     ...(schemaPreset !== undefined ? { schemaPreset } : {}),
     ...(dispatchMeta !== undefined ? { dispatchMeta } : {}),
     // L1 (agent-tool pool-full plan §1/§2): both the top-level and nested

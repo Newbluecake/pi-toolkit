@@ -74,7 +74,7 @@ function setup(wake = true) {
     updatedAt: Date.now(),
     ttlMs: 120_000,
     parked: { at: Date.now(), reason: "wake_false" },
-    payload: { text: "carry this parked finding" },
+    payload: { text: "carry this parked report" },
   });
   sm.appendCustomEntry("subagent:run", prev);
   sm.appendCustomEntry("subagent:fabric", r);
@@ -180,7 +180,7 @@ describe("W3 real stack assembly", () => {
     await until(() => driver.text !== undefined);
     expect(driver.text).toContain("ordinary human request");
     expect(driver.text).toContain("[fabric inbox n=1]");
-    expect(driver.text).toContain("carry this parked finding");
+    expect(driver.text).toContain("carry this parked report");
     expect(h.latest()).toMatchObject({ state: "consumed", terminalReason: "resume_injected", revivedAs: id });
     expect(stack.query.get(id)?.diag).toHaveProperty("inputAcceptedAt");
     expect(stack.query.get(id)?.diag).not.toHaveProperty("wakeOrigin");
@@ -214,12 +214,12 @@ describe("W3 real stack assembly", () => {
       canMessage: ["mention"],
       level: stack.wake!.level,
     });
-    const result = await channel.send("worker-label", "finding", "legacy followup");
+    const result = await channel.send("worker-label", "report", "legacy followup");
     expect(result).toMatchObject({ status: "resumed" });
     if (result.status !== "resumed") throw new Error("not resumed");
     await until(() => driver.text !== undefined);
     expect(driver.text).toContain("legacy followup");
-    expect(driver.text).toContain("carry this parked finding");
+    expect(driver.text).toContain("carry this parked report");
     expect(stack.query.get(result.runId)?.diag).not.toHaveProperty("wakeOrigin");
     expect(h.latest().revivedAs).toBe(result.runId);
     driver.finish();
@@ -287,7 +287,7 @@ describe("W3 real stack assembly", () => {
     await until(() => latestOf(late.key)?.state === "delivered");
     expect(latestOf(late.key)).toMatchObject({ attempts: 1, steerAttempt: { runId: started.runId } });
     // the admitted parked message rode the prompt instead (never also steered)
-    expect(driver.text).toContain("carry this parked finding");
+    expect(driver.text).toContain("carry this parked report");
     expect(driver.text).not.toContain("arrived during startup");
     expect(h.latest()).toMatchObject({ state: "consumed", terminalReason: "resume_injected" });
     driver.finish();

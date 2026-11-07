@@ -69,3 +69,14 @@ it("public session ids are deterministic, domain-separated, fixed-width and neve
   expect(publicSessionId(sidHash)).not.toBe(sidHash.slice(0, 16));
   expect(publicSessionId(hashSid("different"))).not.toBe(publicSessionId(sidHash));
 });
+
+it("#66 frozen v0.10 reader anchor: only 20B TOTP (not 53B) is accepted", () => {
+  // v0.10.0 db-child.ts factorRowValid's TOTP clause, deliberately frozen, NOT production import.
+  const legacyTotpClause = (row: { totp_secret: Uint8Array | null; totp_last_step: number }) =>
+    row.totp_secret === null ||
+    (row.totp_secret.length === 20 && Number.isSafeInteger(row.totp_last_step) && row.totp_last_step >= 0);
+  expect(legacyTotpClause({ totp_secret: Buffer.alloc(20), totp_last_step: 1 })).toBe(true);
+  const encrypted = Buffer.alloc(53);
+  encrypted[0] = 1;
+  expect(legacyTotpClause({ totp_secret: encrypted, totp_last_step: 1 })).toBe(false);
+});

@@ -354,3 +354,59 @@ describe("reload model coordination", () => {
     expect(consumeReloadContinue(ctx as never, "reload")).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// #30 reload-result plan §1 D3: the "host cannot reload" branch routes through
+// `port.unavailable(ctx)` (failed E_RELOAD_UNAVAILABLE on the tracker) instead of a bare notify.
+
+describe("#30 unavailable route (§3 A8)", () => {
+  function unavailableHarness(opts: { wired?: boolean } = {}) {
+    const events: Array<{ kind: string; by?: string }> = [];
+    const ctl = new DeferredReloadController({ fire: vi.fn() });
+    const notify = vi.fn();
+    const unavailable = vi.fn((ctx: { ui: { notify: typeof notify } }) => {
+      events.push({ kind: "unavailable" });
+      ctx.ui.notify("print/json 模式不支持 /agent reload，请使用 TUI 或 RPC 会话。", "warning");
+    });
+    const port = {
+      get pending() {
+        return ctl.pending;
+      },
+      arm: vi.fn(),
+      cancel: vi.fn(() => false),
+      deferFire: vi.fn(() => false),
+      unavailable,
+      reload: vi.fn(async () => undefined),
+    };
+    const deps = { ...baseDeps([]), reload: port } as unknown as StatusCommandDeps;
+    if (opts.wired === false) delete (deps as { reload?: unknown }).reload;
+    const ctx = {
+      ...commandContext({ idle: true, queued: false }),
+      mode: "print", // canReload() === false
+      ui: { notify },
+    };
+    return { deps, ctx, notify, unavailable, events, port };
+  }
+
+  it("a non-reloadable host calls port.unavailable and the user still gets the unchanged notice", async () => {
+    const h = unavailableHarness();
+    await createStatusCommand(h.deps).handler("reload", h.ctx as never);
+    expect(h.unavailable).toHaveBeenCalledTimes(1);
+    expect(h.port.reload).not.toHaveBeenCalled();
+    expect(h.notify).toHaveBeenCalledWith(expect.stringContaining("print/json 模式不支持"), "warning");
+  });
+
+  it("`reload now` on a non-reloadable host also takes the unavailable route", async () => {
+    const h = unavailableHarness();
+    await createStatusCommand(h.deps).handler("reload now", h.ctx as never);
+    expect(h.unavailable).toHaveBeenCalledTimes(1);
+    expect(h.port.reload).not.toHaveBeenCalled();
+  });
+
+  it("a host with no reload port at all keeps its own notice and never calls unavailable", async () => {
+    const h = unavailableHarness({ wired: false });
+    await createStatusCommand(h.deps).handler("reload", h.ctx as never);
+    expect(h.unavailable).not.toHaveBeenCalled();
+    expect(h.notify).toHaveBeenCalledWith(expect.stringContaining("Deferred reload is not wired"), "warning");
+  });
+});

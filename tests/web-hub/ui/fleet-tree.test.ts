@@ -436,7 +436,7 @@ describe("FleetSummaryBar.vue(§6.3 摘要入口;2026-10 悬浮化 —— 右缘
     // 2026-10-09: 徽标只数进行中的(3 running / 6 total ⇒ "3"),已结束的不计
     expect(btn.get(".fab-count").text()).toBe("3");
     expect(btn.get(".fab-count").attributes("data-st")).toBe("running");
-    expect(btn.find(".fab-count .dot").exists()).toBe(true);
+    expect(btn.attributes("data-active")).toBeDefined();
     // 原摘要行的聚合计数(running/总数/成本)不丢 —— 全量收进 aria-label
     const label = btn.attributes("aria-label") ?? "";
     expect(label).toContain("Agents");
@@ -449,7 +449,7 @@ describe("FleetSummaryBar.vue(§6.3 摘要入口;2026-10 悬浮化 —— 右缘
     expect(wrapper.emitted("toggle")).toEqual([[]]);
   });
 
-  it("零 running:不显示徽标(只剩图标),aria-label 仍有总数、不含 running 段", () => {
+  it("零 running: no badge, aria-label explicitly says 0 running and preserves total", () => {
     const done = [
       row({ runId: "d1", status: "completed", phaseLabel: "done", terminal: true, costUsd: 0.1 }),
       row({ runId: "d2", status: "failed", phaseLabel: "error", terminal: true }),
@@ -459,7 +459,7 @@ describe("FleetSummaryBar.vue(§6.3 摘要入口;2026-10 悬浮化 —— 右缘
     expect(btn.find(".fab-count").exists()).toBe(false);
     expect(btn.get(".fab-icon use").attributes("href")).toBe("#i-bot");
     expect(btn.attributes("aria-label")).toContain("2 total");
-    expect(btn.attributes("aria-label")).not.toContain("running");
+    expect(btn.attributes("aria-label")).toContain("0 running");
     expect(btn.attributes("aria-expanded")).toBe("true");
   });
 

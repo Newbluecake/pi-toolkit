@@ -82,3 +82,25 @@ export function formatKTokens(n: number | null | undefined, locale = "en-US"): s
   if (Math.abs(k) < 1000) return `${new Intl.NumberFormat(locale).format(k)}k`;
   return `${new Intl.NumberFormat(locale, { maximumFractionDigits: 2 }).format(n / 1_000_000)}m`;
 }
+
+/** task58 (web-hub-tokens-speed plan §6): a VALIDATED generation core → `12.4 tokens/s` —
+ * fixed `tokens/s` unit, ALWAYS one decimal (every value, no rounding-range rules), tabular
+ * digits left to the caller's `.msg-meta`. Accepts the raw core fields defensively (absent /
+ * non-finite / non-positive ratio ⇒ `""`, i.e. hide); the show/hide GATE itself (sanitize,
+ * streaming, completed-only) is decided upstream in `entries.ts` via the protocol's single
+ * `sanitizeGenerationCore` — this formatter never re-implements those bounds. */
+export function formatTokenSpeed(core: { readonly tokens: number; readonly genMs: number } | undefined | null): string {
+  if (core === null || core === undefined) return "";
+  const { tokens, genMs } = core;
+  if (
+    typeof tokens !== "number" ||
+    typeof genMs !== "number" ||
+    !Number.isFinite(tokens) ||
+    !Number.isFinite(genMs) ||
+    genMs <= 0
+  )
+    return "";
+  const ratio = (tokens * 1000) / genMs;
+  if (!Number.isFinite(ratio) || ratio <= 0) return "";
+  return `${ratio.toFixed(1)} tokens/s`;
+}

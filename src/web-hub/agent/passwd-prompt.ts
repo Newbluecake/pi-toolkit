@@ -18,6 +18,7 @@ import type { LanReqFrame, LanResFrame } from "../protocol/messages.js";
 // L8 "密码 ≥10 位": shared with the hub-side enforcement in `hub/admin.ts` so a password this
 // client-side precheck accepts is never turned around and rejected by the hub (or vice versa).
 import { MAX_LAN_PASSWORD_LENGTH, MIN_LAN_PASSWORD_LENGTH } from "../protocol/lan.js";
+import { checkLanPassword } from "../protocol/password-policy.js";
 
 const MASK_CHAR = "•";
 
@@ -122,8 +123,10 @@ export async function runPasswdPrompt(deps: PasswdPromptDeps): Promise<PasswdOut
   const p2 = await deps.promptPassword("确认新密码");
   if (p2 === undefined) return { ok: false, reason: "cancelled" };
   if (p1 !== p2) return { ok: false, reason: "mismatch" };
-  if (p1.length < MIN_LAN_PASSWORD_LENGTH || p1.length > MAX_LAN_PASSWORD_LENGTH) {
-    return { ok: false, reason: "invalid-length" };
+  const verdict = checkLanPassword(p1, { username });
+  if (!verdict.ok) {
+    if (verdict.reason === "length") return { ok: false, reason: "invalid-length" };
+    return { ok: false, reason: "rejected", code: "E_WEAK_PASSWORD", message: `password rejected: ${verdict.reason}` };
   }
   const accounts = await deps.request({ t: "lan_req", rid: randomUUID(), op: "users" }, "lan.v1");
   if (!accounts.ok) return { ok: false, reason: "rejected", code: accounts.code, message: accounts.message };

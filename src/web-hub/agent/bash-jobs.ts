@@ -12,6 +12,13 @@
  * rows sort first (createdAt desc), then terminal (endedAt ?? createdAt desc); 20 rows total,
  * ≤12 terminal, the rest counted into `omitted`.
  *
+ * Archive-aware `omitted` (2026-10-28 rework): `omitted` counts only terminal rows that are
+ * neither in `rows` NOR archived — archiving is display-only hiding, so an archived row must
+ * stop counting as "omitted" the moment the user archives it (otherwise the `(+N more)` line
+ * never goes away and the button is a no-op from the user's point of view). Running rows pushed
+ * out by the 20-row cap / the byte budget are counted separately in `rowsOverflowRunning`
+ * (they are not archivable, so they must never inflate `omitted`).
+ *
  * Budget (D6): the budget object is ONLY the `BashJobsWire` slot value, measured by
  * `bashJobsWireBytes` (`JSON.stringify` byte length, escape inflation included) — the same
  * function the unit tests and the conformance suite assert with. Five-pass trim ladder, see
@@ -42,7 +49,13 @@ export interface SelectedBashJobs {
   readonly total: number;
   readonly running: number;
   readonly failed: number;
+  /** Terminal jobIds neither in `rows` nor archived, in wire order. `omitted` is its length —
+   *  the two are computed from ONE source so they can never drift. Byte-budget drops (D6 ⑤)
+   *  happen AFTER selection and are added by `projectBashJobsDetail`. */
+  readonly omittedIds: readonly string[];
   readonly omitted: number;
+  /** Running rows the caps/budget pushed out (never part of `omitted` — not archivable). */
+  readonly rowsOverflowRunning: number;
 }
 
 /**
@@ -50,7 +63,52 @@ export interface SelectedBashJobs {
  * every terminal row, mirroring `job-store.ts`'s retention-off semantics. Ties break by jobId so
  * the row order (and therefore the fingerprint) is deterministic under test.
  */
-export function selectJobs(records: readonly JobRecord[], now: number, retentionMs: number): SelectedBashJobs {
+export function selectJobs(
+  records: readonly JobRecord[],
+  now: number,
+  retentionMs: number,
+  archived?: ReadonlySet<string>,
+): SelectedBashJobs {
+  const ranked = rankJobs(records, now, retentionMs);
+  const { nonTerminal, terminal } = ranked;
+  const rows: JobRecord[] = [];
+  let terminalCount = 0;
+  let runningCount = 0;
+  for (const r of nonTerminal) {
+    if (rows.length >= BASH_JOBS_MAX_ROWS) break;
+    rows.push(r);
+    runningCount += 1;
+  }
+  for (const r of terminal) {
+    if (rows.length >= BASH_JOBS_MAX_ROWS || terminalCount >= BASH_JOBS_MAX_TERMINAL_ROWS) break;
+    rows.push(r);
+    terminalCount += 1;
+  }
+  const cappedOmittedIds = terminal
+    .slice(terminalCount)
+    .filter((r) => archived?.has(r.jobId) !== true)
+    .map((r) => r.jobId);
+  return {
+    rows,
+    total: ranked.total,
+    running: nonTerminal.length,
+    failed: terminal.filter((r) => r.status !== "completed").length,
+    omittedIds: cappedOmittedIds,
+    omitted: cappedOmittedIds.length,
+    rowsOverflowRunning: nonTerminal.length - runningCount,
+  };
+}
+
+/**
+ * The wire's ranking, extracted so `selectJobs` and `omittedTerminalJobIds` can never drift:
+ * retention-filtered population split into non-terminal (createdAt desc) and terminal
+ * ((endedAt ?? createdAt) desc), both tie-broken by jobId.
+ */
+function rankJobs(
+  records: readonly JobRecord[],
+  now: number,
+  retentionMs: number,
+): { readonly nonTerminal: readonly JobRecord[]; readonly terminal: readonly JobRecord[]; readonly total: number } {
   const selected = records.filter(
     (r) =>
       r.backgroundedAt !== undefined &&
@@ -62,24 +120,28 @@ export function selectJobs(records: readonly JobRecord[], now: number, retention
   const terminal = selected
     .filter((r) => isTerminalJobStatus(r.status))
     .sort((a, b) => (b.endedAt ?? b.createdAt) - (a.endedAt ?? a.createdAt) || (a.jobId < b.jobId ? -1 : 1));
-  const rows: JobRecord[] = [];
-  let terminalCount = 0;
-  for (const r of nonTerminal) {
-    if (rows.length >= BASH_JOBS_MAX_ROWS) break;
-    rows.push(r);
-  }
-  for (const r of terminal) {
-    if (rows.length >= BASH_JOBS_MAX_ROWS || terminalCount >= BASH_JOBS_MAX_TERMINAL_ROWS) break;
-    rows.push(r);
-    terminalCount += 1;
-  }
-  return {
-    rows,
-    total: selected.length,
-    running: nonTerminal.length,
-    failed: terminal.filter((r) => r.status !== "completed").length,
-    omitted: selected.length - rows.length,
-  };
+  return { nonTerminal, terminal, total: selected.length };
+}
+
+/**
+ * 2026-10-28 (fleet bash 「(+N more)」 either shows or archives): the ids behind the wire's
+ * `omitted` count, in wire order — terminal jobs that are neither on the wire nor archived. Its
+ * length is ALWAYS `projectBashJobs(...)?.omitted ?? 0` for the same inputs: it is literally the
+ * `omittedIds` half of the one projection pass, so the cap stage (20 rows / 12 terminal) and the
+ * D6 ⑤ byte budget are both covered and the two can never drift. Running rows are never included
+ * (not archivable: they are reported as `rowsOverflowRunning`).
+ *
+ * `tails` must be the same tail cache the projection is given — the byte ladder's drops depend on
+ * tail sizes, so omitting it computes the answer for a tail-less wire.
+ */
+export function omittedTerminalJobIds(
+  records: readonly JobRecord[],
+  now: number,
+  retentionMs: number,
+  archived?: ReadonlySet<string>,
+  tails?: BashJobsTails,
+): string[] {
+  return [...projectBashJobsDetail(records, tails, now, retentionMs, archived).omittedIds];
 }
 
 /** D3-1's per-row fingerprint tuple, as a stable string (also the wiring's changed-id diff unit). */
@@ -109,6 +171,7 @@ export function bashJobsLightFingerprint(selected: SelectedBashJobs, now: number
     rows: selected.rows.map((r) => bashJobsRowSignature(r, now)),
     count: selected.rows.length,
     omitted: selected.omitted,
+    rowsOverflowRunning: selected.rowsOverflowRunning,
   });
 }
 
@@ -142,7 +205,11 @@ function elapsedMsOf(record: JobRecord, now: number): number {
 /**
  * D2/D6 projection: `records` = the current manager snapshot, `tails` = the sampler's cache for
  * the CURRENT source generation (the wiring guarantees row set and tails share one generation,
- * D3-4 ④). No selected rows ⇒ `undefined` ⇒ the `bashJobs` field stays absent (byte-equal to the
+ * D3-4 ④). `archived` = this session's archived bash ids (`ArchiveControl.view().bash`) — a
+ * PURELY display-side input: archived rows still occupy their wire slot (the drawer's「已归档」
+ * fold needs their content to render and to un-archive), they only stop counting into `omitted`.
+ * Absent ⇒ byte-identical to the pre-archive-aware projection.
+ * No selected rows ⇒ `undefined` ⇒ the `bashJobs` field stays absent (byte-equal to the
  * pre-feature status shape, D5).
  */
 export function projectBashJobs(
@@ -150,20 +217,66 @@ export function projectBashJobs(
   tails: BashJobsTails | undefined,
   now: number,
   retentionMs: number,
+  archived?: ReadonlySet<string>,
 ): BashJobsWire | undefined {
-  const selected = selectJobs(records, now, retentionMs);
-  if (selected.rows.length === 0) return undefined;
+  return projectBashJobsDetail(records, tails, now, retentionMs, archived).wire;
+}
+
+/** `projectBashJobs`'s full result: the wire plus the two archive-side facts the command handler
+ *  needs to act on exactly what the browser counted. */
+export interface BashJobsProjectionDetail {
+  readonly wire: BashJobsWire | undefined;
+  /** Every jobId the wire's `omitted` counts (cap-stage tail + D6 ⑤ budget drops), terminal and
+   *  unarchived only. `omittedIds.length === wire.omitted` ALWAYS — the `archive_omitted` op
+   *  archives THIS list, not a re-derived approximation, so a click is never a no-op. */
+  readonly omittedIds: readonly string[];
+  /** Running rows the caps/budget pushed out; 0 ⇒ the wire carries no `rowsOverflowRunning`. */
+  readonly rowsOverflowRunning: number;
+}
+
+/** `projectBashJobs` with the omitted id set attached (the same single selection pass — the
+ *  projection and the op can never disagree about what `omitted` means). */
+export function projectBashJobsDetail(
+  records: readonly JobRecord[],
+  tails: BashJobsTails | undefined,
+  now: number,
+  retentionMs: number,
+  archived?: ReadonlySet<string>,
+): BashJobsProjectionDetail {
+  const selected = selectJobs(records, now, retentionMs, archived);
+  if (selected.rows.length === 0) {
+    return { wire: undefined, omittedIds: [], rowsOverflowRunning: selected.rowsOverflowRunning };
+  }
   const terminalFlags = selected.rows.map((r) => isTerminalJobStatus(r.status));
+  const rowIds = selected.rows.map((r) => r.jobId);
   const rows = selected.rows.map((record) => projectRow(record, tails, now));
+  // The pre-ladder wire carries the CAP-stage counts; `fitBudget` re-derives both counters from
+  // these same numbers (it can only add to them), so a no-drop projection is byte-identical to
+  // the pre-archive-aware shape when nothing is omitted.
   const wire: BashJobsWire = {
     rows,
     total: selected.total,
     running: selected.running,
     failed: selected.failed,
     ...(selected.omitted > 0 ? { omitted: selected.omitted } : {}),
+    ...(selected.rowsOverflowRunning > 0 ? { rowsOverflowRunning: selected.rowsOverflowRunning } : {}),
     sampledAt: now,
   };
-  return fitBudget(wire, selected.total, terminalFlags);
+  const fitted = fitBudget(
+    wire,
+    selected.total,
+    terminalFlags,
+    rowIds,
+    archived,
+    selected.omittedIds,
+    selected.rowsOverflowRunning,
+  );
+  const omittedIds = [...selected.omittedIds, ...fitted.droppedTerminalIds];
+  return {
+    wire: fitted.wire,
+    omittedIds,
+    rowsOverflowRunning: fitted.wire.rowsOverflowRunning ?? 0,
+  };
 }
 
 function projectRow(record: JobRecord, tails: BashJobsTails | undefined, now: number): BashJobRowWire {
@@ -219,16 +332,59 @@ const TAIL_FIELDS = ["tail", "tailAt", "tailBytes", "tailUnavailable", "tailCurr
  *  ② oldest terminal row first — delete the tail block entirely;
  *  ③ oldest running row first — shrink tail to ≤256 B;
  *  ④ oldest running row first — delete the tail block;
- *  ⑤ drop terminal rows from the tail end, then running rows, into `omitted`.
+ *  ⑤ drop terminal rows from the tail end, then running rows.
  * Rows are sorted non-terminal (newest first) then terminal (newest first), so walking the array
  * BACKWARDS visits oldest-first within each class and popping from the end drops exactly the
  * rows the ladder names. `cmd` is never trimmed (≤600 B per-row bound already). `total` stays the
  * pre-cap full-population count.
+ *
+ * A ⑤ drop is ATTRIBUTED, not blindly counted (2026-10-28 rework): a dropped terminal row that is
+ * not archived joins `omittedIds` (so the browser's `(+N more)` — and the `archive_omitted` op —
+ * see exactly the rows this pass removed); a dropped terminal row that IS archived counts as
+ * nothing (the user already hid it — it must not resurrect a `(+N more)` line); a dropped running
+ * row joins `droppedRunning` (`rowsOverflowRunning` on the wire — never archivable, so never
+ * `omitted`). `capOmittedIds` / `capOverflowRunning` are the caller's cap-stage counts, which this
+ * pass can only add to.
+ *
+ * Byte note: pass ⑤ drops archived rows at the same rate as unarchived ones (the budget measures
+ * the wire, and an archived row occupies a slot exactly like any other) — the fold simply shows
+ * fewer rows under extreme byte pressure. That is the same ladder that ran before this change.
  */
-function fitBudget(wire: BashJobsWire, total: number, terminalFlags: readonly boolean[]): BashJobsWire {
-  if (bashJobsWireBytes(wire) <= BASH_JOBS_WIRE_BUDGET_BYTES) return wire;
+function fitBudget(
+  wire: BashJobsWire,
+  total: number,
+  terminalFlags: readonly boolean[],
+  rowIds: readonly string[],
+  archived: ReadonlySet<string> | undefined,
+  capOmittedIds: readonly string[],
+  capOverflowRunning: number,
+): { wire: BashJobsWire; droppedTerminalIds: readonly string[]; droppedRunning: number } {
+  const build = (
+    rs: Array<Record<string, unknown>>,
+    droppedTerminal: readonly string[],
+    droppedRunning: number,
+  ): BashJobsWire => {
+    const omitted = capOmittedIds.length + droppedTerminal.length;
+    const overflow = capOverflowRunning + droppedRunning;
+    return {
+      rows: rs as unknown as BashJobRowWire[],
+      total,
+      running: wire.running,
+      failed: wire.failed,
+      ...(omitted > 0 ? { omitted } : {}),
+      ...(overflow > 0 ? { rowsOverflowRunning: overflow } : {}),
+      sampledAt: wire.sampledAt,
+    };
+  };
+  const initial = build(wire.rows as unknown as Array<Record<string, unknown>>, [], 0);
+  if (bashJobsWireBytes(initial) <= BASH_JOBS_WIRE_BUDGET_BYTES) {
+    return { wire: initial, droppedTerminalIds: [], droppedRunning: 0 };
+  }
   const rows = wire.rows.map((r) => ({ ...r })) as Array<Record<string, unknown>>;
-  const fits = (): boolean => bashJobsWireBytes(buildWire(rows, total, wire)) <= BASH_JOBS_WIRE_BUDGET_BYTES;
+  const live = [...rowIds];
+  const dropped: string[] = [];
+  let droppedRunning = 0;
+  const fits = (): boolean => bashJobsWireBytes(build(rows, dropped, droppedRunning)) <= BASH_JOBS_WIRE_BUDGET_BYTES;
 
   const terminalIdx: number[] = [];
   const runningIdx: number[] = [];
@@ -259,8 +415,8 @@ function fitBudget(wire: BashJobsWire, total: number, terminalFlags: readonly bo
     if (fits()) break;
     dropTail(i);
   }
-  // ⑤: drop terminal rows from the array tail first, then running rows. `term` is spliced in
-  // lockstep with `rows` so the flags never misalign after a drop.
+  // ⑤: drop terminal rows from the array tail first, then running rows. `term` and `live` are
+  // spliced in lockstep with `rows` so the flags/ids never misalign after a drop.
   const term = [...terminalFlags];
   while (rows.length > 0 && !fits()) {
     let dropAt = -1;
@@ -270,21 +426,14 @@ function fitBudget(wire: BashJobsWire, total: number, terminalFlags: readonly bo
         break;
       }
     }
-    if (dropAt < 0) dropAt = rows.length - 1; // no terminal rows left ⇒ oldest running (array tail)
+    const wasTerminal = dropAt >= 0;
+    if (!wasTerminal) dropAt = rows.length - 1; // no terminal rows left ⇒ oldest running (array tail)
+    const droppedId = live[dropAt];
+    if (!wasTerminal) droppedRunning += 1;
+    else if (droppedId !== undefined && archived?.has(droppedId) !== true) dropped.push(droppedId);
     rows.splice(dropAt, 1);
     term.splice(dropAt, 1);
+    live.splice(dropAt, 1);
   }
-  return buildWire(rows, total, wire);
-
-  function buildWire(rs: Array<Record<string, unknown>>, tot: number, w: BashJobsWire): BashJobsWire {
-    const omitted = tot - rs.length;
-    return {
-      rows: rs as unknown as BashJobRowWire[],
-      total: tot,
-      running: w.running,
-      failed: w.failed,
-      ...(omitted > 0 ? { omitted } : {}),
-      sampledAt: w.sampledAt,
-    };
-  }
+  return { wire: build(rows, dropped, droppedRunning), droppedTerminalIds: dropped, droppedRunning };
 }

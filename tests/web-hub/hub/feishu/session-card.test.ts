@@ -7,6 +7,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   createFeishuSessionCard,
+  listButtonLabel,
   renderListCard,
   renderListText,
   type SessionCardDeps,
@@ -144,6 +145,7 @@ interface View {
   live: boolean;
   state: "busy" | "idle" | "waiting" | "read-only";
   dup?: boolean;
+  alias?: string;
 }
 function makeSessions(views: View[]) {
   return {
@@ -151,6 +153,7 @@ function makeSessions(views: View[]) {
       views.map((v) => ({
         sessionId: v.sessionId,
         name: v.name,
+        ...(v.alias === undefined ? {} : { alias: v.alias }),
         label: `${v.name} · ${v.sessionId.slice(0, 6)}`,
         cwd: "/repo",
         mode: "tui",
@@ -922,15 +925,15 @@ describe("session-card >8 sessions", () => {
       state: "idle" as const,
     }));
   const buttons = (card: string) => patchNonces({ card }).length;
-  it("12 online ⇒ exactly 8 buttons, all 12 text lines, /use hint; 9th session reachable via /use <sid6>", async () => {
+  it("12 online ⇒ exactly 8 buttons, all 12 text lines, /use hint; 9th session reachable via /use <序号|@别名|名称>", async () => {
     const r = rig(many(12));
     await r.list();
     await r.flush();
     const last = r.patches.at(-1)!.card;
     expect(buttons(last)).toBe(8);
     const text = last.replaceAll("\u200b", "");
-    for (let i = 0; i < 12; i++) expect(text).toContain(`S${i} · sessio`);
-    expect(text).toContain("更多会话：/use <sid6>");
+    for (let i = 0; i < 12; i++) expect(text).toContain(`S${i} · idle`);
+    expect(text).toContain("更多会话：/use <序号|@别名|名称>");
     expect(r.state.nonces.size).toBe(9); // anchor + 8 buttons, never more
   });
   it("45 rows (some offline) ⇒ 8 buttons, ≤40 text lines, tail line 另有 M 个未显示", async () => {
@@ -986,7 +989,7 @@ describe("session-card G2/G3: recovery semantics", () => {
 describe("session-card rendering", () => {
   it("renderListText is byte-identical to the legacy list format; >8 sessions keep text /use", () => {
     const rows = makeSessions(AB).rows();
-    expect(renderListText(rows)).toBe("1. Alpha · sessio [idle/tui]\n2. Beta · sessio [busy/tui]");
+    expect(renderListText(rows)).toBe("1. Alpha [idle/tui]\n2. Beta [busy/tui]");
     expect(renderListText([])).toBe("没有可用会话");
     const many: View[] = Array.from({ length: 12 }, (_, i) => ({
       sessionId: `session-${String(i).padStart(2, "0")}`,
@@ -996,10 +999,10 @@ describe("session-card rendering", () => {
     }));
     const card = renderListCard(makeSessions(many).rows(), []);
     expect(card).toBeDefined();
-    expect(String(card).replaceAll("\u200b", "")).toContain("更多会话：/use <sid6>");
+    expect(String(card).replaceAll("\u200b", "")).toContain("更多会话：/use <序号|@别名|名称>");
     expect(Buffer.byteLength(card!)).toBeLessThanOrEqual(20_000);
   });
-  it("button labels truncate by code point (surrogate-safe), sid6/state never truncated", async () => {
+  it("button labels truncate by code point (surrogate-safe), alias/state never truncated, no sid", async () => {
     const name = "名".repeat(60) + "🚀";
     const r = rig([{ sessionId: "session-a", name, live: true, state: "idle" }]);
     await r.list();
@@ -1010,9 +1013,30 @@ describe("session-card rendering", () => {
       .map((e) => e.text?.content)
       .find((t) => t !== undefined)!;
     expect([...label].length).toBeLessThanOrEqual(FEISHU_CAPS.listButtonLabelMax);
-    expect(label).toContain("sessio");
-    expect(label).toContain("idle");
+    expect(label).not.toContain("sessio");
+    expect(label).toMatch(/ · idle$/);
     expect(label).toBe(label.toWellFormed()); // no unpaired surrogates
+  });
+  it("alias rows: card line + button show @alias, no alias ⇒ no segment, never a sid", async () => {
+    const views: View[] = [
+      { sessionId: "session-a", name: "Alpha", live: true, state: "idle", alias: "reviewer" },
+      { sessionId: "session-b", name: "Beta", live: true, state: "busy" },
+    ];
+    const rows = makeSessions(views).rows();
+    expect(renderListText(rows)).toBe("1. Alpha · @reviewer [idle/tui]\n2. Beta [busy/tui]");
+    expect(listButtonLabel(rows[0]!)).toBe("Alpha · @reviewer · idle");
+    expect(listButtonLabel(rows[1]!)).toBe("Beta · busy");
+    const md = (JSON.parse(renderListCard(rows, [])!) as { body: { elements: { content: string }[] } }).body
+      .elements[0]!.content;
+    expect(md).toContain("1. Alpha · @reviewer · idle");
+    expect(md).toContain("2. Beta · busy");
+    expect(md).not.toContain("sessio");
+    const r = rig(views);
+    await r.list();
+    await r.flush();
+    const card = JSON.parse(r.patches.at(-1)!.card) as { body: { elements: { text?: { content: string } }[] } };
+    const labels = card.body.elements.flatMap((e) => (e.text === undefined ? [] : [e.text.content]));
+    expect(labels).toEqual(["Alpha · @reviewer · idle", "Beta · busy"]);
   });
   it("oversized cards fall back: lines cut to 20, then text degrade", async () => {
     const wide: View[] = Array.from({ length: 41 }, (_, i) => ({
@@ -1064,9 +1088,9 @@ describe("session-card rendering", () => {
       body: { elements: { tag: string; content?: string; text?: { content: string }; type?: string }[] };
     };
     const md = card.body.elements[0]!.content!;
-    expect(md.split("\n").find((l) => l.includes("sessio") && l.includes("✅"))).toContain("session-b".slice(0, 6));
+    expect(md.split("\n").find((l) => l.includes("✅"))).toContain("Beta");
     const primary = card.body.elements.filter((e) => e.tag === "button" && e.type === "primary");
     expect(primary).toHaveLength(1);
-    expect(primary[0]!.text?.content).toContain("session-b".slice(0, 6));
+    expect(primary[0]!.text?.content).toContain("Beta");
   });
 });

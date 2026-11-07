@@ -687,6 +687,54 @@
   border-style: dashed;
 }
 
+/* --- cross-session request area (fabric-xs-activation plan §3 P4, arch §4.9) ---
+ * A LIGHT list beside QueueList (never a whole-machine task panel): same row anatomy as the
+ * queue (badges / id / actions / notes), muted by default — it is evidence, not work. */
+.xs-request-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  max-height: 150px;
+  overflow-y: auto;
+}
+
+.xs-request-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px var(--sp-2);
+  padding: var(--sp-1) var(--sp-2);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-sm);
+  background: var(--c-surface-2);
+  font-size: var(--fs-xs);
+}
+
+.xs-request-item[data-phase="not delivered"] {
+  border-style: dashed;
+}
+
+.xs-request-item .chip-wake {
+  color: var(--c-warn, inherit);
+}
+
+.xs-request-id {
+  font-family: var(--font-mono, monospace);
+  color: var(--c-text-3);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.xs-request-more {
+  padding: 0 var(--sp-2);
+}
+
 /* --- steer-recall hold rows (web-hub-steer-recall plan §7, P-ui) ---
  * `held` — recallable, accented border to stand out from the mirror rows.
  * `returned` / `unavailable` — dashed (nothing is in flight for this row).
@@ -1342,4 +1390,133 @@
   white-space: nowrap;
   color: var(--c-text-3);
   font-size: var(--fs-xs);
+}
+
+/* #47 current-turn hold stop. Keep the old 32px slot / graphic center: only the
+ * transparent target extends right. This is tight (8px composer gap), not spare layout.
+ * Compiled-UI hit probes must prove all four edges, including the existing mobile overhang. */
+.ctx-ring-stop-btn.stop-hold-target {
+  position: static; /* graphics anchor to the unchanged 32px ring slot, not expanded target */
+  width: 44px;
+  margin-right: -12px;
+  align-self: center;
+  height: 100%;
+}
+.ctx-ring-stop-btn.stop-hold-target .ctx-ring-svg {
+  position: absolute;
+  left: 6px;
+  top: max(50%, 22px); /* preserve the old 44px stretch center on a shorter phone card */
+  transform: translateY(-50%);
+}
+.ctx-ring-stop-btn.stop-hold-target .ctx-ring-stop-icon {
+  left: 16px;
+  top: max(50%, 22px);
+}
+.stop-hold-target {
+  position: relative;
+  border-radius: 0; /* transparent rectangular hit area; graphic stays circular */
+  min-width: 44px;
+  min-height: 44px;
+  touch-action: pan-y;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.stop-hold-target:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+.stop-hold-progress {
+  position: absolute;
+  width: 26px;
+  height: 26px;
+  left: 50%;
+  top: 50%;
+  margin: -13px 0 0 -13px;
+  border-radius: 50%;
+  border: 2px solid var(--c-danger);
+  opacity: 0;
+  pointer-events: none;
+}
+.ctx-ring-stop-btn .stop-hold-progress {
+  left: 16px;
+  top: max(50%, 22px);
+}
+.stop-hold-target.holding .stop-hold-progress {
+  animation: stop-hold-progress 700ms linear forwards;
+}
+@keyframes stop-hold-progress {
+  from {
+    opacity: 0.25;
+    transform: scale(0.75);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+.stop-alternative {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: 0;
+  clip-path: inset(50%);
+  overflow: hidden;
+  white-space: nowrap;
+}
+.stop-alternative:focus-visible {
+  width: max-content;
+  max-width: min(300px, calc(100vw - 32px));
+  height: auto;
+  min-height: 44px;
+  right: 0;
+  bottom: calc(100% + var(--sp-1));
+  padding: var(--sp-2);
+  clip-path: none;
+  white-space: normal;
+  background: var(--c-surface);
+  color: var(--c-text);
+  outline: 2px solid var(--c-focus);
+  z-index: 50;
+}
+.stop-hold-note,
+.stop-confirm {
+  position: absolute;
+  bottom: calc(100% + var(--sp-1));
+  right: 0;
+  width: max-content;
+  max-width: min(300px, calc(100vw - 32px));
+  padding: var(--sp-2);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  background: var(--c-surface);
+  box-shadow: var(--shadow-3);
+  color: var(--c-text);
+  font-size: var(--fs-sm);
+  z-index: 50;
+}
+.stop-hold-note {
+  pointer-events: none;
+}
+.stop-confirm .stop-queue-note,
+.stop-hold-note .stop-queue-note {
+  display: block;
+}
+.stop-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+}
+.stop-confirm-actions button {
+  min-height: 44px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .stop-hold-target.holding .stop-hold-progress {
+    animation: none;
+    opacity: 1;
+    border-style: dashed;
+    transform: none;
+  }
 }

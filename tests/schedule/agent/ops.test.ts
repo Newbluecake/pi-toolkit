@@ -1,15 +1,8 @@
 import { afterEach, describe, expect, it } from "vitest";
-import {
-  createTask,
-  deleteTask,
-  previewHash,
-  resolveDef,
-  setTaskEnabled,
-  updateTask,
-  defOf,
-} from "../../../src/schedule/agent/ops.js";
-import { defHash, isApproved, isExecutable } from "../../../src/schedule/core/spec.js";
-import { a3Env, basicRaw, CRON, type A3Env } from "./a3-helpers.js";
+import { createTask, deleteTask, setTaskEnabled, updateTask } from "../../../src/schedule/agent/ops.js";
+import { isExecutable } from "../../../src/schedule/core/spec.js";
+import { validateStateFile } from "../../../src/schedule/core/reader.js";
+import { a3Env, basicRaw, CRON, stripApproval, type A3Env } from "./a3-helpers.js";
 import { holder } from "../core/fixtures.js";
 import type { RunRecord } from "../../../src/schedule/core/spec.js";
 
@@ -24,13 +17,13 @@ const state = () => {
 };
 
 describe("createTask", () => {
-  it("AI create writes NO approval (pending) and initializes the watermark", async () => {
+  it("AI create writes NO approval, is executable at once, and initializes the watermark", async () => {
     env = a3Env();
     const r = await createTask(env.ports, basicRaw(), AI);
     expect(r.ok).toBe(true);
     const t = state().tasks[0]!;
-    expect(t.approval).toBeUndefined();
-    expect(isApproved(t)).toBe(false);
+    expect(t).not.toHaveProperty("approval");
+    expect(isExecutable(t)).toBe(true);
     expect(t.createdBy).toBe("agent");
     expect(t.createdVia).toBe("tool");
     expect(t.ownerCwd).toBe(env.ports.ownerCwd());
@@ -41,14 +34,16 @@ describe("createTask", () => {
     expect(t.bg).toEqual({ type: "general-purpose", timeoutS: 1800, consultMain: false, handoff: false });
   });
 
-  it("user create is approved with exactly the stored definition hash (tui / web via)", async () => {
+  it("user create (tui / web via) writes no approval either and is executable", async () => {
     env = a3Env();
     const a = await createTask(env.ports, basicRaw(), USER);
     const b = await createTask(env.ports, basicRaw({ name: "w" }), { by: "user", via: "web" });
     if (!a.ok || !b.ok) throw new Error("create failed");
-    expect(a.value.approval).toMatchObject({ hash: defHash(a.value), by: "user", via: "tui" });
-    expect(b.value.approval?.via).toBe("web");
+    expect(a.value).not.toHaveProperty("approval");
+    expect(b.value).not.toHaveProperty("approval");
+    expect(b.value.createdVia).toBe("web");
     expect(isExecutable(a.value)).toBe(true);
+    expect(isExecutable(b.value)).toBe(true);
   });
 
   it("caps at 8 tasks per session (E_LIMIT) without writing", async () => {
@@ -118,109 +113,80 @@ describe("createTask", () => {
     const r = await createTask(env.ports, basicRaw(), AI);
     expect(r).toMatchObject({ ok: false, code: "E_MODE" });
   });
-
-  it("__put expectHash: matching hash stores, mismatching ⇒ E_REV with nothing written", async () => {
-    env = a3Env();
-    const def = resolveDef(basicRaw(), undefined, env.ports);
-    if (!def.ok) throw new Error("def");
-    const good = previewHash(def.value, env.ports.ownerCwd());
-    const bad = await createTask(env.ports, basicRaw(), USER, { expectHash: "0".repeat(64) });
-    expect(bad).toMatchObject({ ok: false, code: "E_REV" });
-    expect(env.agent.readState().kind).toBe("absent");
-    const ok = await createTask(env.ports, basicRaw(), USER, { expectHash: good });
-    if (!ok.ok) throw new Error(ok.detail);
-    expect(defHash(ok.value)).toBe(good);
-  });
 });
 
-describe("approval semantics (S2)", () => {
-  async function approvedTask() {
+describe("update (no approval)", () => {
+  async function newTask() {
     const r = await createTask(env.ports, basicRaw(), USER);
     if (!r.ok) throw new Error(r.detail);
     return r.value;
   }
 
-  it("AI update of an execution field invalidates the approval (enabled or paused alike); name-only keeps it", async () => {
+  it("an update by anyone writes no approval, stays executable, and leaves a paused task paused", async () => {
     env = a3Env();
-    const t = await approvedTask();
-    const nameOnly = await updateTask(env.ports, t.id, { name: "renamed" }, AI);
-    if (!nameOnly.ok) throw new Error(nameOnly.detail);
-    expect(isApproved(nameOnly.value)).toBe(true);
-    const edited = await updateTask(env.ports, t.id, { prompt: "exfiltrate" }, AI);
+    const t = await newTask();
+    const edited = await updateTask(env.ports, t.id, { prompt: "new prompt" });
     if (!edited.ok) throw new Error(edited.detail);
-    expect(isApproved(edited.value)).toBe(false);
-    expect(edited.value.approval?.hash).not.toBe(defHash(edited.value)); // stale, not erased
-    expect(isExecutable(edited.value)).toBe(false);
-  });
-
-  it("pause → AI edits prompt → resume: still not executable and run_now is refused", async () => {
-    env = a3Env();
-    env.agent.setExecutor("background", { dispatch: () => undefined });
-    const t = await approvedTask();
+    expect(edited.value).not.toHaveProperty("approval");
+    expect(isExecutable(edited.value)).toBe(true);
     await setTaskEnabled(env.agent.ensureStore(), t.id, false);
-    await updateTask(env.ports, t.id, { prompt: "changed while paused" }, AI);
+    const paused = await updateTask(env.ports, t.id, { prompt: "while paused" });
+    if (!paused.ok) throw new Error(paused.detail);
+    expect(paused.value.enabled).toBe(false);
     const resumed = await setTaskEnabled(env.agent.ensureStore(), t.id, true);
     if (!resumed.ok) throw new Error(resumed.detail);
-    expect(resumed.value.enabled).toBe(true);
-    expect(isExecutable(resumed.value)).toBe(false);
-    const run = await env.agent.runNow({ taskId: t.id, reqId: "r".repeat(16) });
-    expect(run).toMatchObject({ kind: "refused", code: "E_UNAPPROVED" });
-    expect(state().runs).toHaveLength(0);
+    expect(isExecutable(resumed.value)).toBe(true);
+    expect(resumed.value).not.toHaveProperty("approval");
   });
 
-  it("a USER edit keeps an approved task approved (new hash) but never approves a pending one", async () => {
+  it("a legacy approval (matching, stale, auto:true) is kept byte-for-byte by update / pause / resume — never rewritten, never stripped", async () => {
     env = a3Env();
-    const t = await approvedTask();
-    const e1 = await updateTask(env.ports, t.id, { prompt: "user edit" }, USER);
-    if (!e1.ok) throw new Error(e1.detail);
-    expect(isApproved(e1.value)).toBe(true);
-    expect(e1.value.approval?.hash).toBe(defHash(e1.value));
+    for (const legacy of [
+      { hash: "a".repeat(64), by: "user", via: "tui", at: 7 },
+      { hash: "b".repeat(64), by: "user", via: "web", auto: true, at: 9 },
+    ] as const) {
+      const t = await newTask();
+      await env.agent.ensureStore().transact((d) => {
+        d.tasks.find((x) => x.id === t.id)!.approval = structuredClone(legacy) as never;
+        return { value: undefined, write: true };
+      });
+      await updateTask(env.ports, t.id, { prompt: `edit ${legacy.at}` });
+      await setTaskEnabled(env.agent.ensureStore(), t.id, false);
+      await setTaskEnabled(env.agent.ensureStore(), t.id, true);
+      const now = state().tasks.find((x) => x.id === t.id)!;
+      expect(now.approval).toEqual(legacy);
+      expect(isExecutable(now)).toBe(true);
+      expect(validateStateFile(JSON.parse(JSON.stringify(state()))).ok).toBe(true);
+    }
+  });
 
-    const ai = await createTask(env.ports, basicRaw({ name: "ai" }), AI);
-    if (!ai.ok) throw new Error(ai.detail);
-    const e2 = await updateTask(env.ports, ai.value.id, { prompt: "user touched" }, USER);
-    if (!e2.ok) throw new Error(e2.detail);
-    expect(isApproved(e2.value)).toBe(false);
-    expect(e2.value.approval).toBeUndefined();
+  it("an old-ledger task with no approval (what pre-r2 code called pending) updates fine and stays approval-free", async () => {
+    env = a3Env();
+    const t = await newTask();
+    await stripApproval(env, t.id);
+    const up = await updateTask(env.ports, t.id, { prompt: "touched" });
+    if (!up.ok) throw new Error(up.detail);
+    expect(up.value).not.toHaveProperty("approval");
+    expect(isExecutable(state().tasks[0]!)).toBe(true);
+    expect(validateStateFile(JSON.parse(JSON.stringify(state()))).ok).toBe(true);
   });
 
   it("an edit voids the watermark of the new definition (no spurious misses) via changeTask", async () => {
     env = a3Env();
-    const t = await approvedTask();
+    const t = await newTask();
     env.fake.advance(3 * 3_600_000);
-    const e = await updateTask(env.ports, t.id, { when: { kind: "cron", expr: "30 9 * * *", tz: "UTC" } }, USER);
+    const e = await updateTask(env.ports, t.id, { when: { kind: "cron", expr: "30 9 * * *", tz: "UTC" } });
     expect(e.ok).toBe(true);
     const occ = state().occ[t.id]!;
     expect(occ.decidedThrough).toBeGreaterThanOrEqual(env.fake.now());
     expect(occ.missedTotal).toBe(0);
   });
 
-  it("baseHash CAS and expectHash CAS refuse with E_REV and leave the task untouched", async () => {
-    env = a3Env();
-    const t = await approvedTask();
-    const before = state().tasks[0]!;
-    const stale = await updateTask(env.ports, t.id, { prompt: "x" }, USER, { baseHash: "f".repeat(64) });
-    expect(stale).toMatchObject({ ok: false, code: "E_REV" });
-    const wrong = await updateTask(env.ports, t.id, { prompt: "x" }, USER, {
-      baseHash: defHash(t),
-      expectHash: "0".repeat(64),
-    });
-    expect(wrong).toMatchObject({ ok: false, code: "E_REV" });
-    expect(state().tasks[0]).toEqual(before);
-    const def = resolveDef({ prompt: "x" }, defOf(t), env.ports);
-    if (!def.ok) throw new Error("def");
-    const ok = await updateTask(env.ports, t.id, { prompt: "x" }, USER, {
-      baseHash: defHash(t),
-      expectHash: previewHash(def.value, t.ownerCwd),
-    });
-    expect(ok.ok).toBe(true);
-  });
-
   it("update on an unknown task / bad id is E_INVALID; delete removes the task", async () => {
     env = a3Env();
-    const t = await approvedTask();
-    expect(await updateTask(env.ports, "s_aaaaaaaa", { name: "x" }, AI)).toMatchObject({ code: "E_INVALID" });
-    expect(await updateTask(env.ports, "nope", { name: "x" }, AI)).toMatchObject({ code: "E_INVALID" });
+    const t = await newTask();
+    expect(await updateTask(env.ports, "s_aaaaaaaa", { name: "x" })).toMatchObject({ code: "E_INVALID" });
+    expect(await updateTask(env.ports, "nope", { name: "x" })).toMatchObject({ code: "E_INVALID" });
     const d = await deleteTask(env.agent.ensureStore(), t.id);
     expect(d.ok).toBe(true);
     expect(state().tasks).toHaveLength(0);
@@ -230,49 +196,19 @@ describe("approval semantics (S2)", () => {
 
   it("switching background→message drops bg and re-applies the feishu default; E_UNSUPPORTED when capability absent", async () => {
     env = a3Env();
-    const t = await approvedTask();
+    const t = await newTask();
     env.cap.state = "absent";
-    expect(await updateTask(env.ports, t.id, { form: "message" }, AI)).toMatchObject({ code: "E_UNSUPPORTED" });
+    expect(await updateTask(env.ports, t.id, { form: "message" })).toMatchObject({ code: "E_UNSUPPORTED" });
     env.cap.state = "verified";
-    const m = await updateTask(env.ports, t.id, { form: "message" }, AI);
+    const m = await updateTask(env.ports, t.id, { form: "message" });
     if (!m.ok) throw new Error(m.detail);
     expect(m.value.bg).toBeUndefined();
     expect(m.value.feishu).toBe(false);
   });
 });
 
-describe("approveReviewed (__put)", () => {
-  it("a reviewed, hash-bound user edit approves even a previously pending task; without the flag it does not", async () => {
-    env = a3Env();
-    const ai = await createTask(env.ports, basicRaw(), AI);
-    if (!ai.ok) throw new Error(ai.detail);
-    const def = resolveDef({ prompt: "reviewed text" }, defOf(ai.value), env.ports);
-    if (!def.ok) throw new Error("def");
-    const expectHash = previewHash(def.value, ai.value.ownerCwd);
-    const plain = await updateTask(env.ports, ai.value.id, { prompt: "reviewed text" }, USER, { expectHash });
-    if (!plain.ok) throw new Error(plain.detail);
-    expect(isApproved(plain.value)).toBe(false);
-    const reviewed = await updateTask(env.ports, ai.value.id, { prompt: "reviewed text" }, USER, {
-      expectHash,
-      approveReviewed: true,
-    });
-    if (!reviewed.ok) throw new Error(reviewed.detail);
-    expect(isApproved(reviewed.value)).toBe(true); // reviewed + bound ⇒ approved even with an unchanged hash
-    const def2 = resolveDef({ prompt: "reviewed again" }, defOf(reviewed.value), env.ports);
-    if (!def2.ok) throw new Error("def2");
-    const h2 = previewHash(def2.value, ai.value.ownerCwd);
-    const r2 = await updateTask(env.ports, ai.value.id, { prompt: "reviewed again" }, USER, {
-      expectHash: h2,
-      approveReviewed: true,
-    });
-    if (!r2.ok) throw new Error(r2.detail);
-    expect(isApproved(r2.value)).toBe(true);
-    expect(r2.value.approval?.hash).toBe(h2);
-  });
-});
-
 describe("pause / delete revoke queued message runs (I1, A2 residual 3)", () => {
-  async function approvedTask(name = "t") {
+  async function mkTask(name = "t") {
     const r = await createTask(env.ports, basicRaw({ name }), USER);
     if (!r.ok) throw new Error(r.detail);
     return r.value;
@@ -300,8 +236,8 @@ describe("pause / delete revoke queued message runs (I1, A2 residual 3)", () => 
 
   it("pause: queued message runs of THAT task become dropped(task-changed) in the ledger; other tasks, other forms and non-queued runs are untouched; resume revokes nothing", async () => {
     env = a3Env();
-    const t = await approvedTask();
-    const other = await approvedTask("other");
+    const t = await mkTask();
+    const other = await mkTask("other");
     const q = await queuedRun(t.id);
     const qOther = await queuedRun(other.id);
     const dispatched = await queuedRun(t.id, { runKey: `${t.id}@m-aaaaaaa1`, kind: "manual", state: "dispatched" });
@@ -329,7 +265,7 @@ describe("pause / delete revoke queued message runs (I1, A2 residual 3)", () => 
 
   it("delete: the task's queued message run is dropped (or swept) too, and the in-memory revoke is called", async () => {
     env = a3Env();
-    const t = await approvedTask();
+    const t = await mkTask();
     const q = await queuedRun(t.id);
     const revoked: string[] = [];
     expect((await deleteTask(env.agent.ensureStore(), t.id, { revoke: (id) => revoked.push(id) })).ok).toBe(true);

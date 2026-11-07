@@ -6,7 +6,7 @@ import {
   type SchedHubLink,
   type SchedRunVerdict,
 } from "../../../src/schedule/agent/coordinator.js";
-import type { SchedAgentFrame, SchedRunFrame } from "../../../src/web-hub/protocol/schedule.js";
+import type { SchedAgentFrame, SchedDecideFrame, SchedRunFrame } from "../../../src/web-hub/protocol/schedule.js";
 import { decodeAgentFrame } from "../../../src/web-hub/protocol/messages.js";
 
 const SID = "019a0000-aaaa-7bbb-8ccc-dddddddddddd";
@@ -30,6 +30,18 @@ const runFrame = (over: Partial<SchedRunFrame> = {}): SchedRunFrame => ({
   sessionId: SID,
   taskId: "s_abcdefgh",
   defHash: HASH,
+  expiresAt: 2_000,
+  ...over,
+});
+
+const decideFrame = (over: Partial<SchedDecideFrame> = {}): SchedDecideFrame => ({
+  t: "sched_decide",
+  reqId: REQ,
+  sessionId: SID,
+  offerId: "ofAbCdEfGhIjKlMnOpQrStUvWxYz0123",
+  taskId: "s_abcdefgh",
+  defHash: HASH,
+  decision: "approve",
   expiresAt: 2_000,
   ...over,
 });
@@ -164,10 +176,75 @@ describe("hub coordinator", () => {
 
   it("NullCoordinator does nothing", () => {
     expect(NULL_SCHEDULE_COORDINATOR.kind).toBe("null");
+    expect(NULL_SCHEDULE_COORDINATOR).not.toHaveProperty("confirmReady");
+    expect(NULL_SCHEDULE_COORDINATOR).not.toHaveProperty("offers");
     expect(() => {
       NULL_SCHEDULE_COORDINATOR.changed();
       NULL_SCHEDULE_COORDINATOR.onRun(runFrame());
+      NULL_SCHEDULE_COORDINATOR.onDecide(decideFrame());
     }).not.toThrow();
+  });
+});
+
+describe("hub coordinator × sched_decide (stub since schedule-auto-approve r2)", () => {
+  const coordOf = (l: SchedHubLink | undefined) =>
+    createHubCoordinator({
+      link: () => l,
+      sessionId: SID,
+      now: () => 1_000,
+      runRequest: async () => ({ result: "started" }),
+      removeReports: async () => true,
+    });
+
+  it("a live frame is answered with exactly one refused/unsupported ack — approve and reject alike; nothing else is sent", async () => {
+    const l = link();
+    const c = coordOf(l);
+    c.onDecide(decideFrame());
+    c.onDecide(decideFrame({ reqId: "rjAbCdEfGhIjKlMnOpQrStUvWxYz0123", decision: "reject" }));
+    await flush();
+    expect(l.sent).toEqual([
+      { t: "sched_decide_ack", reqId: REQ, result: "refused", reason: "unsupported" },
+      { t: "sched_decide_ack", reqId: "rjAbCdEfGhIjKlMnOpQrStUvWxYz0123", result: "refused", reason: "unsupported" },
+    ]);
+  });
+
+  it("another session / expired frames keep their old refusals", async () => {
+    const l = link();
+    const c = coordOf(l);
+    c.onDecide(decideFrame({ sessionId: "other-session" }));
+    c.onDecide(decideFrame({ reqId: "xpAbCdEfGhIjKlMnOpQrStUvWxYz0123", expiresAt: 1_000 }));
+    await flush();
+    expect(l.sent).toEqual([
+      { t: "sched_decide_ack", reqId: REQ, result: "refused", reason: "E_NOT_OWNER" },
+      { t: "sched_decide_ack", reqId: "xpAbCdEfGhIjKlMnOpQrStUvWxYz0123", result: "refused", reason: "expired" },
+    ]);
+  });
+
+  it("the ack decodes on the hub side (frame schema unchanged) and a not-ready link sends nothing", () => {
+    const l = link();
+    coordOf(l).onDecide(decideFrame());
+    expect(decodeAgentFrame(JSON.parse(JSON.stringify(l.sent[0])))).toMatchObject({
+      t: "sched_decide_ack",
+      result: "refused",
+    });
+    const off = link(false);
+    coordOf(off).onDecide(decideFrame());
+    expect(off.sent).toEqual([]);
+  });
+
+  it("onHubCaps only announces the session (no offers resend any more)", () => {
+    const l = link();
+    coordOf(l).onHubCaps();
+    expect(l.sent).toEqual([{ t: "sched_changed", sessionId: SID }]);
+  });
+
+  it("disposed coordinator still refuses sched_decide (exactly one ack)", async () => {
+    const l = link();
+    const c = coordOf(l);
+    c.dispose();
+    c.onDecide(decideFrame());
+    await flush();
+    expect(l.sent).toEqual([{ t: "sched_decide_ack", reqId: REQ, result: "refused", reason: "E_NOT_OWNER" }]);
   });
 });
 
@@ -191,5 +268,25 @@ describe("activate-level router", () => {
     detachB();
     expect(router.attached()).toBeUndefined();
     expect(router.hubConfig()).toEqual({ dir: "/s", toleranceS: 60 });
+  });
+
+  it("sched_decide: refused E_NOT_OWNER while unattached; routed to the attached coordinator otherwise", async () => {
+    const l = link();
+    const router = createScheduleHubRouter({ hubConfig: () => undefined });
+    router.bindLink(l);
+    router.onSchedDecide(decideFrame());
+    expect(l.sent).toEqual([{ t: "sched_decide_ack", reqId: REQ, result: "refused", reason: "E_NOT_OWNER" }]);
+    const a = coord(router.link());
+    const detach = router.attach(a.c);
+    router.onSchedDecide(decideFrame({ reqId: "atAbCdEfGhIjKlMnOpQrStUvWxYz0123" }));
+    await flush();
+    // reached the attached coordinator ⇒ the r2 stub's `unsupported`
+    expect(l.sent[1]).toEqual({
+      t: "sched_decide_ack",
+      reqId: "atAbCdEfGhIjKlMnOpQrStUvWxYz0123",
+      result: "refused",
+      reason: "unsupported",
+    });
+    detach();
   });
 });

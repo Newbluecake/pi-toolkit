@@ -93,3 +93,12 @@ export const basicRaw = (over: Record<string, unknown> = {}) => ({
   prompt: "do the thing",
   ...over,
 });
+
+/** Build an old-ledger task with NO approval (what pre-r2 code called "pending"): it must still run. */
+export async function stripApproval(env: A3Env, taskId: string): Promise<void> {
+  await env.agent.ensureStore().transact((d) => {
+    const t = d.tasks.find((x) => x.id === taskId);
+    if (t) delete t.approval;
+    return { value: undefined, write: true };
+  });
+}

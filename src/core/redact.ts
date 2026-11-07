@@ -1,7 +1,7 @@
 /**
  * Redact obvious secrets (bearer tokens, api-key query params, and any literal
  * secret values passed in) from an error/log message before it can surface anywhere.
- * Zero imports: pi-free, shared by web-search, quota and cache-ttl.
+ * Zero imports: pi-free, shared by web-tools, quota and cache-ttl.
  */
 export function redactSecrets(message: string, secrets: readonly (string | undefined)[]): string {
   let redacted = message

@@ -29,6 +29,7 @@ interface BuildOptions {
   hostIdle?: boolean; // default true
   hostFlipsOnTrigger?: boolean; // Fpi2 vs Fpi5 (default true)
   rootRunMaxS?: number; // default 900
+  capability?: "unknown" | "observed"; // default observed; unknown ⇒ optimistic dispatch
 }
 
 function build(options: BuildOptions = {}) {
@@ -77,7 +78,7 @@ function build(options: BuildOptions = {}) {
   let controller: RootWakeController | undefined;
   if (options.wakeOn !== false) {
     const capability = new XsHostCapability();
-    capability.observe({ messageType: "user", prompt: "hi" });
+    if ((options.capability ?? "observed") === "observed") capability.observe({ messageType: "user", prompt: "hi" });
     controller = new RootWakeController({
       sessionId: SESSION,
       rootRunMaxS: options.rootRunMaxS ?? 900,
@@ -199,5 +200,36 @@ describe("xs level propagation (§6.6)", () => {
     expect(s.level!.root).toBe(2); // monotonic max, never lowered by a delivery
     s.level!.resetRoot();
     expect(s.level!.root).toBe(0);
+  });
+});
+
+describe("xs level propagation × wake-unknown-optimistic", () => {
+  it("unknown capability carries L_s at dispatch; +1 commits exactly at BAS authorization", () => {
+    const s = build({ capability: "unknown" });
+    const verdict = s.receiver.deliver(s.input({ wake: true, level: 1 }));
+    expect(verdict).toEqual({ effect: "applied", woke: true });
+    expect(s.level!.root).toBe(1); // optimistic dispatch carries only
+    s.controller!.beforeAgentStart({
+      messageType: "custom",
+      message: { customType: "subagent:xs", details: { xsWake: true, wakeToken: "t1", xid: "x" } },
+    });
+    expect(s.level!.root).toBe(2); // the hop commits when the BAS guard authorizes
+  });
+
+  it("a context-aborted optimistic wake keeps the carry forever", () => {
+    const s = build({ capability: "unknown", hostFlipsOnTrigger: false }); // deferred dispatch
+    const frame = s.input({ wake: true, level: 2 });
+    expect(s.receiver.deliver(frame)).toEqual({ effect: "unknown", reason: "start_deferred", woke: true });
+    expect(s.level!.root).toBe(2);
+    expect(
+      s.controller!.context({
+        type: "context",
+        messages: [
+          { role: "custom", customType: "subagent:xs", details: { xsWake: true, wakeToken: "t1", xid: frame.xid } },
+        ],
+      }),
+    ).toEqual({ kind: "aborted", token: "t1" });
+    expect(s.controller!.state).toBe("aborting");
+    expect(s.level!.root).toBe(2); // aborted ⇒ carry stays, never +1
   });
 });

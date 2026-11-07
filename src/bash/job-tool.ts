@@ -436,7 +436,7 @@ export function createBashJobTool(deps: BashJobToolDeps): ToolDefinition<typeof 
 
   function requireManager(): BashJobManager {
     const manager = deps.manager();
-    if (!manager) throw new Error("pi-subagent: no active session yet, bash jobs are unavailable");
+    if (!manager) throw new Error("pi-toolkit: no active session yet, bash jobs are unavailable");
     return manager;
   }
 

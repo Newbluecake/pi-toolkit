@@ -137,9 +137,9 @@ describe("check.run — scenario/route guards (the actual regression from the pr
   // fleet-drawer F6 的 DOM 形状:`.detail[data-drawer][data-drawer-open]` + 摘要行按钮 +
   // `#fleet-drawer`(`.tree .run` 行在其中;drawer 有 fleet 行即挂载,关闭只是 display:none)。
   const drawerHtml = (mode: "docked" | "overlay" | "fullscreen", open: boolean) =>
-    `<div class="detail" data-drawer="${mode}"${open ? " data-drawer-open" : ""}>` +
+    `<div class="detail" data-drawer="${mode}"${open ? " data-drawer-open" + (mode === "docked" ? " data-docked-open" : "") : ""}>` +
     `<div class="detail-main"><div class="detail-body"></div>` +
-    `<button class="fleet-summary-bar" aria-expanded="${open}"></button></div>` +
+    `<button class="fleet-summary-bar" data-panel="agent" aria-controls="fleet-drawer" aria-expanded="${open}"></button></div>` +
     `<aside id="fleet-drawer"><div class="tree-scroll"><ul class="tree"><li><div class="run"></div></li></ul></div></aside>` +
     `</div>`;
 
@@ -176,7 +176,7 @@ describe("check.run — scenario/route guards (the actual regression from the pr
     const ctx = fakeCtx({
       bodyHtml:
         `<div class="detail" data-drawer="overlay"><div class="detail-main"><div class="detail-body"></div>` +
-        `<button class="fleet-summary-bar" aria-expanded="true"></button></div>` +
+        `<button class="fleet-summary-bar" data-panel="agent" aria-controls="fleet-drawer" aria-expanded="true"></button></div>` +
         `<aside id="fleet-drawer"><ul class="tree"><li><div class="run"></div></li></ul></aside></div>`,
       scenario: "detail",
       width: 1024,
@@ -217,8 +217,8 @@ describe("check.run — scenario/route guards (the actual regression from the pr
     process.env["PWH_VISUAL_STRICT_BODY"] = "1";
     const ctx = fakeCtx({
       bodyHtml:
-        `<div class="detail" data-drawer="docked" data-drawer-open><div class="detail-main"><div class="detail-body"></div>` +
-        `<button class="fleet-summary-bar" aria-expanded="true"></button></div>` +
+        `<div class="detail" data-drawer="docked" data-drawer-open data-docked-open><div class="detail-main"><div class="detail-body"></div>` +
+        `<button class="fleet-summary-bar" data-panel="agent" aria-controls="fleet-drawer" aria-expanded="true"></button></div>` +
         `<aside id="fleet-drawer"><ul class="tree"></ul></aside></div>`,
       scenario: "detail",
       width: 1280,

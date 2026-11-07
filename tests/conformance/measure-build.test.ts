@@ -32,6 +32,12 @@ const MANAGED_THINKING_OFF_DISABLED = (() => {
   const [major, minor] = PI_AI_VERSION.split(".").map((n) => Number.parseInt(n, 10));
   return (major ?? 0) > 1 || ((major ?? 0) === 1 && (minor ?? 0) >= 3);
 })();
+// Characterization only: 1.5 changes the non-reasoning managed build's top effort
+// from high to low. Production validation checks shapes, never dependency versions.
+const MANAGED_TOP_EFFORT = (() => {
+  const [major, minor] = PI_AI_VERSION.split(".").map((n) => Number.parseInt(n, 10));
+  return (major ?? 0) > 1 || ((major ?? 0) === 1 && (minor ?? 0) >= 5) ? "low" : "high";
+})();
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
   vi.unstubAllEnvs();
@@ -240,11 +246,14 @@ describe("measure P4 real Anthropic build conformance", () => {
       "managed writes complete",
     );
     const wire = h.stub.requests[0]!.json;
-    expect(wire.thinking).toMatchObject({
+    expect(wire.thinking).toEqual({
       type: "adaptive",
+      display: "summarized",
       block_binding: { prefix_mismatch_behavior: "drop_block" },
     });
     expect(wire.max_tokens).toBe(1);
+    expect(wire.output_config).toEqual({ effort: MANAGED_TOP_EFFORT });
+    expect(wire.messages).toHaveLength(2);
     expect((wire.messages as unknown[]).at(-1)).toEqual({
       role: "system",
       content: [],
@@ -545,26 +554,66 @@ describe("live round 3 — exact stock Anthropic adaptive modes", () => {
     },
     { mode: "managed", managed: true, thinking: { type: "adaptive", display: "summarized" } },
   ])("$mode rejects actual wrong-mode injection $thinking before POST", async ({ managed, thinking }) => {
-    const h = await environment({ reasoning: true, managed, compat: { forceAdaptiveThinking: true } });
-    const original = h.registry.streamSimple.bind(h.registry);
-    vi.spyOn(h.registry, "streamSimple").mockImplementation((selected, context, options) =>
-      original(selected, context, {
-        ...options,
-        onPayload: (params, model) => {
-          (params as Record<string, unknown>).thinking = thinking;
-          return options!.onPayload!(params, model);
-        },
-      }),
-    );
-    await h.port.handle("measure --yes", h.ctx);
-    await h.drive();
-    expect(h.text()).toContain("failed(payload:thinking)");
-    expect(h.stub.requests).toHaveLength(0);
-    expect(h.results[0]!.outcome).toMatchObject({
-      kind: "not-sent",
-      reason: "capability",
-      diag: { baseFetchCalls: 0 },
-      measured: { rejection: "thinking" },
-    });
+    // Keep the five wrong-mode cases, exercising additional managed mutations within
+    // the managed case so the conformance suite remains 25 real cases on both SDKs.
+    const mutations: Array<{ patch: Record<string, unknown>; rejection: string; tail?: "missing" | "low" | "budget" }> =
+      [{ patch: { thinking }, rejection: "thinking" }];
+    if (managed) {
+      const adaptive = {
+        type: "adaptive",
+        display: "summarized",
+        block_binding: { prefix_mismatch_behavior: "drop_block" },
+      };
+      for (const effort of ["high", "low"]) {
+        for (const invalid of ["medium", "xhigh", "max"])
+          mutations.push({ patch: { thinking: adaptive, output_config: { effort: invalid } }, rejection: "thinking" });
+        mutations.push(
+          { patch: { thinking: adaptive, output_config: { effort, budget_tokens: 0 } }, rejection: "thinking" },
+          { patch: { thinking: { ...adaptive, budget_tokens: 0 }, output_config: { effort } }, rejection: "thinking" },
+          { patch: { thinking: adaptive, output_config: { effort } }, tail: "missing", rejection: "extra-input" },
+          { patch: { thinking: adaptive, output_config: { effort } }, tail: "low", rejection: "extra-input" },
+          { patch: { thinking: adaptive, output_config: { effort } }, tail: "budget", rejection: "extra-input" },
+        );
+      }
+    }
+    for (const { patch, rejection, tail } of mutations) {
+      const h = await environment({ reasoning: true, managed, compat: { forceAdaptiveThinking: true } });
+      const original = h.registry.streamSimple.bind(h.registry);
+      vi.spyOn(h.registry, "streamSimple").mockImplementation((selected, context, options) =>
+        original(selected, context, {
+          ...options,
+          onPayload: (params, model) => {
+            Object.assign(params, patch);
+            if (tail) {
+              const p = params as Record<string, unknown>;
+              p.messages = [
+                (p.messages as unknown[])[0],
+                ...(tail === "missing"
+                  ? []
+                  : [
+                      {
+                        role: "system",
+                        content: [],
+                        output_config: tail === "low" ? { effort: "low" } : { effort: "high", budget_tokens: 0 },
+                      },
+                    ]),
+              ];
+            }
+            return options!.onPayload!(params, model);
+          },
+        }),
+      );
+      await h.port.handle("measure --yes", h.ctx);
+      await h.drive();
+      expect(h.text()).toContain(`failed(payload:${rejection})`);
+      expect(h.stub.requests).toHaveLength(0);
+      expect(h.results[0]!.outcome).toMatchObject({
+        kind: "not-sent",
+        reason: "capability",
+        diag: { baseFetchCalls: 0 },
+        measured: { rejection },
+      });
+      h.fire("session_shutdown", { reason: "quit" });
+    }
   });
 });

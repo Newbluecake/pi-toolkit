@@ -1,3 +1,6 @@
+import type { MemorySeedCapture, SessionMemorySeedV1 } from "./memory-types.js";
+export type { MemorySeedCapture, SessionMemorySeedV1 } from "./memory-types.js";
+
 export type Millis = number;
 export type RunId = string;
 export type AgentTypeName = string;
@@ -85,6 +88,8 @@ export interface DeadlineBudget {
   compactionMs: Millis;
   /** 总预算。恒 > 0：非法值（≤ 0 / 非有限数）由 mergeBudget 逐层丢弃并回退下一层（D-11）。 */
   totalMs: Millis;
+  /** Host-only Agent-tool admission floor; 0 disables it. Not a guaranteed lifetime. */
+  minTotalMs: Millis;
   abortGraceMs: Millis;
   steerMs: Millis;
   reapMs: Millis;
@@ -198,7 +203,26 @@ export interface DispatchMeasure {
   payloadTokens?: number;
 }
 
+/** Session-local request policy; inherit preserves the provider payload unchanged. */
+export type FastMode = "inherit" | "on" | "off";
+
+/** Minimal session custom-entry data (subagent:fast); no activation-local identity. */
+export interface FastRecord {
+  readonly v: 1;
+  readonly mode: FastMode;
+}
+
+/** Immutable admission-time data for internal child creation, never an Agent tool parameter. */
+export interface FastSeed {
+  readonly v: 1;
+  readonly mode: FastMode;
+}
+
 export interface SpawnRequest {
+  /** Host-only admission snapshot; strip untrusted/external input. Never journal/hash or re-read empty. */
+  readonly memorySeed?: MemorySeedCapture;
+  /** Captured before queueing; absent preserves the legacy path. Never re-snapshot at dequeue. */
+  readonly fastSeed?: FastSeed;
   /** Dispatch-time input budget; the runtime measures both its coarse preflight and final provider payload. */
   inputBudget?: InputBudget;
   /** Assigned run identifier, used by lifecycle extensions for resource names. */
@@ -241,6 +265,8 @@ export interface SpawnRequest {
    * 模型面只有 Agent 工具传 timeout_s 时写 "extendable"，其余调用方不写（缺省按形状推导为 "fixed"）。
    */
   timeoutPolicy?: TimeoutPolicy;
+  /** Host convention set by every Agent tool path; admission-only, never threaded or persisted. */
+  agentToolDispatch?: true;
   budgetOverride?: Partial<DeadlineBudget>;
   /**
    * fabric-cross-session plan §4.1: provenance of a wake revive. Only programs write it (WakeService, W5); it is
@@ -355,6 +381,16 @@ export interface SpawnRequest {
    */
   schemaPreset?: SchemaPresetId;
   /**
+   * #68: set ONLY by the Agent tool when a `resume` call carries no `schema`
+   * argument. Spawn admission then inherits the resumed run's schema (preset
+   * id → frozen preset schema, else the inline `diag.schema` persisted with
+   * the run). Consumed at admission, never threaded. Absent for every other
+   * resume source (@mention, fabric wake, RPC) and when the caller passed an
+   * explicit `schema` (override) or `schema: null` (opt out of inheritance).
+   * A resume target persisted before #68 has no schema record ⇒ no inheritance.
+   */
+  inheritSchema?: true;
+  /**
    * L1 (agent-tool pool-full plan §1/§2): admission-time policy when this
    * (non-slotless) request would exceed the concurrency pool. `"reject"` —
    * fail admission immediately (no run, no worktree, no record) with a
@@ -439,6 +475,8 @@ export interface RunDisplayMeta {
    * (old entries may lack it).
    */
   schemaPreset?: SchemaPresetId;
+  /** #68: inline (non-preset) JSON Schema of the run, folded write-once by `enqueued` (size-capped by the adapter; absent for presets/oversize/legacy). Resume inheritance source. */
+  schema?: JsonSchema;
   /** fabric-cross-session plan §4.1 (W5): wake provenance (without `trigger.claimToken`), folded write-once by `enqueued`. */
   wakeOrigin?: WakeOrigin;
   /** fabric-cross-session plan §4.5 (W5): admission-time wake-ability verdict, folded write-once by `enqueued`. */
@@ -483,7 +521,7 @@ export interface ExternalPriceTier extends ExternalPriceRates {
   inputTokensAbove: number;
 }
 export interface ExternalPriceTable extends ExternalPriceRates {
-  tiers?: readonly ExternalPriceTier[];
+  tiers?: readonly ExternalPriceTier[] | undefined;
 }
 /** 价格从哪来：override=用户覆盖；upstream=droid 标注的上游 provider 的官方条目；family=按模型家族前缀推断的厂商条目；
  *  consensus=无规范 provider 时多个注册表条目价格一致。 */
@@ -1043,6 +1081,8 @@ export interface RunDiagnostics {
    * through the journal whitelist.
    */
   schemaPreset?: SchemaPresetId;
+  /** #68: mirrors `RunDisplayMeta.schema` (inline schema, write-once, journal-whitelisted); resume `schema`-less inheritance source. Absent on legacy runs. */
+  schema?: JsonSchema;
   stopRequestedAt?: Millis;
   stopCause?: StopCause;
   timeoutReason?: TimeoutReason;
@@ -1155,6 +1195,17 @@ export interface RunDiagnostics {
    * (dedup'd) the first time it observes the event.
    */
   childExtensionMissing?: true;
+  /**
+   * Structured-output repair turn (structured-output-repair-plan.md §1j):
+   * present only when a repair turn was actually sent (repairNote ===
+   * "attempted"), written by the adapter's post-policy store.put (H3
+   * work-back precedent). Store-only by design — never journaled, never in
+   * StatusInfo, never rendered by get_run_result (R8), so no golden is
+   * affected. "succeeded" = the run ended with a schema-valid submission
+   * (outcome.structuredResult set); "failed" otherwise (including a run
+   * aborted after a late capture — user abort always wins, R9).
+   */
+  structuredRepair?: "succeeded" | "failed";
   /**
    * 外部 agent（external-agent plan §2.1）：本 run 的外部 provider 运行时元数据
    * （ExternalRunMeta），由 `external_meta` session_event 经 mergeExternalMeta 折入。
@@ -1357,6 +1408,10 @@ export interface RunState {
  * the original SpawnRequest and the DeadlineBudget.
  */
 export interface SessionSpec {
+  /** Internal new child only. Seed append/gate failure rejects creation; resume never reseeds. */
+  readonly memorySeed?: SessionMemorySeedV1;
+  /** Internal child initialization only; omit when absent, never put into promptNotes. */
+  readonly fastSeed?: FastSeed;
   cwd?: string;
   agentDir?: string;
   model?: unknown;

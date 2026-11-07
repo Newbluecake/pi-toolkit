@@ -21,14 +21,16 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { mount } from "@vue/test-utils";
+import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import FleetBashJobs from "../../../src/web-hub/ui/src/components/fleet/FleetBashJobs.vue";
 import FleetDrawer from "../../../src/web-hub/ui/src/components/drawer/FleetDrawer.vue";
 import FleetSummaryBar from "../../../src/web-hub/ui/src/components/fleet/FleetSummaryBar.vue";
+import { FLEET_ARCHIVE } from "../../../src/web-hub/ui/src/components/fleet/summary.js";
 import { HUB_CTX } from "../../../src/web-hub/ui/src/components/control/controlContext.js";
 import type { HubHandle } from "../../../src/web-hub/ui/src/types.js";
 import { ref } from "vue";
+import { computed } from "vue";
 import {
   bashJobsOf,
   formatBytes,
@@ -531,13 +533,13 @@ describe("FleetDrawer — 「bash」分组(树视图末尾,agent 树之后)", ()
 // —— 徽标 = agent running + bash running(wire `running` 含 staged 等非终态行);
 // aria-label 的 agent/bash 分项小计保留。
 // ---------------------------------------------------------------------------
-describe("FleetSummaryBar — 徽标计入运行中的 bash (2026-10-15 再次拍板)", () => {
+describe("FleetSummaryBar — #41 independent agent and bash counts", () => {
   it("no agents and no bashJobs ⇒ the button stays hidden (legacy 不占位)", () => {
     const wrapper = mount(FleetSummaryBar, { props: { rows: [], open: false } });
     expect(wrapper.find(".fleet-summary-bar").exists()).toBe(false);
   });
 
-  it("仅 bash running ⇒ 按钮出现且徽标计入 bash「1」;抽屉里的 bash 分组要可达", () => {
+  it("only bash running ⇒ terminal button with independent badge 1", () => {
     const wrapper = mount(FleetSummaryBar, {
       props: { rows: [], open: false, bashJobs: wire([row()], { total: 3, running: 1, failed: 0 }) },
     });
@@ -546,19 +548,20 @@ describe("FleetSummaryBar — 徽标计入运行中的 bash (2026-10-15 再次�
     // 2026-10-15 新口径:没有 agent 行但 bash 在跑 ⇒ 徽标显示 bash running 数
     expect(wrapper.find(".fab-count .num").text()).toBe("1");
     expect(wrapper.get(".fab-count").attributes("data-st")).toBe("running");
-    expect(btn.attributes("aria-label")).toContain("bash 1 running");
+    expect(btn.attributes("aria-label")).toContain("1 running");
   });
 
-  it("agents + bash: 2 agent running + 1 bash running ⇒ 徽标「3」;aria-label 分项小计保留", () => {
+  it("agents + bash: 2 agent running + 1 bash running ⇒ independent 2 and 1 badges", () => {
     const rows = [fleetRow("r_1"), fleetRow("r_2")] as never[];
     const wrapper = mount(FleetSummaryBar, {
       props: { rows, open: false, bashJobs: wire([row()], { total: 2, running: 1, failed: 0 }) },
     });
     const btn = wrapper.find(".fleet-summary-bar");
-    expect(wrapper.find(".fab-count .num").text()).toBe("3"); // agent 2 + bash 1
+    expect(wrapper.get('[data-panel="agent"] .num').text()).toBe("2");
+    expect(wrapper.get('[data-panel="bash"] .num').text()).toBe("1");
     const label = btn.attributes("aria-label") ?? "";
     expect(label).toContain("2 running"); // agent 分项
-    expect(label).toContain("bash 1 running"); // bash 分项
+    expect(wrapper.get('[data-panel="bash"]').attributes("aria-label")).toContain("1 running");
   });
 
   it("all-terminal(agents 终态 + bash 终态)⇒ 无徽标;bash 小计回退 done/failed 总数", () => {
@@ -572,7 +575,7 @@ describe("FleetSummaryBar — 徽标计入运行中的 bash (2026-10-15 再次�
     });
     expect(wrapper.find(".fleet-summary-bar").exists()).toBe(true); // 仍有内容,入口保留
     expect(wrapper.find(".fab-count").exists()).toBe(false);
-    expect(wrapper.find(".fleet-summary-bar").attributes("aria-label")).toContain("bash 5 done");
+    expect(wrapper.get('[data-panel="bash"]').attributes("aria-label")).toContain("5 done");
   });
 
   it("staged 等非终态 bash 行计入徽标(wire running = 非终态数,「仍在跑」口径)", () => {
@@ -709,5 +712,338 @@ describe("FleetBashJobs.vue — archive (web-hub archive plan)", () => {
     // The per-row archive button requires the FLEET_ARCHIVE provider — absent here.
     expect(w.findAll(".arch-act")).toHaveLength(0);
     expect(w.find(".bj-sum-text").text()).not.toContain("archived");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// omitted-orphan fix (2026-10-27): the wire caps terminal rows at 12 and archiving is
+// display-only, so when every wire row is archived the bare `(+N more)` marker would hang in
+// an empty live list (unidentifiable, un-archivable). It moves next to the archived fold with
+// a prose note — ONLY in that case.
+// ---------------------------------------------------------------------------
+
+describe("FleetBashJobs.vue — omitted orphan (all rows archived)", () => {
+  const doneRow = (id: string): BashJobRowWire =>
+    row({ id, status: "completed", exitCode: 0, endedAt: SAMPLED_AT - 1_000 });
+  const archiveAll = (rows: BashJobRowWire[]) =>
+    new Map(rows.map((r, i) => [String(r.id), { kind: "bash" as const, id: String(r.id), at: i + 1 }]));
+
+  it("all wire rows archived + omitted>0 ⇒ prose note next to the fold, no orphan `(+N more)`", async () => {
+    const rows = Array.from({ length: 12 }, (_, i) => doneRow(`job-done${String(i).padStart(4, "0")}`));
+    const w = mount(FleetBashJobs, {
+      props: { jobs: wire(rows, { total: 13, omitted: 1 }), now: SAMPLED_AT, archived: archiveAll(rows) },
+    });
+    // 13 all-terminal > BASH_OPEN_FEW ⇒ the group defaults to collapsed; open it.
+    await w.find(".bj-sum").trigger("click");
+    expect(w.find(".bj-more-orphan").exists()).toBe(true);
+    expect(w.find(".bj-more-orphan").text()).toBe(
+      "1 older finished job(s) not sent to the web (cannot be viewed or archived)",
+    );
+    expect(w.find(".bj-more:not(.bj-more-orphan)").exists()).toBe(false);
+    // The note sits AFTER the archived fold, inside the same list.
+    const items = w.findAll(".bj-list > li");
+    const foldIdx = items.findIndex((li) => li.classes().includes("bj-archived"));
+    const noteIdx = items.findIndex((li) => li.classes().includes("bj-more-orphan"));
+    expect(foldIdx).toBeGreaterThanOrEqual(0);
+    expect(noteIdx).toBe(foldIdx + 1);
+  });
+
+  it("live rows present + omitted>0 ⇒ unchanged `(+N more)` in the live list", async () => {
+    const rows = [row({ id: "job-live0001" }), doneRow("job-done0001")];
+    const w = mount(FleetBashJobs, {
+      props: {
+        jobs: wire(rows, { total: 8, running: 1, omitted: 6 }),
+        now: SAMPLED_AT,
+        archived: new Map([["job-done0001", { kind: "bash", id: "job-done0001", at: 1 }]]),
+      },
+    });
+    expect(w.find(".bj-more-orphan").exists()).toBe(false);
+    expect(w.find(".bj-more").text()).toBe("(+6 more)");
+  });
+
+  it("all wire rows archived + no omitted ⇒ no marker at all", async () => {
+    const rows = [doneRow("job-done0001"), doneRow("job-done0002")];
+    const w = mount(FleetBashJobs, {
+      props: { jobs: wire(rows), now: SAMPLED_AT, archived: archiveAll(rows) },
+    });
+    expect(w.find(".bj-archived").exists()).toBe(true);
+    expect(w.find(".bj-more").exists()).toBe(false);
+    expect(w.find(".bj-more-orphan").exists()).toBe(false);
+  });
+
+  it("all wire rows archived + omitted:0 ⇒ no marker at all", async () => {
+    const rows = [doneRow("job-done0001"), doneRow("job-done0002")];
+    const w = mount(FleetBashJobs, {
+      props: { jobs: wire(rows, { total: 2, omitted: 0 }), now: SAMPLED_AT, archived: archiveAll(rows) },
+    });
+    expect(w.find(".bj-more").exists()).toBe(false);
+    expect(w.find(".bj-more-orphan").exists()).toBe(false);
+  });
+
+  it("no wire rows at all + omitted>0 (nothing archived) ⇒ legacy `(+N more)`, no note", async () => {
+    const w = await mountGroupOpen(wire([], { total: 3, omitted: 3 }));
+    expect(w.find(".bj-more-orphan").exists()).toBe(false);
+    expect(w.find(".bj-more").text()).toBe("(+3 more)");
+  });
+
+  it("omitted>0 without any archived rows ⇒ byte-identical `(+N more)` (no note)", async () => {
+    const w = await mountGroupOpen(wire([doneRow("job-done0001")], { total: 5, omitted: 4 }));
+    expect(w.find(".bj-more").text()).toBe("(+4 more)");
+    expect(w.find(".bj-more-orphan").exists()).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 2026-10-28 user request: the fleet bash group's `(+N more)` marker must either be displayable
+// (the wire cannot carry it — D1 row caps + the D6 byte budget) or be archivable in one click.
+// It becomes a `.run-more` button that asks the agent to bulk-archive the omitted tail; the id
+// set is agent-derived, so the UI only sends a kind-only op. Without a FLEET_ARCHIVE provider
+// (isolated mounts / control off) the marker stays plain text — byte-identical to before.
+// ---------------------------------------------------------------------------
+describe("FleetBashJobs.vue — archive the omitted tail (「(+N more)」 actionable)", () => {
+  const doneRow = (id: string): BashJobRowWire =>
+    row({ id, status: "completed", exitCode: 0, endedAt: SAMPLED_AT - 1_000 });
+
+  const provideArchive = (archiveOmitted?: (n: number) => void) => ({
+    [FLEET_ARCHIVE as symbol]: {
+      canArchive: computed(() => true),
+      archive: vi.fn(),
+      unarchive: vi.fn(),
+      ...(archiveOmitted === undefined ? {} : { archiveOmitted }),
+    },
+  });
+
+  it("renders the archive button with the i18n copy and calls it once with N", async () => {
+    const archiveOmitted = vi.fn();
+    const w = mount(FleetBashJobs, {
+      props: { jobs: wire([row()], { omitted: 5 }), now: SAMPLED_AT },
+      global: { provide: provideArchive(archiveOmitted) },
+    });
+    const btn = w.find(".bj-more .run-more");
+    expect(btn.exists()).toBe(true);
+    expect(btn.text()).toBe("Archive 5 Older Finished Jobs");
+    expect(w.find(".bj-more").text()).not.toContain("(+5 more)");
+    await btn.trigger("click");
+    expect(archiveOmitted).toHaveBeenCalledTimes(1);
+    expect(archiveOmitted).toHaveBeenCalledWith(5);
+  });
+
+  it("no FLEET_ARCHIVE provider ⇒ plain `(+N more)`, no button", () => {
+    const w = mountGroup(wire([row()], { omitted: 7 }));
+    expect(w.find(".bj-more").text()).toBe("(+7 more)");
+    expect(w.find(".bj-more .run-more").exists()).toBe(false);
+  });
+
+  it("a handle without archiveOmitted (older build) ⇒ plain text", () => {
+    const w = mount(FleetBashJobs, {
+      props: { jobs: wire([row()], { omitted: 7 }), now: SAMPLED_AT },
+      global: { provide: provideArchive() },
+    });
+    expect(w.find(".bj-more").text()).toBe("(+7 more)");
+  });
+
+  it("the orphan case (all wire rows archived) gets the SAME action, not just a prose note", async () => {
+    const archiveOmitted = vi.fn();
+    const rows = Array.from({ length: 12 }, (_, i) => doneRow(`job-done${String(i).padStart(4, "0")}`));
+    const archived = new Map(
+      rows.map((r, i) => [String(r.id), { kind: "bash" as const, id: String(r.id), at: i + 1 }]),
+    );
+    const w = mount(FleetBashJobs, {
+      props: { jobs: wire(rows, { total: 13, omitted: 1 }), now: SAMPLED_AT, archived },
+      global: { provide: provideArchive(archiveOmitted) },
+    });
+    await w.find(".bj-sum").trigger("click");
+    const note = w.find(".bj-more-orphan");
+    expect(note.exists()).toBe(true);
+    const btn = note.find(".run-more");
+    expect(btn.exists()).toBe(true);
+    expect(btn.text()).toBe("Archive 1 Older Finished Jobs");
+    expect(note.text()).not.toContain("cannot be viewed or archived");
+    await btn.trigger("click");
+    expect(archiveOmitted).toHaveBeenCalledWith(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 2026-10-28 user request (红框对齐): the two tail hint lines — 「显示已完成的 N 个」
+// (`.bj-fill-more .run-more`) and the omitted marker (`.bj-more`, plain or its `.run-more`
+// button) — must start at the SAME left edge: `.bj-row`'s content edge (16px icon column +
+// `--sp-2` gap). happy-dom does not lay out, so this pins the CSS contract that produces it.
+// ---------------------------------------------------------------------------
+describe("bash-jobs.css — tail hint lines share `.bj-row`'s content edge", () => {
+  const css = readFileSync(resolve(process.cwd(), "src/web-hub/ui/src/styles/bash-jobs.css"), "utf8");
+  const block = (selector: string): string => {
+    const at = css.indexOf(`${selector} {`);
+    expect(at).toBeGreaterThanOrEqual(0);
+    return css.slice(at, css.indexOf("}", at));
+  };
+
+  it("`.bj-more` and `.bj-fill-more` both pad to the icon column + gap", () => {
+    expect(block(".bj-more")).toContain("calc(16px + var(--sp-2))");
+    expect(block(".bj-fill-more")).toContain("calc(16px + var(--sp-2))");
+  });
+
+  it("both `.run-more` instances inside the group zero their extra left margin/padding", () => {
+    const rule = block(".bj-more .run-more,\n.bj-fill-more .run-more");
+    expect(rule).toContain("margin-left: 0");
+    expect(rule).toContain("padding-left: 0");
+  });
+
+  it("the fill row renders its button through `.run-more` (the rule above targets it)", async () => {
+    const rows = ["job-a", "job-b", "job-c"].map((id) =>
+      row({ id, status: "completed", exitCode: 0, endedAt: SAMPLED_AT - 1_000 }),
+    );
+    const w = mount(FleetBashJobs, {
+      props: {
+        jobs: wire(rows, { omitted: 2, total: 5 }),
+        now: SAMPLED_AT,
+        fill: true,
+        terminalBudget: 1,
+        fillReady: true,
+      },
+      global: { provide: provideArchiveRail() },
+    });
+    if (!w.find(".bj-list").exists()) await w.find(".bj-sum").trigger("click");
+    expect(w.find(".bj-fill-more .run-more").exists()).toBe(true);
+  });
+});
+
+function provideArchiveRail() {
+  return { [FLEET_ARCHIVE as symbol]: { canArchive: computed(() => true), archive: vi.fn(), unarchive: vi.fn() } };
+}
+
+// ---------------------------------------------------------------------------
+// 2026-10-28 rework (acceptance blocker: "clicking does nothing"): the bulk archive's outcome is
+// REPORTED — three visibly different shapes — and the button exists exactly while `omitted > 0`.
+// ---------------------------------------------------------------------------
+describe("FleetDrawer — archive_omitted feedback toast (three distinct shapes)", () => {
+  const doneRow = (id: string): BashJobRowWire =>
+    row({ id, status: "completed", exitCode: 0, endedAt: SAMPLED_AT - 1_000 });
+
+  function mountWithControl(archiveOmitted: () => Promise<unknown>, omitted = 3) {
+    const hub = {
+      state: ref({ control: true }),
+      selectRun: vi.fn(),
+      pageRun: vi.fn(),
+      dispatch: vi.fn(),
+      control: { setArchived: vi.fn(async () => ({ ok: true })), archiveOmitted },
+    } as unknown as HubHandle;
+    const wrapper = mount(FleetDrawer, {
+      props: {
+        agent: drawerAgent({
+          fleet: [],
+          status: {
+            busy: false,
+            pending: false,
+            bashJobs: wire([doneRow("job-done0001")], { total: 1 + omitted, omitted }),
+          },
+        }),
+        now: SAMPLED_AT,
+        mode: "docked",
+        open: true,
+      },
+      global: { provide: { [HUB_CTX as symbol]: hub } },
+    });
+    mountedDrawers.push(wrapper);
+    return wrapper;
+  }
+  const click = async (w: ReturnType<typeof mountWithControl>) => {
+    await w.find(".bj-more .run-more").trigger("click");
+    await flushPromises();
+  };
+
+  it("changed > 0 ⇒ 「已归档/archived N older jobs」, no undo button, no title", async () => {
+    const w = mountWithControl(async () => ({ ok: true, data: { op: "archive_omitted", changed: 3 } }));
+    await click(w);
+    const toast = w.find(".arch-toast");
+    expect(toast.exists()).toBe(true);
+    expect(toast.find(".arch-toast-text").text()).toBe("Archived 3 Older Job(s)");
+    expect(toast.find(".arch-toast-undo").exists()).toBe(false);
+    expect(toast.attributes("title")).toBeUndefined();
+  });
+
+  it("changed === 0 ⇒ an explicit 「no jobs to archive」 note (not silence)", async () => {
+    const w = mountWithControl(async () => ({ ok: true, data: { op: "archive_omitted", changed: 0 } }));
+    await click(w);
+    expect(w.find(".arch-toast-text").text()).toBe("No Older Jobs to Archive");
+    expect(w.find(".arch-toast").attributes("title")).toBeUndefined();
+  });
+
+  it("error code ⇒ 「Archive Failed」 with the code in title", async () => {
+    const w = mountWithControl(async () => ({ ok: false, error: "E_UNSUPPORTED" }));
+    await click(w);
+    expect(w.find(".arch-toast-text").text()).toBe("Archive Failed");
+    expect(w.find(".arch-toast").attributes("title")).toBe("E_UNSUPPORTED");
+  });
+
+  it("a rejected promise (transport timeout) ⇒ failed, code in title", async () => {
+    const w = mountWithControl(async () => {
+      throw new Error("timeout");
+    });
+    await click(w);
+    expect(w.find(".arch-toast-text").text()).toBe("Archive Failed");
+    expect(w.find(".arch-toast").attributes("title")).toBe("E_NETWORK");
+  });
+
+  it("the three outcomes render three different texts", async () => {
+    const texts: string[] = [];
+    for (const result of [
+      { ok: true, data: { changed: 2 } },
+      { ok: true, data: { changed: 0 } },
+      { ok: false, error: "E_DEADLINE" },
+    ]) {
+      const w = mountWithControl(async () => result);
+      await click(w);
+      texts.push(w.find(".arch-toast-text").text());
+    }
+    expect(new Set(texts).size).toBe(3);
+  });
+
+  it("a single-row archive keeps its undo toast (unchanged)", async () => {
+    const w = mountWithControl(async () => ({ ok: true, data: { changed: 1 } }), 0);
+    await w.find(".bj-item .arch-act").trigger("click");
+    expect(w.find(".arch-toast-text").text()).toMatch(/^Archived /);
+    expect(w.find(".arch-toast-undo").exists()).toBe(true);
+  });
+});
+
+describe("FleetBashJobs.vue — button presence tracks `omitted` (2026-10-28)", () => {
+  const provide = (archiveOmitted: () => void) => ({
+    [FLEET_ARCHIVE as symbol]: {
+      canArchive: computed(() => true),
+      archive: vi.fn(),
+      unarchive: vi.fn(),
+      archiveOmitted,
+    },
+  });
+
+  it("omitted = 0 / absent ⇒ no `(+N more)` line and no button", () => {
+    const w = mount(FleetBashJobs, {
+      props: { jobs: wire([row()]), now: SAMPLED_AT },
+      global: { provide: provide(vi.fn()) },
+    });
+    expect(w.find(".bj-more").exists()).toBe(false);
+    expect(w.find(".run-more").exists()).toBe(false);
+  });
+
+  it("omitted > 0 ⇒ the button; after the next frame reports omitted gone ⇒ the line vanishes", async () => {
+    const w = mount(FleetBashJobs, {
+      props: { jobs: wire([row()], { omitted: 4 }), now: SAMPLED_AT },
+      global: { provide: provide(vi.fn()) },
+    });
+    expect(w.find(".bj-more .run-more").exists()).toBe(true);
+    await w.setProps({ jobs: wire([row()]) });
+    expect(w.find(".bj-more").exists()).toBe(false);
+  });
+
+  it("rowsOverflowRunning ⇒ one quiet note, never the archive button", () => {
+    const w = mount(FleetBashJobs, {
+      props: { jobs: wire([row()], { rowsOverflowRunning: 5 }), now: SAMPLED_AT },
+      global: { provide: provide(vi.fn()) },
+    });
+    const note = w.find(".bj-more-running");
+    expect(note.exists()).toBe(true);
+    expect(note.text()).toBe("5 more running job(s) not shown");
+    expect(w.find(".run-more").exists()).toBe(false);
   });
 });

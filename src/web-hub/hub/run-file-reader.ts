@@ -20,10 +20,10 @@
  * - Cooperative: after every chunk the scan `await`s one `setImmediate`; a caller whose
  *   `deadlineAt` is reached gets `busy`; cumulative scanned bytes beyond `maxScanBytes`
  *   (256 MiB) ⇒ `too_large`.
- * - Cursor cache: LRU of 16, keyed by `(realpath, size, mtimeMs, leafId)`, holding the projected
- *   chain (newest first) plus resume state (offset/carry/want), so a `before` page continues
- *   where the previous page stopped instead of rescanning from EOF. An append bumps size/mtime,
- *   changing the key and naturally rescanning.
+ * - Cursor cache: LRU (default 16, `cursorCacheSize`), keyed by `(realpath, size, mtimeMs,
+ *   leafId)`, holding the projected chain (newest first) plus resume state (offset/carry/want),
+ *   so a `before` page continues where the previous page stopped instead of rescanning from
+ *   EOF. An append bumps size/mtime, changing the key and naturally rescanning.
  * - Snapshot semantics: the scan sees the file as stat'ed at read start (`size`, `mtimeMs`):
  *   bytes appended while a scan runs sit beyond the stat'd offset and are invisible to that
  *   read; the next read gets a changed cache key and naturally rescans.
@@ -33,6 +33,19 @@
  * - Single-flight: one in-flight scan per cursor; concurrent readers share it and slice their own
  *   page from the chain afterwards. A global gate allows at most 2 concurrent scans; queued
  *   acquirers are bounded by their own `deadlineAt`, timeout ⇒ `busy`.
+ * - `fullReaderParity` (refresh-slow plan §2.1): the walk-branch (`hub/history.ts` `walkBranch`)
+ *   profile the history service's branch reader runs. Three behavior changes, each equal to the
+ *   full reader: (1) EXACT `hasMore` — once `limit` entries are collected the scan continues
+ *   until one MORE projected entry appears (hasMore:true) or the walk terminates (hasMore:
+ *   false); without parity a chain whose remaining ancestors are all unprojectable (label /
+ *   session_info / …) reports hasMore:true and the next page would come back empty. (2) A missing
+ *   ANCESTOR at the file head ends the chain (`done`) instead of failing `leaf_missing` —
+ *   `walkBranch` breaks its walk the same way; only the leaf itself missing stays `leaf_missing`.
+ *   (3) A parentId cycle ends the chain (`done`) instead of `leaf_missing` — `walkBranch`'s
+ *   `!seen.has(cur)` breaks the same way. Note (2)'s flip side: a corrupt branch line whose
+ *   `"id":"…"` needle bytes are damaged prefilter-MISSES and the walk silently truncates at
+ *   that ancestor (an ok result with a shorter chain) where the full reader would have failed
+ *   PARSE — a documented relaxation (docs/dev/web-hub/README.md, History tail reads).
  */
 import { Buffer } from "node:buffer";
 import { open, realpath, stat } from "node:fs/promises";
@@ -121,15 +134,24 @@ const NEWLINE = 0x0a;
 export function createRunFileReader(opts?: {
   now?: () => number;
   stats?: RunFileReaderStats;
-  /** Test seam (plan fixes 1 MiB). */
+  /** Backward-scan chunk size. Default 1 MiB (`RUN_READER_SCAN_CHUNK_BYTES`); the history
+   *  service's branch reader passes 512 KiB to bound the synchronous projection between yields. */
   scanChunkBytes?: number;
   /** Test seam (plan fixes 256 MiB). */
   maxScanBytes?: number;
+  /** Walk-branch parity — see the module docblock. Default false (run transcripts keep the
+   *  historical behavior; their tests pin it). */
+  fullReaderParity?: boolean;
+  /** Cursor LRU capacity. Default 16 (`RUN_READER_CURSOR_CACHE_SIZE`); the history service
+   *  passes 8 (every append invalidates the active cursor's key; stale cursors only hold memory). */
+  cursorCacheSize?: number;
 }): RunFileReader {
   const now = opts?.now ?? Date.now;
   const stats = opts?.stats ?? createRunFileReaderStats();
   const scanChunkBytes = opts?.scanChunkBytes ?? RUN_READER_SCAN_CHUNK_BYTES;
   const maxScanBytes = opts?.maxScanBytes ?? RUN_READER_MAX_SCAN_BYTES;
+  const parity = opts?.fullReaderParity ?? false;
+  const cursorCacheSize = opts?.cursorCacheSize ?? RUN_READER_CURSOR_CACHE_SIZE;
   const cursors = new Map<string, Cursor>();
   const waiters: Waiter[] = [];
   let active = 0;
@@ -188,7 +210,7 @@ export function createRunFileReader(opts?: {
     trackActive();
   };
 
-  // ------------------------------------------------------------------ cursor cache (LRU 16)
+  // ------------------------------------------------------------------ cursor cache (LRU)
   const cacheGet = (key: string): Cursor | undefined => {
     const c = cursors.get(key);
     if (c === undefined) return undefined;
@@ -199,7 +221,7 @@ export function createRunFileReader(opts?: {
   const cacheSet = (key: string, c: Cursor): void => {
     cursors.delete(key);
     cursors.set(key, c);
-    while (cursors.size > RUN_READER_CURSOR_CACHE_SIZE) {
+    while (cursors.size > cursorCacheSize) {
       const oldest = cursors.keys().next().value;
       if (oldest === undefined) break;
       cursors.delete(oldest);
@@ -210,7 +232,9 @@ export function createRunFileReader(opts?: {
   /**
    * Slice the request's page out of the cached chain (newest first). `needmore` ⇔ the chain is
    * exhausted before `limit` entries were collected (or `before` was never crossed) AND the scan
-   * has not terminated. `missing` ⇔ `before` is not on the fully-scanned branch.
+   * has not terminated; under parity also when `limit` entries ARE collected but the scan has
+   * not terminated — `hasMore` is only decidable once one more projected entry appeared or the
+   * walk ended. `missing` ⇔ `before` is not on the fully-scanned branch.
    */
   const collect = (cursor: Cursor, q: RunFileReadQuery): Collect => {
     const chain = cursor.chain;
@@ -230,7 +254,7 @@ export function createRunFileReader(opts?: {
       picked.push(item.entry);
       bytes += item.bytes;
     }
-    if (j === chain.length && picked.length < q.limit && !cursor.done) return { status: "needmore" };
+    if (j === chain.length && !cursor.done && (picked.length < q.limit || parity)) return { status: "needmore" };
     picked.reverse(); // wire order: oldest first
     return { status: "ok", entries: picked, hasMore: j < chain.length || !cursor.done };
   };
@@ -270,8 +294,11 @@ export function createRunFileReader(opts?: {
     if (r["id"] !== want) return; // prefilter false positive (e.g. a nested `{"id":...}` in content)
     if (cursor.visited.has(want)) {
       // Cyclic parentId (corrupted file with duplicated ids): a healthy append-only file never
-      // revisits an id along a parent walk. Terminate as leaf_missing instead of walking on.
-      cursor.failed = "leaf_missing";
+      // revisits an id along a parent walk. Terminate instead of walking on — `leaf_missing`
+      // for run transcripts, a chain end (`done`) under walk-branch parity (`walkBranch`'s
+      // `!seen.has(cur)` breaks its walk the same way, returning the truncated chain as ok).
+      if (parity) cursor.done = true;
+      else cursor.failed = "leaf_missing";
       return;
     }
     cursor.visited.add(want);
@@ -353,8 +380,11 @@ export function createRunFileReader(opts?: {
         processChunk(cursor, chunk, start === 0);
         if (start === 0 && !cursor.done && cursor.failed === undefined) {
           // File head reached: the whole file is consumed. A still-pending `want` never
-          // appeared ⇒ the leaf (or an ancestor of it) is not in this file.
-          if (cursor.want === null || collect(cursor, q).status !== "needmore") cursor.done = true;
+          // appeared ⇒ the leaf (or an ancestor of it) is not in this file. Under parity a
+          // missing ANCESTOR ends the chain (walkBranch breaks its walk the same way — the
+          // truncated chain is a valid ok answer); only the leaf itself missing stays a failure.
+          const ancestorMissing = parity && cursor.visited.size > 0;
+          if (cursor.want === null || ancestorMissing || collect(cursor, q).status !== "needmore") cursor.done = true;
           else cursor.failed = "leaf_missing";
         }
         stats.yields++;

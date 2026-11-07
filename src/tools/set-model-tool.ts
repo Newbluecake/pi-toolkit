@@ -37,10 +37,8 @@ import { cleanLabel, runRefDetails, titleForHandle } from "./run-ref.js";
 export const SetModelParams = Type.Object({
   model: Type.String({
     description:
-      "Target model: the FULL 'provider/id' exactly as listed in the 'Available models' section of the system " +
-      "prompt — the provider prefix is mandatory. A bare model id or substring alias ('kimi-k3', 'sonnet') is a " +
-      "fallback only and may be rejected, so copy the exact pair whenever the list is available. The resolved " +
-      "provider/id is reported back in the result.",
+      "Target model: the full 'provider/id' copied from the system prompt's 'Available models' section (the " +
+      "prefix rule is stated there). The resolved provider/id is reported back in the result.",
   }),
   run_id: Type.Optional(
     Type.String({

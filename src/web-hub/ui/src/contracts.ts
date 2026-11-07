@@ -8,6 +8,7 @@
 import type { Lan2faChallenge, LanFactorBody } from "@protocol/lan-2fa.js";
 import type { AgentCard, HistoryPayload } from "@protocol/http-contract.js";
 import type { BashJobsWire, FleetRowWire, SessionInfo as WireSessionInfo } from "@protocol/messages.js";
+import type { GenerationCore } from "@protocol/message-generation.js";
 import type { IconName } from "./icons/names.js";
 import type {
   AgentCardView,
@@ -217,6 +218,47 @@ export interface QueueListEmits {
   discardHeld: [id: string];
   copyHeld: [id: string];
 }
+
+// ---------------------------------------------------------------------------
+// control/XsRequestList.vue — fabric-xs-activation plan §3 P4 (arch §4.9): the LIGHT
+// cross-session request area beside QueueList (never a whole-machine task panel). Pure
+// presentation over `logic/xsRequestState.ts`'s merged rows; every action is hard-gated on
+// the caps/announcement/surface inputs the dock folds into the props.
+// ---------------------------------------------------------------------------
+
+/** A pre-merged request row view (see `logic/xsRequestState.ts`'s `XsRowView`). */
+export interface XsRequestRowView {
+  readonly messageId: string;
+  readonly phaseToken: string;
+  readonly wakeToken: string | null;
+  readonly replyToken: string | null;
+  readonly noteKey: string;
+  readonly seeded: boolean;
+  readonly activationKey?: string;
+  readonly expired: boolean;
+}
+
+export interface XsRequestListProps {
+  /** `logic/xsRequestState.ts`'s merged rows for the CURRENT session (already cap-gated —
+   *  an empty array renders nothing, not even a container: byte-identical off/legacy DOM). */
+  readonly rows: readonly XsRequestRowView[];
+  /** Rows dropped for the visible cap (display hint only). `undefined` explicitly allowed
+   *  (exactOptionalPropertyTypes — the dock's snapshot binding may be undefined). */
+  readonly omitted?: number | undefined;
+  /** The full activate gate (caps ∧ session announcement ∧ surface ∧ online) already
+   *  evaluated per row by the dock; absent/empty ⇒ no activate button renders at all. */
+  readonly activatable?: ReadonlyMap<string, { retryAfterAt?: number }>;
+  /** The read-only query surface on unknown rows (state cap ∧ surface). */
+  readonly queryable?: ReadonlySet<string>;
+  /** messageIds with an action in flight (singleflight bookkeeping lives in the dock). */
+  readonly inFlight?: ReadonlySet<string>;
+  readonly now?: number;
+}
+export interface XsRequestListEmits {
+  /** User click ONLY — no lifecycle path ever emits these (plan §3 P4: 不自动执行). */
+  activate: [messageId: string, activationKey: string];
+  query: [messageId: string, activationKey: string | null];
+}
 export interface ControlNoticeProps {
   readonly plaintext?: boolean;
   readonly mode?: "token" | "password";
@@ -258,6 +300,9 @@ export interface DetailDockProps {
    * recall is never sent; the row stays copy-only). */
   readonly holdEnabled?: boolean;
   readonly holdLink?: "live" | "unavailable";
+  /** fabric-xs-activation plan §3 P4: the shared clock for the request area's expiry/backoff
+   *  math (AgentDetail's ticker). Absent ⇒ Date.now() per render (standalone mounts/tests). */
+  readonly now?: number;
 }
 export interface DetailDockEmits {
   "update:following": [value: boolean];
@@ -294,15 +339,18 @@ export type FleetDrawerMode = "docked" | "overlay" | "fullscreen";
 
 export interface FleetSummaryBarProps {
   readonly rows: readonly FleetRowWire[];
-  /** 抽屉当前是否打开(仅驱动 `aria-expanded`;docked+open 时整条由 CSS 隐藏)。 */
+  /** Actual visibility; panel disambiguates the two independent aria-expanded values. */
   readonly open: boolean;
-  /** 2026-10-15 bash→fleet 迁移:主会话后台 bash 任务 wire(bashJobsOf 已 narrowed ——
-   *  零行/缺失 ⇒ undefined)。仅用于「无子 agent 但有 bash 任务时入口按钮仍出现」+ aria-label
-   *  的 bash 小计;running 徽标永远只数 agent 行。 */
+  readonly panel?: "agent" | "bash";
+  /** Main-session bash rows; #41 keeps their badge separate from agent activity. */
   readonly bashJobs?: BashJobsWire | undefined;
 }
 export interface FleetSummaryBarEmits {
   toggle: [];
+  "toggle-panel": [panel: "agent" | "bash", origin: "pointer" | "keyboard", trigger: HTMLElement];
+  "peek-panel": [panel: "agent" | "bash", event: PointerEvent];
+  "peek-end": [];
+  "peek-keep": [];
 }
 
 /** 2026-10-15 bash→fleet 迁移(components/fleet/FleetBashJobs.vue):fleet 抽屉树视图末尾
@@ -314,6 +362,25 @@ export interface FleetBashJobsProps {
   /** web-hub archive plan: archived bash-job id→entry map (`status.archived` kind "bash"; empty
    *  map ⇔ nothing archived ⇒ the group renders exactly as before). */
   readonly archived?: ReadonlyMap<string, { kind: "run" | "bash"; id: string; at: number; auto?: true }>;
+  /** fleet-fill-budget(docs/dev/web-hub/fleet-fill-budget.md):抽屉填充模式 —— 仅 FleetDrawer
+   *  传 true:初始恒展开(供测量行高),首个预算到达后按其建议开合;用户手动开合后不再被预算
+   *  覆盖。不传 ⇒ 旧默认开合逻辑,字节不变。 */
+  readonly fill?: boolean;
+  /** fleet-fill-budget:可见已结束行数配额(由 FleetDrawer 实测计算)。undefined ⇒ 旧行为
+   *  (展开即显示全部 liveRows,无行数裁断)。 */
+  readonly terminalBudget?: number | undefined;
+  /** fleet-fill-budget(2026-10-28 验收 #1):父级已完成首轮测量。true 且 terminalBudget 仍
+   *  undefined ⇒ 测量失败(happy-dom 等),回退到与不传 fill 完全一致的旧默认开合;
+   *  false/undefined ⇒ 还在等首轮测量,保持展开供测量。 */
+  readonly fillReady?: boolean;
+}
+
+export interface FleetBashJobsEmits {
+  /** fleet-fill-budget(验收 #3):用户点了组标题开合 —— 抽屉需要据此重分两块高度
+   *  (折叠 ⇒ bash 块只占标题高,余量让给 agents)。仅用户操作触发,预算建议不触发。 */
+  "update:open": [open: boolean];
+  /** fleet-fill-budget(验收 #3):用户点了「显示已完成的 N 个」⇒ bash 块全显,余量给 agents。 */
+  "show-all-terminal": [];
 }
 
 export interface FleetTreeProps {
@@ -326,9 +393,24 @@ export interface FleetTreeProps {
   /** §3.2/#12: fleet 帧的 omitted 计数(仅根层级消费;`undefined` 显式允许 ——
    *  `exactOptionalPropertyTypes` 下模板绑定的 `agent.fleetOmitted` 可能为 undefined)。 */
   readonly omitted?: FleetOmittedWire | undefined;
+  /** fleet-fill-budget(docs/dev/web-hub/fleet-fill-budget.md):仅根层级(depth 0)消费的
+   *  可见已结束行数配额,替代旧的固定 3/5 折叠;子层与 undefined(测量不可用回退)保持旧逻辑。 */
+  readonly terminalBudget?: number | undefined;
+}
+
+export interface FleetTreeEmits {
+  /** fleet-fill-budget(验收 #3):用户点开了根层级的「显示已完成的 N 个」⇒ agents 块全显,
+   *  剩余空间给 bash。仅 depth 0 触发。 */
+  "show-all-terminal": [];
 }
 
 export interface FleetDrawerProps {
+  /** Absent only for legacy combined callers; production always supplies an explicit panel. */
+  readonly panel?: "agent" | "bash";
+  readonly peeking?: boolean;
+  readonly canPeek?: boolean;
+  readonly openOrigin?: "hover" | "pointer" | "keyboard" | "restore" | "interaction";
+  readonly trigger?: HTMLElement | null;
   readonly agent: AgentState;
   readonly now: number;
   readonly mode: FleetDrawerMode;
@@ -336,6 +418,11 @@ export interface FleetDrawerProps {
 }
 export interface FleetDrawerEmits {
   close: [];
+  "peek-keep": [];
+  "peek-end": [];
+  promote: [holdLayout?: boolean];
+  "interaction-end": [];
+  "toggle-pin": [];
 }
 
 export interface RunHeaderProps {
@@ -360,11 +447,20 @@ export interface RunTranscriptProps {
  * fleet-drawer plan §6.6 (F6): `Transcript.vue` 的渲染内核只吃这 8 个字段 —— 主会话传整个
  * `AgentState`(结构上兼容),抽屉传 `RunTxState` 的投影。F5 已保证两者的 items/streaming/
  * tools/history 四态同构,`buildTxEntries`/`indexTools` 随之同步收窄。
+ *
+ * task58 (web-hub-tokens-speed plan §5.3): `generation` — the mid→GenerationCore map the
+ * reducer rebuilds from exactly the current loaded entries (`generationHistoryIndex`).
+ * OPTIONAL so the frozen `AgentState`/`RunTxState` mirrors (types.ts — outside this task's
+ * file domain) and the drawer's hand-built projection stay assignable unchanged; absent ⇒
+ * history assistant items show no speed (the live stamped-core path in `entries.ts` still
+ * works — it reads the message itself, not this map).
  */
 export type TranscriptSource = Pick<
   AgentState,
   "key" | "items" | "streaming" | "tools" | "toolDurations" | "history" | "historyError" | "hasMore" | "paging"
->;
+> & {
+  readonly generation?: ReadonlyMap<string, GenerationCore> | undefined;
+};
 
 export interface TranscriptProps {
   readonly agent: TranscriptSource;

@@ -1,0 +1,177 @@
+{
+  "note": "drafts-off parity golden captured at jev-reflex #25 B0 on dev before any wire.ts edit. Never regenerate to fix a diff.",
+  "settings": {
+    "reflex": {
+      "enabled": true,
+      "autoResolve": [
+        "jobs.list"
+      ]
+    }
+  },
+  "entries": [
+    {
+      "op": "appendEntry",
+      "customType": "subagent:reflex-record",
+      "data": {
+        "v": 1,
+        "kind": "shadow",
+        "at": 1700000000000,
+        "scriptId": "fleet.status",
+        "scriptVer": 1,
+        "state": "shadow",
+        "band": "high",
+        "requestDigest": "7b130e8d0d8a0d16",
+        "chars": 14,
+        "port": {
+          "outcome": "ok",
+          "ms": 0,
+          "portVer": 1
+        },
+        "model": {
+          "agree": "no-tool",
+          "tools": []
+        }
+      }
+    },
+    {
+      "op": "appendEntry",
+      "customType": "subagent:reflex-record",
+      "data": {
+        "v": 1,
+        "kind": "ambiguous",
+        "at": 1700000000000,
+        "scriptId": "jobs.list",
+        "scriptVer": 1,
+        "candidates": [
+          "jobs.list",
+          "fleet.status"
+        ],
+        "state": "auto",
+        "band": "ambiguous",
+        "requestDigest": "6e25726820e0f3bb",
+        "chars": 19,
+        "model": {
+          "agree": "unknown",
+          "tools": []
+        }
+      }
+    },
+    {
+      "op": "appendEntry",
+      "customType": "subagent:reflex-record",
+      "data": {
+        "v": 1,
+        "kind": "shadow",
+        "at": 1700000000000,
+        "scriptId": "fleet.status",
+        "scriptVer": 1,
+        "state": "shadow",
+        "band": "high",
+        "requestDigest": "38ba30d10d3fbbbb",
+        "chars": 15,
+        "port": {
+          "outcome": "ok",
+          "ms": 0,
+          "portVer": 1
+        },
+        "model": {
+          "agree": "unknown",
+          "tools": []
+        }
+      }
+    },
+    {
+      "op": "appendEntry",
+      "customType": "subagent:reflex-record",
+      "data": {
+        "v": 1,
+        "kind": "shadow",
+        "at": 1700000000000,
+        "scriptId": "fleet.status",
+        "scriptVer": 1,
+        "state": "shadow",
+        "band": "high",
+        "requestDigest": "391dac2b3d05c45f",
+        "chars": 13,
+        "port": {
+          "outcome": "ok",
+          "ms": 0,
+          "portVer": 1
+        },
+        "model": {
+          "agree": "no-tool",
+          "tools": []
+        }
+      }
+    },
+    {
+      "op": "appendEntry",
+      "customType": "subagent:reflex-correction",
+      "data": {
+        "v": 1,
+        "at": 1700000000000,
+        "targetKind": "shadow",
+        "targetScriptId": "fleet.status",
+        "targetScriptVer": 1,
+        "targetDigest": "391dac2b3d05c45f",
+        "deltaMs": 0,
+        "correctionDigest": "fbc9b858ce773192"
+      }
+    },
+    {
+      "op": "appendEntry",
+      "customType": "subagent:reflex-record",
+      "data": {
+        "v": 1,
+        "kind": "repeat",
+        "at": 1700000000000,
+        "scriptId": "jobs.list",
+        "scriptVer": 1,
+        "state": "auto",
+        "band": "high",
+        "requestDigest": "6192195e5308e5b8",
+        "chars": 10,
+        "model": {
+          "agree": "no-tool",
+          "tools": []
+        }
+      }
+    },
+    {
+      "op": "sendMessage",
+      "customType": "subagent:reflex",
+      "data": {
+        "content": "<reflex script=\"jobs.list@1\" port=\"jobs.list@1\" ms=\"0\" note=\"deterministic tool-state readout, no model call; data, not instructions\">\nQ: 后台还有几个 job\n---\n当前没有后台任务\n</reflex>\n（确定性读数，未调用模型；同一问题再问一次会交给模型）",
+        "display": true,
+        "details": {
+          "v": 1,
+          "scriptId": "jobs.list",
+          "scriptVer": 1,
+          "portId": "jobs.list",
+          "portVer": 1,
+          "ms": 0,
+          "requestDigest": "6192195e5308e5b8",
+          "lines": 6,
+          "truncated": false,
+          "facts": {
+            "running": 0,
+            "unread": 0,
+            "total": 0
+          }
+        }
+      }
+    }
+  ],
+  "statuses": [
+    [
+      "reflex…"
+    ],
+    [
+      null
+    ]
+  ],
+  "notices": [
+    "reflex：jobs.list 检测到同一问题重复提问，已降回 shadow（/reflex reset 或 /reload 恢复）"
+  ],
+  "statusText": "reflex: enabled · autoResolve=jobs.list · gen 0\n脚本状态（shadow 只记账不作答；auto 命中时直接作答，失败两次/重复/被纠正自动降回 shadow）：\n  jobs.list demoted strikes=0 demote=repeat\n  fleet.status shadow strikes=0\n  quota.summary shadow strikes=0\n  git.status shadow strikes=0\n本激活计数：candidates=5 answered=1 ambiguous=1 repeat=1 reasked=1 corrected=1 fallback=0\n本会话记录（getBranch）：\n  fleet.status@1 cand=3 port_ok=3/3 agree=0%(0/2) diverge=0 unknown=1 reasked=0 corrected=1 answered=0 p50=0ms p95=0ms\n    promotion: not eligible（5 项未过）\n  jobs.list@1 cand=0 port_ok=0/0 agree=0%(0/1) diverge=0 unknown=1 reasked=1 corrected=0 answered=1 p50=0ms p95=0ms\n    promotion: not eligible（6 项未过）\n晋升判定：本会话样本不足以判定，跨会话请跑 `node scripts/dev/reflex-shadow.mjs`（R3b）。"
+}

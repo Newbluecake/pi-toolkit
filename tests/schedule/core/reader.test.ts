@@ -260,4 +260,27 @@ describe("session directory names / validation", () => {
       expect(validateStateFile(s).ok).toBe(false);
     }
   });
+
+  it("legacy approval fields: any extra key (incl. auto:true/false) is tolerated; absent is fine; malformed core fields still reject", () => {
+    const mk = (mut: (a: Record<string, unknown>) => void) => {
+      const f = emptyStateFile(SID);
+      f.tasks.push(approve(makeTask()));
+      const raw = structuredClone(f) as unknown as { tasks: Array<{ approval: Record<string, unknown> }> };
+      mut(raw.tasks[0]!.approval);
+      return validateStateFile(raw);
+    };
+    expect(mk(() => undefined).ok).toBe(true);
+    expect(mk((a) => (a.auto = true)).ok).toBe(true);
+    expect(mk((a) => (a.auto = false)).ok).toBe(true);
+    // R-A4: the reader has no unknown-key check (an old hub reads a new ledger, and vice versa)
+    expect(mk((a) => (a.futureField = "x")).ok).toBe(true);
+    // the HEAD validation of the legacy shape itself is unchanged
+    expect(mk((a) => (a.via = "carrier-pigeon")).ok).toBe(false);
+    expect(mk((a) => (a.by = "agent")).ok).toBe(false);
+    expect(mk((a) => (a.hash = 7)).ok).toBe(false);
+    expect(mk((a) => (a.at = -1)).ok).toBe(false);
+    const noApproval = emptyStateFile(SID);
+    noApproval.tasks.push(makeTask());
+    expect(validateStateFile(noApproval).ok).toBe(true);
+  });
 });

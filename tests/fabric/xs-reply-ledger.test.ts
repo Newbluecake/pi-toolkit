@@ -614,9 +614,9 @@ describe("xs reply ledger — process accessor and visibility", () => {
 });
 
 describe("xs reply modules stay pi-free (reply-plan §12.1 source-scan gate)", () => {
-  it("reply-ledger.ts and reply-notice.ts import no pi / peer modules", () => {
+  it("reply-ledger.ts, reply-notice.ts and ask-redirect.ts import no pi / peer modules", () => {
     const root = fileURLToPath(new URL("../../src/fabric/xs/", import.meta.url));
-    for (const name of ["reply-ledger.ts", "reply-notice.ts"]) {
+    for (const name of ["reply-ledger.ts", "reply-notice.ts", "ask-redirect.ts"]) {
       const source = readFileSync(`${root}${name}`, "utf8");
       const imports = [...source.matchAll(/from\s+"([^"]+)"/g)].map((match) => match[1]!);
       expect(imports.length).toBeGreaterThan(0);

@@ -1,0 +1,498 @@
+{
+  "blocks": [
+    {
+      "name": "bom.001.md",
+      "content": "---\nkind: block\nauthority: user\nscope: topic\nuntil: task complete\nstatus: active\nsection: BOM\nheading: BOM\ntags: +safety,-noise\nprivate: true\ncreated: 1970-01-01T00:00:00.000Z\nupdated: 1970-01-01T00:00:00.000Z\nversion: 1\n---\n\n- protected\n"
+    },
+    {
+      "name": "code.001.md",
+      "content": "---\nkind: block\nauthority: agent\nstatus: active\ncreated: 1970-01-01T00:00:00.000Z\nupdated: 1970-01-01T00:00:00.000Z\nversion: 1\n---\n\n```\nxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n```\n"
+    },
+    {
+      "name": "general.001.md",
+      "content": "---\nkind: block\nauthority: user\nscope: global\naudience: main\nexpires: 2030-01-01\nstatus: active\nsection: Main\nheading: Main › Safety\ntags: +safety\ncreated: 1970-01-01T00:00:00.000Z\nupdated: 1970-01-01T00:00:00.000Z\nversion: 1\n---\n\n- Always use exact paths\n"
+    },
+    {
+      "name": "general.002.md",
+      "content": "---\nkind: block\nauthority: agent\nstatus: active\nsection: Main\nheading: Main › Safety\ncreated: 1970-01-01T00:00:00.000Z\nupdated: 1970-01-01T00:00:00.000Z\nversion: 1\n---\n\n- Read docs\n"
+    },
+    {
+      "name": "general.003.md",
+      "content": "---\nkind: block\nauthority: user\nscope: topic\nstatus: active\nsection: Main\nheading: Main › Safety\ncreated: 1970-01-01T00:00:00.000Z\nupdated: 1970-01-01T00:00:00.000Z\nversion: 1\n---\n\n- docs/readme.md\n"
+    },
+    {
+      "name": "general.004.md",
+      "content": "---\nkind: block\nauthority: user\nscope: global\naudience: main\nstatus: active\nsection: Main\nheading: Main › Safety\ncreated: 1970-01-01T00:00:00.000Z\nupdated: 1970-01-01T00:00:00.000Z\nversion: 1\n---\n\n- Follow the comprehensive persistent rule in docs/readme.md and verify the result carefully before every delivery\n"
+    },
+    {
+      "name": "general.005.md",
+      "content": "---\nkind: block\nauthority: agent\nstatus: active\nsection: Code\nresidue: true\norigin: core.md#L13-L15\ncreated: 1970-01-01T00:00:00.000Z\nupdated: 1970-01-01T00:00:00.000Z\nversion: 1\n---\n\n```sh\nopaque\n```\n"
+    },
+    {
+      "name": "empty.001.md",
+      "content": "---\nkind: block\nauthority: user\nscope: topic\nstatus: active\ncreated: 1970-01-01T00:00:00.000Z\nupdated: 1970-01-01T00:00:00.000Z\nversion: 1\n---\n\n# Only heading\n"
+    },
+    {
+      "name": "feedback.001.md",
+      "content": "---\nkind: block\nauthority: user\nscope: topic\nstatus: active\ncreated: 1970-01-01T00:00:00.000Z\nupdated: 1970-01-01T00:00:00.000Z\nversion: 1\n---\n\n- Prefer tests\n"
+    },
+    {
+      "name": "feedback.002.md",
+      "content": "---\nkind: block\nauthority: user\nscope: topic\nstatus: active\ntitle: style decision\nwhen: choosing style\ncreated: 1970-01-01T00:00:00.000Z\nupdated: 1970-01-01T00:00:00.000Z\nversion: 1\n---\n\n- Prefer concise outputs\n"
+    },
+    {
+      "name": "hand.001.md",
+      "content": "---\nkind: block\nauthority: user\nscope: topic\nstatus: active\nsection: Topic\nheading: Topic\ncreated: 1970-01-01T00:00:00.000Z\nupdated: 1970-01-01T00:00:00.000Z\nversion: 1\n---\n\n- My decision\n"
+    },
+    {
+      "name": "hand.002.md",
+      "content": "---\nkind: block\nauthority: agent\nstatus: active\nsection: Topic\nheading: Topic\ncreated: 1970-01-01T00:00:00.000Z\nupdated: 1970-01-01T00:00:00.000Z\nversion: 1\n---\n\n- Learned lesson\n"
+    },
+    {
+      "name": "hand.003.md",
+      "content": "---\nkind: block\nauthority: agent\nstatus: active\nsection: Code\nresidue: true\norigin: hand.md#L7-L9\ncreated: 1970-01-01T00:00:00.000Z\nupdated: 1970-01-01T00:00:00.000Z\nversion: 1\n---\n\n```\nuncovered\n```\n"
+    },
+    {
+      "name": "general.006.md",
+      "content": "---\nkind: block\nauthority: user\nscope: topic\nstatus: active\ncreated: 1970-01-01T00:00:00.000Z\nupdated: 1970-01-01T00:00:00.000Z\nversion: 1\n---\n\n- A pinned decision\n"
+    },
+    {
+      "name": "plain.001.md",
+      "content": "---\nkind: block\nauthority: agent\nstatus: active\nsection: Paragraph\nheading: Paragraph\ncreated: 1970-01-01T00:00:00.000Z\nupdated: 1970-01-01T00:00:00.000Z\nversion: 1\n---\n\nlong ordinary paragraph with no list and no inline metadata\n"
+    },
+    {
+      "name": "project.001.md",
+      "content": "---\nkind: block\nauthority: agent\nstatus: active\ncreated: 1970-01-01T00:00:00.000Z\nupdated: 1970-01-01T00:00:00.000Z\nversion: 1\n---\n\n- Project state\n"
+    },
+    {
+      "name": "reference.001.md",
+      "content": "---\nkind: block\nauthority: agent\nstatus: active\ncreated: 1970-01-01T00:00:00.000Z\nupdated: 1970-01-01T00:00:00.000Z\nversion: 1\n---\n\n- Reference docs\n"
+    },
+    {
+      "name": "structured.001.md",
+      "content": "---\nkind: block\nauthority: agent\nstatus: active\nsection: Structures\nheading: Structures\ncreated: 1970-01-01T00:00:00.000Z\nupdated: 1970-01-01T00:00:00.000Z\nversion: 1\n---\n\n| a | b |\n|---|---|\n\n> quote\n\n<div>html</div>\n"
+    },
+    {
+      "name": "notes.001.md",
+      "content": "---\nkind: block\nauthority: agent\nstatus: active\ncreated: 2026-11-05\nupdated: 2026-11-05\nversion: 1\n---\n\n- First topic fact\n"
+    },
+    {
+      "name": "notes.002.md",
+      "content": "---\nkind: block\nauthority: agent\nstatus: active\ncreated: 1970-01-01T00:00:00.000Z\nupdated: 1970-01-01T00:00:00.000Z\nversion: 1\n---\n\n- Second topic fact\n"
+    },
+    {
+      "name": "uniform.001.md",
+      "content": "---\nkind: block\nauthority: user\nscope: topic\nstatus: active\ntags: +safety\nprivate: true\ncreated: 1970-01-01T00:00:00.000Z\nupdated: 1970-01-01T00:00:00.000Z\nversion: 1\n---\n\n- first\n- second\n## Code\n```\nopaque\n```\n"
+    },
+    {
+      "name": "user.001.md",
+      "content": "---\nkind: block\nauthority: user\nscope: topic\nstatus: active\ncreated: 1970-01-01T00:00:00.000Z\nupdated: 1970-01-01T00:00:00.000Z\nversion: 1\n---\n\n- User choice\n"
+    },
+    {
+      "name": "zero.001.md",
+      "content": "---\nkind: block\nauthority: user\nscope: topic\nstatus: active\ncreated: 1970-01-01T00:00:00.000Z\nupdated: 1970-01-01T00:00:00.000Z\nversion: 1\n---\n\n# Empty headings\n```\nonly code\n```\n"
+    }
+  ],
+  "sidecar": {
+    "v": 1,
+    "entries": {},
+    "review": {
+      "lastRunAt": "",
+      "corpusFp": "",
+      "suggestions": [
+        {
+          "id": "migrate-code.001-oversize",
+          "kind": "oversize",
+          "a": {
+            "hash": "f65b93668c11",
+            "anchor": "code.001"
+          },
+          "p": 1,
+          "at": "1970-01-01T00:00:00.000Z"
+        },
+        {
+          "id": "migrate-general.004-pointer",
+          "kind": "pointer",
+          "a": {
+            "hash": "85428dd104df",
+            "anchor": "general.004"
+          },
+          "p": 1,
+          "at": "1970-01-01T00:00:00.000Z"
+        },
+        {
+          "id": "migrate-general.006-scope-check",
+          "kind": "scope-check",
+          "a": {
+            "hash": "fe920b2b8189",
+            "anchor": "general.006"
+          },
+          "p": 1,
+          "at": "1970-01-01T00:00:00.000Z"
+        }
+      ],
+      "dismissed": []
+    }
+  },
+  "whole": [
+    "code.md",
+    "empty.md",
+    "uniform.md",
+    "zero.md"
+  ],
+  "report": {
+    "files": [
+      {
+        "name": "bom.md",
+        "sha256": "6a2ea3005291aa8edbd7a040e3b9878bcb63c59790b88721d1fb1af084edf385",
+        "size": 127,
+        "mtimeMs": 0,
+        "frontmatter": {
+          "source": "agent"
+        },
+        "h1": [],
+        "blocks": [
+          "bom.001"
+        ],
+        "whole": false,
+        "mixedAuthority": true
+      },
+      {
+        "name": "code.md",
+        "sha256": "5ff2e236250c588d9d06a8d5cc185d6a0986b83a0e3678a3c5cd06c26c075a3a",
+        "size": 1131,
+        "mtimeMs": 0,
+        "frontmatter": {
+          "source": "agent"
+        },
+        "h1": [],
+        "blocks": [
+          "code.001"
+        ],
+        "whole": true,
+        "mixedAuthority": false
+      },
+      {
+        "name": "core.md",
+        "sha256": "bc193fc21f66de7fc6da4ba2c87c44c0aabeacb9a919fbfa64df1893809e3e78",
+        "size": 350,
+        "mtimeMs": 0,
+        "frontmatter": {
+          "source": "agent"
+        },
+        "h1": [
+          "# Rules"
+        ],
+        "blocks": [
+          "general.001",
+          "general.002",
+          "general.003",
+          "general.004",
+          "general.005"
+        ],
+        "whole": false,
+        "mixedAuthority": true
+      },
+      {
+        "name": "empty.md",
+        "sha256": "c0a7acc36a6561bbbde5e0237c927425189f9e6d01326020a8d87288e0d075e9",
+        "size": 15,
+        "mtimeMs": 0,
+        "frontmatter": {},
+        "h1": [
+          "# Only heading"
+        ],
+        "blocks": [
+          "empty.001"
+        ],
+        "whole": true,
+        "mixedAuthority": false
+      },
+      {
+        "name": "feedback_more.md",
+        "sha256": "6f45951eee569e2dcdcf3cc362e0ac336af70880d8bf23be453713e0e11baf9b",
+        "size": 15,
+        "mtimeMs": 0,
+        "frontmatter": {},
+        "h1": [],
+        "blocks": [
+          "feedback.001"
+        ],
+        "whole": false,
+        "mixedAuthority": false
+      },
+      {
+        "name": "feedback_style.md",
+        "sha256": "7ee24f78236a2a1b2309b4fa8e0476b27069d23f29d2c355abc901f602acd335",
+        "size": 87,
+        "mtimeMs": 0,
+        "frontmatter": {
+          "description": "style decision",
+          "read_when": "choosing style"
+        },
+        "h1": [],
+        "blocks": [
+          "feedback.002"
+        ],
+        "whole": false,
+        "mixedAuthority": false
+      },
+      {
+        "name": "hand.md",
+        "sha256": "92f44b2490f44927bd645b9924de68f0a43991fcb6d6caa12eb980d175eade08",
+        "size": 112,
+        "mtimeMs": 0,
+        "frontmatter": {},
+        "h1": [
+          "# Hand"
+        ],
+        "blocks": [
+          "hand.001",
+          "hand.002",
+          "hand.003"
+        ],
+        "whole": false,
+        "mixedAuthority": true
+      },
+      {
+        "name": "MEMORY.md",
+        "sha256": "7cd88a32ecd6ea9f149ca709d3706495c1b92cf5679e26b543fbecc772ae154d",
+        "size": 25,
+        "mtimeMs": 0,
+        "frontmatter": {},
+        "h1": [
+          "# Manual CC index"
+        ],
+        "blocks": [],
+        "whole": false,
+        "mixedAuthority": false,
+        "retained": true
+      },
+      {
+        "name": "pin.md",
+        "sha256": "ac1c94c0be7e2bdac0a3a888f7bba69fd847af8818a4b2bb9c56c8dc13fd66a3",
+        "size": 38,
+        "mtimeMs": 0,
+        "frontmatter": {
+          "pin": "true"
+        },
+        "h1": [],
+        "blocks": [
+          "general.006"
+        ],
+        "whole": false,
+        "mixedAuthority": false
+      },
+      {
+        "name": "plain.md",
+        "sha256": "a123beaa2df486fa9d2fb4aa41cb7e99b54ae8fef1f6a1fc5d7deadbf7893db4",
+        "size": 95,
+        "mtimeMs": 0,
+        "frontmatter": {
+          "source": "agent"
+        },
+        "h1": [],
+        "blocks": [
+          "plain.001"
+        ],
+        "whole": false,
+        "mixedAuthority": false
+      },
+      {
+        "name": "project_state.md",
+        "sha256": "9efd187514ecc218633fd3191a48174a573cfc77461c4631e1af998203d600ba",
+        "size": 16,
+        "mtimeMs": 0,
+        "frontmatter": {},
+        "h1": [],
+        "blocks": [
+          "project.001"
+        ],
+        "whole": false,
+        "mixedAuthority": false
+      },
+      {
+        "name": "reference_docs.md",
+        "sha256": "9ce50c4ec80ceda7e86cd7cd5b11b8975167bc0eabdca1cc11e5c04e8a85d6fe",
+        "size": 17,
+        "mtimeMs": 0,
+        "frontmatter": {},
+        "h1": [],
+        "blocks": [
+          "reference.001"
+        ],
+        "whole": false,
+        "mixedAuthority": false
+      },
+      {
+        "name": "structured.md",
+        "sha256": "616a15c793c4490c8eb0b61f320b8759a00449eaeb1122d8f5550e68622150a1",
+        "size": 82,
+        "mtimeMs": 0,
+        "frontmatter": {
+          "source": "agent"
+        },
+        "h1": [],
+        "blocks": [
+          "structured.001"
+        ],
+        "whole": false,
+        "mixedAuthority": false
+      },
+      {
+        "name": "topic_a.md",
+        "sha256": "1707314ad59ebbfcbbbf575b4572584945d39d0fd931c0c15dc13b25d457e3ef",
+        "size": 74,
+        "mtimeMs": 0,
+        "frontmatter": {
+          "source": "agent",
+          "topic": "notes",
+          "updated": "2026-11-05"
+        },
+        "h1": [],
+        "blocks": [
+          "notes.001"
+        ],
+        "whole": false,
+        "mixedAuthority": false
+      },
+      {
+        "name": "topic_b.md",
+        "sha256": "0c700dce6cee734dd803d9c38dca07370d5345baca98c7a7a522a3b921e3c979",
+        "size": 55,
+        "mtimeMs": 0,
+        "frontmatter": {
+          "source": "agent",
+          "topic": "notes"
+        },
+        "h1": [],
+        "blocks": [
+          "notes.002"
+        ],
+        "whole": false,
+        "mixedAuthority": false
+      },
+      {
+        "name": "uniform.md",
+        "sha256": "1acc78dce26bbfced7a877a0a944e7fb6f34fd4be0e67c0a7c82bef49f09b57a",
+        "size": 148,
+        "mtimeMs": 0,
+        "frontmatter": {},
+        "h1": [],
+        "blocks": [
+          "uniform.001"
+        ],
+        "whole": true,
+        "mixedAuthority": false
+      },
+      {
+        "name": "user_pref.md",
+        "sha256": "3b534f9ddda3311fc68cccbd809dbfac6b37e185b06839fff7e5e8081a13a3cd",
+        "size": 14,
+        "mtimeMs": 0,
+        "frontmatter": {},
+        "h1": [],
+        "blocks": [
+          "user.001"
+        ],
+        "whole": false,
+        "mixedAuthority": false
+      },
+      {
+        "name": "zero.md",
+        "sha256": "4178b65c1bca86772ae421ebd738cb5c4604a3f61153e1bf5fcd2825984ea2eb",
+        "size": 35,
+        "mtimeMs": 0,
+        "frontmatter": {},
+        "h1": [
+          "# Empty headings"
+        ],
+        "blocks": [
+          "zero.001"
+        ],
+        "whole": true,
+        "mixedAuthority": false
+      }
+    ],
+    "global": [
+      "general.001",
+      "general.004"
+    ],
+    "pointers": [
+      "general.003",
+      "general.004"
+    ],
+    "oversize": [
+      "code.001"
+    ],
+    "audience": [
+      "general.001",
+      "general.004"
+    ],
+    "merged": [
+      {
+        "topic": "general",
+        "files": [
+          "core.md",
+          "pin.md"
+        ]
+      },
+      {
+        "topic": "feedback",
+        "files": [
+          "feedback_more.md",
+          "feedback_style.md"
+        ]
+      },
+      {
+        "topic": "notes",
+        "files": [
+          "topic_a.md",
+          "topic_b.md"
+        ]
+      }
+    ],
+    "inlineErrors": [],
+    "residue": [
+      {
+        "id": "general.005",
+        "origin": "core.md#L13-L15",
+        "bytes": 16,
+        "preview": "```sh\nopaque\n```"
+      },
+      {
+        "id": "hand.003",
+        "origin": "hand.md#L7-L9",
+        "bytes": 17,
+        "preview": "```\nuncovered\n```"
+      }
+    ],
+    "wholeInline": [
+      {
+        "file": "uniform.md",
+        "line": 1,
+        "meta": {
+          "present": true,
+          "authority": "user",
+          "expires": "2030-01-01",
+          "tagsAdd": [
+            "safety"
+          ],
+          "isPrivate": true
+        }
+      },
+      {
+        "file": "uniform.md",
+        "line": 2,
+        "meta": {
+          "present": true,
+          "authority": "user",
+          "expires": "2031-01-01",
+          "tagsAdd": [
+            "safety"
+          ]
+        }
+      }
+    ]
+  }
+}

@@ -28,12 +28,17 @@
 #                   checks (run them with a real release or by hand).
 #   --changelog     Only sync the version fields and generate/merge the
 #                   CHANGELOG.md section; does not commit/tag/push/publish.
-#   --skip-tests    Skip the pre-release check suite (format/typecheck/test/
-#                   build/build:web). Emergency use only — normal releases
-#                   must not use this.
+#   --skip-tests    Skip the pre-release check suite (format/typecheck/
+#                   test:tier1/test:tier2/build/build:web). Emergency use only —
+#                   normal releases must not use this.
 #   --skip-push     Commit + tag locally but do not push, package or publish.
 #   --skip-publish  Push <branch> + tag but skip scripts/release/package.sh and
 #                   `gh release create`.
+#   --skip-hub-restart
+#                   Do not restart the local web-hub after a successful publish
+#                   (default: step 9 asks the hub running on this machine to
+#                   restart, WARN-only on any failure — see
+#                   scripts/release/hub-restart-step.sh).
 #
 # What it does:
 #   1. Preflight — bump kind (patch/minor/major, version vs latest tag)
@@ -54,7 +59,8 @@
 #      refs at the bottom of the file.
 #   5. (--changelog stops here.)
 #   6. Runs the pre-release check suite: format:check, typecheck, build,
-#      build:web + check:web, then test (the dist test needs the bumped dist). Build steps are run with
+#      build:web + check:web, then test:tier1 -> test:tier2 (the dist test
+#      needs the bumped dist; test-speed plan D6). Build steps are run with
 #      NODE_ENV=production pinned (mirrors package.sh — vitest sets
 #      NODE_ENV=test, which changes the Vue SFC compiler's output and would
 #      make the UI bundle miss its own gzip budget).
@@ -66,7 +72,9 @@
 #      minor/major on master it prints a reminder to sync dev (never pushes
 #      dev itself).
 #   9. Runs scripts/release/package.sh <version> and `gh release create`
-#      (unless --skip-push or --skip-publish).
+#      (unless --skip-push or --skip-publish), then — unless --skip-hub-restart —
+#      asks the local web-hub to restart (best-effort: no hub / stopped hub ⇒
+#      INFO and skip; any failure ⇒ WARN; the release is never failed by it).
 #
 # Version bump rule (computed, printed, never auto-applied):
 #   - BREAKING CHANGE (subject `!:` or a `BREAKING CHANGE:` footer anywhere
@@ -98,6 +106,7 @@ CHANGELOG_ONLY=0
 SKIP_TESTS=0
 SKIP_PUSH=0
 SKIP_PUBLISH=0
+SKIP_HUB_RESTART=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -106,6 +115,7 @@ while [[ $# -gt 0 ]]; do
     --skip-tests)   SKIP_TESTS=1 ;;
     --skip-push)    SKIP_PUSH=1 ;;
     --skip-publish) SKIP_PUBLISH=1 ;;
+    --skip-hub-restart) SKIP_HUB_RESTART=1 ;;
     -h|--help)
       grep -E '^# ?' "$0" | sed 's/^# \{0,1\}//' | sed -n '1,70p'
       exit 0
@@ -535,16 +545,36 @@ if [[ $SKIP_TESTS -eq 0 ]]; then
   [[ $DRY_RUN -eq 0 ]] && npm run format:check
   info "  -> npm run typecheck"
   [[ $DRY_RUN -eq 0 ]] && npm run typecheck
-  # Build BEFORE npm test: step 3 already bumped package.json, and the dist integration test
+  # Build BEFORE the test suites: step 3 already bumped package.json, and the dist integration test
   # (tests/integration/web-hub-ui-dist.test.ts) rejects a dist/web-hub-ui built for the old version.
   info "  -> npm run build (NODE_ENV=production)"
   [[ $DRY_RUN -eq 0 ]] && NODE_ENV=production npm run build
   info "  -> npm run build:web (NODE_ENV=production) && npm run check:web"
   [[ $DRY_RUN -eq 0 ]] && { NODE_ENV=production npm run build:web && npm run check:web; }
-  info "  -> npm test (PI_TOOLKIT_TEST_WORKERS=${PI_TOOLKIT_TEST_WORKERS:-4})"
   # Release preflight favors determinism over speed: the release box usually has other agents
   # running, and load-sensitive tests flake at the default 8 workers. Override via the env var.
-  [[ $DRY_RUN -eq 0 ]] && PI_TOOLKIT_TEST_WORKERS="${PI_TOOLKIT_TEST_WORKERS:-4}" npm test
+  # env -u: a release must be judged by the real secure preflight, never by an inherited
+  # PI_TOOLKIT_SECURE_PREFLIGHT(_FAKE) override from the caller's environment.
+  info "  -> npm run test:tier1 (PI_TOOLKIT_TEST_WORKERS=${PI_TOOLKIT_TEST_WORKERS:-4})"
+  if [[ $DRY_RUN -eq 0 ]] && ! env -u PI_TOOLKIT_SECURE_PREFLIGHT -u PI_TOOLKIT_SECURE_PREFLIGHT_FAKE \
+      PI_TOOLKIT_TEST_WORKERS="${PI_TOOLKIT_TEST_WORKERS:-4}" npm run test:tier1; then
+    err "test:tier1 failed — release aborted before commit/tag (no tag was created)."
+    err "Triage: a Tier 1 red is a real bug, unless the failing file is declared kind:\"timing\" in"
+    err "tests/tiers.ts — those files are triaged like Tier 2 (rerun the file alone: green = flake,"
+    err "still red = bug). Either way fix or confirm the flake first, then re-run the release;"
+    err "triage never lets a red release through. See AGENTS.md 'Test tiers and flake triage'."
+    exit 1
+  fi
+  info "  -> npm run test:tier2 (PI_TOOLKIT_TEST_WORKERS=${PI_TOOLKIT_TEST_WORKERS:-4})"
+  if [[ $DRY_RUN -eq 0 ]] && ! env -u PI_TOOLKIT_SECURE_PREFLIGHT -u PI_TOOLKIT_SECURE_PREFLIGHT_FAKE \
+      PI_TOOLKIT_TEST_WORKERS="${PI_TOOLKIT_TEST_WORKERS:-4}" npm run test:tier2; then
+    err "test:tier2 failed — release aborted before commit/tag (no tag was created)."
+    err "Triage (AGENTS.md 'Test tiers and flake triage'): rerun the failing file(s) alone — green ="
+    err "flake (close it, re-run the release); still red = real bug. A [secure-preflight] failure is"
+    err "an environment problem, never a flake: unmount your own vaults first (pi-secure lock <name>,"
+    err "or fusermount3 -u <mount> — see the preflight output), fix the machine, then re-run."
+    exit 1
+  fi
   ok "Pre-release checks passed"
 else
   warn "[5/9] Skipping pre-release checks (--skip-tests — emergency use only)"
@@ -644,5 +674,13 @@ else
       || die "gh release create failed (branch + tag pushed, assets built in release/). Resume with:
     gh release create $TAG release/pi-toolkit-${VERSION}.zip release/pi-toolkit-${VERSION}.zip.sha256 release/pi-toolkit-web-ui-${VERSION}.zip release/pi-toolkit-web-ui-${VERSION}.zip.sha256 --title $TAG --notes-file release/CHANGELOG-${VERSION}.md"
     ok "✅ Released $TAG"
+
+    # ─── Step 9b: restart the local web-hub (best-effort, never fails the release) ───
+    if [[ $SKIP_HUB_RESTART -eq 1 ]]; then
+      info "Skipping local web-hub restart (--skip-hub-restart)"
+    else
+      bash "$PROJECT_ROOT/scripts/release/hub-restart-step.sh" \
+        || warn "hub restart step failed — restart the hub by hand with /webhub restart"
+    fi
   fi
 fi

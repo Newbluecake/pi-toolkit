@@ -12,7 +12,7 @@ const detail = {
   notConnectedBody: "它可能已退出，或链接已过期。",
   sessionDetailsAria: "会话详情",
   // 2026-10 「红框部分支持收起，点击标题展开」：标题行的展开/收起开关（aria-label，展开+收起
-  // 合一描述，同 todoToggleAria 语法；状态由 aria-expanded 承载）。
+  // 合一描述，同 tasksToggleAria 语法；状态由 aria-expanded 承载）。
   headToggleAria: "展开/收起会话信息",
   kvCwd: "cwd",
   kvSession: "会话",
@@ -73,8 +73,6 @@ const detail = {
   bashJobsTailAge: "tail {n}s old",
   bashJobsUnavailable: "unavailable",
   bashJobsMore: "(+{n} more)",
-  todoTitle: "任务 {total} · {done} 已完成 · {active} 进行中",
-  todoToggleAria: "展开或收起任务列表",
   todoStatusPending: "待办",
   todoStatusInProgress: "进行中",
   todoStatusCompleted: "已完成",
@@ -84,7 +82,7 @@ const detail = {
   removedBody: "会话文件仍保留，可在终端用 pi 恢复。",
   loadingTitle: "正在连接…",
   loadingBody: "正在等待 hub 的首个快照。",
-  // todo-archive plan v2.1 §2（包 B，D4/D5）：TodoPanel 折叠尾行。zh 按散文翻译（D4 拍板：web 走
+  // todo-archive plan v2.1 §2（包 B，D4/D5）：todo 分区折叠尾行。zh 按散文翻译（D4 拍板：web 走
   // i18n，不同于 TUI 折叠行的英文 token）。追加在文件末尾——其它包插在 `todoCompletedHidden`
   // 之前，永不动这里。
   todoCompletedHidden: "已完成 {n} 项",
@@ -104,6 +102,43 @@ const detail = {
   scheduleOpenLabel: "定时",
   // issue #41（顶栏窄屏溢出）：接收折入按钮的「⋯」菜单——触发器与菜单的 aria-label。
   moreActions: "更多操作",
+  // 2026-10-28: the cards' corner × moved here — ⋯ menu entry + in-bar ✓/✕ confirm pill.
+  deleteSessionLabel: "删除会话",
+  deleteSessionGroupAria: "确认删除会话",
+  deleteSessionConfirmAria: "立即删除会话",
+  // omitted-orphan 修复（2026-10-27）：fleet bash 分组——wire 行全部归档且 omitted>0 时，
+  // 「(+N more)」改为此说明文案，放在归档折叠旁。
+  bashJobsOlderOmitted: "另有 {n} 条更早的已结束任务未传到网页（无法查看或归档）",
+  // 2026-10-28 用户需求：「(+N more)」变成可操作的归档按钮——把 wire 装不下的已完成任务一次性
+  // 归档（id 集合由 agent 侧重算，一次批量提交）。
+  bashJobsArchiveOmitted: "归档 {n} 条更早的已完成任务",
+  // 2026-10-28: running rows pushed out of the wire by the 20-row cap / byte budget (not archivable).
+  bashJobsRunningOverflow: "另有 {n} 条运行中的任务未显示",
+  // Composer 任务按钮（2026-11 用户需求 + schedule-auto-approve r2 W3）：输入框底行常驻的聚合
+  // 按钮 + 只读面板（Composer.vue，styles/composer-todo.css）。状态/阻塞文案复用上方
+  // todoStatus*/todoBlockedBy；定时分区标题复用 tasksSchedSec。
+  composerTasksAria: "查看任务",
+  composerTasksTitle: "任务",
+  composerSchedReadonly: "定时任务在此只读——暂停或删除请到详情面板操作。",
+  composerTodoDone: "已完成 {n} 项",
+  composerTodoMore: "（+{n} 更多）",
+  // schedule-auto-approve r2 W2：聚合 TasksPanel（详情头部——待办分区 + 定时任务分区，
+  // 一条合并 summary）。紧凑行内标记（⏰ 计数、running/paused chip、run 状态 token）两种
+  // 语言均用英文 token（UI 文本规则）；其余为 prose 可中文。
+  tasksToggleAria: "展开/收起任务面板",
+  tasksSummary: "任务 {done}/{total} · {active} 进行中",
+  tasksTodoSec: "待办 {n}",
+  tasksSchedSec: "定时任务 {n}",
+  tasksFoot: "详情 »",
+  tasksSchedUnreadable: "任务数据不可读（{reason}）——请到终端执行 /schedule repair。",
+  tasksActionFailed: "操作失败：{reason}",
+  schedPause: "暂停",
+  schedPauseAria: "暂停定时任务 {name}",
+  schedResume: "继续",
+  schedResumeAria: "继续定时任务 {name}",
+  schedRemove: "删除",
+  schedRemoveAria: "删除定时任务 {name}",
+  schedOpenDetailAria: "打开定时任务 {name}",
 } satisfies Messages<typeof en>;
 
 export default detail;

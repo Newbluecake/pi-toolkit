@@ -410,6 +410,53 @@ describe("bash job store directory sweep", () => {
     expect(await readdir(store.dir)).toEqual([]);
   });
 
+  it("removes the job's exit file (and its tmp twin) along with the record and log", async () => {
+    // Issue #73: `<jobId>.exit` / `<jobId>.exit.tmp` are the wrapper's, but they
+    // are the job's artefacts — a leftover would resurface under a reused id.
+    const { store } = await harness();
+    const base = record("b_EX1TF1LE", store);
+    await store.save(base);
+    await writeFile(store.logPath("b_EX1TF1LE"), "out\n", "utf8");
+    await writeFile(store.exitPath("b_EX1TF1LE"), "7\n", "utf8");
+    await writeFile(`${store.exitPath("b_EX1TF1LE")}.tmp`, "7", "utf8");
+
+    await store.remove("b_EX1TF1LE");
+    expect(await readdir(store.dir)).toEqual([]);
+    // Idempotent: a second remove of a fully gone job stays quiet.
+    await store.remove("b_EX1TF1LE");
+  });
+
+  it("sweeps an aged orphan .exit and its .exit.tmp debris, but keeps a tracked one", async () => {
+    const { store, clock } = await sweepHarness();
+    await writeFile(join(store.dir, "b_0RPHAN11.exit"), "0\n", "utf8");
+    await writeFile(join(store.dir, "b_TR4CKED1.exit"), "0\n", "utf8");
+    await writeFile(join(store.dir, "b_0RPHAN11.exit.tmp"), "0", "utf8");
+    clock.advance(60_000);
+
+    const result = await store.pruneExpired({ isTracked: (id) => id === "b_TR4CKED1" });
+    // The orphan `.exit` goes at the normal retention; the `.exit.tmp` is a
+    // crashed atomic write and uses the fixed 1h TTL, so it survives this pass.
+    expect(result.files).toEqual(["b_0RPHAN11.exit"]);
+    expect((await readdir(store.dir)).sort()).toEqual(["b_0RPHAN11.exit.tmp", "b_TR4CKED1.exit"]);
+
+    clock.advance(TMP_RETENTION_MS);
+    expect((await store.pruneExpired({ isTracked: (id) => id === "b_TR4CKED1" })).files).toEqual([
+      "b_0RPHAN11.exit.tmp",
+    ]);
+    expect(await readdir(store.dir)).toEqual(["b_TR4CKED1.exit"]);
+  });
+
+  it("keeps an exit file whose record is still present (live job, not litter)", async () => {
+    const { store, clock } = await sweepHarness(86_400_000);
+    const running = transitionJob(record("b_R4NN0NG1", store, 0), "running", { at: 1, pid: 4242, pgid: 4242 });
+    if (!running.ok) throw new Error(running.reason);
+    await store.save(running.record);
+    await writeFile(store.exitPath("b_R4NN0NG1"), "0\n", "utf8");
+    clock.advance(10 * 86_400_000);
+    expect((await store.pruneExpired()).files).toEqual([]);
+    expect((await readdir(store.dir)).sort()).toEqual(["b_R4NN0NG1.exit", "b_R4NN0NG1.json"]);
+  });
+
   it("deletes nothing when the clock sits behind the files' mtime", async () => {
     // Default harness clock = 1_000ms since the epoch; every real mtime is in
     // its future, so no age is computable and the sweep must be a no-op.

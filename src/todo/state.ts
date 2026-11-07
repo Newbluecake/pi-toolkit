@@ -1,6 +1,12 @@
 // Ported from pi-claude-todo (MIT, author is this repository's user) — src/state.ts.
 // Strict-mode adaptations per docs/dev/plugin-merge/merge-plan.md D4.2; replayState
 // moved here from the source's index.ts and made a pure function (revision S6).
+// todo-archive-split #92: persistence is now two-tier — live tasks keep flowing through the
+// STATE_ENTRY snapshot while ARCHIVED tasks persist as incremental ARCHIVE_ENTRY packages;
+// replayTodo/replayState fold + merge them back (details in docs/dev/todo-archive-split/plan.md
+// and docs/dev/todo-archive/plan.md §9 D10–D15). Invariant to keep: cross-storage dependency
+// edges are authoritative on the ARCHIVE side — the live snapshot strips them on write (D13).
+// The in-memory model is unchanged: state still contains archived tasks.
 
 export type TaskStatus = "pending" | "in_progress" | "completed";
 
@@ -48,6 +54,42 @@ export interface TaskInput {
  * verbatim from the standalone plugin so existing session data keeps loading).
  */
 export const STATE_ENTRY = "claude-code-todo-state";
+
+/**
+ * Persistence customType for ARCHIVED-task incremental packages (todo-archive-split #92, D10).
+ * Same `claude-code-todo-*` family namespace as STATE_ENTRY — it belongs to the todo plugin's
+ * data namespace, not `subagent:*`. The live snapshot stays in STATE_ENTRY (string frozen by
+ * I7/D3); this entry only ever carries `{v:1, reset?, put?, drop?}` archive deltas.
+ *
+ * Forward compatibility rule: a v1 reader IGNORES any package whose `v !== 1` (sanitize is
+ * fail-closed on the whole package). Therefore a future v2 bump must be safe to be ignored by
+ * v1 readers — otherwise introduce a NEW customType instead of bumping `v` here.
+ */
+export const ARCHIVE_ENTRY = "claude-code-todo-archive";
+
+/**
+ * Hard cap on the archived set (todo-archive-split #92, D14 / OD2): same order of magnitude as
+ * src/archive's ARCHIVE_ENTRIES_CAP. Bounds the in-memory state, the replay fold size and the
+ * TaskList includeCompleted / TUI showAll output — NOT the file growth (that is what the
+ * incremental form solves). Deliberately a constant, not a setting: a new settings key would
+ * grow the I9 surface for no user-facing value. Eviction happens ONLY in sweep (§6).
+ */
+export const TODO_ARCHIVE_CAP = 256;
+
+/**
+ * v1 payload of an ARCHIVE_ENTRY (todo-archive-split §2.1). One package applies its fields in
+ * the fixed order `reset → put → drop`; packages apply in branch order. The writer guarantees
+ * a single package never puts AND drops the same id.
+ */
+export interface TodoArchiveEntryV1 {
+  v: 1;
+  /** Fold starts by clearing the whole archived set (`/tasklist clear`). */
+  reset?: true;
+  /** Upsert: whole tasks (full copies, not tombstones). */
+  put?: Task[];
+  /** Remove these ids from the archived set. */
+  drop?: number[];
+}
 
 /** Structural view of the session-branch entries replayState scans. */
 export type BranchEntry = {
@@ -143,6 +185,34 @@ export function archiveCompleted(state: TodoState, ids: number[] | "all", now: n
  *  mark, so ids are never reused within a branch/session even after a clear. */
 export function clearTasks(state: TodoState): TodoState {
   return { tasks: [], nextId: state.nextId };
+}
+
+/**
+ * Hard-cap eviction for the archived set (todo-archive-split §6, D14 / OD2). Pure function:
+ * returns the SAME reference while the archived count is ≤ cap. When over, the oldest tasks by
+ * `(archivedAt asc, id asc)` are PERMANENTLY deleted with deleteTask semantics — their ids are
+ * pruned from every remaining task's blocks/blockedBy (a pruned neighbor therefore differs and
+ * produces a put in the same sweep package as the eviction drop, §4.3 #9). Evicted tasks are
+ * completed, so no blocking computation ever changes. The ONLY execution point is sweep
+ * (restore never evicts — it does not write; edits never evict — no "deleted right after an
+ * edit"). Note eviction is branch-local: navigateTree back past the eviction point resurrects
+ * the tasks (natural fold semantics — the session file is the truth; review Nit #6).
+ */
+export function evictArchived(state: TodoState, cap: number): TodoState {
+  const archived = state.tasks.filter(isArchived);
+  if (archived.length <= cap) return state;
+  const excess = archived.length - cap;
+  const oldest = [...archived]
+    .sort((a, b) => (a.archivedAt ?? 0) - (b.archivedAt ?? 0) || a.id - b.id)
+    .slice(0, excess);
+  const evictIds = new Set(oldest.map((task) => task.id));
+  const next = cloneState(state);
+  next.tasks = next.tasks.filter((task) => !evictIds.has(task.id));
+  for (const task of next.tasks) {
+    task.blocks = task.blocks.filter((id) => !evictIds.has(id));
+    task.blockedBy = task.blockedBy.filter((id) => !evictIds.has(id));
+  }
+  return next;
 }
 
 export function cloneState(state: TodoState): TodoState {
@@ -307,51 +377,84 @@ export function orderTasks(tasks: readonly Task[]): Task[] {
   return [...open, ...completed, ...archived];
 }
 
-export function restoreState(value: unknown): TodoState | undefined {
+/**
+ * Per-task whitelist rebuild (todo-archive-split §4.1), extracted verbatim from restoreState's
+ * loop body. Doubles as the canonical serialization form `canonicalTask`: fixed field order +
+ * id dedup, so JSON.stringify keys are stable across writes. Returns undefined for ANY
+ * non-conforming task — the whole candidate is then invalid (single-task-fail ⇒ candidate-fail,
+ * the pre-existing restoreState contract).
+ */
+export function restoreTask(raw: unknown): Task | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const task = raw as Partial<Task>;
+  if (
+    typeof task.id !== "number" ||
+    !Number.isInteger(task.id) ||
+    task.id < 1 ||
+    typeof task.subject !== "string" ||
+    typeof task.description !== "string" ||
+    !isTaskStatus(task.status) ||
+    !Array.isArray(task.blocks) ||
+    !Array.isArray(task.blockedBy) ||
+    !task.blocks.every(isIntegerId) ||
+    !task.blockedBy.every(isIntegerId) ||
+    typeof task.createdAt !== "number" ||
+    typeof task.updatedAt !== "number"
+  )
+    return undefined;
+  return {
+    id: task.id,
+    subject: task.subject,
+    description: task.description,
+    ...(typeof task.activeForm === "string" ? { activeForm: task.activeForm } : {}),
+    status: task.status,
+    blocks: uniqueIds(task.blocks),
+    blockedBy: uniqueIds(task.blockedBy),
+    ...(typeof task.owner === "string" ? { owner: task.owner } : {}),
+    ...(task.metadata && typeof task.metadata === "object" && !Array.isArray(task.metadata)
+      ? { metadata: { ...(task.metadata as Record<string, unknown>) } }
+      : {}),
+    createdAt: task.createdAt,
+    updatedAt: task.updatedAt,
+    // todo-archive D2: the two optional timestamps survive restore only as finite numbers on a
+    // completed task; otherwise just the field is dropped — the candidate state stays valid.
+    ...(isFiniteTimestamp(task.completedAt) && task.status === "completed" ? { completedAt: task.completedAt } : {}),
+    ...(isFiniteTimestamp(task.archivedAt) && task.status === "completed" ? { archivedAt: task.archivedAt } : {}),
+  };
+}
+
+/**
+ * Whitelist rebuild WITHOUT the dependency-graph validation (todo-archive-split §3.1): the
+ * exported `restoreState` behavior is unchanged (whitelist + validateState); replayTodo defers
+ * validation to AFTER the archive merge, which is what lets split-format candidates live in
+ * the candidate list before we know whether their merge validates.
+ */
+export function restoreShape(value: unknown): TodoState | undefined {
   if (!value || typeof value !== "object") return undefined;
   const record = value as { tasks?: unknown; nextId?: unknown };
   if (!Array.isArray(record.tasks) || typeof record.nextId !== "number" || !Number.isInteger(record.nextId))
     return undefined;
   const tasks: Task[] = [];
   for (const raw of record.tasks) {
-    if (!raw || typeof raw !== "object") return undefined;
-    const task = raw as Partial<Task>;
-    if (
-      typeof task.id !== "number" ||
-      !Number.isInteger(task.id) ||
-      task.id < 1 ||
-      typeof task.subject !== "string" ||
-      typeof task.description !== "string" ||
-      !isTaskStatus(task.status) ||
-      !Array.isArray(task.blocks) ||
-      !Array.isArray(task.blockedBy) ||
-      !task.blocks.every(isIntegerId) ||
-      !task.blockedBy.every(isIntegerId) ||
-      typeof task.createdAt !== "number" ||
-      typeof task.updatedAt !== "number"
-    )
-      return undefined;
-    tasks.push({
-      id: task.id,
-      subject: task.subject,
-      description: task.description,
-      ...(typeof task.activeForm === "string" ? { activeForm: task.activeForm } : {}),
-      status: task.status,
-      blocks: uniqueIds(task.blocks),
-      blockedBy: uniqueIds(task.blockedBy),
-      ...(typeof task.owner === "string" ? { owner: task.owner } : {}),
-      ...(task.metadata && typeof task.metadata === "object" && !Array.isArray(task.metadata)
-        ? { metadata: { ...(task.metadata as Record<string, unknown>) } }
-        : {}),
-      createdAt: task.createdAt,
-      updatedAt: task.updatedAt,
-      // todo-archive D2: the two optional timestamps survive restore only as finite numbers on a
-      // completed task; otherwise just the field is dropped — the candidate state stays valid.
-      ...(isFiniteTimestamp(task.completedAt) && task.status === "completed" ? { completedAt: task.completedAt } : {}),
-      ...(isFiniteTimestamp(task.archivedAt) && task.status === "completed" ? { archivedAt: task.archivedAt } : {}),
-    });
+    const task = restoreTask(raw);
+    if (!task) return undefined;
+    tasks.push(task);
   }
-  const state = { tasks, nextId: Math.max(record.nextId, 1) };
+  return { tasks, nextId: Math.max(record.nextId, 1) };
+}
+
+/** Canonical serialization form (todo-archive-split §4.1): restoreTask applied to an in-memory
+ *  task — fixed field order + id dedup. Keys the persist baselines against must be stable, so
+ *  everything written to disk (live snapshot tasks AND archive puts) goes through this. */
+export function canonicalTask(task: Task): Task {
+  const canonical = restoreTask(task);
+  if (!canonical) throw new Error(`Task #${task.id} cannot be canonicalized`);
+  return canonical;
+}
+
+export function restoreState(value: unknown): TodoState | undefined {
+  const state = restoreShape(value);
+  if (!state) return undefined;
   try {
     validateState(state);
   } catch {
@@ -361,35 +464,193 @@ export function restoreState(value: unknown): TodoState | undefined {
 }
 
 /**
- * Pure replay (merge-plan revision S6): scans a session-branch entry list
- * (caller passes `ctx.sessionManager.getBranch()`) and rebuilds the todo
- * state from history. Two historical shapes are recognized, and when they
- * are interleaved the LAST valid candidate wins:
- *
- * 1. `custom` entries with customType STATE_ENTRY (written by persist()).
- * 2. `message` entries with role "toolResult" whose details carry a `state`
- *    snapshot (written into tool results by earlier versions / forks).
- *
- * Dirty candidates are skipped individually via restoreState; returns
- * undefined when nothing valid was found.
+ * Fail-closed sanitize of an ARCHIVE_ENTRY payload (todo-archive-split §2.1), following the
+ * prompt-sections/store.ts v1 precedent. Only the two whole-package failures ignore the
+ * package entirely (so a pre-split session never takes the split read path — OD4):
+ *   - not an object, or `v !== 1` (this is what makes a future v2 invisible to v1 readers);
+ * everything else degrades field-by-field / element-by-element (D2's "single field droppable,
+ * candidate still valid" spirit):
+ *   - `reset` must be `=== true`, else just the field is dropped;
+ *   - `put` must be an array, else just the field is dropped; elements run through restoreTask
+ *     PLUS the archive invariants (completed + finite archivedAt) — bad elements are dropped
+ *     individually, the package stays valid;
+ *   - `drop` must be an array, else just the field is dropped; only positive integer ids
+ *     survive, deduplicated;
+ *   - no cap on put count at read time (truncation would lose data); the cap is write-side only.
  */
-export function replayState(entries: readonly unknown[]): TodoState | undefined {
-  let restored: TodoState | undefined;
+export function sanitizeArchiveEntry(raw: unknown): TodoArchiveEntryV1 | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const record = raw as { v?: unknown; reset?: unknown; put?: unknown; drop?: unknown };
+  if (record.v !== 1) return undefined;
+  let put: Task[] | undefined;
+  if (Array.isArray(record.put)) {
+    const tasks: Task[] = [];
+    for (const element of record.put) {
+      const task = restoreTask(element);
+      if (!task || task.status !== "completed" || !isFiniteTimestamp(task.archivedAt)) continue;
+      tasks.push(task);
+    }
+    put = tasks;
+  }
+  let drop: number[] | undefined;
+  if (Array.isArray(record.drop)) {
+    drop = uniqueIds(record.drop.filter(isIntegerId));
+  }
+  return {
+    v: 1,
+    ...(record.reset === true ? { reset: true } : {}),
+    ...(put !== undefined ? { put } : {}),
+    ...(drop !== undefined ? { drop } : {}),
+  };
+}
+
+/** Fold one sanitized package into the archived set (todo-archive-split §2.1): within a
+ *  package `reset → put → drop`; across packages, branch order. Mutates `archived` in place
+ *  (the map is replayTodo-local; callers get the original objects back, review Minor #4). */
+export function foldArchive(archived: Map<number, Task>, entry: TodoArchiveEntryV1): void {
+  if (entry.reset) archived.clear();
+  for (const task of entry.put ?? []) archived.set(task.id, task);
+  for (const id of entry.drop ?? []) archived.delete(id);
+}
+
+/**
+ * Merge a live-snapshot candidate with the folded archived set (todo-archive-split §3.3, D11).
+ *  1. id conflict ⇒ LIVE wins: the archived copy is ignored entirely (reopening self-heals; a
+ *     crash-window duplicate dissolves the same way);
+ *  2. result sorted by id ascending — the stored order has been creation order (createTask only
+ *     appends), so this equals the pre-persist in-memory order;
+ *  3. tolerant reattach, A-SOURCE tasks only: edges pointing outside the merged set are dropped
+ *     (tolerant read); edges pointing at a live task get their opposite edge pushed onto that
+ *     live task when missing. Live-source edges are NEVER touched — a dangling live edge is
+ *     data corruption and must be rejected by validateState, exactly like today. Reattach only
+ *     ever completes the opposite of an EXISTING edge, so it cannot create a cycle on its own.
+ *
+ * Clone rule (review Minor #4): the tolerant edge work happens on CLONES — the folded task
+ * objects in `archived` are never mutated (replayTodo returns them as-is so the caller can key
+ * the restore baseline with the PRE-drop edges, which is what self-heals dangling on-disk edges
+ * on the next persist).
+ *
+ * Edge-array order: reattached edges are pushed at the end, so a round trip guarantees edge-SET
+ * equality, not order. Safe because reattached edges always point at archived (completed)
+ * tasks and every display surface uses activeBlockers (completed never blocks).
+ */
+export function mergeArchive(candidate: TodoState, archived: ReadonlyMap<number, Task>): TodoState {
+  const liveIds = new Set(candidate.tasks.map((task) => task.id));
+  const liveTasks = candidate.tasks.map(cloneTask); // live source: edges untouched
+  const archiveTasks: Task[] = [];
+  for (const task of archived.values()) {
+    if (liveIds.has(task.id)) continue; // live wins
+    archiveTasks.push(cloneTask(task));
+  }
+  const merged = [...liveTasks, ...archiveTasks].sort((a, b) => a.id - b.id);
+  const mergedIds = new Set(merged.map((task) => task.id));
+  const byId = new Map(merged.map((task) => [task.id, task]));
+  for (const task of archiveTasks) {
+    task.blocks = task.blocks.filter((id) => mergedIds.has(id));
+    task.blockedBy = task.blockedBy.filter((id) => mergedIds.has(id));
+  }
+  for (const task of archiveTasks) {
+    for (const blockedId of task.blocks) {
+      const target = byId.get(blockedId)!; // membership asserted by the filter above
+      if (liveIds.has(blockedId) && !target.blockedBy.includes(task.id)) target.blockedBy.push(task.id);
+    }
+    for (const dependencyId of task.blockedBy) {
+      const target = byId.get(dependencyId)!; // same
+      if (liveIds.has(dependencyId) && !target.blocks.includes(task.id)) target.blocks.push(task.id);
+    }
+  }
+  let maxId = 0;
+  for (const task of merged) if (task.id > maxId) maxId = task.id;
+  return { tasks: merged, nextId: Math.max(candidate.nextId, maxId + 1) };
+}
+
+/** replayTodo result (todo-archive-split §3.1). `archived` holds the fold's ORIGINAL task
+ *  objects (pre-merge, pre-tolerant-drop — review Minor #4); `degraded` is true only when a
+ *  split-format session failed to validate ANY merge and fell back to live-only. */
+export interface ReplayTodoResult {
+  state: TodoState | undefined;
+  archived: ReadonlyMap<number, Task>;
+  degraded: boolean;
+}
+
+/** validateState as a predicate (replayTodo's `valid()`). */
+function isValidState(state: TodoState): boolean {
+  try {
+    validateState(state);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Pure three-phase replay (todo-archive-split §3.2, D11). Single pass over the branch in order:
+ *  - custom ARCHIVE_ENTRY → sanitize (fail-closed) → fold into the archived set;
+ *  - custom STATE_ENTRY / non-error toolResult `details.state` → whitelist (restoreShape) into
+ *    the candidate list (BOTH historical shapes, like the pre-#92 replayState).
+ *
+ * Phase 2 — no valid archive package ever seen (pre-split session): iterate candidates from the
+ * LAST, first one passing validateState wins; deep-equal to the pre-#92 replayState (proven by
+ * the frozen-copy fuzz in tests/todo/archive-store.test.ts). No lenient repair, no sorting,
+ * no nextId adjustment in this path (OD4: old sessions must stay byte-identical).
+ *
+ * Phase 3 — split session: from the last candidate, merge with the archived set and validate
+ * the MERGED state; first success wins. If every merge fails (e.g. the archived set is
+ * internally inconsistent), degrade: return the best live-only candidate per the phase-2 rule
+ * plus `degraded: true` — never WORSE than not reading the archive at all. The caller reacts by
+ * refusing to drop what it could not read (empty restore baseline).
+ */
+export function replayTodo(entries: readonly unknown[]): ReplayTodoResult {
+  const archived = new Map<number, Task>();
+  let sawArchive = false;
+  const candidates: TodoState[] = [];
   for (const raw of entries) {
     const entry = raw as BranchEntry;
+    if (entry.type === "custom" && entry.customType === ARCHIVE_ENTRY) {
+      const clean = sanitizeArchiveEntry(entry.data);
+      if (clean) {
+        sawArchive = true;
+        foldArchive(archived, clean);
+      }
+      continue;
+    }
     if (entry.type === "custom" && entry.customType === STATE_ENTRY) {
-      const candidate = restoreState(entry.data);
-      if (candidate) restored = candidate;
+      const candidate = restoreShape(entry.data);
+      if (candidate) candidates.push(candidate);
       continue;
     }
     const message = entry.message;
     if (entry.type !== "message" || message?.role !== "toolResult" || message.isError) continue;
     if (!message.details || typeof message.details !== "object") continue;
     const details = message.details as { state?: unknown };
-    const candidate = restoreState(details.state);
-    if (candidate) restored = candidate;
+    const candidate = restoreShape(details.state);
+    if (candidate) candidates.push(candidate);
   }
-  return restored;
+  if (!sawArchive) {
+    for (let i = candidates.length - 1; i >= 0; i--) {
+      const candidate = candidates[i]!;
+      if (isValidState(candidate)) return { state: candidate, archived, degraded: false };
+    }
+    return { state: undefined, archived, degraded: false };
+  }
+  for (let i = candidates.length - 1; i >= 0; i--) {
+    const merged = mergeArchive(candidates[i]!, archived);
+    if (isValidState(merged)) return { state: merged, archived, degraded: false };
+  }
+  for (let i = candidates.length - 1; i >= 0; i--) {
+    const candidate = candidates[i]!;
+    if (isValidState(candidate)) return { state: candidate, archived, degraded: true };
+  }
+  return { state: undefined, archived, degraded: true };
+}
+
+/**
+ * Pure replay (merge-plan revision S6; todo-archive-split §3.1 wrapper): the pre-#92 signature —
+ * `replayTodo(entries).state`. All three readers (restore, session-facts, topic-switch hold)
+ * go through this single choke point, which is what keeps the split format invisible to them.
+ */
+export function replayState(entries: readonly unknown[]): TodoState | undefined {
+  return replayTodo(entries).state;
 }
 
 export function validateState(state: TodoState): void {

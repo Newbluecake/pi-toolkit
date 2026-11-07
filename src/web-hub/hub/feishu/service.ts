@@ -40,10 +40,21 @@ import {
 } from "./admission.js";
 import { createFeishuRequests, feishuBatchIdentity, feishuDigest, type FeishuRequestEvent } from "./requests.js";
 import { createFeishuRouter, type FeishuRouterIntent } from "./router.js";
+import { createBindingTransfer, type BindingTransfer } from "./bindings-transfer.js";
 import { createFeishuInbound, type FeishuMessage, type FeishuInboundIntent } from "./inbound.js";
 import { createFeishuOutbox, type OutboxTarget, type OutboxMessage, type SettledGroup } from "./outbox.js";
 import { renderReply, renderNotice, neutralizeMarkdown } from "./render.js";
 import { createFeishuRuns, type FeishuRunEvent, type FeishuRunResult } from "./runs.js";
+import {
+  createFeishuThreads,
+  THREAD_RECEIPT_EMOJI,
+  threadFinishGuarded,
+  threadRetainedRequests,
+  type FeishuThreadTransport,
+  type FeishuThreads,
+} from "./thread-hub.js";
+import type { StatusInfo } from "../../protocol/messages.js";
+import type { ThrReqFrame, ThrResFrame } from "../../protocol/thread.js";
 import { createFeishuDialogs } from "./dialogs.js";
 import { createFeishuDiagnostics, feishuPatchMessage } from "./diagnostics.js";
 import { safeFeishuLink } from "./link.js";
@@ -80,7 +91,9 @@ export type FeishuServiceEvent =
   | FeishuRunEvent
   | { type: "dialogs"; agentKey: string; epoch: string; open: DialogWire[]; closed: DialogClosedWire[] }
   | { type: "spawns" }
-  | { type: "status"; agentKey: string }
+  /** The full status payload rides the bus event (registry publishes it); the bot taps only the
+   *  `threads` slot (§7.3 — ignored entirely while the hub has no `thr.v1` cap). */
+  | { type: "status"; agentKey: string; status?: StatusInfo }
   | { type: "fleet"; agentKey: string }
   /** F1 (#32 §7.5): the agent's schedule dispatcher bound this run to a scheduled message (`sched_bound` frame). */
   | { type: "sched_bound"; agentKey: string; runKey: string };
@@ -98,7 +111,11 @@ export interface FeishuBotServiceDeps {
   /** SAME object as HTTP uses (FA hoists it). */
   limit: CmdLimit;
   commands: FeishuAdmissionDeps["commands"];
-  sessions: { views(): readonly FeishuSessionView[]; managed(): readonly FeishuManagedSession[] };
+  sessions: {
+    views(): readonly FeishuSessionView[];
+    managed(): readonly FeishuManagedSession[];
+    alias?(sessionId: string): string | undefined;
+  };
   events: {
     subscribe(listener: (event: FeishuServiceEvent) => void): () => void;
     /** Authoritative registry dialog slots only (absence is NOT an empty list). */
@@ -141,7 +158,7 @@ const NEW_SESSION = "feishu:new";
 const SCHEDULE_HELP_LINE = "/schedule [run <序号>] — 查看定时任务 / 立即运行（仅私聊）";
 const HELP_BASE = [
   "/list — 列出可用会话（卡片可直接点击切换）",
-  "/use <n|sid-prefix|name> — 绑定/切换会话",
+  "/use <n|@alias|name> — 绑定/切换会话",
   "/cur — 查看当前绑定会话",
   "/new <dir> [first message] — 创建并绑定新会话",
   "/unbind — 解除当前绑定",
@@ -235,6 +252,9 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
   let adminBusy = false,
     lifecycle = 0;
   let connectorView: FeishuConnectorView | undefined;
+  // fabric-thread P2: registry seams injected post-construction by hub.ts (§8.1/§5.4); read
+  // lazily by every runtime's threads module so a restart picks the live one up.
+  let threadTransport: FeishuThreadTransport | undefined;
   // Bounded-sample timestamps for noisy inbound audit classes; service-lifetime, not per-runtime.
   const auditSampled = new Map<string, number>();
   // Snapshot counters cover the whole service lifetime (including reset/replacement), not one runtime.
@@ -365,6 +385,10 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
     publish();
   }
   async function install(input: CredentialInput, guard: () => boolean) {
+    // Coordinates only; replacement still stops the connector before ANY cleanup/IO.
+    // fabric-thread §5.4: best-effort thr_closed{reset} while the transport is still up (the
+    // state cleanup itself is the installation-changed sweep below — §8.2 换安装代).
+    runtime?.threadsPushInstallReset();
     // Stop is FIRST, even when replacement eventually fails. Generation fences all old follow-ups.
     await stopRuntime();
     if (disposed || !guard()) return { ok: false as const, reason: "cancelled" };
@@ -740,6 +764,8 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
     });
     const runs = createFeishuRuns({
       clock,
+      // §8.1: the same dispatch deadline admission uses (default 8000) — candidate fallback bound.
+      frameDeadlineMs: 8_000,
       finish: (result) => {
         if (
           !replies.run(async () => {
@@ -776,6 +802,57 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
         }
       },
     });
+    // rebind-plan r3 §4.5/§4.10 (P1): late-bound seams for the thread module — the shared
+    // binding transfer is built AFTER threads (it takes `threads` for the notifyLifecycle:true
+    // path) and requests after both (its closedByRebind serves the retention-expiry recheck).
+    let bindingTransferRef: BindingTransfer | undefined;
+    let closedByRebindRef: ((id: string) => void) | undefined;
+    // fabric-thread §8: exists iff `feishuBot.threads` exists — retention, receipts, posts,
+    // status cache, thr_closed push. Absent ⇒ every surface below is byte-identical (G2a).
+    const threads =
+      deps.config.threads === undefined
+        ? undefined
+        : createFeishuThreads({
+            clock,
+            config: deps.config.threads,
+            state,
+            installation,
+            transport: () => threadTransport,
+            agentForSession: (sid) => deps.sessions.views().find((v) => v.sessionId === sid && v.live)?.agentKey,
+            sessionOf: (key) => deps.sessions.views().find((v) => v.agentKey === key && v.live)?.sessionId,
+            // rebind-plan r3 §4.6 (P1): the rebind `to` ladder resolves over the live session
+            // views + the hub-held alias store; inert unless `threads.rebind` is on (I9).
+            sessionViews: () => deps.sessions.views(),
+            aliasOf: (sid) => deps.sessions.alias?.(sid),
+            transfer: () => bindingTransferRef,
+            closedByRebind: (id) => closedByRebindRef?.(id),
+            notice: (target, text, lane) => notice(target, text, lane),
+            enqueueNotice: (input) => outbox.enqueueNotice(input),
+            addReceiptReaction: async (messageId) => {
+              if (!active) return false;
+              const result = await bounded(
+                api.addReaction({ messageId, emojiType: THREAD_RECEIPT_EMOJI }),
+                8_000,
+                clock,
+              );
+              if (result.ok) {
+                capability("reactions", true);
+                return true;
+              }
+              if (result.capabilityDenied) capability("reactions", false);
+              return false;
+            },
+            reactionsDenied: () => caps.reactions === "denied",
+            deleteTypingReaction: async (request) => {
+              await reaction(request, false);
+            },
+            run: (task) => {
+              work.run(task);
+            },
+            label,
+            targetFor,
+            log: (event, reason) => log(event, reason),
+          });
     const requests = createFeishuRequests({
       state,
       installation,
@@ -785,7 +862,14 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
       staleMessageS: deps.config.staleMessageS,
       onHealth: (e) => health(e.reason),
       emit: requestEvent,
+      ...(threads === undefined ? {} : { threads }),
+      ...(threads === undefined ? {} : { detachRun: (id: string) => runs.detach(id) }),
     });
+    closedByRebindRef = (id) => {
+      void requests.closedByRebind(id).catch(() => {
+        /* state ops are guarded; a rebind finalization must never take the runtime down */
+      });
+    };
     const dialogs = createFeishuDialogs({
       state,
       admission,
@@ -817,13 +901,24 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
       },
       log,
     });
+    // rebind-plan r3 §4.4 D1 (P0a): the ONE shared binding write op — `/use` goes through it
+    // with notifyLifecycle:false (the inbound durable hook stays its lifecycle source); the
+    // rebind op (later package) shares the same instance with notifyLifecycle:true.
+    const bindingTransfer = createBindingTransfer({
+      state,
+      ...(threads === undefined ? {} : { threads }),
+      log: (event, reason) => log(event, reason),
+    });
+    bindingTransferRef = bindingTransfer;
     const router = createFeishuRouter({
       state,
       sessions,
       requests,
+      bindingTransfer,
       groupRootTopics: deps.config.groupRootTopics,
       spawnScope: deps.config.spawnScope,
       ...(deps.schedule !== undefined ? { schedule: true } : {}),
+      ...(deps.config.threads !== undefined ? { threads: true } : {}),
       preparePayload: files.prepare,
       emit: (intent) => {
         work.run(() => routerIntent(intent));
@@ -855,6 +950,7 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
               work.run(() => dialogs.text(message, identity));
             },
           };
+        const beforeBinding = bindingKey ? state.bindings.get(bindingKey) : undefined;
         const prepared = await router.prepare(message, identity);
         if (
           prepared.drop ||
@@ -870,6 +966,17 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
                 ...(message.threadId ? { threadId: message.threadId } : {}),
               });
             prepared.durable?.();
+            // Binding add/remove/switch is already durable here, including /unbind (no bound intent).
+            const afterBinding = bindingKey ? state.bindings.get(bindingKey) : undefined;
+            // fabric-thread §5.4: a removed/rebound binding finalizes its retained thr:routed and
+            // pushes a best-effort thr_closed to the agent that served the PREVIOUS session.
+            if (
+              threads !== undefined &&
+              bindingKey !== undefined &&
+              beforeBinding?.sessionId !== undefined &&
+              beforeBinding.rev !== afterBinding?.rev
+            )
+              threads.onBindingClosed(bindingKey, beforeBinding, afterBinding === undefined ? "unbound" : "rebound");
           },
         };
       },
@@ -953,6 +1060,15 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
     function requestEvent(event: FeishuRequestEvent) {
       if (!active) return;
       runs.request(event);
+      // fabric-thread §8.1 step 3: attachments settle referenced; no Typing was added during
+      // dispatching, any stray one is removed; receipt + retention arm live in the module.
+      if (event.type === "routed") {
+        for (const id of event.request.payload?.messageIds ?? []) files.settle(id, "referenced");
+        work.run(async () => {
+          threads?.onRouted(event);
+        });
+        return;
+      }
       if (event.type === "accepted" || event.type === "rejected" || event.type === "expired")
         for (const id of event.request.payload?.messageIds ?? [])
           files.settle(id, event.type === "accepted" ? "referenced" : "released");
@@ -979,6 +1095,10 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
       if (!active) return;
       const r = state.requests.get(result.request.id);
       if (!r || !["dispatching", "accepted", "uncertain"].includes(r.state)) return;
+      // §8.1 finishRun 守卫: a retained `thr:` record is never overwritten with unattributed —
+      // second line of defence behind the pre-commit detach. Threads-UNDEFINED (feature off /
+      // old-hub rollback) keeps the legacy sweep: nothing else would ever finalize the record.
+      if (threadFinishGuarded(r.state, r.code, threads !== undefined)) return;
       if (result.kind === "unattributed" || result.kind === "rejected" || result.kind === "expired") {
         if (r.state === "dispatching") state.requests.transition(r.id, "uncertain");
         state.requests.transition(r.id, result.kind, { code: result.kind });
@@ -1275,6 +1395,8 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
               "use-topic": "请在话题内 @ 机器人",
               "no-session-bound": "尚未绑定会话 — /list 后 /use",
               "queue-full": "队列已满，请稍后重发",
+              // fabric-thread §6.2: only reachable while threads are enabled.
+              "main-text-only": "/main 仅接受纯文本；附件请另发一条消息并 @ 机器人",
             } as Record<string, string>
           )[intent.code] ?? intent.code,
           m.chatId,
@@ -1289,8 +1411,13 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
           return;
         }
         const resolution = sessions.resolve(binding.sessionId);
-        if (resolution.ok) await notice(target, `当前：${label(binding.sessionId)}`, m.chatId);
-        else {
+        if (resolution.ok) {
+          // fabric-thread /cur projection (§7.3): live subscriptions of the bound session's
+          // agent; absent cache (threads off / no subs) keeps /cur byte-identical.
+          const agentKey = deps.sessions.views().find((v) => v.sessionId === binding.sessionId && v.live)?.agentKey;
+          const lines = (agentKey !== undefined ? threads?.threadLinesFor(agentKey) : undefined) ?? [];
+          await notice(target, [`当前：${label(binding.sessionId)}`, ...lines].join("\n"), m.chatId);
+        } else {
           const managed = deps.spawn?.supervisor
             .records()
             .find((record) => record.sessionId === binding.sessionId && isTerminalSpawnState(record.state));
@@ -1320,7 +1447,9 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
         const result = await sendCard(
           `ft${feishuKey(m.messageId)}`,
           { scope: "group-root", messageId: m.messageId, inThread: true },
-          simpleCard("话题已建立。请在话题内 @ 机器人使用 /new <dir> 或 /use <id> 绑定会话。未绑定前不会运行 agent。"),
+          simpleCard(
+            "话题已建立。请在话题内 @ 机器人使用 /new <dir> 或 /use <序号|@别名|名称> 绑定会话。未绑定前不会运行 agent。",
+          ),
           m.chatId,
         );
         if (result?.threadId && active && admission.authorize(intent.identity).ok) {
@@ -1661,7 +1790,12 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
         work.run(bindFresh);
         return;
       }
-      if (event.type === "status" || event.type === "fleet") return;
+      if (event.type === "status" || event.type === "fleet") {
+        // §7.3: cache the threads slot for /cur (and post admission); never read without the cap.
+        if (event.type === "status" && threads !== undefined && event.status !== undefined)
+          threads.onStatus(event.agentKey, event.status);
+        return;
+      }
       if (event.type === "sched_bound") {
         // Exact, per-run suppression of the done notice. No marker without a run ⇒ conservatively notify.
         const p = deps.schedule !== undefined ? proactive.get(event.agentKey) : undefined;
@@ -1749,6 +1883,62 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
       approval,
       sessionCard,
       schedule,
+      /** fabric-thread §7.3: agent-server's thr_req entry (post → module, handback → requests). */
+      async thrReq(agentKey: string, frame: ThrReqFrame, write: (reply: ThrResFrame) => void): Promise<void> {
+        const reply = (res: ThrResFrame) => {
+          try {
+            write(res);
+          } catch {
+            /* socket gone — nothing hub-side to clean up */
+          }
+        };
+        if (threads === undefined) {
+          reply({ t: "thr_res", rid: frame.rid, ok: false, code: "E_THR_STATE", effect: "none" });
+          return;
+        }
+        if (frame.op === "post" || frame.op === "rebind" || frame.op === "acquire") {
+          // rebind-plan r3 §6 实施要点 2: rebind/acquire route to the thread module like post.
+          // thrReq rebind/acquire self-gate on config.rebind (E_THR_STATE when off, §4.1).
+          await threads.thrReq(agentKey, frame, write);
+          return;
+        }
+        // §8.3 handback — the same session gate, then the deterministic-id state machine.
+        const session = deps.sessions.views().find((v) => v.agentKey === agentKey && v.live)?.sessionId;
+        const install = installation(),
+          tenantKey = state.tenant.get();
+        if (session === undefined || session !== frame.sessionId || !install?.active || tenantKey === undefined) {
+          reply({ t: "thr_res", rid: frame.rid, ok: false, code: "E_THR_STATE", effect: "none" });
+          return;
+        }
+        const result = await requests.handback({
+          eventId: frame.eventId,
+          sessionId: frame.sessionId,
+          by: frame.by,
+          note: frame.note,
+          ctx: { installGen: install.gen, tenantKey },
+        });
+        reply(
+          result.ok
+            ? {
+                t: "thr_res",
+                rid: frame.rid,
+                ok: true,
+                data: { requestId: result.requestId, ...(result.dup ? { dup: true as const } : {}) },
+              }
+            : { t: "thr_res", rid: frame.rid, ok: false, code: result.code, effect: result.effect },
+        );
+      },
+      /** §8.1 晚到 cmd_late: only a routed result of an `uncertain` request matters here. */
+      onCmdLate(agentKey: string, id: string, ok: boolean, data: unknown): void {
+        if (threads === undefined || !ok) return;
+        void requests.lateRouted(id, data, agentKey).catch(() => {
+          /* state ops are guarded; a late result must never take the runtime down */
+        });
+      },
+      /** §5.4 setup --replace/reset: best-effort thr_closed{reset} before the transport stops. */
+      threadsPushInstallReset(): void {
+        threads?.pushInstallReset();
+      },
       xsMirror(e: FeishuXsMirrorEvent): void {
         if (!active || !mirror) return;
         mirror.deliver(e);
@@ -1795,11 +1985,18 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
             (r) =>
               r.sessionId !== NEW_SESSION &&
               !state.outbox.list().some((part) => part.kind === "final" && part.requestId === r.id),
-          ))
+          )) {
+          // §8.1 恢复: retained thr: records re-arm (or expire) instead of the unattributed sweep
+          // — a threads-off hub (old-hub rollback) keeps the legacy unattributed path (§8.4).
+          if (r.code !== undefined && r.code.startsWith("thr:") && threads !== undefined) {
+            threads.onRestartRetained(r);
+            continue;
+          }
           replies.run(async () => {
             await reaction(r, false);
             await finishRun({ request: r, kind: "unattributed", text: "", truncated: false, continued: false });
           });
+        }
         for (const card of state.dialogCards.list()) if (card.status === "open") dialogs.disconnected(card.agentKey);
         for (const frame of deps.events.dialogs?.() ?? [])
           work.run(() => dialogs.reconcile(frame.agentKey, frame.epoch, frame.open, frame.closed));
@@ -1828,6 +2025,7 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
         inbound.dispose();
         router.dispose();
         requests.dispose();
+        threads?.dispose();
         dialogs.dispose();
         sessionCard.dispose();
         sessions.clear();
@@ -2038,6 +2236,9 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
       else {
         state.allowList.remove(frame.openId);
         state.requests.revokeSender(frame.openId);
+        // §8.2 撤权 (stopped-runtime path): retained thr:routed of the sender finalize too.
+        for (const r of threadRetainedRequests(state))
+          if (r.senderOpenId === frame.openId) state.requests.transition(r.id, "replied", { code: "thread-revoked" });
         state.nonces.purgeOperator(frame.openId);
         await state.commit();
       }
@@ -2071,6 +2272,27 @@ export function createFeishuBotService(deps: FeishuBotServiceDeps) {
       } catch {
         /* observer must never affect xs routing */
       }
+    },
+    /** fabric-thread P2 (§7.3/§8.1/§5.4): agent-server's thr_req entry, the cmd_late tap and the
+     *  post-construction registry seams (hub.ts injects; direct unit tests inject fakes). All
+     *  safe in any lifecycle phase; a stopped runtime answers E_THR_STATE on the socket. */
+    thrReq(agentKey: string, frame: ThrReqFrame, write: (reply: ThrResFrame) => void): void {
+      const rt = runtime;
+      if (rt === undefined || disposed) {
+        try {
+          write({ t: "thr_res", rid: frame.rid, ok: false, code: "E_THR_STATE", effect: "none" });
+        } catch {
+          /* socket gone */
+        }
+        return;
+      }
+      void rt.thrReq(agentKey, frame, write);
+    },
+    onCmdLate(agentKey: string, id: string, ok: boolean, data: unknown): void {
+      runtime?.onCmdLate(agentKey, id, ok, data);
+    },
+    setThreadTransport(transport: FeishuThreadTransport): void {
+      threadTransport = transport;
     },
     /**
      * F1 (#32): H1 → F1 entry points. Every method is safe to call in any lifecycle phase and never throws;

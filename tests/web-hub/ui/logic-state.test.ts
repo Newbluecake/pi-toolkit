@@ -934,6 +934,27 @@ describe("state.reduce — control plane (§7.3/§7.7)", () => {
     expect(A(s).queue).toEqual([]);
   });
 
+  it("U2: a status frame with no held sweeps held/returned prompt rows from pendingCtl (missed ctl terminal)", () => {
+    let s = base();
+    s = reduce(s, send("A", { id: "h1", kind: "prompt", state: "held", at: 1 }));
+    s = reduce(s, send("A", { id: "r1", kind: "prompt", state: "returned", at: 2 }));
+    s = reduce(s, send("A", { id: "d1", kind: "prompt", state: "handed", at: 3 }));
+    s = reduce(s, send("A", { id: "o1", kind: "prompt", state: "observed", at: 4 }));
+    s = reduce(s, send("A", { id: "x1", kind: "abort", state: "held", at: 5 }));
+    // a status frame WITH held rows proves nothing ⇒ no sweep
+    s = reduce(s, {
+      event: "status",
+      data: {
+        agentKey: "A",
+        status: { leafId: null, busy: true, pending: false, held: [], heldRev: 1, heldEpoch: "e1" },
+      },
+    });
+    expect(A(s).pendingCtl.map((i) => i.id)).toEqual(["h1", "r1", "d1", "o1", "x1"]);
+    // buffer empty (no held field) ⇒ held/returned prompt rows dropped; others untouched
+    s = reduce(s, { event: "status", data: { agentKey: "A", status: { leafId: null, busy: false, pending: false } } });
+    expect(A(s).pendingCtl.map((i) => i.id)).toEqual(["d1", "o1", "x1"]);
+  });
+
   // steer-recall plan §7 / v4.3 Y2 (P-ui): the held snapshot rides the open status slot and
   // lands on agent.held via acceptHeld — scope-gated by the card's CURRENT epoch, rev
   // monotonic inside one scope, tombstones never resurrected.

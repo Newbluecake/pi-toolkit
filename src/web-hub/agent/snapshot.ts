@@ -49,21 +49,26 @@ export function buildBranchReply(
 ): Extract<AgentFrame, { t: "branch_reply" }> {
   const budget = Math.max(0, Math.min(maxBytes, LIMITS.branchReplyBytes));
   const raw = safe(() => ctx.sessionManager.getBranch(), [] as unknown[]);
-  const projected: WireEntry[] = [];
-  for (const r of raw) {
-    const e = projectSessionEntry(r);
-    if (e !== undefined) projected.push(e);
-  }
-  // Keep the tail: walk newest → oldest until the byte budget is exhausted.
+  // Walk newest → oldest, projecting lazily and stopping at the first projectable entry that no
+  // longer fits the budget: only the ~budget-sized tail is ever projected (canonicalJson is the
+  // expensive part), yet the output is byte-identical to "project all, then trim the head":
+  // a break always lands on a projected entry, so an older projected entry exists ⇒ truncated.
+  const kept: WireEntry[] = [];
   let used = 0;
-  let start = projected.length;
-  for (let i = projected.length - 1; i >= 0; i--) {
-    const size = Buffer.byteLength(JSON.stringify(projected[i]), "utf8") + 1;
-    if (used + size > budget) break;
+  let truncated = false;
+  for (let i = raw.length - 1; i >= 0; i--) {
+    const e = projectSessionEntry(raw[i]);
+    if (e === undefined) continue;
+    const size = Buffer.byteLength(JSON.stringify(e), "utf8") + 1;
+    if (used + size > budget) {
+      truncated = true;
+      break;
+    }
     used += size;
-    start = i;
+    kept.push(e);
   }
-  return { t: "branch_reply", rid, entries: projected.slice(start), truncated: start > 0 };
+  kept.reverse();
+  return { t: "branch_reply", rid, entries: kept, truncated };
 }
 
 function safe<T>(fn: () => T, fallback: T): T {

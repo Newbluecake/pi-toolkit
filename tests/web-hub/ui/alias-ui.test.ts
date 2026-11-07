@@ -4,7 +4,7 @@
 import { DOMWrapper, flushPromises, mount } from "@vue/test-utils";
 import { computed, ref } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { formatTakeConfirmLine } from "../../../src/web-hub/protocol/xs-alias.js";
+import { formatTakeConfirmLine, XS_ALIAS_MAX_GRAPHEMES } from "../../../src/web-hub/protocol/xs-alias.js";
 import AgentCard from "../../../src/web-hub/ui/src/components/agents/AgentCard.vue";
 import {
   aliasChipText,
@@ -89,11 +89,14 @@ describe("model", () => {
     expect(xsAliasOf(undefined, CAPS)).toBeUndefined();
   });
 
-  it("truncateGraphemes / aliasChipText: first 8 grapheme clusters (Q8)", () => {
-    const long = "前端开发工作台一二三四五"; // 12 clusters
-    const t = truncateGraphemes(long, XS_ALIAS_CARD_GRAPHEMES);
-    expect(t).toEqual({ text: "前端开发工作台一", truncated: true });
-    expect(aliasChipText(long)).toBe("@前端开发工作台一…");
+  it("truncateGraphemes / aliasChipText: whole alias up to the 16-cluster protocol max (Q8 r2)", () => {
+    expect(XS_ALIAS_CARD_GRAPHEMES).toBe(XS_ALIAS_MAX_GRAPHEMES);
+    expect(aliasChipText("claude2api")).toBe("@claude2api");
+    const max = "前端开发工作台一二三四五六七八九"; // 16 clusters ⇒ untouched
+    expect(aliasChipText(max)).toBe(`@${max}`);
+    const over = `${max}十`; // 17 (out of contract) ⇒ defensive cut
+    expect(truncateGraphemes(over, XS_ALIAS_CARD_GRAPHEMES)).toEqual({ text: max, truncated: true });
+    expect(aliasChipText(over)).toBe(`@${max}…`);
     expect(aliasChipText("web")).toBe("@web");
     expect(truncateGraphemes("abc", 8)).toEqual({ text: "abc", truncated: false });
   });
@@ -131,6 +134,20 @@ describe("model", () => {
     const k = (o: Record<string, string>) => Object.keys(o).sort();
     expect(k(ALIAS_EXTRA.zh)).toEqual(k(ALIAS_EXTRA.en));
   });
+
+  it("aliasSuggestions (AFU): cwd chip ≡ deriveAliasFromDirName under xs.alias.v2; raw basename without", () => {
+    const CAPS2 = [...CAPS, "xs.alias.v2"];
+    // sanitised names (spaces/dots) only yield a cwd chip with v2 — chip ≡ auto-claim
+    const spaced = ag("s", { joined: true }, "s-0123456789abcdef", { cwd: "/home/u/My Project", name: "!!!" });
+    expect(aliasSuggestions(spaced, new Map([["s", spaced]]), CAPS2).map((s) => s.alias)).toEqual(["my-project"]);
+    expect(aliasSuggestions(spaced, new Map([["s", spaced]]), CAPS)).toEqual([]);
+    // underivable (reserved prefix after sanitising): no cwd chip either way (D4: never stripped)
+    const pref = ag("s", { joined: true }, "s-0123456789abcdef", { cwd: "/home/u/pi.toolkit", name: "!!!" });
+    expect(aliasSuggestions(pref, new Map([["s", pref]]), CAPS2)).toEqual([]);
+    // identical when both paths succeed
+    const plain = ag("s", { joined: true }, "s-0123456789abcdef", { cwd: "/home/u/shop-front", name: "!!!" });
+    expect(aliasSuggestions(plain, new Map([["s", plain]]), CAPS2).map((s) => s.alias)).toEqual(["shop-front"]);
+  });
 });
 
 // --------------------------------------------------------------------------- card chip
@@ -145,11 +162,12 @@ describe("card chip", () => {
     w.unmount();
     return out;
   };
-  it("@alias chip sits before the channel chip, truncated at 8 graphemes, title carries full", () => {
+  it("@alias chip sits before the channel chip, shows the whole alias (Q8 r2), title carries full", () => {
     const h = html(ag("a", { joined: true, channels: ["default", "x"], alias: "前端开发工作台一二三四" }), CAPS);
     expect(h).toContain("chip-xs-alias");
     expect(h.indexOf("chip-xs-alias")).toBeLessThan(h.indexOf("chip-xs-channels"));
-    expect(h).toContain("@前端开发工作台一…");
+    expect(h).toContain(">@前端开发工作台一二三四<");
+    expect(h).not.toContain("…");
     expect(h).toContain('title="@前端开发工作台一二三四"');
   });
   it("no cap or no field ⇒ no alias chip (byte-identical surface)", () => {
@@ -515,6 +533,87 @@ describe("ChannelsDialog alias section", () => {
     expect(calls[0]!.args).toBe("alias web --take");
     expect(w.find(".alias-take-confirm").exists()).toBe(false);
     expect(w.get(".alias-output").text()).toContain("仍在线");
+    // AFU: without xs.alias.v2 the refusal echo stands alone — no force button (byte-identical)
+    expect(w.find(".alias-force-row").exists()).toBe(false);
+  });
+
+  it("force (AFU): online refusal + xs.alias.v2 ⇒ danger button → --force preview → same box → --take=<token>", async () => {
+    const CAPS2 = [...CAPS, "xs.alias.v2"];
+    const refused = "别名「web」的持有者仍在线，不能抢占。";
+    const forcePreview = `强制抢占别名「web」？\n持有会话：~/ai/foo（自动认领），当前在线。\n${formatTakeConfirmLine("web", TOKEN)}`;
+    const { w, calls, setOutcome } = setupDialog(ag("s", { joined: true }), [], CAPS2, syncEcho(refused));
+    await w.get("input[name=alias-name]").setValue("web");
+    await w
+      .findAll(".alias-actions button")
+      .find((b) => b.text() === "Try take")!
+      .trigger("click");
+    await flushPromises();
+    expect(calls[0]!.args).toBe("alias web --take");
+    expect(w.find(".alias-take-confirm").exists()).toBe(false);
+    expect(w.get(".alias-output").text()).toContain("仍在线");
+    const forceBtn = w.get(".alias-force-row button");
+    expect(forceBtn.text()).toBe("Force take…");
+
+    setOutcome(syncEcho(forcePreview));
+    await forceBtn.trigger("click");
+    await flushPromises();
+    expect(calls[1]!.args).toBe("alias web --force");
+    const box = w.get(".alias-take-confirm");
+    expect(box.get(".alias-take-preview").text()).toBe(forcePreview); // holder dir / online / auto origin
+    expect(box.text()).toContain("token expires in");
+    expect(w.find(".alias-force-row").exists()).toBe(false); // consumed by the new preview
+
+    setOutcome(syncEcho("别名已设置为：@web"));
+    await box.get(".alias-take-run").trigger("click");
+    await flushPromises();
+    expect(calls[2]!.args).toBe(`alias web --take=${TOKEN}`); // execution still uses --take=<token>
+    expect(w.find(".alias-take-confirm").exists()).toBe(false);
+    expect(w.get(".alias-output").text()).toBe("别名已设置为：@web");
+  });
+
+  it.each([
+    ["no holder", "该别名当前没有可抢占的持有者。"],
+    ["stale preview", "状态已变化或确认已失效，请重新预览：/fabric alias <名> --take"],
+  ])("force (AFU): v2 caps but a non-online/recent --take refusal (%s) never offers force", async (_n, refused) => {
+    const CAPS2 = [...CAPS, "xs.alias.v2"];
+    const { w, calls } = setupDialog(ag("s", { joined: true }), [], CAPS2, syncEcho(refused));
+    await w.get("input[name=alias-name]").setValue("web");
+    await w
+      .findAll(".alias-actions button")
+      .find((b) => b.text() === "Try take")!
+      .trigger("click");
+    await flushPromises();
+    expect(calls[0]!.args).toBe("alias web --take");
+    expect(w.get(".alias-output").text()).toBe(refused);
+    expect(w.find(".alias-take-confirm").exists()).toBe(false);
+    expect(w.find(".alias-force-row").exists()).toBe(false);
+  });
+
+  it("force (AFU): the offer follows the draft and dies with the input; force refusal shows its echo", async () => {
+    const CAPS2 = [...CAPS, "xs.alias.v2"];
+    const refused = "别名「web」的持有者离线不足 10 分钟，暂不能抢占。";
+    const unnotifiable = "持有会话在线但无法实时通知（版本较旧或未启用跨会话），不能强制抢占。";
+    const { w, calls, setOutcome } = setupDialog(ag("s", { joined: true }), [], CAPS2, syncEcho(refused));
+    await w.get("input[name=alias-name]").setValue("web");
+    await w
+      .findAll(".alias-actions button")
+      .find((b) => b.text() === "Try take")!
+      .trigger("click");
+    await flushPromises();
+    expect(w.find(".alias-force-row").exists()).toBe(true);
+    // editing the draft away from the refused alias hides the offer; typing it back brings it back
+    await w.get("input[name=alias-name]").setValue("other");
+    expect(w.find(".alias-force-row").exists()).toBe(false);
+    await w.get("input[name=alias-name]").setValue("web");
+    expect(w.find(".alias-force-row").exists()).toBe(true);
+
+    setOutcome(syncEcho(unnotifiable));
+    await w.get(".alias-force-row button").trigger("click");
+    await flushPromises();
+    expect(calls[1]!.args).toBe("alias web --force");
+    expect(w.find(".alias-take-confirm").exists()).toBe(false);
+    expect(w.get(".alias-output").text()).toContain("无法实时通知");
+    expect(w.find(".alias-force-row").exists()).toBe(false); // a force refusal does not re-offer force
   });
 
   it("expired token (5 min): confirm disabled, re-preview hint", async () => {

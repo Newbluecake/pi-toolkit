@@ -83,7 +83,7 @@
       "scenario": "tick-grid-latch-wobble-rearm",
       "index": 1,
       "customType": "subagent:usage-tick",
-      "content": "[pi-subagent 上下文通报] 上下文已使用约 12%。达到 75% 时会再提醒你考虑 compact_context；现在无需操作。",
+      "content": "[上下文通报] 上下文已使用约 12%。达到 75% 时会再提醒你考虑 compact_context；现在无需操作。",
       "details": {
         "percent": 12,
         "tickStep": 10
@@ -93,7 +93,7 @@
       "scenario": "tick-grid-latch-wobble-rearm",
       "index": 2,
       "customType": "subagent:usage-tick",
-      "content": "[pi-subagent 上下文通报] 上下文已使用约 21%。达到 75% 时会再提醒你考虑 compact_context；现在无需操作。",
+      "content": "[上下文通报] 上下文已使用约 21%。达到 75% 时会再提醒你考虑 compact_context；现在无需操作。",
       "details": {
         "percent": 21,
         "tickStep": 20
@@ -103,7 +103,7 @@
       "scenario": "tick-grid-latch-wobble-rearm",
       "index": 3,
       "customType": "subagent:usage-tick",
-      "content": "[pi-subagent 上下文通报] 上下文已使用约 61%。达到 75% 时会再提醒你考虑 compact_context；现在无需操作。",
+      "content": "[上下文通报] 上下文已使用约 61%。达到 75% 时会再提醒你考虑 compact_context；现在无需操作。",
       "details": {
         "percent": 61,
         "tickStep": 60
@@ -113,7 +113,7 @@
       "scenario": "tick-grid-latch-wobble-rearm",
       "index": 4,
       "customType": "subagent:usage-tick",
-      "content": "[pi-subagent 上下文通报] 上下文已使用约 31%。达到 75% 时会再提醒你考虑 compact_context；现在无需操作。",
+      "content": "[上下文通报] 上下文已使用约 31%。达到 75% 时会再提醒你考虑 compact_context；现在无需操作。",
       "details": {
         "percent": 31,
         "tickStep": 30
@@ -123,7 +123,7 @@
       "scenario": "tick-grid-latch-wobble-rearm",
       "index": 5,
       "customType": "subagent:usage-tick",
-      "content": "[pi-subagent 上下文通报] 上下文已使用约 70%。达到 75% 时会再提醒你考虑 compact_context；现在无需操作。",
+      "content": "[上下文通报] 上下文已使用约 70%。达到 75% 时会再提醒你考虑 compact_context；现在无需操作。",
       "details": {
         "percent": 70,
         "tickStep": 60
@@ -133,7 +133,7 @@
       "scenario": "tick-grid-latch-wobble-rearm",
       "index": 6,
       "customType": "subagent:compact-hint",
-      "content": "[pi-subagent 上下文警告] 上下文已使用约 75%（阈值 75%）。\n\n建议在当前子任务告一段落后调用 compact_context 主动压缩：\n- 通过 instructions 参数写明必须保留的内容（当前目标、关键文件路径、未决决策、TODO），\n  这是只有自主压缩才有的控制权；\n- 若用量继续涨至 88%，系统将强制压缩并使用通用摘要，你可能丢失想保留的细节；\n- 压缩不是终止：压缩后你会带着摘要自动继续当前任务。",
+      "content": "[上下文警告] 上下文已使用约 75%（阈值 75%）。\n\n建议在当前子任务告一段落后调用 compact_context 主动压缩：\n- 通过 instructions 参数写明必须保留的内容（当前目标、关键文件路径、未决决策、TODO），\n  这是只有自主压缩才有的控制权；\n- 若用量继续涨至 88%，系统将强制压缩并使用通用摘要，你可能丢失想保留的细节；\n- 压缩不是终止：压缩后你会带着摘要自动继续当前任务。",
       "details": {
         "percent": 75,
         "thresholdPercent": 75
@@ -143,7 +143,7 @@
       "scenario": "tick-grid-latch-wobble-rearm",
       "index": 7,
       "customType": "subagent:usage-tick",
-      "content": "[pi-subagent 上下文通报] 上下文已使用约 80%。已超过提醒阈值 75%；如果你正在收尾一个子任务，请尽快调用 compact_context。",
+      "content": "[上下文通报] 上下文已使用约 80%。已超过提醒阈值 75%；如果你正在收尾一个子任务，请尽快调用 compact_context。",
       "details": {
         "percent": 80,
         "tickStep": 80
@@ -153,7 +153,7 @@
       "scenario": "hint-latch-cooldown-rearm",
       "index": 1,
       "customType": "subagent:compact-hint",
-      "content": "[pi-subagent 上下文警告] 上下文已使用约 75%（阈值 75%）。\n\n建议在当前子任务告一段落后调用 compact_context 主动压缩：\n- 通过 instructions 参数写明必须保留的内容（当前目标、关键文件路径、未决决策、TODO），\n  这是只有自主压缩才有的控制权；\n- 若用量继续涨至 88%，系统将强制压缩并使用通用摘要，你可能丢失想保留的细节；\n- 压缩不是终止：压缩后你会带着摘要自动继续当前任务。",
+      "content": "[上下文警告] 上下文已使用约 75%（阈值 75%）。\n\n建议在当前子任务告一段落后调用 compact_context 主动压缩：\n- 通过 instructions 参数写明必须保留的内容（当前目标、关键文件路径、未决决策、TODO），\n  这是只有自主压缩才有的控制权；\n- 若用量继续涨至 88%，系统将强制压缩并使用通用摘要，你可能丢失想保留的细节；\n- 压缩不是终止：压缩后你会带着摘要自动继续当前任务。",
       "details": {
         "percent": 75,
         "thresholdPercent": 75
@@ -163,7 +163,7 @@
       "scenario": "hint-latch-cooldown-rearm",
       "index": 2,
       "customType": "subagent:compact-hint",
-      "content": "[pi-subagent 上下文警告] 上下文已使用约 75%（阈值 75%）。\n\n建议在当前子任务告一段落后调用 compact_context 主动压缩：\n- 通过 instructions 参数写明必须保留的内容（当前目标、关键文件路径、未决决策、TODO），\n  这是只有自主压缩才有的控制权；\n- 若用量继续涨至 88%，系统将强制压缩并使用通用摘要，你可能丢失想保留的细节；\n- 压缩不是终止：压缩后你会带着摘要自动继续当前任务。",
+      "content": "[上下文警告] 上下文已使用约 75%（阈值 75%）。\n\n建议在当前子任务告一段落后调用 compact_context 主动压缩：\n- 通过 instructions 参数写明必须保留的内容（当前目标、关键文件路径、未决决策、TODO），\n  这是只有自主压缩才有的控制权；\n- 若用量继续涨至 88%，系统将强制压缩并使用通用摘要，你可能丢失想保留的细节；\n- 压缩不是终止：压缩后你会带着摘要自动继续当前任务。",
       "details": {
         "percent": 75,
         "thresholdPercent": 75
@@ -173,7 +173,7 @@
       "scenario": "hint-window-switch-and-effective-zero",
       "index": 1,
       "customType": "subagent:compact-hint",
-      "content": "[pi-subagent 上下文警告] 上下文已使用约 75%（阈值 75%）。\n\n建议在当前子任务告一段落后调用 compact_context 主动压缩：\n- 通过 instructions 参数写明必须保留的内容（当前目标、关键文件路径、未决决策、TODO），\n  这是只有自主压缩才有的控制权；\n- 压缩不是终止：压缩后你会带着摘要自动继续当前任务。",
+      "content": "[上下文警告] 上下文已使用约 75%（阈值 75%）。\n\n建议在当前子任务告一段落后调用 compact_context 主动压缩：\n- 通过 instructions 参数写明必须保留的内容（当前目标、关键文件路径、未决决策、TODO），\n  这是只有自主压缩才有的控制权；\n- 压缩不是终止：压缩后你会带着摘要自动继续当前任务。",
       "details": {
         "percent": 75,
         "thresholdPercent": 75
@@ -183,7 +183,7 @@
       "scenario": "hint-window-switch-and-effective-zero",
       "index": 2,
       "customType": "subagent:compact-hint",
-      "content": "[pi-subagent 上下文警告] 上下文已使用约 76%（阈值 74%）。\n\n建议在当前子任务告一段落后调用 compact_context 主动压缩：\n- 通过 instructions 参数写明必须保留的内容（当前目标、关键文件路径、未决决策、TODO），\n  这是只有自主压缩才有的控制权；\n- 压缩不是终止：压缩后你会带着摘要自动继续当前任务。",
+      "content": "[上下文警告] 上下文已使用约 76%（阈值 74%）。\n\n建议在当前子任务告一段落后调用 compact_context 主动压缩：\n- 通过 instructions 参数写明必须保留的内容（当前目标、关键文件路径、未决决策、TODO），\n  这是只有自主压缩才有的控制权；\n- 压缩不是终止：压缩后你会带着摘要自动继续当前任务。",
       "details": {
         "percent": 76,
         "thresholdPercent": 74
@@ -193,7 +193,7 @@
       "scenario": "hint-window-switch-and-effective-zero",
       "index": 3,
       "customType": "subagent:compact-hint",
-      "content": "[pi-subagent 上下文警告] 上下文已使用约 80%（阈值 75%）。\n\n建议在当前子任务告一段落后调用 compact_context 主动压缩：\n- 通过 instructions 参数写明必须保留的内容（当前目标、关键文件路径、未决决策、TODO），\n  这是只有自主压缩才有的控制权；\n- 压缩不是终止：压缩后你会带着摘要自动继续当前任务。",
+      "content": "[上下文警告] 上下文已使用约 80%（阈值 75%）。\n\n建议在当前子任务告一段落后调用 compact_context 主动压缩：\n- 通过 instructions 参数写明必须保留的内容（当前目标、关键文件路径、未决决策、TODO），\n  这是只有自主压缩才有的控制权；\n- 压缩不是终止：压缩后你会带着摘要自动继续当前任务。",
       "details": {
         "percent": 80,
         "thresholdPercent": 75
@@ -203,7 +203,7 @@
       "scenario": "hint-unknown-usage-clears-latch",
       "index": 1,
       "customType": "subagent:compact-hint",
-      "content": "[pi-subagent 上下文警告] 上下文已使用约 80%（阈值 75%）。\n\n建议在当前子任务告一段落后调用 compact_context 主动压缩：\n- 通过 instructions 参数写明必须保留的内容（当前目标、关键文件路径、未决决策、TODO），\n  这是只有自主压缩才有的控制权；\n- 若用量继续涨至 88%，系统将强制压缩并使用通用摘要，你可能丢失想保留的细节；\n- 压缩不是终止：压缩后你会带着摘要自动继续当前任务。",
+      "content": "[上下文警告] 上下文已使用约 80%（阈值 75%）。\n\n建议在当前子任务告一段落后调用 compact_context 主动压缩：\n- 通过 instructions 参数写明必须保留的内容（当前目标、关键文件路径、未决决策、TODO），\n  这是只有自主压缩才有的控制权；\n- 若用量继续涨至 88%，系统将强制压缩并使用通用摘要，你可能丢失想保留的细节；\n- 压缩不是终止：压缩后你会带着摘要自动继续当前任务。",
       "details": {
         "percent": 80,
         "thresholdPercent": 75
@@ -213,7 +213,7 @@
       "scenario": "force-complete-resume-and-cooldown",
       "index": 1,
       "customType": "subagent:compact-hint",
-      "content": "[pi-subagent 上下文警告] 上下文已使用约 88%，达到强制阈值 88%，正在强制压缩（通用摘要）；压缩不是终止，完成后会自动继续当前任务。",
+      "content": "[上下文警告] 上下文已使用约 88%，达到强制阈值 88%，正在强制压缩（通用摘要）；压缩不是终止，完成后会自动继续当前任务。",
       "details": {
         "percent": 88,
         "thresholdPercent": 88,
@@ -224,7 +224,7 @@
       "scenario": "force-complete-resume-and-cooldown",
       "index": 2,
       "customType": "subagent:compact-hint",
-      "content": "[pi-subagent 上下文警告] 上下文已使用约 75%（阈值 75%）。\n\n建议在当前子任务告一段落后调用 compact_context 主动压缩：\n- 通过 instructions 参数写明必须保留的内容（当前目标、关键文件路径、未决决策、TODO），\n  这是只有自主压缩才有的控制权；\n- 若用量继续涨至 88%，系统将强制压缩并使用通用摘要，你可能丢失想保留的细节；\n- 压缩不是终止：压缩后你会带着摘要自动继续当前任务。",
+      "content": "[上下文警告] 上下文已使用约 75%（阈值 75%）。\n\n建议在当前子任务告一段落后调用 compact_context 主动压缩：\n- 通过 instructions 参数写明必须保留的内容（当前目标、关键文件路径、未决决策、TODO），\n  这是只有自主压缩才有的控制权；\n- 若用量继续涨至 88%，系统将强制压缩并使用通用摘要，你可能丢失想保留的细节；\n- 压缩不是终止：压缩后你会带着摘要自动继续当前任务。",
       "details": {
         "percent": 75,
         "thresholdPercent": 75
@@ -234,7 +234,7 @@
       "scenario": "force-complete-resume-and-cooldown",
       "index": 3,
       "customType": "subagent:compact-hint",
-      "content": "[pi-subagent 上下文警告] 上下文已使用约 88%，达到强制阈值 88%，正在强制压缩（通用摘要）；压缩不是终止，完成后会自动继续当前任务。",
+      "content": "[上下文警告] 上下文已使用约 88%，达到强制阈值 88%，正在强制压缩（通用摘要）；压缩不是终止，完成后会自动继续当前任务。",
       "details": {
         "percent": 88,
         "thresholdPercent": 88,
@@ -245,7 +245,7 @@
       "scenario": "force-onerror-clears-inflight",
       "index": 1,
       "customType": "subagent:compact-hint",
-      "content": "[pi-subagent 上下文警告] 上下文已使用约 88%，达到强制阈值 88%，正在强制压缩（通用摘要）；压缩不是终止，完成后会自动继续当前任务。",
+      "content": "[上下文警告] 上下文已使用约 88%，达到强制阈值 88%，正在强制压缩（通用摘要）；压缩不是终止，完成后会自动继续当前任务。",
       "details": {
         "percent": 88,
         "thresholdPercent": 88,
@@ -256,7 +256,7 @@
       "scenario": "force-onerror-clears-inflight",
       "index": 2,
       "customType": "subagent:compact-hint",
-      "content": "[pi-subagent 上下文警告] 上下文已使用约 88%，达到强制阈值 88%，正在强制压缩（通用摘要）；压缩不是终止，完成后会自动继续当前任务。",
+      "content": "[上下文警告] 上下文已使用约 88%，达到强制阈值 88%，正在强制压缩（通用摘要）；压缩不是终止，完成后会自动继续当前任务。",
       "details": {
         "percent": 88,
         "thresholdPercent": 88,
@@ -267,7 +267,7 @@
       "scenario": "force-sync-throw-clears-inflight",
       "index": 1,
       "customType": "subagent:compact-hint",
-      "content": "[pi-subagent 上下文警告] 上下文已使用约 88%，达到强制阈值 88%，正在强制压缩（通用摘要）；压缩不是终止，完成后会自动继续当前任务。",
+      "content": "[上下文警告] 上下文已使用约 88%，达到强制阈值 88%，正在强制压缩（通用摘要）；压缩不是终止，完成后会自动继续当前任务。",
       "details": {
         "percent": 88,
         "thresholdPercent": 88,
@@ -278,7 +278,7 @@
       "scenario": "force-sync-throw-clears-inflight",
       "index": 2,
       "customType": "subagent:compact-hint",
-      "content": "[pi-subagent 上下文警告] 上下文已使用约 88%，达到强制阈值 88%，正在强制压缩（通用摘要）；压缩不是终止，完成后会自动继续当前任务。",
+      "content": "[上下文警告] 上下文已使用约 88%，达到强制阈值 88%，正在强制压缩（通用摘要）；压缩不是终止，完成后会自动继续当前任务。",
       "details": {
         "percent": 88,
         "thresholdPercent": 88,
@@ -289,7 +289,7 @@
       "scenario": "switch-demand-then-force-fallback",
       "index": 1,
       "customType": "subagent:compact-hint",
-      "content": "[pi-subagent 上下文警告] 上下文已使用约 90%，已达强制线 88%。\n\n请在本回合内调用 switch_context 完成上下文切换（先把手头这一步收尾，不要开新工作）：\n- 把目标、进展、下一步、已定决策、关键文件写进参数，这些就是切换后你能看到的全部内容；\n- 如果本回合结束时仍未切换，系统将改为强制通用摘要压缩，保留什么将不再由你决定。",
+      "content": "[上下文警告] 上下文已使用约 90%，已达强制线 88%。\n\n请在本回合内调用 switch_context 完成上下文切换（先把手头这一步收尾，不要开新工作）：\n- 把目标、进展、下一步、已定决策、关键文件写进参数，这些就是切换后你能看到的全部内容；\n- 如果本回合结束时仍未切换，系统将改为强制通用摘要压缩，保留什么将不再由你决定。",
       "details": {
         "percent": 90,
         "thresholdPercent": 88,
@@ -301,7 +301,7 @@
       "scenario": "switch-demand-then-force-fallback",
       "index": 2,
       "customType": "subagent:compact-hint",
-      "content": "[pi-subagent 上下文警告] 上下文已使用约 90%，达到强制阈值 88%，正在强制压缩（通用摘要）；压缩不是终止，完成后会自动继续当前任务。",
+      "content": "[上下文警告] 上下文已使用约 90%，达到强制阈值 88%，正在强制压缩（通用摘要）；压缩不是终止，完成后会自动继续当前任务。",
       "details": {
         "percent": 90,
         "thresholdPercent": 88,
@@ -312,7 +312,7 @@
       "scenario": "switch-demand-then-force-fallback",
       "index": 3,
       "customType": "subagent:compact-hint",
-      "content": "[pi-subagent 上下文警告] 上下文已使用约 90%，已达强制线 88%。\n\n请在本回合内调用 switch_context 完成上下文切换（先把手头这一步收尾，不要开新工作）：\n- 把目标、进展、下一步、已定决策、关键文件写进参数，这些就是切换后你能看到的全部内容；\n- 如果本回合结束时仍未切换，系统将改为强制通用摘要压缩，保留什么将不再由你决定。",
+      "content": "[上下文警告] 上下文已使用约 90%，已达强制线 88%。\n\n请在本回合内调用 switch_context 完成上下文切换（先把手头这一步收尾，不要开新工作）：\n- 把目标、进展、下一步、已定决策、关键文件写进参数，这些就是切换后你能看到的全部内容；\n- 如果本回合结束时仍未切换，系统将改为强制通用摘要压缩，保留什么将不再由你决定。",
       "details": {
         "percent": 90,
         "thresholdPercent": 88,
@@ -324,7 +324,7 @@
       "scenario": "absolute-token-line-1m-window",
       "index": 1,
       "customType": "subagent:usage-tick",
-      "content": "[pi-subagent 上下文通报] 上下文已使用约 39%。达到 40% 时会再提醒你考虑 compact_context；现在无需操作。",
+      "content": "[上下文通报] 上下文已使用约 39%。达到 40% 时会再提醒你考虑 compact_context；现在无需操作。",
       "details": {
         "percent": 39,
         "tickStep": 30
@@ -334,7 +334,7 @@
       "scenario": "absolute-token-line-1m-window",
       "index": 2,
       "customType": "subagent:compact-hint",
-      "content": "[pi-subagent 上下文警告] 上下文已使用约 40%（阈值 40%）。\n\n建议在当前子任务告一段落后调用 compact_context 主动压缩：\n- 通过 instructions 参数写明必须保留的内容（当前目标、关键文件路径、未决决策、TODO），\n  这是只有自主压缩才有的控制权；\n- 若用量继续涨至 88%，系统将强制压缩并使用通用摘要，你可能丢失想保留的细节；\n- 压缩不是终止：压缩后你会带着摘要自动继续当前任务。",
+      "content": "[上下文警告] 上下文已使用约 40%（阈值 40%）。\n\n建议在当前子任务告一段落后调用 compact_context 主动压缩：\n- 通过 instructions 参数写明必须保留的内容（当前目标、关键文件路径、未决决策、TODO），\n  这是只有自主压缩才有的控制权；\n- 若用量继续涨至 88%，系统将强制压缩并使用通用摘要，你可能丢失想保留的细节；\n- 压缩不是终止：压缩后你会带着摘要自动继续当前任务。",
       "details": {
         "percent": 40,
         "thresholdPercent": 40
@@ -344,7 +344,7 @@
       "scenario": "absolute-line-auto-disable-small-window",
       "index": 1,
       "customType": "subagent:compact-hint",
-      "content": "[pi-subagent 上下文警告] 上下文已使用约 75%（阈值 75%）。\n\n建议在当前子任务告一段落后调用 compact_context 主动压缩：\n- 通过 instructions 参数写明必须保留的内容（当前目标、关键文件路径、未决决策、TODO），\n  这是只有自主压缩才有的控制权；\n- 压缩不是终止：压缩后你会带着摘要自动继续当前任务。",
+      "content": "[上下文警告] 上下文已使用约 75%（阈值 75%）。\n\n建议在当前子任务告一段落后调用 compact_context 主动压缩：\n- 通过 instructions 参数写明必须保留的内容（当前目标、关键文件路径、未决决策、TODO），\n  这是只有自主压缩才有的控制权；\n- 压缩不是终止：压缩后你会带着摘要自动继续当前任务。",
       "details": {
         "percent": 75,
         "thresholdPercent": 75
@@ -354,7 +354,7 @@
       "scenario": "force-tokens-only-percent-off",
       "index": 1,
       "customType": "subagent:usage-tick",
-      "content": "[pi-subagent 上下文通报] 上下文已使用约 31%。现在无需操作。",
+      "content": "[上下文通报] 上下文已使用约 31%。现在无需操作。",
       "details": {
         "percent": 31,
         "tickStep": 30
@@ -364,7 +364,7 @@
       "scenario": "force-tokens-only-percent-off",
       "index": 2,
       "customType": "subagent:usage-tick",
-      "content": "[pi-subagent 上下文通报] 上下文已使用约 39%。现在无需操作。",
+      "content": "[上下文通报] 上下文已使用约 39%。现在无需操作。",
       "details": {
         "percent": 39,
         "tickStep": 38
@@ -374,7 +374,7 @@
       "scenario": "force-tokens-only-percent-off",
       "index": 3,
       "customType": "subagent:compact-hint",
-      "content": "[pi-subagent 上下文警告] 上下文已使用约 40%，达到强制阈值 40%，正在强制压缩（通用摘要）；压缩不是终止，完成后会自动继续当前任务。",
+      "content": "[上下文警告] 上下文已使用约 40%，达到强制阈值 40%，正在强制压缩（通用摘要）；压缩不是终止，完成后会自动继续当前任务。",
       "details": {
         "percent": 40,
         "thresholdPercent": 40,
@@ -385,7 +385,7 @@
       "scenario": "window-scaled-force-densified-ticks",
       "index": 1,
       "customType": "subagent:usage-tick",
-      "content": "[pi-subagent 上下文通报] 上下文已使用约 88%。现在无需操作。",
+      "content": "[上下文通报] 上下文已使用约 88%。现在无需操作。",
       "details": {
         "percent": 88,
         "tickStep": 87
@@ -395,7 +395,7 @@
       "scenario": "window-scaled-force-densified-ticks",
       "index": 2,
       "customType": "subagent:usage-tick",
-      "content": "[pi-subagent 上下文通报] 上下文已使用约 90%。现在无需操作。",
+      "content": "[上下文通报] 上下文已使用约 90%。现在无需操作。",
       "details": {
         "percent": 90,
         "tickStep": 89
@@ -405,7 +405,7 @@
       "scenario": "window-scaled-force-densified-ticks",
       "index": 3,
       "customType": "subagent:compact-hint",
-      "content": "[pi-subagent 上下文警告] 上下文已使用约 91%，达到强制阈值 91%，正在强制压缩（通用摘要）；压缩不是终止，完成后会自动继续当前任务。",
+      "content": "[上下文警告] 上下文已使用约 91%，达到强制阈值 91%，正在强制压缩（通用摘要）；压缩不是终止，完成后会自动继续当前任务。",
       "details": {
         "percent": 91,
         "thresholdPercent": 91,
@@ -416,7 +416,7 @@
       "scenario": "window-scaled-force-densified-ticks",
       "index": 4,
       "customType": "subagent:compact-hint",
-      "content": "[pi-subagent 上下文警告] 上下文已使用约 55%，达到强制阈值 55%，正在强制压缩（通用摘要）；压缩不是终止，完成后会自动继续当前任务。",
+      "content": "[上下文警告] 上下文已使用约 55%，达到强制阈值 55%，正在强制压缩（通用摘要）；压缩不是终止，完成后会自动继续当前任务。",
       "details": {
         "percent": 55,
         "thresholdPercent": 55,
@@ -427,7 +427,7 @@
       "scenario": "hint-l1-keeps-ticking-to-force-ceiling",
       "index": 1,
       "customType": "subagent:usage-tick",
-      "content": "[pi-subagent 上下文通报] 上下文已使用约 70%。达到 75% 时会再提醒你考虑 compact_context；现在无需操作。",
+      "content": "[上下文通报] 上下文已使用约 70%。达到 75% 时会再提醒你考虑 compact_context；现在无需操作。",
       "details": {
         "percent": 70,
         "tickStep": 60
@@ -437,7 +437,7 @@
       "scenario": "hint-l1-keeps-ticking-to-force-ceiling",
       "index": 2,
       "customType": "subagent:compact-hint",
-      "content": "[pi-subagent 上下文警告] 上下文已使用约 75%（阈值 75%）。\n\n建议在当前子任务告一段落后调用 compact_context 主动压缩：\n- 通过 instructions 参数写明必须保留的内容（当前目标、关键文件路径、未决决策、TODO），\n  这是只有自主压缩才有的控制权；\n- 若用量继续涨至 88%，系统将强制压缩并使用通用摘要，你可能丢失想保留的细节；\n- 压缩不是终止：压缩后你会带着摘要自动继续当前任务。",
+      "content": "[上下文警告] 上下文已使用约 75%（阈值 75%）。\n\n建议在当前子任务告一段落后调用 compact_context 主动压缩：\n- 通过 instructions 参数写明必须保留的内容（当前目标、关键文件路径、未决决策、TODO），\n  这是只有自主压缩才有的控制权；\n- 若用量继续涨至 88%，系统将强制压缩并使用通用摘要，你可能丢失想保留的细节；\n- 压缩不是终止：压缩后你会带着摘要自动继续当前任务。",
       "details": {
         "percent": 75,
         "thresholdPercent": 75
@@ -447,7 +447,7 @@
       "scenario": "hint-l1-keeps-ticking-to-force-ceiling",
       "index": 3,
       "customType": "subagent:usage-tick",
-      "content": "[pi-subagent 上下文通报] 上下文已使用约 80%。已超过提醒阈值 75%；如果你正在收尾一个子任务，请尽快调用 compact_context。",
+      "content": "[上下文通报] 上下文已使用约 80%。已超过提醒阈值 75%；如果你正在收尾一个子任务，请尽快调用 compact_context。",
       "details": {
         "percent": 80,
         "tickStep": 80
@@ -457,7 +457,7 @@
       "scenario": "hint-l1-keeps-ticking-to-force-ceiling",
       "index": 4,
       "customType": "subagent:usage-tick",
-      "content": "[pi-subagent 上下文通报] 上下文已使用约 87%。已超过提醒阈值 75%；如果你正在收尾一个子任务，请尽快调用 compact_context。",
+      "content": "[上下文通报] 上下文已使用约 87%。已超过提醒阈值 75%；如果你正在收尾一个子任务，请尽快调用 compact_context。",
       "details": {
         "percent": 87,
         "tickStep": 86
@@ -467,7 +467,7 @@
       "scenario": "switch-tool-l1-hint-text",
       "index": 1,
       "customType": "subagent:usage-tick",
-      "content": "[pi-subagent 上下文通报] 上下文已使用约 42%。达到 75% 时会再提醒你考虑 switch_context；现在无需操作。",
+      "content": "[上下文通报] 上下文已使用约 42%。达到 75% 时会再提醒你考虑 switch_context；现在无需操作。",
       "details": {
         "percent": 42,
         "tickStep": 40
@@ -477,7 +477,7 @@
       "scenario": "switch-tool-l1-hint-text",
       "index": 2,
       "customType": "subagent:compact-hint",
-      "content": "[pi-subagent 上下文警告] 上下文已使用约 80%（阈值 75%）。\n\n建议在当前子任务告一段落后调用 switch_context 主动切换上下文：\n- 你在参数里写下的 goal / progress / next_steps / decisions / key_files 就是切换后的全部上下文，\n  没有摘要模型替你补救——写全才不丢；\n- 若用量继续涨至 88%，系统会先硬性要求你切换；仍不照办就回落到通用摘要压缩，\n  届时保留什么由摘要模型决定，你会失去控制权；\n- 切换不是终止：切换后你会带着自己写的交接内容自动继续当前任务。",
+      "content": "[上下文警告] 上下文已使用约 80%（阈值 75%）。\n\n建议在当前子任务告一段落后调用 switch_context 主动切换上下文：\n- 你在参数里写下的 goal / progress / next_steps / decisions / key_files 就是切换后的全部上下文，\n  没有摘要模型替你补救——写全才不丢；\n- 若用量继续涨至 88%，系统会先硬性要求你切换；仍不照办就回落到通用摘要压缩，\n  届时保留什么由摘要模型决定，你会失去控制权；\n- 切换不是终止：切换后你会带着自己写的交接内容自动继续当前任务。",
       "details": {
         "percent": 80,
         "thresholdPercent": 75
@@ -487,7 +487,7 @@
       "scenario": "force-scaling-off-literal-line",
       "index": 1,
       "customType": "subagent:compact-hint",
-      "content": "[pi-subagent 上下文警告] 上下文已使用约 87%，达到强制阈值 55%，正在强制压缩（通用摘要）；压缩不是终止，完成后会自动继续当前任务。",
+      "content": "[上下文警告] 上下文已使用约 87%，达到强制阈值 55%，正在强制压缩（通用摘要）；压缩不是终止，完成后会自动继续当前任务。",
       "details": {
         "percent": 87,
         "thresholdPercent": 55,
@@ -498,7 +498,7 @@
       "scenario": "large-window-1m-default-lines",
       "index": 1,
       "customType": "subagent:usage-tick",
-      "content": "[pi-subagent 上下文通报] 上下文已使用约 45%。达到 75% 时会再提醒你考虑 compact_context；现在无需操作。",
+      "content": "[上下文通报] 上下文已使用约 45%。达到 75% 时会再提醒你考虑 compact_context；现在无需操作。",
       "details": {
         "percent": 45,
         "tickStep": 40
@@ -508,7 +508,7 @@
       "scenario": "large-window-1m-default-lines",
       "index": 2,
       "customType": "subagent:usage-tick",
-      "content": "[pi-subagent 上下文通报] 上下文已使用约 55%。达到 75% 时会再提醒你考虑 compact_context；现在无需操作。",
+      "content": "[上下文通报] 上下文已使用约 55%。达到 75% 时会再提醒你考虑 compact_context；现在无需操作。",
       "details": {
         "percent": 55,
         "tickStep": 50
@@ -518,7 +518,7 @@
       "scenario": "large-window-1m-default-lines",
       "index": 3,
       "customType": "subagent:compact-hint",
-      "content": "[pi-subagent 上下文警告] 上下文已使用约 75%（阈值 75%）。\n\n建议在当前子任务告一段落后调用 compact_context 主动压缩：\n- 通过 instructions 参数写明必须保留的内容（当前目标、关键文件路径、未决决策、TODO），\n  这是只有自主压缩才有的控制权；\n- 若用量继续涨至 88%，系统将强制压缩并使用通用摘要，你可能丢失想保留的细节；\n- 压缩不是终止：压缩后你会带着摘要自动继续当前任务。",
+      "content": "[上下文警告] 上下文已使用约 75%（阈值 75%）。\n\n建议在当前子任务告一段落后调用 compact_context 主动压缩：\n- 通过 instructions 参数写明必须保留的内容（当前目标、关键文件路径、未决决策、TODO），\n  这是只有自主压缩才有的控制权；\n- 若用量继续涨至 88%，系统将强制压缩并使用通用摘要，你可能丢失想保留的细节；\n- 压缩不是终止：压缩后你会带着摘要自动继续当前任务。",
       "details": {
         "percent": 75,
         "thresholdPercent": 75
@@ -528,7 +528,7 @@
       "scenario": "large-window-1m-default-lines",
       "index": 4,
       "customType": "subagent:compact-hint",
-      "content": "[pi-subagent 上下文警告] 上下文已使用约 88%，达到强制阈值 88%，正在强制压缩（通用摘要）；压缩不是终止，完成后会自动继续当前任务。",
+      "content": "[上下文警告] 上下文已使用约 88%，达到强制阈值 88%，正在强制压缩（通用摘要）；压缩不是终止，完成后会自动继续当前任务。",
       "details": {
         "percent": 88,
         "thresholdPercent": 88,

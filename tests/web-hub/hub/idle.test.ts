@@ -81,7 +81,7 @@ describe("createHubLog", () => {
   const tmp = tmpDirs();
   afterEach(() => tmp.cleanup());
 
-  it("writes 0600 JSON lines and rotates to .1 past maxBytes", () => {
+  it("writes 0600 JSON lines and keeps exactly three rotated backups", () => {
     const dir = tmp.make();
     const file = join(dir, "hub.log");
     const log = createHubLog(file, { maxBytes: 400 });
@@ -96,6 +96,28 @@ describe("createHubLog", () => {
     const before = readFileSync(file, "utf8");
     log.error("after close");
     expect(readFileSync(file, "utf8")).toBe(before);
+  });
+
+  it("keeps at most hub.log.1/.2/.3 in order across multiple rotations", () => {
+    const dir = tmp.make();
+    const file = join(dir, "hub.log");
+    // One line ≈ 73–80 bytes > maxBytes/2 ⇒ a rotation on every write: each
+    // backup file ends up holding exactly one line, so the shift chain is observable.
+    const log = createHubLog(file, { maxBytes: 120 });
+    for (let i = 0; i < 14; i++) log.info(`m${i}`);
+    log.close();
+    expect(existsSync(`${file}.4`)).toBe(false);
+    const idx: number[] = [];
+    for (const suffix of [".3", ".2", ".1"]) {
+      expect(existsSync(`${file}${suffix}`), suffix).toBe(true);
+      for (const l of readFileSync(`${file}${suffix}`, "utf8").split("\n")) {
+        if (l) idx.push(Number(JSON.parse(l).msg.slice(1)));
+      }
+    }
+    // Three backups survived, oldest (.3) to newest (.1), strictly increasing;
+    // after 14 writes (m0..m13) the backups hold m10/m11/m12 and live holds m13.
+    expect(idx).toEqual([10, 11, 12]);
+    expect(JSON.parse(readFileSync(file, "utf8").trim()).msg).toBe("m13");
   });
 
   it("never throws when the directory is missing", () => {

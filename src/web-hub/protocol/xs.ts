@@ -1,5 +1,12 @@
 import { Type, type TSchema } from "@sinclair/typebox";
 import { XS_ALIAS_MAX_BYTES } from "./xs-alias.js";
+import type { XsActivateResWire, XsActivationReqOp } from "./xs-activation.js";
+import {
+  XS_ACTIVATE_REQ_DEADLINE_MS,
+  XS_RECEIPT_DEADLINE_MS,
+  XsReqActivationKeySchema,
+  XsReqMessageIdSchema,
+} from "./xs-activation.js";
 
 /**
  * fabric phase-2 XS0 (phase2-plan §4.2/§8.1/§8.2): the FROZEN cross-session frame contract —
@@ -57,6 +64,16 @@ export const XS_ALIAS_HUB_CAP = "xs.alias.v1";
 /** Alias-plan §3.6 (AL0b): agent-side alias cap, appended to `hello.caps` iff `xsOn ∧ fabric.crossSession.alias.enabled`.
  *  `XS_AGENT_CAPS` itself stays frozen (off goldens). */
 export const XS_ALIAS_AGENT_CAP = "xs.alias.v1";
+/** Alias-force-default plan §3.1 (AF0, cap only — never a PROTO bump): hub-side alias v2 cap, appended right after
+ *  `xs.alias.v1` under the SAME condition (`store.advertised`). Semantics: the hub understands `intent`
+ *  (auto / force / handoff) and pushes `xs_alias_evt`. `intent`, `prevSessionId`, the new preview/state keys and the
+ *  `unnotifiable` detail are written ONLY to a peer that declared this cap (S1: the strict `XsReqSchema` of an old hub
+ *  would silently drop the whole frame). */
+export const XS_ALIAS_V2_HUB_CAP = "xs.alias.v2";
+/** Alias-force-default plan §3.1 (AF0): agent-side alias v2 cap, appended right after `xs.alias.v1` under the same
+ *  condition (`xsOn ∧ fabric.crossSession.alias.enabled`). Semantics: the agent handles `xs_alias_evt`, `lost.forced`
+ *  and the preview extension keys. `XS_AGENT_CAPS` itself stays frozen (off goldens). */
+export const XS_ALIAS_V2_AGENT_CAP = "xs.alias.v2";
 /** The slot kind the `xs_member` frame rides (X2 appends it to SLOT_ORDER right after "session"). */
 export const XS_SLOT_KIND = "xs" as const;
 
@@ -83,6 +100,11 @@ export const XS_REQ_DEADLINE_MS = {
   channels: 3_000,
   // alias-plan §3.3 (AL0b): hub-side transaction budget is 4s (queue wait included); client deadline 5s.
   alias: 5_000,
+  // fabric-xs-activation plan §3 P0 (arch §4.4/§4.7): receipt is a pure read (list-tier 3s);
+  // activate = hub admission + the 5s target relay + headroom (send's 8s derivation). Constants
+  // live in xs-activation.ts (the module owns the new ops' shapes and deadlines).
+  receipt: XS_RECEIPT_DEADLINE_MS,
+  activate: XS_ACTIVATE_REQ_DEADLINE_MS,
 } as const;
 
 /** Per-frame hard byte cap for every `xs_*` frame (§5.2): the hub REJECTS oversize sends with
@@ -104,7 +126,9 @@ export type XsChannelReqOp = "broadcast" | "channels";
 /** Alias-plan §3.4 (AL0b): the `alias` op (get/set/clear/take). Sent only to a hub advertising `xs.alias.v1`
  *  by an agent that declared it. */
 export type XsAliasReqOp = "alias";
-export type XsAnyReqOp = XsReqOp | XsChannelReqOp | XsAliasReqOp;
+/** fabric-xs-activation plan §3 P0: the receipt/activate ops. Sent only to a hub advertising
+ *  `xs.state.v1`/`xs.activate.v1` (the shapes and deadline constants live in xs-activation.ts). */
+export type XsAnyReqOp = XsReqOp | XsChannelReqOp | XsAliasReqOp | XsActivationReqOp;
 
 // ----------------------------------------------------------------- aliases (alias-plan §3.4/§3.5, AL0b)
 
@@ -112,18 +136,36 @@ export type XsAnyReqOp = XsReqOp | XsChannelReqOp | XsAliasReqOp;
 export interface XsAliasStateWire {
   alias?: string;
   state: "held" | "none";
-  lost?: { alias: string; reason: "taken" | "expired"; at: number };
+  /** Alias-force-default plan §3.2 (AF0): `"auto"` iff the held record was auto-claimed from the cwd basename.
+   *  Written ONLY to a requester that declared `xs.alias.v2`; absent for human-granted records. */
+  origin?: "auto";
+  /** `forced` (v2 requesters only): the alias was taken by an online-capable `--force`, not a plain take/expiry. */
+  lost?: { alias: string; reason: "taken" | "expired"; at: number; forced?: true };
 }
 /** `xs_res.alias` for a take preview (§3.5): `cwdLabel` is untrusted plain text (≤120 chars), never ref/name/channels. */
 export interface XsAliasTakePreviewWire {
-  take: { cwdLabel: string; offlineForS: number; token: string; expiresAt: number };
+  take: {
+    cwdLabel: string;
+    /** 0 when the holder is online (force preview). */
+    offlineForS: number;
+    token: string;
+    expiresAt: number;
+    /** Alias-force-default plan §3.2 (AF0, v2 requesters only): the holder is currently online. */
+    online?: true;
+    /** Alias-force-default plan §3.2 (AF0, v2 requesters only): the held record was auto-claimed. */
+    auto?: true;
+  };
 }
 export type XsAliasResWire = XsAliasStateWire | XsAliasTakePreviewWire;
 /** `xs_req.take` value for the preview step. Any other value must match `XS_ALIAS_TAKE_TOKEN_RE`. */
 export const XS_ALIAS_TAKE_PREVIEW = "preview";
 /** Alias error sub-reasons (code brace suffix, e.g. `E_XS_ALIAS_TAKEN{confusable}`). */
 export type XsAliasTakenDetail = "taken" | "confusable";
-export type XsAliasTakeDetail = "online" | "recent" | "stale" | "not_held";
+/** `unnotifiable` (AF0, only ever answered to a v2 requester): force refused because the holder cannot be notified in real time. */
+export type XsAliasTakeDetail = "online" | "recent" | "stale" | "not_held" | "unnotifiable";
+/** Alias-force-default plan §3.2 (AF0): the `xs_req.intent` values (`op:"alias"`, v2 hub only). */
+export const XS_ALIAS_INTENTS = ["auto", "force", "handoff"] as const;
+export type XsAliasIntent = (typeof XS_ALIAS_INTENTS)[number];
 export type XsAliasBusyDetail = "queue" | "io" | "tokens";
 /** `E_XS_NO_TARGET` is the only code for an unreachable/unknown/changed target on an `aliasUsable` send (§5.2); no new wire field. */
 
@@ -199,7 +241,7 @@ export type XsErrorCode =
   // except E_XS_ALIAS_UNKNOWN (rename in flight — may have taken effect).
   | "E_XS_ALIAS_INVALID" // {invalid|too_long|id_like|reserved} (`XsAliasRejectReason`)
   | "E_XS_ALIAS_TAKEN" // {taken|confusable} — never echoes an existing alias
-  | "E_XS_ALIAS_TAKE" // {online|recent|stale|not_held}
+  | "E_XS_ALIAS_TAKE" // {online|recent|stale|not_held|unnotifiable} (unnotifiable: v2 requesters only)
   | "E_XS_ALIAS_FULL" // binding table at 256 records (new records only)
   | "E_XS_ALIAS_BUSY" // {queue|io|tokens}
   | "E_XS_ALIAS_UNKNOWN" // rename in flight past 1s: the write may have been committed
@@ -254,7 +296,7 @@ export type XsUnknownReason =
 export type XsWakeDowngraded =
   | "wake_disabled" // receiver's fabric.wake.enabled false
   | "controller_disabled" // rootRunMaxS === 0
-  | "host_unverified" // capability unknown (N1: first prompt not yet seen)
+  | "host_unverified" // legacy only: emitted by agents before wake-unknown-optimistic; kept append-only (I10)
   | "host_unsupported" // capability absent (pi 1.0/1.1 shape)
   | "receiver_policy" // session receive is "deliver" (or off ⇒ none{rejected} instead)
   | "busy" // receiver not idle / Controller slot occupied
@@ -411,6 +453,11 @@ export const XsReqSchema = Type.Object(
       Type.Literal("broadcast"), // channel-plan §3.3 (CH0): only sent to a hub advertising `xs.channel.v1`
       Type.Literal("channels"),
       Type.Literal("alias"), // alias-plan §3.4 (AL0b): only sent to a hub advertising `xs.alias.v1`
+      // fabric-xs-activation plan §3 P0 (arch §4.7): only sent to a hub advertising
+      // `xs.state.v1` (receipt) / `xs.activate.v1` (activate); an old hub's strict schema
+      // silently drops such a frame — exactly why the ops are cap-gated.
+      Type.Literal("receipt"),
+      Type.Literal("activate"),
     ]),
     origin: OriginSchema,
     query: Type.Optional(Type.String({ maxLength: 128 })),
@@ -427,6 +474,16 @@ export const XsReqSchema = Type.Object(
     alias: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
     clear: Type.Optional(Type.Literal(true)),
     take: Type.Optional(Type.String({ minLength: 1, maxLength: 64 })), // "preview" | XS_ALIAS_TAKE_TOKEN_RE token; the router validates
+    // alias-force-default plan §3.2 (AF0): `op:"alias"` only, written ONLY to a hub advertising `xs.alias.v2` (an old hub's
+    // strict schema would silently drop the whole frame). Combination rules (intent × alias/take/clear/prevSessionId) are the router's.
+    intent: Type.Optional(Type.Union([Type.Literal("auto"), Type.Literal("force"), Type.Literal("handoff")])),
+    prevSessionId: Type.Optional(SessionIdSchema), // only with intent:"handoff"
+    // fabric-xs-activation plan §3 P0 (arch §4.4/§4.7): `op:"receipt"`/`op:"activate"` only —
+    // the original body's hub xid and the receipt-issued key. Trailing optional props (alias-op
+    // precedent, AL0b): old ops never carry them, old frames decode byte-identically, and the
+    // schemas themselves are declared in xs-activation.ts (the module owning the new-op shapes).
+    messageId: Type.Optional(XsReqMessageIdSchema),
+    activationKey: Type.Optional(XsReqActivationKeySchema),
   },
   { additionalProperties: false },
 );
@@ -454,6 +511,16 @@ export interface XsReqFrame {
   clear?: true;
   /** Alias-plan §3.5: `op:"alias"` take — `"preview"` or the token returned by the preview. */
   take?: string;
+  /** Alias-force-default plan §3.2 (AF0): `op:"alias"` intent; only sent to a hub advertising `xs.alias.v2`. */
+  intent?: XsAliasIntent;
+  /** Alias-force-default plan §3.2 (AF0): the previous sessionId of a `/new` handoff (`intent:"handoff"` only). */
+  prevSessionId?: string;
+  /** fabric-xs-activation plan §3 P0: the ORIGINAL body's hub xid — `op:"receipt"`/`op:"activate"`
+   *  only (never a q-id/rid/wakeToken/runId; arch §4.1). */
+  messageId?: string;
+  /** fabric-xs-activation plan §3 P0: the receipt-issued activation key (not a bearer token —
+   *  the hub re-validates source/target/channel against the relation). */
+  activationKey?: string;
 }
 
 /** One `xs_res{rows}` row (§4.3 list projection — no agentKey, pid, tools or model). */
@@ -515,6 +582,10 @@ export const XsResSchema = Type.Object(
     ),
     // alias-plan §3.4 (AL0b): `op:"alias"` reply body (`XsAliasResWire`), written only to a requester that declared `xs.alias.v1`.
     alias: Type.Optional(Type.Object({}, { additionalProperties: true })),
+    // fabric-xs-activation P3 (arch §4.4/§4.7): `op:"activate"` outcome body (`XsActivateResWire`),
+    // written ONLY to a requester that declared `xs.activate.v1` (a trailing optional prop —
+    // old ops never carry it, old frames decode byte-identically).
+    activation: Type.Optional(Type.Object({}, { additionalProperties: true })),
   },
   { additionalProperties: false },
 );
@@ -539,6 +610,8 @@ export interface XsResFrame {
   channels?: XsChannelInfoWire[];
   /** Alias-plan §3.4: `op:"alias"` reply body. */
   alias?: XsAliasResWire;
+  /** fabric-xs-activation P3: `op:"activate"` outcome (status/effect/retry/progress; never text). */
+  activation?: XsActivateResWire;
 }
 
 /**
@@ -632,6 +705,23 @@ export interface XsAckFrame {
 
 /** Schema-map fragments `messages.ts` folds into its agent/hub decode tables (XS0 wiring:
  * decoding is inert — nothing routes an xs frame until X1/X2). */
+/** Alias-force-default plan §3.2 (AF0): hub→agent nudge that the session's alias binding changed (force). A pure reminder —
+ *  it carries NO alias text; the agent answers it with its normal get reconciliation. Strict schema, written only to a
+ *  v2 effective member (an old agent's decoder would ignore the unknown `t` anyway, S3). */
+export const XsAliasEvtSchema = Type.Object(
+  {
+    t: Type.Literal("xs_alias_evt"),
+    sessionId: SessionIdSchema,
+    at: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+  },
+  { additionalProperties: false },
+);
+export interface XsAliasEvtFrame {
+  t: "xs_alias_evt";
+  sessionId: string;
+  at: number;
+}
+
 export const XS_AGENT_FRAME_SCHEMAS: Readonly<Record<string, TSchema>> = {
   xs_member: XsMemberSchema,
   xs_req: XsReqSchema,
@@ -640,6 +730,7 @@ export const XS_AGENT_FRAME_SCHEMAS: Readonly<Record<string, TSchema>> = {
 export const XS_HUB_FRAME_SCHEMAS: Readonly<Record<string, TSchema>> = {
   xs_res: XsResSchema,
   xs_deliver: XsDeliverSchema,
+  xs_alias_evt: XsAliasEvtSchema, // alias-force-default plan §3.2 (AF0)
 };
 
 // ----------------------------------------------------------------- StatusInfo.xs (§4.4, P3: read-only display)

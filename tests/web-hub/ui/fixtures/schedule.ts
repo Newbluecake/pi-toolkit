@@ -62,7 +62,9 @@ export function makeTask(
   };
 }
 
-/** The AI-created pending-approval task (message form). */
+/** The AI-created legacy pending-approval task (message form) — carries the pre-r2 wire
+ *  shape (`pendingApproval: true`, `executable: false`, an `offer`) that OLD hubs still
+ *  send; the UI must keep ignoring these fields (schedule-auto-approve r2 §6-W1 compat). */
 export function makePendingTask(): ScheduleTaskProjectionWire {
   return makeTask({
     task: {
@@ -75,10 +77,17 @@ export function makePendingTask(): ScheduleTaskProjectionWire {
       bg: undefined,
       createdBy: "agent",
       createdVia: "tool",
+      approval: {
+        hash: "9c7d31f0d0b6c7d31f0d0b6c7d31f0d0b6c7d31f0d0b6c7d31f0d0b6c7d31f0",
+        by: "user",
+        via: "tui",
+        at: T0 - 86_400_000,
+      },
     },
     defHash: HASH_B,
     executable: false,
     pendingApproval: true,
+    offer: { offerId: "offer-aaaa1111bbbb2222", expiresAt: T0 + 3_600_000 },
     nextAt: T0 + 3 * 86_400_000,
     totals: { fired: 0, missed: 0, skipped: 0, manual: 0 },
   });

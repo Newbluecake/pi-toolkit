@@ -69,29 +69,20 @@ export const WorkflowToolParams = Type.Object({
       "literal). The sandboxed script body may call agent(prompt, opts?), parallel(thunks), pipeline(items, " +
       "...stages), phase(title), log(message), and read the top-level `args`/`budget` globals. agent()'s opts is " +
       "strictly validated: only label, agentType, phase, fullResult, model, thinking, isolation are " +
-      "allowed — any other key (or a wrong-typed value on an allowed one, or opts itself not being a plain object) " +
-      "rejects the call with the full allowed-key list and a 'did you mean' hint for common mistakes (e.g. effort " +
-      "-> thinking, subagent_type -> agentType, schema/resume/timeout_ms are not supported here at all). model is a " +
-      "per-call model override — the FULL 'provider/id' exactly as listed in the " +
-      "'Available models' section of the system prompt, same rule as the Agent tool; a bare model id/substring is " +
-      "resolved as a fuzzy hint, and an unknown model or unresolvable hint rejects the agent() call), thinking " +
-      "('off' | 'low' | 'medium' | 'high', per-call thinking-level override; unset = the agent type's frontmatter " +
-      "level). isolation: 'worktree' runs that specific agent() call in its own isolated git worktree created from " +
-      "the current HEAD (uncommitted main-checkout changes are NOT visible, and isolated calls cannot see each " +
-      "other's changes either); on completion its changes are committed to a new pi-agent-<runId> branch in the " +
-      "main repo (merge or cherry-pick it yourself — the workflow never merges automatically) or the worktree is " +
-      "PRESERVED on disk instead if committing fails (the outcome names its path). Fails the call outright (no " +
-      "fallback) when worktree.enabled is off. With workflow.isolationReplay=verify (the default), a subsequent " +
-      "run with the same journal can reuse a prior isolated call's result IF its pi-agent-<runId> branch still " +
-      "exists and points exactly at the commit that was recorded (anything else — merged-and-deleted, rebased, " +
-      "force-pushed, appended-to — reruns it live); a re-run whose isolated call was skipped/live also re-runs " +
-      "every downstream call that depended on it. With isolationReplay=off, an isolated call's result is never " +
-      "journaled or replayed, and every " +
-      "call submitted afterward in this same run is skipped from replay too, even when a journal is configured. " +
-      "Each pipeline stage " +
-      "is called as stage(prevValue, item, index) \u2014 the first stage gets prevValue=undefined, so write it as " +
-      "(_prev, item, i) => ... . The script may not use " +
-      "Date.now()/Math.random()/eval (all disabled \u2014 they would silently break replay). Max 512 KiB.",
+      "allowed — anything else (another key, a wrong-typed value, non-object opts) rejects the call with the " +
+      "allowed-key list and a 'did you mean' hint (schema/resume/timeout_ms are not supported). model: per-call " +
+      "override, same rule as the Agent tool (full 'provider/id'; a bare id/substring is a fuzzy hint; an " +
+      "unknown model rejects the call). thinking: 'off' | 'low' | 'medium' | 'high' (unset = the agent type's " +
+      "frontmatter level). isolation: 'worktree' runs that call in its own git worktree from the current HEAD " +
+      "(uncommitted changes are NOT visible; isolated calls don't see each other); on completion its changes are " +
+      "committed to a new pi-agent-<runId> branch (merge it yourself — never merged automatically), or the " +
+      "worktree is PRESERVED on disk if committing fails (the outcome names its path). Fails outright when " +
+      "worktree.enabled is off. With workflow.isolationReplay=verify (default) a re-run with the same journal " +
+      "reuses an isolated call's result only if its branch still points at the recorded commit (else it reruns " +
+      "live, as do downstream calls that depended on it); with off, isolated results are never journaled or " +
+      "replayed and every later call in the run skips replay. Each pipeline stage is stage(prevValue, item, " +
+      "index); the first stage gets prevValue=undefined, so write (_prev, item, i) => ... . Date.now()/" +
+      "Math.random()/eval are disabled (they would silently break replay). Max 512 KiB.",
   }),
   args: Type.Optional(
     Type.Unknown({ description: "JSON-shaped value surfaced to the script as its top-level `args` global." }),

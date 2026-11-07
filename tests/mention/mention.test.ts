@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { createMentionRegistry } from "../../src/mention/registry.js";
 import { installMentionInput, parseMention, routeMention } from "../../src/mention/mention.js";
+import { createMentionSessionPort, type MentionSessionSendOutcome } from "../../src/mention/session.js";
+import type { XsDirectoryRow } from "../../src/fabric/xs/directory.js";
 import type { RunSnapshot } from "../../src/core/types.js";
 
 function snapshot(runId: string, status: RunSnapshot["status"]): RunSnapshot {
@@ -292,5 +294,79 @@ describe("X6 @handle mention", () => {
     });
     await expect(handlers[0]!({ type: "input", text: "@builder inspect" })).resolves.toEqual({ action: "handled" });
     expect(sendMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe("2026-11-04 mention-handled fix: the onHandled report port", () => {
+  type Handler = (event: { type: "input"; text: string }) => Promise<unknown>;
+  function install(deps: { onHandled?: (text: string) => void; steerOk?: boolean; sessions?: unknown }) {
+    const handlers: Handler[] = [];
+    const registry = createMentionRegistry();
+    registry.register("builder", { runId: "run-1", type: "worker" });
+    installMentionInput(
+      { on: (_event, handler) => handlers.push(handler as Handler), sendMessage: vi.fn() },
+      {
+        registry,
+        query: {
+          get: () => snapshot("run-1", "running"),
+          steer: async () => (deps.steerOk === false ? { ok: false, reason: "steer_rejected" } : { ok: true as const }),
+        },
+        spawn: { spawn: async () => ({ runId: "unexpected" }) },
+        ...(deps.onHandled !== undefined ? { onHandled: deps.onHandled } : {}),
+        ...((deps.sessions as object | undefined) !== undefined ? { sessions: deps.sessions as object } : {}),
+      },
+    );
+    return handlers[0]!;
+  }
+
+  it("reports EXACTLY once with the raw event.text, right before answering handled (@label steer)", async () => {
+    const calls: string[] = [];
+    const handler = install({ onHandled: (text) => calls.push(text) });
+    await expect(handler({ type: "input", text: "@builder ship it" })).resolves.toEqual({ action: "handled" });
+    expect(calls).toEqual(["@builder ship it"]);
+  });
+
+  it("an error outcome is still a consumed input: handled ⇒ reported once", async () => {
+    const calls: string[] = [];
+    const handler = install({ steerOk: false, onHandled: (text) => calls.push(text) });
+    await expect(handler({ type: "input", text: "@builder boom" })).resolves.toEqual({ action: "handled" });
+    expect(calls).toEqual(["@builder boom"]);
+  });
+
+  it("a @session branch handled input reports too (same single raw-text call)", async () => {
+    const calls: string[] = [];
+    const row: XsDirectoryRow = {
+      ref: "ab12cd34",
+      name: "builder",
+      cwdLabel: "~/repo",
+      kind: "main",
+      receive: "wake",
+      busy: false,
+      lastActiveAgoS: 5,
+    };
+    const outcome: MentionSessionSendOutcome = { status: "sent", effect: "applied" };
+    const port = createMentionSessionPort({
+      joined: () => true,
+      isLabel: () => false,
+      cwd: () => "/tmp",
+      lookupExact: (name) => (name === "builder" || name === "ab12cd34" ? row : undefined),
+      send: async () => outcome,
+    });
+    const handler = install({ onHandled: (text) => calls.push(text), sessions: port });
+    await expect(handler({ type: "input", text: "@session:ab12cd34 ping" })).resolves.toEqual({ action: "handled" });
+    expect(calls).toEqual(["@session:ab12cd34 ping"]);
+  });
+
+  it("a continue input is NEVER reported (zero calls)", async () => {
+    const calls: string[] = [];
+    const handler = install({ onHandled: (text) => calls.push(text) });
+    await expect(handler({ type: "input", text: "@unknown/path inspect" })).resolves.toEqual({ action: "continue" });
+    await expect(handler({ type: "input", text: "plain text, no mention" })).resolves.toEqual({ action: "continue" });
+    expect(calls).toEqual([]);
+  });
+
+  it("absent port ⇒ zero calls and unchanged behavior (legacy byte-path)", async () => {
+    const handler = install({});
+    await expect(handler({ type: "input", text: "@builder silent" })).resolves.toEqual({ action: "handled" });
   });
 });

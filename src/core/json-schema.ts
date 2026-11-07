@@ -1,4 +1,5 @@
 import type { JsonSchema, RunOutcome } from "./types.js";
+import { structuredRepairSuffix, type StructuredRepairNote } from "./structured-repair.js";
 
 export type { JsonSchema } from "./types.js";
 
@@ -54,6 +55,19 @@ export function normalizeSchemaInput(raw: unknown): SchemaInputResult {
     };
   }
   return { ok: true, schema: value as JsonSchema };
+}
+
+/** #68: inline schemas larger than this (JSON chars) are not persisted on the run, so a later schema-less resume does not inherit them. */
+export const PERSISTED_SCHEMA_MAX_CHARS = 16_384;
+
+/** #68: true when the schema serializes within {@link PERSISTED_SCHEMA_MAX_CHARS}. */
+export function isPersistableSchema(schema: JsonSchema): boolean {
+  try {
+    const text = JSON.stringify(schema);
+    return typeof text === "string" && text.length <= PERSISTED_SCHEMA_MAX_CHARS;
+  } catch {
+    return false;
+  }
 }
 
 export function validateAgainstSchema(schema: JsonSchema | undefined, data: unknown): ValidationResult {
@@ -165,6 +179,7 @@ export function applyStructuredOutputPolicy(
   schema: JsonSchema,
   captured: unknown,
   semanticValidator?: (value: unknown) => ValidationResult,
+  repair?: StructuredRepairNote,
 ): RunOutcome {
   if (outcome.status !== "completed") return outcome;
   if (captured === undefined) {
@@ -173,7 +188,9 @@ export function applyStructuredOutputPolicy(
       status: "failed",
       error: {
         kind: "schema",
-        message: "subagent reached a terminal state without submitting a StructuredOutput result",
+        message:
+          "subagent reached a terminal state without submitting a StructuredOutput result" +
+          structuredRepairSuffix(repair),
         retryable: false,
       },
     };

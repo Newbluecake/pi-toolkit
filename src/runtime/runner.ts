@@ -7,14 +7,21 @@ import {
   withDeadline,
   SET_MODEL_TIMEOUT_MS,
 } from "../core/deadline.js";
-import type { Clock } from "../core/clock.js";
+import type { Clock, TimerHandle } from "../core/clock.js";
 import { classifiedInfo } from "../core/errors.js";
+import {
+  phaseDueAt,
+  structuredRepairCloseAt,
+  structuredRepairWindow,
+  type StructuredRepairSpec,
+} from "../core/structured-repair.js";
 import { createInitialState, reduce } from "../core/state-machine.js";
 import { isTerminalStatus } from "../core/status.js";
 import { markLiveSessionFile, releaseLiveSessionFile } from "../core/live-session-files.js";
 import type {
   DeadlineBudget,
   DeliveryPayload,
+  DriverEvent,
   EffectEnvelope,
   ErrorInfo,
   ExtendOutcome,
@@ -93,6 +100,14 @@ export interface ResolvedSpawnRequest extends SessionSpec {
   inputBudget?: import("../core/types.js").InputBudget;
   /** X11: per-run tool-scope policy + a fresh (per-run) enforcer instance; undefined = no dynamic re-enforcement (legacy behavior). */
   toolScope?: { policy: ToolScopePolicy; enforcer: ToolScopeEnforcer };
+  /**
+   * Structured-output repair turn (structured-output-repair-plan.md §2.5):
+   * runtime-only, assembled by service/runtime-adapter.ts for pi-path schema
+   * runs. Like `toolScope`/`inputBudget`, consumed inside the runner only and
+   * never sent to pi. NOT a SpawnRequest field — request-threading's
+   * Gate A/B/C deliberately do not know it.
+   */
+  structuredRepair?: StructuredRepairSpec;
 }
 export interface CancelHandle {
   readonly runId: string;
@@ -216,6 +231,8 @@ export class BasicEffectInterpreter implements EffectInterpreter {
   }
 }
 export interface RunnerDeps {
+  /** Same activation-local port presence as driver; not a model/DTO/wire field. */
+  memoryBindingEnabled?: boolean;
   clock: Clock;
   driver: SessionDriver;
   pool: SlotPool;
@@ -493,6 +510,27 @@ export class RuntimeRunner implements Runner {
     if (!entry) throw new Error(`no active session for run ${runId}`);
     await entry.handle.steer(text);
   }
+  /** fabric-thread arch r3 §6.4 (P3): the thread-steer channel — disposition-preserving and
+   *  BOUNDED by `capMs` (unlike steerRun above, whose unboundedness is a known defect this path
+   *  deliberately does not repeat — it is the §6.4 TODO landing as a thread-dedicated channel so
+   *  the existing steer/steer tool semantics stay byte-identical). Resolves with pi's disposition
+   * STRING; rejects on timeout (the engine maps any rejection to Outcome `unknown`, §6.4 post-call)
+   * or when no active session exists. */
+  async steerThreadRun(runId: string, text: string, capMs: number): Promise<string> {
+    const entry = this.activeHandles.get(runId);
+    if (!entry) throw new Error(`no active session for run ${runId}`);
+    const handle = entry.handle;
+    const call =
+      handle.steerDisposition !== undefined ? handle.steerDisposition(text) : handle.steer(text).then(() => "queued");
+    const result = await withDeadline(call, Math.max(1, Math.floor(capMs)), this.d.clock, "steer_thread");
+    if (!result.ok) throw new Error(`steer_thread ${result.reason}`);
+    return result.value;
+  }
+  /** fabric-thread §6.4/§5.1 (P3): whether the run currently holds a live, steerable session
+   *  handle — the `ThreadRunFacts.steerable` source. Synchronous registry read. */
+  hasActiveSession(runId: string): boolean {
+    return this.activeHandles.has(runId);
+  }
   /** set_model: switch an active run's model. Bounded (SET_MODEL_TIMEOUT_MS) —
    *  session.setModel awaits a provider auth check, and no anti-hang path may
    *  await an unbounded pi call. (steerRun itself is unbounded — steerMs only
@@ -611,7 +649,18 @@ export class RuntimeRunner implements Runner {
     const handleEntry = this.activeHandles.get(runId);
     if (!handleEntry || handleEntry.gen !== state.generation) return undefined;
     try {
-      return handleEntry.handle.getBranchEntries?.();
+      const branch = handleEntry.handle.getBranchEntries?.();
+      const after = this.states.get(runId);
+      if (
+        !after ||
+        after.generation !== state.generation ||
+        after.sessionId !== state.sessionId ||
+        this.activeHandles.get(runId) !== handleEntry ||
+        after.status === "stopping" ||
+        isTerminalStatus(after.status)
+      )
+        return undefined;
+      return branch;
     } catch {
       return undefined;
     }
@@ -729,6 +778,190 @@ export class RuntimeRunner implements Runner {
     const entry = this.activeCancels.get(runId);
     if (entry && entry.gen === generation) entry.cancel.cancel("timeout");
   }
+  /**
+   * Structured-output repair turn (plan §2.5.6): synchronous eligibility
+   * check, in the exact §1h order — cancelled/stopping/terminal (silent skip,
+   * the settle re-check owns the mapping), already-captured (silent skip),
+   * phase, active tool, then the time window. Skip paths report their note
+   * (skipped_phase / skipped_tool / skipped_grace / skipped_budget) so the
+   * adapter can suffix the failure message; only the attempt path reports
+   * "attempted". No `await` anywhere: a skip keeps the settlement timing
+   * byte-identical to the pre-feature code.
+   */
+  private planStructuredRepair(
+    spec: StructuredRepairSpec,
+    handle: SessionHandle,
+    cancel: CancelHandle,
+    state: RunState,
+    budget: DeadlineBudget,
+  ): { kind: "skip" } | { kind: "attempt"; windowDueAt: Millis } {
+    if (cancel.signal.aborted || state.status === "stopping" || isTerminalStatus(state.status)) return { kind: "skip" };
+    if (!spec.pending()) return { kind: "skip" };
+    if (state.phase !== "model_turn") {
+      spec.report("skipped_phase");
+      return { kind: "skip" };
+    }
+    let toolActive = false;
+    try {
+      toolActive = handle.getActiveTools().includes(spec.toolName);
+    } catch {
+      toolActive = false; // a throwing read counts as "tool unavailable"
+    }
+    if (!toolActive) {
+      spec.report("skipped_tool");
+      return { kind: "skip" };
+    }
+    const watchdogBudget = this.d.watchdog.budget;
+    const budgets = watchdogBudget === undefined ? [budget] : [budget, watchdogBudget];
+    const window = structuredRepairWindow({
+      now: this.d.clock.now(),
+      deadlines: state.deadlines,
+      phaseDue: phaseDueAt(state.phase, state.diag, budgets),
+      limits: spec.limits,
+    });
+    if ("skip" in window) {
+      spec.report(window.skip);
+      return { kind: "skip" };
+    }
+    spec.report("attempted");
+    return { kind: "attempt", windowDueAt: window.dueAt };
+  }
+  /**
+   * Structured-output repair turn (plan §1b/§1f/§2.5.7): one extra prompt on
+   * the SAME handle, still inside the run's running phase — no new runId, no
+   * generation bump, no watchdog disarm. Sub-phase clocks are NOT reset (the
+   * reducer never re-enters on repair events; I1 gets no free refill). The
+   * local close point is re-derived on every repair-phase event (dynamic
+   * early close into tool_exec/compaction/retry_backoff with short budgets)
+   * and always precedes every deadline the watchdog or the outer guard could
+   * fire by at least tailMs. Cancellation closes the capture window
+   * SYNCHRONOUSLY via the signal listener (review r2 #4): an abort() followed
+   * by a submission in the same synchronous stack is already rejected. The
+   * awaited result is ignored entirely (plan §1d.4): a rejected/errored/
+   * locally-closed repair turn falls back to the first prompt's completed
+   * outcome and the host schema policy.
+   */
+  private async runStructuredRepair(
+    req: ResolvedSpawnRequest,
+    gen: number,
+    handle: SessionHandle,
+    cancel: CancelHandle,
+    getState: () => RunState,
+    budget: DeadlineBudget,
+    spec: StructuredRepairSpec,
+    windowDueAt: Millis,
+    setCtl: (c: { onEvent(e: DriverEvent): void } | undefined) => void,
+  ): Promise<void> {
+    const watchdogBudget = this.d.watchdog.budget;
+    const budgets = watchdogBudget === undefined ? [budget] : [budget, watchdogBudget];
+    let closed = false;
+    let promptDone = false;
+    let turnEnds = 0;
+    let timer: TimerHandle | undefined;
+    let armedAt = Number.POSITIVE_INFINITY;
+    let resolveClosed!: () => void;
+    const closedP = new Promise<"closed">((r) => (resolveClosed = () => r("closed")));
+    const target = (): Millis => {
+      const s = getState();
+      return structuredRepairCloseAt({
+        windowDueAt,
+        deadlines: s.deadlines,
+        phaseDue: phaseDueAt(s.phase, s.diag, budgets),
+        tailMs: spec.limits.tailMs,
+      });
+    };
+    const close = () => {
+      if (closed) return;
+      closed = true;
+      spec.closeCapture();
+      if (timer) {
+        this.d.clock.clearTimer(timer);
+        timer = undefined;
+      }
+      // Close BEFORE arming the abort (plan §1f): a submission racing this
+      // microtask is already rejected; requestAbort only stops the session.
+      if (!promptDone)
+        queueMicrotask(() => {
+          try {
+            void handle.requestAbort();
+          } catch {
+            /* the outer watchdog/guard still bounds the run */
+          }
+        });
+      resolveClosed();
+    };
+    const rearm = () => {
+      if (closed) return;
+      const t = target();
+      const now = this.d.clock.now();
+      if (t <= now) return close();
+      // Only re-arm when the close point moved EARLIER; a later value (an
+      // idle due pushed out by fresh events, an extended deadline) is picked
+      // up by the at-fire recompute below — one timer, never a busy loop.
+      if (t >= armedAt && timer) return;
+      if (timer) this.d.clock.clearTimer(timer);
+      armedAt = t;
+      timer = this.d.clock.setTimer(t - now, () => {
+        timer = undefined;
+        armedAt = Number.POSITIVE_INFINITY;
+        rearm();
+      });
+    };
+    // Review r2 #4 (主会话裁定): close the capture window synchronously with
+    // cancellation — abort() then a same-stack submission must already be
+    // rejected, never "accepted because the finally hadn't run yet".
+    const onAbort = () => close();
+    if (cancel.signal.aborted) close();
+    else cancel.signal.addEventListener("abort", onAbort);
+    setCtl({
+      onEvent: (e) => {
+        if (e.t === "turn_end") {
+          turnEnds += 1;
+          if (turnEnds >= spec.limits.maxTurns && spec.pending()) return close();
+        }
+        rearm();
+      },
+    });
+    rearm();
+    const p = (() => {
+      try {
+        return handle.prompt(spec.prompt);
+      } catch (err) {
+        return Promise.reject(err);
+      }
+    })();
+    try {
+      await this.guardUntil(
+        Promise.race([
+          p.finally(() => {
+            promptDone = true;
+          }),
+          closedP,
+        ]),
+        () => effectiveDeadlineAt(getState().deadlines),
+        cancel,
+        "structured_repair",
+        () => {
+          // Same due-source choice as the main prompt guard: total_grace
+          // while a grace window is armed, total otherwise. The settle
+          // re-check then maps the fired deadline to timed_out.
+          const s = getState();
+          const timerId = s.deadlines.graceUntil !== undefined ? "total_grace" : "total";
+          this.fireDeadline(req.runId, gen, {
+            kind: "deadline_fired",
+            at: this.d.clock.now(),
+            timer: timerId,
+            reason: "total",
+          });
+        },
+      );
+    } finally {
+      promptDone = true;
+      cancel.signal.removeEventListener("abort", onAbort);
+      setCtl(undefined);
+      close(); // idempotent: clears the timer, closes capture
+    }
+  }
   async run(req: ResolvedSpawnRequest, budget: DeadlineBudget): Promise<RunOutcome> {
     const gen = (this.generation.get(req.runId) ?? 0) + 1;
     this.generation.set(req.runId, gen);
@@ -758,6 +991,12 @@ export class RuntimeRunner implements Runner {
     let createP: Promise<SessionHandle> | undefined;
     let inputBudgetRegistration: { unregister: () => void } | undefined;
     let inputBudgetFailure: string | undefined;
+    // Structured-output repair turn (plan §2.5.2): the live controller fed by
+    // the bind listener below (undefined except while a repair turn is in
+    // flight), and the one-shot latch telling settlement the repair actually
+    // ran (gates the second self-check pass).
+    let repairCtl: { onEvent(e: DriverEvent): void } | undefined;
+    let repairRan = false;
     // child-context-switch plan P0 (§2.3.1 point 3): the FIRST
     // switch_selfcheck_failed reason observed for this (runId, generation),
     // latched here rather than read back out of `state.diag` at settlement
@@ -855,11 +1094,15 @@ export class RuntimeRunner implements Runner {
       dispatch({ kind: "slot_acquired", at: this.d.clock.now() });
       dispatch({ kind: "phase_entered", at: this.d.clock.now(), phase: "session_create" });
       const openFile = req.resumeFrom;
+      // Fast owns pending-create bindings: revoke them on the runner/watchdog's
+      // internal cancellation too. No-seed keeps the exact legacy request object.
+      const createReq =
+        req.fastSeed === undefined && !this.d.memoryBindingEnabled ? req : { ...req, signal: cancel.signal };
       createP = openFile
         ? this.d.driver.resume
-          ? this.d.driver.resume(openFile, req)
+          ? this.d.driver.resume(openFile, createReq)
           : Promise.reject(new Error("session driver does not support resume"))
-        : this.d.driver.create(req);
+        : this.d.driver.create(createReq);
       const createBudget = remainingFor(budget.startupMs, this.d.clock.now(), state.deadlines);
       const created = await this.guard(createP, createBudget.ms, cancel, "create");
       if (!created.ok) {
@@ -955,6 +1198,12 @@ export class RuntimeRunner implements Runner {
           ) {
             req.toolScope.enforcer.onTurnBoundary(handle!, req.toolScope.policy);
           }
+          // Structured-output repair turn (plan §2.5.3): after the dispatch
+          // above has folded the event into the state machine, let the live
+          // repair controller re-derive its dynamic close point (and count
+          // turn_ends against the turn cap). Terminal-guarded so a
+          // deadline_fired landing in the same burst stops the re-derivation.
+          if (repairCtl && !isTerminalStatus(state.status)) repairCtl.onEvent(e);
         }),
         bindBudget.ms,
         cancel,
@@ -1110,42 +1359,52 @@ export class RuntimeRunner implements Runner {
       // 外部 agent（external-agent plan §2.7）：带 kind/retryable 的 turn 错误优先于裸 turnError
       // （getTurnErrorInfo 存在且返回值时）；PiSessionHandle 不实现 ⇒ pi 路径行为不变。
       const turnInfo = prompted.ok ? handle.getTurnErrorInfo?.() : undefined;
-      const promptError = ((): ErrorInfo | undefined => {
+      // child-context-switch plan P0 (§2.3.1 point 3) + structured-repair
+      // plan §1e/§2.5.4: the self-check block of the former settlement
+      // IIFE, extracted verbatim into a local function so the post-repair
+      // re-check can run the exact same verdict against the LIVE turn error.
+      // Self-check failure takes priority over turnError — the run must
+      // never settle `completed`/`failed(model)` on the switch-before
+      // text/message when the run ended right after a committed switch
+      // without ever reaching a subsequent model request. The
+      // extension-reported latch wins when present; otherwise fall back to a
+      // synchronous, driver-independent read of pi's own persisted branch
+      // (does not depend on agent_end firing, appendEntry succeeding, or the
+      // event being forwarded through bind() — v3.1 §3.1 failure-mode table).
+      const selfcheckErrorFor = (turnErr: string | undefined): ErrorInfo | undefined => {
+        const selfcheckReason =
+          selfcheckLatch ??
+          (() => {
+            const tail = handle?.getSwitchTail?.();
+            return tail !== undefined && !tail.assistantAfter
+              ? "run ended right after switch_context (pi runtime semantics changed)"
+              : undefined;
+          })();
+        if (selfcheckReason === undefined) return undefined;
+        const base = `context switch self-check failed: ${selfcheckReason}`;
+        return error(turnErr === undefined ? base : `${base}; turn error: ${turnErr}`, "model");
+      };
+      // structured-repair plan §2.5.4: the former settlement IIFE, verbatim
+      // semantics, parameterized on the guard result so the post-repair
+      // cancel re-check reuses the exact original mapping (input-budget >
+      // timeout > aborted).
+      const settleErrorFor = (p: GuardResult<void>): ErrorInfo | undefined => {
         if (inputBudgetFailure !== undefined) return error(inputBudgetFailure, "config");
-        if (prompted.ok) {
-          // child-context-switch plan P0 (§2.3.1 point 3): self-check failure
-          // takes priority over turnError — the run must never settle
-          // `completed`/`failed(model)` on the switch-before text/message
-          // when the run ended right after a committed switch without ever
-          // reaching a subsequent model request. The extension-reported
-          // latch wins when present; otherwise fall back to a synchronous,
-          // driver-independent read of pi's own persisted branch (does not
-          // depend on agent_end firing, appendEntry succeeding, or the event
-          // being forwarded through bind() — v3.1 §3.1 failure-mode table).
-          const selfcheckReason =
-            selfcheckLatch ??
-            (() => {
-              const tail = handle?.getSwitchTail?.();
-              return tail !== undefined && !tail.assistantAfter
-                ? "run ended right after switch_context (pi runtime semantics changed)"
-                : undefined;
-            })();
-          if (selfcheckReason !== undefined) {
-            const base = `context switch self-check failed: ${selfcheckReason}`;
-            return error(turnError === undefined ? base : `${base}; turn error: ${turnError}`, "model");
-          }
+        if (p.ok) {
+          const selfcheck = selfcheckErrorFor(turnError);
+          if (selfcheck !== undefined) return selfcheck;
           if (turnInfo !== undefined) return { ...turnInfo, message: capStartErrorMessage(turnInfo.message) };
           if (turnError === undefined) return undefined;
           return error(`${turnError}${compactionFailureAnnotation(state.diag) ?? ""}`, "model");
         }
-        if (prompted.reason === "timeout") return error("timeout", "timeout");
+        if (p.reason === "timeout") return error("timeout", "timeout");
         // prompt() itself rejected (pi threw before/while running the turn —
         // e.g. "No API key found for <provider>.") on a run nobody asked to
         // stop: failed with the real cause. A rejection racing a stop/deadline
         // (stopCause/timeoutReason already recorded) takes the cancel mapping
         // below, so abort/timeout semantics are unchanged.
-        if (prompted.reason === "error" && state.diag.stopCause === undefined && state.diag.timeoutReason === undefined)
-          return startError(prompted.error);
+        if (p.reason === "error" && state.diag.stopCause === undefined && state.diag.timeoutReason === undefined)
+          return startError(p.error);
         // M4: guard 因 cancel 解除时，若状态机已因 watchdog 超时进入 abort_grace
         // （timeoutReason/stopCause 已记录），结果必须是 timed_out 而非 aborted。
         if (state.diag.timeoutReason !== undefined || state.diag.stopCause === "timeout") {
@@ -1155,7 +1414,43 @@ export class RuntimeRunner implements Runner {
           return error(`${describeTimeout(state.diag, killedAt)}; prompt cancelled`, "timeout");
         }
         return error("cancelled", "aborted");
-      })();
+      };
+      let promptError = settleErrorFor(prompted);
+      // Structured-output repair turn (plan §1d/§2.5.5): only for pi-path
+      // schema runs that are about to settle completed. planStructuredRepair
+      // is SYNCHRONOUS — every skip path keeps the pre-repair timing exactly
+      // (zero extra microtasks). After the awaited repair (or the skip),
+      // everything down to the dispatch below is synchronous again: close the
+      // capture window, then re-check cancellation live (closing the
+      // "method returned / outer await resumed" microtask race where a stop
+      // would otherwise be swallowed by a completed settle → schema failed),
+      // then re-run the self-check gated on repairRan (a switch_context call
+      // inside the repair turn must still fail the run, §1e).
+      const repair = req.structuredRepair;
+      if (promptError === undefined && repair !== undefined && req.external === undefined && handle !== undefined) {
+        const plan = this.planStructuredRepair(repair, handle, cancel, state, budget);
+        if (plan.kind === "attempt") {
+          repairRan = true;
+          await this.runStructuredRepair(
+            req,
+            gen,
+            handle,
+            cancel,
+            () => state,
+            budget,
+            repair,
+            plan.windowDueAt,
+            (c) => {
+              repairCtl = c;
+            },
+          );
+        }
+        // —— synchronous from here to the dispatch (plan §2.5.5). ——
+        repair.closeCapture();
+        if (cancel.signal.aborted || state.status === "stopping" || isTerminalStatus(state.status))
+          promptError = settleErrorFor({ ok: false, reason: "cancelled" });
+        else if (repairRan) promptError = selfcheckErrorFor(handle.getTurnError?.());
+      }
       this.sealBeforeTerminal(req.runId, gen);
       dispatch({
         kind: "prompt_settled",

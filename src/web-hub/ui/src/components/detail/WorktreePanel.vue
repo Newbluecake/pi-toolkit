@@ -27,7 +27,7 @@
   -rows guard.
 
   Fold state is a plain local ref — NOT persisted across reloads, same precedent as
-  `TodoPanel` (source-scan.test.ts's persistence allowlist doesn't cover this component).
+  the TasksPanel fold (source-scan.test.ts's persistence allowlist doesn't cover this component).
   Styles live in `styles/worktrees.css` (imported below) + `styles/diff.css` (via the diff
   components), not scoped `<style>` — source-scan bans `<style>` blocks outright.
 
@@ -57,7 +57,7 @@ import WorktreeFileList from "../diff/WorktreeFileList.vue";
 import { currentRowOf, formatSampleTime, rowStatus } from "./worktreesView.js";
 import "../../styles/worktrees.css";
 
-// Deliberately local props interface (same escape hatch as TodoPanel): contracts.ts is owned
+// Deliberately local props interface (same escape hatch as TasksPanel): contracts.ts is owned
 // by another in-flight line and `WorktreesWire` comes straight from `@protocol/messages.js`.
 // `agentKey`/`session` (D5 §4.1, optional — absent in every pre-D5 mount, e.g. old snapshots)
 // are the wtdiff scope inputs alongside the injected hub/transport.

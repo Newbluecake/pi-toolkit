@@ -5,13 +5,16 @@
  *
  *  - 锁定态 `AgentDetail` 整棵子树不存在 (P0 — the gate is at DashboardView, not the transcript);
  *  - fail-closed: `privacy.v1` cap without the first `privacy` frame ⇒ NO session detail renders;
- *  - 回锁四路: route switch / idle timeout (fake timers) / manual 「立即锁定」 / visibilitychange;
+ *  - 回锁四路: route switch / idle timeout (fake timers) / `relock("manual")` (API-only since
+ *    the 2026-11 header redesign) / visibilitychange;
  *  - 回锁关浮层: entering the locked state closes the App-level preview dialog;
  *  - loopback 变体: no password box, click-to-confirm, `verify` never called;
  *  - 手机 band 完全忽略 privacy (<768px: 照常渲染、无锁标、无锁屏);
  *  - 无 cap 零痕迹: no lock affordances anywhere;
  *  - 取消标记两变体: LAN password dialog vs loopback confirm (wire shapes pinned);
- *  - 标记 vs 立即锁定 naming separation (distinct i18n labels on the two header/card actions);
+ *  - the header button is the mark-STATE toggle (2026-11-03): unmarked 「锁定」 marks, marked
+ *    「解锁」 opens the 取消标记 flow — mark/unmark vocabularies stay separate from the lock
+ *    screen's view-unlock copy;
  *  - ask_user needsAnswer badge survives the lock on the card (内容解锁后才可见).
  */
 import { flushPromises, mount } from "@vue/test-utils";
@@ -182,6 +185,19 @@ async function unlockViaPassword(m: Mounted, password = "pw"): Promise<void> {
   await flushPromises();
 }
 
+/** Dispatch one visibilitychange:hidden round trip (relock path ④), restoring the descriptor. */
+async function hideTabOnce(): Promise<void> {
+  const original = Object.getOwnPropertyDescriptor(document, "visibilityState");
+  Object.defineProperty(document, "visibilityState", { value: "hidden", configurable: true });
+  try {
+    document.dispatchEvent(new Event("visibilitychange"));
+    await flushPromises();
+  } finally {
+    if (original !== undefined) Object.defineProperty(document, "visibilityState", original);
+    else delete (document as unknown as Record<string, unknown>)["visibilityState"];
+  }
+}
+
 beforeEach(() => {
   window.localStorage.clear();
   document.documentElement.style.overflow = "";
@@ -213,7 +229,8 @@ describe("P0 gate — locked session never mounts AgentDetail", () => {
     expect(m.wrapper.find(".detail-body").exists()).toBe(false);
     expect(m.wrapper.find(".dock").exists()).toBe(false);
     expect(m.wrapper.find(".composer").exists()).toBe(false);
-    expect(m.wrapper.find(".fleet-summary-bar").exists()).toBe(false);
+    expect(m.wrapper.find(".activity-rail").exists()).toBe(false);
+    expect(m.wrapper.find('button[aria-controls="fleet-drawer"]').exists()).toBe(false);
   });
 
   it("unlocked viewed session renders AgentDetail normally while another session is locked", async () => {
@@ -410,18 +427,21 @@ describe("回锁四路 (four relock paths)", () => {
     expect(m.wrapper.find(".privacy-lock").exists()).toBe(true);
   });
 
-  it("③ the header's 「立即锁定」 relocks the view (no request)", async () => {
+  it("③ the header button on a marked session is 「解锁」 → 取消标记 flow (manual relock is API-only now)", async () => {
     const m = await unlockedView();
     const btn = m.wrapper.find(".privacy-head-btn");
     expect(btn.exists()).toBe(true);
-    expect(btn.attributes("aria-label")).toBe("Relock this session's view immediately");
-    expect(btn.attributes("title")).toBe("Lock now");
-    expect(btn.get(".head-btn-label").text()).toBe("Lock"); // marked ⇒ 「锁定」 label
+    expect(btn.attributes("aria-label")).toBe("Unlock this session by removing its privacy mark");
+    expect(btn.attributes("title")).toBe("Remove privacy mark");
+    expect(btn.get(".head-btn-label").text()).toBe("Unlock"); // marked ⇒ 「解锁」 label
     expect(btn.get(".head-btn-label").attributes("aria-hidden")).toBe("true");
     await btn.trigger("click");
     await flushPromises();
-    expect(m.wrapper.find(".privacy-lock").exists()).toBe(true);
-    expect(m.privacy.lock).not.toHaveBeenCalled(); // pure client-side
+    // the unmark dialog opens (LAN: password form); no wire call until it is confirmed —
+    // and the view NEVER relocks from this button anymore (relock("manual") is API-only)
+    expect(document.body.querySelector(".privacy-unmark")).not.toBeNull();
+    expect(m.wrapper.find(".privacy-lock").exists()).toBe(false);
+    expect(m.privacy.lock).not.toHaveBeenCalled();
   });
 
   it("④ visibilitychange: hidden relocks immediately", async () => {
@@ -441,9 +461,8 @@ describe("回锁四路 (four relock paths)", () => {
   it("entering the locked state closes the session's preview dialog (回锁关浮层)", async () => {
     const m = await unlockedView();
     expect(m.previewClose).not.toHaveBeenCalled();
-    const btn = m.wrapper.find(".privacy-head-btn");
-    await btn.trigger("click");
-    await flushPromises();
+    await hideTabOnce(); // any locked transition of the VIEWED session fires onRelock (④ here)
+    expect(m.wrapper.find(".privacy-lock").exists()).toBe(true);
     expect(m.previewClose).toHaveBeenCalledTimes(1);
   });
 
@@ -459,10 +478,9 @@ describe("回锁四路 (four relock paths)", () => {
       previewHandle: face,
     });
     await flushPromises();
-    await unlockViaPassword(m); // unlocked viewing — the head button now instantly relocks
+    await unlockViaPassword(m); // unlocked viewing — a hidden tab relocks (④) and closes the windows
     expect(face.windowsRef.value).toHaveLength(2);
-    await m.wrapper.find(".privacy-head-btn").trigger("click");
-    await flushPromises();
+    await hideTabOnce();
     expect(face.closeAllSpy).toHaveBeenCalledTimes(1); // root close() = closeAll (§4.3)
     expect(face.windowsRef.value).toHaveLength(0);
     expect(a.closeSpy).toHaveBeenCalledTimes(1);
@@ -578,8 +596,8 @@ describe("标记 / 取消标记", () => {
   });
 });
 
-describe("命名分离 (「隐私标记」 vs 「立即锁定」)", () => {
-  it("the mark action and the view-relock action carry distinct i18n labels", async () => {
+describe("标记状态反转开关 (「锁定」=标记 vs 「解锁」=取消标记)", () => {
+  it("the header button flips with the mark state; mark/unmark copy stays separate from the lock screen's", async () => {
     stubMatchMedia(false);
     const m = mountDashboard({
       route: { name: "agent", key: "agent-b" },
@@ -587,24 +605,30 @@ describe("命名分离 (「隐私标记」 vs 「立即锁定」)", () => {
       mode: "password",
     });
     await flushPromises();
-    // unmarked session (agent-b being viewed): header button = 「隐私标记」
+    // unmarked session (agent-b being viewed): header button = 「锁定」 → mark
     const headBtn = m.wrapper.find(".privacy-head-btn");
     expect(headBtn.exists()).toBe(true);
     expect(headBtn.attributes("aria-label")).toBe("Mark this session as private");
     expect(headBtn.attributes("title")).toBe("Mark private");
-    expect(headBtn.get(".head-btn-label").text()).toBe("Private"); // unmarked ⇒ 「隐私」 label
+    expect(headBtn.get(".head-btn-label").text()).toBe("Lock"); // unmarked ⇒ 「锁定」 label
     expect(headBtn.classes()).not.toContain("is-marked"); // unmarked ⇒ neutral tint
-    // mark it → broadcast → now viewing a marked session ⇒ the SAME button becomes 「立即锁定」
+    // mark it → broadcast → now viewing a marked session ⇒ the lock screen (标记瞬间)
     await headBtn.trigger("click");
     await flushPromises();
     expect(m.privacy.lock).toHaveBeenCalledWith({ agentKey: "agent-b", sessionId: SID_B, locked: true });
-    await m.pushFrame([SID_B]); // marked while viewing ⇒ lock screen (标记瞬间)
+    await m.pushFrame([SID_B]);
     expect(m.wrapper.find(".privacy-lock").exists()).toBe(true);
     await unlockViaPassword(m);
+    // marked + view-unlocked: the SAME button becomes 「解锁」 → the 取消标记 entry (the card's twin)
     const headBtn2 = m.wrapper.find(".privacy-head-btn");
-    expect(headBtn2.attributes("aria-label")).toBe("Relock this session's view immediately");
-    expect(headBtn2.attributes("title")).toBe("Lock now");
+    expect(headBtn2.attributes("aria-label")).toBe("Unlock this session by removing its privacy mark");
+    expect(headBtn2.attributes("title")).toBe("Remove privacy mark");
+    expect(headBtn2.get(".head-btn-label").text()).toBe("Unlock"); // marked ⇒ 「解锁」 label
     expect(headBtn2.classes()).toContain("is-marked"); // marked ⇒ primary tint at rest
+    await headBtn2.trigger("click");
+    await flushPromises();
+    expect(document.body.querySelector(".privacy-unmark")).not.toBeNull();
+    expect(m.privacy.lock).toHaveBeenCalledTimes(1); // only the earlier mark — unmark waits for the dialog's confirm
   });
 });
 

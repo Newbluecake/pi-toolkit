@@ -32,7 +32,7 @@ import { startHub, type RunningHub } from "../../src/web-hub/hub/hub.js";
 import type { HistoryService } from "../../src/web-hub/hub/spawn/history/ports.js";
 import type { HubConfig, HubSpawnConfig } from "../../src/web-hub/hub/ports.js";
 import type { HistoryItemWire, HistoryPage } from "../../src/web-hub/protocol/session-history.js";
-import { RESTORE_SESSION_ID_RE } from "../../src/web-hub/protocol/spawn.js";
+import { RESTORE_SESSION_ID_RE, SUPPORTED_PI_RANGE } from "../../src/web-hub/protocol/spawn.js";
 import { webHubSpawnFiles } from "../../src/web-hub/protocol/paths.js";
 import { login, openSse, postJson, rawRequest, type SseConn } from "../web-hub/http/helpers.js";
 import { waitUntil } from "../web-hub/agent/helpers.js";
@@ -76,13 +76,19 @@ function kill9(pid: number | undefined): void {
   }
 }
 
+/**
+ * The pi version the fake launcher's package claims — a SUPPORTED host version (see the headless
+ * suite's note: refusing unsupported versions is covered by `launcher-check.test.ts`).
+ */
+const FAKE_PI_HOST_VERSION = SUPPORTED_PI_RANGE.min;
+
 /** Fixture launcher tree satisfying SP7's version chain (same shape as the headless suite). */
 function fakeLauncher(root: string): readonly [string, string] {
   const pkgDir = join(root, "node_modules", "@earendil-works", "pi-coding-agent");
   mkdirSync(pkgDir, { recursive: true });
   writeFileSync(
     join(pkgDir, "package.json"),
-    JSON.stringify({ name: "@earendil-works/pi-coding-agent", version: "1.0.2" }),
+    JSON.stringify({ name: "@earendil-works/pi-coding-agent", version: FAKE_PI_HOST_VERSION }),
   );
   const entry = join(pkgDir, "pi.mjs");
   copyFileSync(FAKE_PI, entry);

@@ -26,46 +26,58 @@
   display: none;
 }
 
-/* docked 且已打开时,悬浮 tab 按钮由 CSS 隐藏(§6.3:抽屉本身就是常驻视图;2026-10
- * 悬浮化后沿用同一裁决 —— 宽屏 docked 打开时不让悬浮按钮贴在抽屉左缘与常驻树并排,
- * × 按钮就是关闭入口;关闭后 tab 回到主栏右缘)。按钮仍在 DOM 里(display:none),
- * checkFleetDrawerOpen 的 aria-expanded 一致性断言不受影响。 */
-.detail[data-drawer="docked"][data-drawer-open] .fleet-summary-bar {
-  display: none;
-}
-
-/* ---- docked(≥1280px):grid 右列 ------------------------------------------------ */
+/* Viewport mode is not intent: only pinned docked opens a layout column. */
 .detail[data-drawer="docked"] {
   --drawer-w: clamp(480px, 38vw, 760px);
 }
-
 .detail[data-drawer="docked"] .detail-split {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 0;
 }
-
-.detail[data-drawer="docked"][data-drawer-open] .detail-split {
+.detail[data-docked-open] .detail-split {
   grid-template-columns: minmax(0, 1fr) var(--drawer-w);
 }
-
-/* ---- overlay(768–1279px):浮在主栏右侧 ---------------------------------------- */
-.detail[data-drawer="overlay"] .fleet-drawer {
+.fleet-drawer[data-mode="docked"] {
+  grid-column: 2;
+}
+/* Task60 (compact-panel-plan §2.2): 手动/锁定展开不再保留右侧整列预留 —— 原三处 84px
+ * padding-right override 已删除，头部/正文/run-head 恢复普通内边距；docked 列宽策略
+ * 不变，无新右列、margin 或等价 spacer。 */
+.fleet-drawer[data-mode="overlay"] {
   position: absolute;
-  inset-block: 0;
-  right: 0;
-  width: min(640px, 92%);
+  top: 12px;
+  bottom: 12px;
   z-index: 30;
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
   box-shadow: var(--shadow-3);
 }
-
-/* ---- fullscreen(≤767px):占满全屏 --------------------------------------------- */
-.detail[data-drawer="fullscreen"] .fleet-drawer {
+/* 手动 overlay（入口已进公共头部，data-floating 缺席）：不占外侧按钮栏，right12，
+ * 宽度上限不借机扩容。 */
+.fleet-drawer[data-mode="overlay"]:not([data-floating]) {
+  right: 12px;
+  width: min(440px, calc(100% - 24px));
+}
+/* hover/held（data-floating）：入口仍在右缘浮动 DOM —— fine rail 外缘 20 + 命中 44 +
+ * 净距 8 ⇒ right72；窄 split 左缘至少 12px。hover 与 held 共用同一几何，不停仅靠
+ * data-peek-open 驱动（held 时 peeking 已为 false）。 */
+.fleet-drawer[data-mode="overlay"][data-floating] {
+  right: 72px;
+  width: min(440px, calc(100% - 84px));
+}
+.activity-bridge {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: -8px;
+  width: 8px;
+}
+.fleet-drawer[data-mode="fullscreen"] {
   position: fixed;
   inset: 0;
   z-index: 40;
   border-left: none;
 }
-
 /* ---- 抽屉内部构件 -------------------------------------------------------------- */
 
 .drawer-head,
@@ -77,6 +89,12 @@
   min-height: 44px;
   padding: 0 var(--sp-2) 0 var(--sp-3);
   border-bottom: 1px solid var(--c-border);
+}
+
+/* Task60: 公共头部窄到放不下时只换行自身（入口行 flex-shrink:0、标题可截断），不侵入
+ * 正文；run-head 不换行。 */
+.drawer-head {
+  flex-wrap: wrap;
 }
 
 /* 2026-10-15: the fleet drawer title leads with the bot icon (same family as the bash group's

@@ -1,83 +1,110 @@
-/*
- * fleet 树 + 摘要行样式(ui-design.md §5.3, §6.4/§6.6;fleet-drawer plan v2 §6.3 — F6)。
- * `.tree`/`.run` 行样式从 `docs/dev/web-hub/ui-mockups/app.css` 原样移植(FleetTree.vue 渲染
- * 同样的标记)。F6 起浮层机制删除:`.fleet` 面板和 `.tree-scroll` 的 absolute 浮层规则随
- * FleetPanel.vue 一起移除 —— 入口是悬浮竖排的 `.fleet-summary-bar` 按钮(2026-10 用户现场
- * 要求,见下),树本体在右侧抽屉里(`.tree-scroll` 是抽屉内的静态滚动容器,规则在
- * drawer.css)。本文件由 FleetTree.vue / FleetSummaryBar.vue 引入。
- *
- * `.run[data-st="…"]` 状态色规则保持在本文件(见下),与 P3 的 primitives.css 互不依赖。
- */
-
-/* §6.3(2026-10 修订,用户现场要求「整个子 Agent 按钮放到右侧居中作为悬浮展开按钮」):
- * 摘要入口从常驻文档流的全宽行改为悬浮竖排 tab —— absolute 钉在 `.detail-body`
- * (detail.css 已 `position:relative`,即主会话 transcript 列)右缘、垂直居中,彻底退出
- * 文档流(transcript 吃回原来那一行高度)。
- *
- * 定位决策(逐档,与 drawer.css 的三模式对齐):
- *  - 锚点选 `.detail-body` 而不是 `.detail`/`.detail-split`:按钮永远留在主栏列内,
- *    不可能盖到左侧 agents 侧栏;composer(`.dock`)是 `.detail-body` 下一档的兄弟节点,
- *    top:50% 只在 transcript 区内取中,纵向够不到 composer。
- *  - docked(≥1280)且抽屉打开:drawer.css 沿用 F6 规则把按钮整条隐藏(抽屉本身就是
- *    常驻视图,× 关闭)—— 悬浮按钮不与常驻抽屉并排抢位。关闭时按钮贴主栏右缘,
- *    指向即将展开的抽屉。
- *  - overlay(768–1279)/fullscreen(≤767)打开时:抽屉 z-index 30/40 直接盖住按钮
- *    (本按钮 z-index 5),抽屉自带 ×/Esc/外点关闭,按钮无需也不应可见。
- *  - 横向让出滚动条水槽:coarse 档(触屏,overlay 滚动条 0 宽)贴边 8px;fine 档让
- *    20px,清空经典滚动条(≤~17px),不遮 transcript 的滚动条。
- *  - z-index 5:高于 transcript 内容(z-auto),低于抽屉 overlay(30)/fullscreen(40)。 */
-.fleet-summary-bar {
+/* #41/#42: independent activity rail; anchor is AgentDetail .detail-split. */
+.activity-rail {
   position: absolute;
   top: 50%;
-  right: var(--sp-2);
-  z-index: 5;
+  right: 8px;
+  z-index: 31;
   transform: translateY(-50%);
   display: flex;
   flex-direction: column;
-  align-items: center;
-  gap: var(--sp-2);
-  min-height: 44px;
-  padding: var(--sp-3) 5px;
-  border: 1px solid var(--c-border);
-  border-radius: var(--r-md);
-  background: var(--c-surface);
-  box-shadow: var(--shadow-2);
-  color: var(--c-text);
-  cursor: pointer;
-  user-select: none;
+  gap: 12px;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  pointer-events: none;
 }
-
 @media (pointer: fine) {
-  .fleet-summary-bar {
-    right: calc(var(--sp-3) + var(--sp-2));
+  .activity-rail {
+    right: 20px;
   }
 }
-
-.fleet-summary-bar:hover {
-  background: var(--c-surface-2);
+/* #48: phone-only shared backdrop separates the icons from transcript text.
+ * Content-sized (one or two buttons), never a reserved layout column. */
+@media (max-width: 767px) {
+  .activity-rail {
+    gap: var(--sp-2);
+    padding: var(--sp-1);
+    border: 1px solid var(--c-border);
+    border-radius: var(--r-md);
+    background: var(--c-surface);
+    box-shadow: var(--shadow-2);
+  }
 }
-
-.fleet-summary-bar .chev {
+.fleet-summary-bar {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  pointer-events: auto;
   color: var(--c-text-3);
-  transition: transform var(--dur-base) var(--ease-out);
+  cursor: pointer;
 }
-
-.fleet-summary-bar[aria-expanded="true"] .chev {
-  transform: rotate(180deg);
+.fleet-summary-bar:hover {
+  color: var(--c-text);
 }
-
-/* 2026-10-09: the sideways "子 Agent" label read oddly — a bot glyph stands in for it
- * (the name lives in the button's aria-label). */
+.fleet-summary-bar:focus:not(:focus-visible) {
+  outline: none;
+  box-shadow: none;
+}
+.fleet-summary-bar:focus-visible {
+  outline: 2px solid var(--c-focus);
+  outline-offset: 2px;
+  box-shadow: none;
+}
 .fleet-summary-bar .fab-icon {
-  color: var(--c-text-2);
+  width: 20px;
+  height: 20px;
 }
-
-/* 计数徽标:复用 `.pill`/`[data-st]` 语义(primitives.css)—— running>0 时 running 色
- * 软底 + 呼吸点(`.dot` 的脉冲在 prefers-reduced-motion 下由构建期 motion 改写关掉),
- * 否则 idle 软底纯计数。聚合计数(running/总数/成本)全量在按钮 aria-label 里。 */
+.fleet-summary-bar[data-active] {
+  color: var(--st-running);
+}
+.fleet-summary-bar[aria-expanded="true"] {
+  color: var(--st-running);
+}
 .fleet-summary-bar .fab-count {
-  gap: 4px;
-  padding: 1px 6px;
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  min-height: 18px;
+  padding: 0 5px;
+  font-size: var(--fs-2xs);
+  border: 2px solid var(--c-surface);
+  background: var(--st-running);
+  color: var(--c-surface);
+}
+.fleet-summary-bar[data-active]::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: radial-gradient(circle, var(--st-running) 0%, transparent 72%);
+  pointer-events: none;
+  opacity: 0;
+  animation: activity-breathe 3.2s ease-in-out infinite;
+}
+.fleet-summary-bar[data-panel="bash"]::after {
+  animation-delay: -1.6s;
+}
+@keyframes activity-breathe {
+  0%,
+  100% {
+    opacity: 0;
+  }
+  50% {
+    opacity: 0.22;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .fleet-summary-bar[data-active]::after {
+    animation: none;
+    opacity: 0.1;
+  }
 }
 
 .tree,
@@ -466,6 +493,17 @@ details[open] > summary.run .chev {
   margin: var(--sp-1) 0 0 var(--sp-2);
 }
 
+/* 2026-10-28 user ("两个已完成提示需要左对齐"): the agents fold and the bash group's folds must
+ * start on ONE x. Bash reaches it structurally — `.bj-list` pads 6px and `.bj-more` /
+ * `.bj-fill-more` pad `16px + --sp-2`, so the text lands 30px from the drawer's content edge.
+ * The tree's fold is a plain `.btn` (12px padding) under an 8px margin ⇒ 20px. Match the bash
+ * value instead of the other way round: only the depth-0 fold (direct child of `.tree-scroll`)
+ * is targeted; nested levels keep the plain rule. */
+.tree-scroll > .run-more {
+  margin-left: 0;
+  padding-left: calc(16px + var(--sp-2) + 6px);
+}
+
 /* status → { --pill-fg, --pill-bg } for `.run-icon`/`.run-activity .phase`/the highlight box-shadows */
 .run[data-st="running"] {
   --pill-fg: var(--st-running);
@@ -713,4 +751,52 @@ details[open] > summary.run .chev {
   border: 1px solid var(--c-border);
   border-radius: var(--r-sm);
   padding: 0 4px;
+}
+
+/* ---------------------------------------------------------------------------
+ * Task60 (docs/dev/activity-rail/compact-panel-plan.md §2.1/§2.2): 零预留列后，唯一
+ * activity rail 在两个局部稳定宿主之间移动（AgentDetail 持有元素并 Teleport，无第二份
+ * SummaryBar、无全局 selector 寻址）。
+ * ------------------------------------------------------------------------- */
+
+/* 浮动宿主：.detail-split 的常驻直属子节点，是浮动 .activity-rail 的定位祖先 —— absolute
+ * inset:0 + 点击穿透，零布局占位（不建层叠上下文，rail 的 z-index:31 仍按原样与
+ * overlay 抽屉的 30 比较）。按钮自身 pointer-events:auto（上面 .fleet-summary-bar 规则）。 */
+[data-rail-host="floating"] {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+/* 头部宿主：drawer 公共头部的正常流 flex item（position:static，不以 split 作定位基准）。
+ * block padding 4 给 badge（top:-2px）与 focus ring 留空间：基本行高至少 52px。 */
+[data-rail-host="header"] {
+  display: flex;
+  flex-direction: row;
+  flex-shrink: 0;
+  padding: 4px 0;
+}
+
+/* 头部内的 rail 覆盖为静态横排：明确清掉浮动定位/变换与 ≤767px 手机 backdrop 的容器
+ * 装饰（背景/边框/阴影/圆角/内边距）；只清容器 chrome —— 按钮 badge、pulse（data-active
+ * 的 ::after 圆 halo）、focus、44×44 命中全部原样保留。属性选择器优先级高于上面所有
+ * .activity-rail 规则（含手机媒体块），源码顺序无关。 */
+[data-rail-host="header"] .activity-rail {
+  position: static;
+  inset: auto;
+  transform: none;
+  z-index: auto;
+  display: flex;
+  flex-direction: row;
+  gap: 8px;
+  flex-shrink: 0;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+[data-rail-host="header"] .activity-rail .fleet-summary-bar {
+  flex-shrink: 0;
 }

@@ -485,3 +485,149 @@ describe("ToolCard.vue — mermaid fence in MD_RESULT_TOOLS results (web-hub-mer
     expect(blocks[1]!.find("pre").text()).toBe("const answer = 42;");
   });
 });
+
+describe("ToolCard.vue — write tool content view (#37)", () => {
+  const PATH = "/proj/src/a.ts";
+  const CODE = 'const a = 1;\nconst b = "x";\n';
+  const writeView = (over: Partial<ToolView> = {}, content = CODE, path: string | null = PATH): ToolView =>
+    view({
+      toolCallId: "w1",
+      toolName: "write",
+      state: "done",
+      args: path === null ? { content } : { path, content },
+      result: `Successfully wrote to ${path}`,
+      ...over,
+    });
+  const mountW = (v: ToolView) => mount(ToolCard, { props: { view: v }, attachTo: document.body });
+  const manyLines = (n: number) => Array.from({ length: n }, (_, i) => `line ${i + 1}`).join("\n") + "\n";
+
+  it("renders content as a multi-line numbered <pre> with real newlines and a compact summary", () => {
+    const w = mountW(writeView());
+    const pre = w.get("pre.write-code");
+    expect(pre.element.textContent).toBe(CODE);
+    expect(pre.element.textContent).not.toContain("\\n");
+    expect(pre.findAll(".pv-line")).toHaveLength(2);
+    expect(w.get(".tool-end").text()).toBe("2 lines · 28 B");
+    expect(w.get(".tool-write-path").text()).toBe(PATH);
+    expect(w.text()).not.toContain("1 lines");
+    w.unmount();
+  });
+
+  it("hides the standard success result by default; raw output is one click away", async () => {
+    const w = mountW(writeView());
+    const std = `Successfully wrote to ${PATH}`;
+    expect(w.findAll(".tool-section .pre").map((p) => p.text())).not.toContain(std);
+    expect(w.find(".tool-write-ok").exists()).toBe(true);
+    await w.get(".tool-write-ok button").trigger("click");
+    expect(w.findAll(".tool-section .pre").map((p) => p.text())).toContain(std);
+    await w.get(".tool-write-ok button").trigger("click");
+    expect(w.findAll(".tool-section .pre").map((p) => p.text())).not.toContain(std);
+    w.unmount();
+  });
+
+  it("custom result and error results stay verbatim and visible", () => {
+    const custom = mountW(writeView({ result: `Wrote 27 bytes to ${PATH}` }));
+    expect(custom.find(".tool-write-ok").exists()).toBe(false);
+    expect(custom.findAll(".tool-section .pre").map((p) => p.text())).toContain(`Wrote 27 bytes to ${PATH}`);
+    custom.unmount();
+    const err = mountW(writeView({ state: "error", result: "EACCES: denied" }));
+    expect(err.find(".tool-write-ok").exists()).toBe(false);
+    const sec = err.get(".tool-section.is-error");
+    expect(sec.text()).toContain("EACCES: denied");
+    expect(err.get(".tool-end").text()).toBe("error · 2 lines · 28 B");
+    expect(err.get("pre.write-code").element.textContent).toBe(CODE);
+    err.unmount();
+  });
+
+  it("code / raw JSON toggle goes back and forth", async () => {
+    const w = mountW(writeView());
+    const [codeBtn, rawBtn] = w.findAll(".tool-write-label .tool-md-btn");
+    await rawBtn!.trigger("click");
+    expect(w.find("pre.write-code").exists()).toBe(false);
+    const raw = w.findAll(".tool-section .pre").find((p) => p.text().includes('"content"'));
+    expect(raw).toBeDefined();
+    expect(raw!.text()).toContain("\\n");
+    await codeBtn!.trigger("click");
+    expect(w.find("pre.write-code").exists()).toBe(true);
+    w.unmount();
+  });
+
+  it("folds >18 lines by default, expands and collapses; ≤18 has no fold", async () => {
+    const w = mountW(writeView({}, manyLines(40)));
+    const wrap = () => w.get(".write-code-wrap");
+    expect(wrap().attributes("data-fold")).toBe("folded");
+    const toggle = w.get(".write-fold-toggle");
+    expect(toggle.text()).toContain("40");
+    await toggle.trigger("click");
+    expect(wrap().attributes("data-fold")).toBe("expanded");
+    expect(w.get(".write-fold-toggle").attributes("aria-expanded")).toBe("true");
+    await w.get(".write-fold-toggle").trigger("click");
+    expect(wrap().attributes("data-fold")).toBe("folded");
+    w.unmount();
+    const at18 = mountW(writeView({}, manyLines(18)));
+    expect(at18.get(".write-code-wrap").attributes("data-fold")).toBeUndefined();
+    expect(at18.find(".write-fold-toggle").exists()).toBe(false);
+    at18.unmount();
+  });
+
+  it("huge content (> highlight cap) renders plain, folded, without error", () => {
+    const big = "x".repeat(120) + "\n";
+    const content = big.repeat(1100); // ~133 KB > HIGHLIGHT_MAX_BYTES
+    const w = mountW(writeView({}, content));
+    expect(w.get("pre.write-code").element.textContent).toBe(content);
+    expect(w.get(".write-code-wrap").attributes("data-fold")).toBe("folded");
+    expect(w.find(".tok-keyword").exists()).toBe(false);
+    w.unmount();
+  });
+
+  it("copy button copies the full received content, not the folded fragment", async () => {
+    const writeText = vi.fn(async () => {});
+    Object.defineProperty(window, "isSecureContext", { value: true, configurable: true });
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+    const content = manyLines(40);
+    const w = mountW(writeView({}, content));
+    await w.get(".tool-write-actions .btn-icon").trigger("click");
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(writeText).toHaveBeenCalledWith(content);
+    vi.unstubAllGlobals();
+    w.unmount();
+  });
+
+  it("hostile content is inert text: no script / injected elements", () => {
+    const evil = "<script>alert(1)<\/script></pre><img src=x onerror=alert(1)>\n[a](javascript:alert(1))\n";
+    const w = mountW(writeView({}, evil, "/x/evil.html"));
+    expect(w.find("script").exists()).toBe(false);
+    expect(w.find("img").exists()).toBe(false);
+    expect(w.find("a").exists()).toBe(false);
+    expect(w.get("pre.write-code").element.textContent).toBe(evil);
+    w.unmount();
+  });
+
+  it("path missing: code is shown, no path row", () => {
+    const w = mountW(writeView({ result: "ok" }, CODE, null));
+    expect(w.get("pre.write-code").element.textContent).toBe(CODE);
+    expect(w.find(".tool-write-path").exists()).toBe(false);
+    w.unmount();
+  });
+
+  it("falls back to the legacy input <pre> for incomplete args (streaming) and non-write tools", () => {
+    const partial = mountW(
+      view({ toolCallId: "w2", toolName: "write", state: "running", args: {}, partial: '{"path":"a' }),
+    );
+    expect(partial.find(".write-code-wrap").exists()).toBe(false);
+    expect(partial.find(".tool-write").exists()).toBe(false);
+    partial.unmount();
+    const other = mountW(
+      view({ toolCallId: "w3", toolName: "read", state: "done", args: { path: "a", content: "x" } }),
+    );
+    expect(other.find(".tool-write").exists()).toBe(false);
+    other.unmount();
+  });
+
+  it("keeps the truncated badge", () => {
+    const w = mountW(writeView({ truncated: true }));
+    expect(w.find(".badge-trunc").exists()).toBe(true);
+    w.unmount();
+  });
+});

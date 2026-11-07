@@ -80,7 +80,9 @@ describe.skipIf(!existsSync(PI_CLI))("rpc-bash-jobs conformance — real pi --mo
       v: 1,
       jobId,
       command: `echo seed ${jobId}`,
-      cwd: "/tmp",
+      cwd: workdir!, // cwd-strict adoption: the child session runs in workdir — a
+      // foreign cwd (e.g. "/tmp") would now be cwdSkipped by recover() and
+      // b_DEAD0002's real-recovery assertions would never fire.
       sessionId: SESSION_ID,
       hostPid: DEAD_PID,
       status: "completed",

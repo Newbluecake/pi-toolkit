@@ -332,6 +332,48 @@ describe("goal loop until-cmd evaluation (D4)", () => {
   });
 });
 
+describe("goal loop hook dispose (session shutdown, 7b G9)", () => {
+  it("cancels the pending delivery watchdog; a stale firing neither retries nor reports", async () => {
+    const h = harness({ execResult: { code: 1, killed: false } });
+    h.hook.onAgentSettled(h.settled, h.ctx());
+    await flush();
+    expect(h.sent).toHaveLength(1);
+    const watchdog = h.timers.at(-1)!;
+    expect(watchdog.cancelled).toBe(false);
+    h.hook.dispose();
+    expect(watchdog.cancelled).toBe(true);
+    watchdog.fn(); // a timer that had already been dequeued by the host must still be inert
+    expect(h.sent).toHaveLength(1);
+    expect(h.record?.state).toBe("active"); // no delivery-failed brake either
+  });
+
+  it("an evaluation in flight at dispose cannot inject a continuation afterwards, and its latch timer is cancelled", async () => {
+    let finish!: (o: ReturnType<typeof makeOutcome>) => void;
+    const h = harness({
+      record: { untilCmd: undefined, untilText: "done?" },
+      spawnAndWait: () => new Promise((resolve) => (finish = resolve)),
+    });
+    h.hook.onAgentSettled(h.settled, h.ctx());
+    await flush();
+    const latch = h.timers.at(-1)!;
+    expect(latch.ms).toBe(h.goal.settings.evalTimeoutMs);
+    h.hook.dispose();
+    expect(latch.cancelled).toBe(true);
+    finish(makeOutcome({ structuredResult: { goal_met: false, gap: "more" } }));
+    await flush();
+    expect(h.sent).toHaveLength(0);
+  });
+
+  it("is permanent: later settled events start nothing", async () => {
+    const h = harness();
+    h.hook.dispose();
+    h.hook.onAgentSettled(h.settled, h.ctx());
+    await flush();
+    expect(h.execCalls).toHaveLength(0);
+    expect(h.record?.evalCount).toBe(0);
+  });
+});
+
 describe("goal loop verifier evaluation (D1-D4, v4 condition 10)", () => {
   const textOnly = { untilCmd: undefined, untilText: "构建通过且文档更新" };
 

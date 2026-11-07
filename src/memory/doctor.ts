@@ -23,7 +23,14 @@
 
 import { parseFrontmatter } from "./frontmatter.js";
 import { formatSize } from "./render.js";
+import { findSecrets } from "./secret-patterns.js";
+import { expiredEntries, untilEntries } from "./jev/entries.js";
+import { bodyBytes, isExpired, isResident, type ParsedBlock } from "./blocks/format.js";
+import { residentBlocksOf, residentMeteredBytes } from "./blocks/render.js";
+import type { BlocksStateV1, BlocksHoldV1 } from "./blocks/state.js";
+import type { DirFormat } from "./blocks/naming.js";
 import type { DoctorFinding, DoctorId, DoctorSeverity, MemoryMeta, TieredRenderResult } from "./contracts.js";
+import type { MemEntry } from "./jev/contracts.js";
 
 export interface DoctorSnapshotFile {
   name: string;
@@ -41,6 +48,11 @@ export interface DoctorSnapshotFile {
   /** Hard-link count (D14 "nlink > 1"). `undefined` = unknown/unsupported
    *  by the caller's fs layer — see the module doc comment above. */
   nlink?: number;
+  /** jev-plan §4 J8: per-file entry split (jev/entries.ts's `splitEntries`),
+   *  used ONLY when `runDoctor`'s `jev` parameter is present (D17/D18).
+   *  Omitted ⇒ those two rules are skipped for the file — same "optional
+   *  add-on, never guessed" convention as every other field here. */
+  entries?: readonly MemEntry[];
 }
 
 export type DoctorSkippedKind = "symlink" | "dangling" | "not-file" | "bad-name";
@@ -85,8 +97,11 @@ export interface DoctorSettings {
    *  model; under `legacy` the block inlines file bodies (render.ts) and
    *  those findings would be factually wrong — they sit out entirely.
    *  Omitted ⇒ `"tiered"` (the default layout, and every hand-fed test
-   *  snapshot that predates the field). */
-  layout?: "legacy" | "tiered";
+   *  snapshot that predates the field).
+   *  #36 P0: `"blocks"` joins the union because `MemoryLayout` widened (the
+   *  settings key parses it); until P3 adds the blocks dispatch the value
+   * cannot appear in real settings (P5b flips the default later). */
+  layout?: "legacy" | "tiered" | "blocks";
 }
 
 const ID_ORDER: readonly DoctorId[] = [
@@ -102,6 +117,9 @@ const ID_ORDER: readonly DoctorId[] = [
   "D11",
   "D13",
   "D14",
+  "D17",
+  "D18",
+  "D19",
 ];
 
 // ───────────────────────────── primary-core selection (§2.1) ─────────────────────────────
@@ -124,118 +142,9 @@ export function selectPrimaryCore(files: readonly DoctorSnapshotFile[]): string 
 }
 
 // ───────────────────────────── D13 secret scan ─────────────────────────────
-
-// High-confidence literal shapes — reported as-is (whole match masked).
-const SECRET_PATTERNS: readonly RegExp[] = [
-  /sk-[A-Za-z0-9]{20,}/g,
-  /AKIA[0-9A-Z]{16}/g,
-  /ghp_[A-Za-z0-9]{30,}/g,
-  /xox[bap]-[A-Za-z0-9-]{10,}/g,
-  /-----BEGIN [A-Z ]*PRIVATE KEY-----/g,
-];
-
-// Loose `password|secret|token <sep> value` rule. Two gates, both required:
-//
-// 1. Word boundary before the keyword: `(?<![A-Za-z0-9])`. `_` and `-` count
-//    as separators, NOT as word characters — that is a deliberate choice so
-//    `api_token=` / `x-auth-token:` / `TOKEN=` still hit, while pure-letter
-//    adjacency (`hasUsableAccessToken=`, `tokenizer=`) never does. The
-//    trade-off: snake-case constants (`JUDGE_BYTES_PER_TOKEN=4`) still
-//    keyword-match and rely on gate 2 (the value filter) to stay silent.
-//
-// 2. The value must LOOK like a credential (after de-quoting). Excluded
-//    outright: env refs (`$VAR` / `${VAR}` / `%VAR%`), `<…>` placeholders,
-//    `(…)` parenthesized notes, boolean-ish literals, pure numbers (incl.
-//    thousands separators/decimals), masked remainders (`***`, `xxxx`, `…`).
-//    What remains is reported only if it is credential-like — thresholds
-//    pinned by tests/memory/doctor.test.ts "D13":
-//      · de-quoted length ≥ 12 AND contains BOTH a letter and a digit, or
-//      · length ≥ 20 entirely within the base64/hex-ish charset
-//        `[A-Za-z0-9+/=._-]` (catches long letter-only passphrases).
-// An optional closing quote may sit between keyword and separator, so quoted
-// keys (`"token": "…"`, `'secret': …`) de-quote and hit too.
-const LOOSE_KV_SECRET_RE =
-  /(?<![A-Za-z0-9])(?:password|secret|token)["']?[ \t]*[:=][ \t]*("[^"\n]*"|'[^'\n]*'|`[^`\n]*`|\S+)/gi;
-
-const ENV_REF_RE = /^(?:\$[A-Za-z_][A-Za-z0-9_]*|\$\{[^}\n]+\}|%[A-Za-z_][A-Za-z0-9_]*%)$/;
-const PLACEHOLDER_RE = /^<[^<>\n]*>$/;
-const PURE_NUMBER_RE = /^-?\d[\d,.]*$/;
-const BOOLEANISH_RE = /^(?:true|false|null|undefined|none)$/i;
-
-/** Symmetric surrounding quotes ("…" / '…' / `…`) — JSON/YAML values are
- * judged de-quoted, so `"token": "hunter2hunter2"` still reports. */
-function dequote(value: string): string {
-  if (value.length >= 2) {
-    const first = value[0]!;
-    const last = value[value.length - 1]!;
-    if ((first === '"' && last === '"') || (first === "'" && last === "'") || (first === "`" && last === "`")) {
-      return value.slice(1, -1);
-    }
-  }
-  return value;
-}
-
-/** Gate 2 for the loose rule: does this raw captured value look like a
- * real credential? See LOOSE_KV_SECRET_RE's comment for the rule set. */
-function looseValueLooksLikeSecret(raw: string): boolean {
-  const dequoted = dequote(raw);
-  // `(octet-stream)`-style notes describe the syntax, not a secret.
-  if (dequoted.startsWith("(") && dequoted.endsWith(")")) return false;
-  let v = dequoted;
-  // A backtick mid-value means `\S+` crossed a markdown inline-code span
-  // boundary (`…TOKEN=4``other-span`…`): the real value ends at the fence.
-  const tick = v.indexOf("`");
-  if (tick > 0) v = v.slice(0, tick);
-  v = v.replace(/[.,;]+$/, "");
-  if (v === "") return false;
-  if (ENV_REF_RE.test(v)) return false;
-  if (PLACEHOLDER_RE.test(v)) return false;
-  if (BOOLEANISH_RE.test(v)) return false;
-  if (PURE_NUMBER_RE.test(v)) return false;
-  // Masked remainders: strip the mask charset and nothing alphanumeric stays
-  // (`********`, `xxxx`, `…` — but `x0x0` keeps a digit and stays in play).
-  if (!/[0-9A-Za-z]/.test(v.replace(/[*xX….]+/g, ""))) return false;
-  if (v.length >= 12 && /[A-Za-z]/.test(v) && /\d/.test(v)) return true;
-  return v.length >= 20 && /^[A-Za-z0-9+/=._-]+$/.test(v);
-}
-
-function lineOf(content: string, index: number): number {
-  let line = 1;
-  for (let i = 0; i < index && i < content.length; i++) {
-    if (content.charCodeAt(i) === 10) line++;
-  }
-  return line;
-}
-
-/** "打码为前 4 字符 + …" (§6.1 D13) — code-point safe (never splits a
- *  surrogate pair). */
-function maskSecret(text: string): string {
-  const chars = Array.from(text);
-  return `${chars.slice(0, 4).join("")}…`;
-}
-
-function findSecrets(content: string): { line: number; snippet: string }[] {
-  const found: { line: number; snippet: string }[] = [];
-  for (const pattern of SECRET_PATTERNS) {
-    const re = new RegExp(pattern.source, pattern.flags);
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(content)) !== null) {
-      const whole = m[0];
-      found.push({ line: lineOf(content, m.index), snippet: maskSecret(whole) });
-      if (whole.length === 0) re.lastIndex++; // never loop forever on a zero-length match
-    }
-  }
-  const loose = new RegExp(LOOSE_KV_SECRET_RE.source, LOOSE_KV_SECRET_RE.flags);
-  let lm: RegExpExecArray | null;
-  while ((lm = loose.exec(content)) !== null) {
-    const whole = lm[0];
-    if (looseValueLooksLikeSecret(lm[1] ?? whole)) {
-      found.push({ line: lineOf(content, lm.index), snippet: maskSecret(whole) });
-    }
-  }
-  found.sort((a, b) => a.line - b.line);
-  return found;
-}
+// SECRET_PATTERNS / findSecrets moved verbatim to ./secret-patterns.ts (J1,
+// pure move) so the Jev entry index (jev/entries.ts `secret` field) shares
+// the exact same detection source as D13; behavior is byte-identical.
 
 // ───────────────────────────── D07 frontmatter structural errors ─────────────────────────────
 
@@ -299,7 +208,11 @@ function sortFindings(findings: readonly DoctorFinding[]): DoctorFinding[] {
 
 // ───────────────────────────── main entry ─────────────────────────────
 
-export function runDoctor(snapshot: DoctorSnapshot, settings: DoctorSettings): DoctorFinding[] {
+export function runDoctor(
+  snapshot: DoctorSnapshot,
+  settings: DoctorSettings,
+  jev?: { today: string },
+): DoctorFinding[] {
   const findings: DoctorFinding[] = [];
   const files = snapshot.files;
   const primary = selectPrimaryCore(files);
@@ -307,7 +220,9 @@ export function runDoctor(snapshot: DoctorSnapshot, settings: DoctorSettings): D
   // layout:legacy the block inlines file bodies and has no resident-core
   // concept, so they would be factually wrong there (defaults to tiered,
   // the default layout, for hand-fed snapshots that omit the field).
-  const layoutTiered = (settings.layout ?? "tiered") === "tiered";
+  const layout = settings.layout ?? "tiered";
+  const layoutTiered = layout === "tiered";
+  const layoutBlocks = layout === "blocks";
 
   // D01: primary-core health. Two cases:
   //  · NO primary at all (no active core.md, not even a pin:true stand-in) —
@@ -348,13 +263,17 @@ export function runDoctor(snapshot: DoctorSnapshot, settings: DoctorSettings): D
       });
     }
   } else if (primary !== "core.md") {
-    findings.push({
-      id: "D01",
-      severity: "info",
-      file: primary,
-      message: `No core.md — "${primary}" (pin: true) is standing in as the degraded primary core.`,
-      fix: "Rename it to core.md, or run /mem tidy to migrate.",
-    });
+    // #36 P3 (arch §3.3.4): blocks 目录下没有 primary/pin 概念（常驻区取
+    // 代 core），静默。
+    if (!layoutBlocks) {
+      findings.push({
+        id: "D01",
+        severity: "info",
+        file: primary,
+        message: `No core.md — "${primary}" (pin: true) is standing in as the degraded primary core.`,
+        fix: "Rename it to core.md, or run /mem tidy to migrate.",
+      });
+    }
   }
 
   const byTopic = new Map<string, string[]>();
@@ -589,10 +508,279 @@ export function runDoctor(snapshot: DoctorSnapshot, settings: DoctorSettings): D
     });
   }
 
+  // D17–D19 (jev-plan §4 J8, jev-arch §6.3.5/§1.4): only when `jev` is
+  // supplied — absent, this whole block never runs and the report is
+  // byte-identical to before these codes existed (I9).
+  if (jev) {
+    // #36 P3 (arch 附录 A): blocks 目录下 D17 只统计 user 块 —— agent 块
+    // 的到期交给治理（sweep 归档 + 渲染层过滤）。
+    const allEntries = layoutBlocks
+      ? files.flatMap((f) => (f.entries ?? []).filter((e) => e.authority === "user"))
+      : files.flatMap((f) => f.entries ?? []);
+    for (const e of expiredEntries(allEntries, jev.today)) {
+      findings.push({
+        id: "D17",
+        severity: "warn",
+        file: e.file,
+        line: e.lineStart,
+        message: `entry expired on ${e.inline.expires ?? "?"} — delete it, extend it, or clear the expiry with /mem expired.`,
+        fix: "/mem expired",
+      });
+    }
+    for (const e of untilEntries(allEntries)) {
+      findings.push({
+        id: "D17",
+        severity: "info",
+        file: e.file,
+        line: e.lineStart,
+        message: `entry has an until condition (${JSON.stringify(e.inline.until ?? "")}) — confirm it with /mem expired.`,
+      });
+    }
+    for (const f of files) {
+      for (const e of f.entries ?? []) {
+        for (const err of e.inlineErrors) {
+          findings.push({
+            id: "D18",
+            severity: "error",
+            file: e.file,
+            line: e.lineStart,
+            message: `inline authority comment error: ${err}`,
+          });
+        }
+      }
+    }
+    if (primary !== undefined && settings.coreBytes > 0 && !layoutBlocks) {
+      const alreadyFlagged = findings.some((f) => (f.id === "D02" || f.id === "D03") && f.file === primary);
+      const primaryFile = files.find((f) => f.name === primary);
+      if (!alreadyFlagged && primaryFile) {
+        const ratio = primaryFile.size / settings.coreBytes;
+        if (ratio >= 0.8) {
+          findings.push({
+            id: "D19",
+            severity: "warn",
+            file: primary,
+            message: `${primary} is at ${String(Math.round(ratio * 100))}% of coreBytes (${formatSize(settings.coreBytes)}) — getting close to the hard budget.`,
+            fix: "Trim it, or split topics out with /mem tidy.",
+          });
+        }
+      }
+    }
+  }
+
   return sortFindings(findings);
 }
 
-// ───────────────────────────── §6.2 report / summary formatting ─────────────────────────────
+// ───────────────────────────── #36 blocks-only doctor codes (D20–D25, arch 附录 A) ─────────────────────────────
+
+/** Root 裁定 2026-11-06（P3 派单批复）：D20–D25 的 id 联合与 snapshot I/O
+ *  层（doctor-command.ts）不在 P3 文件域，所以在 doctor.ts 内本地扩展，
+ *  不动 contracts.ts 的 `DoctorId`；生产 `/mem doctor` 的 blocks 分派接线
+ *  留 P4/P5b。`formatDoctorReport`/`countBySeverity`/`summaryLine` 的参数
+ *  放宽为 `DoctorFindingLike`，两者都接受。 */
+export type BlocksDoctorId = "D20" | "D21" | "D22" | "D23" | "D24" | "D25";
+
+export type BlocksDoctorFinding = Omit<DoctorFinding, "id"> & { id: BlocksDoctorId };
+
+/** Structural superset of both finding shapes — what the formatters accept. */
+export interface DoctorFindingLike {
+  readonly id: string;
+  readonly severity: DoctorSeverity;
+  readonly file?: string;
+  readonly line?: number;
+  readonly message: string;
+  readonly fix?: string;
+}
+
+export interface DoctorBlocksInput {
+  /** `readCorpus(realDir).blocks`. */
+  readonly blocks: readonly ParsedBlock[];
+  /** `readCorpus(realDir).strays` — D23. */
+  readonly strays: readonly string[];
+  /** Archived block ids (readCorpus counts per topic; the names come from
+   *  listing `blocks/archive/`) — D22 existence checks. Omitted ⇒ only the
+   *  active ids are known. */
+  readonly archivedIds?: readonly string[];
+  /** The settings `layout` value — D24 (directory already block-format). */
+  readonly settingsLayout: "tiered" | "legacy" | "blocks";
+  /** Root-directory v2 `.md` count — D24's rollback-snapshot line. */
+  readonly rootFileCount: number;
+  /** Drift verdict count (arch §4.3.6 — produced by blocks/legacy.ts in P2;
+   *  injected here so this file stays pure). 0/omitted ⇒ silent. */
+  readonly driftCount?: number;
+  /** `memory.residentBytes` — D21. */
+  readonly residentBytes: number;
+  readonly today: string;
+  /** `.blocks-state.json` — D25 overBudgetStreak. */
+  readonly state?: BlocksStateV1;
+  /** `.blocks-hold` — D25 unfinished rollback. */
+  readonly hold?: BlocksHoldV1;
+  /** `.blocks-staging-*` dirs without an owner.json — D25. */
+  readonly stagingWithoutOwner?: readonly string[];
+  readonly nowMs?: number;
+}
+
+const BLOCKS_ID_ORDER: readonly string[] = ["D20", "D21", "D22", "D23", "D24", "D25"];
+
+/** `runDoctorBlocks` — the blocks-layout-only codes (arch 附录 A). Pure:
+ *  everything the rules need arrives in `DoctorBlocksInput`; no fs, no pi. */
+export function runDoctorBlocks(input: DoctorBlocksInput): BlocksDoctorFinding[] {
+  const findings: BlocksDoctorFinding[] = [];
+  // D22 existence checks look at EVERY block id on disk (superseded blocks
+  // still exist); archived ids arrive via input when the caller listed them.
+  const knownIds = new Set<string>([...input.blocks.map((b) => b.id), ...(input.archivedIds ?? [])]);
+  // D20: migration-exempt oversize bodies.
+  for (const b of input.blocks) {
+    const size = bodyBytes(b.body);
+    if (size > 1024) {
+      findings.push({
+        id: "D20",
+        severity: "warn",
+        file: `${b.id}.md`,
+        message: `${b.id}'s body is ${formatSize(size)}, over the 1024B block budget (migration-exempt) — update it to shrink below 1024B.`,
+        fix: `memory update ${b.id}`,
+      });
+    }
+  }
+  // D21: resident budget — main-session口径, same metering as the renderer.
+  {
+    const resident = residentBlocksOf(input.blocks, { isChild: false, today: input.today });
+    const used = residentMeteredBytes(resident, input.today);
+    if (used > input.residentBytes * 4) {
+      findings.push({
+        id: "D21",
+        severity: "error",
+        message: `Resident user rules are ${formatSize(used)}, over 4× the residentBytes budget (${formatSize(input.residentBytes)}) — consolidate or demote to topic.`,
+        fix: "/mem review",
+      });
+    } else if (used > input.residentBytes) {
+      findings.push({
+        id: "D21",
+        severity: "warn",
+        message: `Resident user rules are ${formatSize(used)} of the residentBytes budget (${formatSize(input.residentBytes)}) — consolidate or demote to topic.`,
+        fix: "/mem review",
+      });
+    }
+  }
+  // D22: dangling supersededBy edges and cycles (single-sided relation).
+  {
+    const byId = new Map(input.blocks.map((b) => [b.id, b] as const));
+    for (const b of input.blocks) {
+      const target = b.meta.supersededBy;
+      if (target === undefined) continue;
+      if (!knownIds.has(target)) {
+        findings.push({
+          id: "D22",
+          severity: "warn",
+          file: `${b.id}.md`,
+          message: `${b.id}.supersededBy → ${target}: no such block (moved, deleted or archived?).`,
+          fix: `memory update ${b.id}`,
+        });
+        continue;
+      }
+      // Cycle walk: follow supersededBy until a block without one; bail at
+      // revisit/self — every member of a cycle reports once (dedup below).
+      const seen = new Set<string>([b.id]);
+      let cursor: ParsedBlock | undefined = b;
+      let cyclic = false;
+      while (cursor !== undefined && cursor.meta.supersededBy !== undefined) {
+        const next = cursor.meta.supersededBy;
+        if (seen.has(next)) {
+          cyclic = true;
+          break;
+        }
+        seen.add(next);
+        cursor = byId.get(next);
+      }
+      if (cyclic) {
+        findings.push({
+          id: "D22",
+          severity: "warn",
+          file: `${b.id}.md`,
+          message: `supersededBy cycle detected at ${b.id} → ${target} — restore or clear one edge.`,
+          fix: "/mem restore --block",
+        });
+      }
+    }
+  }
+  // D23: parse errors (inline-meta remains, invalid frontmatter values,
+  // agent scope ignored) + stray files in blocks/. Only the BODY oversize
+  // (`E_TOO_LARGE`) is D20's subject — an over-limit `section` (>80B,
+  // `E_SECTION_TOO_LARGE`) has no other reporter, so D23 covers it
+  // (acceptance fix).
+  for (const b of input.blocks) {
+    for (const err of b.errors) {
+      if (err === "E_TOO_LARGE") continue;
+      findings.push({
+        id: "D23",
+        severity: "warn",
+        file: `${b.id}.md`,
+        message: `${b.id}: ${err}`,
+      });
+    }
+  }
+  for (const name of input.strays) {
+    findings.push({
+      id: "D23",
+      severity: "warn",
+      file: name,
+      message: `${name} is a stray file in blocks/ (missing kind: block or a malformed name) — not addressable as a block.`,
+    });
+  }
+  // D24: layout/settings mismatch + rollback snapshot + legacy drift.
+  if (input.settingsLayout !== "blocks") {
+    findings.push({
+      id: "D24",
+      severity: "info",
+      message: `layout setting is ${input.settingsLayout} but the directory is block-format — the data format wins, rendering uses blocks.`,
+    });
+  }
+  if (input.rootFileCount > 0) {
+    findings.push({
+      id: "D24",
+      severity: "info",
+      message: `Root keeps ${input.rootFileCount} legacy file(s) as the rollback snapshot — untouched by design (/mem migrate --rollback to restore).`,
+    });
+  }
+  if ((input.driftCount ?? 0) > 0) {
+    findings.push({
+      id: "D24",
+      severity: "info",
+      message: `Legacy drift: ${input.driftCount} root file(s) changed since migration — /mem migrate --import-legacy to import.`,
+    });
+  }
+  // D25: overBudgetStreak, ownerless staging dirs, unfinished rollback.
+  if ((input.state?.overBudgetStreak ?? 0) >= 3) {
+    findings.push({
+      id: "D25",
+      severity: "warn",
+      message: `Auto-migration went over budget ${input.state?.overBudgetStreak} times in a row — run /mem migrate explicitly.`,
+    });
+  }
+  if ((input.stagingWithoutOwner?.length ?? 0) > 0) {
+    findings.push({
+      id: "D25",
+      severity: "warn",
+      message: `${input.stagingWithoutOwner?.length} staging dir(s) missing owner.json — never auto-cleaned; remove by hand if stale.`,
+    });
+  }
+  if (input.hold?.rollback?.done === false) {
+    findings.push({
+      id: "D25",
+      severity: "warn",
+      message: "Rollback unfinished (hold.rollback.done=false) — the next /mem migrate continues it.",
+    });
+  }
+  return findings.sort((a, b) => {
+    const ai = BLOCKS_ID_ORDER.indexOf(a.id);
+    const bi = BLOCKS_ID_ORDER.indexOf(b.id);
+    if (ai !== bi) return ai - bi;
+    const af = a.file ?? "";
+    const bf = b.file ?? "";
+    return af < bf ? -1 : af > bf ? 1 : 0;
+  });
+}
+
+// ───────────────────────────── report / summary formatting (§6.2) ─────────────────────────────
 
 interface SeverityCounts {
   error: number;
@@ -600,14 +788,14 @@ interface SeverityCounts {
   info: number;
 }
 
-export function countBySeverity(findings: readonly DoctorFinding[]): SeverityCounts {
+export function countBySeverity(findings: readonly DoctorFindingLike[]): SeverityCounts {
   const counts: SeverityCounts = { error: 0, warn: 0, info: 0 };
   for (const f of findings) counts[f.severity]++;
   return counts;
 }
 
 /** Full `/mem doctor` listing (§6.2) — multi-line, one finding per line. */
-export function formatDoctorReport(findings: readonly DoctorFinding[]): string {
+export function formatDoctorReport(findings: readonly DoctorFindingLike[]): string {
   if (findings.length === 0) return "/mem doctor: no findings — memory looks healthy.";
   const c = countBySeverity(findings);
   const header = `/mem doctor: ${c.error} error · ${c.warn} warn · ${c.info} info`;
@@ -622,7 +810,7 @@ export function formatDoctorReport(findings: readonly DoctorFinding[]): string {
 /** §6.2's `/mem` / `/mem list` trailer line, e.g. "doctor: 1 error · 3 warn
  *  — /mem doctor". Always returns a line (never omitted) so the caller can
  *  append it unconditionally. */
-export function summaryLine(findings: readonly DoctorFinding[]): string {
+export function summaryLine(findings: readonly DoctorFindingLike[]): string {
   const c = countBySeverity(findings);
   const parts: string[] = [];
   if (c.error > 0) parts.push(`${c.error} error`);

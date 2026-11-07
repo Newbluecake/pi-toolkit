@@ -573,7 +573,7 @@ const FEISHU_WARNING_PHRASES: Record<FeishuBotWarning, string> = {
 export function formatFeishuSettingsWarningLine(warnings: readonly FeishuBotWarning[]): string | undefined {
   if (warnings.length === 0) return undefined;
   const parts = warnings.map((w) => FEISHU_WARNING_PHRASES[w]);
-  return `feishuBot 设置告警：${parts.join("；")}。修改 ~/.pi/agent/pi-subagent.json 后 /reload（再 /webhub restart）生效。`;
+  return `feishuBot 设置告警：${parts.join("；")}。修改 ~/.pi/agent/pi-toolkit.json 后 /reload（再 /webhub restart）生效。`;
 }
 
 /** unref'd sleep：轮询循环绝不 pin 住进程（pi -p 不可被 ref'd timer 卡死）。 */

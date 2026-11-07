@@ -7,18 +7,20 @@
  * millisecond-scale via `DbClientDeps` so the whole file runs fast while
  * exercising the exact same state machine as production.
  */
-import { afterEach, describe, expect, it } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { execFile as execFileCb } from "node:child_process";
+import { execFile as execFileCb, spawn } from "node:child_process";
 import {
   createDbClient,
   DbClientError,
   DEFAULT_DEADLINE_MS,
   type DbClient,
 } from "../../../src/web-hub/hub/db-client.js";
+import { createRequire } from "node:module";
+import { createHmac } from "node:crypto";
 import { buildMaintScript } from "../../../src/web-hub/hub/db-child.js";
 import { hasNodeSqlite } from "../../../src/web-hub/hub/db.js";
 import { memLog } from "./helpers.js";
@@ -378,4 +380,77 @@ skipIfNoSqlite("createDbClient (plan §4.2 real subprocess)", () => {
       t.cleanup();
     }
   }, 10_000);
+});
+
+skipIfNoSqlite("#66 P6 immutable childEnv survives query crashes", () => {
+  it.each(["0", "1"])("TOTP_WRITE=%s supplied by maintenance stays fixed after respawn", async (flag) => {
+    const t = tmp(),
+      log = memLog(),
+      envs: NodeJS.ProcessEnv[] = [],
+      children: ReturnType<typeof spawn>[] = [];
+    const keyFile = join(t.dir, "key-dir", "totp.key");
+    mkdirSync(join(t.dir, "key-dir"), { mode: 0o700 });
+    writeFileSync(keyFile, Buffer.alloc(32, 9), { mode: 0o600 });
+    await migrate(t.dbFile);
+    const childEnv = { PI_WEBHUB_TOTP_WRITE: flag, PI_WEBHUB_TOTP_KEY: keyFile };
+    const client = createDbClient({
+      dbFile: t.dbFile,
+      log,
+      childEnv,
+      test: true,
+      backoffMs: [5, 5, 5],
+      spawnFn: ((...args: Parameters<typeof spawn>) => {
+        envs.push({ ...args[2]?.env });
+        const c = spawn(...args);
+        children.push(c);
+        return c;
+      }) as typeof spawn,
+    });
+    try {
+      // A caller cannot mutate the opening verdict between launches.
+      childEnv.PI_WEBHUB_TOTP_WRITE = flag === "1" ? "0" : "1";
+      childEnv.PI_WEBHUB_TOTP_KEY = "not-the-key";
+      async function enroll(replace: boolean, now: number, gen: number) {
+        const p = await client.call<{ secretB32: string }>("beginTotp", { userId: 1, now, replace });
+        const bits = [...p.secretB32]
+          .map((c) => "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567".indexOf(c).toString(2).padStart(5, "0"))
+          .join("");
+        const secret = Buffer.from((bits.match(/.{8}/g) ?? []).map((b) => parseInt(b, 2))),
+          counter = Buffer.alloc(8);
+        counter.writeBigUInt64BE(BigInt(Math.floor(now / 30000)));
+        const hash = createHmac("sha1", secret).update(counter).digest();
+        const code = String((hash.readUInt32BE(hash[19]! & 15) & 0x7fffffff) % 1_000_000).padStart(6, "0");
+        expect(await client.call("commitTotp", { userId: 1, now, code, expectedGen: gen })).toMatchObject({ ok: true });
+        const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
+        const db = new DatabaseSync(t.dbFile);
+        try {
+          expect(
+            (db.prepare("SELECT totp_secret FROM twofa WHERE user_id=1").get()!.totp_secret as Uint8Array).length,
+          ).toBe(flag === "1" ? 53 : 20);
+        } finally {
+          db.close();
+        }
+      }
+      await enroll(false, 1_800_000_000_000, 0);
+      await expect(
+        client.call("deleteSession", { sidHash: Buffer.alloc(32).toString("base64"), __crashAfterCommit: true }),
+      ).rejects.toMatchObject({ code: "E_DB" });
+      await vi.waitFor(
+        async () => {
+          expect(await client.call("get2faState", { userId: 1 })).toMatchObject({ state: "enrolled" });
+        },
+        { timeout: 3000, interval: 20 },
+      );
+      await enroll(true, 1_800_000_030_000, 1);
+      expect(envs).toHaveLength(2);
+      for (const env of envs) {
+        expect(env.PI_WEBHUB_TOTP_WRITE).toBe(flag);
+        expect(env.PI_WEBHUB_TOTP_KEY).toBe(keyFile);
+      }
+      expect(children).toHaveLength(2);
+    } finally {
+      await client.close();
+      t.cleanup();
+    }
+  });
 });

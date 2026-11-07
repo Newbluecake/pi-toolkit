@@ -10,6 +10,7 @@ import {
 } from "@protocol/worktree-diff.ts";
 import {
   parseWtGraphPayload,
+  parseWtGraphCommitFiles,
   WTGRAPH_BODY_MAX_BYTES,
   WTGRAPH_CLIENT_TIMEOUT_MS,
   WTGRAPH_MERGED_CLIENT_TIMEOUT_MS,
@@ -194,6 +195,37 @@ describe.each([
     expect(typeof h.transport.unsubscribe).toBe("function");
     expect(typeof h.transport.page).toBe("function");
   });
+
+  it.each(["activate", "query"] as const)(
+    "xsActivate(%s) reuses POST /api/cmd, same id/expect and X-PWH, no new HTTP surface",
+    async (action) => {
+      const h = make();
+      const out = await h.transport.xsActivate!({
+        agentKey: "agent-A",
+        id: "stable-command-id",
+        action,
+        messageId: "original-message",
+        activationKey: "original-key",
+        expect: { sessionId: "current-session" },
+      });
+      expect(out.ok).toBe(true);
+      const calls = h.fetchCalls.filter((c) => c.url === "/api/cmd");
+      expect(calls).toHaveLength(1);
+      expect(calls[0]!.init.method).toBe("POST");
+      expect(calls[0]!.init.headers?.["X-PWH"]).toBe("1");
+      const body = JSON.parse(calls[0]!.init.body as string);
+      expect(body).toEqual({
+        agentKey: "agent-A",
+        id: "stable-command-id",
+        op: "command",
+        name: "fabric",
+        args: `__xs ${JSON.stringify({ action, messageId: "original-message", activationKey: "original-key" })}`,
+        expect: { sessionId: "current-session" },
+      });
+      expect(body.text).toBeUndefined();
+      expect(h.fetchCalls.every((c) => c.url !== "/api/xs/activate")).toBe(true);
+    },
+  );
 
   it('subscribe(): POST /api/subscribe with X-PWH:"1" and a JSON {clientId, agentKey} body', async () => {
     const h = make();
@@ -3036,5 +3068,46 @@ describe.each([
     const h = make(async () => resp(200, { nope: 1 }));
     const out = await h.transport.privacy!.verify("pw");
     expect(out).toMatchObject({ ok: false, error: "E_BAD_RESPONSE" });
+  });
+});
+
+// wtgraph.files.v1: `commitFiles` — same capped-JSON GET flow on both adapters, `h` in the query,
+// strict parser gate, error bodies verbatim.
+const WTGF_BODY = {
+  v: 1,
+  h: G_OID,
+  entries: [{ path: "src/a.ts", status: "M", add: 3, del: 1 }],
+  total: 1,
+  truncated: false,
+  limits: { files: false, bytes: false, output: false },
+};
+describe.each([
+  ["token", (fetchImpl: FetchImpl) => makeToken(fetchImpl)] as const,
+  ["password", (fetchImpl: FetchImpl) => makePassword(fetchImpl)] as const,
+])("%s transport: worktreeGraph.commitFiles (wtgraph.files.v1)", (_mode, make) => {
+  it("GET /api/worktree-graph/files?agentKey&sessionId&wt&h with X-PWH; 200 ⇒ parser value", async () => {
+    const h = make(async () => respStream(200, [wtgBytes(WTGF_BODY)], GRAPH_HEADERS));
+    const out = await h.transport.worktreeGraph!.commitFiles!({ ...GRAPH_REQ, h: G_OID });
+    expect(out).toEqual({ ok: true, value: parseWtGraphCommitFiles(WTGF_BODY, wtgBytes(WTGF_BODY).byteLength) });
+    const url = `/api/worktree-graph/files?agentKey=A&sessionId=s1&wt=${encodeURIComponent("/home/u/wt main")}&h=${G_OID}`;
+    const call = h.fetchCalls.find((c) => c.url === url);
+    expect(call).toBeDefined();
+    expect(call!.init.headers?.["X-PWH"]).toBe("1");
+  });
+
+  it("off-contract body ⇒ E_BAD_RESPONSE; 409 stale rides verbatim", async () => {
+    const bad = make(async () => respStream(200, [wtgBytes({ ...WTGF_BODY, x: 1 })], GRAPH_HEADERS));
+    expect(await bad.transport.worktreeGraph!.commitFiles!({ ...GRAPH_REQ, h: G_OID })).toEqual({
+      ok: false,
+      status: 0,
+      error: "E_BAD_RESPONSE",
+    });
+    const stale = make(async () => resp(409, { error: "E_STALE_CTX", reason: "commit" }));
+    expect(await stale.transport.worktreeGraph!.commitFiles!({ ...GRAPH_REQ, h: G_OID })).toMatchObject({
+      ok: false,
+      status: 409,
+      error: "E_STALE_CTX",
+      reason: "commit",
+    });
   });
 });

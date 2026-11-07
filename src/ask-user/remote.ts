@@ -1,7 +1,12 @@
 import type { AskUserAnswers, AskUserQuestion } from "./channel-handler.js";
 
-export type RemoteOutcome =
-  { kind: "answer"; answers: AskUserAnswers; origin: string } | { kind: "cancel"; origin: string };
+/** Agent-local trusted CmdOrigin projection. Missing or source text alone is NOT authorization.
+ * Producer belongs to the Web dialog bridge (#39 P3); no protocol/wire field is added here.
+ */
+export type RemoteOriginKind = "loopback" | "lan" | "feishu";
+export type RemoteOutcome = (
+  { kind: "answer"; answers: AskUserAnswers; origin: string } | { kind: "cancel"; origin: string }
+) & { originKind?: RemoteOriginKind };
 
 export interface DialogRace {
   claim(by: "tui" | "web" | "abort" | "error" | "background"): boolean;

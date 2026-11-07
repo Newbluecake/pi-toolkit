@@ -24,12 +24,33 @@ export interface XsWakeRecord {
   readonly levelCommitted: boolean;
   readonly boundAt?: number;
   readonly abortIssuedAt?: number;
+  /** wake-unknown-optimistic: dispatched while capability was `unknown` (first run is verified/aborted). */
+  readonly optimistic?: true;
+  /** Set when the BAS guard AUTHORIZED this token (before its run's first LLM call). */
+  readonly authorizedAt?: number;
+  /** #21 ask-redirect D3: host-tap captured origin of a trusted delegated wake — written ONCE by
+   *  the stack's `host.sendMessage` observation tap at Controller dispatch time (never from a
+   *  branch scan; pi custom messages carry no writer authentication). Absent ⇒ the run is the
+   *  O class (ordinary wake / reply-revival / activation control marker). Pure data — survives
+   *  `/reload` with the process ledger; dies with the record on `release`. */
+  readonly askOrigin?: { requesterSessionId: string; requestId: string; dueAt: number };
+  /** #21 ask-redirect D4: billed + in-flight redirected ask_user calls under this token
+   *  ("already billed" + "in flight" — the reservation is synchronous, before any await).
+   *  Effective cap is always min(settings, 2); only a provably-unsent result refunds. */
+  readonly askUsed?: number;
+  /** Write-once: the first guard (BAS or context) that actually saw this trigger. Linearization (§1.3). */
+  readonly gateSightAt?: number;
+  /** fabric-xs-activation P3: a host CONTROL marker's record — the original delivered messageId
+   *  it activates (`xid` is the control action's own id). Absent on every body wake. */
+  readonly activateFor?: string;
 }
 
 export type XsWakeReleaseProof = "host_rejected" | "settled" | "idle_observed" | "aborted" | "teardown";
 export type NewXsWakeRecord = Pick<XsWakeRecord, "token" | "sessionId" | "xid" | "dispatchedAt" | "deadlineAt"> & {
   level?: number;
   levelMode?: "hop" | "return";
+  optimistic?: true;
+  activateFor?: string;
 };
 type MutableFields = Partial<Omit<XsWakeRecord, "token" | "sessionId" | "xid" | "dispatchedAt" | "deadlineAt">>;
 

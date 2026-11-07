@@ -62,7 +62,6 @@ const agents = {
   // schedules 槽位；缺失 ⇒ 徽标整体不出现）。仅数量，不含任务内容，隐私锁定的卡片照常显示
   // （与 needsAnswer 徽标同一先例）。
   schedBadge: "{n} 个定时任务",
-  schedBadgePending: "{n} 个定时任务——有待确认",
 } satisfies Messages<typeof en>;
 
 export default agents;

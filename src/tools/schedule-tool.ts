@@ -11,12 +11,11 @@ import {
   type OpsPorts,
   type RawFields,
 } from "../schedule/agent/ops.js";
-import { runLine, taskDetail, taskLine } from "../schedule/agent/view.js";
+import { localTime, runLine, taskDetail, taskLine } from "../schedule/agent/view.js";
 import type { ScheduleAgent } from "../schedule/agent/wire.js";
 import { compileTask } from "../schedule/core/occurrence.js";
 import { nextOccurrence } from "../schedule/core/cron.js";
 import {
-  isApproved,
   isExecutable,
   SCHED_UPDATE_FORBIDDEN_FIELDS,
   type ScheduleErrorCode,
@@ -27,10 +26,9 @@ import { SCHED_TASK_ID_RE } from "../web-hub/protocol/schedule.js";
 
 /**
  * `schedule` — the AI's handle on the session's scheduled tasks (scheduled-reports plan r3 §5.1).
- * Tasks are owned by THIS session and only run while it is open. Approval semantics (§4.3):
- * everything the AI creates or changes waits for the USER's approval (`/schedule approve` in the
- * terminal, or the web panel) — there is deliberately no approve action here, and `resume` does not
- * approve. Registered once per activate with a frozen description (prompt-cache prefix stays byte-
+ * Tasks are owned by THIS session and only run while it is open. There is no approval (schedule-auto-approve
+ * r2): everything the AI creates or changes takes effect immediately and keeps running until paused or
+ * deleted. Registered once per activate with a frozen description (prompt-cache prefix stays byte-
  * stable); main session only (child sessions never reach this registration).
  */
 
@@ -41,10 +39,9 @@ export const SCHEDULE_TOOL_DESCRIPTION =
   "background subagent (form=background: runs in a clean context; its final reply is the report) or as a " +
   "message into this session (form=message). Tasks only run while this session is open; a run that is " +
   "missed because the session was closed is skipped, never replayed. Run results appear as messages in this " +
-  "session. IMPORTANT: every task you create, and every change you make to a task's schedule/prompt/form/" +
-  "feishu/background options, must be approved by the USER before it can run (in the terminal with " +
-  "/schedule approve <id>, or in the web schedule panel). You cannot approve; resume only un-pauses. " +
-  "Actions: list, get, create, update, pause, resume, delete, run_now (immediate run; only an approved task), " +
+  "session. IMPORTANT: tasks you create or change take effect immediately and keep running on schedule until paused or deleted. " +
+  "Only create or change a scheduled task when the user asked for it, and tell the user the task id and its next run. " +
+  "Actions: list, get, create, update, pause, resume, delete, run_now (immediate run), " +
   "history (recent runs).";
 
 export const ScheduleToolParams = Type.Object(
@@ -121,9 +118,8 @@ export interface ScheduleToolDeps {
 }
 
 const HISTORY_LIMIT = 20;
-const PENDING_NOTE =
-  "PENDING USER APPROVAL: it will not run until the user approves it (terminal: /schedule approve <id>; or the web schedule panel). " +
-  "It only runs while this session is open, and each run's result appears as a message in this session.";
+const ACTIVE_NOTE =
+  "active immediately. It only runs while this session is open, and each run's result appears as a message in this session.";
 
 function out(text: string, extra: Record<string, unknown> = {}) {
   return { content: [{ type: "text" as const, text }], details: { ok: true as const, ...extra } };
@@ -178,9 +174,9 @@ export function createScheduleTool(deps: ScheduleToolDeps): ToolDefinition<typeo
     label: "Schedule",
     description: SCHEDULE_TOOL_DESCRIPTION,
     promptSnippet:
-      "schedule(action, …) - create/list/update scheduled tasks for this session (user must approve what you create)",
+      "schedule(action, …) - create/list/update scheduled tasks for this session (takes effect immediately; create only what the user asked for)",
     promptGuidelines: [
-      "Tasks you create or modify are pending until the user approves them; tell the user to run /schedule approve <id> (or use the web schedule panel). Never claim a pending task will run.",
+      "Tasks you create or modify take effect immediately and keep running until paused or deleted. Only create or change one when the user asked for it, and tell the user the task id and its next run.",
       "A background task's prompt must be self-contained (clean context); a message task is sent into this session when it is idle.",
     ],
     parameters: ScheduleToolParams,
@@ -255,10 +251,11 @@ export function createScheduleTool(deps: ScheduleToolDeps): ToolDefinition<typeo
           if ("ok" in raw) return failOp(raw);
           const res = await createTask(ports(), raw, { by: "agent", via: "tool" });
           if (!res.ok) return failOp(res);
-          return out(`Created task ${res.value.id} "${res.value.name}". It is ${PENDING_NOTE}`, {
-            id: res.value.id,
-            pending: true,
-          });
+          notifyActive(ctx, "created", res.value, now());
+          return out(
+            `Created task ${res.value.id} "${res.value.name}". It is ${ACTIVE_NOTE}${nextText(res.value, now())}`,
+            { id: res.value.id },
+          );
         }
         case "update": {
           const bad = needId();
@@ -266,11 +263,11 @@ export function createScheduleTool(deps: ScheduleToolDeps): ToolDefinition<typeo
           const raw = flatToRaw(params);
           if ("ok" in raw) return failOp(raw);
           if (Object.keys(raw).length === 0) return failure("E_INVALID", "nothing to update");
-          const res = await updateTask(ports(), taskId!, raw, { by: "agent", via: "tool" });
+          const res = await updateTask(ports(), taskId!, raw);
           if (!res.ok) return failOp(res);
-          return out(`Updated task ${res.value.id}. ${statusNote(res.value)}`, {
+          notifyActive(ctx, "updated", res.value, now());
+          return out(`Updated task ${res.value.id}. Task is ${ACTIVE_NOTE}${nextText(res.value, now())}`, {
             id: res.value.id,
-            pending: !isApproved(res.value),
           });
         }
         case "pause":
@@ -305,12 +302,7 @@ export function createScheduleTool(deps: ScheduleToolDeps): ToolDefinition<typeo
           if (bad) return bad;
           const res = await agent.runNow({ taskId: taskId!, reqId: randomBytes(12).toString("base64url") });
           if (res.kind === "refused") {
-            const hint =
-              res.code === "E_UNAPPROVED"
-                ? " The task is pending the user's approval (/schedule approve <id>)."
-                : res.code === "E_OVERLAP"
-                  ? " A run of this task is already in progress."
-                  : "";
+            const hint = res.code === "E_OVERLAP" ? " A run of this task is already in progress." : "";
             return failure(res.code as ScheduleErrorCode, `${res.detail ?? "refused"}${hint}`);
           }
           return out(
@@ -329,9 +321,26 @@ function nextOf(task: ScheduleTask, at: number): number | undefined {
   return c === undefined ? undefined : nextOccurrence(c, at);
 }
 
+/** TUI-only courtesy line after an AI create/update; silent without a UI or on any error. */
+function notifyActive(ctx: ExtensionContext, verb: string, task: ScheduleTask, at: number): void {
+  try {
+    const n = nextOf(task, at);
+    const next = n === undefined ? "no upcoming run" : `next run ${new Date(n).toLocaleString()}`;
+    ctx.ui?.notify(
+      `定时任务 ${task.id}「${task.name}」已${verb === "created" ? "创建" : "更新"}并启用，${next}`,
+      "info",
+    );
+  } catch {
+    /* no UI (print/rpc) or notify failed — never affects the tool result */
+  }
+}
+
 function statusNote(task: ScheduleTask): string {
-  const pending = !isApproved(task);
-  const paused = !task.enabled;
-  if (pending) return `Task is ${PENDING_NOTE}`;
-  return paused ? "Task is paused." : "Task is approved and scheduled.";
+  return task.enabled ? "Task is scheduled." : "Task is paused.";
+}
+
+/** ` Next run: …` for the tool result (empty when the task has no upcoming occurrence). */
+function nextText(task: ScheduleTask, at: number): string {
+  const n = nextOf(task, at);
+  return n === undefined ? "" : ` Next run: ${localTime(task.when, n)}.`;
 }

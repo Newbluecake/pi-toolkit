@@ -48,7 +48,7 @@ function conditionLines(record: GoalRecord): string[] {
 export function buildContinuationText(record: GoalRecord, gap: string | undefined): string {
   const conditions = conditionLines(record);
   return [
-    `[pi-subagent /goal 续跑 · 第 ${record.iteration} 轮] 目标尚未达成，继续推进，不要停下来等确认。`,
+    `[/goal 续跑 · 第 ${record.iteration} 轮] 目标尚未达成，继续推进，不要停下来等确认。`,
     "",
     `目标：${record.objective}`,
     ...(conditions.length > 0 ? ["完成条件：", ...conditions] : []),
@@ -64,7 +64,7 @@ export function buildContinuationText(record: GoalRecord, gap: string | undefine
 /** 达成后的收尾总结指令（注入主 agent，让它面向用户总结）。 */
 export function buildAchievedText(record: GoalRecord): string {
   return [
-    `[pi-subagent /goal 达成] 完成条件已满足（共 ${record.iteration} 轮迭代 / ${record.evalCount} 次评估）。`,
+    `[/goal 达成] 完成条件已满足（共 ${record.iteration} 轮迭代 / ${record.evalCount} 次评估）。`,
     "",
     `目标：${record.objective}`,
     "",
@@ -75,7 +75,7 @@ export function buildAchievedText(record: GoalRecord): string {
 /** 撞线终止报告指令（v1 §4：不静默消失，让主 agent 总结进展与卡点）。 */
 export function buildBrakeReportText(record: GoalRecord, reason: Exclude<GoalStopReason, "achieved">): string {
   return [
-    `[pi-subagent /goal 终止] goal 因「${stopReasonLabel(reason)}」已停止（${record.iteration} 轮迭代 / ${record.evalCount} 次评估）。`,
+    `[/goal 终止] goal 因「${stopReasonLabel(reason)}」已停止（${record.iteration} 轮迭代 / ${record.evalCount} 次评估）。`,
     "",
     `目标：${record.objective}`,
     ...(record.lastEvalNote !== undefined && record.lastEvalNote.length > 0

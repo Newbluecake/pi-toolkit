@@ -128,4 +128,42 @@ describe("coalescer", () => {
     expect(isCoalescible(makePayload("round", { reconcileRound: 1 }))).toBe(false);
     expect(isCoalescible(makePayload("retry", { attempts: 1 }))).toBe(false);
   });
+
+  it("G2/G3 discard(): drops the buffer and the window timer without sending or settling; dispose() afterwards is a no-op", () => {
+    const clock = new FakeClock();
+    const sent: DeliveryPayload[][] = [];
+    const settled: unknown[] = [];
+    const c = createCoalescer({
+      clock,
+      windowMs: 100,
+      maxBatch: 8,
+      send: (items) => sent.push([...items]),
+      onSettled: (keys, ok) => settled.push([keys, ok]),
+    });
+    c.submit(makePayload("a"));
+    c.submit(makePayload("b"));
+    expect(clock.pendingTimers).toBe(1);
+    c.discard();
+    expect(clock.pendingTimers).toBe(0);
+    clock.advance(1_000);
+    c.dispose(); // would have flushed a and b if discard had not emptied the buffer
+    c.discard(); // idempotent
+    expect(sent).toEqual([]);
+    expect(settled).toEqual([]);
+  });
+
+  it("G2/G3 discard() is a terminal state: a later submit sends straight through, like after dispose()", () => {
+    const clock = new FakeClock();
+    const sent: DeliveryPayload[][] = [];
+    const c = createCoalescer({
+      clock,
+      windowMs: 100,
+      maxBatch: 8,
+      send: (items) => sent.push([...items]),
+      onSettled: () => undefined,
+    });
+    c.discard();
+    expect(c.submit(makePayload("late"))).toBe("sent");
+    expect(sent).toEqual([[expect.objectContaining({ key: "late" })]]);
+  });
 });

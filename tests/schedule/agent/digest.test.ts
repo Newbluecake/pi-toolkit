@@ -6,7 +6,7 @@ import { computeDigest, createScheduleDigest, deriveCoversAt } from "../../../sr
 import { createTask } from "../../../src/schedule/agent/ops.js";
 import { isEpochDisposed } from "../../../src/schedule/agent/wire.js";
 import { sweep } from "../../../src/schedule/core/claim.js";
-import { emptyStateFile, type ScheduleStateFile } from "../../../src/schedule/core/spec.js";
+import { defHash, emptyStateFile, type ScheduleStateFile } from "../../../src/schedule/core/spec.js";
 import { a3Env, type A3Env } from "./a3-helpers.js";
 import { makeTask, readOk, self, SID } from "../core/fixtures.js";
 
@@ -130,7 +130,7 @@ describe("computeDigest (pure)", () => {
           scheduledAt: ctx.now,
           startedAt: ctx.now,
           endedAt: ctx.now,
-          defHash: d.tasks[0]!.approval!.hash,
+          defHash: defHash(d.tasks[0]!),
           state: "unknown",
           reason: "owner-closed",
           holder: env.agent.holder!,

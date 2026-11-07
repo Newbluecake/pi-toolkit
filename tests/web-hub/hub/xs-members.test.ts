@@ -187,3 +187,87 @@ describe("xs members: limits clamping (§4.6)", () => {
     expect(clampMemberLimits({ ...LIMITS })).toEqual(LIMITS);
   });
 });
+
+describe("xs members: succession edge (AF7, I10)", () => {
+  const detach = (r: ReturnType<typeof rig>, key: string, reason = "new"): void =>
+    r.registry.onFrame(key, { t: "session_detached", reason } as never);
+
+  it("/new on one socket: detach → session(new) → xs_member(new) ⇒ predecessorOf = the old sid; nothing before the new member exists", () => {
+    const r = rig();
+    const a = r.agent({ pid: 1, sessionId: "sess-A" });
+    expect(r.relay.members.predecessorOf(a.key)).toBeUndefined();
+    detach(r, a.key);
+    expect(r.relay.members.predecessorOf(a.key)).toBeUndefined(); // no successor yet
+    r.registry.onFrame(a.key, session({ sessionId: "sess-B" }));
+    expect(r.relay.members.predecessorOf(a.key)).toBeUndefined(); // still no xs_member for B
+    r.registry.onFrame(a.key, memberFrame({ sessionId: "sess-B", epoch: 2 }));
+    expect(r.relay.members.predecessorOf(a.key)).toEqual({ from: "sess-A", at: expect.any(Number) });
+  });
+
+  it("a bare session switch (no detach) and a bare xs_member with another sid both record the edge", () => {
+    const r = rig();
+    const a = r.agent({ pid: 1, sessionId: "sess-A" });
+    r.registry.onFrame(a.key, session({ sessionId: "sess-B" }));
+    r.registry.onFrame(a.key, memberFrame({ sessionId: "sess-B", epoch: 2 }));
+    expect(r.relay.members.predecessorOf(a.key)?.from).toBe("sess-A");
+    const b = r.agent({ pid: 2, sessionId: "sess-X", skipMember: false });
+    r.registry.onFrame(b.key, memberFrame({ sessionId: "sess-Y", epoch: 2 }));
+    r.registry.onFrame(b.key, session({ sessionId: "sess-Y" }));
+    expect(r.relay.members.predecessorOf(b.key)?.from).toBe("sess-X");
+  });
+
+  it("edges are per socket: another agentKey never sees them", () => {
+    const r = rig();
+    const a = r.agent({ pid: 1, sessionId: "sess-A" });
+    const b = r.agent({ pid: 2, sessionId: "sess-C" });
+    detach(r, a.key);
+    r.registry.onFrame(a.key, session({ sessionId: "sess-B" }));
+    r.registry.onFrame(a.key, memberFrame({ sessionId: "sess-B", epoch: 2 }));
+    expect(r.relay.members.predecessorOf(a.key)?.from).toBe("sess-A");
+    expect(r.relay.members.predecessorOf(b.key)).toBeUndefined();
+  });
+
+  it("the same sid coming back (reload / resume) is not a succession", () => {
+    const r = rig();
+    const a = r.agent({ pid: 1, sessionId: "sess-A" });
+    detach(r, a.key, "reload");
+    r.registry.onFrame(a.key, session({ sessionId: "sess-A" }));
+    r.registry.onFrame(a.key, memberFrame({ sessionId: "sess-A", epoch: 2 }));
+    expect(r.relay.members.predecessorOf(a.key)).toBeUndefined();
+  });
+
+  it("TTL 120 s from the moment the successor appeared; clearPredecessor consumes it; a newer switch replaces it", () => {
+    const r = rig();
+    const a = r.agent({ pid: 1, sessionId: "sess-A" });
+    detach(r, a.key);
+    r.clock.t += 100_000; // a slow attach: the clock starts when the successor shows up
+    r.registry.onFrame(a.key, session({ sessionId: "sess-B" }));
+    r.registry.onFrame(a.key, memberFrame({ sessionId: "sess-B", epoch: 2 }));
+    r.clock.t += 119_000;
+    expect(r.relay.members.predecessorOf(a.key)?.from).toBe("sess-A");
+    r.clock.t += 2_000;
+    expect(r.relay.members.predecessorOf(a.key)).toBeUndefined();
+    // replaced by the next switch
+    r.registry.onFrame(a.key, session({ sessionId: "sess-C" }));
+    r.registry.onFrame(a.key, memberFrame({ sessionId: "sess-C", epoch: 3 }));
+    expect(r.relay.members.predecessorOf(a.key)?.from).toBe("sess-B");
+    r.relay.members.clearPredecessor(a.key);
+    expect(r.relay.members.predecessorOf(a.key)).toBeUndefined();
+  });
+
+  it("socket close / unrelated invalidation forgets a pending edge; the edge never survives a record that no longer matches", () => {
+    const r = rig();
+    const a = r.agent({ pid: 1, sessionId: "sess-A" });
+    detach(r, a.key);
+    r.registry.onClose(a.key, false);
+    r.registry.onFrame(a.key, session({ sessionId: "sess-B" }));
+    r.registry.onFrame(a.key, memberFrame({ sessionId: "sess-B", epoch: 2 }));
+    expect(r.relay.members.predecessorOf(a.key)).toBeUndefined();
+    // an edge whose `to` is no longer the current member sid does not answer
+    const b = r.agent({ pid: 2, sessionId: "sess-P" });
+    r.registry.onFrame(b.key, session({ sessionId: "sess-Q" }));
+    r.registry.onFrame(b.key, memberFrame({ sessionId: "sess-Q", epoch: 2 }));
+    r.registry.onFrame(b.key, session({ sessionId: "sess-R" })); // table voided, no member for R yet
+    expect(r.relay.members.predecessorOf(b.key)).toBeUndefined();
+  });
+});

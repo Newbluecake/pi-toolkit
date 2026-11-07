@@ -1,3 +1,4 @@
+import { isFeishuCmdOrigin } from "../protocol/messages.js";
 import type {
   CmdFrame,
   CmdOrigin,
@@ -13,6 +14,13 @@ import { ASK_USER_MARKER } from "../../ask-user/channel-handler.js";
 import { encodeAnswer } from "../../ask-user/answer-codec.js";
 import type { AskUserAnswers, AskUserQuestion } from "../../ask-user/channel-handler.js";
 import type { AskUserRemotePort, AskUserRemoteSession, RemoteOutcome } from "../../ask-user/remote.js";
+
+/** Agent-local projection only: legacy display strings are NOT source authority. */
+function remoteOrigin(origin: string | CmdOrigin): Pick<RemoteOutcome, "originKind"> {
+  if (typeof origin === "string") return {};
+  if (isFeishuCmdOrigin(origin)) return { originKind: "feishu" };
+  return origin.listener === "loopback" || origin.listener === "lan" ? { originKind: origin.listener } : {};
+}
 
 const CLOSED_LIMIT = 8;
 const CLOSED_TTL_MS = 120_000;
@@ -252,6 +260,7 @@ export function createDialogBridge(options?: DialogBridgeOptions): DialogBridge 
         kind: "answer",
         answers: encodeAnswers(record.request.questions, answers),
         origin: originText(origin),
+        ...remoteOrigin(origin),
       });
     } catch {
       claimed = false;
@@ -276,7 +285,7 @@ export function createDialogBridge(options?: DialogBridgeOptions): DialogBridge 
     if (callback === undefined) return failure("E_DIALOG_CLOSED", "closed", false);
     let claimed = false;
     try {
-      claimed = callback({ kind: "cancel", origin: originText(origin) });
+      claimed = callback({ kind: "cancel", origin: originText(origin), ...remoteOrigin(origin) });
     } catch {
       claimed = false;
     }

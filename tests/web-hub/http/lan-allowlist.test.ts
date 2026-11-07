@@ -1,7 +1,7 @@
 import { Agent, request } from "node:http";
 import { connect } from "node:net";
 import { describe, expect, it, vi } from "vitest";
-import { createLanTransport } from "../../../src/web-hub/hub/http.js";
+import { createLanTransport } from "../../../src/web-hub/hub/http-lan.js";
 import { createConnGuard } from "../../../src/web-hub/hub/conn-guard.js";
 import { createClientAllowGuard } from "../../../src/web-hub/hub/client-allow.js";
 import type { HostSnapshot } from "../../../src/web-hub/hub/ports.js";

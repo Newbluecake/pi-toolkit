@@ -25,11 +25,14 @@ import { computed, onUnmounted, ref, watch } from "vue";
 import { buildEditDiff, foldRows } from "@logic/diff.js";
 import { formatDuration } from "@logic/duration.js";
 import { runRefHeader, safeJson, summarizeArgs } from "@logic/tools.js";
+import { buildWriteView, isStandardWriteSuccess } from "@logic/writeView.js";
 import type { ToolCardProps } from "../../contracts.js";
 import { useCoarseClamp } from "../../composables/useCoarseClamp.js";
 import { useI18n } from "../../composables/useI18n.js";
 import { useTicker, type TickerHandle } from "../../composables/useTicker.js";
 import AppIcon from "../../icons/AppIcon.vue";
+import CopyButton from "../detail/CopyButton.vue";
+import NumberedCode from "../shared/NumberedCode.vue";
 import PathText from "../preview/PathText.vue";
 import ClampToggle from "./ClampToggle.vue";
 import MarkdownView from "./MarkdownView.vue";
@@ -69,8 +72,31 @@ const argsText = computed(() => {
   if (args === undefined) return undefined;
   return typeof args === "string" ? args : safeJson(args, true);
 });
+/* --- write tool (#37): content-as-code view, see `@logic/writeView.ts` ---------------------------
+ * `writeView` non-null ⇒ the Input section shows the received `content` as numbered, highlighted
+ * code (default) or the raw JSON (toggle); `null` keeps the legacy `argsText` `<pre>`. */
+const WRITE_FOLD_LINES = 18;
+const writeView = computed(() => buildWriteView(props.view.toolName, props.view.args));
+const writeRaw = ref(false);
+const writeExpanded = ref(false);
+const writeFoldable = computed(() => writeView.value !== null && writeView.value.lines > WRITE_FOLD_LINES);
+const writeStdSuccess = computed(
+  () =>
+    writeView.value !== null &&
+    props.view.state === "done" &&
+    props.view.result !== undefined &&
+    isStandardWriteSuccess(writeView.value, props.view.result),
+);
+const writeShowStdResult = ref(false);
+const resultHidden = computed(() => writeStdSuccess.value && !writeShowStdResult.value);
+
 const endLabel = computed(() => {
   const v = props.view;
+  const wv = writeView.value;
+  if (wv !== null) {
+    // the result's line count ("Successfully wrote…" ⇒ "1 lines") would mislead: show the content's own
+    return v.state === "error" ? `${t("transcript.tool.error")} · ${wv.summary}` : wv.summary;
+  }
   if (v.state === "error") return t("transcript.tool.error");
   if (v.state === "done" && typeof v.result === "string") {
     const n = v.result === "" ? 0 : v.result.split("\n").length;
@@ -179,7 +205,7 @@ const partialPre = ref<HTMLElement | null>(null);
 const resultPre = ref<HTMLElement | null>(null);
 const resultMd = ref<HTMLElement | null>(null);
 const diffClamp = useCoarseClamp(() => diffBox.value, [() => editDiff.value, () => expandedHunks.value]);
-const inputClamp = useCoarseClamp(() => inputPre.value, [() => argsText.value]);
+const inputClamp = useCoarseClamp(() => inputPre.value, [() => argsText.value, () => writeRaw.value]);
 const partialClamp = useCoarseClamp(() => partialPre.value, [() => displayedPartial.value]);
 /* The result region's target follows the rendered/source flip: exactly one of the two nodes
  * exists at a time (v-if/v-else), and the mode flip is a reactive source so the clamp
@@ -247,6 +273,58 @@ const resultClamp = useCoarseClamp(
         </div>
         <ClampToggle :clamp="diffClamp" />
       </div>
+      <div v-else-if="writeView !== null" class="tool-section tool-write">
+        <div class="tool-label tool-write-label">
+          <span class="tool-write-title"
+            >{{ t("transcript.tool.input") }} ·
+            <span class="tool-write-meta">{{ t("transcript.tool.write.received") }}</span></span
+          >
+          <span class="tool-write-actions">
+            <span class="tool-md-toggle" role="group" :aria-label="t('transcript.tool.write.viewLabel')">
+              <button type="button" class="tool-md-btn" :aria-pressed="!writeRaw" @click="writeRaw = false">
+                {{ t("transcript.tool.write.code") }}
+              </button>
+              <button type="button" class="tool-md-btn" :aria-pressed="writeRaw" @click="writeRaw = true">
+                {{ t("transcript.tool.write.raw") }}
+              </button>
+            </span>
+            <CopyButton :value="writeView.content" :label="t('transcript.tool.write.copy')" />
+          </span>
+        </div>
+        <div v-if="writeView.path !== null && !writeRaw" class="tool-write-path" translate="no">
+          <PathText :text="writeView.path" />
+        </div>
+        <pre
+          v-if="writeRaw"
+          ref="inputPre"
+          class="pre"
+          :data-cc="inputClamp.dataCc"
+          translate="no"
+          tabindex="0"
+        ><PathText v-if="argsText !== undefined" :text="argsText"
+        /></pre>
+        <div
+          v-else
+          class="write-code-wrap"
+          :data-fold="writeFoldable ? (writeExpanded ? 'expanded' : 'folded') : undefined"
+        >
+          <pre
+            class="pre write-code"
+            translate="no"
+            tabindex="0"
+          ><NumberedCode :text="writeView.content" :lang="writeView.lang" /></pre>
+        </div>
+        <ClampToggle v-if="writeRaw" :clamp="inputClamp" />
+        <button
+          v-else-if="writeFoldable"
+          class="btn btn-ghost btn-xs write-fold-toggle"
+          type="button"
+          :aria-expanded="writeExpanded ? 'true' : 'false'"
+          @click="writeExpanded = !writeExpanded"
+        >
+          {{ writeExpanded ? t("transcript.collapse") : t("transcript.tool.write.expand", { n: writeView.lines }) }}
+        </button>
+      </div>
       <div v-else-if="argsText !== undefined" class="tool-section">
         <div class="tool-label">{{ t("transcript.tool.input") }}</div>
         <pre
@@ -271,7 +349,22 @@ const resultClamp = useCoarseClamp(
         }}</pre>
         <ClampToggle :clamp="partialClamp" />
       </div>
-      <div v-if="view.result !== undefined" class="tool-section" :class="{ 'is-error': view.state === 'error' }">
+      <div v-if="writeStdSuccess" class="tool-section tool-write-ok">
+        <span class="tool-write-ok-text">{{ t("transcript.tool.write.ok") }}</span>
+        <button
+          class="btn btn-ghost btn-xs"
+          type="button"
+          :aria-expanded="writeShowStdResult ? 'true' : 'false'"
+          @click="writeShowStdResult = !writeShowStdResult"
+        >
+          {{ writeShowStdResult ? t("transcript.tool.write.resultHide") : t("transcript.tool.write.resultShow") }}
+        </button>
+      </div>
+      <div
+        v-if="view.result !== undefined && !resultHidden"
+        class="tool-section"
+        :class="{ 'is-error': view.state === 'error' }"
+      >
         <div class="tool-label">
           {{ view.state === "error" ? t("transcript.tool.result") : t("transcript.tool.output") }}
           <div v-if="resultAsMd" class="tool-md-toggle" role="group" :aria-label="t('transcript.tool.viewToggleLabel')">

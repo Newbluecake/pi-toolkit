@@ -22,7 +22,7 @@
 <script setup lang="ts">
 import { computed, inject, ref, watch } from "vue";
 import type { FleetRowWire } from "@protocol/messages.js";
-import type { FleetTreeProps } from "../../contracts.js";
+import type { FleetTreeEmits, FleetTreeProps } from "../../contracts.js";
 import type { FleetTreeNode } from "../../types.js";
 import "../../styles/fleet.css";
 import { formatDuration, formatUsd, formatKTokens, clip } from "../../format.js";
@@ -35,6 +35,7 @@ import { formatTimeRange, type TimeRangeLabel } from "@logic/timeRange.js";
 import { fleetActivity, isTerminalRow, FLEET_ARCHIVE, FLEET_SELECT } from "./summary.js";
 
 const props = withDefaults(defineProps<FleetTreeProps>(), { depth: 0 });
+const emit = defineEmits<FleetTreeEmits>();
 const { t } = useI18n();
 
 // ---------------------------------------------------------------------------
@@ -45,17 +46,31 @@ const TERMINAL_FOLD_MAX = 3;
  *  many finished siblings shows them all — the fold only kicks in for longer lists. */
 const TERMINAL_FOLD_FEW = 5;
 const expanded = ref(false);
+/** fleet-fill-budget(验收 #3):根层级用户点开「显示已完成的 N 个」⇒ 回传抽屉
+ *  (agents 块全显,剩余空间再给 bash);子层的开合不影响预算。 */
+function onShowAllTerminal(): void {
+  expanded.value = true;
+  if (props.depth === 0) emit("show-all-terminal");
+}
 const terminalCount = computed(() => props.nodes.filter((n) => isTerminalRow(n.row)).length);
-const hiddenCount = computed(() =>
-  expanded.value || terminalCount.value <= TERMINAL_FOLD_FEW ? 0 : terminalCount.value - TERMINAL_FOLD_MAX,
-);
+/** fleet-fill-budget:仅根层级(depth 0)且父级传入配额时用预算替代固定 3/5;子层与
+ *  无配额(happy-dom/旧浏览器回退)保持旧逻辑不变。用户点过「显示已完成的 N 个」后
+ *  expanded=true,配额不再生效(用户操作为准)。 */
+const budgetMax = computed(() => (props.depth === 0 ? props.terminalBudget : undefined));
+const hiddenCount = computed(() => {
+  if (expanded.value) return 0;
+  const budget = budgetMax.value;
+  if (budget !== undefined) return Math.max(0, terminalCount.value - Math.max(0, budget));
+  return terminalCount.value <= TERMINAL_FOLD_FEW ? 0 : terminalCount.value - TERMINAL_FOLD_MAX;
+});
 const visible = computed<readonly FleetTreeNode[]>(() => {
   if (expanded.value || hiddenCount.value === 0) return props.nodes;
+  const maxTerminal = Math.max(0, budgetMax.value ?? TERMINAL_FOLD_MAX);
   let seenTerminal = 0;
   return props.nodes.filter((n) => {
     if (!isTerminalRow(n.row)) return true;
     seenTerminal++;
-    return seenTerminal <= TERMINAL_FOLD_MAX;
+    return seenTerminal <= maxTerminal;
   });
 });
 
@@ -358,7 +373,7 @@ function isOrphan(row: FleetRowWire): boolean {
       </div>
     </li>
   </ul>
-  <button v-if="hiddenCount > 0" class="btn btn-ghost run-more" type="button" @click="expanded = true">
+  <button v-if="hiddenCount > 0" class="btn btn-ghost run-more" type="button" @click="onShowAllTerminal">
     {{ t("fleet.showFinished", { n: hiddenCount }) }}
   </button>
   <template v-if="depth === 0 && omitted">

@@ -1,3 +1,4 @@
+import type { XsProgress, XsWakeView } from "../web-hub/protocol/xs-activation.js";
 import { lstatSync } from "node:fs";
 import { resolve } from "node:path";
 import type { XsDirectoryRow } from "../fabric/xs/directory.js";
@@ -152,6 +153,11 @@ export type MentionSessionSendStatus =
 export interface MentionSessionSendOutcome {
   status: MentionSessionSendStatus;
   effect: XsEffect;
+  wakeDowngraded?: string;
+  woke?: boolean;
+  wake?: XsWakeView;
+  track?: { messageId: string; activationKey?: string };
+  progress?: XsProgress;
   reason?: string;
   /** §4.2: present iff an expectReply request was registered for this send. */
   requestId?: string;
@@ -179,6 +185,11 @@ export interface MentionSessionSendOptions {
  */
 export interface MentionSessionPort {
   parse(text: string): ParsedSessionMention | undefined;
+  enhanced?(): boolean;
+  reportSessionRouted?(text: string, result: Extract<SessionMentionRouteResult, { handled: true }>): void;
+  subscribeSessionRouted?(
+    sink: (text: string, result: Extract<SessionMentionRouteResult, { handled: true }>) => void,
+  ): () => void;
   send(target: string, message: string, options?: MentionSessionSendOptions): Promise<MentionSessionSendOutcome>;
 }
 
@@ -186,13 +197,38 @@ export interface MentionSessionPort {
 export interface MentionSessionPortDeps extends SessionMentionParseDeps {
   /** Live membership/connection view — `false` ⇒ `parse` returns `undefined` (§9.3/§9.7). */
   joined(): boolean;
+  enhanced?(): boolean;
   /** §9.3's send: wake:true + expectReply + origin "human" + levelOverride 0 (RX4/MW own the real one). */
   send(target: string, message: string, options?: MentionSessionSendOptions): Promise<MentionSessionSendOutcome>;
 }
 
 /** Build the port MW injects as `MentionRouteDeps.sessions`. A throwing dep never breaks input. */
 export function createMentionSessionPort(deps: MentionSessionPortDeps): MentionSessionPort {
+  const sinks = new Set<(text: string, result: Extract<SessionMentionRouteResult, { handled: true }>) => void>();
   return {
+    ...(deps.enhanced
+      ? {
+          enhanced: deps.enhanced,
+          subscribeSessionRouted: (
+            sink: (text: string, result: Extract<SessionMentionRouteResult, { handled: true }>) => void,
+          ) => {
+            sinks.add(sink);
+            return () => {
+              sinks.delete(sink);
+            };
+          },
+          reportSessionRouted: (text: string, result: Extract<SessionMentionRouteResult, { handled: true }>) => {
+            if (deps.enhanced?.() !== true) return;
+            for (const sink of sinks) {
+              try {
+                sink(text, result);
+              } catch {
+                /* projection cannot change delivery */
+              }
+            }
+          },
+        }
+      : {}),
     parse(text) {
       try {
         if (!deps.joined()) return undefined;
@@ -241,7 +277,7 @@ export const SESSION_MENTION_SENT_CUSTOM_TYPE = "subagent:mention-session";
  *   none{other} ⇒ 未送达（reason），可稍后重试 · reply_quota ⇒ 已有 N 条回复尚未进入对话 ·
  *   unknown ⇒ 可能已送达，不要重发 · success ⇒ → 已发给 …（q…，等待回复 ≤Nm）
  */
-export function sessionMentionNotice(
+function legacySessionMentionNotice(
   parsed: ParsedSessionMention,
   outcome: MentionSessionSendOutcome,
   opts: { plainFallback: boolean; now: number },
@@ -273,6 +309,25 @@ export function sessionMentionNotice(
     return { kind: "sent", message: `→ 已发给 ${display}（${outcome.requestId}${wait}）` };
   }
   return { kind: "sent", message: `→ 已发给 ${display}` };
+}
+
+/** New metadata augments prose only; no metadata => byte-identical legacy notice. */
+export function sessionMentionNotice(
+  parsed: ParsedSessionMention,
+  outcome: MentionSessionSendOutcome,
+  opts: { plainFallback: boolean; now: number },
+): SessionMentionNotice {
+  const notice = legacySessionMentionNotice(parsed, outcome, opts);
+  const phase = outcome.progress?.phase;
+  const downgrade = outcome.wakeDowngraded
+    ? `；唤醒降级 ${outcome.wakeDowngraded}${outcome.wakeDowngraded === "pair_wake_rate" ? "（hub，每会话对默认 2 次/小时）" : ""}，不要重发正文`
+    : "";
+  const progress = phase
+    ? `；正文 ${phase}${phase === "started" ? "（context 观察点，非业务完成）" : ""}`
+    : outcome.woke
+      ? "；唤醒已受理，尚非 started 证明"
+      : "";
+  return downgrade || progress ? { ...notice, message: notice.message + downgrade + progress } : notice;
 }
 
 // ----------------------------------------------------------------- completion rule (§9.5)
@@ -316,6 +371,11 @@ export type SessionMentionRouteResult =
       target: string;
       requestId?: string;
       effect: XsEffect;
+      wakeDowngraded?: string;
+      woke?: boolean;
+      wake?: XsWakeView;
+      track?: { messageId: string; activationKey?: string };
+      progress?: XsProgress;
     };
 
 export interface SessionMentionRouteDeps {
@@ -350,8 +410,14 @@ export async function routeSessionMention(
     outcome = await deps.sessions.send(parsed.target, parsed.message);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    deps.notifySession?.({ kind: "error", message: `未送达（${message}），可稍后重试` });
-    return { handled: true, action: "session", target: parsed.target, effect: "none" };
+    const effect: XsEffect = deps.sessions.enhanced?.() === true ? "unknown" : "none";
+    deps.notifySession?.({
+      kind: "error",
+      message: effect === "unknown" ? `可能已送达（${message}），不要重发` : `未送达（${message}），可稍后重试`,
+    });
+    const result = { handled: true as const, action: "session" as const, target: parsed.target, effect };
+    deps.sessions.reportSessionRouted?.(text, result);
+    return result;
   }
   let plainFallback = false;
   if (outcome.status === "reply_unsupported" && outcome.effect === "none") {
@@ -360,16 +426,29 @@ export async function routeSessionMention(
       outcome = await deps.sessions.send(parsed.target, parsed.message, { expectReply: false });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      deps.notifySession?.({ kind: "error", message: `未送达（${message}），可稍后重试` });
-      return { handled: true, action: "session", target: parsed.target, effect: "none" };
+      const effect: XsEffect = deps.sessions.enhanced?.() === true ? "unknown" : "none";
+      deps.notifySession?.({
+        kind: "error",
+        message: effect === "unknown" ? `可能已送达（${message}），不要重发` : `未送达（${message}），可稍后重试`,
+      });
+      const result = { handled: true as const, action: "session" as const, target: parsed.target, effect };
+      deps.sessions.reportSessionRouted?.(text, result);
+      return result;
     }
   }
   deps.notifySession?.(sessionMentionNotice(parsed, outcome, { plainFallback, now: now() }));
-  return {
+  const result: Extract<SessionMentionRouteResult, { handled: true }> = {
     handled: true,
     action: "session",
     target: parsed.target,
     ...(outcome.requestId !== undefined ? { requestId: outcome.requestId } : {}),
     effect: outcome.effect,
+    ...(outcome.wakeDowngraded !== undefined ? { wakeDowngraded: outcome.wakeDowngraded } : {}),
+    ...(outcome.woke !== undefined ? { woke: outcome.woke } : {}),
+    ...(outcome.wake ? { wake: outcome.wake } : {}),
+    ...(outcome.track ? { track: outcome.track } : {}),
+    ...(outcome.progress ? { progress: outcome.progress } : {}),
   };
+  deps.sessions.reportSessionRouted?.(text, result);
+  return result;
 }

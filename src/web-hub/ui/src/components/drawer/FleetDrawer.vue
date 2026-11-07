@@ -83,37 +83,9 @@ export function useFleetDrawerOpen(mode: Readonly<Ref<FleetDrawerMode>>): FleetD
 </script>
 
 <script setup lang="ts">
-/**
- * FleetDrawer —— 抽屉本体,§6.4 键盘/指针/焦点契约的唯一 owner:
- *
- * 1. 只有本组件注册文档级监听,且仅在 `mode !== "docked" && open` 时(watch + onCleanup
- *    动态注册/移除,卸载时随之移除 —— 不调 transport,run 订阅只归 useHub 管,§6.4 #7):
- *    `document` 的 **bubble** 阶段 keydown,overlay 模式下再加 pointerdown。
- * 2. 事件顺序:元素级处理器(若有 stopPropagation 的 Esc 处理)先执行,
- *    抽屉收不到是期望行为;抽屉处理后 preventDefault + stopPropagation,window 上
- *    DashboardView 的 defaultPrevented 守卫是双保险。
- * 3. Esc 规则链:非 Escape / isComposing / defaultPrevented / 目标是 input|textarea|select
- *    ⇒ 不处理(与 DashboardView.vue 的判定一致)。
- * 4. pointerdown(仅 overlay):落在抽屉内部或 `[aria-controls="fleet-drawer"]`(悬浮开合
- *    按钮,2026-10 起为右缘竖排 tab —— 虽然打开时被抽屉盖住,防御性保留这条豁免)上 ⇒ 忽略,
- *    避免「先关闭再被重新打开」;否则关闭。fullscreen 占满全屏,没有「外部」。
- * 5. 焦点:非 docked 打开时移到抽屉的关闭按钮;关闭时还给开合按钮(悬浮 tab),不在 DOM
- *    则还给主区
- *    `#transcript`。docked 开合不动焦点。
- *
- * 内容区:选中 run 时是 RunHeader + RunTranscript(各模式都只显示其一,fullscreen 的
- * 「← 子 agent 列表」返回键在 RunHeader 上,所有模式都可用来回到树);未选中时是树
- * (FleetTree + 「另有 N 个」)。选中/退选经 `FLEET_SELECT`(provide 给 FleetTree)和
- * RunHeader 的 back —— 都汇到 `HubHandle.selectRun`,组件从不直连 transport。
- *
- * sysload plan §6.4/§7.4/§10 (package P4): the tree view additionally shows a crit/warn
- * dispatch-paused banner (`bannerView`, `@logic/load.js`) above `FleetTree`, reading the
- * SESSION's own `StatusInfo.loadGate` (mirrored onto `AgentState.loadGate`) — never the hub-
- * global `LoadPill`/`LoadCard` reading. Hidden while a run is selected (mockup fleet-crit shows
- * it only on the tree root). Duration stays on the SAME line as the headline (approved mockup
- * tweak ③); the gate wire carries no per-metric breakdown, so (unlike the agent-side turn_end
- * hint text) the banner cannot name which metric tripped — only the overall level + duration.
- */
+/** #41/#42: production passes an explicit panel and effective mode; undefined panel
+ * preserves legacy combined callers. Keyboard/outside/focus remain owned here, while
+ * transient hover/pinned intent belongs to AgentDetail's useActivityRail. */
 import { inject, nextTick, onBeforeUnmount, onMounted, provide } from "vue";
 import type { FleetRowWire } from "@protocol/messages.js";
 import type { FleetDrawerEmits, FleetDrawerProps } from "../../contracts.js";
@@ -125,16 +97,33 @@ import AppIcon from "../../icons/AppIcon.vue";
 import FleetTree from "../fleet/FleetTree.vue";
 import FleetBashJobs from "../fleet/FleetBashJobs.vue";
 import FleetArchived from "../fleet/FleetArchived.vue";
-import { bashJobsOf } from "../detail/bashJobsView.js";
+import { bashJobsOf, statusToken } from "../detail/bashJobsView.js";
 import { archivedOf, archiveSetOf, partitionArchived } from "../fleet/archiveView.js";
+import {
+  computeFillBudget,
+  fixedAgentRowCount,
+  topTerminalRowCount,
+  type FillBudget,
+  type FillCounts,
+} from "../fleet/fillBudget.js";
+import { observeResize } from "../../composables/useSharedResize.js";
 import { bannerView } from "@logic/load.js";
 import { buildFleetTree, orphanRunIds, runTranscriptAvailable, FLEET_ARCHIVE, FLEET_SELECT } from "../fleet/summary.js";
 import RunHeader from "./RunHeader.vue";
 import RunTranscript from "./RunTranscript.vue";
 
-const props = defineProps<FleetDrawerProps>();
+const props = defineProps<FleetDrawerProps & { readonly floating?: boolean }>();
 const emit = defineEmits<FleetDrawerEmits>();
 const { t } = useI18n();
+
+/** Task60 (compact-panel-plan §2.2): `floating` 是 AgentDetail 派生的 peek/held 真值
+ * （panelFloating = peeking || held，生产必传），驱动 data-floating 几何、bridge 渲染与
+ * fill 预算重测。旧独立调用未传时以 peeking 回退 —— 不能由 mode 猜测：中宽 manual
+ * overlay 与 held overlay 同为 data-mode="overlay"，只有 floating 能区分。
+ * 注：用 `||` 而非方案文案里的 `??`：Vue 运行时把缺席的 Boolean prop 规范化为 false
+ * （不是 undefined），`??` 永远短路到 false、回退不可达；而生产口径下 floating=false
+ * 时 peeking 必为 false（floating = peeking || held），`||` 与 `??` 语义在真实调用上等价。 */
+const resolvedFloating = computed(() => props.floating || (props.peeking ?? false));
 
 const rootEl = ref<HTMLElement | null>(null);
 
@@ -150,14 +139,36 @@ const liveRows = computed(() => partitionArchived(rows.value, runArchive.value).
 const archivedRows = computed(() => partitionArchived(rows.value, runArchive.value).archivedRows);
 
 const hub = inject(HUB_CTX, null);
-const archToast = ref<{ kind: "run" | "bash"; id: string; label: string } | null>(null);
+/** One toast for BOTH archive halves: a single-row archive carries an undo affordance, the bulk
+ *  `archive_omitted` click carries a one-shot outcome note (2026-10-28 rework: previously its
+ *  promise was dropped on the floor, so success / nothing-to-do / failure all looked identical —
+ *  i.e. like a dead button). */
+const archToast = ref<{
+  text: string;
+  kind: "run" | "bash";
+  id: string;
+  undo: boolean;
+  /** Diagnostics only (the error code on a failed bulk archive) — surfaced via `title`. */
+  title?: string;
+} | null>(null);
 let archToastTimer: ReturnType<typeof setTimeout> | undefined;
-function showArchToast(kind: "run" | "bash", id: string, label: string): void {
-  archToast.value = { kind, id, label };
+const TOAST_MS = 4000;
+const TOAST_ERR_MS = 8000;
+function showArchToast(
+  text: string,
+  opts: { kind?: "run" | "bash"; id?: string; undo?: boolean; title?: string; ms?: number } = {},
+): void {
+  archToast.value = {
+    text,
+    kind: opts.kind ?? "run",
+    id: opts.id ?? "",
+    undo: opts.undo === true,
+    ...(opts.title === undefined ? {} : { title: opts.title }),
+  };
   if (archToastTimer !== undefined) clearTimeout(archToastTimer);
   archToastTimer = setTimeout(() => {
     archToast.value = null;
-  }, 4000);
+  }, opts.ms ?? TOAST_MS);
 }
 function sendArchive(kind: "run" | "bash", id: string, set: "archive" | "unarchive"): void {
   const control = hub?.control;
@@ -166,7 +177,7 @@ function sendArchive(kind: "run" | "bash", id: string, set: "archive" | "unarchi
 }
 function undoArchive(): void {
   const t = archToast.value;
-  if (t !== null) sendArchive(t.kind, t.id, "unarchive");
+  if (t !== null && t.undo) sendArchive(t.kind, t.id, "unarchive");
   archToast.value = null;
 }
 onBeforeUnmount(() => {
@@ -176,9 +187,43 @@ provide(FLEET_ARCHIVE, {
   canArchive: computed(() => hub?.control !== undefined),
   archive: (kind, id, label) => {
     sendArchive(kind, id, "archive");
-    showArchToast(kind, id, label);
+    showArchToast(t("fleet.archivedToast", { name: label }), { kind, id, undo: true });
   },
   unarchive: (kind, id) => sendArchive(kind, id, "unarchive"),
+  // 2026-10-28 rework (acceptance blocker: "clicking does nothing"): the op's outcome is now
+  // REPORTED. Three distinct shapes, never the same render:
+  //   changed > 0  →「已归档 N 条更早的任务」(the next `status.archived` frame moves the rows into
+  //                  the fold and the `(+N more)` line disappears);
+  //   changed === 0 →「没有可归档的任务」 (an honest no-op instead of a silent dead button);
+  //   error/timeout →「归档失败」+ the code in `title`, i.e. a failure affordance that lasts
+  //                  longer (8s) and never pretends to have archived anything.
+  // No undo affordance on the bulk path: it has no single id to reverse (un-archive per row from
+  // the fold instead). `n` is only gone: the agent re-derives (and re-counts) the real set, and the toast copy uses its answer.
+  archiveOmitted: async (): Promise<void> => {
+    const control = hub?.control;
+    if (control?.archiveOmitted === undefined) {
+      showArchToast(t("fleet.archiveOmittedFailed"), { title: "E_UNSUPPORTED", ms: TOAST_ERR_MS });
+      return;
+    }
+    let changed: number | undefined;
+    let code = "E_DEADLINE";
+    try {
+      const outcome = await control.archiveOmitted(props.agent.key, "bash");
+      if (outcome.ok) {
+        const data = outcome.data as { changed?: unknown } | undefined;
+        changed = typeof data?.changed === "number" ? data.changed : 0;
+      } else {
+        code = outcome.error ?? "E_UNKNOWN";
+      }
+    } catch {
+      code = "E_NETWORK";
+    }
+    if (changed === undefined) {
+      showArchToast(t("fleet.archiveOmittedFailed"), { title: code, ms: TOAST_ERR_MS });
+      return;
+    }
+    showArchToast(changed > 0 ? t("fleet.archiveOmittedDone", { n: changed }) : t("fleet.archiveOmittedNone"));
+  },
 });
 
 // ---------------------------------------------------------------------------
@@ -194,13 +239,174 @@ const treeEmpty = computed(() => {
   const om = props.agent.fleetOmitted;
   return treeNodes.value.length === 0 && !((om?.active ?? 0) > 0 || (om?.terminal ?? 0) > 0);
 });
-const selectedRunId = computed(() => props.agent.runSel ?? null);
+const showAgent = computed(() => props.panel !== "bash");
+const showBash = computed(() => props.panel !== "agent");
+const selectedRunId = computed(() => (showAgent.value ? (props.agent.runSel ?? null) : null));
 
 // 2026-10-15 bash→fleet 迁移(用户拍板 L1):主会话后台 bash 任务作为树视图末尾的独立
 // 「bash」分组(FleetBashJobs),wire 同原详情头部面板(`StatusInfo.bashJobs`,经
 // bashJobsOf narrowed;缺失/零行 ⇒ 分组不出现,旧 hub/agent 与现状一致)。agent 计数
 // (fleetSummary/徽标)不混入 bash。
 const bashJobs = computed(() => bashJobsOf(props.agent));
+
+// ---------------------------------------------------------------------------
+// fleet-fill-budget(docs/dev/web-hub/fleet-fill-budget.md;2026-10-28 用户需求「调配显示数量
+// 把整个高度填满」):按 `.tree-scroll` 的 clientHeight 实测可用高度,动态分配 agent 树顶层 /
+// bash 分组各显示多少条已结束行。要点:
+// - 行高/附加高度全部实测已渲染行的 offsetHeight(--fs-scale 字号缩放与密度变化自适应),
+//   不写死像素;测不到(happy-dom 返回 0、无 ResizeObserver 的旧浏览器)⇒ computeFillBudget
+//   返回 null ⇒ 子组件收到 undefined ⇒ 旧固定 3/5 行为,字节不变。
+// - 可用高度只取 clientHeight(不取 scrollHeight):预算改变 → 内容高度改变不会反过来改变
+//   clientHeight,无反馈环。ResizeObserver 回调天然按帧对齐(每帧至多一次),无需再加节流
+//   (requestAnimationFrame 被 source-scan 全仓禁用,§3.5)。不新增任何 timer。
+// - bash 行高/折叠按钮高用 last-good 缓存:预算把 bash 组收起后行不在 DOM,仍用上次实测值。
+// ---------------------------------------------------------------------------
+const treeScrollEl = ref<HTMLElement | null>(null);
+const fillBudget = ref<FillBudget | null>(null);
+/** 首轮测量是否已完成(2026-10-28 验收 #1):true 且预算仍 null ⇒ 测量失败,FleetBashJobs
+ *  回退到与不传 fill 完全一致的旧默认开合。 */
+const fillReady = ref(false);
+let lastAgentRowPx = 0;
+let lastBashRowPx = 0;
+// 验收 #4:两块折叠按钮(.run-more)高度分别测量、分别缓存;未测到时用该块已测行高估计。
+let lastAgentFoldPx = 0;
+let lastBashFoldPx = 0;
+
+// 验收 #3:用户手动操作回传 —— bash 组开合 / 两块「显示已完成」点击都改变该块的高度诉求,
+// 以用户操作为准重分(FillOverrides),手动状态一旦置位不被预算覆盖。
+const bashUserOpen = ref<boolean | null>(null);
+const bashShowAll = ref(false);
+const agentShowAll = ref(false);
+function onBashOpenChange(open: boolean): void {
+  bashUserOpen.value = open;
+  void nextTick(recomputeFill);
+}
+function onBashShowAll(): void {
+  bashShowAll.value = true;
+  void nextTick(recomputeFill);
+}
+function onAgentShowAll(): void {
+  agentShowAll.value = true;
+  void nextTick(recomputeFill);
+}
+
+const fillCounts = computed<FillCounts>(() => {
+  const nodes = showAgent.value ? treeNodes.value : [];
+  const jobs = showBash.value ? bashJobs.value : undefined;
+  const liveBashRows = jobs === undefined ? [] : jobs.rows.filter((r) => bashArchive.value.has(String(r.id)) !== true);
+  let bashMust = 0;
+  for (const r of liveBashRows) if (statusToken(r).live) bashMust++;
+  return {
+    agentFixedRows: fixedAgentRowCount(nodes),
+    agentTerminalTop: topTerminalRowCount(nodes),
+    bashMustRows: bashMust,
+    bashTerminalRows: liveBashRows.length - bashMust,
+  };
+});
+
+function recomputeFill(): void {
+  const el = treeScrollEl.value;
+  if (el === null) return;
+  const agentRow = el.querySelector<HTMLElement>(".tree .run")?.offsetHeight ?? 0;
+  if (agentRow > 0) lastAgentRowPx = agentRow;
+  const bashRow = el.querySelector<HTMLElement>(".fleet-bash .bj-row")?.offsetHeight ?? 0;
+  if (bashRow > 0) lastBashRowPx = bashRow;
+  // 验收 #4:两块折叠按钮分别测量(agent 的是 tree-scroll 直属的 .run-more;bash 的在
+  // .bj-fill-more 里)。首轮按钮还没渲染 ⇒ 0 ⇒ 下面用该块行高估计,不按 0 预留。
+  const agentFold = el.querySelector<HTMLElement>(":scope > .run-more")?.offsetHeight ?? 0;
+  if (agentFold > 0) lastAgentFoldPx = agentFold;
+  const bashFold = el.querySelector<HTMLElement>(".fleet-bash .bj-fill-more .run-more")?.offsetHeight ?? 0;
+  if (bashFold > 0) lastBashFoldPx = bashFold;
+  let agentExtraPx = 0;
+  for (const p of el.querySelectorAll<HTMLElement>(".fleet-omitted")) agentExtraPx += p.offsetHeight;
+  // Whole archived section (fold header + its rows once the user opened it), not just the header.
+  agentExtraPx += el.querySelector<HTMLElement>(".fleet-archived")?.offsetHeight ?? 0;
+  let bashHeaderPx = el.querySelector<HTMLElement>(".fleet-bash .bj-sum")?.offsetHeight ?? 0;
+  bashHeaderPx += el.querySelector<HTMLElement>(".fleet-bash .bj-archived-fold")?.offsetHeight ?? 0;
+  for (const p of el.querySelectorAll<HTMLElement>(".fleet-bash .bj-more")) bashHeaderPx += p.offsetHeight;
+  fillBudget.value = computeFillBudget(
+    {
+      heightPx: contentHeightOf(el),
+      agentRowPx: lastAgentRowPx,
+      bashRowPx: lastBashRowPx,
+      agentExtraPx,
+      bashHeaderPx,
+      agentFoldPx: lastAgentFoldPx > 0 ? lastAgentFoldPx : lastAgentRowPx,
+      bashFoldPx: lastBashFoldPx > 0 ? lastBashFoldPx : lastBashRowPx,
+    },
+    fillCounts.value,
+    {
+      bashCollapsed: bashUserOpen.value === false,
+      agentShowAll: agentShowAll.value,
+      bashShowAll: bashShowAll.value,
+    },
+  );
+  fillReady.value = true;
+}
+
+/** clientHeight includes the scroller's own padding and the Bash group's top margin/border —
+ *  neither can hold rows, so counting them made an "exactly full" budget overflow by ~8–10px
+ *  (verify r2). Computed styles are read per measure (cheap; no layout thrash beyond the
+ *  offsetHeight reads already done). */
+function contentHeightOf(el: HTMLElement): number {
+  const px = (v: string): number => {
+    const n = Number.parseFloat(v);
+    return Number.isFinite(n) ? n : 0;
+  };
+  const cs = getComputedStyle(el);
+  let h = el.clientHeight - px(cs.paddingTop) - px(cs.paddingBottom);
+  const bash = el.querySelector<HTMLElement>(".fleet-bash");
+  if (bash !== null) {
+    const bs = getComputedStyle(bash);
+    h -= px(bs.marginTop) + px(bs.borderTopWidth) + px(bs.borderBottomWidth) + px(bs.marginBottom);
+  }
+  return Math.max(0, h);
+}
+
+function onArchivedOpen(): void {
+  void nextTick(recomputeFill);
+}
+
+let unobserveFill: (() => void) | undefined;
+// tree-scroll 只在树视图(未选中 run)时存在:用 ref watch 接管挂载/卸载,flush:"post"
+// 保证元素插入且子组件渲染后再测量。immediate 覆盖常规挂载路径。
+watch(
+  treeScrollEl,
+  (el) => {
+    unobserveFill?.();
+    unobserveFill = undefined;
+    if (el !== null) unobserveFill = observeResize(el, recomputeFill);
+    void nextTick(recomputeFill);
+  },
+  { immediate: true, flush: "post" },
+);
+// 行数变化(fleet 帧/bash 帧)后重算:等 DOM 更新再测;字符串键避免同值重复触发。
+watch(
+  () => {
+    const c = fillCounts.value;
+    return `${c.agentFixedRows}/${c.agentTerminalTop}/${c.bashMustRows}/${c.bashTerminalRows}`;
+  },
+  () => {
+    void nextTick(recomputeFill);
+  },
+);
+onBeforeUnmount(() => unobserveFill?.());
+
+// A mode/width or panel transition invalidates cached line heights; measure the rendered panel.
+// Task60: resolvedFloating 也入列 —— held 释放时 effectiveMode 仍可能是 overlay，但
+// floating 从 true→false 改变了可用宽度（right72+桥8 ⇒ right12），必须清行高缓存重测。
+watch(
+  () => [props.panel, props.mode, props.open, resolvedFloating.value] as const,
+  () => {
+    lastAgentRowPx = lastBashRowPx = lastAgentFoldPx = lastBashFoldPx = 0;
+    fillBudget.value = null;
+    fillReady.value = false;
+    void nextTick(recomputeFill);
+  },
+);
+
+const agentTerminalBudget = computed(() => fillBudget.value?.agentTerminal);
+const bashTerminalBudget = computed(() => fillBudget.value?.bashTerminal);
 
 // ---------------------------------------------------------------------------
 // sysload plan §6.4/§7.4/§10 (package P4): the crit/warn dispatch-paused banner, reading the
@@ -227,12 +433,49 @@ provide(FLEET_SELECT, {
   canOpen,
   select(runId: string): void {
     if (!canOpen.value) return;
+    emit("promote");
     hub?.selectRun?.(props.agent.key, runId);
   },
 });
 
+/** Task60 §3: isConnected/hidden 不足以证明可见 —— 入口可能在 Teleport 迁移窗口或
+ * display:none/inert 祖先内。实际可见（checkVisibility；happy-dom/旧浏览器回退旧语义）
+ * 且无 inert 祖先才可作为焦点归还目标。 */
+function focusTargetVisible(el: HTMLElement): boolean {
+  if (!el.isConnected || el.hidden) return false;
+  for (let p: HTMLElement | null = el; p !== null; p = p.parentElement) if (p.inert) return false;
+  return typeof el.checkVisibility !== "function" || el.checkVisibility();
+}
+function restoreTrigger(): void {
+  const split = rootEl.value?.closest(".detail-split");
+  const trigger = props.trigger;
+  const fallback = split?.querySelector<HTMLElement>(
+    props.panel === undefined
+      ? '[aria-controls="fleet-drawer"]'
+      : `[data-panel="${props.panel}"][aria-controls="fleet-drawer"]`,
+  );
+  // close/Esc 先关闭并迁回浮动宿主（nextTick 后），再归还：此时按钮在浮动宿主内可见。
+  if (trigger !== null && trigger !== undefined && focusTargetVisible(trigger)) trigger.focus();
+  else if (fallback != null && focusTargetVisible(fallback)) fallback.focus();
+  else document.getElementById("transcript")?.focus();
+}
 function onClose(): void {
   emit("close");
+  if (props.panel !== undefined) void nextTick(restoreTrigger);
+}
+// Keep the pointerdown target still until its click handler has run. Capture queues the
+// release even when FleetTree stops bubbling; a microtask never changes layout mid-dispatch.
+function finishInteraction(): void {
+  queueMicrotask(() => emit("interaction-end"));
+}
+function promoteInteraction(ev: Event): void {
+  const target = ev.target;
+  if (!(target instanceof Element) || target.closest(".drawer-close, .activity-pin") !== null) return;
+  // Task60 guard-fix: HEAD 语义是「仅交互元素才 promote」——非交互区域（drawer-title/head/
+  // run-open 等）pointerdown 不升级，peek 由 hover 状态机自行收起；否则反例 1024 hover peek
+  // 下点标题会误 pin 并迁 header（right 952→1012 跳 60px），focusin 也走不到 .run-open 升级。
+  if (target.closest("button,a,input,textarea,select,[tabindex]") === null) return;
+  emit("promote", ev.type === "pointerdown");
 }
 
 /** 「← 子 agent 列表」:退选 run(订阅由 useHub 拆除),抽屉保持打开、回到树视图。 */
@@ -244,6 +487,25 @@ function onBackToTree(): void {
 // §6.4 键盘/指针契约(唯一 owner)
 // ---------------------------------------------------------------------------
 function onKey(ev: KeyboardEvent): void {
+  if (ev.key === "Tab" && props.mode === "fullscreen") {
+    const elements = Array.from(
+      rootEl.value?.querySelectorAll<HTMLElement>(
+        'button:not([disabled]),a[href],input:not([disabled]),textarea:not([disabled]),select:not([disabled]),[tabindex="0"]',
+      ) ?? [],
+    );
+    const first = elements[0],
+      last = elements[elements.length - 1];
+    if (
+      first &&
+      last &&
+      (!rootEl.value?.contains(document.activeElement) ||
+        (ev.shiftKey ? document.activeElement === first : document.activeElement === last))
+    ) {
+      ev.preventDefault();
+      (ev.shiftKey ? last : first).focus();
+    }
+    return;
+  }
   if (ev.key !== "Escape" || ev.isComposing || ev.defaultPrevented) return;
   const target = ev.target as HTMLElement | null;
   if (target && /^(input|textarea|select)$/i.test(target.tagName)) return;
@@ -257,13 +519,13 @@ function onPointer(ev: PointerEvent): void {
   if (target === null) return;
   if (rootEl.value?.contains(target) === true) return;
   if (target instanceof Element && target.closest('[aria-controls="fleet-drawer"]') !== null) return;
-  onClose();
+  if (!props.peeking) emit("close"); // outside clicks retain their own natural focus
 }
 
 watch(
   () => [props.mode, props.open] as const,
   ([mode, open], _prev, onCleanup) => {
-    if (mode === "docked" || !open) return;
+    if (!open || (mode === "docked" && props.panel === undefined)) return;
     document.addEventListener("keydown", onKey);
     if (mode === "overlay") document.addEventListener("pointerdown", onPointer);
     onCleanup(() => {
@@ -281,23 +543,44 @@ onBeforeUnmount(() => {
 });
 
 // ---------------------------------------------------------------------------
-// §6.4 #6 焦点迁移(仅非 docked;docked 开合不动焦点)
-// ---------------------------------------------------------------------------
+// Only keyboard opens move focus. Legacy standalone callers retain their prior behavior.
 watch(
   () => props.open,
   async (open, wasOpen) => {
-    if (props.mode === "docked" || open === wasOpen) return;
+    if (open === wasOpen) return;
     if (open) {
+      if (props.panel === undefined ? props.mode === "docked" : props.openOrigin !== "keyboard") return;
       await nextTick();
-      rootEl.value?.querySelector<HTMLElement>(".drawer-close")?.focus();
-      return;
+      if (props.open) rootEl.value?.querySelector<HTMLElement>(".drawer-close")?.focus();
+    } else if (props.panel === undefined && props.mode !== "docked") restoreTrigger();
+  },
+);
+// Fullscreen is modal, without stealing focus on pointer opens. Cleanup on resize/unmount.
+watch(
+  () => [props.mode, props.open] as const,
+  async ([mode, open], _old, cleanup) => {
+    let disposed = false;
+    const restored: Array<[HTMLElement, boolean]> = [];
+    cleanup(() => {
+      disposed = true;
+      for (const [el, inert] of restored) el.inert = inert;
+    });
+    if (mode !== "fullscreen" || !open) return;
+    await nextTick();
+    if (disposed) return;
+    // Inert every background sibling up to body (header/sidebar/topbar included), not just
+    // the transcript column. Preserve pre-existing inert values for nested-overlay cleanup.
+    let branch: HTMLElement | null = rootEl.value;
+    while (branch?.parentElement) {
+      const parent: HTMLElement = branch.parentElement;
+      for (const el of Array.from(parent.children)) {
+        if (!(el instanceof HTMLElement) || el === branch) continue;
+        restored.push([el, el.inert]);
+        el.inert = true;
+      }
+      if (parent === document.body) break;
+      branch = parent;
     }
-    const toggle = document.querySelector<HTMLElement>('[aria-controls="fleet-drawer"]');
-    if (toggle !== null && document.contains(toggle)) {
-      toggle.focus();
-      return;
-    }
-    document.getElementById("transcript")?.focus();
   },
 );
 </script>
@@ -308,29 +591,58 @@ watch(
     ref="rootEl"
     class="fleet-drawer"
     :data-mode="mode"
+    :data-panel="panel"
+    :data-peeking="peeking || undefined"
+    :data-floating="resolvedFloating || undefined"
+    @pointerenter="emit('peek-keep')"
+    @pointerleave="emit('peek-end')"
+    @pointerdown.capture="promoteInteraction"
+    @click.capture="finishInteraction"
+    @pointercancel="finishInteraction"
+    @focusin="promoteInteraction"
     :data-open="open || undefined"
     :role="mode === 'docked' ? undefined : 'dialog'"
     :aria-modal="mode === 'fullscreen' ? true : undefined"
-    :aria-label="t('fleet.panelTitle')"
+    :aria-label="t(panel === 'bash' ? 'fleet.commandsTitle' : 'fleet.panelTitle')"
   >
+    <!-- Task60 §2.2: 桥仅 hover/held 浮动几何存在（resolvedFloating 与根 data-floating
+         同源）；manual overlay 入口已进头部，无外侧 rail 栏也无桥。 -->
+    <span v-if="mode === 'overlay' && resolvedFloating" class="activity-bridge" aria-hidden="true"></span>
+    <!-- Task60 §2.2: 公共头部行提升到 tree/run 互斥分支之外 —— 列表时标题/入口/既有
+         pin/close；子详情时入口+pin（下方原 RunHeader 保留 back/name/status/close，
+         公共头部不重复 close）。活动入口宿主（activity slot）在分支切换间永不销毁。 -->
+    <div class="drawer-head">
+      <template v-if="selectedRunId === null">
+        <AppIcon :name="panel === 'bash' ? 'terminal' : 'bot'" class="icon-sm drawer-title-icon" />
+        <span class="drawer-title">{{ t(panel === "bash" ? "fleet.commandsTitle" : "fleet.panelTitle") }}</span>
+      </template>
+      <slot name="activity"></slot>
+      <button
+        v-if="panel !== undefined && canPeek"
+        class="btn btn-ghost btn-icon activity-pin"
+        type="button"
+        :aria-label="t(peeking ? 'fleet.pin' : 'fleet.unpin')"
+        :aria-pressed="!peeking"
+        @click="emit('toggle-pin')"
+      >
+        <AppIcon :name="peeking ? 'unlock' : 'lock'" class="icon-sm" />
+      </button>
+      <button
+        v-if="selectedRunId === null"
+        class="btn btn-ghost btn-icon drawer-close"
+        type="button"
+        :aria-label="t('drawer.close')"
+        @click="onClose"
+      >
+        <AppIcon name="x" class="icon-sm" />
+      </button>
+    </div>
     <template v-if="selectedRunId !== null">
       <RunHeader :agent="agent" :mode="mode" @back="onBackToTree" @close="onClose" />
       <RunTranscript :key="selectedRunId" :agent="agent" :now="now" />
     </template>
     <template v-else>
-      <div class="drawer-head">
-        <AppIcon name="bot" class="icon-sm drawer-title-icon" />
-        <span class="drawer-title">{{ t("fleet.panelTitle") }}</span>
-        <button
-          class="btn btn-ghost btn-icon drawer-close"
-          type="button"
-          :aria-label="t('drawer.close')"
-          @click="onClose"
-        >
-          <AppIcon name="x" class="icon-sm" />
-        </button>
-      </div>
-      <div v-if="banner" class="ld-banner" :data-level="banner.level">
+      <div v-if="banner && showAgent" class="ld-banner" :data-level="banner.level">
         <AppIcon name="alert" class="icon-sm" />
         <span class="ld-banner-body">
           <strong>{{ t("load.bannerPaused") }}</strong>
@@ -340,25 +652,46 @@ watch(
           <template v-else> · {{ banner.level.toUpperCase() }}</template>
         </span>
       </div>
-      <div class="tree-scroll">
-        <FleetTree :nodes="treeNodes" :now="now" :orphans="orphans" :omitted="agent.fleetOmitted" />
+      <div ref="treeScrollEl" class="tree-scroll">
+        <FleetTree
+          v-if="showAgent"
+          :nodes="treeNodes"
+          :now="now"
+          :orphans="orphans"
+          :omitted="agent.fleetOmitted"
+          :terminal-budget="agentTerminalBudget"
+          @show-all-terminal="onAgentShowAll"
+        />
         <!-- web-hub archive plan: the archived-runs fold (hidden when nothing archived). -->
-        <FleetArchived v-if="archivedRows.length > 0" :rows="archivedRows" :set="runArchive" />
+        <FleetArchived
+          v-if="showAgent && archivedRows.length > 0"
+          :rows="archivedRows"
+          :set="runArchive"
+          @update:open="onArchivedOpen"
+        />
         <!-- 2026-10-15:子 agent 树之后的独立 bash 分组(无任务/无字段 ⇒ 不渲染)。 -->
         <FleetBashJobs
-          v-if="bashJobs"
-          :class="{ 'fleet-bash-solo': treeEmpty }"
+          v-if="showBash && bashJobs"
+          :class="{ 'fleet-bash-solo': !showAgent || treeEmpty }"
           :jobs="bashJobs"
           :now="now"
           :archived="bashArchive"
+          :fill="true"
+          :fill-ready="fillReady"
+          :terminal-budget="bashTerminalBudget"
+          @update:open="onBashOpenChange"
+          @show-all-terminal="onBashShowAll"
         />
       </div>
     </template>
   </aside>
-  <!-- web-hub archive plan: the shared undo toast (viewport-fixed; both the tree's and the bash
-       group's archive actions land here). -->
-  <div v-if="archToast !== null" class="arch-toast" role="status">
-    <span class="arch-toast-text">{{ t("fleet.archivedToast", { name: archToast.label }) }}</span>
-    <button class="btn btn-ghost arch-toast-undo" type="button" @click="undoArchive">{{ t("fleet.undo") }}</button>
+  <!-- web-hub archive plan: the shared toast (viewport-fixed; the tree's and the bash group's
+       archive actions land here). A single-row archive shows「撤销」; the bulk `archive_omitted`
+       click shows its outcome (done / nothing to do / failed + code in `title`). -->
+  <div v-if="archToast !== null" class="arch-toast" role="status" :title="archToast.title">
+    <span class="arch-toast-text">{{ archToast.text }}</span>
+    <button v-if="archToast.undo" class="btn btn-ghost arch-toast-undo" type="button" @click="undoArchive">
+      {{ t("fleet.undo") }}
+    </button>
   </div>
 </template>

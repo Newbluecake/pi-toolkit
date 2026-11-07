@@ -6,6 +6,7 @@
 //
 // Zero pi/typebox imports; independently unit-testable.
 
+import type { ProjectCapture } from "./scoped-project-view.js";
 import { frontmatterSource, isPinned, stripFrontmatter } from "./frontmatter.js";
 import { memoryDirFor, toSlug, type MemoryPaths } from "./paths.js";
 import { listMemory, type MemoryFile } from "./store.js";
@@ -115,7 +116,12 @@ function readHead(dir: string, name: string, bytes: number): string {
  * then injects nothing (unlike the original plugin's token-burning "(none)"
  * block).
  */
-export function renderMemoryBlock(cwd: string, budget: InjectBudget, paths?: MemoryPaths): string | undefined {
+export function renderMemoryBlock(
+  cwd: string,
+  budget: InjectBudget,
+  paths?: MemoryPaths,
+  project?: ProjectCapture,
+): string | undefined {
   const files = listMemory(cwd, paths);
   if (files.length === 0) return undefined;
   const slug = toSlug(cwd);
@@ -145,7 +151,14 @@ export function renderMemoryBlock(cwd: string, budget: InjectBudget, paths?: Mem
   const candidates = [...pinned, ...unpinned].slice(0, budget.inlineMax);
 
   const inline: string[] = [];
-  let remaining = budget.byteCap;
+  // Scopes-on: reserve the complete frame as well as every future entry marker.
+  // No projection argument takes the ORIGINAL truncation/cache path unchanged.
+  const scopedTail = `\n\n(Older files are in the index only — use the \`read\` tool to open \`${display}/<file>\`.)`;
+  let remaining =
+    project === undefined
+      ? budget.byteCap
+      : budget.byteCap -
+        Buffer.byteLength(header + "\n\nPinned & recent:\n" + scopedTail + `\n\n${injectionSentinel(slug)}\n`, "utf8");
   for (const f of candidates) {
     if (remaining <= 0) break;
     let raw: string;
@@ -163,6 +176,16 @@ export function renderMemoryBlock(cwd: string, budget: InjectBudget, paths?: Mem
     const overhead = Buffer.byteLength(head + fenceLine, "utf8");
     const bodyBudget = remaining - overhead;
     if (bodyBudget <= 0) break;
+    if (project !== undefined) {
+      const unit = project.file(f.name, raw, body);
+      const piece = head + fenceLine + body;
+      const cost = Buffer.byteLength(piece, "utf8") + project.reserve(unit) + (inline.length > 0 ? 2 : 0);
+      if (cost > remaining) continue; // whole file only; NEVER truncate raw body
+      remaining -= cost;
+      inline.push(piece);
+      project.track(piece, unit);
+      continue;
+    }
     const text = truncateAtSection(body, bodyBudget);
     remaining -= overhead + Buffer.byteLength(text, "utf8");
     inline.push(head + fenceLine + text);
@@ -174,7 +197,7 @@ export function renderMemoryBlock(cwd: string, budget: InjectBudget, paths?: Mem
     out += `\n\n(Older files are in the index only — use the \`read\` tool to open \`${display}/<file>\`.)`;
   }
   out += `\n\n${injectionSentinel(slug)}\n`;
-  return out;
+  return project !== undefined && Buffer.byteLength(out, "utf8") > budget.byteCap ? undefined : out;
 }
 
 // ───────────────────────────── RenderCache (B2) ─────────────────────────────

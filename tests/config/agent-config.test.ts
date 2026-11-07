@@ -3,7 +3,8 @@ import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAgentTypeRegistry, formatAgentTypesForPrompt } from "../../src/config/agent-types.js";
-import { DEFAULT_SETTINGS, DEFAULT_WORKFLOW_BUDGET, loadSettings, mergeBudget } from "../../src/config/settings.js";
+import { DEFAULT_SETTINGS, loadSettings, mergeBudget } from "../../src/config/settings.js";
+import { DEFAULT_WORKFLOW_BUDGET } from "../../src/workflow/settings.js";
 
 describe("agent config", () => {
   it("loads BOM files from precedence order and skips malformed files", async () => {

@@ -1,12 +1,13 @@
 import type { Clock, TimerHandle } from "../core/clock.js";
 import type { FabricRecord, MessageChannel, NodeRef } from "../core/message.js";
-import { effectiveChannel } from "../core/message.js";
+import { effectiveChannel, isMessageKind } from "../core/message.js";
 import { newRunId } from "../core/ids.js";
 import type { Millis, RunId } from "../core/types.js";
 import type { DeliveryEngine } from "../delivery/engine.js";
 import type { FabricRouter } from "./router.js";
 import type { FabricThrottle } from "./throttle.js";
 import type { ReviveVerdict, WakeService } from "./wake.js";
+import { retireUnknownKind } from "./unknown-kind.js";
 
 /**
  * What a failed send is KNOWN to have done to the target (fabric-cross-session plan §3.4c). `none`: the steer's promise
@@ -24,7 +25,7 @@ export interface FabricPorts {
   sendRootContext(record: FabricRecord): Promise<Verdict>;
   sendRootDisplay(record: FabricRecord): Promise<Verdict>;
   /**
-   * W5: revive a finished target for a `wake:true` finding/directive. Absent (wake off) ⇒ legacy `target_gone` handling.
+   * W5: revive a finished target for a `wake:true` report/directive. Absent (wake off) ⇒ legacy `target_gone` handling.
    * The returned promise's synchronous part has already decided reservation ownership (`claimToken` is the mailbox
    * claim the trigger rides on) — see {@link WakeService.revive}.
    */
@@ -99,10 +100,12 @@ export class FabricMailbox {
     this.pump();
   }
 
-  /** The successor this finished-target record may be coalesced into (finding/directive with an explicit wake only). */
+  /** The successor this finished-target record may be coalesced into (report/directive with an explicit wake only). */
   private successorRoute(
     record: FabricRecord,
   ): { runId: RunId; sessionFile: string | undefined; running: boolean } | undefined {
+    // #34 (E7③): a record whose kind is not a current MessageKind has no successor route either.
+    if (!isMessageKind(record.kind)) return undefined;
     if (!this.options.inbox || record.wake === undefined || record.kind === "progress") return undefined;
     if (this.options.router.targetState(record.to) !== "gone") return undefined;
     const successor = this.options.inbox.successor(record.to);
@@ -126,12 +129,20 @@ export class FabricMailbox {
         .sort((a, b) => a.createdAt - b.createdAt || a.seq - b.seq);
       for (const record of candidates) {
         const now = this.options.clock.now();
+        // #34 (E5): a persisted kind that is no longer a MessageKind is retired here — never claimed, dispatched,
+        // parked or revived — and its in-memory wait/retry markers are dropped so no timer ever fires for it.
+        if (!isMessageKind(record.kind)) {
+          this.waitingFor.delete(record.key);
+          this.parkRetryAt.delete(record.key);
+          retireUnknownKind(this.options.engine, record);
+          continue;
+        }
         // Reservation ownership outranks TTL. Only the disposition sweep may terminate it.
         if (this.options.inbox && (record.reserved || record.quarantined || this.options.inbox.steerHeld(record.key)))
           continue;
         if (ttlExpired(record.createdAt, record.ttlMs, now)) {
           this.waitingFor.delete(record.key);
-          if (record.kind === "finding" || record.kind === "directive")
+          if (record.kind === "report" || record.kind === "directive")
             this.options.router.issueDeadLetter(record, "ttl_expired");
           else this.options.engine.transition(record.key, "pending", "abandoned", { terminalReason: "ttl_expired" });
           continue;
@@ -170,7 +181,7 @@ export class FabricMailbox {
             this.options.inbox &&
             this.options.ports.revive &&
             record.wake === true &&
-            (record.kind === "finding" || record.kind === "directive")
+            (record.kind === "report" || record.kind === "directive")
           ) {
             if (this.inFlight.has(target) || now < this.options.throttle.eligibleAt(record)) continue;
             const token = `${this.mailboxInstanceId}:${record.attempts}`;
@@ -180,7 +191,7 @@ export class FabricMailbox {
             this.dispatchRevive(claimed, token);
             break;
           }
-          if (record.kind === "finding" || record.kind === "directive") gone.push(record);
+          if (record.kind === "report" || record.kind === "directive") gone.push(record);
           else this.options.engine.transition(record.key, "pending", "dropped", { terminalReason: "target_gone" });
           continue;
         }
@@ -482,12 +493,12 @@ export class FabricMailbox {
     } else if (verdict.retryable && attempts < this.options.maxAttempts) {
       this.options.engine.transition(key, "claimed", "pending", { attempts });
     } else if (verdict.retryable) {
-      if (record.kind === "finding" || record.kind === "directive")
+      if (record.kind === "report" || record.kind === "directive")
         this.options.router.issueDeadLetter({ ...record, attempts }, "attempts_exhausted");
       else
         this.options.engine.transition(key, "claimed", "dropped", { attempts, terminalReason: "attempts_exhausted" });
     } else if (verdict.reason === "target_gone") {
-      if (record.kind === "finding" || record.kind === "directive")
+      if (record.kind === "report" || record.kind === "directive")
         this.options.router.issueDeadLetter({ ...record, attempts }, "target_gone");
       else this.options.engine.transition(key, "claimed", "dropped", { attempts, terminalReason: "target_gone" });
     } else {
@@ -504,13 +515,19 @@ export class FabricMailbox {
     this.wake = undefined;
     const now = this.options.clock.now();
     let due = this.options.inbox?.nextSweepAt(now) ?? Number.POSITIVE_INFINITY;
-    for (const key of this.waitingFor.keys())
-      if (this.options.engine.get(key)?.state !== "pending") this.waitingFor.delete(key);
+    // #34 (E6): every time source below ignores records whose kind is no longer a MessageKind — even if retiring
+    // failed and the record is still pending, no timer is ever armed for it, so nothing can spin on it.
+    for (const key of this.waitingFor.keys()) {
+      const record = this.options.engine.get(key);
+      if (record?.state !== "pending" || !isMessageKind(record.kind)) this.waitingFor.delete(key);
+    }
     for (const [key, at] of this.parkRetryAt) {
-      if (this.options.engine.get(key)?.state === "pending") due = Math.min(due, Math.max(at, now));
+      const record = this.options.engine.get(key);
+      if (record?.state === "pending" && isMessageKind(record.kind)) due = Math.min(due, Math.max(at, now));
       else this.parkRetryAt.delete(key);
     }
     for (const record of this.options.engine.select((r) => r.state === "pending")) {
+      if (!isMessageKind(record.kind)) continue;
       if (this.options.inbox && (record.reserved || record.quarantined || this.options.inbox.steerHeld(record.key)))
         continue;
       // W4: a record waiting for a starting successor only has its TTL as a clock wake source (the successor's running

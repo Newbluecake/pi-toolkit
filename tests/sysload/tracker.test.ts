@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseLoadSettings } from "../../src/config/settings.js";
+import { parseLoadSettings } from "../../src/sysload/settings.js";
 import { createLoadTracker } from "../../src/sysload/tracker.js";
 import type { LoadSample } from "../../src/sysload/types.js";
 

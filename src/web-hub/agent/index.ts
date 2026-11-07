@@ -1,3 +1,5 @@
+import type { HumanDispatchBridge } from "./human-dispatch-proof.js";
+import type { XsActivationPort, XsActivationHubPort } from "../../fabric/xs/session-activation.js";
 /**
  * web-hub agent client wiring (plan §包 D — index.ts; arch §3.2).
  *
@@ -19,7 +21,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { LoadPort } from "../../sysload/types.js";
 import type {
@@ -28,12 +29,20 @@ import type {
   WebHubProxySettings,
   WebHubProxyWarning,
 } from "../../config/settings.js";
+import type { FeishuThreadsHubConfig } from "../protocol/feishu.js";
 import type { ObserveRunResult, RunObserverListener, RunSnapshot, RunStatus } from "../../core/types.js";
 import { isTerminalStatus } from "../../core/status.js";
+import { packageRoot } from "../../core/package-root.js";
 import { defaultPluginInfoDeps, pluginRoot, readPluginInfo } from "../../hud/plugin-info.js";
 import type { HubConfig, HubLanConfig } from "../hub/ports.js";
 import type { ScheduleWebHubPort } from "../../schedule/agent/coordinator.js";
-import { SCHED_AGENT_CAPS, SCHED_HUB_CAP, type SchedReceiptsFrame, type SchedRunFrame } from "../protocol/schedule.js";
+import {
+  SCHED_AGENT_CAPS,
+  SCHED_HUB_CAP,
+  type SchedDecideFrame,
+  type SchedReceiptsFrame,
+  type SchedRunFrame,
+} from "../protocol/schedule.js";
 import type { HubSpawnConfig } from "../protocol/spawn.js";
 import { PREVIEW_DEFAULT_MODE, type PreviewMode } from "../protocol/preview.js";
 import { PROXY_PORTS_FILE_NAME, PROXY_STATE_DIR_NAME, parseProxyPortRange } from "../protocol/proxy.js";
@@ -41,6 +50,7 @@ import {
   CMD_HISTORY_FEATURE_V1,
   FORWARDED_EVENTS,
   RESUME_FEATURE_V1,
+  UNKNOWN_SLASH_TEXT_FEATURE_V1,
   type AgentKind,
   type CommandsFrame,
   type LanInfoPayload,
@@ -49,6 +59,7 @@ import {
 } from "../protocol/messages.js";
 import type { CompleteReqFrame } from "../protocol/command-args.js";
 import { resolveHubPaths, type HubPaths } from "../protocol/paths.js";
+import { resolveAgentDir } from "../protocol/agent-dir.js";
 import { pidAlive } from "../protocol/pid.js";
 import {
   readStopMarkerSync,
@@ -59,10 +70,9 @@ import {
 import {
   UPLOAD_AGENT_CAPS,
   RUNTX_AGENT_CAPS,
+  EPOCH_UP_AGENT_CAPS,
   HOLD_AGENT_CAPS,
   HOLD_CAP,
-  QUOTA_POOLS_HUB_CAP,
-  TODO_ARCHIVE_HUB_CAP,
   CMD_ARGS_AGENT_CAPS,
   CMD_ARGS_HUB_CAP,
 } from "../protocol/version.js";
@@ -78,9 +88,17 @@ import {
 import { createXsAgentBridge, type XsAgentPort } from "./xs.js";
 import type { XsHubPort } from "../../fabric/xs/sender.js";
 import type { XsBlockResolve } from "../../commands/fabric-xs.js";
-import type { XsAliasBridgePort, XsAliasCachePort } from "../../fabric/xs/types-alias.js";
+import type {
+  XsAliasAutoSkipReason,
+  XsAliasBridgePort,
+  XsAliasBridgePortV2,
+  XsAliasCachePort,
+} from "../../fabric/xs/types-alias.js";
 import type { XsHubLimitsWire } from "../protocol/xs.js";
+import type { XsPhase, XsStateFrame } from "../protocol/xs-activation.js";
 import { createRunTranscripts, type RunTxRunInfo, type RunTranscriptPort } from "./run-transcript.js";
+import { createMessageSpeed } from "./message-speed.js";
+import { wireMessageSpeed } from "./message-speed-wire.js";
 import { createEventTap } from "./event-tap.js";
 import { formatLanStatusLines, type LanStatusPaths } from "./lan-status.js";
 import { formatUiStatusLines } from "./ui-status.js";
@@ -102,31 +120,38 @@ import { buildBranchReply, buildSnapshotReply } from "./snapshot.js";
 import { fleetFingerprint, projectFleet, readStatus } from "./status.js";
 import { createGitRunner, type GitRunner } from "../../git/run.js";
 import { createWorktreeSampler } from "./worktree-sampler.js";
-import { bashJobsLightFingerprint, bashJobsRowSignature, projectBashJobs, selectJobs } from "./bash-jobs.js";
+import { bashJobsLightFingerprint, bashJobsRowSignature, selectJobs } from "./bash-jobs.js";
 import { createBashJobsSampler, type BashJobsSource } from "./bash-jobs-sampler.js";
-import type { ArchiveWire, BashJobsWire, TodoWire, WireEvent } from "../protocol/messages.js";
+import type { WireEvent } from "../protocol/messages.js";
 import type { ArchiveControl } from "../../archive/control.js";
-import { projectTodo, todoLightFingerprint } from "./todo.js";
+import { todoLightFingerprint } from "./todo.js";
 import type { TodoState } from "../../todo/state.js";
-import { projectQuota, quotaFingerprint } from "./quota-sampler.js";
-import type { CacheKeepaliveWire, QuotaWire } from "../protocol/messages.js";
-import { cacheKeepaliveFingerprint, projectCacheKeepalive, type CacheKeepaliveInput } from "./cache-keepalive.js";
+import { quotaFingerprint } from "./quota-sampler.js";
+import { cacheKeepaliveFingerprint, type CacheKeepaliveInput } from "./cache-keepalive.js";
+import { createStatusSlotProjections } from "./status-slots.js";
+import type { QuotaCostView } from "../../quota/cost-scan.js";
 import type { ProviderVerdict } from "../../quota/ladder.js";
 import type { QuotaProblem } from "../../quota/types.js";
 import { createCommandCapture, type CommandCapturePort } from "../../commands/capture.js";
 import { createCommandRecorder, type CommandRecorder, type CommandRecorderDeps } from "./command-record.js";
 import { cmdHistoryStatusLevel, formatCmdHistoryStatusLines } from "./cmd-history-status.js";
 import { createCommandHandler, type InputEventLike, type MessageStartLike } from "./commands.js";
+import type { ThreadPromptPort } from "./commands.js";
+import type { ThreadCloseReason, ThreadStatusSlotWire } from "../protocol/thread.js";
+import { THREAD_CAP, THREAD_REBIND_AGENT_CAPS } from "../protocol/version.js";
 import { createCommandLedger } from "./ledger.js";
 import { createQueueMirror } from "./queue-mirror.js";
 import { createCompactionState } from "./compaction-state.js";
 import { createOriginEntry, registerOriginEntryRenderer } from "./origin-entry.js";
-import { createHoldBuffer, holdWired } from "./hold.js";
-import { createHoldDriver, type HoldDriver, type TurnEndLike } from "./hold-driver.js";
+import { holdWired } from "./hold.js";
+import type { HoldDriver } from "./hold-driver.js";
+import { createHoldGates, registerHoldHandlers, wireHoldDriver } from "./hold-wire.js";
 import type { PromptGatePort } from "./prompt-gate.js";
 import { appendToolTimingEntries, registerToolTimingEntryRenderer } from "./tool-timing.js";
 import { createBuiltinBridge, type BuiltinBridgeDeps } from "./builtin-bridge.js";
 import { createExecGate, createResumeExec } from "./resume-exec.js";
+import { createReloadTracker } from "./reload-track.js";
+import type { ReloadPhaseEvent } from "../../reload/phase.js";
 import { createResumeList, defaultResumeCore } from "./resume-list.js";
 import { classifyCommand, listSlashCommands, stripCommandArgs, type CommandArgsHints } from "./slash.js";
 import {
@@ -138,7 +163,7 @@ import {
 import { resolveCommandUsage } from "./command-usage.js";
 import { modelsFingerprint, projectModels } from "./models.js";
 import { effectivePolicy, parameterizedBuiltinPolicy } from "./command-policy.js";
-import { createDialogBridge } from "./dialogs.js";
+import { wireDialogs } from "./dialogs-wire.js";
 import { clearRestoreVetoSync, createAdminCommands, type AdminCommands } from "./admin-cmds.js";
 import type { AskUserRemotePort } from "../../ask-user/remote.js";
 import type { MentionRouteDeps } from "../../mention/mention.js";
@@ -226,6 +251,9 @@ export interface WebHubSettings {
    *  from the drawer still works). AGENT-side only — never read by buildHubConfig, so a change
    *  needs just `/reload` (picked up at the next stack build), NOT a hub restart. */
   archiveAfterMin?: number;
+  /** #59: unarchived terminal keep counts (held included); 0 = time-only. Agent-side, /reload. */
+  archiveKeepRuns?: number;
+  archiveKeepBash?: number;
   /** web-hub-steer-recall plan §2/§4.7 (A6) / arch §11 Q1: hold busy web steer/followUp in the
    *  agent-side buffer until pi's next queue drain so the browser can recall/re-edit them.
    *  Default `true`; `false` (or `control:false`) ⇒ no driver, no hold handlers, no `hold.v1`
@@ -285,7 +313,18 @@ export interface QueryControlPort {
    * `QueryService.observe`'s synchronous four-state verdict. */
   observe?(runId: string, l: RunObserverListener): ObserveRunResult;
 }
+/** fabric-thread arch r3 §11.1 P3: the agent-wiring face of the stack's thread surface — prompt
+ *  routing (ThreadPromptPort, commands.ts) + the status slot + thr_closed. `ThreadStackSurface`
+ *  (stack.ts) satisfies this structurally; the agent wiring never imports the stack type. */
+export interface ThreadAgentPort extends ThreadPromptPort {
+  /** §7.3 `status.threads` 槽数据（hub cap 由本模块的 getter 检查）。 */
+  statusSlots(): ThreadStatusSlotWire[];
+  /** §5.4 `thr_closed`：结束订阅 + 给订阅者 steer 解绑通知。 */
+  threadClosed(h: string, reason: ThreadCloseReason): void;
+}
 export interface WebHubDeps {
+  /** P4 owns/wires ONE bridge independent of webHub.enabled; this client only dispatches. */
+  memoryProof?: () => HumanDispatchBridge | undefined;
   /** Top-level, non-live settings; only buildHubConfig consumes it. */
   feishuBot?: FeishuBotSettings;
   settings: WebHubSettings;
@@ -338,6 +377,12 @@ export interface WebHubDeps {
    *  a throwing getter is downgraded to "no problems" at projection time (a broken getter
    *  must never take the status frame down — see the wiring test). */
   quotaProblems?: () => readonly QuotaProblem[];
+  /** 2026-11-03 费用折算（形态 B，无设置门）：cost-scan 视图的 late-bound 同步读（投影用）。
+   *  Unset ⇒ 窗口不带 costUsd（wire 字节不变）。 */
+  quotaCost?: () => QuotaCostView | undefined;
+  /** 费用折算的推进驱动：1Hz tick 每拍调用，scanner 内部节流（incomplete 2s / complete 15s）
+   *  + single-flight，fire-and-forget 永不抛。Unset ⇒ 永不推进 ⇒ 扫描器零 I/O。 */
+  quotaCostTick?: () => void;
   /** cache-keepalive-web plan §3.3: late-bound getter of the main session's keepalive report + cache
    *  mode (`src/index.ts` threads it only when `cacheTtl.keepalive` is on). Unset ⇒ the
    *  `StatusInfo.cacheKeepalive` field is never set (byte-equal to the pre-feature shape). */
@@ -358,12 +403,30 @@ export interface WebHubDeps {
    *  assigns the ref. Unset (topic-switch off, or not wired yet) ⇒ `commands.ts` never calls
    *  `tryClaim` at all — byte-identical to the pre-feature native/hold dispatch path. */
   promptGate?: () => PromptGatePort | undefined;
+  /** fabric-thread arch r3 §11.1 P3: the stack's thread surface, late-bound (`holder.current?.threads`).
+   *  Unset (threads off) ⇒ no §6.1 prompt step, no `status.threads`, no thr_closed handling —
+   *  byte-identical prompt handling (G2a). Structural: `ThreadStackSurface` (stack.ts) satisfies
+   *  this without importing it. */
+  threads?: () => ThreadAgentPort | undefined;
+  /** §7.1 agent cap gate: `fabric.enabled ∧ fabric.threads.enabled ∧ 非 secure` — computed at
+   *  ACTIVATE level by src/index.ts (settings + secure guards; NOT stack-dependent, so the cap
+   *  is stable across session rebuilds). Unset ⇒ `thr.v1` never advertised. */
+  threadsCapOn?: () => boolean;
+  /** rebind-plan r3 §4.2 (P0b): `threadsCapOn() ∧ fabric.threads.rebind` — same activate-level
+   *  stability rule. Unset/false ⇒ `thr.rebind.v1` never advertised (tail byte-identical, A16);
+   *  the rebind/acquire ops are only ever SENT under this cap on both ends (D3). */
+  threadsRebindCapOn?: () => boolean;
+  /** §8.2 buildHubConfig's `feishuBot.threads` value (ALREADY-clamped window/reply params);
+   *  unset ⇒ the key stays absent (hub threads off, byte-identical). */
+  threadsHubConfig?: () => FeishuThreadsHubConfig | undefined;
   /** fabric phase-2 X2 (§11.1): the cross-session agent port. UNSET (xs off — the only state
    *  before XW threads it) ⇒ no `xs.v1` cap, no `xs_member` slot, no `HubConfig.crossSession`,
    *  no `StatusInfo.xs`, no deliver/ack path: the agent stays byte-identical to the pre-xs
    *  shape (pinned by `tests/integration/fabric-xs-off-golden.test.ts`). Presence IS `xsOn`
    *  (XW computes XS0's switch at activate and only threads the port when it holds). */
   xs?: XsAgentPort;
+  /** P3b host-only web command path; absent/off preserves legacy command dispatch. */
+  xsActivation?: () => XsActivationPort | undefined;
   /** web-hub archive plan: the session's archive control (late-bound like `query` — `undefined`
    *  ⇔ web-hub off / no live stack, e.g. the detach grace window). Feeds the `StatusInfo.archived`
    *  projection and the `archive` cmd op. Unset ⇒ the wire field never appears and the op settles
@@ -373,9 +436,11 @@ export interface WebHubDeps {
    *  off — the default — or a non-plain domain) ⇒ no `sched.v1` cap, no `HubConfig.schedule`, no
    *  sched frame hooks: byte-identical to the pre-feature shape. */
   schedule?: ScheduleWebHubPort;
-  hubMainPath?: string; // 默认 fileURLToPath(new URL("../hub/main.ts", import.meta.url))
+  hubMainPath?: string; // 默认 join(packageRoot(), "src/web-hub/hub/main.ts")
   env?: NodeJS.ProcessEnv;
   now?: () => number;
+  /** Generation delta ingestion clock (not a setting/feature switch). */
+  monotonicNow?: () => number;
   // ---- test seams (optional; production leaves them unset) ----
   netConnect?: typeof import("node:net").connect;
   spawnImpl?: typeof import("node:child_process").spawn;
@@ -390,6 +455,10 @@ export interface WebHubDeps {
   paths?: HubPaths;
   /** Explicit home for the launched hub. Never inferred from an injected `paths` object. */
   launchHome?: string;
+  /** #30 reload-result: test seam standing in for the re-evaluated module instance a real
+   *  /reload hands the tracker (MODULE_INSTANCE is one random UUID per module evaluation, so a
+   *  single test process cannot produce two). Production leaves this unset. */
+  reloadModuleInstance?: string;
   buildInfo?: () => Promise<{ pluginVersion: string; buildId: string }>;
   argv1?: string;
 }
@@ -421,12 +490,27 @@ export type LanAdminResult<T> =
 
 export interface WebHubControl {
   readonly capture?: CommandCapturePort;
+  /** #30 reload-result plan §1 D6: the deferred-reload command port's phase sink — the tracker
+   *  behind `StatusInfo.reload`. Wired late-bound from src/index.ts
+   *  (`() => webHubRef.current?.onReloadPhase?.(event)`); optional so pre-feature doubles keep
+   *  compiling (same convention as `capture`). No new pi.on — handlerCounts stay frozen. */
+  onReloadPhase?(event: ReloadPhaseEvent): void;
+  /** fabric-thread arch r3 §6.7 (P3): the engine-reply sink — forwards the engine's first-reply
+   *  outcomes onto the live command handler (which holds the pending cmd frames). Threaded by
+   *  src/index.ts into buildSessionStack's StackThreadInput. Present iff deps.threads is set. */
+  readonly threadSink?: {
+    replyRouted(eventId: string, runs: ReadonlyArray<{ runId: string; label: string }>): void;
+    releaseToNative(eventId: string): boolean;
+    replyStaleCtx(eventId: string): void;
+  };
   /** web-hub-cmd-history plan §4.3 (A1): the command recorder — present iff
    *  `webHub.cmdHistory !== false` (the feature's agent-side switch). `src/index.ts` assigns it
    *  into its own `commandRecorderRef` exactly like `capture`. */
   readonly recorder?: CommandRecorder;
   internalExec(args: string, ctx: unknown): Promise<{ ok: true } | { ok: false; code: "E_UNSUPPORTED" }>;
   askUserRemote(): AskUserRemotePort | undefined;
+  /** Same effective object this WebHub instance uses; P4 feeds it to the slot adapter. */
+  memoryHubPaths?(): { readonly stateDir: string };
   /**
    * fabric-cross-session plan §3.3 L7 (W1): attribution port for the causal-level reset. An `extension`-sourced `input`
    * event is a HUMAN prompt iff it is a prompt the web hub itself dispatched on a browser user's behalf — answered by a
@@ -434,6 +518,15 @@ export interface WebHubControl {
    * ledger does not vouch for (topic-switch re-injection, goal loop, `/agent reload fire`, other extensions) is `undefined`.
    */
   attributeInput(text: string): "web_prompt" | undefined;
+  /** 2026-11-04 mention-handled fix: the mention input interceptor's consumption report —
+   *  `installMentionInput` answers pi `{action:"handled"}` for an @label/@session input, which
+   *  short-circuits the input chain before this control's own `input` observer can attribute
+   *  it. The mention wiring (`src/mention/wire.ts`) calls this with the RAW event text; the
+   *  command handler flips the matching still-`dispatched` web prompt to `consumed` (miss /
+   *  ambiguity ⇒ no-op) so the browser row never decays to "sent · unconfirmed". Optional like
+   *  `capture` so pre-feature `WebHubControl` doubles keep compiling; absent on the mention
+   *  side ⇔ web-hub off / pre-feature control ⇒ the call is an optional-chaining no-op. */
+  noteInputHandled?(text: string): void;
   readonly admin: AdminCommands;
   status(): WebHubStatusView;
   /** http://127.0.0.1:<port>/#t=<token>; port from hello_ack (live) or hub.json (pid alive); else a hint. */
@@ -479,12 +572,17 @@ export interface WebHubControl {
     publishMember(): void;
     /** channel-plan §12 (IBP): the unread count changed ⇒ republish status (IBW calls this). */
     notifyUnreadChanged(): void;
-    hubPort(): XsHubPort;
+    hubPort(): XsHubPort & XsActivationHubPort;
+    /** #20: synchronous read-only source mirror; absent on older bridge facades. */
+    progressPhaseOf?(sessionId: string, requestId: string): XsPhase | undefined;
     resolveBlock(query: string): Promise<XsBlockResolve>;
     hubInfo(): Promise<XsHubLimitsWire | undefined>;
     /** alias-plan §4/§7 (ALW): AL3's `op:"alias"` bridge and per-activate alias cache for `/fabric alias`. */
-    aliasBridge(): XsAliasBridgePort;
+    /** The live bridge object also carries the v2 methods (`forcePreview` …); typed optional so v1-shaped doubles compile. */
+    aliasBridge(): XsAliasBridgePort & Partial<Pick<XsAliasBridgePortV2, "forcePreview">>;
     aliasCache(): XsAliasCachePort;
+    /** alias-force-default §7 (AFW): the auto engine's cached `auto skip:<token>` reason for the CURRENT session. */
+    aliasAutoSkip?(): XsAliasAutoSkipReason | undefined;
   };
   /** web-hub-slash-args plan §5 (P4): `/`-command argument-completion status line (agent-side
    * mode + live hub cap). Optional for the same double-compatibility reason as `proxy`. */
@@ -528,7 +626,9 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       uid: process.getuid?.() ?? 0,
       xdgRuntimeDir: env.XDG_RUNTIME_DIR !== undefined && env.XDG_RUNTIME_DIR !== "" ? env.XDG_RUNTIME_DIR : undefined,
     });
-  const hubMainPath = deps.hubMainPath ?? fileURLToPath(new URL("../hub/main.ts", import.meta.url));
+  // The hub always runs from source (`src/`) through jiti, even when the parent runs a bundle:
+  // `dist/` has no `hub/main.ts`. Anchoring on the package root keeps it correct in all layouts.
+  const hubMainPath = deps.hubMainPath ?? join(packageRoot(), "src", "web-hub", "hub", "main.ts");
   const argv1 = deps.argv1 ?? process.argv[1];
 
   // private-plan §4.1 / security review N3 #1: the gate verdict is re-judged FRESH on every use
@@ -599,6 +699,49 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   // dropped lazily by the gate itself.
   const execGate = createExecGate({ now });
 
+  // #30 reload-result plan §1 D3–D6: the reload tracker. Pure-state machine in
+  // `reload-track.ts`; its process-global Symbol.for store ({v:1, rec?, handover?}, capacity
+  // 1+1, D5) survives the in-process reload handover, which is exactly how a started fact from
+  // the OLD activation meets the NEW activation's session_start takeover validation (D4).
+  // `publish()` (late-bound — publishStatus is declared further down) fires only on a real
+  // projection change (D6): no record / no change ⇒ no frame, byte-identical wire.
+  const reloadTracker = createReloadTracker(
+    {
+      now,
+      moduleInstance: deps.reloadModuleInstance ?? MODULE_INSTANCE,
+      version: () => packageVersionSync(),
+      session: () => {
+        const x = ctx;
+        if (x === undefined) return undefined;
+        const sessionId = safe(() => x.sessionManager.getSessionId() ?? "", "");
+        if (sessionId === "") return undefined;
+        return { sessionId, sessionFile: safe(() => x.sessionManager.getSessionFile(), undefined) };
+      },
+    },
+    { publish: () => publishStatus() },
+  );
+
+  // Object identities, not timestamps/epochs, bind this activation's live writer.
+  const speedActivation = {};
+  let speedOwnerToken = {};
+  const speed = createMessageSpeed({
+    ...(deps.monotonicNow !== undefined ? { monotonicNow: deps.monotonicNow } : {}),
+    currentOwner: () => {
+      if (!attached || ctx === undefined) return undefined;
+      const sessionId = ctx.sessionManager.getSessionId();
+      return {
+        sessionId,
+        sessionGeneration: generation,
+        activationGeneration: speedActivation,
+        ownerToken: speedOwnerToken,
+      };
+    },
+    getCurrentContext: () => ctx,
+    sessionId: (c: ExtensionContext) => c.sessionManager.getSessionId(),
+    ...(deps.secureRecheckForWrite !== undefined ? { secureRecheckForWrite: deps.secureRecheckForWrite } : {}),
+    appendEntry: (type, data) => pi.appendEntry(type, data),
+  });
+  const speedWire = wireMessageSpeed(pi, speed, () => attached);
   const attributePromptRef: { current: (e: WireEvent) => WireEvent } = { current: (e) => e };
   const tap = createEventTap(
     (e, droppable) => {
@@ -607,6 +750,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       c.send({ t: "ev", seq: c.nextSeq(), e }, { droppable });
     },
     {
+      speed,
       now,
       setTimer: (ms, fn) => {
         const t = setTimeout(fn, ms);
@@ -648,100 +792,50 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     isLive: () => conn?.status().state === "live",
     onChange: () => publishStatus(),
   });
-  /** `readStatus`'s bash-jobs projection closure (hot path: source read + in-memory list + cache
-   *  — zero fs I/O; the sampler owns every read). Rows and tails provably share one source
-   *  generation: `tails(src.gen)` reconciles on mismatch (D3-4 ③/④). */
-  const bashJobsProjection = (): BashJobsWire | undefined => {
-    const d = deps.bashJobs;
-    if (d === undefined) return undefined;
-    const src = d.current();
-    if (src === undefined) return undefined;
-    return projectBashJobs(src.list(), bashSampler.tails(src.gen), now(), d.retentionMs());
-  };
-
-  // quota-web plan §2 (D3): pure, stateless projection — `QuotaService.verdicts()` is already a
-  // synchronous in-memory read, so there is no sampler state to own here (see quota-sampler.ts's
-  // module docstring). Re-evaluated fresh on every call; the 1Hz tick below only decides whether
-  // a given evaluation is worth publishing.
-  // todo-archive plan v2.1 §2 (D5): the todo projection closure — same PURE-read cap gate as
-  // quota's `pools` below (never cached, never bound to a link generation): `completedHidden` /
-  // `archived` ride the wire ONLY while the live link's hello_ack.caps carries `todo.archive.v1`
-  // (an un-upgraded hub's closed TodoWireSchema would silently drop the whole status frame,
-  // plan §4). B1 keeps the optional-source gate INSIDE the closure too: `deps.todo === undefined`
-  // (todo.enabled=false ⇒ `wireTodo` never ran) ⇒ undefined, never a `deps.todo!()` throw.
-  const todoArchiveCap = (): boolean =>
-    conn?.status().state === "live" && (conn?.caps.includes(TODO_ARCHIVE_HUB_CAP) ?? false);
-  const todoProjection = (): TodoWire | undefined =>
-    deps.todo !== undefined ? projectTodo(deps.todo(), { archiveFields: todoArchiveCap() }) : undefined;
-  // web-hub archive plan: projection closure (same optional-source pattern as todo/bashJobs).
-  // `wire()` is a synchronous in-memory read; undefined while the control is detached (no live
-  // stack) or nothing is archived — the status frame stays byte-equal in both cases.
-  const archiveProjection = (): ArchiveWire | undefined => {
-    try {
-      return deps.archive?.()?.wire();
-    } catch {
-      return undefined;
-    }
-  };
-  const cacheKeepaliveProjection = (): CacheKeepaliveWire | undefined => {
-    const d = deps.cacheKeepalive;
-    if (d === undefined) return undefined;
-    try {
-      return projectCacheKeepalive(d(), now());
-    } catch {
-      return undefined;
-    }
-  };
-  const quotaProjection = (): QuotaWire | undefined => {
-    const d = deps.quota;
-    if (d === undefined) return undefined;
-    // quota-plan r2 §9A.4 (P7wa): droid rows / month / billing / problems ride the wire ONLY
-    // while the live link's hello_ack.caps carries `quota.pools.v1` — same PURE-read shape as
-    // holdCap() (never cached, never bound to a link generation): a reconnect to an upgraded
-    // hub flips the projection here and the 1Hz tick's fingerprint gate publishes on the next
-    // tick, no extra event needed. While disconnected pools stays false, so the slot keeps the
-    // legacy projection (an old hub must never decode an unknown enum and drop the frame, R7).
-    const pools = conn?.status().state === "live" && (conn?.caps.includes(QUOTA_POOLS_HUB_CAP) ?? false);
-    return projectQuota(d(), now(), {
-      pools,
-      problems: pools ? quotaProblemsSafe() : [], // ignored by projectQuota when pools !== true
-    });
-  };
-  /** 端口契约永不抛；兜注入桩（§11 wiring 行：quotaProblems 抛错 ⇒ 视为无 problems）。 */
-  const quotaProblemsSafe = (): readonly QuotaProblem[] => {
-    const g = deps.quotaProblems;
-    if (g === undefined) return [];
-    try {
-      return g();
-    } catch {
-      return [];
-    }
-  };
+  // source-governance batch2 ⑨-H1: the StatusInfo slot projections (todo / bash-jobs / quota /
+  // cache-keepalive / archive + their cap gates and never-throw wrappers) live in
+  // status-slots.ts — a pure extraction; the destructured locals below keep their pre-extraction
+  // names and semantics (`conn` is threaded as a call-time getter, same as the captured `let`).
+  const {
+    bashJobsProjection,
+    todoArchiveCap,
+    todoProjection,
+    archiveProjection,
+    cacheKeepaliveProjection,
+    quotaProjection,
+  } = createStatusSlotProjections({
+    sources: deps,
+    conn: () => conn,
+    bashTails: (gen) => bashSampler.tails(gen),
+    now,
+  });
 
   const commandLedger = createCommandLedger();
   const queueMirror = createQueueMirror();
   const compactionState = createCompactionState(pi);
   const originEntry = createOriginEntry(pi);
 
-  // ── web-hub-steer-recall plan §4.7 (A6): hold wiring ──────────────────────────────────────
-  // `holdOn` is the ONE gate (plan §8.1): it decides cap advertisement, handler registration and
-  // the `status.held` projection together. `false` (⇐ `steerRecall:false` or `control:false`)
-  // ⇒ no driver, no hold handlers, no cap, no held rows — the agent is byte-identical to the
-  // pre-feature agent on the wire (W1/W2). The buffer is the process-level `Symbol.for` bag
-  // (plain data, survives /reload — P-core's `hold.ts`); creating it here even when off is
-  // allocation-only and invisible on the wire.
-  const holdOn = holdWired(settings);
-  const holdBuffer = createHoldBuffer();
-  /** PURE read of the current link (plan C1 / §4.7 step 2): same shape as `isLiveWithCap` — read
-   *  at hold-decision time and at every tick, never cached, never bound to a link generation. */
-  const holdCap = (): boolean => conn?.status().state === "live" && (conn?.caps.includes(HOLD_CAP) ?? false);
-  /** `true` ⇔ the link is live AND the hub demonstrably lacks `hold.v1` — the ONLY case where
-   *  the ctl projection filters the hold vocabulary (§4.7 step 11): a hub without the cap has a
-   *  CLOSED CtlItemSchema that would drop the whole frame on a `state:"held"` row. While
-   *  disconnected nothing is filtered — the slot keeps the full projection and replays
-   *  correctly to whatever hub comes next (D3). */
-  const capKnownAbsent = (): boolean =>
-    holdOn && conn?.status().state === "live" && !(conn?.caps.includes(HOLD_CAP) ?? false);
+  /** 2026-10-28 (archive-aware `omitted`): this session's archived bash ids, the same display-side
+   *  input `bashJobsProjection` and the `archive_omitted` op receive. Never throws — a broken
+   *  archive getter must not take the 1Hz tick or a status frame down. */
+  const archivedBashIds = (): ReadonlySet<string> | undefined => {
+    try {
+      return deps.archive?.()?.view().bash;
+    } catch {
+      return undefined;
+    }
+  };
+
+  // ── web-hub-steer-recall plan §4.7 (A6): hold wiring — the gate/buffer/cap probes and the
+  // `status.held` projection live in hold-wire.ts (source-governance batch2 ⑨-H1, pure
+  // extraction; conn/ctx threaded as call-time getters, same as the captured closure vars).
+  const { holdOn, holdBuffer, holdCap, capKnownAbsent, heldStatus } = createHoldGates({
+    settings,
+    conn: () => conn,
+    getSessionId: () => safe(() => ctx?.sessionManager.getSessionId() ?? "", ""),
+    now,
+    epoch: MODULE_INSTANCE,
+  });
 
   // fleet-drawer §4.4 (F2): the run-transcript service. Enabled only while the live link's
   // hello_ack.caps carries runtx.v1 AND webHub.subagentTranscript ≠ "off" (§3.2 compat:
@@ -823,6 +917,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   let tuiWrapperRegistered = false;
   const commandComplete: CommandCompleteService | undefined = cmdCompleteOn
     ? createCommandComplete({
+        ...(deps.memoryProof ? { memoryScopes: true } : {}),
         commands: pi,
         own: () => deps.argCompleters ?? EMPTY_COMPLETERS,
         tui: () => tuiProviderRef.current,
@@ -887,6 +982,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     sendLate: (frame, result) => bridgeLate.current?.(frame, result),
   });
   const builtinBridge = createBuiltinBridge({
+    ...(deps.memoryProof ? { memoryScopes: true } : {}),
     pi,
     getCtx: () => ctx,
     getSessionId: () => safe(() => ctx?.sessionManager.getSessionId() ?? "", ""),
@@ -898,6 +994,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     // B2 (verify 2026-10-24): the second parameter IS the web frame's cmdId — without it
     // `consumeNew` hands internalExec `cmdId: undefined` and the /new card never lands.
     armExec: (op, cmdId) => (op === "new" ? execGate.armNew(cmdId) : undefined),
+    ...(deps.xsActivation ? { xsActivation: deps.xsActivation } : {}),
     resume: (frame, cmd, bridgeCtx) => {
       const first = cmd.args.trim().split(/\s+/)[0];
       return first === "__list" ? resumeList.list(frame, cmd) : resumeExec.pick(frame, cmd, bridgeCtx);
@@ -955,13 +1052,16 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
    * `command.v1` can never reach the resume ops at all, so advertising the feature there would
    * only surface a guaranteed failure). Old agents never emit `features`, so a new UI against an
    *  old agent degrades to no intercept / no button (§2.8 row 1). */
+  const unknownSlashTextEnabled = (): boolean =>
+    settings.control !== false && settings.webCommands !== false && ctx !== undefined;
+
   const resumeFeatures = (): string[] | undefined => {
     // web-resume plan §2.7 (HEAD semantics, B1 restore): `resume.v1` requires control ∧
     // webCommands ∧ policy ∧ ctx ∧ a PERSISTED session (`getSessionFile()` defined) — entirely
     // independent of the command recorder. web-hub-cmd-history plan §4.6 (A1) adds
     // `cmd.history.v1` with its OWN gate (recorder wired ∧ the same persisted check — no
     // control-plane conjuncts, the recorder records TUI invocations too). One getSessionFile
-    // read serves both. Order is frozen: [resume.v1?, cmd.history.v1?].
+    // read serves both. Existing token order is retained; #40 appends its independent token.
     const tokens: string[] = [];
     const x = ctx;
     const file = x === undefined ? undefined : safe(() => x.sessionManager.getSessionFile(), undefined);
@@ -971,6 +1071,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
         tokens.push(RESUME_FEATURE_V1);
     }
     if (commandRecorder !== undefined && file !== undefined) tokens.push(CMD_HISTORY_FEATURE_V1);
+    if (unknownSlashTextEnabled()) tokens.push(UNKNOWN_SLASH_TEXT_FEATURE_V1);
     return tokens.length > 0 ? tokens : undefined;
   };
 
@@ -992,16 +1093,14 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       // §4.7 step 10 (A6): held rows ride the OPEN status slot — gated ONLY on holdWired, never
       // on holdCap() (D3): a disconnect keeps the full projection in the slot, and an old hub's
       // open StatusInfoSchema ignores the unknown fields instead of dropping the frame.
-      holdOn
-        ? () => {
-            const sid = safe(() => ctx?.sessionManager.getSessionId() ?? "", "");
-            return { items: holdBuffer.project(sid, now()), rev: holdBuffer.rev(), epoch: MODULE_INSTANCE };
-          }
-        : undefined,
+      heldStatus,
       deps.load?.port,
       deps.cacheKeepalive !== undefined ? cacheKeepaliveProjection : undefined,
       resumeFeatures,
       deps.archive !== undefined ? archiveProjection : undefined,
+      // fabric-thread §7.3 (P3): status.threads — the getter itself checks the LIVE link's
+      // `thr.v1` cap; absent getter (threads off) or absent hub cap ⇒ field absent, byte-equal.
+      threadsStatusProjection,
     );
     lastLeaf = s.leafId;
     // fabric phase-2 X2 (§4.4, P3): the display-only xs projection — absent while deps.xs is
@@ -1012,6 +1111,11 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       if (xsView !== undefined) s.xs = xsView;
       const inbox = xsBridge.inboxProjection();
       if (inbox !== undefined) s.xsInbox = inbox;
+      // fabric-xs-activation plan §3 P1 (arch §4.7): the tracked-request slot — only while the
+      // mirror holds rows for the current session (absent ⇒ the status frame is byte-equal to
+      // the pre-feature shape; StatusInfoSchema is open, an old hub forwards verbatim).
+      const xsRequests = xsBridge.requestsProjection();
+      if (xsRequests !== undefined) s.xsRequests = xsRequests;
     }
     // web-hub-cmd-history plan §4.6 (A1): open command records, ≤16 newest first — present only
     // while non-empty (StatusInfoSchema is open; an old hub forwards, an old UI ignores).
@@ -1019,6 +1123,12 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       const running = commandRecorder.running();
       if (running.length > 0) s.cmdRunning = running;
     }
+    // #30 reload-result plan §1 D6: the tracked reload slot — present ONLY while a valid,
+    // non-expired record exists (deferred/started/…). TUI-origin reloads are never tracked and
+    // a web-hub-off session never wires this code path, so those status frames stay
+    // byte-identical to the pre-feature shape (StatusInfoSchema is open; old hubs/UIs ignore it).
+    const reloadView = reloadTracker.projection();
+    if (reloadView !== undefined) s.reload = reloadView;
     c.setSlot("status", { t: "status", ...s }, xsBridge?.slotFlush);
   };
 
@@ -1096,6 +1206,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     // quota-web plan §2 (D3): `QuotaService` has no events either — same 1Hz tick fingerprint
     // gate (quotaFingerprint excludes the ever-moving `at` field, see its own docstring).
     if (deps.quota !== undefined) {
+      deps.quotaCostTick?.(); // 费用折算：节流 + single-flight 在 scanner 内部
       const quotaFp = quotaFingerprint(quotaProjection());
       if (quotaFp !== lastQuotaFp) {
         lastQuotaFp = quotaFp;
@@ -1119,6 +1230,10 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
         publishStatus();
       }
     }
+    // #30 reload-result plan §1 D5: TTL constrains reads only — this same 1Hz probe catches an
+    // expiry (open 40min / closed 10min) and retracts the slot with exactly ONE publish; no
+    // new timer (I5). Regular facts publish through onReloadPhase directly.
+    if (reloadTracker.tick()) publishStatus();
     // bash-jobs-panel plan §3.7 (包 A, D3-1): the manager has no events, so the same 1Hz tick
     // carries a light-fingerprint gate over the selectJobs result (running logBytes and
     // second-level elapsed stay OUT; terminal logBytes — the footer patch — is IN, R3-2). A
@@ -1129,7 +1244,9 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       let fp = "";
       const sigs = new Map<string, string>();
       if (src !== undefined) {
-        const selected = selectJobs(src.list(), now(), deps.bashJobs.retentionMs());
+        // Same archived set the projection gets: archiving a row must flip this fingerprint (the
+        // `omitted` count changes) so the frame republishes without waiting for a job edge.
+        const selected = selectJobs(src.list(), now(), deps.bashJobs.retentionMs(), archivedBashIds());
         fp = bashJobsLightFingerprint(selected, now());
         for (const r of selected.rows) sigs.set(r.jobId, bashJobsRowSignature(r, now()));
       }
@@ -1184,6 +1301,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   };
 
   const commandHandler = createCommandHandler({
+    ...(deps.memoryProof !== undefined ? { memoryProof: deps.memoryProof } : {}),
     pi,
     getCtx: () => ctx,
     getSessionId: () => safe(() => ctx?.sessionManager.getSessionId() ?? "", ""),
@@ -1195,7 +1313,20 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     // web-hub archive plan: manual archive/unarchive from the drawer (auto sweep lives in the
     // control itself, wired from the stack).
     archive: () => deps.archive?.(),
+    // 2026-10-28 (`archive_omitted`): the same late-bound bash-jobs port the status projection
+    // reads — plus the SAME tail cache (`bashSampler.tails`) the projection consumes, so the op
+    // derives its id set from an identical projection (byte budget included).
+    ...(deps.bashJobs !== undefined
+      ? {
+          bashJobs: {
+            current: () => deps.bashJobs?.current(),
+            retentionMs: () => deps.bashJobs?.retentionMs() ?? 0,
+            tails: (gen: object) => bashSampler.tails(gen),
+          },
+        }
+      : {}),
     controlEnabled: () => settings.control !== false,
+    unknownSlashTextEnabled,
     now,
     send: (frame) => conn?.send(frame),
     // Never throws (each step isolated): commands.ts sends the cmd_result / cmd_late frame
@@ -1227,44 +1358,43 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     // web-resume plan §2.5 step c: web prompts are refused (E_STALE_CTX, effect none) while a
     // resume switch is between its execution-point checks and its post-switch verification.
     switchInFlight: () => resumeExec.switchInFlight(),
+    // fabric-thread P3 §6.1: the stack's thread surface for the prompt-routing step — unset
+    // (threads off) keeps handlePrompt byte-identical.
+    ...(deps.threads !== undefined ? { threads: () => deps.threads?.() } : {}),
   });
   bridgeLate.current = (frame, result) => commandHandler.handleBridgeLate(frame, result);
+  // fabric-thread arch r3 §6.7 (P3): the engine-reply sink — the engine's first-reply outcomes
+  // land on the handler that holds the pending cmd frames. Exposed on the control object for
+  // src/index.ts to thread into buildSessionStack (StackThreadInput.replySink).
+  const threadSink =
+    deps.threads !== undefined
+      ? {
+          replyRouted: (eventId: string, runs: ReadonlyArray<{ runId: string; label: string }>) =>
+            commandHandler.threadSettle(eventId, { kind: "routed", runs }),
+          releaseToNative: (eventId: string) => commandHandler.threadSettle(eventId, { kind: "native" }),
+          replyStaleCtx: (eventId: string) => {
+            commandHandler.threadSettle(eventId, { kind: "stale" });
+          },
+        }
+      : undefined;
 
   // §4.7 step 4 (A6): the hold driver — `undefined` while `holdWired(settings)` is false (no
   // handlers registered below, no cap advertised, prompts take the native path unconditionally).
-  // `setRefTimer` is REF'd (v4.3 Y3 / T-REF): the driver uses it exclusively inside its ≤200 ms
-  // bounded confirm phase — a wait pi is actually awaiting — while every other timer this wiring
-  // owns (commands' 30s/3s display timers, the 1Hz tick) stays unref'd so `pi -p` never wedges.
-  const holdDriver: HoldDriver | undefined = holdOn
-    ? createHoldDriver({
-        buffer: holdBuffer,
-        owner: MODULE_INSTANCE,
-        getSessionId: () => safe(() => ctx?.sessionManager.getSessionId() ?? "", ""),
-        holdCap,
-        dispatchToPi: (item) => commandHandler.dispatchHeld(item),
-        onReturned: (items) => {
-          for (const it of items) {
-            commandLedger.updatePrompt(
-              it.cmdId,
-              { promptState: "returned", ...(it.reason !== undefined ? { reason: it.reason } : {}) },
-              now(),
-            );
-          }
-        },
-        publish: () => {
-          // same never-throw isolation as onChanged (stale ctx after a real session switch)
-          safe(() => publishStatus(), undefined);
-          safe(() => publishCtl(), undefined);
-          safe(() => refreshStatusLine(), undefined);
-        },
-        now,
-        setRefTimer: (ms, fn) => {
-          const t = setTimeout(fn, ms);
-          return { cancel: () => clearTimeout(t) };
-        },
-        nextMacrotask: () => new Promise<void>((r) => setImmediate(r)),
-      })
-    : undefined;
+  // Assembly lives in hold-wire.ts (⑨-H1 pure extraction); `setRefTimer` stays REF'd (v4.3 Y3 /
+  // T-REF: the ≤200 ms bounded confirm phase is a wait pi is actually awaiting).
+  const holdDriver: HoldDriver | undefined = wireHoldDriver({
+    holdOn,
+    buffer: holdBuffer,
+    owner: MODULE_INSTANCE,
+    getSessionId: () => safe(() => ctx?.sessionManager.getSessionId() ?? "", ""),
+    holdCap,
+    ledger: commandLedger,
+    dispatchToPi: (item) => commandHandler.dispatchHeld(item),
+    publishStatus,
+    publishCtl,
+    refreshStatusLine,
+    now,
+  });
 
   /** §3.2 commands slot: the web's slash palette (policy + §4.9 output badge), refreshed on
    * (re)connect, `resources_discover` (extensions loaded mid-session change the list), hello_ack
@@ -1301,27 +1431,16 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
         : undefined,
     );
   };
-  const remoteAskUserEnabled = (): boolean =>
-    settings.control !== false && settings.remoteAskUser !== false && (deps.askUserEnabled?.() ?? true);
-  const dialogBridge = createDialogBridge({
-    setSlot: (kind, f) => conn?.setSlot(kind, f),
+  // source-governance batch2 ⑨-H1: the remote-ask_user gate + dialog bridge assembly live in
+  // dialogs-wire.ts — a pure extraction (conn/attached/ctx threaded as call-time getters).
+  const { remoteAskUserEnabled, dialogBridge } = wireDialogs({
+    settings,
+    askUserEnabled: deps.askUserEnabled,
+    conn: () => conn,
     isAttached: () => attached,
-    notify: (message) => {
-      const x = ctx;
-      try {
-        if (x === undefined || x.mode !== "tui" || !x.hasUI) return;
-        x.ui.notify(message);
-      } catch {
-        /* a stale ctx / notify failure must never affect the reply already sent */
-      }
-    },
+    getCtx: () => ctx,
     now,
-    enabled: remoteAskUserEnabled(),
     epoch: MODULE_INSTANCE,
-    send: (frame) => conn?.send(frame),
-    // ask-user-async §7.2 (P3): live hub caps — drives the by:"background" → "abort" downgrade
-    // in dialogs.ts while the connected hub lacks `dialog.bg.v1` (empty until hello_ack lands).
-    hubCaps: () => conn?.caps ?? [],
   });
   attributePromptRef.current = dialogBridge.attributePrompt;
   // fabric phase-2 X2: the xs bridge exists iff deps.xs was threaded (xsOn) — every surface it
@@ -1329,7 +1448,13 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   // getter (the closure variable swaps on every connectWith/handover).
   const xsBridge =
     deps.xs !== undefined
-      ? createXsAgentBridge({ port: deps.xs, conn: () => conn, publishStatus: () => publishStatus() })
+      ? createXsAgentBridge({
+          port: deps.xs,
+          conn: () => conn,
+          // alias-force-default §5.1 (AF3): the attach generation is one leg of the auto-claim dedup key.
+          connGen: () => connGen,
+          publishStatus: () => publishStatus(),
+        })
       : undefined;
   // scheduled-reports A0: the router sends only while the live link's hello_ack carries sched.v1.
   const schedulePort = deps.schedule;
@@ -1338,11 +1463,30 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     send: (frame) => conn?.send(frame),
   });
   const binding: BindingPort = {
-    ...(xsBridge !== undefined ? { onXsDeliver: (frame) => xsBridge.onDeliver(frame) } : {}),
+    ...(xsBridge !== undefined
+      ? {
+          onXsDeliver: (frame) => xsBridge.onDeliver(frame),
+          // alias-force-default §5.4 (AF3): the hub's alias-force nudge → the bridge's reconcile.
+          onXsAliasEvt: (frame) => xsBridge.onAliasEvt(frame),
+          // fabric-xs-activation P1: the hub's mirrored progress push → the source-side mirror.
+          onXsState: (frame: XsStateFrame) => xsBridge.onState(frame),
+          // fabric-xs-activation P3: the hub's text-free control relay → the receiver half.
+          onXsActivate: (frame) => xsBridge.onActivate(frame),
+        }
+      : {}),
     ...(schedulePort !== undefined
       ? {
           onSchedRun: (frame: SchedRunFrame) => schedulePort.onSchedRun(frame),
           onSchedReceipts: (frame: SchedReceiptsFrame) => schedulePort.onSchedReceipts(frame),
+          onSchedDecide: (frame: SchedDecideFrame) => schedulePort.onSchedDecide(frame),
+        }
+      : {}),
+    // fabric-thread P3 §5.4: thr_closed → end subscriptions + 解绑 notices. No hook (threads
+    // off) ⇒ ignored (the hub never sends it to an agent without thr.v1 anyway).
+    ...(deps.threads !== undefined
+      ? {
+          onThrClosed: (frame: import("../protocol/thread.js").ThrClosedFrame) =>
+            deps.threads?.()?.threadClosed(frame.h, frame.reason),
         }
       : {}),
     onCmd: (frame) => {
@@ -1399,6 +1543,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
             deps.cacheKeepalive !== undefined ? cacheKeepaliveProjection : undefined,
             resumeFeatures,
             deps.archive !== undefined ? archiveProjection : undefined,
+            threadsStatusProjection,
           ),
           fleet: projectFleet(snaps, now(), deps.fleetTypeOf),
         }),
@@ -1597,11 +1742,25 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
         staleMessageS: bot.staleMessageS,
         files: { ...bot.files },
       };
+      // fabric-thread arch r3 §4.2/§8.2 (P3)：`feishuBot.threads` 键的存在即 hub 侧开关。只写
+      // clamp 后的窗口/回帖参数（同一 HubConfig 喂给本 agent 拉起的 hub ⇒ 残余同 R11）；
+      // threads 关闭 ⇒ 键缺席 ⇒ hub 字节一致（G2a），P2 休眠唤醒点即在此处接通。
+      const thrCfg = deps.threadsHubConfig?.();
+      if (thrCfg !== undefined) config.feishuBot.threads = thrCfg;
     }
     return config;
   };
 
-  const capsExtra = (): readonly string[] => {
+  // #23 web-update-stuck plan §2.2 (D13): the caps the agent ADVERTISES are `baseCapsExtra()`
+  // plus — only when hold is NOT wired into this config — the tail-appended `epoch.up.v1`.
+  // holdWired = control ∧ steerRecall; every config that leaves hold out (control:false or
+  // steerRecall:false) would otherwise publish NO epoch-refresh signal on /reload-style epoch
+  // changes (the hub's D14 gate answers hold.v1 OR epoch.up.v1). Appending only when
+  // `HOLD_CAP` is absent keeps every DEFAULT hello byte-identical — the five A-tier goldens
+  // (thread-off / thread-rebind-off / fabric-xs-off / fabric-xs-reply-off / schedule-off) all
+  // carry hold.v1 and must never regenerate (AGENTS.md Frozen artifacts) — and every other
+  // config differs from its pre-#23 hello by exactly one trailing entry (compat golden s3).
+  const baseCapsExtra = (): readonly string[] => {
     const caps: string[] = [];
     // fleet-drawer §4.4 (F2): runtx is the READ plane — advertised independently of `control`
     // ("all" ⇒ runtx.v1 + runtx.lan.v1, "loopback" ⇒ runtx.v1 only, "off" ⇒ neither).
@@ -1638,8 +1797,26 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     // `extraHubCaps` tail append. xsOn ⇒ control is on (the switch requires it), so the early
     // `!control` return above has already passed when we get here.
     if (xsBridge !== undefined) caps.push(...xsBridge.caps());
-    // scheduled-reports A0 (§10.1): tail-appended, only while the schedule router exists.
+    // scheduled-reports A0 (§10.1) + #61 C2 (sched.confirm.v1): tail-appended, only while the
+    // schedule router exists.
     if (schedulePort !== undefined) caps.push(...SCHED_AGENT_CAPS);
+    // fabric-thread arch r3 §7.1 (P3): the agent-side `thr.v1` cap — `fabric.enabled ∧
+    // fabric.threads.enabled ∧ 非 secure`, computed at ACTIVATE level by src/index.ts
+    // (secure domains force threads off in the settings parser already, D8/I11). Tail-appended
+    // like xs/sched. Off ⇒ absent ⇒ the hub never attaches `cmd.thread` (G2a/G2b).
+    // rebind-plan r3 §4.2 (P0b): `thr.rebind.v1` rides IMMEDIATELY after `thr.v1`, iff
+    // `threadsRebindCapOn()` (§4.2: `threadsCapOn() && rebindOn()` — the outer check already
+    // covers threadsCapOn).
+    if (deps.threadsCapOn?.() === true) {
+      caps.push(THREAD_CAP);
+      if (deps.threadsRebindCapOn?.() === true) caps.push(...THREAD_REBIND_AGENT_CAPS);
+    }
+    return caps;
+  };
+
+  const capsExtra = (): readonly string[] => {
+    const caps = [...baseCapsExtra()];
+    if (!caps.includes(HOLD_CAP)) caps.push(...EPOCH_UP_AGENT_CAPS);
     return caps;
   };
 
@@ -1716,6 +1893,8 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   on("session_start", (event, c) => {
     if (c.mode !== "tui" && c.mode !== "rpc") return; // print/json: never attach
     generation += 1;
+    speedOwnerToken = {};
+    speed.reset();
     const gen = generation;
     ctx = c;
     attached = true;
@@ -1745,6 +1924,14 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     // happens immediately (subject to isLive()); same-cwd /new・/resume・/fork keeps the cache.
     bashSampler.start(); // bash-jobs-panel plan §3.7: clear cache/generations + re-kick — a new
     // stack means a new manager instance anyway (D3-4 session boundaries).
+    // #30 reload-result plan §1 D4: reload handover validation — consume the marker and complete
+    // the tracked record iff EVERY identity condition holds (reason, sessionId + sessionFile,
+    // originEpoch ≠ this activation, shutdownAt written, the 120s window, the record's life).
+    // BEFORE the attach below so the completed projection is already in place for it (the
+    // record's own change probe drops the publish while `conn` is still undefined — the
+    // replayed slot then carries it, D9); a failed validation leaves the record started (UI
+    // infers via its effect timer / version).
+    reloadTracker.onSessionStart(reasonOf(event));
     // O(branch entries) cost sum, deferred so session_start returns at once.
     const im = setImmediate(() => {
       if (gen !== generation) return;
@@ -1768,6 +1955,8 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   on("session_shutdown", (event) => {
     if (!attached) return;
     attached = false;
+    speedOwnerToken = {};
+    speed.reset();
     generation += 1;
     stopTick();
     // web-hub-slash-args plan §4.5 (P1): drop the captured S-tui provider (the wrappers list
@@ -1800,6 +1989,12 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     resumeExec.onSessionBoundary();
     resumeList.onShutdown();
     dialogBridge.detachAll();
+    // #30 reload-result plan §1 D3/D4: the boundary facts — shutdown{reload} completes the
+    // handover marker's shutdownAt (never a frame: the marker does not ride the wire) and
+    // supersedes a still-parked record; a non-reload shutdown cancels an open record as
+    // session|quit. Record mutations persist in the process-global store; the NEXT
+    // activation's publishes carry them (a quit publishes nothing — the UI infers offline).
+    reloadTracker.onSessionShutdown(reasonOf(event));
     tap.dispose();
     // §4.4 (F2 verifier P1): session replacement is a RESET, not a kill — /new・/resume・/fork
     // re-enter session_start inside this same activation and the run service must answer again
@@ -1827,7 +2022,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     on(type, (event, c) => {
       if (!attached) return;
       if (c !== undefined) ctx = c;
-      tap.handle(event as { type: string } & Record<string, unknown>);
+      speedWire.forward(tap, event as { type: string } & Record<string, unknown>);
       // tool-duration plan: `turn_end` fires after the turn's tool executions (pi-agent-core
       // emits it from the loop right after executeToolCalls), so it is the flush point.
       if (type === "turn_end") flushToolTimings();
@@ -1867,52 +2062,25 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
 
   // web-hub-steer-recall §4.7 step 5 (A6): the hold driver's OWN handlers, registered exactly
   // once per activate() — this wiring is their single owner (W5: /new・/resume・/fork re-enter
-  // session_start inside the same activation and re-register nothing). They sit AFTER the
-  // FORWARDED loop above so the tap/publish bookkeeping for the same event runs first; the
-  // `turn_end`/`agent_end` handlers may return a Promise (pi awaits them — the bounded confirm
-  // phase) and NEVER return `entries`/`continue` (the loop's own turn_end handler owns those
-  // semantics). Every handler detaches on its first line while not attached (child sessions,
-  // print mode). Registered ONLY while `holdOn` (W1: zero new handlers with steerRecall off).
+  // session_start inside the same activation and re-register nothing). The registrations sit
+  // AFTER the FORWARDED loop above so the tap/publish bookkeeping for the same event runs first
+  // (the bodies live in hold-wire.ts, ⑨-H1 pure extraction; the guard's ctx adoption writes
+  // back through adoptCtx). Registered ONLY while `holdOn` (W1: zero new handlers with
+  // steerRecall off).
   if (holdDriver !== undefined) {
-    const drv = holdDriver;
-    // Plan §4.7 step 5's handler preamble, verbatim order: detach FIRST, then adopt the event's
-    // ctx — an unattached event (child session / post-shutdown) writes nothing at all.
-    const guard = (c: ExtensionContext | undefined): ExtensionContext | undefined => {
-      if (!attached) return undefined;
-      if (c !== undefined) ctx = c;
-      return ctx;
-    };
-    on("context", (_event, c) => {
-      const x = guard(c);
-      if (x === undefined) return undefined;
-      drv.onContext(x); // ARM (P-core §5.1): the only phase a new prompt can be held in
-      return undefined;
-    });
-    on("turn_start", (_event, c) => {
-      const x = guard(c);
-      if (x === undefined) return undefined;
-      drv.onTurnStart(x); // best-effort skip-detect (C4/A-SKIP): phase still armed ⇒ last turn_end never ran
-      return undefined;
-    });
-    on("turn_end", (event, c) => {
-      const x = guard(c);
-      if (x === undefined) return undefined;
-      return drv.onTurnEnd(event as TurnEndLike, x); // Promise ⇔ exactly one item was handed to pi
-    });
-    on("agent_end", (_event, c) => {
-      const x = guard(c);
-      if (x === undefined) return undefined;
-      return drv.onAgentEnd(x); // run ending: B1-blocked leftovers return to the browser (R-A)
-    });
-    on("agent_settled", (_event, c) => {
-      const x = guard(c);
-      if (x === undefined) return undefined;
-      drv.onAgentSettled(x); // NEVER dispatches (I-EMPTY / C3); defensive leftovers ⇒ returned{stale}
-      return undefined;
+    registerHoldHandlers({
+      on,
+      driver: holdDriver,
+      isAttached: () => attached,
+      getCtx: () => ctx,
+      adoptCtx: (c) => {
+        ctx = c;
+      },
     });
   }
 
   interface HubJsonSnapshot {
+    agentDir?: string;
     pid?: number;
     procStartTicks?: number;
     argv?: string[];
@@ -1927,6 +2095,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     try {
       const parsed = JSON.parse(readFileSync(paths.hubJson, "utf8")) as Record<string, unknown>;
       const rec: HubJsonSnapshot = {};
+      if (typeof parsed.agentDir === "string" && parsed.agentDir !== "") rec.agentDir = parsed.agentDir;
       if (typeof parsed.pid === "number") rec.pid = parsed.pid;
       if (typeof parsed.procStartTicks === "number") rec.procStartTicks = parsed.procStartTicks;
       if (Array.isArray(parsed.argv) && parsed.argv.every((a) => typeof a === "string")) {
@@ -2035,7 +2204,24 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     });
   };
 
-  const aliasStatusLines = (): string[] => formatAliasStatusLines(readHubJsonRecord()?.alias);
+  // #54 P4: reuse the existing status-only warning channel; no new command or wire surface.
+  const aliasStatusLines = (): string[] => {
+    const rec = readHubJsonRecord();
+    const lines = formatAliasStatusLines(rec?.alias);
+    if (rec === undefined) return lines; // stopped / unreadable hub: no directory to diagnose
+    const sessionDir = resolveAgentDir(env, home);
+    const hubDir = rec.agentDir ?? sessionDir.home;
+    const display = (dir: string): string => dir.replace(/[\x00-\x1f\x7f-\x9f]/g, "");
+    if (rec.agentDir === undefined && sessionDir.source === "env") {
+      lines.push("hub 的 agentDir 未知（旧版 hub 或默认）；缺失字段按 ~/.pi/agent 判断。");
+    }
+    if (hubDir !== sessionDir.dir) {
+      lines.push(
+        `hub agentDir ${display(hubDir)} ≠ 本会话 ${display(sessionDir.dir)}：网页新建会话使用 hub 的目录；如需切换，请从目标环境执行 /webhub restart。`,
+      );
+    }
+    return lines;
+  };
 
   const sendLanReq = async (op: "info" | "unlock"): Promise<LanAdminResult<LanInfoPayload | undefined>> => {
     const c = conn;
@@ -2166,6 +2352,18 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     });
 
   const admin = createAdminCommands();
+  const threadsStatusProjection =
+    deps.threads !== undefined
+      ? (): ThreadStatusSlotWire[] | undefined => {
+          const c = conn;
+          if (c === undefined || c.status().state !== "live" || !c.caps.includes(THREAD_CAP)) return undefined;
+          try {
+            return deps.threads?.()?.statusSlots();
+          } catch {
+            return undefined;
+          }
+        }
+      : undefined;
   return {
     // todo #32 P0 fix: without this, `src/index.ts`'s `if (webHubRef.current.capture !== undefined)
     // commandCaptureRef.current = webHubRef.current.capture;` line never fires, so the web call
@@ -2175,6 +2373,13 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     // byte-identically once the ref is actually populated.
     capture: commandCapture,
     ...(commandRecorder !== undefined ? { recorder: commandRecorder } : {}),
+    // #30 reload-result plan §1 D6: the deferred-reload command port's phase sink — assembled
+    // late-bound in src/index.ts (`() => webHubRef.current?.onReloadPhase?.(event)`), so no
+    // new pi.on and no handlerCounts change (I9). Optional like `capture` so pre-feature
+    // WebHubControl doubles keep compiling.
+    onReloadPhase: (event) => reloadTracker.onPhase(event),
+    // fabric-thread P3: exposed for src/index.ts → buildSessionStack (StackThreadInput.replySink).
+    ...(threadSink !== undefined ? { threadSink } : {}),
     internalExec: async (args, ctx) => {
       const parts = args
         .trim()
@@ -2247,6 +2452,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       return { ok: false, code: "E_UNSUPPORTED" };
     },
     askUserRemote: () => (remoteAskUserEnabled() ? dialogBridge : undefined),
+    memoryHubPaths: () => paths,
     attributeInput: (text) =>
       safe(
         () =>
@@ -2255,6 +2461,9 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
             : undefined,
         undefined,
       ),
+    // 2026-11-04 mention-handled fix: late-bound to the handler above (same closure discipline
+    // as `attributeInput` — never throws, a stale/broken report is swallowed and ignored).
+    noteInputHandled: (text) => safe(() => commandHandler.onInputHandled(text), undefined),
     admin,
     status: () => conn?.status() ?? { state: "off", attached: false },
     url: () => hubUrl(paths, conn),
@@ -2287,10 +2496,12 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
             publishMember: () => xsBridge.publishMember(),
             notifyUnreadChanged: () => xsBridge.notifyUnreadChanged(),
             hubPort: () => xsBridge.hubPort(),
+            progressPhaseOf: (sid: string, rid: string) => xsBridge.progressPhaseOf?.(sid, rid),
             resolveBlock: (query: string) => xsBridge.resolveBlock(query),
             hubInfo: () => xsBridge.hubInfo(),
             aliasBridge: () => xsBridge.aliasBridge(),
             aliasCache: () => xsBridge.aliasCache(),
+            aliasAutoSkip: () => xsBridge.aliasAutoSkip(),
           },
         }
       : {}),

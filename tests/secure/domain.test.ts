@@ -1,4 +1,14 @@
-import { appendFileSync, existsSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -6,6 +16,7 @@ import {
   canonicalPath,
   computeSecureDomain,
   getSecureDomain,
+  judgeVaultMount,
   initSecureDomain,
   isPrivateNsSession,
   judgePrivateNsGate,
@@ -1000,5 +1011,31 @@ describe("review round 2 #1 — a present-but-unusable secure section gates to u
     ).toBe("unusable");
     expect(secureConfigNsFactor({ present: true, enabled: false, valid: true, vaults: [], invalid: [] })).toBe("off");
     expect(secureConfigNsFactor({ present: true, enabled: true, valid: true, vaults: [], invalid: [] })).toBe("ok");
+  });
+});
+
+describe("#28 judgeVaultMount with a symlinked ancestor of <dir>", () => {
+  it("source = realpath(dir)/cipher ⇒ ok; lexical spelling ⇒ foreign", () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-secure-sym-")));
+    try {
+      mkdirSync(join(root, "data", "share", "v", "cipher"), { recursive: true });
+      symlinkSync(join(root, "data"), join(root, "link"));
+      const mnt = join(root, "home", "secure", "acme");
+      mkdirSync(join(mnt, "state"), { recursive: true });
+      const dir = join(root, "link", "share", "v");
+      const real = realpathSync(dir);
+      expect(real).not.toBe(dir);
+      const v = { vault: { name: "acme", dir, mnt }, root: real, mntReal: mnt } as unknown as Parameters<
+        typeof judgeVaultMount
+      >[0];
+      expect(judgeVaultMount(v, () => mountLine(mnt, "fuse.gocryptfs", join(real, "cipher")) + "\n")).toEqual({
+        ok: true,
+      });
+      const lex = judgeVaultMount(v, () => mountLine(mnt, "fuse.gocryptfs", join(dir, "cipher")) + "\n");
+      expect(lex.ok).toBe(false);
+      expect(lex.ok === false && lex.reason).toMatch(/不是它自己的 gocryptfs 挂载/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

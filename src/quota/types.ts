@@ -12,7 +12,7 @@
 import type { Millis } from "../core/types.js";
 
 /** auth store / pi model registry 的 provider id（二者逐字相同，见 plan §0）。 */
-export type StaticQuotaProviderId = "zai-coding-cn" | "zai" | "kimi-coding";
+export type StaticQuotaProviderId = "zai-coding-cn" | "zai" | "kimi-coding" | "opencode-go";
 
 /**
  * droid 额度接入（docs/dev/external-agent/quota-plan.md r2 §2.1，D1）：Factory 的
@@ -25,12 +25,13 @@ export type DroidQuotaProviderId = "droid-standard" | "droid-core";
 export type QuotaProviderId = StaticQuotaProviderId | DroidQuotaProviderId;
 
 export const QUOTA_PROVIDER_IDS: readonly QuotaProviderId[] = [
-  // 旧三者顺序不变（字节不变承诺）。
+  // 旧序不变（字节不变承诺）；新 provider 只许尾部追加。
   "zai-coding-cn",
   "zai",
   "kimi-coding",
   "droid-standard",
   "droid-core",
+  "opencode-go",
 ];
 
 export const DROID_QUOTA_IDS: readonly DroidQuotaProviderId[] = ["droid-standard", "droid-core"];

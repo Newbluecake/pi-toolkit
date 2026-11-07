@@ -2,12 +2,8 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  DEFAULT_SETTINGS,
-  loadSettings,
-  loadSettingsFromFile,
-  parseExtendSettings,
-} from "../../src/config/settings.js";
+import { DEFAULT_SETTINGS, loadSettings, loadSettingsFromFile } from "../../src/config/settings.js";
+import { parseExtendSettings } from "../../src/delivery/extend-settings.js";
 import { SETTING_SPECS } from "../../src/config/setting-specs.js";
 
 describe("config/extend-settings: parseExtendSettings", () => {

@@ -95,6 +95,15 @@ export interface Runner {
   /** M4: EventWatchdog 的超时入口——折进状态机并解除 prompt guard 的阻塞。 */
   fireDeadline?(runId: RunId, generation: number, input: Extract<RunInput, { kind: "deadline_fired" }>): void;
   /**
+   * fabric-thread P4（§6.4，E2E 验收发现的真 bug修复）：bounded、保留 disposition 的 thread
+   * steer 通道（RuntimeRunner.steerThreadRun 的适配器透传）。可选 —— stack.ts 的
+   * `ThreadRunnerLike` 结构类型只在 threads 开启时调用；缺席（旧 fake/测试）⇒ thread 订阅
+   * 面报 `steer_thread unwired`，其余行为不变。
+   */
+  steerThreadRun?(runId: RunId, text: string, capMs: number): Promise<string>;
+  /** fabric-thread P4（§5.1）：本 run 当前是否持有可 steer 的活会话句柄（同步注册表读）。 */
+  hasActiveSession?(runId: RunId): boolean;
+  /**
    * timeout-notify：延长 run 的软截止（deadlineAt）。**同步**返回（D-9：检查—派发—回读之间
    * 无 await，单线程事件循环内串行，消除与 watchdog tick 的 TOCTOU）。老实现缺席此方法
    * 时调用方按 `{ ok: false, reason: "unsupported" }` 处理。

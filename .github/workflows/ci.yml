@@ -33,12 +33,30 @@ jobs:
       - name: Build web UI
         run: npm run build:web && npm run check:web
 
-      - name: Test
-        run: npm test
+      # startup-bundle plan r3 §6.3: the bundle gates run BEFORE the test suite (the dispatcher
+      # suite asserts the on-disk artifact matches a fresh build), and they enforce reproducibility,
+      # the 6 MB budget, src-only inputs and zero dynamic imports.
+      - name: Build bundle (gated)
+        run: npm run build:bundle
+
+      - name: Test (tier 1)
+        id: tier1
+        run: npm run test:tier1
         env:
           PWH_REQUIRE_UI_DIST: "1"
           # Fewer workers than the 4-vCPU runner allows: CI time is cheap, and the timing-sensitive
-          # integration tests (real hub children, perf ratios) flake under CPU contention.
+          # tests (real hub children, perf ratios) flake under CPU contention.
+          PI_TOOLKIT_TEST_WORKERS: "2"
+
+      # test-speed plan D7: tier 2 (env-sensitive: integration, conformance, real mounts) runs only
+      # once tier 1 actually executed — if npm ci or a build step failed, tier 1 was skipped and
+      # tier 2 must not run either; !cancelled() keeps it from starting on cancellation. The
+      # real-mount secure suites keep self-skipping on runners without FUSE (status quo).
+      - name: Test (tier 2 + secure)
+        if: ${{ !cancelled() && (steps.tier1.outcome == 'success' || steps.tier1.outcome == 'failure') }}
+        run: npm run test:tier2
+        env:
+          PWH_REQUIRE_UI_DIST: "1"
           PI_TOOLKIT_TEST_WORKERS: "2"
 
       - name: Build

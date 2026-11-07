@@ -15,7 +15,7 @@ const spawn = {
   itemPickDir: "Choose a directory…",
   // main-button clicks while spawn is unavailable (2026-10 redesign point 3)
   unavailableHint:
-    'Headless sessions are off: set webHub.spawn.enabled: true in ~/.pi/agent/pi-subagent.json (over LAN also webHub.spawn.lan: "known"), then /reload and /webhub restart.',
+    'Headless sessions are off: set webHub.spawn.enabled: true in ~/.pi/agent/pi-toolkit.json (over LAN also webHub.spawn.lan: "known"), then /reload and /webhub restart.',
   retryHint: "Checking whether this hub supports headless sessions — click again.",
   // 「替换当前会话（/new）」 inline confirm bar (AgentList)
   replaceConfirmTitle: "Replace current session",

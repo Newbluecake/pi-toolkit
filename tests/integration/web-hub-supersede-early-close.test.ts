@@ -13,10 +13,17 @@ import type { FrontendFactory, LanAssembly } from "../../src/web-hub/hub/ports.j
 import { LanAssemblyOffError } from "../../src/web-hub/hub/lan-assembly.js";
 import { SUPERSEDE_YIELD_MS } from "../../src/web-hub/hub/supersede.js";
 import { resolveHubPaths, webHubSpawnFiles } from "../../src/web-hub/protocol/paths.js";
+import { SUPPORTED_PI_RANGE } from "../../src/web-hub/protocol/spawn.js";
 import { SETTINGS } from "../web-hub/agent/helpers.js";
 import { config, connectClient, hello, tmpDirs, waitFor, type TestClient } from "../web-hub/hub/helpers.js";
 
 const tmp = tmpDirs();
+
+/**
+ * The pi version the fixture launcher's package claims — a SUPPORTED host version, so the hub's
+ * SP7 launcher check admits the spawn and the supersede behaviour under test is what runs.
+ */
+const FAKE_PI_HOST_VERSION = SUPPORTED_PI_RANGE.min;
 const hubs: RunningHub[] = [];
 const clients: TestClient[] = [];
 const connections: HubConnection[] = [];
@@ -307,7 +314,7 @@ describe("real startHub early close", () => {
       mkdirSync(pkg, { recursive: true });
       writeFileSync(
         join(pkg, "package.json"),
-        JSON.stringify({ name: "@earendil-works/pi-coding-agent", version: "1.0.2" }),
+        JSON.stringify({ name: "@earendil-works/pi-coding-agent", version: FAKE_PI_HOST_VERSION }),
       );
       const cli = join(pkg, "pi.mjs");
       copyFileSync(resolve("tests/integration/fixtures/fake-rpc-pi.mjs"), cli);

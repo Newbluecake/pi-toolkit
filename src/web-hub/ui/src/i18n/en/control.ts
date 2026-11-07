@@ -41,6 +41,14 @@ const control = {
   stopConfirm: "Confirm stop",
   stopAria: "Stop the current turn",
   stopArmed: "Armed — click again to confirm, Esc to cancel",
+  stopHelp:
+    "Hold for 0.7 seconds to stop; release, move away or scroll to cancel. Keyboard or assistive technology: activate, then confirm.",
+  stopAlternative: "Stop without holding: open confirmation",
+  stopHolding: "Hold to stop — release to cancel",
+  stopCancelled: "Hold cancelled — not stopped",
+  stopHint: "Hold for 0.7 seconds to stop",
+  stopPending: "Stop requested — waiting for result",
+  stopConfirmTitle: "Stop the current turn?",
   stopQueueNote: "{n} queued message(s) will still be sent",
 
   // --- queue list (§7.4/§7.7) — badges are compact English tokens in both languages ---
@@ -119,6 +127,7 @@ const control = {
   outputHere: "output here",
   outputTerminal: "output in terminal",
   cmdDeniedTerminal: "Terminal only",
+  cmdUnknownText: "No matching command; sent as text once confirmed unknown",
   cmdDeniedUnknown: "Unknown command — never sent as plain text",
   cmdConfirmAria: "Run {cmd}?",
   cmdConfirmDo: "Run",

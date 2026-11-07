@@ -19,6 +19,7 @@ import { config, connectClient, hello, type TestClient } from "../web-hub/hub/he
 import { login, openSse } from "../web-hub/http/helpers.js";
 import { parseAttachmentBlock } from "../../src/web-hub/protocol/upload.js";
 import { resolveHubPaths } from "../../src/web-hub/protocol/paths.js";
+import { SUPPORTED_PI_RANGE } from "../../src/web-hub/protocol/spawn.js";
 import { FSB_HUB_CAP } from "../../src/web-hub/protocol/version.js";
 import type { CmdFrame } from "../../src/web-hub/protocol/messages.js";
 
@@ -156,6 +157,12 @@ afterEach(async () => {
   for (const home of homes) rmSync(home, { recursive: true, force: true });
   homes.clear();
 }, 25_000);
+/**
+ * The pi version the fixture launcher's package claims — a SUPPORTED host version, so the hub's
+ * SP7 launcher check admits the spawn and the Feishu behaviour under test is what runs.
+ */
+const FAKE_PI_HOST_VERSION = SUPPORTED_PI_RANGE.min;
+
 function newHome() {
   const home = mkdtempSync(join(tmpdir(), "pwh-f10-"));
   homes.add(home);
@@ -182,7 +189,7 @@ async function boot(
     mkdirSync(pkg, { recursive: true });
     writeFileSync(
       join(pkg, "package.json"),
-      JSON.stringify({ name: "@earendil-works/pi-coding-agent", version: "1.2.0" }),
+      JSON.stringify({ name: "@earendil-works/pi-coding-agent", version: FAKE_PI_HOST_VERSION }),
     );
     copyFileSync(resolve("tests/integration/fixtures/fake-rpc-pi.mjs"), join(pkg, "pi.mjs"));
     writeFileSync(join(cwd, ".fake-pi-switches"), "--cmd-echo\n");
@@ -589,7 +596,7 @@ describe("F10 Feishu bot — real hub child assembly", () => {
     );
     // Establish real tenant evidence before the real approval port issues callback nonces.
     await h.send("/list");
-    await h.sent("One · sessio");
+    await h.sent("One · idle");
     expect(await admin("tfa_req", { op: "feishu", on: true })).toMatchObject({ ok: true });
     const f = await post("127.0.0.5", "/api/login", loginBody);
     expect(f.status).toBe(401);
@@ -642,7 +649,7 @@ describe("F10 Feishu bot — real hub child assembly", () => {
     expect(a.ack.caps).toEqual(h.ready.caps);
     expect(h.ready.caps).toContain(FSB_HUB_CAP);
     await h.send("/list");
-    await h.sent("One · sessio");
+    await h.sent("One · idle");
     await h.send("/use 1");
     await h.sent("已绑定");
     await h.send("write report");
@@ -675,8 +682,11 @@ describe("F10 Feishu bot — real hub child assembly", () => {
       a = await h.agent();
     await h.send("/help");
     await h.sent("/file");
+    // #40: unknown slash inputs are delivered as ordinary text — never an "unknown command"
+    // notice. Unbound, it reaches the prompt binding check (no-session-bound) and never dispatches.
     await h.send("/not-a-command");
-    await h.sent("未知命令 /not-a-command");
+    const unknownState = await h.sent("尚未绑定会话");
+    expect(unknownState.sent.filter((m) => String(m.body.content).includes("未知命令"))).toHaveLength(0);
     await h.bind();
     await h.send("/cur");
     await h.sent("One · sessio");

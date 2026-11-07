@@ -27,7 +27,7 @@ export function inboxRecord(patch: Partial<FabricRecord> = {}): FabricRecord {
     key: makeMessageKey(sender, target, 1, 1),
     from: sender,
     to: target,
-    kind: "finding",
+    kind: "report",
     seq: 1,
     generation: 1,
     payload: { text: "parked payload" },
@@ -121,7 +121,7 @@ export function inboxRig(
     throttle,
     {
       maxPerRun: 20,
-      findingQuota: 20,
+      reportQuota: 20,
       directiveQuota: 20,
       deadLetterQuota: 20,
       maxChars: 1000,

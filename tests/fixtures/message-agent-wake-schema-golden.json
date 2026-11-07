@@ -13,7 +13,7 @@
           "type": "string"
         },
         {
-          "const": "finding",
+          "const": "report",
           "type": "string"
         },
         {

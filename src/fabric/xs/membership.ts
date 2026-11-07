@@ -1,5 +1,5 @@
 import { systemClock, type Clock } from "../../core/clock.js";
-import { effectiveReceive, isValidXsSessionId } from "../../config/settings.js";
+import { effectiveReceive, isValidXsSessionId } from "./receive.js";
 import type { XsReceiveWire } from "../../web-hub/protocol/xs.js";
 import {
   XS_DEFAULT_CHANNEL,
@@ -86,6 +86,30 @@ const XS_EPOCH_KEY = Symbol.for("pi-subagent:xs-epoch");
 export function getXsEpochCounter(): XsEpochCounter {
   const globals = globalThis as Record<symbol, XsEpochCounter | undefined>;
   return (globals[XS_EPOCH_KEY] ??= new XsEpochCounter());
+}
+
+/**
+ * /new membership handoff (new-session-channels-fix): `/new` (and its web 「清空」 twin) replaces
+ * the session with a FRESH sessionId inside the same process, so the new branch carries no
+ * `subagent:xs-membership` entry and the channels would be lost. The outgoing stack's explicit
+ * membership state rides this single-slot process global (I4: capacity 1, consume-once TTL =
+ * the next `session_start`) from `session_shutdown{reason:"new"}` into the next stack build.
+ * Forks never write it (P10 stays: fork/copied entries are still ignored by `restore`), and a
+ * shutdown for any other reason leaves the slot untouched — the next `session_start` always
+ * consumes (and drops) whatever is here unless its own reason is "new".
+ */
+const XS_HANDOFF_KEY = Symbol.for("pi-subagent:xs-membership-handoff");
+
+export function stashXsMembershipHandoff(entry: XsMembershipEntryData): void {
+  (globalThis as Record<symbol, unknown>)[XS_HANDOFF_KEY] = entry;
+}
+
+/** Consume-once read: returns the stashed entry (if any) and clears the slot. */
+export function takeXsMembershipHandoff(): XsMembershipEntryData | undefined {
+  const globals = globalThis as Record<symbol, XsMembershipEntryData | undefined>;
+  const entry = globals[XS_HANDOFF_KEY];
+  delete globals[XS_HANDOFF_KEY];
+  return entry;
 }
 
 /**
@@ -186,6 +210,8 @@ export class XsMembership implements XsChannelView {
   private blocked: XsBlockEntry[] = [];
   private joinedAt: number | undefined;
   private restored = false;
+  /** /new handoff: explicit human state exists (a matching entry was restored or any mutation flushed). */
+  private explicit = false;
 
   constructor(private readonly deps: XsMembershipDeps) {
     this.clock = deps.clock ?? systemClock;
@@ -266,6 +292,12 @@ export class XsMembership implements XsChannelView {
     }
     this.restored = true;
     if (entry.sessionId !== this.deps.sessionId) return; // fork / copied file (P10)
+    this.applyEntry(entry);
+    this.explicit = true;
+  }
+
+  /** §2.4 entry application shared by `restore` and `adopt`. */
+  private applyEntry(entry: XsMembershipEntryData): void {
     // §2.4: a legal `channels` array wins (already normalized + capped by the reader; re-run
     // defensively for hand-built entries); otherwise the legacy `joined ⇒ [default]`.
     const channels = entry.channels === undefined ? [] : capChannels(entry.channels);
@@ -273,6 +305,31 @@ export class XsMembership implements XsChannelView {
     this.receiveState = entry.receivePref ?? entry.receive;
     this.blocked = entry.blocked.filter((b) => isValidXsSessionId(b.sessionId)).slice(0, this.blockCap);
     if (typeof entry.joinedAt === "number") this.joinedAt = entry.joinedAt;
+  }
+
+  /**
+   * /new handoff (new-session-channels-fix): the state a SAME-PROCESS `/new` successor should
+   * inherit, or undefined when this membership carries no explicit human state (never joined/
+   * left/blocked and no matching entry restored) — in that case the successor behaves exactly
+   * like a fresh session today (autoJoin still applies). An explicit LEAVE is explicit state
+   * too, so the successor stays un-joined (mirroring "explicit persisted leave wins over
+   * autoJoin").
+   */
+  handoffSnapshot(): XsMembershipEntryData | undefined {
+    return this.explicit ? this.toEntryData() : undefined;
+  }
+
+  /**
+   * /new handoff: apply the outgoing session's snapshot IGNORING its sessionId (the whole point
+   * of the handoff — unlike `restore`, which rejects mismatches for fork safety) and persist it
+   * under THIS session's id so a later `/reload` restores it. Call at most once per stack build,
+   * after `restore` found no entry of its own. No epoch bump: attach() already bumped for this
+   * stack and no in-flight origin can exist yet.
+   */
+  adopt(entry: XsMembershipEntryData): void {
+    this.applyEntry(entry);
+    this.explicit = true;
+    this.flush();
   }
 
   /**
@@ -445,6 +502,7 @@ export class XsMembership implements XsChannelView {
   }
 
   private flush(): void {
+    this.explicit = true; // join/leave/receive/block/unblock/adopt are all explicit human state
     this.deps.persist(this.toEntryData());
   }
 }

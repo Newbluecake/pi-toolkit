@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { formatMessage, type MessageKind } from "../../../src/core/message.js";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { LIMITS, type WireEntry, type WireMessage } from "../../../src/web-hub/protocol/messages.js";
@@ -14,6 +15,7 @@ import {
 } from "../../../src/web-hub/protocol/keys.js";
 
 const FIXTURE = fileURLToPath(new URL("../../../tests/fixtures/web-hub/session-sample.jsonl", import.meta.url));
+const LEGACY_KIND: string = "finding"; // #34 legacy input
 
 function loadFixture(): unknown[] {
   return readFileSync(FIXTURE, "utf8")
@@ -111,7 +113,7 @@ describe("customKey", () => {
         from: "r_ABC12345",
         fromLabel: "secreview:-secure-V6-wiring",
         to: "root",
-        kind: "finding",
+        kind: "report",
         state: "delivered",
         payload: { text: "body" },
       },
@@ -148,7 +150,7 @@ describe("customKey", () => {
     const noSender = projectSessionEntry({
       type: "custom",
       customType: "subagent:fabric",
-      data: { key: "k12", to: "root", kind: "finding", state: "delivered", payload: { text: "anon" } },
+      data: { key: "k12", to: "root", kind: "report", state: "delivered", payload: { text: "anon" } },
       id: "f12",
       parentId: null,
       timestamp: "2026-10-07T00:00:08.000Z",
@@ -642,5 +644,93 @@ describe("truncateText", () => {
   it("handles maxBytes 0", () => {
     expect(truncateText("x", 0)).toEqual({ text: "", truncated: true });
     expect(truncateText("", 0)).toEqual({ text: "", truncated: false });
+  });
+});
+
+describe("#34 fabric kind rename vs the hub wire projection", () => {
+  const project = (data: unknown, id: string, ts: string) =>
+    projectSessionEntry({
+      type: "custom",
+      customType: "subagent:fabric",
+      data,
+      id,
+      parentId: null,
+      timestamp: ts,
+    });
+
+  it("T-U7: a delivered display record with a pre-#34 kind still projects as a custom_message, sender-only header", () => {
+    const legacy = project(
+      {
+        key: "k13",
+        from: "r_ABC12345",
+        to: "root",
+        kind: LEGACY_KIND,
+        state: "delivered",
+        payload: { text: "old body" },
+      },
+      "f13",
+      "2026-10-07T00:00:09.000Z",
+    );
+    expect(legacy).toBeDefined();
+    expect(legacy!.type).toBe("custom_message");
+    expect(legacy!.customType).toBe("subagent:fabric");
+    expect(legacy!.content).toBe("[@r_ABC12345]\nold body");
+    expect(JSON.stringify(legacy)).not.toContain(`kind=${LEGACY_KIND}`);
+  });
+
+  it("T-U15: a context message differs ONLY in the content text — identical key set, key order and bytes", () => {
+    const mkRecord = (kind: MessageKind) => ({
+      key: "r_ABC12345:root:1:1",
+      from: "r_ABC12345",
+      to: "root",
+      kind,
+      seq: 1,
+      generation: 1,
+      payload: { text: "answer body" },
+      ttlMs: 1000,
+      createdAt: 0,
+      updatedAt: 0,
+      state: "delivered",
+      attempts: 1,
+      deliveredAt: 1,
+    });
+    const projectContext = (kind: MessageKind): WireEntry => {
+      const record = mkRecord(kind);
+      const entry = projectSessionEntry({
+        type: "custom_message",
+        customType: "subagent:fabric",
+        content: formatMessage(record, "child").text,
+        display: false,
+        details: record,
+        id: "f14",
+        parentId: null,
+        timestamp: "2026-10-07T00:00:10.000Z",
+      });
+      expect(entry).toBeDefined();
+      return entry!;
+    };
+    const reportWire = projectContext("report");
+    const legacyWire = projectContext(LEGACY_KIND as MessageKind);
+    // Identical key set AND key order; `details` is never projected for subagent:fabric.
+    expect(Object.keys(legacyWire)).toEqual([
+      "id",
+      "parentId",
+      "type",
+      "timestamp",
+      "customType",
+      "content",
+      "display",
+    ]);
+    expect(Object.keys(reportWire)).toEqual(Object.keys(legacyWire));
+    // Content is the verbatim formatMessage text of its own record.
+    expect(reportWire.content).toBe(formatMessage(mkRecord("report"), "child").text);
+    expect(legacyWire.content).toBe(formatMessage(mkRecord(LEGACY_KIND as MessageKind), "child").text);
+    // Replacing the one kind token makes the two wire entries byte-identical.
+    const legacyJson = JSON.stringify(legacyWire);
+    const reportJson = JSON.stringify({
+      ...reportWire,
+      content: (reportWire.content as string).replace("[fabric report ", `[fabric ${LEGACY_KIND} `),
+    });
+    expect(reportJson).toBe(legacyJson);
   });
 });

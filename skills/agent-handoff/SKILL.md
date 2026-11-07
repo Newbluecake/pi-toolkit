@@ -149,6 +149,32 @@ metadata:
 
 3. 如果不提供请教渠道，就**别在 prompt 里暗示存在它拿不到的信息**。
 
+## 可选：派发时把飞书话题一起交给下游（fabric.threads.rebind）
+
+跨会话派发（`message_session`）且希望该飞书群话题的后续消息**直达下游主会话**（本会话零参与）时：
+
+1. 先 `thread(action:"rebind", h, to)` 换绑（你是现持有者才能转）；用回执里的**完整 sessionId** 作为
+   `message_session` 的 `to`，不要自己再猜/截短 sid；
+2. 派发文本里带上话题句柄 `h`，并明确要求 worker **先 `thread(action:"acquire", h)` 再处理正文**
+   （acquire 是唯一的目录登记入口；worker 跳过它则 subscribe 报 `thread_unknown`，话题消息仍回本会话——
+   安全降级，不是错误）；
+3. 失败处置：`E_THR_UNSUPPORTED`（对端不支持）**别重试**；effect `none` 是确定没生效，修正后重试；
+   effect `unknown` 可能已生效，**不要盲重**——先 `thread(action:"acquire", h)` 探归属再决定。
+
+该能力默认关闭（`fabric.threads.rebind`）；未开启时工具没有 `rebind`/`acquire` action，本节不适用。
+
+## 可选：处理委派任务中途需要澄清时（expectReply 委派）
+
+下游会话（worker）在处理带 `reply_to` 的委派请求时遇到需要请求方拍板的问题：
+
+1. **先自查能否自行决定**：能从代码/交接包/上下文推断的，不要问；
+2. 确需提问时，把问题（连同你建议的默认做法）作为**新消息**发给请求方并带 `expectReply`（`wake:true`），
+   **绝不复用原请求的 `replyTo`** —— 它只接受一次回复（你的最终结果），提前消费会导致最终结果被拒收；
+3. 问题一次问全、附上每个问题的默认做法；请求方用**该问题消息**的 `reply_to` 回答，原请求保持打开；
+4. 不要为等待答复而阻塞在 `ask_user` 上：请求方看不到你的本地对话框（平台开启 `fabric.crossSession.askRedirect` 时，
+   宿主会自动把 `ask_user` 重定向给请求方，拿到答案后照做即可）；
+5. 请求方（A）侧若用户在场：由 A 用 `ask_user` 问人后把答案转答给 worker，不要让 worker 干等。
+
 ## 反模式
 
 - 只转一段结论文字 ⇒ 下游不知道去哪看，只能重新摸索；

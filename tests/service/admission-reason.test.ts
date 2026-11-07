@@ -394,8 +394,9 @@ describe("AdmissionReason on every spawn() admission rejection (plan v3 §4.6)",
     const body = src.slice(src.indexOf("async spawn(req) {"), src.indexOf("successorOf(sessionFile) {"));
     const retryable = (body.match(/retryable: (true|false)/g) ?? []).length;
     const reasons = (body.match(/reason: "/g) ?? []).length;
-    // W3 adds the persist-first inbox reservation rejection before any label/tree write.
-    expect(retryable).toBe(25);
+    // Original 24 cases + W3 persist-first inbox reservation + Fast parent snapshot failure
+    // + #39 P2 memory-seed capture failure (fail-closed at the same admission point).
+    expect(retryable).toBe(27);
     expect(reasons).toBe(retryable);
   });
 

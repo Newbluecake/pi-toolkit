@@ -174,6 +174,144 @@ describe("buildBranchReply", () => {
   });
 });
 
+describe("buildBranchReply — lazy reverse projection ≡ legacy project-all-then-trim", () => {
+  /** Verbatim copy of the pre-P1② implementation (reference oracle). */
+  function legacy(rid: string, raw: unknown[], maxBytes: number) {
+    const budget = Math.max(0, Math.min(maxBytes, LIMITS.branchReplyBytes));
+    const projected: NonNullable<ReturnType<typeof projectSessionEntry>>[] = [];
+    for (const r of raw) {
+      const e = projectSessionEntry(r);
+      if (e !== undefined) projected.push(e);
+    }
+    let used = 0;
+    let start = projected.length;
+    for (let i = projected.length - 1; i >= 0; i--) {
+      const size = Buffer.byteLength(JSON.stringify(projected[i]), "utf8") + 1;
+      if (used + size > budget) break;
+      used += size;
+      start = i;
+    }
+    return { t: "branch_reply", rid, entries: projected.slice(start), truncated: start > 0 };
+  }
+
+  function rng(seed: number): () => number {
+    let a = seed >>> 0;
+    return () => {
+      a = (a + 0x6d2b79f5) >>> 0;
+      let t = a;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  function randomBranch(seed: number): unknown[] {
+    const r = rng(seed);
+    const n = Math.floor(r() * 60);
+    const out: unknown[] = [];
+    if (r() < 0.5) out.push({ type: "session", id: "s", timestamp: "t" });
+    for (let i = 0; i < n; i++) {
+      const id = `e${seed}-${i}`;
+      const base = { id, parentId: i === 0 ? null : `e${seed}-${i - 1}`, timestamp: "2026-09-01T00:00:00.000Z" };
+      const k = r();
+      if (k < 0.15) out.push({ ...base, type: "label", label: "x" });
+      else if (k < 0.25) out.push({ ...base, type: "custom", customType: "c", data: { n: i, pad: "d".repeat(500) } });
+      else if (k < 0.3)
+        out.push({ type: "message", id }); // malformed ⇒ not projectable
+      else {
+        const size = r() < 0.1 ? 300_000 : r() < 0.5 ? 50 : 4_000;
+        out.push({ ...base, type: "message", message: { role: "user", timestamp: i, content: "m".repeat(size) } });
+      }
+    }
+    return out;
+  }
+
+  it("is byte-identical to the legacy implementation over 200 seeded branches × 5 budgets", () => {
+    let truncatedSeen = 0;
+    let fullSeen = 0;
+    for (let seed = 1; seed <= 200; seed++) {
+      const branch = randomBranch(seed);
+      const { ctx } = fakeCtx({ branch });
+      for (const budget of [0, 1, 200 * 1024, 2 << 20, 8 << 20]) {
+        const got = buildBranchReply("r", ctx, budget);
+        const want = legacy("r", branch, budget);
+        expect(JSON.stringify(got)).toBe(JSON.stringify(want));
+        if (want.truncated) truncatedSeen++;
+        else fullSeen++;
+      }
+    }
+    // the corpus really exercises both outcomes
+    expect(truncatedSeen).toBeGreaterThan(100);
+    expect(fullSeen).toBeGreaterThan(100);
+  });
+
+  it("boundaries: budget 0 with a non-empty branch ⇒ [] truncated; nothing projectable ⇒ [] not truncated", () => {
+    const m = {
+      type: "message",
+      id: "a",
+      parentId: null,
+      timestamp: "t",
+      message: { role: "user", timestamp: 1, content: "x" },
+    };
+    expect(buildBranchReply("r", fakeCtx({ branch: [m] }).ctx, 0)).toEqual({
+      t: "branch_reply",
+      rid: "r",
+      entries: [],
+      truncated: true,
+    });
+    const none = [
+      { type: "session", id: "s", timestamp: "t" },
+      { type: "label", id: "l", parentId: "s", timestamp: "t" },
+    ];
+    expect(buildBranchReply("r", fakeCtx({ branch: none }).ctx, 0)).toEqual({
+      t: "branch_reply",
+      rid: "r",
+      entries: [],
+      truncated: false,
+    });
+  });
+
+  it("the newest projectable entry is always attempted first, and an oversized newest entry ⇒ empty + truncated", () => {
+    const mk = (i: number, n: number) => ({
+      type: "message",
+      id: `e${i}`,
+      parentId: i === 0 ? null : `e${i - 1}`,
+      timestamp: "t",
+      message: { role: "user", timestamp: i, content: "q".repeat(n) },
+    });
+    const branch = [mk(0, 10), mk(1, 10), mk(2, 5_000)];
+    const r = buildBranchReply("r", fakeCtx({ branch }).ctx, 1_000);
+    expect(r.entries).toEqual([]);
+    expect(r.truncated).toBe(true);
+    expect(JSON.stringify(r)).toBe(JSON.stringify(legacy("r", branch, 1_000)));
+  });
+
+  it("operation count: does not project the whole branch — reads ≈ kept + O(1) indices, newest first", () => {
+    const N = 10_000;
+    const text = "p".repeat(60 * 1024);
+    const arr = Array.from({ length: N }, (_, i) => ({
+      type: "message",
+      id: `e${i}`,
+      parentId: i === 0 ? null : `e${i - 1}`,
+      timestamp: "t",
+      message: { role: "user", timestamp: i, content: text },
+    }));
+    const touched = new Set<number>();
+    const proxy = new Proxy(arr, {
+      get(target, prop, recv) {
+        if (typeof prop === "string" && /^\d+$/.test(prop)) touched.add(Number(prop));
+        return Reflect.get(target, prop, recv);
+      },
+    });
+    const reply = buildBranchReply("r", fakeCtx({ branch: proxy }).ctx, 8 << 20);
+    expect(reply.truncated).toBe(true);
+    expect(reply.entries.at(-1)!.id).toBe(`e${N - 1}`);
+    expect(touched.size).toBeLessThanOrEqual(reply.entries.length + 1);
+    expect(touched.size).toBeLessThan(100);
+    expect(touched.has(0)).toBe(false);
+  });
+});
+
 describe("projectFleet / fleetFingerprint / readStatus", () => {
   it("projects the fleet widget view-model onto the wire subset", () => {
     const rows = projectFleet([snap({ parentRunId: "parent-1" })], 5_000, () => "Explore");

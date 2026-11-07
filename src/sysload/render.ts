@@ -9,7 +9,6 @@ export interface LoadMessageContext {
   readonly now?: number;
 }
 
-const levelLabel = (level: LoadLevel): string => (level === "unknown" ? "unknown" : level);
 const headline = (level: LoadLevel): string =>
   level === "crit" ? "系统负载过高" : level === "warn" ? "系统负载偏高" : "系统负载状态异常";
 const topRows = (rows: readonly LoadTopRow[], unitsAvailable = true): string =>
@@ -35,5 +34,5 @@ export function buildLoadEscalationText(verdict: LoadVerdict, context: LoadMessa
 }
 
 export function buildLoadRecoveryText(verdict: LoadVerdict, gateEnabled = true): string {
-  return `[load] ${levelLabel(verdict.level)} · 负载已回落${gateEnabled ? "，可以继续派发" : "（仅提示，闸门已关闭，派发不受限）"}`;
+  return `[load 恢复] 负载已回落${gateEnabled ? "，可以继续派发" : "（仅提示，闸门已关闭，派发不受限）"}`;
 }

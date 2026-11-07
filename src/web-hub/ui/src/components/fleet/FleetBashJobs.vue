@@ -18,7 +18,7 @@
   变化(新帧)时把 `at` 重置为共享 now,显示值 = baseline + max(0, now − at);终态行直接
   显示 wire 冻结的 `elapsedMs`。行集合收缩时 pruning,展开中的行消失时收起。
 
-  折叠状态是普通局部 ref —— 不跨 reload 持久化(同 TodoPanel/WorktreePanel 先例;
+  折叠状态是普通局部 ref —— 不跨 reload 持久化(同 TasksPanel/WorktreePanel 先例;
   source-scan 的持久化白名单不覆盖本组件)。有运行中的任务时分组默认展开,全终态时默认
   收起(终态计数已在组标题里一目了然)。样式沿用 `styles/bash-jobs.css`(`.bj-*` 类不变,
   overscroll-guard.test.ts 按类名钉),分组包装与状态底色也在该文件。
@@ -29,7 +29,7 @@ import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";
 import { formatDuration } from "../../format.js";
 import type { BashJobRowWire, BashJobsWire } from "@protocol/messages.js";
-import type { FleetBashJobsProps } from "../../contracts.js";
+import type { FleetBashJobsEmits, FleetBashJobsProps } from "../../contracts.js";
 import { formatBytes, statusToken, summaryCounts, tailFreshness, type TailFreshness } from "../detail/bashJobsView.js";
 import { deshellCmd, type DeshelledCmd } from "../../logic/bashCmd.js";
 import { formatTimeRange, type TimeRangeLabel } from "../../logic/timeRange.js";
@@ -37,16 +37,31 @@ import { FLEET_ARCHIVE } from "./summary.js";
 import "../../styles/bash-jobs.css";
 
 const props = defineProps<FleetBashJobsProps>();
+const emit = defineEmits<FleetBashJobsEmits>();
 const { t } = useI18n();
 const arch = inject(FLEET_ARCHIVE, null);
 
 /** 有运行中的任务、或任务总数 ≤ BASH_OPEN_FEW 时默认展开(2026-10-16 用户:「很少就默认展开，不然
- *  显得空空的」);更多且全终态时默认收起。一次性的初始值,不随 wire 后续变化强制开合。 */
+ *  显得空空的」);更多且全终态时默认收起。一次性的初始值,不随 wire 后续变化强制开合。
+ *  fleet-fill-budget:fill 模式(仅 FleetDrawer 传入)初始恒展开 —— 抽屉需要渲染出行来实测
+ *  行高;首个预算到达后按其建议(有必显行 或 预算能容下 ≥1 条已结束行 ⇒ 展开)重置一次,
+ *  用户手动开合后(userToggled)预算不再覆盖。 */
 const BASH_OPEN_FEW = 5;
-const initialCounts = summaryCounts(props.jobs);
-const open = ref(
-  initialCounts.running > 0 || initialCounts.running + initialCounts.failed + initialCounts.done <= BASH_OPEN_FEW,
-);
+/** 与不传 fill 时完全一致的旧默认开合规则(2026-10-28 验收 #1:测量失败回退也用这份)。 */
+function legacyDefaultOpen(): boolean {
+  const c = summaryCounts(props.jobs);
+  return c.running > 0 || c.running + c.failed + c.done <= BASH_OPEN_FEW;
+}
+const open = ref(props.fill === true || legacyDefaultOpen());
+/** 用户点过组标题开合 ⇒ 以用户操作为准,预算建议不再应用。 */
+const userToggled = ref(false);
+function toggleOpen(): void {
+  userToggled.value = true;
+  open.value = !open.value;
+  // 验收 #3:开合状态回传抽屉 —— 折叠时 bash 块只占标题高,余量让给 agents(重算预算)。
+  emit("update:open", open.value);
+}
+let budgetOpenApplied = false; // 见下方 terminalBudget watch(在 liveRows 声明之后)
 /** At most one row's tail is expanded at a time (the wire caps rows at 20 — no fold math needed). */
 const expandedId = ref<string | null>(null);
 
@@ -58,8 +73,81 @@ const expandedId = ref<string | null>(null);
 // ---------------------------------------------------------------------------
 const archivedRows = computed(() => props.jobs.rows.filter((row) => props.archived?.has(String(row.id)) === true));
 const liveRows = computed(() => props.jobs.rows.filter((row) => props.archived?.has(String(row.id)) !== true));
+// ---------------------------------------------------------------------------
+// fleet-fill-budget:fill 模式下按配额裁断已结束行(必显的 live 行不受影响),被藏起的
+// 行合并为「显示已完成的 N 个」按钮(复用 fleet.showFinished 案);用户点过后
+// showAllTerminal=true ⇒ 不再裁断。无 fill/无配额 ⇒ hiddenTerminal 恒 0,渲染与旧版一致。
+// ---------------------------------------------------------------------------
+const showAllTerminal = ref(false);
+/** 验收 #3:用户点开「显示已完成的 N 个」⇒ 回传抽屉(bash 块全显,剩余空间再给 agents)。 */
+function onShowAllTerminal(): void {
+  showAllTerminal.value = true;
+  emit("show-all-terminal");
+}
+const terminalLiveCount = computed(() => liveRows.value.filter((row) => !statusToken(row).live).length);
+const hiddenTerminal = computed(() => {
+  if (props.fill !== true || props.terminalBudget === undefined || showAllTerminal.value) return 0;
+  return Math.max(0, terminalLiveCount.value - Math.max(0, props.terminalBudget));
+});
+const visibleLiveRows = computed<readonly BashJobRowWire[]>(() => {
+  if (hiddenTerminal.value === 0) return liveRows.value;
+  const budget = Math.max(0, props.terminalBudget ?? 0);
+  let seenTerminal = 0;
+  return liveRows.value.filter((row) => {
+    if (statusToken(row).live) return true;
+    seenTerminal++;
+    return seenTerminal <= budget;
+  });
+});
+/** 首个预算到达时按其建议重置一次默认开合(「预算能容下至少 1 条则展开」;有必显行恒展开);
+ *  只应用一次,且用户手动开合后不再应用。immediate:true 让重挂载时立即可用已有预算。
+ *  2026-10-28 验收 #1:fillReady=true 而预算仍是 undefined ⇒ 首轮测量已完成但失败
+ *  (happy-dom 等),回退到与不传 fill 完全一致的旧默认开合(>5 全终态 ⇒ 收起)。 */
+watch(
+  () => [props.terminalBudget, props.fillReady] as const,
+  ([budget, ready]) => {
+    if (budgetOpenApplied || userToggled.value || props.fill !== true) return;
+    if (budget !== undefined) {
+      budgetOpenApplied = true;
+      open.value = liveRows.value.some((row) => statusToken(row).live) || budget >= 1;
+    } else if (ready === true) {
+      budgetOpenApplied = true;
+      open.value = legacyDefaultOpen();
+    }
+  },
+  { immediate: true },
+);
+/** omitted-orphan fix (2026-10-27): the wire caps terminal rows at 12 and the agent does not
+ *  know which rows are archived (display-only hiding). When ALL wire rows are archived, the
+ *  live list is empty and a bare `(+N more)` would hang in the empty list — unidentifiable and
+ *  un-archivable. In that one case the marker moves next to the archived fold with an explicit
+ *  prose note. live rows present ⇒ unchanged; no archived rows ⇒ byte-identical render. */
+const orphanOmitted = computed(
+  () =>
+    liveRows.value.length === 0 &&
+    archivedRows.value.length > 0 &&
+    props.jobs.omitted !== undefined &&
+    props.jobs.omitted > 0,
+);
 function isAuto(row: BashJobRowWire): boolean {
   return props.archived?.get(String(row.id))?.auto === true;
+}
+// ---------------------------------------------------------------------------
+// 2026-10-28 用户需求(「(+N more) 要么能显示，要么直接归档」):wire 的行上限/字节预算决定了
+// 「全部显示」做不到,所以把这一行变成可操作的「归档 N 条更早的已完成任务」。id 集合由 agent
+// 侧从自己的 live 快照重算(浏览器看不到这些行),UI 只发一个 kind-only 的 op。
+// 没有 FLEET_ARCHIVE 提供者(独立挂载/控制面关闭)或 handle 不带该 op(旧构建)⇒ 退回纯文本,
+// 渲染与之前逐字节一致。
+// ---------------------------------------------------------------------------
+// 2026-10-28 rework: the button's presence is exactly `omitted > 0` (plus the provider/handle gates).
+// The agent now guarantees `omitted` counts ONLY terminal, unarchived, un-sent rows (archived rows
+// stay in `rows` and fold; running overflow rides `rowsOverflowRunning`), so a visible button is
+// always a button that can do something — there is no "ids empty but omitted > 0" state to hide.
+const canArchiveOmitted = computed(
+  () => (props.jobs.omitted ?? 0) > 0 && arch !== null && arch.canArchive.value && arch.archiveOmitted !== undefined,
+);
+function onArchiveOmitted(): void {
+  arch?.archiveOmitted?.(props.jobs.omitted ?? 0);
 }
 function canArchiveRow(row: BashJobRowWire): boolean {
   return arch !== null && arch.canArchive.value && !statusToken(row).live;
@@ -178,13 +266,13 @@ function toggleRow(row: BashJobRowWire): void {
 
 <template>
   <section class="fleet-bash" :data-open="open" aria-readonly="true">
-    <button class="bj-sum" type="button" :aria-expanded="open" :aria-label="toggleAria" @click="open = !open">
+    <button class="bj-sum" type="button" :aria-expanded="open" :aria-label="toggleAria" @click="toggleOpen">
       <AppIcon name="terminal" class="icon-sm" />
       <span class="bj-sum-text">{{ summary }}</span>
       <AppIcon name="chev-right" class="icon-sm chev" />
     </button>
     <ul v-if="open" class="bj-list">
-      <li v-for="row in liveRows" :key="row.id" class="bj-item" :data-status="statusToken(row).text">
+      <li v-for="row in visibleLiveRows" :key="row.id" class="bj-item" :data-status="statusToken(row).text">
         <button
           class="bj-row"
           type="button"
@@ -239,8 +327,21 @@ function toggleRow(row: BashJobRowWire): void {
         <!-- plain-text tail: arbitrary process output, never v-html / never markdown -->
         <pre v-if="expandedId === row.id && row.tail !== undefined" class="bj-tail">{{ row.tail }}</pre>
       </li>
-      <li v-if="jobs.omitted !== undefined && jobs.omitted > 0" class="bj-more">
-        {{ t("detail.bashJobsMore", { n: jobs.omitted }) }}
+      <li v-if="hiddenTerminal > 0" class="bj-fill-more">
+        <button class="btn btn-ghost run-more" type="button" @click="onShowAllTerminal">
+          {{ t("fleet.showFinished", { n: hiddenTerminal }) }}
+        </button>
+      </li>
+      <li v-if="jobs.omitted !== undefined && jobs.omitted > 0 && !orphanOmitted" class="bj-more">
+        <button v-if="canArchiveOmitted" class="btn btn-ghost run-more" type="button" @click="onArchiveOmitted">
+          {{ t("detail.bashJobsArchiveOmitted", { n: jobs.omitted }) }}
+        </button>
+        <template v-else>{{ t("detail.bashJobsMore", { n: jobs.omitted }) }}</template>
+      </li>
+      <!-- 2026-10-28: running rows the wire could not carry. Not archivable, so deliberately a quiet
+           prose line, never the `(+N more)` button (and never counted into `omitted`). -->
+      <li v-if="(jobs.rowsOverflowRunning ?? 0) > 0" class="bj-more bj-more-running">
+        {{ t("detail.bashJobsRunningOverflow", { n: jobs.rowsOverflowRunning ?? 0 }) }}
       </li>
       <!-- web-hub archive plan: the archived fold — dimmed rows, `auto` badge for sweep-archived
            ones,「取消归档」on hover. -->
@@ -278,6 +379,14 @@ function toggleRow(row: BashJobRowWire): void {
             </button>
           </li>
         </ul>
+      </li>
+      <!-- omitted-orphan fix: all wire rows archived ⇒ the marker moves here, with the SAME action
+           (2026-10-28: the remaining tail is still archivable — the note alone left the user stuck). -->
+      <li v-if="orphanOmitted" class="bj-more bj-more-orphan">
+        <button v-if="canArchiveOmitted" class="btn btn-ghost run-more" type="button" @click="onArchiveOmitted">
+          {{ t("detail.bashJobsArchiveOmitted", { n: jobs.omitted ?? 0 }) }}
+        </button>
+        <template v-else>{{ t("detail.bashJobsOlderOmitted", { n: jobs.omitted ?? 0 }) }}</template>
       </li>
     </ul>
   </section>

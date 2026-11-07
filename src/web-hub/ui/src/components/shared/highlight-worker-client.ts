@@ -24,6 +24,9 @@
  * The default worker factory is a test seam away from the real `Worker` (see `workerFactory`);
  * tests inject structural fakes, node/happy-dom (no `Worker`) gets a sticky `fallback` — which
  * is exactly why every component test keeps exercising the §5.1 fallback path unchanged.
+ *
+ * 2026-11-03 transcript-flood fix: `opts.onTimeout: "plain"` lets a caller opt THIS request
+ * out of the timeout ⇒ main-thread-fallback leg (details on `HighlightWorkerRequestOptions`).
  */
 import type { HighlightSpans } from "@logic/previewVirtualTypes.js";
 import type { HighlightWorkerRequest } from "./highlight-worker.js";
@@ -46,13 +49,32 @@ export interface HighlightWorkerHandle {
   cancel(): void;
 }
 
+/** Per-request options (all optional — omitted fields keep the frozen defaults). */
+export interface HighlightWorkerRequestOptions {
+  /** J1: pins the worker's `flattenTokens` budget for THIS request. */
+  readonly maxTokens?: number;
+  /**
+   * 2026-11-03 transcript-flood fix: what THIS request resolves to when its 3 s deadline
+   * expires. Default `"fallback"` is the frozen §5.3 contract (the caller runs the §5.1
+   * main-thread idle path). `"plain"` opts out: a timeout there means the shared worker's
+   * queue was flooded (a detail page mounts ~300 CodeBlocks whose debounces fire together —
+   * the worker tokenizes them SEQUENTIALLY, so the queue tail outlives its deadline), and
+   * re-running the same slow tokenize on the MAIN thread is strictly worse (multi-second
+   * render-process long tasks — the page-freeze root cause). The block simply stays plain
+   * until its next invalidation. Only the timeout leg is affected: STICKY unavailability
+   * (constructor throw / `error` / `messageerror`) still resolves `fallback` for every
+   * request, so the K10 CSP-blocked-worker degrade keeps its documented §5.1 path.
+   */
+  readonly onTimeout?: "plain";
+}
+
 export interface HighlightWorkerClient {
   /** Sticky process-wide verdict (§5.3 回落). Read-only diagnostics; `request` already folds it in. */
   readonly unavailable: boolean;
   /** J1: `opts.maxTokens` (optional) pins the worker's `flattenTokens` budget for THIS request —
    *  the non-virtual bodies pass the ORIGINAL 20k so their degrade set stays byte-identical;
    *  omitted keeps the worker's own widened 80k default (the virtual path, unchanged). */
-  request(text: string, lang: string, opts?: { readonly maxTokens?: number }): HighlightWorkerHandle;
+  request(text: string, lang: string, opts?: HighlightWorkerRequestOptions): HighlightWorkerHandle;
 }
 
 /** Structural subset of `Worker` the client touches (tests implement this; prod casts). */
@@ -80,6 +102,8 @@ export interface HighlightWorkerClientOptions {
 interface PendingEntry {
   readonly resolve: (o: HighlightWorkerOutcome) => void;
   readonly timer: ReturnType<typeof setTimeout>;
+  /** What the 3 s deadline resolves THIS request to (default `fallback`; `onTimeout: "plain"` opts out). */
+  readonly timeoutOutcome: HighlightWorkerOutcome;
 }
 
 export function createHighlightWorkerClient(opts?: HighlightWorkerClientOptions): HighlightWorkerClient {
@@ -161,7 +185,7 @@ export function createHighlightWorkerClient(opts?: HighlightWorkerClientOptions)
     return w;
   }
 
-  function request(text: string, lang: string, opts?: { readonly maxTokens?: number }): HighlightWorkerHandle {
+  function request(text: string, lang: string, opts?: HighlightWorkerRequestOptions): HighlightWorkerHandle {
     const w = ensureWorker();
     const settled = (o: HighlightWorkerOutcome): HighlightWorkerHandle => ({
       result: Promise.resolve(o),
@@ -175,13 +199,17 @@ export function createHighlightWorkerClient(opts?: HighlightWorkerClientOptions)
     });
     const entry: PendingEntry = {
       resolve: resolveFn,
+      timeoutOutcome: opts?.onTimeout === "plain" ? { status: "plain" } : { status: "fallback" },
       timer: setTimeout(() => {
         // §5.3: this request's 3 s deadline expired — terminate the (shared!) worker and
-        // rebuild lazily on the next request. Every request pending on it falls to the
-        // main-thread fallback path; the verdict stays NON-sticky.
+        // rebuild lazily on the next request; the verdict stays NON-sticky. Every request
+        // pending on the terminated worker settles with ITS OWN timeout outcome (2026-11-03:
+        // per-request, so transcript blocks that opted out via `onTimeout: "plain"` resolve
+        // plain instead of stampeding the main-thread fallback).
         killWorker();
-        settle(id, { status: "fallback" });
-        failAllPending();
+        for (const pid of [...pending.keys()]) {
+          settle(pid, pending.get(pid)?.timeoutOutcome ?? { status: "fallback" });
+        }
       }, timeoutMs),
     };
     pending.set(id, entry);

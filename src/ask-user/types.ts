@@ -13,8 +13,7 @@ export const SPLIT_PANE_RIGHT_MIN = 28;
 
 export const OptionSchema = Type.Object({
   label: Type.String({
-    description:
-      "Short, mutually exclusive option label (also the answer value returned to the LLM - keep it concise, <= ~40 chars). To recommend an option, prefix its label with '(Recommended)' and list it first.",
+    description: "Short option label; also the answer value returned to you (<= ~40 chars).",
   }),
   description: Type.Optional(
     Type.String({
@@ -83,7 +82,7 @@ export const InputSchema = Type.Object({
   dismissParked: Type.Optional(
     Type.Boolean({
       description:
-        "Set true (with questions omitted) to dismiss ALL questions parked by background-completion interrupts — use when a background result already settled them. Returns immediately without showing any UI. Cannot be combined with questions.",
+        "Set true (questions omitted) to dismiss ALL parked questions without showing any UI. Cannot be combined with questions.",
     }),
   ),
 });
@@ -122,7 +121,23 @@ export interface InterruptInfo {
   draftSaved: boolean;
 }
 
-export type AskUserDetails = Result & { interrupted?: InterruptInfo; dismissed?: number };
+/** #21 D8: set when ask_user was settled by host redirection to the delegating requester
+ *  (trusted delegated turns) instead of a local dialog. `state` mirrors
+ *  AskUserRedirectResult["kind"] (src/ask-user/redirect.ts §2.0); answered.requestId there
+ *  carries the ORIGINAL replyTo id. */
+export interface AskRedirectDetails {
+  state: "answered" | "timeout" | "not_woken" | "unavailable" | "aborted" | "disposed";
+  attempt?: number;
+  limit?: number;
+  requestId?: string;
+  reason?: string;
+}
+
+export type AskUserDetails = Result & {
+  interrupted?: InterruptInfo;
+  dismissed?: number;
+  redirected?: AskRedirectDetails;
+};
 
 /** JSON-safe per-question component state for draft restore (§4, §6.3). `optionCount` is the
  *  fingerprint's runtime double-check: a restored draft whose option count no longer matches

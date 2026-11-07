@@ -40,6 +40,7 @@ import {
 } from "../protocol/version.js";
 import type { FsbReqFrame, FsbResFrame } from "../protocol/feishu.js";
 import type { SchedAgentFrame } from "../protocol/schedule.js";
+import type { ThrReqFrame, ThrResFrame } from "../protocol/thread.js";
 import { xsFrameBytesOk } from "../protocol/xs.js";
 import type { XsRouter } from "./xs/router.js";
 import type { AdminHandler } from "./admin.js";
@@ -93,6 +94,14 @@ export function createAgentServer(
      * never reach the registry (unreachable in the real assembly — the `sched.v1` cap is only
      * declared when a coordinator exists). */
     schedule?: { onAgentFrame(agentKey: string, frame: SchedAgentFrame): void };
+    /** fabric-thread P2 (arch §7.3): the feishu bot's thread router, present ONLY when
+     * `config.feishuBot.threads` exists. `thr_req` frames go here BEFORE the registry (same
+     * posture as `fsb_req`/`xs_req` — the bot owns the `thr_res` reply on the SAME socket);
+     * absent ⇒ the frame is swallowed early (the registry switch has no `thr_req` case and the
+     * cap is only declared when the router exists, so it is unreachable in the real assembly). */
+    threads?: {
+      onAgentFrame(agentKey: string, frame: ThrReqFrame, write: (frame: ThrResFrame) => void): void;
+    };
   },
 ): AgentServer {
   const { registry, config, log, now } = deps;
@@ -256,14 +265,34 @@ export function createAgentServer(
         deps.xs.handle(agentKey, frame, write);
         return;
       }
+      // fabric-xs-activation plan §3 P1: state/activation PUSH frames never enter the registry
+      // either — the xs router owns them (`xs_state`: verify + forward to the source;
+      // `xs_activate_ack`: P3's pending match, P1 diagnostic-only). No reply semantics; a
+      // service-less hub (activation off / xs off) ignores them exactly like before.
+      if ((frame.t === "xs_state" || frame.t === "xs_activate_ack") && deps.xs !== undefined) {
+        deps.xs.onAgentFrame(agentKey, frame);
+        return;
+      }
       // scheduled-reports H1 (§10.1): sched_* frames never enter the registry/bus — they go to
       // the coordinator (targeted rescan for `sched_changed`; `sched_bound` is tapped into the
       // bot's event stream and `sched_run_ack` resolves a run() waiter). The frames exist only
       // under the `sched.v1` cap, which hub.ts declares iff a coordinator was built — with
       // `deps.schedule` absent the intercept still swallows them early (unreachable in the real
       // assembly; keeps the registry path free of schedule knowledge either way).
-      if (frame.t === "sched_changed" || frame.t === "sched_bound" || frame.t === "sched_run_ack") {
+      if (
+        frame.t === "sched_changed" ||
+        frame.t === "sched_bound" ||
+        frame.t === "sched_run_ack" ||
+        frame.t === "sched_offers" || // #61 sched.confirm.v1
+        frame.t === "sched_decide_ack"
+      ) {
         deps.schedule?.onAgentFrame(agentKey, frame);
+        return;
+      }
+      // fabric-thread P2 (§8.3/§7.3): thread requests never enter the registry — the bot's
+      // thread router validates and replies `thr_res` on this same socket.
+      if (frame.t === "thr_req") {
+        if (deps.threads !== undefined) deps.threads.onAgentFrame(agentKey, frame, write);
         return;
       }
       if (frame.t === "tfa_req") {

@@ -1,19 +1,20 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { afterEach, describe, expect, it } from "vitest";
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createScheduleCommand, parseFlags, splitPrompt, tokenizeScheduleArgs } from "../../src/commands/schedule.js";
-import { createTask, updateTask } from "../../src/schedule/agent/ops.js";
+import { createTask } from "../../src/schedule/agent/ops.js";
 import { manualClaim } from "../../src/schedule/core/claim.js";
 import { finishRun, openSessionStore } from "../../src/schedule/core/writer.js";
 import { sessionDirName } from "../../src/schedule/core/paths.js";
-import { defHash, isApproved } from "../../src/schedule/core/spec.js";
-import { a3Env, basicRaw, CRON, type A3Env } from "../schedule/agent/a3-helpers.js";
+import { defHash, isExecutable } from "../../src/schedule/core/spec.js";
+import { a3Env, basicRaw, CRON, stripApproval, type A3Env } from "../schedule/agent/a3-helpers.js";
 import { addTask, approve, makeTask, readOk, SID, self } from "../schedule/core/fixtures.js";
 
 let env: A3Env;
 afterEach(() => env?.cleanup());
 const AI = { by: "agent", via: "tool" } as const;
+
 const OTHER_SID = "019a1111-bbbb-7ccc-8ddd-eeeeeeeeeeee";
 
 interface Harness {
@@ -87,7 +88,7 @@ describe("gates", () => {
     expect(await h.run("list")).toMatch(/E_DISABLED/);
     expect(await h.run(ADD)).toMatch(/E_DISABLED/);
     h.enabled.value = true;
-    for (const a of [ADD, "approve s_aaaaaaaa", "rm s_aaaaaaaa", "list --all"])
+    for (const a of [ADD, "rm s_aaaaaaaa", "list --all"])
       expect(await h.run(a, { feishuInvocation: true, webInvocation: true })).toMatch(/飞书入口不能修改/);
     expect(await h.run("list", { feishuInvocation: true, webInvocation: true })).toMatch(/没有定时任务/);
     expect(env.agent.readState().kind).toBe("absent");
@@ -105,12 +106,13 @@ describe("gates", () => {
 });
 
 describe("add / edit / list / show / log", () => {
-  it("add by flags creates an APPROVED task; list shows it with next time; show prints full definition + hash", async () => {
+  it("add by flags creates a task that is enabled at once and carries no approval; list shows it with next time; show prints full definition + hash", async () => {
     env = a3Env();
     const h = harness(env);
-    expect(await h.run(ADD)).toMatch(/已创建并批准 s_/);
+    expect(await h.run(ADD)).toMatch(/已创建并启用 s_/);
     const t = readOk(env.agent.store()!).tasks[0]!;
-    expect(isApproved(t)).toBe(true);
+    expect(isExecutable(t)).toBe(true);
+    expect(t).not.toHaveProperty("approval");
     expect(t.createdBy).toBe("user");
     expect(t.prompt).toBe("summarize the repo");
     const list = await h.run("");
@@ -123,11 +125,32 @@ describe("add / edit / list / show / log", () => {
     expect(await h.run("show s_zzzzzzzz")).toMatch(/E_INVALID/);
   });
 
+  it("show prints no approval line for new tasks AND for legacy ones; list rows never say pending", async () => {
+    env = a3Env();
+    const h = harness(env);
+    await h.run(ADD);
+    const mine = readOk(env.agent.store()!).tasks[0]!;
+    const ai = await createTask(env.ports, basicRaw({ name: "ai" }), AI);
+    if (!ai.ok) throw new Error(ai.detail);
+    await env.agent.ensureStore().transact((d) => {
+      d.tasks[0] = approve(d.tasks[0]!); // legacy ledger: a matching old approval is simply ignored
+      return { value: undefined, write: true };
+    });
+    for (const id of [mine.id, ai.value.id]) {
+      const show = await h.run(`show ${id}`);
+      expect(show).not.toMatch(/approv|PENDING|待确认/i);
+      expect(show).toContain("defHash:");
+    }
+    const list = await h.run("");
+    expect(list).not.toMatch(/pending|auto/);
+    expect(list).toContain(ai.value.id);
+  });
+
   it("add with missing pieces asks interactively; still incomplete ⇒ nothing created", async () => {
     env = a3Env();
     const h = harness(env);
     h.setInputs(["nightly", "0 3 * * *", "do it"]);
-    expect(await h.run("add")).toMatch(/已创建并批准/);
+    expect(await h.run("add")).toMatch(/已创建并启用/);
     const t = readOk(env.agent.store()!).tasks[0]!;
     expect([t.name, t.when.kind, t.prompt]).toEqual(["nightly", "cron", "do it"]);
     h.setInputs([]);
@@ -155,105 +178,114 @@ describe("add / edit / list / show / log", () => {
     expect(await h.run(`add x --cron "0 8 * * *" --consult -- p`)).toMatch(/--consult 已移除/);
     expect(env.agent.readState().kind).toBe("absent");
     expect(parseFlags(["--no-consult"]).error).toBeUndefined();
-    expect(await h.run(`add x --cron "0 8 * * *" --no-consult -- p`)).toMatch(/已创建并批准/);
-    expect(await h.run(`add y --cron "0 8 * * *" -- p`)).toMatch(/已创建并批准/);
+    expect(await h.run(`add x --cron "0 8 * * *" --no-consult -- p`)).toMatch(/已创建并启用/);
+    expect(await h.run(`add y --cron "0 8 * * *" -- p`)).toMatch(/已创建并启用/);
     const [withFlag, without] = readOk(env.agent.store()!).tasks;
     expect(withFlag!.bg?.consultMain).toBe(without!.bg?.consultMain); // the flag changed nothing
   });
 
-  it("edit of an approved task keeps it approved; edit of a pending (AI) task keeps it pending and says so", async () => {
+  it("edit takes effect at once, says so, writes no approval; an old-ledger task without approval edits the same way", async () => {
     env = a3Env();
     const h = harness(env);
     await h.run(ADD);
     const mine = readOk(env.agent.store()!).tasks[0]!;
-    expect(await h.run(`edit ${mine.id} -- new prompt`)).toMatch(/已重新批准/);
-    expect(isApproved(readOk(env.agent.store()!).tasks[0]!)).toBe(true);
+    const out = await h.run(`edit ${mine.id} -- new prompt`);
+    expect(out).toMatch(/已修改 s_\w+（hash [0-9a-f]{8}），立即生效。/);
+    expect(out).not.toMatch(/批准|待确认/);
+    expect(readOk(env.agent.store()!).tasks[0]).not.toHaveProperty("approval");
     const ai = await createTask(env.ports, basicRaw({ name: "ai" }), AI);
     if (!ai.ok) throw new Error(ai.detail);
-    expect(await h.run(`edit ${ai.value.id} --no-feishu`)).toMatch(/仍待确认/);
-    expect(isApproved(readOk(env.agent.store()!).tasks[1]!)).toBe(false);
+    await stripApproval(env, ai.value.id);
+    expect(await h.run(`edit ${ai.value.id} --no-feishu`)).toMatch(/立即生效/);
+    expect(isExecutable(readOk(env.agent.store()!).tasks[1]!)).toBe(true);
     expect(await h.run(`edit ${ai.value.id}`)).toMatch(/没有要修改/);
   });
 });
 
-describe("approve — review + hash CAS", () => {
-  it("bare approve shows the FULL definition and hash in the confirm, then approves exactly that hash", async () => {
+describe("the approval commands are gone (schedule-auto-approve r2)", () => {
+  const HASH = "a".repeat(64);
+  const PUT = `__put ${JSON.stringify({ name: "web", when: CRON, prompt: "x" })} ${HASH}`;
+
+  it.each([
+    ["approve", `approve s_aaaaaaaa`],
+    ["approve <hash>", `approve s_aaaaaaaa ${HASH}`],
+    ["approve --all", `approve s_aaaaaaaa --all`],
+    ["reject", `reject s_aaaaaaaa`],
+    ["reject <hash>", `reject s_aaaaaaaa ${HASH}`],
+    ["__put", PUT],
+    ["__put preview", `__put {} ${"0".repeat(64)}`],
+  ])("%s ⇒ unknown subcommand; the ledger is untouched and no dialog opens", async (_n, cmd) => {
     env = a3Env();
     const h = harness(env);
-    const ai = await createTask(env.ports, basicRaw({ prompt: "secret plan: do X then Y" }), AI);
-    if (!ai.ok) throw new Error(ai.detail);
-    const out = await h.run(`approve ${ai.value.id}`);
-    expect(h.confirms).toHaveLength(1);
-    expect(h.confirms[0]!.message).toContain("secret plan: do X then Y");
-    expect(h.confirms[0]!.message).toContain(defHash(ai.value));
-    expect(out).toMatch(/已批准/);
-    const t = readOk(env.agent.store()!).tasks[0]!;
-    expect(t.approval).toMatchObject({ hash: defHash(t), by: "user", via: "tui" });
-    expect(await h.run(`approve ${ai.value.id}`)).toMatch(/已是批准状态/);
+    await h.run(ADD);
+    const file = join(env.dir, sessionDirName(SID), "state.json");
+    const before = readFileSync(file, "utf8");
+    const out = await h.run(cmd, { webInvocation: true });
+    expect(out).toMatch(/未知子命令/);
+    expect(readFileSync(file, "utf8")).toBe(before);
+    expect(h.confirms).toHaveLength(0);
   });
 
-  it("the definition changing while the confirm dialog is open ⇒ E_REV, NOT approved (hash sampled before confirm)", async () => {
+  it("the usage text and the completions mention none of approve / reject / __put", async () => {
     env = a3Env();
     const h = harness(env);
-    const ai = await createTask(env.ports, basicRaw(), AI);
-    if (!ai.ok) throw new Error(ai.detail);
-    h.setConfirm(async () => {
-      await updateTask(env.ports, ai.value.id, { prompt: "swapped under the reviewer" }, AI);
-      return true;
+    const usage = await h.run("frobnicate");
+    expect(usage).not.toMatch(/approve|reject|__put|批准|确认/);
+    const cmd = createScheduleCommand({
+      enabled: () => true,
+      agent: () => env.agent,
+      ports: () => env.ports,
+      inVault: () => false,
     });
-    const out = await h.run(`approve ${ai.value.id}`);
-    expect(out).toMatch(/E_REV/);
-    const t = readOk(env.agent.store()!).tasks[0]!;
-    expect(t.prompt).toBe("swapped under the reviewer");
-    expect(isApproved(t)).toBe(false);
+    const items = (cmd.getArgumentCompletions!("") as Array<{ value: string }>).map((i) => i.value);
+    expect(items).not.toContain("approve");
+    expect(items).not.toContain("reject");
+    expect(items).not.toContain("__put");
   });
 
-  it("declining the confirm leaves it pending; a typed/web hash skips the confirm and CASes; wrong hash ⇒ E_REV; web via", async () => {
+  it("an unapproved task on an OLD ledger is listed, shown, run and edited like any other (no `pending` anywhere)", async () => {
     env = a3Env();
+    const seen: string[] = [];
+    env.agent.setExecutor("background", { dispatch: (r) => void seen.push(r.runKey) });
     const h = harness(env);
-    const ai = await createTask(env.ports, basicRaw(), AI);
-    if (!ai.ok) throw new Error(ai.detail);
-    h.setConfirm(() => false);
-    expect(await h.run(`approve ${ai.value.id}`)).toMatch(/已取消/);
-    expect(isApproved(readOk(env.agent.store()!).tasks[0]!)).toBe(false);
-    expect(await h.run(`approve ${ai.value.id} ${"a".repeat(64)}`)).toMatch(/E_REV/);
-    expect(h.confirms).toHaveLength(1); // the hashed forms never opened a dialog
-    expect(await h.run(`approve ${ai.value.id} nothex`)).toMatch(/64 位十六进制/);
-    expect(await h.run(`approve ${ai.value.id} ${defHash(ai.value)}`, { webInvocation: true })).toMatch(/已批准/);
-    expect(readOk(env.agent.store()!).tasks[0]!.approval?.via).toBe("web");
+    const c = await createTask(env.ports, basicRaw(), AI);
+    if (!c.ok) throw new Error(c.detail);
+    await stripApproval(env, c.value.id);
+    expect(await h.run("")).not.toMatch(/pending/);
+    expect(await h.run(`run ${c.value.id}`)).toMatch(/已开始运行/);
+    expect(seen).toHaveLength(1);
   });
 });
 
 describe("pause / resume / rm / run / repair", () => {
-  it("pause→resume; resume of a pending task warns it is NOT approved; rm deletes", async () => {
+  it("pause→resume (plain receipts, no approval talk); rm deletes", async () => {
     env = a3Env();
     const h = harness(env);
     await h.run(ADD);
     const id = readOk(env.agent.store()!).tasks[0]!.id;
-    expect(await h.run(`pause ${id}`)).toMatch(/已暂停/);
+    expect(await h.run(`pause ${id}`)).toBe(`已暂停 ${id}。`);
     expect(readOk(env.agent.store()!).tasks[0]!.enabled).toBe(false);
-    expect(await h.run(`resume ${id}`)).toMatch(/已恢复/);
+    expect(await h.run(`resume ${id}`)).toBe(`已恢复 ${id}。`);
     const ai = await createTask(env.ports, basicRaw({ name: "ai" }), AI);
     if (!ai.ok) throw new Error(ai.detail);
-    expect(await h.run(`resume ${ai.value.id}`)).toMatch(/恢复不等于批准/);
+    await stripApproval(env, ai.value.id);
+    expect(await h.run(`resume ${ai.value.id}`)).toBe(`已恢复 ${ai.value.id}。`);
     expect(await h.run(`rm ${id}`)).toMatch(/已删除/);
     expect(readOk(env.agent.store()!).tasks.map((t) => t.id)).toEqual([ai.value.id]);
     expect(await h.run("rm")).toMatch(/用法/);
     expect(await h.run("rm s_zzzzzzzz")).toMatch(/E_INVALID/);
   });
 
-  it("run: pending ⇒ E_UNAPPROVED hint; approved ⇒ started through the executor", async () => {
+  it("run: a freshly created task starts through the executor at once; a second run overlaps", async () => {
     env = a3Env();
     const seen: string[] = [];
     env.agent.setExecutor("background", { dispatch: (r) => void seen.push(r.runKey) });
     const h = harness(env);
     const ai = await createTask(env.ports, basicRaw(), AI);
     if (!ai.ok) throw new Error(ai.detail);
-    expect(await h.run(`run ${ai.value.id}`)).toMatch(/E_UNAPPROVED.*approve/);
-    await h.run(`approve ${ai.value.id} ${defHash(ai.value)}`);
     expect(await h.run(`run ${ai.value.id}`)).toMatch(/已开始运行/);
     expect(seen).toHaveLength(1);
-    expect(await h.run(`run ${ai.value.id}`)).toMatch(/E_OVERLAP/);
+    expect(await h.run(`run ${ai.value.id}`)).toMatch(/E_OVERLAP.*已有运行在进行/);
   });
 
   it("repair quarantines a corrupt ledger; a healthy one needs nothing", async () => {
@@ -283,7 +315,7 @@ describe("--all matrix (§5.2)", () => {
       lockTimeoutMs: 300,
     });
     const t = makeTask({ name: "foreign", ownerCwd: env.ports.ownerCwd() });
-    await addTask(other, t, env.fake.now()); // pending (no approval)
+    await addTask(other, t, env.fake.now()); // no approval (runs like any other)
     return { h, other, foreign: t };
   }
 
@@ -323,26 +355,18 @@ describe("--all matrix (§5.2)", () => {
     expect(readOk(store).runs[0]!.reportFile).toBe(reportFile);
   });
 
-  it("approve --all reviews + CASes under the foreign lock; pause/resume/rm --all work; resume never approves", async () => {
+  it("pause/resume/rm --all work under the foreign lock and never touch an approval", async () => {
     const { h, other, foreign } = await twoSessions();
-    const out = await h.run(`approve ${foreign.id} --all`);
-    expect(out).toMatch(/已批准/);
-    expect(h.confirms[0]!.message).toContain(defHash(foreign));
-    expect(isApproved(readOk(other).tasks[0]!)).toBe(true);
     expect(await h.run(`pause ${foreign.id} --all`)).toMatch(/已暂停/);
     expect(readOk(other).tasks[0]!.enabled).toBe(false);
-    expect(await h.run(`resume ${foreign.id} --all`)).toMatch(/已恢复/);
+    expect(await h.run(`resume ${foreign.id} --all`)).toBe(`已恢复 ${foreign.id}。`);
+    expect(readOk(other).tasks[0]!.enabled).toBe(true);
+    expect(readOk(other).tasks[0]).not.toHaveProperty("approval");
+    expect(h.confirms).toHaveLength(0);
     expect(await h.run(`rm ${foreign.id} --all`)).toMatch(/已删除/);
     expect(readOk(other).tasks).toHaveLength(0);
     // an id found nowhere
     expect(await h.run(`rm s_zzzzzzzz --all`)).toMatch(/都没有任务/);
-  });
-
-  it("resume --all of a never-approved foreign task leaves it pending", async () => {
-    const { h, other, foreign } = await twoSessions();
-    await h.run(`pause ${foreign.id} --all`);
-    expect(await h.run(`resume ${foreign.id} --all`)).toMatch(/恢复不等于批准/);
-    expect(isApproved(readOk(other).tasks[0]!)).toBe(false);
   });
 
   it("an id present in two sessions is ambiguous and nothing is written", async () => {
@@ -358,66 +382,5 @@ describe("--all matrix (§5.2)", () => {
     await addTask(third, { ...foreign }, env.fake.now());
     expect(await h.run(`pause ${foreign.id} --all`)).toMatch(/多个会话中出现/);
     expect(readOk(other).tasks[0]!.enabled).toBe(true);
-  });
-});
-
-describe("__put — frozen web review contract", () => {
-  const body = (over: Record<string, unknown> = {}) =>
-    JSON.stringify({ name: "web", when: CRON, prompt: "from the web form", feishu: true, ...over });
-  const ZERO = "0".repeat(64);
-
-  it("preview (all-zero hash) returns the hash to bind and writes nothing; a matching hash creates an APPROVED web task", async () => {
-    env = a3Env();
-    const h = harness(env);
-    const prev = await h.run(`__put ${body()} ${ZERO}`, { webInvocation: true });
-    const hash = /^PREVIEW defHash=([0-9a-f]{64})/.exec(prev)?.[1];
-    expect(hash).toBeDefined();
-    expect(env.agent.readState().kind).toBe("absent");
-    const ok = await h.run(`__put ${body()} ${hash}`, { webInvocation: true });
-    const id = /^OK (s_[a-z2-7]{8}) defHash=([0-9a-f]{64})$/.exec(ok);
-    expect(id?.[2]).toBe(hash);
-    const t = readOk(env.agent.store()!).tasks[0]!;
-    expect(t.approval).toMatchObject({ hash, via: "web" });
-    expect(t.createdVia).toBe("web");
-  });
-
-  it("a non-matching hash is E_REV and nothing is written (content differs from what was reviewed)", async () => {
-    env = a3Env();
-    const h = harness(env);
-    const prev = await h.run(`__put ${body()} ${ZERO}`);
-    const hash = /defHash=([0-9a-f]{64})/.exec(prev)![1]!;
-    const out = await h.run(`__put ${body({ prompt: "tampered" })} ${hash}`);
-    expect(out).toMatch(/E_REV/);
-    expect(env.agent.readState().kind).toBe("absent");
-  });
-
-  it("edit needs baseHash; a stale baseHash is E_REV; a reviewed edit approves a previously pending task", async () => {
-    env = a3Env();
-    const h = harness(env);
-    const ai = await createTask(env.ports, basicRaw(), AI);
-    if (!ai.ok) throw new Error(ai.detail);
-    const base = defHash(ai.value);
-    const edit = { id: ai.value.id, baseHash: base, name: "daily", when: CRON, prompt: "reviewed edit" };
-    expect(await h.run(`__put ${JSON.stringify({ ...edit, baseHash: undefined })} ${ZERO}`)).toMatch(/必须带 baseHash/);
-    const prev = await h.run(`__put ${JSON.stringify(edit)} ${ZERO}`);
-    const hash = /defHash=([0-9a-f]{64})/.exec(prev)![1]!;
-    expect(isApproved(readOk(env.agent.store()!).tasks[0]!)).toBe(false); // preview wrote nothing
-    expect(await h.run(`__put ${JSON.stringify({ ...edit, baseHash: "f".repeat(64) })} ${hash}`)).toMatch(/E_REV/);
-    expect(await h.run(`__put ${JSON.stringify(edit)} ${hash}`)).toMatch(/^OK /);
-    const t = readOk(env.agent.store()!).tasks[0]!;
-    expect(t.prompt).toBe("reviewed edit");
-    expect(t.approval?.hash).toBe(hash);
-    expect(t.createdBy).toBe("agent"); // provenance is kept
-  });
-
-  it("malformed input: no hash, bad json, unknown field, baseHash on create, bad id", async () => {
-    env = a3Env();
-    const h = harness(env);
-    expect(await h.run(`__put ${body()}`)).toMatch(/用法/);
-    expect(await h.run(`__put {nope ${ZERO}`)).toMatch(/json 无法解析/);
-    expect(await h.run(`__put ${body({ approval: {} })} ${ZERO}`)).toMatch(/未知字段 approval/);
-    expect(await h.run(`__put ${body({ baseHash: "a".repeat(64) })} ${ZERO}`)).toMatch(/创建不能带 baseHash/);
-    expect(await h.run(`__put ${body({ id: "bad", baseHash: "a".repeat(64) })} ${ZERO}`)).toMatch(/id 无效/);
-    expect(env.agent.readState().kind).toBe("absent");
   });
 });

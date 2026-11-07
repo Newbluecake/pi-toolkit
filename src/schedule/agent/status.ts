@@ -1,13 +1,13 @@
 /**
  * Scheduled tasks — TUI status bar (plan r3 §5.4; A3). Key `pi-subagent:schedule`
  * (`SCHED_STATUS_KEY`). English tokens only (AGENTS.md UI language split):
- *   `sched 2 · next 08:00 · run 1 · pending 1 · busy · msg off`
+ *   `sched 2 · next 08:00 · run 1 · busy · msg off`
  * Shown only for an interactive session that owns at least one task; otherwise the key is cleared.
  */
 import type { Clock, TimerHandle } from "../../core/clock.js";
 import { nextOccurrence } from "../core/cron.js";
 import { compileTask } from "../core/occurrence.js";
-import { isApproved, isExecutable, isTerminalRunState, type ScheduleStateFile } from "../core/spec.js";
+import { isExecutable, isTerminalRunState, type ScheduleStateFile } from "../core/spec.js";
 import type { XsHostCapabilityState } from "../../fabric/xs/host-cap.js";
 import type { ScheduleAgent } from "./wire.js";
 
@@ -65,8 +65,6 @@ export function renderStatus(f: StatusFacts): string | undefined {
   if (next !== undefined) parts.push(`next ${next}`);
   const running = st.runs.filter((r) => !isTerminalRunState(r.state)).length;
   if (running > 0) parts.push(`run ${running}`);
-  const pending = st.tasks.filter((t) => !isApproved(t)).length;
-  if (pending > 0) parts.push(`pending ${pending}`);
   if (f.busy) parts.push("busy");
   const usesMsg = st.tasks.some((t) => t.form === "message" || t.bg?.handoff === true);
   if (usesMsg && f.capability === "absent") parts.push("msg off");

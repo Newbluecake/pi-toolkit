@@ -13,7 +13,11 @@ import { Type as DevType } from "@sinclair/typebox";
 import {
   canonicalJson,
   MEMORY_TOOL_V2_TEXT,
+  MEMORY_TOOL_V2_TEXT_JEV,
+  MEMORY_TOOL_V3_TEXT,
+  MEMORY_TOOL_V3_TEXT_JEV,
   MemoryToolParamsV2,
+  MemoryToolParamsV3,
   toolSurfaceBytes,
   type ToolSurfaceText,
 } from "../../src/memory/tool-surface.js";
@@ -23,7 +27,13 @@ import { DEFAULT_SETTINGS } from "../../src/config/settings.js";
 const fixture = JSON.parse(readFileSync(new URL("../fixtures/memory-tool-surface.json", import.meta.url), "utf8")) as {
   legacy: { description: string; promptSnippet: string; promptGuidelines: string; parameters: string };
   v2: { description: string; promptSnippet: string; promptGuidelines: string; parameters: string };
-  bytes: { legacy: number; v2: number };
+  /** J5 (jev-plan §4): description-variant key — additions only, the legacy
+   *  and v2 groups above are byte-frozen. */
+  jev: { description: string; bytes: number };
+  /** #36 P4 (arch r5 §4.1.6): v3 block-surface keys — additions only. */
+  blocks: { description: string; promptSnippet: string; promptGuidelines: string; parameters: string };
+  blocksJev: { description: string };
+  bytes: { legacy: number; v2: number; blocks: number; blocksJev: number };
 };
 
 // The legacy tool is NEVER edited by this package (optimize-plan §2.7 复审
@@ -76,6 +86,22 @@ function buildV2Params(T: typeof DevType) {
     action: lit(["list", "write", "append"]),
     name: S(),
     content: S(),
+  });
+}
+
+// Same shape as src/memory/tool-surface.ts's MemoryToolParamsV3 (arch r5
+// §4.1.1) — rebuilt against an explicit typebox namespace so both builds
+// can be compared.
+function buildV3Params(T: typeof DevType) {
+  const S = () => T.Optional(T.String());
+  const lit = (values: readonly string[]) => T.Optional(T.Union(values.map((v) => T.Literal(v))));
+  return T.Object({
+    command: lit(["view", "create", "update", "delete", "search"]),
+    path: S(),
+    topic: S(),
+    text: S(),
+    rev: S(),
+    query: S(),
   });
 }
 
@@ -158,6 +184,38 @@ describe("v2 tool surface (§4.5 frozen text)", () => {
     expect(v2DevBytes).toBeLessThanOrEqual(1500);
     expect(fixture.bytes.v2).toBe(1443);
   });
+
+  // J5 (jev-plan §4 / arch §9.3): the jev-on variant ONLY swaps the
+  // description — the schema's canonical JSON is byte-identical to v2 and
+  // promptSnippet/promptGuidelines are shared. Budget updated in this same
+  // test per the plan ("字节预算断言更新在同一测试").
+  it("jev variant: description = v2 text + §9.3 sentence, schema/snippet/guidelines unchanged, budget 1616B (≤1700B ceiling)", async () => {
+    const RuntimeType = await resolveRuntimeType();
+    // description: original + " " + the §9.3 sentence, verbatim.
+    expect(MEMORY_TOOL_V2_TEXT_JEV.description.startsWith(MEMORY_TOOL_V2_TEXT.description)).toBe(true);
+    expect(MEMORY_TOOL_V2_TEXT.description.endsWith("Never store secrets.")).toBe(true);
+    expect(MEMORY_TOOL_V2_TEXT_JEV.description).toContain(
+      "Entries are tagged automatically after writes. Inline authority (end of the entry's first line): " +
+        '<!-- mem user|lesson expires=YYYY-MM-DD until="…" tags=+a,-b private -->.',
+    );
+    // ~250B suffix per §9.3 (194B + the joining space, pinned exactly).
+    expect(
+      Buffer.byteLength(MEMORY_TOOL_V2_TEXT_JEV.description, "utf8") -
+        Buffer.byteLength(MEMORY_TOOL_V2_TEXT.description, "utf8"),
+    ).toBe(173);
+    // shared fields — NOT part of the variant.
+    expect(MEMORY_TOOL_V2_TEXT_JEV.promptSnippet).toBe(MEMORY_TOOL_V2_TEXT.promptSnippet);
+    expect(MEMORY_TOOL_V2_TEXT_JEV.promptGuidelines).toStrictEqual([...MEMORY_TOOL_V2_TEXT.promptGuidelines]);
+    // schema byte-identical under canonicalJson, on BOTH typebox builds.
+    const runtimeV2Params = buildV2Params(RuntimeType);
+    expect(toolSurfaceBytes({ ...MEMORY_TOOL_V2_TEXT_JEV, parameters: MemoryToolParamsV2 })).toBe(1616);
+    expect(toolSurfaceBytes({ ...MEMORY_TOOL_V2_TEXT_JEV, parameters: runtimeV2Params })).toBe(1616);
+    expect(toolSurfaceBytes({ ...MEMORY_TOOL_V2_TEXT_JEV, parameters: MemoryToolParamsV2 })).toBeLessThanOrEqual(1700);
+    expect(fixture.jev.bytes).toBe(1616);
+    // fixture: the new key matches the constant (canonical form).
+    expect(canonicalJson(MEMORY_TOOL_V2_TEXT_JEV.description)).toBe(fixture.jev.description);
+    expect(fixture.jev.description.startsWith(fixture.v2.description.slice(0, -1))).toBe(true);
+  });
 });
 
 describe("canonicalJson", () => {
@@ -181,5 +239,88 @@ describe("canonicalJson", () => {
         expect(canonicalJson(JSON.parse(value))).toBe(value);
       }
     }
+  });
+});
+
+// ── #36 P4 (arch r5 §4.1.1/§4.1.6): the v3 block surface — declared update ──
+
+describe("v3 tool surface (#36 blocks, declared golden addition)", () => {
+  it("canonical JSON matches the new fixture keys on the dev typebox", async () => {
+    expect(canonicalJson(MemoryToolParamsV3)).toBe(fixture.blocks.parameters);
+    expect(canonicalJson(buildV3Params(DevType))).toBe(fixture.blocks.parameters);
+    expect(canonicalJson(MEMORY_TOOL_V3_TEXT.description)).toBe(fixture.blocks.description);
+    expect(canonicalJson(MEMORY_TOOL_V3_TEXT.promptSnippet)).toBe(fixture.blocks.promptSnippet);
+    expect(canonicalJson(MEMORY_TOOL_V3_TEXT.promptGuidelines)).toBe(fixture.blocks.promptGuidelines);
+  });
+
+  it("runtime typebox (resolved from the pi package): same canonical JSON, different raw key order", async () => {
+    const RuntimeType = await resolveRuntimeType();
+    expect(canonicalJson(buildV3Params(RuntimeType))).toBe(fixture.blocks.parameters);
+    expect(JSON.stringify(buildV3Params(RuntimeType))).not.toBe(JSON.stringify(buildV3Params(DevType)));
+  });
+
+  it("v3 drops every v2 editing field; the five commands are the only enum members", () => {
+    const params = JSON.parse(fixture.blocks.parameters) as {
+      properties: Record<string, { anyOf?: { const: string }[] }>;
+    };
+    expect(Object.keys(params.properties).sort()).toEqual(["command", "path", "query", "rev", "text", "topic"]);
+    expect(params.properties.command.anyOf?.map((m) => m.const)).toEqual([
+      "view",
+      "create",
+      "update",
+      "delete",
+      "search",
+    ]);
+    for (const gone of [
+      "action",
+      "name",
+      "content",
+      "old_str",
+      "new_str",
+      "insert_line",
+      "insert_text",
+      "old_path",
+      "new_path",
+      "view_range",
+      "section",
+      "file_text",
+    ]) {
+      expect(params.properties).not.toHaveProperty(gone);
+    }
+  });
+
+  it("byte budget: blocks is 923B, blocksJev is 1111B (≤1700B ceiling), stable across both typebox builds", async () => {
+    const RuntimeType = await resolveRuntimeType();
+    const devBytes = toolSurfaceBytes({ ...MEMORY_TOOL_V3_TEXT, parameters: buildV3Params(DevType) });
+    const runtimeBytes = toolSurfaceBytes({ ...MEMORY_TOOL_V3_TEXT, parameters: buildV3Params(RuntimeType) });
+    expect(devBytes).toBe(923);
+    expect(runtimeBytes).toBe(923);
+    expect(fixture.bytes.blocks).toBe(923);
+    const jevDev = toolSurfaceBytes({ ...MEMORY_TOOL_V3_TEXT_JEV, parameters: buildV3Params(DevType) });
+    const jevRuntime = toolSurfaceBytes({ ...MEMORY_TOOL_V3_TEXT_JEV, parameters: buildV3Params(RuntimeType) });
+    expect(jevDev).toBe(1111);
+    expect(jevRuntime).toBe(1111);
+    expect(fixture.bytes.blocksJev).toBe(1111);
+    expect(jevDev).toBeLessThanOrEqual(1700);
+  });
+
+  it("jev variant: description = v3 text + write-syntax sentence; schema/snippet/guidelines shared", () => {
+    expect(MEMORY_TOOL_V3_TEXT_JEV.description.startsWith(MEMORY_TOOL_V3_TEXT.description)).toBe(true);
+    expect(MEMORY_TOOL_V3_TEXT_JEV.promptSnippet).toBe(MEMORY_TOOL_V3_TEXT.promptSnippet);
+    expect(MEMORY_TOOL_V3_TEXT_JEV.promptGuidelines).toStrictEqual([...MEMORY_TOOL_V3_TEXT.promptGuidelines]);
+    expect(canonicalJson(MEMORY_TOOL_V3_TEXT_JEV.description)).toBe(fixture.blocksJev.description);
+    expect(fixture.blocksJev.description.startsWith(fixture.blocks.description.slice(0, -1))).toBe(true);
+    expect(
+      Buffer.byteLength(MEMORY_TOOL_V3_TEXT_JEV.description, "utf8") -
+        Buffer.byteLength(MEMORY_TOOL_V3_TEXT.description, "utf8"),
+    ).toBe(188);
+  });
+
+  it("declared-addition fence: the pre-#36 keys keep their frozen bytes (legacy 1333 / v2 1443 / jev 1616)", () => {
+    expect(fixture.bytes.legacy).toBe(1333);
+    expect(fixture.bytes.v2).toBe(1443);
+    expect(fixture.jev.bytes).toBe(1616);
+    // the legacy/v2/v3 descriptions are three distinct surfaces
+    expect(fixture.blocks.description).not.toBe(fixture.v2.description);
   });
 });

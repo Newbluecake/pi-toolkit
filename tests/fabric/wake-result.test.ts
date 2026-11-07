@@ -294,7 +294,7 @@ describe("W6 wake_result record (router + authorize)", () => {
   it("authorize() pins a wake_result route to a system `result` — nothing else rides it", () => {
     const route = { kind: "wake_result", runId: SUCC } as const;
     expect(authorize({ kind: "result", relation: "unrelated", from: "system", route })).toBe(true);
-    expect(authorize({ kind: "finding", relation: "child", from: "system", route })).toBe(false);
+    expect(authorize({ kind: "report", relation: "child", from: "system", route })).toBe(false);
     expect(authorize({ kind: "result", relation: "child", from: sender, route })).toBe(false);
     expect(authorize({ kind: "dead_letter", relation: "unrelated", from: "system", route })).toBe(false);
   });

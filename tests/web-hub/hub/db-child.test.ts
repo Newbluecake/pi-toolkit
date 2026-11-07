@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { buildMaintScript, buildQueryScript, dbTestModeEnabled } from "../../../src/web-hub/hub/db-child.js";
 import { hasNodeSqlite } from "../../../src/web-hub/hub/db.js";
+import { parseReaderMarker, WRITER_SOAK_MS, writerActive } from "../../../src/web-hub/hub/hardening.js";
 
 const execFileP = promisify(execFile);
 const skipIfNoSqlite = (await hasNodeSqlite()) ? describe : describe.skip;
@@ -177,6 +178,53 @@ skipIfNoSqlite("query script run directly (bypassing db-client.ts)", () => {
       expect(q.child.killed).toBe(false);
     } finally {
       q.child.kill("SIGKILL");
+      t.cleanup();
+    }
+  });
+
+  it("#66 P2 rehash is an autocommit CAS: child exit after UPDATE preserves epoch/session/initial fields; retry is stale", async () => {
+    const t = tmp();
+    await migrate(t.dbFile);
+    const q = spawnQuery(t.dbFile);
+    let again: ReturnType<typeof spawnQuery> | undefined;
+    try {
+      q.send(1, "getUser", { username: "admin" });
+      const user = (await q.waitFor(1)).result as Record<string, unknown>;
+      q.send(2, "createSession", {
+        userId: user["id"],
+        epoch: user["epoch"],
+        sidHash: "AAAA",
+        boundOrigin: "http://hub",
+        createdIp: "1.2.3.4",
+        now: 1000,
+      });
+      expect((await q.waitFor(2)).ok).toBe(true);
+      const args = {
+        userId: user["id"],
+        old: user,
+        next: {
+          n: 131072,
+          r: 8,
+          p: 1,
+          salt: Buffer.alloc(16, 9).toString("base64"),
+          hash: Buffer.alloc(32, 8).toString("base64"),
+        },
+        now: 2000,
+      };
+      const exited = new Promise<void>((resolve) => q.child.once("exit", () => resolve()));
+      q.send(3, "rehashPassword", { ...args, __crashAfterCommit: true });
+      await exited;
+      expect(q.lines.find((line) => line.id === 3)).toBeUndefined();
+      again = spawnQuery(t.dbFile);
+      again.send(1, "getUser", { username: "admin" });
+      expect((await again.waitFor(1)).result).toEqual({ ...user, ...args.next, updatedAt: 2000 });
+      again.send(2, "rehashPassword", args);
+      expect((await again.waitFor(2)).result).toEqual({ ok: false, reason: "stale" });
+      again.send(3, "touchSession", { sidHash: "AAAA", now: 2001 });
+      expect((await again.waitFor(3)).result).toMatchObject({ userId: user["id"], epoch: user["epoch"] });
+    } finally {
+      q.child.kill("SIGKILL");
+      again?.child.kill("SIGKILL");
       t.cleanup();
     }
   });
@@ -443,5 +491,198 @@ skipIfNoSqlite("maintenance script (open-check-migrate)", () => {
     } finally {
       t.cleanup();
     }
+  });
+});
+
+skipIfNoSqlite("maintenance open check — #66 hardening reader marker / verdict (plan §4.0)", () => {
+  type Hardening = { readerSince: number; writerActive: boolean; maxKdf: { n: number; r: number; p: number } | null };
+  type Reply = { ok: boolean; code?: string; warning?: string; hardening?: Hardening };
+
+  async function open(
+    dbFile: string,
+    opts: { hardeningPhase?: 1 | 2; now?: number } = {},
+    op = "open-check-migrate",
+  ): Promise<Reply> {
+    const script = buildMaintScript(opts);
+    const { stdout } = await execFileP(process.execPath, ["--disable-warning=ExperimentalWarning", "-e", script], {
+      env: { ...process.env, PI_WEBHUB_DB_PATH: dbFile, PI_WEBHUB_DB_OP: op, PI_WEBHUB_DB_DEADLINE_MS: "5000" },
+      timeout: 5000,
+    });
+    return JSON.parse(stdout.trim().split("\n").pop()!) as Reply;
+  }
+
+  async function withDb<T>(dbFile: string, fn: (db: import("node:sqlite").DatabaseSync) => T): Promise<T> {
+    const { createRequire } = await import("node:module");
+    const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
+    const db = new DatabaseSync(dbFile);
+    try {
+      return fn(db);
+    } finally {
+      db.close();
+    }
+  }
+  const marker = (dbFile: string) =>
+    withDb(dbFile, (db) => (db.prepare("SELECT value FROM meta WHERE key='hardening_reader'").get() as any)?.value);
+  const setMarker = (dbFile: string, value: string | undefined) =>
+    withDb(dbFile, (db) => {
+      if (value === undefined) db.exec("DELETE FROM meta WHERE key='hardening_reader'");
+      else db.prepare("INSERT OR REPLACE INTO meta(key,value) VALUES('hardening_reader',?)").run(value);
+    });
+
+  const NOW = 1_800_000_000_000;
+
+  it("fresh db: stamps {v:1,since:now}, reports phase-1 writerActive=false and the seeded 2^15 maxKdf", async () => {
+    const t = tmp();
+    try {
+      const res = await open(t.dbFile, { now: NOW });
+      expect(res.ok).toBe(true);
+      expect(res.hardening).toEqual({
+        readerSince: NOW,
+        writerActive: false,
+        maxKdf: { n: 32768, r: 8, p: 1 },
+        totpKey: "none",
+        totpMigrated: 0,
+        truncateFailed: false,
+        totpWarnings: [],
+      });
+      expect(JSON.parse((await marker(t.dbFile))!)).toEqual({ v: 1, since: NOW });
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  it("re-opening never moves `since`", async () => {
+    const t = tmp();
+    try {
+      await open(t.dbFile, { now: NOW });
+      const res = await open(t.dbFile, { now: NOW + 99 * 86_400_000 });
+      expect(res.hardening?.readerSince).toBe(NOW);
+      expect(JSON.parse((await marker(t.dbFile))!)).toEqual({ v: 1, since: NOW });
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  it("an older marker version only gets its v raised (since kept); garbage is re-stamped with now", async () => {
+    const t = tmp();
+    try {
+      await open(t.dbFile, { now: NOW });
+      await setMarker(t.dbFile, JSON.stringify({ v: 0, since: 1234 }));
+      const res = await open(t.dbFile, { now: NOW + 5 });
+      expect(res.hardening?.readerSince).toBe(1234);
+      expect(JSON.parse((await marker(t.dbFile))!)).toEqual({ v: 1, since: 1234 });
+      await setMarker(t.dbFile, "not json");
+      const res2 = await open(t.dbFile, { now: NOW + 9 });
+      expect(res2.hardening?.readerSince).toBe(NOW + 9);
+      await setMarker(t.dbFile, undefined);
+      expect((await open(t.dbFile, { now: NOW + 11 })).hardening?.readerSince).toBe(NOW + 11);
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  it("writerActive: the maintenance script agrees with hub/hardening.ts's writerActive on a full grid", async () => {
+    const t = tmp();
+    try {
+      await open(t.dbFile, { now: NOW });
+      const cases: Array<{ phase: 1 | 2; marker: string | undefined; readerSince?: number }> = [];
+      for (const phase of [1, 2] as const) {
+        for (const since of [
+          0,
+          NOW - WRITER_SOAK_MS - 1,
+          NOW - WRITER_SOAK_MS,
+          NOW - WRITER_SOAK_MS + 1,
+          NOW,
+          NOW + 1,
+          NOW + 40 * 86_400_000,
+        ]) {
+          for (const v of [0, 1, 2]) cases.push({ phase, marker: JSON.stringify({ v, since }) });
+        }
+        cases.push({ phase, marker: undefined });
+      }
+      for (const c of cases) {
+        await setMarker(t.dbFile, c.marker);
+        const res = await open(t.dbFile, { hardeningPhase: c.phase, now: NOW });
+        const stored = await marker(t.dbFile);
+        const parsed = parseReaderMarker(stored)!;
+        // the verdict is evaluated on the marker AFTER this open stamped/raised it
+        expect(res.hardening?.writerActive, `${c.phase} ${c.marker}`).toBe(writerActive(c.phase, parsed, NOW));
+      }
+      // explicit anchors
+      await setMarker(t.dbFile, JSON.stringify({ v: 1, since: NOW - WRITER_SOAK_MS }));
+      expect((await open(t.dbFile, { hardeningPhase: 1, now: NOW })).hardening?.writerActive).toBe(false);
+      expect((await open(t.dbFile, { hardeningPhase: 2, now: NOW })).hardening?.writerActive).toBe(true);
+      await setMarker(t.dbFile, JSON.stringify({ v: 1, since: NOW + 1000 }));
+      expect((await open(t.dbFile, { hardeningPhase: 2, now: NOW })).hardening?.writerActive).toBe(false);
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  it("a v≥1 first-ever phase-2 open stamps now, so the writer stays off for the whole soak", async () => {
+    const t = tmp();
+    try {
+      const res = await open(t.dbFile, { hardeningPhase: 2, now: NOW });
+      expect(res.hardening).toMatchObject({ readerSince: NOW, writerActive: false });
+      expect((await open(t.dbFile, { hardeningPhase: 2, now: NOW + WRITER_SOAK_MS - 1 })).hardening?.writerActive).toBe(
+        false,
+      );
+      expect((await open(t.dbFile, { hardeningPhase: 2, now: NOW + WRITER_SOAK_MS })).hardening?.writerActive).toBe(
+        true,
+      );
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  it("maxKdf is the strongest stored record by n·r·p", async () => {
+    const t = tmp();
+    try {
+      await open(t.dbFile, { now: NOW });
+      await withDb(t.dbFile, (db) => {
+        const ins = db.prepare(
+          "INSERT INTO users (username,kdf,n,r,p,salt,hash,epoch,created_at,updated_at) VALUES (?,?,?,?,?,?,?,1,1,1)",
+        );
+        ins.run("weak", "scrypt", 16384, 1, 1, Buffer.alloc(16), Buffer.alloc(32));
+        ins.run("strong", "scrypt", 65536, 8, 2, Buffer.alloc(16), Buffer.alloc(32));
+        ins.run("mid", "scrypt", 131072, 8, 1, Buffer.alloc(16), Buffer.alloc(32));
+      });
+      const res = await open(t.dbFile, { now: NOW });
+      expect(res.hardening?.maxKdf).toEqual({ n: 65536, r: 8, p: 2 }); // 2^20 (tie with `mid`: lowest id wins)
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  it("the open check keeps the initial account at the legacy 2^15 cost (no scryptSync upgrade in the child)", async () => {
+    const t = tmp();
+    try {
+      await open(t.dbFile, { hardeningPhase: 2, now: NOW });
+      const row = await withDb(t.dbFile, (db) => db.prepare("SELECT n,r,p FROM users").get());
+      expect(row).toEqual({ n: 32768, r: 8, p: 1 });
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  it("repair-2fa and the checkpoint ops carry no hardening field and never touch the marker", async () => {
+    const t = tmp();
+    try {
+      await open(t.dbFile, { now: NOW });
+      const before = await marker(t.dbFile);
+      const repaired = await open(t.dbFile, { now: NOW + 1 }, "repair-2fa");
+      expect(repaired.ok).toBe(true);
+      expect(repaired.hardening).toBeUndefined();
+      expect((await open(t.dbFile, {}, "checkpoint-truncate")).hardening).toBeUndefined();
+      expect(await marker(t.dbFile)).toBe(before);
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  it("the resident query script never decides the writer verdict (single decision point)", () => {
+    const q = buildQueryScript({ test: false });
+    expect(q).not.toContain("WRITER_SOAK");
+    expect(q).not.toContain("hardening_reader");
   });
 });

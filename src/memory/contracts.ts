@@ -2,7 +2,7 @@
 // (optimize-plan §10 "P0 冻结面完整性核对": P1 renderTiered, P2 tool-v2/edit/
 // search/budget/normalize, P3 doctor, P4 tidy all consume this file without
 // redefining any of it). P0-b's own consumers (`inject.ts`'s layout routing,
-// `tool-surface.ts`) plus the pi-facing `TidyPort` adapter in `src/index.ts`
+// `tool-surface.ts`) plus the pi-facing `TidyPort` adapter in `src/holder.ts`
 // are the only real callers today — everything else here is typed ahead of
 // the package that implements it, per the plan's "冻结接口先行" ordering.
 //
@@ -139,7 +139,25 @@ export interface BudgetReport {
 
 // ───────────────────────────── §6 doctor ─────────────────────────────
 
-export type DoctorId = "D01" | "D02" | "D03" | "D04" | "D05" | "D06" | "D07" | "D08" | "D09" | "D11" | "D13" | "D14";
+export type DoctorId =
+  | "D01"
+  | "D02"
+  | "D03"
+  | "D04"
+  | "D05"
+  | "D06"
+  | "D07"
+  | "D08"
+  | "D09"
+  | "D11"
+  | "D13"
+  | "D14"
+  // jev-plan §4 J8 (jev-arch §6.3.5 到期 / §9.2): only reported when `runDoctor`'s
+  // optional `jev` parameter is present — absent (the common, off, case) is
+  // byte-identical to before these three codes existed (I9).
+  | "D17"
+  | "D18"
+  | "D19";
 export type DoctorSeverity = "error" | "warn" | "info";
 
 export interface DoctorFinding {
@@ -386,7 +404,7 @@ export const TIDY_SCHEMA: JsonSchema = {
  * The host-side port `/mem tidy` spawns a proposal-drafting subagent
  * through — a thin projection of `SpawnService` (§7.0's `toolDomain` is a
  * REQUIRED literal so a caller can't forget the readonly domain the P0-r
- * runtime enforces). `src/index.ts` implements this by reading the current
+ * runtime enforces). `src/holder.ts` (createTidyPort) implements this by reading the current
  * session stack (same `holder.current` pattern as every other forwarded
  * port); P4's `tidy/*.ts` is the only in-package consumer.
  */
@@ -416,6 +434,34 @@ export interface TidyPort {
   waitOutcome(runId: RunId, waitMs?: number): Promise<BoundedWaitResult>;
   abort(runId: RunId, cause?: StopCause): Promise<boolean>;
   snapshot(runId: RunId): RunSnapshot | undefined;
+}
+
+// ───────────────────────── #36 §4.7 secure 写闸门（P0 声明，P2 实现） ─────────────────────────
+
+/** #36 memory-governance（arch r5 §4.7）：所有自动写入口（启动迁移、sweep、
+ *  自动取代、漂移导入、侧车写入、暂存区构建/清理的每个操作）逐操作复检的写
+ *  闸门。实现 `src/secure/memory-gate.ts`（P2）：plain 域恒 ok；locked 恒拒；
+ *  secure 域复检挂载状态 + 路径身份。自动路径永不 mkdir；`capture` 在显式路径
+ *  新建 memDir 后立即调用，此后自动路径才允许写入该目录。 */
+export interface MemoryWriteGate {
+  /** 每个自动写操作前调用；false ⇒ 本操作及本轮剩余操作全部跳过，不读不写、不 mkdir。 */
+  check(
+    memDir: string,
+  ): { ok: true } | { ok: false; reason: "locked" | "unmounted" | "path-escaped" | "identity-changed" };
+  /** activate 时捕获 memDir 的 realpath + dev/ino（目录不存在则不捕获，之后的自动路径一律视为 identity-changed）。 */
+  capture(memDir: string): void;
+  /** #36 P4 修复轮（root 2026-11-06）：受控的**显式路径**目录创建前置验证。
+   *  仅在 memDir 尚不存在、且调用方是显式写入入口（工具写入、/mem init、
+   *  显式 /mem migrate）时调用：plain 域恒 ok；secure 域先验证 domain 未锁、
+   *  vault 挂载有效、路径位于写区、且最近存在祖先（含挂载点）的当前身份
+   *  可验证，然后由调用方 ensureMemoryDir 并立即 capture 新目录，锁内再走
+   *  正常 check。不存在目录不要求已有 capture；已存在目录的 identity 异常
+   *  仍拒绝。**自动路径（sweep、取代、侧车写入、自动迁移）永不调用** —
+   *  它们不获得 mkdir 能力。缺省无此方法 ⇒ 调用方回退到 check() 的既有
+   *  语义（旧 gate 实现零改动）。 */
+  bootstrap?(
+    memDir: string,
+  ): { ok: true } | { ok: false; reason: "locked" | "unmounted" | "path-escaped" | "identity-changed" };
 }
 
 export type { RunOutcome };

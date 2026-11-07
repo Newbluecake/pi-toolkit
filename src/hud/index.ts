@@ -55,7 +55,7 @@ export interface HudOptions {
   autoFetchMinutes?: number;
   /**
    * 插件自身版本/commit 的读取依赖（测试注入）；`null` = 不读取。
-   * 省略时用 import.meta.url 推出的包根 + package.json + git。
+   * 省略时用 packageRoot() 定位的包根 + package.json + git。
    */
   pluginInfoDeps?: PluginInfoDeps | null;
 }
@@ -93,7 +93,7 @@ export interface HudSession {
    */
   bgAgents: Map<string, number>;
   /**
-   * pi-subagent 实时费用（subagent:usage 事件，1Hz）：runId → 累计花费/是否终态/是否已被父 run 吸收。
+   * pi-toolkit 实时费用（subagent:usage 事件，1Hz）：runId → 累计花费/是否终态/是否已被父 run 吸收。
    * 与 session 已入账部分（携带 usage 的 toolResult，其 details.runId 可识别）
    * 按 runId 去重：已入账的 run 不再计入实时分量，避免双算；被吸收
    * （absorbed）同理 —— 其花费已随父 run 的 toolResult usage 入账。
@@ -239,7 +239,7 @@ export function wireHud(pi: ExtensionAPI, options: HudOptions = {}): void {
 
   // 后台 subagent 生命周期。兼容两套广播源：
   //  - 旧 @tintinweb/pi-subagents：频道 subagents:*（复数），payload { id }
-  //  - pi-subagent（本仓库扩展）：频道 subagent:*（单数），payload { runId }
+  //  - pi-toolkit（本仓库扩展）：频道 subagent:*（单数），payload { runId }
   // 两者用 Map 键去重，重复事件无害。started 在进入 running 时触发（含从队列启动）。
   const bgAgentId = (data: unknown): string | undefined => {
     const d = data as { id?: unknown; runId?: unknown } | undefined;
@@ -283,7 +283,7 @@ export function wireHud(pi: ExtensionAPI, options: HudOptions = {}): void {
       }
     }
   };
-  // pi-subagent 实时费用广播（1Hz，含终态帧）：更新 runId → 花费映射并触发
+  // pi-toolkit 实时费用广播（1Hz，含终态帧）：更新 runId → 花费映射并触发
   // footer 重绘，使 Σ 旁的 +agents 分量实时跳动。
   const onSubUsage = (data: unknown) => {
     const s = session;
@@ -309,7 +309,7 @@ export function wireHud(pi: ExtensionAPI, options: HudOptions = {}): void {
       pi.events.on("subagents:started", onBgStarted),
       pi.events.on("subagents:completed", onBgSettled),
       pi.events.on("subagents:failed", onBgSettled),
-      // pi-subagent（单数频道）：completed/failed 覆盖全部终态（aborted/timed_out 也走 failed 频道）。
+      // pi-toolkit（单数频道）：completed/failed 覆盖全部终态（aborted/timed_out 也走 failed 频道）。
       pi.events.on("subagent:started", onBgStarted),
       pi.events.on("subagent:completed", onBgSettled),
       pi.events.on("subagent:failed", onBgSettled),
