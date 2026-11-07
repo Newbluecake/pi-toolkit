@@ -21,6 +21,8 @@ import {
  * file key is silently ignored — field-by-field tolerant parsing.)
  */
 export interface MemorySettings {
+  /** #39 opt-in scopes. Non-live; off leaves runtime ports/hooks/sections absent. */
+  scopes: { session: boolean; hub: boolean };
   /** 总开关。false = 不注册注入 hook、memory 工具、/mem 命令。Default true（融合后原插件被卸载，默认关=升级即功能消失，merge-plan D2 哲学）。 */
   enabled: boolean;
   /** 子会话是否注入。Default true（对齐原插件：所有会话注入）。仅影响注入 hook；工具可见性仍由 agent type tools allowlist 决定。 */
@@ -320,7 +322,8 @@ function parseJevPredict(raw: unknown, fallback: MemoryJevPredictSettings): Memo
  */
 export function parseMemorySettings(input: unknown): MemorySettings {
   const defaults = DEFAULT_MEMORY_SETTINGS;
-  if (!input || typeof input !== "object" || Array.isArray(input)) return { ...defaults };
+  if (!input || typeof input !== "object" || Array.isArray(input))
+    return { ...defaults, scopes: { ...defaults.scopes } };
   const value = input as Record<string, unknown>;
   const bool = (raw: unknown, fallback: boolean): boolean => (typeof raw === "boolean" ? raw : fallback);
   const num = (raw: unknown, fallback: number, min: number, max: number): number =>
@@ -422,7 +425,14 @@ export function parseMemorySettings(input: unknown): MemorySettings {
     predict: parseJevPredict(jevObj.predict, defaults.jev.predict),
   };
 
+  const scopesRaw = value.scopes;
+  const scopes =
+    scopesRaw && typeof scopesRaw === "object" && !Array.isArray(scopesRaw)
+      ? (scopesRaw as Record<string, unknown>)
+      : {};
+
   return {
+    scopes: { session: bool(scopes.session, defaults.scopes.session), hub: bool(scopes.hub, defaults.scopes.hub) },
     enabled: bool(value.enabled, defaults.enabled),
     injectInChildSessions: bool(value.injectInChildSessions, defaults.injectInChildSessions),
     allowWriteInChildSessions: bool(value.allowWriteInChildSessions, defaults.allowWriteInChildSessions),
@@ -449,6 +459,7 @@ export function parseMemorySettings(input: unknown): MemorySettings {
 }
 
 export const DEFAULT_MEMORY_SETTINGS: MemorySettings = {
+  scopes: { session: false, hub: false },
   enabled: true,
   injectInChildSessions: true,
   allowWriteInChildSessions: false,

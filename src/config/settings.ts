@@ -451,7 +451,11 @@ function applySecureDomainOverrides(settings: AgentSettings): AgentSettings {
     // traffic-merge plan §6：加密/锁定域禁止流量落库（唯一落库闸口 persist 另有每次复查）。
     traffic: { ...settings.traffic, enabled: false },
     // jev-plan v2 §4 J3 / jev-arch §7.3（I11）：加密/锁定域强制关闭 Jev，无论用户文件怎么写。
-    memory: { ...settings.memory, jev: { ...settings.memory.jev, enabled: false } },
+    memory: {
+      ...settings.memory,
+      scopes: { ...settings.memory.scopes, hub: false },
+      jev: { ...settings.memory.jev, enabled: false },
+    },
     // jev-reflex arch §4.1（I11/D8）：加密/锁定域强制关闭 R 层（wireReflex 另有 secureDomainKind 守卫）；
     // #25 BA §4.6：drafts 同属 D8 强制关闭面（离线脚本永不进入加密域）。
     reflex: { ...settings.reflex, enabled: false, drafts: { enabled: false } },

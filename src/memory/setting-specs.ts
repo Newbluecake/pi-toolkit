@@ -322,4 +322,13 @@ export const MEMORY_SETTING_SPECS: Record<string, SettingSpec> = {
     ...count("memory.jev.predict.cacheTtlMin", 1, "Session-local predict cache TTL, minutes (P2)"),
     max: 240,
   } as SettingSpec,
+  // #39 intentional additive settings. Both remain non-live and default off.
+  "memory.scopes.session": bool(
+    "memory.scopes.session",
+    "Session-scoped memory and child snapshots (default off; requires /reload)",
+  ),
+  "memory.scopes.hub": bool(
+    "memory.scopes.hub",
+    "Shared Hub memory with exact-content human approval (default off; requires /reload; forced off in secure domains)",
+  ),
 };

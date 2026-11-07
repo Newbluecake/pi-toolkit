@@ -273,10 +273,19 @@ function stripRetired(template: unknown, retiredPaths: readonly string[]): unkno
 /** task55: intentional additive /fast configuration. Preserve every old field's order/value
  * and all warns/files hashes, while checking the new block for every legacy input. The
  * generator continues to use the unprojected result; no corpus/template/hash is refreshed. */
-function withoutFast(settings: typeof DEFAULT_SETTINGS): Omit<typeof DEFAULT_SETTINGS, "fast"> {
+function withoutFast(settings: typeof DEFAULT_SETTINGS) {
   expect(settings.fast).toEqual({ enabled: true });
-  const { fast: _fast, ...legacy } = settings;
-  return legacy;
+  // #39 declared additive keys only: every legacy case must parse both flags as false.
+  // Preserve ALL old rows/fields/order; never regenerate or filter the frozen inputs.
+  expect(settings.memory.scopes).toEqual({ session: false, hub: false });
+  const { memory } = settings;
+  const { scopes: _scopes, ...oldMemory } = memory;
+  // Replace at the original memory position rather than appending it to the end.
+  return Object.fromEntries(
+    Object.entries(settings)
+      .filter(([key]) => key !== "fast")
+      .map(([key, value]) => [key, key === "memory" ? oldMemory : value]),
+  );
 }
 
 const generateFrom = process.env.GOV_CORPUS_GENERATE;

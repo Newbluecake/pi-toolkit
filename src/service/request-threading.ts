@@ -48,6 +48,7 @@ const THREADED = [
  * (this table is what a reviewer should read when a new field shows up here):
  */
 const NOT_THREADED = [
+  "memorySeed", // #39 host-only snapshot; transfer explicitly to SessionSpec.memorySeed, never raw runner/worker/journal data (P2).
   "fastSeed", // Fast control-plane seed; P3 must explicitly transfer to SessionSpec.fastSeed, never a ResolvedSpawnRequest runner field; P4a contract only
   "runId", // supplied directly as RunnerSpec.runId / ResolvedSpawnRequest.runId
   "type", // resolved to RunnerSpec.type (AgentTypeConfig) before this layer

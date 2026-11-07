@@ -13,6 +13,7 @@ const defaults = DEFAULT_SETTINGS.memory;
 describe("memory settings", () => {
   it("pins the P5 defaults (tiered injection + v2 tool surface)", () => {
     expect(defaults).toEqual({
+      scopes: { session: false, hub: false },
       enabled: true,
       injectInChildSessions: true,
       allowWriteInChildSessions: false,
@@ -873,5 +874,25 @@ describe("memory settings", () => {
     expect(SETTING_SPECS["memory.jev.predict.cacheTtlMin"]).toMatchObject({ kind: "number", min: 1, max: 240 });
     expect(defaultOf(SETTING_SPECS["memory.jev.predict.enabled"]!)).toBe(true);
     expect(defaultOf(SETTING_SPECS["memory.jev.predict.model.models"]!)).toBe("deepseek/deepseek-flash");
+  });
+});
+
+describe("#39 declared opt-in scopes settings (no runtime wiring)", () => {
+  it("defaults off, parses independently and tolerates malformed blocks/values", () => {
+    expect(loadSettings({}).memory.scopes).toEqual({ session: false, hub: false });
+    expect(loadSettings({ memory: { scopes: { session: true, hub: true } } }).memory.scopes).toEqual({
+      session: true,
+      hub: true,
+    });
+    expect(loadSettings({ memory: { scopes: { session: true, hub: "true" } } }).memory.scopes).toEqual({
+      session: true,
+      hub: false,
+    });
+    for (const scopes of [null, [], 1, "true"])
+      expect(loadSettings({ memory: { scopes } }).memory.scopes).toEqual({ session: false, hub: false });
+    // memory.enabled remains the runtime prerequisite; P0 does not implement runtime ports.
+    const off = loadSettings({ memory: { enabled: false, scopes: { session: true, hub: true } } });
+    expect(off.memory.enabled).toBe(false);
+    expect(off.memory.scopes).toEqual({ session: true, hub: true });
   });
 });

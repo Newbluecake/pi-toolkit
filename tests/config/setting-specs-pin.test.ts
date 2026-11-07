@@ -37,14 +37,31 @@ if (process.env.GOV_SPECS_GENERATE === "1") {
   });
 } else {
   const pin = JSON.parse(readFileSync(PIN_PATH, "utf8")) as Pin;
-  // task55 /fast is an intentional additive feature, not a refactor baseline refresh.
-  // Remove exactly its one declared key; any other added/changed/reordered key still fails.
-  const legacySpecs = Object.fromEntries(Object.entries(SETTING_SPECS).filter(([key]) => key !== "fast.enabled"));
+  // task55 /fast and task39 scopes are declared additive features, not baseline refreshes.
+  // Project exactly these NEW keys; all old specs/order/content remain pinned.
+  const declaredAdditions = ["memory.scopes.session", "memory.scopes.hub", "fast.enabled"];
+  const legacySpecs = Object.fromEntries(
+    Object.entries(SETTING_SPECS).filter(([key]) => !declaredAdditions.includes(key)),
+  );
   describe("SETTING_SPECS pin (order + content)", () => {
-    it("adds exactly fast.enabled at the end, with the declared non-live default", () => {
+    it("adds exactly declared Fast/scopes keys with non-live defaults and keeps old ordering", () => {
       const oldKeys = pin.specs.map(([key]) => key);
-      expect(Object.keys(SETTING_SPECS).filter((key) => !oldKeys.includes(key))).toEqual(["fast.enabled"]);
-      expect(Object.keys(SETTING_SPECS)).toEqual([...oldKeys, "fast.enabled"]);
+      expect(Object.keys(SETTING_SPECS).filter((key) => !oldKeys.includes(key))).toEqual(declaredAdditions);
+      const anchor = oldKeys.indexOf("memory.jev.predict.cacheTtlMin");
+      expect(anchor).toBeGreaterThan(0);
+      expect(Object.keys(SETTING_SPECS)).toEqual([
+        ...oldKeys.slice(0, anchor + 1),
+        "memory.scopes.session",
+        "memory.scopes.hub",
+        ...oldKeys.slice(anchor + 1),
+        "fast.enabled",
+      ]);
+      for (const path of ["memory.scopes.session", "memory.scopes.hub"]) {
+        expect(SETTING_SPECS[path]?.kind).toBe("boolean");
+        expect(SETTING_SPECS[path]?.path).toBe(path);
+        expect(SETTING_SPECS[path]?.live).toBeUndefined();
+        expect(defaultOf(SETTING_SPECS[path]!)).toBe(false);
+      }
       expect(SETTING_SPECS["fast.enabled"]).toEqual({
         kind: "boolean",
         path: "fast.enabled",

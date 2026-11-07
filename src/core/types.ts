@@ -1,3 +1,6 @@
+import type { MemorySeedCapture, SessionMemorySeedV1 } from "./memory-types.js";
+export type { MemorySeedCapture, SessionMemorySeedV1 } from "./memory-types.js";
+
 export type Millis = number;
 export type RunId = string;
 export type AgentTypeName = string;
@@ -214,6 +217,8 @@ export interface FastSeed {
 }
 
 export interface SpawnRequest {
+  /** Host-only admission snapshot; strip untrusted/external input. Never journal/hash or re-read empty. */
+  readonly memorySeed?: MemorySeedCapture;
   /** Captured before queueing; absent preserves the legacy path. Never re-snapshot at dequeue. */
   readonly fastSeed?: FastSeed;
   /** Dispatch-time input budget; the runtime measures both its coarse preflight and final provider payload. */
@@ -1399,6 +1404,8 @@ export interface RunState {
  * the original SpawnRequest and the DeadlineBudget.
  */
 export interface SessionSpec {
+  /** Internal new child only. Seed append/gate failure rejects creation; resume never reseeds. */
+  readonly memorySeed?: SessionMemorySeedV1;
   /** Internal child initialization only; omit when absent, never put into promptNotes. */
   readonly fastSeed?: FastSeed;
   cwd?: string;
