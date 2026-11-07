@@ -34,6 +34,8 @@ export interface HubRecord {
   socket: string;
   port: number;
   startedAt: number;
+  /** #54 P4: resolved hub agentDir, present only for a non-default env override. */
+  agentDir?: string;
   procStartTicks?: number;
   argv?: string[];
   lan?: LanStatus;

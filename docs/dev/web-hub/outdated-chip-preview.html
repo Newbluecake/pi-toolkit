@@ -1,0 +1,1100 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>会话卡片「需更新」chip 收敛 — 改前/改后预览</title>
+    <style>
+      /* ===== tokens.css 内联（浅色，与 src/web-hub/ui/src/styles/tokens.css 一致） ===== */
+      :root {
+        color-scheme: light;
+        --c-bg: #f4f7f7;
+        --c-surface: #ffffff;
+        --c-surface-2: #f8fafa;
+        --c-sunken: #eef3f3;
+        --c-border: #e1e8e9;
+        --c-border-strong: #c9d4d6;
+        --c-text: #132026;
+        --c-text-2: #3b4a52;
+        --c-text-3: #5a6a72;
+        --c-primary: #0b7a70;
+        --c-primary-hover: #09665e;
+        --c-primary-soft: #e3f4f1;
+        --c-on-primary: #ffffff;
+        --c-on-primary-soft: #0a5f58;
+        --c-focus: #1f8f84;
+        --c-success: #177a3e;
+        --c-success-soft: #e6f4ea;
+        --c-warning: #9a5a06;
+        --c-warning-soft: #fff7e8;
+        --c-warning-border: #f3dcae;
+        --c-warning-text: #7a4604;
+        --c-danger: #c0262d;
+        --c-danger-soft: #fdeeee;
+        --c-danger-border: #f5c9cb;
+        --c-info: #1f5fc4;
+        --c-info-soft: #e8f0fc;
+        --st-running: #0b7a70;
+        --st-running-soft: #e3f4f1;
+        --st-idle: #5a6a72;
+        --st-idle-soft: #edf1f2;
+        --st-stale: #8f6412;
+        --st-stale-soft: #fbf3e2;
+        --st-offline: #5e6b73;
+        --st-offline-soft: #edf0f1;
+        --font-sans:
+          system-ui, -apple-system, "Segoe UI", "PingFang SC", "Hiragana Sans GB", "Microsoft YaHei",
+          "Noto Sans CJK SC", "Source Han Sans SC", Roboto, "Helvetica Neue", Arial, sans-serif;
+        --font-mono: ui-monospace, "SF Mono", SFMono-Regular, "Cascadia Mono", Menlo, Consolas, monospace;
+        --fs-2xs: 11px;
+        --fs-xs: 12px;
+        --fs-sm: 13px;
+        --fs-md: 14px;
+        --lh-snug: 1.4;
+        --fw-medium: 500;
+        --fw-semibold: 600;
+        --sp-1: 4px;
+        --sp-2: 8px;
+        --sp-3: 12px;
+        --sp-4: 16px;
+        --r-xs: 4px;
+        --r-sm: 6px;
+        --r-md: 10px;
+        --r-pill: 999px;
+        --shadow-2: 0 1px 2px rgb(16 32 38 / 0.04), 0 4px 12px -2px rgb(16 32 38 / 0.08);
+        --dur-fast: 120ms;
+        --ease-out: cubic-bezier(0.2, 0.7, 0.2, 1);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--c-bg);
+        color: var(--c-text);
+        font-family: var(--font-sans);
+        font-size: var(--fs-md);
+        line-height: var(--lh-snug);
+      }
+
+      /* ===== primitives.css 子集：.btn / .chip / .pill / .dot / .badge-answer / .spin ===== */
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: var(--sp-2);
+        min-height: 32px;
+        padding: 0 var(--sp-3);
+        border: 1px solid var(--c-border-strong);
+        border-radius: var(--r-sm);
+        background: var(--c-surface);
+        color: var(--c-text);
+        font: inherit;
+        font-size: var(--fs-sm);
+        font-weight: var(--fw-medium);
+        line-height: 1;
+        white-space: nowrap;
+        cursor: pointer;
+      }
+      .btn-primary {
+        border-color: var(--c-primary);
+        background: var(--c-primary);
+        color: var(--c-on-primary);
+      }
+
+      .chip {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--sp-1);
+        min-height: 20px;
+        padding: 1px 6px;
+        border: 1px solid var(--c-border);
+        border-radius: var(--r-sm);
+        background: var(--c-surface);
+        color: var(--c-text-3);
+        font-size: var(--fs-2xs);
+        font-weight: var(--fw-semibold);
+        letter-spacing: 0.02em;
+        line-height: 1;
+        white-space: nowrap;
+      }
+      /* 既有（#65）：卡片「需更新」chip，warning 配色 */
+      .chip-outdated {
+        border-color: var(--c-warning-border);
+        background: var(--c-warning-soft);
+        color: var(--c-warning-text);
+      }
+
+      .pill {
+        --pill-fg: var(--st-idle);
+        --pill-bg: var(--st-idle-soft);
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        min-height: 22px;
+        padding: 1px 8px;
+        border-radius: var(--r-pill);
+        background: var(--pill-bg);
+        color: var(--pill-fg);
+        font-size: var(--fs-xs);
+        font-weight: var(--fw-semibold);
+        line-height: 1;
+        white-space: nowrap;
+      }
+      [data-st="running"] {
+        --pill-fg: var(--st-running);
+        --pill-bg: var(--st-running-soft);
+      }
+      [data-st="stale"] {
+        --pill-fg: var(--st-stale);
+        --pill-bg: var(--st-stale-soft);
+      }
+      [data-st="offline"] {
+        --pill-fg: var(--st-offline);
+        --pill-bg: var(--st-offline-soft);
+      }
+      .pill-inline {
+        min-height: 20px;
+        font-size: var(--fs-2xs);
+        gap: 3px;
+        padding: 0 6px;
+      }
+      .badge-answer {
+        background: var(--c-warning-soft);
+        color: var(--c-warning-text);
+      }
+
+      .dot {
+        position: relative;
+        width: 8px;
+        height: 8px;
+        flex: none;
+        border-radius: 50%;
+        background: var(--pill-fg, var(--st-idle));
+      }
+      .dot-hollow {
+        background: transparent;
+        box-shadow: inset 0 0 0 1.5px var(--pill-fg);
+      }
+      .dot-dashed {
+        background: transparent;
+        outline: 1.5px dashed var(--pill-fg);
+        outline-offset: -1.5px;
+      }
+      .dot-live::after {
+        content: "";
+        position: absolute;
+        inset: -3px;
+        border-radius: 50%;
+        background: var(--pill-fg, var(--st-running));
+        opacity: 0.35;
+      }
+
+      .icon {
+        width: 16px;
+        height: 16px;
+        flex: none;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 1.8;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+      .icon-sm {
+        width: 14px;
+        height: 14px;
+      }
+      .num {
+        font-variant-numeric: tabular-nums;
+      }
+      .spin {
+        animation: spin 0.9s linear infinite;
+      }
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+
+      /* ===== agents.css 子集：会话卡片（compact + detailed 两版，与线上一致） ===== */
+      .agent-card {
+        position: relative;
+        display: grid;
+        gap: 3px;
+        margin: 2px 0;
+        padding: 10px var(--sp-3) 10px 14px;
+        border: 1px solid transparent;
+        border-radius: var(--r-md);
+        color: inherit;
+        text-decoration: none;
+      }
+      .agent-card[aria-current="page"] {
+        background: var(--c-primary-soft);
+        border-color: color-mix(in srgb, var(--c-primary) 28%, transparent);
+      }
+      .agent-card[aria-current="page"]::before {
+        content: "";
+        position: absolute;
+        left: 4px;
+        top: 12px;
+        bottom: 12px;
+        width: 3px;
+        border-radius: var(--r-pill);
+        background: var(--c-primary);
+      }
+      .agent-row1 {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr) auto;
+        align-items: start;
+        column-gap: var(--sp-2);
+        min-width: 0;
+      }
+      .agent-row1 > .dot {
+        margin-top: 0.45em;
+      }
+      .agent-main {
+        display: flex;
+        align-items: center;
+        column-gap: var(--sp-2);
+        min-width: 0;
+      }
+      .agent-chips {
+        display: inline-flex;
+        align-items: center;
+        flex: none;
+        gap: var(--sp-2);
+      }
+      .agent-line2 {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        column-gap: 6px;
+        padding-left: 16px;
+        min-width: 0;
+      }
+      .agent-line2 > .agent-session {
+        flex: 0 1 auto;
+        min-width: 0;
+        max-width: 100%;
+        padding-left: 0;
+      }
+      .agent-below {
+        display: contents;
+      }
+      .agent-line2 .agent-chips {
+        margin-left: auto;
+      }
+      .agent-end {
+        display: flex;
+        align-items: center;
+        gap: var(--sp-1);
+        flex: none;
+        white-space: nowrap;
+      }
+      .agent-title {
+        min-width: 0;
+        max-width: 100%;
+        direction: rtl;
+        text-align: left;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-weight: var(--fw-semibold);
+      }
+      .agent-cost {
+        flex: none;
+        color: var(--c-text-2);
+        font-size: var(--fs-xs);
+        font-family: var(--font-mono);
+        font-variant-numeric: tabular-nums;
+      }
+      .agent-session {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: var(--c-text-2);
+        font-size: var(--fs-sm);
+        padding-left: 16px;
+      }
+      .agent-meta {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 2px var(--sp-2);
+        min-width: 0;
+        padding-left: 16px;
+        color: var(--c-text-3);
+        font-size: var(--fs-xs);
+      }
+      .agent-meta .sep {
+        color: var(--c-text-3);
+      }
+      .agent-flags {
+        display: flex;
+        padding-left: 16px;
+      }
+
+      /* compact（默认密度）规则 —— 与 agents.css 一致 */
+      .agent-card[data-density="compact"] {
+        padding-top: 7px;
+        padding-bottom: 7px;
+        gap: 1px;
+      }
+      .agent-card[data-density="compact"] .agent-main {
+        justify-content: space-between;
+      }
+      .agent-card[data-density="compact"] .agent-main > .agent-title {
+        flex: 0 1 auto;
+      }
+      .agent-card[data-density="compact"] .agent-chips {
+        margin-left: auto;
+        gap: var(--sp-1);
+      }
+      .agent-card[data-density="compact"] .agent-chips > .pill {
+        padding: 2px 6px;
+      }
+      .agent-card[data-density="compact"] .agent-line2 {
+        flex-wrap: nowrap;
+      }
+      .agent-card[data-density="compact"] .agent-line2 > .agent-session {
+        flex: 1 1 auto;
+      }
+
+      .chip-run-count {
+        display: inline-flex;
+        align-items: center;
+        gap: 2px;
+        padding-inline: 5px;
+        color: var(--c-text-2);
+        font-variant-numeric: tabular-nums;
+      }
+      .agent-card[data-st="running"] .chip-run-count,
+      .chip-run-count[data-compact="sub"] {
+        color: var(--st-running, var(--c-primary));
+      }
+      .chip-xs {
+        display: inline-flex;
+        align-items: center;
+        padding-inline: 4px;
+        color: var(--c-primary);
+      }
+      .chip-xs .icon {
+        width: 12px;
+        height: 12px;
+      }
+      .chip-xs-channels {
+        max-width: 14em;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: var(--c-text-2);
+      }
+      .chip-xs-unread {
+        display: inline-flex;
+        align-items: center;
+        gap: 2px;
+        padding-inline: 5px;
+        color: var(--c-primary);
+        font-variant-numeric: tabular-nums;
+      }
+      .chip-xs-unread .icon {
+        width: 12px;
+        height: 12px;
+      }
+      .chip-web {
+        color: var(--c-info);
+        border-color: color-mix(in srgb, var(--c-info) 35%, transparent);
+        background: var(--c-info-soft);
+      }
+
+      /* ===== outdated-reload.css 子集：汇总条 / 详情条 ===== */
+      .or-banner {
+        --n-fg: var(--c-warning-text);
+        --n-bg: var(--c-warning-soft);
+        --n-border: var(--c-warning-border);
+        --n-text: var(--c-warning-text);
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: var(--sp-2) var(--sp-3);
+        padding: var(--sp-2) var(--sp-3);
+        border: 1px solid var(--n-border);
+        border-radius: var(--r-md);
+        background: var(--n-bg);
+        color: var(--n-text);
+        font-size: var(--fs-sm);
+        line-height: var(--lh-snug);
+      }
+      .or-banner > .icon {
+        margin-top: 1px;
+        color: var(--n-fg);
+      }
+      .or-banner-text {
+        flex: 1 1 280px;
+        min-width: 0;
+      }
+      .or-banner-text .mono {
+        font-family: var(--font-mono);
+        font-size: 0.92em;
+        padding: 1px 5px;
+        border-radius: var(--r-xs);
+        background: color-mix(in srgb, var(--c-surface) 55%, transparent);
+      }
+      .or-banner-actions {
+        display: flex;
+        flex: none;
+        gap: var(--sp-2);
+        margin-left: auto;
+      }
+
+      /* ===== 拟新增的「改后」规则（只作用在 .pv-after 列；真实实现见 §0 说明） ===== */
+      /* A. 状态 pill 恢复真实状态：改后列里不再出现过时长文案 pill（纯模板/模型改动，无 CSS） */
+      /* B. chip 可点击（复用 #65 的单会话 reload 通道），字重/边框不变，仅加指针与 hover */
+      .pv-after button.chip {
+        font: inherit;
+        font-size: var(--fs-2xs);
+        font-weight: var(--fw-semibold);
+        letter-spacing: 0.02em;
+        cursor: pointer;
+      }
+      .pv-after button.chip-outdated:hover {
+        border-color: var(--c-warning);
+        background: color-mix(in srgb, var(--c-warning-soft) 60%, var(--c-warning-border));
+      }
+      .pv-after button.chip-outdated:focus-visible {
+        outline: 2px solid var(--c-focus);
+        outline-offset: 1px;
+      }
+      /* C. 溢出收敛：只给 outdated 卡片（根节点新增 data-outdated="true"）的 chip 组松绑
+            flex:none → 可收缩 + 右侧裁切。名称（.agent-title）保持既有收缩规则，不再被
+            压没；放不下的尾部 chip（@alias → #频道 → 未读）按既有顺序从右侧截断。
+            非 outdated 卡片不带此属性，样式逐字节不变。 */
+      .pv-after .agent-card[data-outdated="true"] .agent-chips {
+        flex: 0 1 auto;
+        min-width: 0;
+        overflow: hidden;
+      }
+
+      /* ===== 预览脚手架（.pv-* 仅本页使用） ===== */
+      .pv-page {
+        max-width: 1180px;
+        margin: 0 auto;
+        padding: var(--sp-6, 24px) var(--sp-4);
+      }
+      .pv-h {
+        margin: 28px 0 6px;
+        font-size: 17px;
+      }
+      .pv-note {
+        margin: 0 0 12px;
+        color: var(--c-text-2);
+        font-size: var(--fs-sm);
+        max-width: 70em;
+      }
+      .pv-note code {
+        font-family: var(--font-mono);
+        font-size: 0.92em;
+        padding: 1px 5px;
+        border-radius: var(--r-xs);
+        background: var(--c-sunken);
+      }
+      .pv-cols {
+        display: flex;
+        flex-wrap: wrap;
+        gap: var(--sp-4);
+        align-items: flex-start;
+      }
+      .pv-col-h {
+        margin: 0 0 8px;
+        font-size: var(--fs-sm);
+        font-weight: var(--fw-semibold);
+        color: var(--c-text-2);
+      }
+      .pv-col-h .tag {
+        display: inline-block;
+        margin-left: 6px;
+        padding: 1px 8px;
+        border-radius: var(--r-pill);
+        font-size: var(--fs-2xs);
+        font-weight: var(--fw-semibold);
+      }
+      .pv-col-h .tag.before {
+        background: var(--c-danger-soft);
+        color: var(--c-danger);
+      }
+      .pv-col-h .tag.after {
+        background: var(--c-success-soft);
+        color: var(--c-success);
+      }
+      /* 模拟侧边栏：宽版 400px；窄版 360px（复刻 ≤480px 断点规则，作用域 .pv-narrow） */
+      .pv-sidebar {
+        width: 400px;
+        padding: var(--sp-2);
+        border: 1px solid var(--c-border);
+        border-radius: var(--r-md);
+        background: var(--c-surface);
+        overflow: hidden; /* 复现线上 sidebar 的右侧裁切 */
+      }
+      .pv-sidebar.narrow {
+        width: 360px;
+      }
+      .pv-search {
+        margin: 2px 2px 8px;
+        padding: 7px 10px;
+        border: 1px solid var(--c-border);
+        border-radius: var(--r-sm);
+        background: var(--c-surface-2);
+        color: var(--c-text-3);
+        font-size: var(--fs-sm);
+      }
+      .pv-filters {
+        display: flex;
+        gap: 4px;
+        margin: 0 2px 8px;
+      }
+      .pv-filters .chip {
+        background: transparent;
+        font-size: var(--fs-xs);
+        font-weight: var(--fw-medium);
+      }
+      .pv-filters .chip.on {
+        background: var(--c-primary);
+        border-color: var(--c-primary);
+        color: #fff;
+      }
+      .pv-caption {
+        margin: 6px 4px 2px;
+        color: var(--c-text-3);
+        font-size: var(--fs-2xs);
+      }
+      /* 窄版复刻 outdated-reload.css 的 ≤480px 规则（媒体查询在容器内不触发，用类作用域） */
+      .pv-narrow .or-banner {
+        flex-direction: column;
+        align-items: stretch;
+      }
+      .pv-narrow .or-banner-text {
+        flex-basis: auto;
+      }
+      .pv-narrow .or-banner-actions {
+        margin-left: 0;
+      }
+      .pv-narrow .or-banner-actions .btn {
+        flex: 1;
+        min-height: 44px;
+      }
+      /* detail 侧模拟容器 */
+      .pv-detail {
+        width: 560px;
+        max-width: 100%;
+        border: 1px solid var(--c-border);
+        border-radius: var(--r-md);
+        background: var(--c-surface);
+        overflow: hidden;
+      }
+      .pv-detail-body {
+        padding: var(--sp-3);
+        color: var(--c-text-3);
+        font-size: var(--fs-sm);
+      }
+      .pv-detail > .or-banner {
+        margin: var(--sp-2) var(--sp-3) 0;
+      }
+    </style>
+  </head>
+  <body>
+    <svg width="0" height="0" style="position: absolute" aria-hidden="true">
+      <!-- 与 src/web-hub/ui/src/icons/IconSprite.vue 同源的 symbol（24 viewBox） -->
+      <symbol id="i-info" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="9" />
+        <path d="M12 11v5.5M12 7.8v.1" />
+      </symbol>
+      <symbol id="i-message" viewBox="0 0 24 24">
+        <path d="M4.5 5h15v10.5h-9l-4.5 3.5v-3.5H4.5z" />
+      </symbol>
+      <symbol id="i-inbox" viewBox="0 0 24 24">
+        <path d="M3.5 13.5 6 5.5h12l2.5 8V18a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 18z" />
+        <path d="M3.5 13.5H8l1.5 2.5h5l1.5-2.5h4.5" />
+      </symbol>
+      <symbol id="i-branch" viewBox="0 0 24 24">
+        <circle cx="6.5" cy="5.5" r="2" />
+        <circle cx="6.5" cy="18.5" r="2" />
+        <circle cx="17.5" cy="8.5" r="2" />
+        <path d="M6.5 7.5v9M17.5 10.5a6 6 0 0 1-6 6h-3" />
+      </symbol>
+      <symbol id="i-terminal" viewBox="0 0 24 24">
+        <rect x="3" y="4.5" width="18" height="15" rx="2.5" />
+        <path d="M7 9.5l3 2.5-3 2.5M13 15h4" />
+      </symbol>
+      <symbol id="i-radio" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="2" />
+        <path d="M8 8a5.7 5.7 0 0 0 0 8M16 8a5.7 5.7 0 0 1 0 8M5 5a10 10 0 0 0 0 14M19 5a10 10 0 0 1 0 14" />
+      </symbol>
+      <symbol id="i-loader" viewBox="0 0 24 24">
+        <path d="M12 3.5a8.5 8.5 0 1 0 8.5 8.5" />
+      </symbol>
+    </svg>
+
+    <main class="pv-page">
+      <h1 style="margin: 0 0 4px; font-size: 20px">会话卡片「需更新」chip 收敛 — 改前 / 改后</h1>
+      <p class="pv-note" id="s0">
+        §0 问题：顶部汇总条已说明「8 个会话的插件版本落后于 hub」，卡片上却又同时出现长文案状态 pill「ⓘ 插件旧于 hub，需
+        /reload」和「ⓘ 需更新」chip —— 同一件事说三遍；长 pill 顶替了真实状态 （idle/running），并把
+        <code>@alias</code>、<code>#频道</code>、未读角标挤出卡片右缘，行首目录名被压到 只剩一个字符。<br />
+        改后（本页右列）：① 状态 pill 恢复显示真实状态（idle 无 pill）；② 卡片只保留一枚紧凑的
+        「需更新」chip，完整说明收进 tooltip；③ chip 可点击，直接触发该会话的
+        <code>/agent reload</code>（复用 #65 既有通道，无协议改动）；④ 仅 outdated 卡片（根节点新增
+        <code>data-outdated="true"</code>）的 chip 组允许收缩，放不下的尾部 chip 按既有顺序 （@alias → #频道 →
+        未读）从右侧截断，名称和状态标识不再被裁。非 outdated 卡片逐字节不变。 汇总条与详情页提示条行为不变。
+      </p>
+
+      <h2 class="pv-h">§1 宽版侧边栏（400px，compact 默认密度）</h2>
+      <p class="pv-note">
+        四张卡：idle+outdated、running+outdated+未读、outdated+@alias+#频道+未读（溢出用例）、 普通
+        running（对照，改前改后必须一致）。
+      </p>
+      <div class="pv-cols">
+        <!-- ============ 改前 ============ -->
+        <section>
+          <h3 class="pv-col-h">改前<span class="tag before">现状</span></h3>
+          <div class="pv-sidebar">
+            <div class="pv-search">按路径或会话筛选…</div>
+            <div class="pv-filters">
+              <span class="chip on">全部</span><span class="chip">#default 5</span><span class="chip">#core 1</span
+              ><span class="chip">#invest 2</span>
+            </div>
+            <div class="or-banner">
+              <svg class="icon"><use href="#i-info" /></svg>
+              <span class="or-banner-text">8 个会话的插件版本落后于 hub <span class="mono">0.10.1</span> 。</span>
+              <span class="or-banner-actions">
+                <button class="btn btn-primary" type="button">全部重新加载</button>
+                <button class="btn" type="button">查看</button>
+              </span>
+            </div>
+            <div style="height: 8px"></div>
+
+            <!-- 卡 1：idle + outdated -->
+            <a class="agent-card" data-st="idle" data-density="compact">
+              <span class="agent-row1">
+                <span class="dot dot-hollow"></span>
+                <span class="agent-main">
+                  <span class="agent-title" title="~/ai/pi-toolkit"><bdi>~/ai/pi-toolkit</bdi></span>
+                  <span class="agent-chips">
+                    <span class="pill pill-inline" data-st="idle"
+                      ><svg class="icon icon-sm"><use href="#i-info" /></svg>插件旧于 hub，需 /reload</span
+                    >
+                    <span class="chip chip-outdated" title="需更新"
+                      ><svg class="icon icon-sm"><use href="#i-info" /></svg>需更新</span
+                    >
+                  </span>
+                </span>
+              </span>
+              <span class="agent-line2"><span class="agent-session">pi工具提示词精简审计</span></span>
+            </a>
+
+            <!-- 卡 2：running + outdated + 未读（真实状态被长文案顶替） -->
+            <a class="agent-card" data-st="running" data-density="compact" aria-current="page">
+              <span class="agent-row1">
+                <span class="dot dot-live"></span>
+                <span class="agent-main">
+                  <span class="agent-title" title="~/work/alias-afw"><bdi>~/work/alias-afw</bdi></span>
+                  <span class="agent-chips">
+                    <span class="pill pill-inline" data-st="running"
+                      ><svg class="icon icon-sm"><use href="#i-info" /></svg>插件旧于 hub，需 /reload</span
+                    >
+                    <span class="chip chip-outdated" title="需更新"
+                      ><svg class="icon icon-sm"><use href="#i-info" /></svg>需更新</span
+                    >
+                    <span class="chip chip-xs-unread" role="img" title="2 条未读"
+                      ><svg class="icon"><use href="#i-inbox" /></svg><span class="num">2</span></span
+                    >
+                  </span>
+                </span>
+              </span>
+              <span class="agent-line2"><span class="agent-session">rebase remote branch</span></span>
+            </a>
+
+            <!-- 卡 3：outdated + @alias + #频道 + 未读（溢出用例：目录名被压没、右侧截断） -->
+            <a class="agent-card" data-st="idle" data-density="compact">
+              <span class="agent-row1">
+                <span class="dot dot-hollow"></span>
+                <span class="agent-main">
+                  <span class="agent-title" title="~/work/customer-hub"><bdi>~/work/customer-hub</bdi></span>
+                  <span class="agent-chips">
+                    <span class="pill pill-inline" data-st="idle"
+                      ><svg class="icon icon-sm"><use href="#i-info" /></svg>插件旧于 hub，需 /reload</span
+                    >
+                    <span class="chip chip-outdated" title="需更新"
+                      ><svg class="icon icon-sm"><use href="#i-info" /></svg>需更新</span
+                    >
+                    <span class="chip chip-xs-alias" title="@控制中心">@控制中心</span>
+                    <span class="chip chip-xs-unread" role="img" title="102 条未读"
+                      ><svg class="icon"><use href="#i-inbox" /></svg><span class="num">99+</span></span
+                    >
+                  </span>
+                </span>
+              </span>
+              <span class="agent-line2"><span class="agent-session">项目仓库与客户信息梳理</span></span>
+            </a>
+
+            <!-- 卡 4：普通 running（对照） -->
+            <a class="agent-card" data-st="running" data-density="compact">
+              <span class="agent-row1">
+                <span class="dot dot-live"></span>
+                <span class="agent-main">
+                  <span class="agent-title" title="~/ai/knowledge"><bdi>~/ai/knowledge</bdi></span>
+                  <span class="agent-chips">
+                    <span class="pill pill-inline" data-st="running">运行中</span>
+                    <span class="chip chip-run-count" data-compact="sub" title="1 个子 agent 运行中"
+                      ><svg class="icon icon-sm"><use href="#i-branch" /></svg><span class="num">1</span></span
+                    >
+                  </span>
+                </span>
+              </span>
+              <span class="agent-line2"><span class="agent-session">认知进化</span></span>
+            </a>
+          </div>
+          <p class="pv-caption">
+            ↑ 卡 3：pill 把 <code>@控制中心</code>/未读挤出右缘；目录名只剩「b」；running 的卡 2 看不到「运行中」。
+          </p>
+        </section>
+
+        <!-- ============ 改后 ============ -->
+        <section class="pv-after">
+          <h3 class="pv-col-h">改后<span class="tag after">方案</span></h3>
+          <div class="pv-sidebar">
+            <div class="pv-search">按路径或会话筛选…</div>
+            <div class="pv-filters">
+              <span class="chip on">全部</span><span class="chip">#default 5</span><span class="chip">#core 1</span
+              ><span class="chip">#invest 2</span>
+            </div>
+            <div class="or-banner">
+              <svg class="icon"><use href="#i-info" /></svg>
+              <span class="or-banner-text">8 个会话的插件版本落后于 hub <span class="mono">0.10.1</span> 。</span>
+              <span class="or-banner-actions">
+                <button class="btn btn-primary" type="button">全部重新加载</button>
+                <button class="btn" type="button">查看</button>
+              </span>
+            </div>
+            <div style="height: 8px"></div>
+
+            <!-- 卡 1：idle + outdated —— idle 本就无 pill，只留一枚可点击 chip -->
+            <a class="agent-card" data-st="idle" data-density="compact" data-outdated="true">
+              <span class="agent-row1">
+                <span class="dot dot-hollow"></span>
+                <span class="agent-main">
+                  <span class="agent-title" title="~/ai/pi-toolkit"><bdi>~/ai/pi-toolkit</bdi></span>
+                  <span class="agent-chips">
+                    <button
+                      type="button"
+                      class="chip chip-outdated"
+                      title="插件版本 0.9.4 落后于 hub 0.10.1 — 点击重新加载（/agent reload）"
+                    >
+                      <svg class="icon icon-sm"><use href="#i-info" /></svg>需更新
+                    </button>
+                  </span>
+                </span>
+              </span>
+              <span class="agent-line2"><span class="agent-session">pi工具提示词精简审计</span></span>
+            </a>
+
+            <!-- 卡 2：running + outdated + 未读 —— pill 恢复真实状态 -->
+            <a class="agent-card" data-st="running" data-density="compact" data-outdated="true" aria-current="page">
+              <span class="agent-row1">
+                <span class="dot dot-live"></span>
+                <span class="agent-main">
+                  <span class="agent-title" title="~/work/alias-afw"><bdi>~/work/alias-afw</bdi></span>
+                  <span class="agent-chips">
+                    <span class="pill pill-inline" data-st="running">运行中</span>
+                    <button
+                      type="button"
+                      class="chip chip-outdated"
+                      title="插件版本 0.9.4 落后于 hub 0.10.1 — 点击重新加载（运行中将排队，空闲后自动执行）"
+                    >
+                      <svg class="icon icon-sm"><use href="#i-info" /></svg>需更新
+                    </button>
+                    <span class="chip chip-xs-unread" role="img" title="2 条未读"
+                      ><svg class="icon"><use href="#i-inbox" /></svg><span class="num">2</span></span
+                    >
+                  </span>
+                </span>
+              </span>
+              <span class="agent-line2"><span class="agent-session">rebase remote branch</span></span>
+            </a>
+
+            <!-- 卡 3：溢出用例 —— 名称完整，尾部 chip 从右侧截断 -->
+            <a class="agent-card" data-st="idle" data-density="compact" data-outdated="true">
+              <span class="agent-row1">
+                <span class="dot dot-hollow"></span>
+                <span class="agent-main">
+                  <span class="agent-title" title="~/work/customer-hub"><bdi>~/work/customer-hub</bdi></span>
+                  <span class="agent-chips">
+                    <button
+                      type="button"
+                      class="chip chip-outdated"
+                      title="插件版本 0.9.4 落后于 hub 0.10.1 — 点击重新加载（/agent reload）"
+                    >
+                      <svg class="icon icon-sm"><use href="#i-info" /></svg>需更新
+                    </button>
+                    <span class="chip chip-xs-alias" title="@控制中心">@控制中心</span>
+                    <span class="chip chip-xs-unread" role="img" title="102 条未读"
+                      ><svg class="icon"><use href="#i-inbox" /></svg><span class="num">99+</span></span
+                    >
+                  </span>
+                </span>
+              </span>
+              <span class="agent-line2"><span class="agent-session">项目仓库与客户信息梳理</span></span>
+            </a>
+
+            <!-- 卡 4：普通 running（对照，与左列逐字节一致） -->
+            <a class="agent-card" data-st="running" data-density="compact">
+              <span class="agent-row1">
+                <span class="dot dot-live"></span>
+                <span class="agent-main">
+                  <span class="agent-title" title="~/ai/knowledge"><bdi>~/ai/knowledge</bdi></span>
+                  <span class="agent-chips">
+                    <span class="pill pill-inline" data-st="running">运行中</span>
+                    <span class="chip chip-run-count" data-compact="sub" title="1 个子 agent 运行中"
+                      ><svg class="icon icon-sm"><use href="#i-branch" /></svg><span class="num">1</span></span
+                    >
+                  </span>
+                </span>
+              </span>
+              <span class="agent-line2"><span class="agent-session">认知进化</span></span>
+            </a>
+
+            <!-- 卡 5（加分项）：点击 chip 后的排队态 -->
+            <a class="agent-card" data-st="running" data-density="compact" data-outdated="true">
+              <span class="agent-row1">
+                <span class="dot dot-live"></span>
+                <span class="agent-main">
+                  <span class="agent-title" title="~/ai/notes"><bdi>~/ai/notes</bdi></span>
+                  <span class="agent-chips">
+                    <span class="pill pill-inline" data-st="running">运行中</span>
+                    <button
+                      type="button"
+                      class="chip chip-outdated"
+                      title="已排队：本轮结束、空闲后自动重新加载 — 点击取消"
+                    >
+                      <svg class="icon icon-sm spin"><use href="#i-loader" /></svg>排队中
+                    </button>
+                  </span>
+                </span>
+              </span>
+              <span class="agent-line2"><span class="agent-session">继续对话</span></span>
+            </a>
+          </div>
+          <p class="pv-caption">
+            ↑ 卡 2：pill 恢复「运行中」；卡 3：目录名完整保留，尾部 chip 从右侧截断；卡 5：点击 chip 后进入
+            「排队中」态（再点取消），与详情页提示条同一状态机。
+          </p>
+        </section>
+      </div>
+
+      <h2 class="pv-h">§2 窄版（360px 容器，复刻 ≤480px 断点）</h2>
+      <p class="pv-note">汇总条按钮按既有 ≤480px 规则换行占满；卡片行内规则同 §1。</p>
+      <div class="pv-cols">
+        <section>
+          <h3 class="pv-col-h">改前<span class="tag before">现状</span></h3>
+          <div class="pv-narrow">
+            <div class="pv-sidebar narrow">
+              <div class="or-banner">
+                <svg class="icon"><use href="#i-info" /></svg>
+                <span class="or-banner-text">8 个会话的插件版本落后于 hub <span class="mono">0.10.1</span> 。</span>
+                <span class="or-banner-actions">
+                  <button class="btn btn-primary" type="button">全部重新加载</button>
+                  <button class="btn" type="button">查看</button>
+                </span>
+              </div>
+              <div style="height: 8px"></div>
+              <a class="agent-card" data-st="running" data-density="compact">
+                <span class="agent-row1">
+                  <span class="dot dot-live"></span>
+                  <span class="agent-main">
+                    <span class="agent-title" title="~/work/alias-afw"><bdi>~/work/alias-afw</bdi></span>
+                    <span class="agent-chips">
+                      <span class="pill pill-inline" data-st="running"
+                        ><svg class="icon icon-sm"><use href="#i-info" /></svg>插件旧于 hub，需 /reload</span
+                      >
+                      <span class="chip chip-outdated" title="需更新"
+                        ><svg class="icon icon-sm"><use href="#i-info" /></svg>需更新</span
+                      >
+                      <span class="chip chip-xs-unread" role="img" title="2 条未读"
+                        ><svg class="icon"><use href="#i-inbox" /></svg><span class="num">2</span></span
+                      >
+                    </span>
+                  </span>
+                </span>
+                <span class="agent-line2"><span class="agent-session">rebase remote branch</span></span>
+              </a>
+            </div>
+          </div>
+        </section>
+        <section class="pv-after">
+          <h3 class="pv-col-h">改后<span class="tag after">方案</span></h3>
+          <div class="pv-narrow">
+            <div class="pv-sidebar narrow">
+              <div class="or-banner">
+                <svg class="icon"><use href="#i-info" /></svg>
+                <span class="or-banner-text">8 个会话的插件版本落后于 hub <span class="mono">0.10.1</span> 。</span>
+                <span class="or-banner-actions">
+                  <button class="btn btn-primary" type="button">全部重新加载</button>
+                  <button class="btn" type="button">查看</button>
+                </span>
+              </div>
+              <div style="height: 8px"></div>
+              <a class="agent-card" data-st="running" data-density="compact" data-outdated="true">
+                <span class="agent-row1">
+                  <span class="dot dot-live"></span>
+                  <span class="agent-main">
+                    <span class="agent-title" title="~/work/alias-afw"><bdi>~/work/alias-afw</bdi></span>
+                    <span class="agent-chips">
+                      <span class="pill pill-inline" data-st="running">运行中</span>
+                      <button
+                        type="button"
+                        class="chip chip-outdated"
+                        title="插件版本 0.9.4 落后于 hub 0.10.1 — 点击重新加载（运行中将排队，空闲后自动执行）"
+                      >
+                        <svg class="icon icon-sm"><use href="#i-info" /></svg>需更新
+                      </button>
+                      <span class="chip chip-xs-unread" role="img" title="2 条未读"
+                        ><svg class="icon"><use href="#i-inbox" /></svg><span class="num">2</span></span
+                      >
+                    </span>
+                  </span>
+                </span>
+                <span class="agent-line2"><span class="agent-session">rebase remote branch</span></span>
+              </a>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <h2 class="pv-h">§3 detail 侧（detailed 密度卡片 + 详情页提示条）</h2>
+      <p class="pv-note">
+        detailed 卡片的 chip 组放不下时沿用既有 Teleport 机制整体移到名称行（不变）；变化只有两处： meta 行的状态 pill
+        恢复真实状态；chip 组的「需更新」变为可点击。详情页顶部提示条不变（仍是一等 入口，含【重新加载】【暂不】）。
+      </p>
+      <div class="pv-cols">
+        <section>
+          <h3 class="pv-col-h">改前<span class="tag before">现状</span></h3>
+          <div class="pv-sidebar">
+            <a class="agent-card" data-st="running" data-density="detailed">
+              <span class="agent-row1">
+                <span class="dot dot-live"></span>
+                <span class="agent-main">
+                  <span class="agent-title" title="~/work/alias-afw"><bdi>~/work/alias-afw</bdi></span>
+                  <span class="agent-chips">
+                    <span class="chip">TUI</span>
+                    <span class="chip chip-outdated" title="需更新"
+                      ><svg class="icon icon-sm"><use href="#i-info" /></svg>需更新</span
+                    >
+                    <span class="chip chip-xs" role="img" title="xs：唤醒"
+                      ><svg class="icon"><use href="#i-radio" /></svg
+                    ></span>
+                    <span class="chip chip-xs-alias" title="@小w">@小w</span>
+                    <span class="chip chip-xs-channels" title="#core #invest">#core #invest</span>
+                  </span>
+                </span>
+                <span class="agent-end"><span class="agent-cost num">$1.23</span></span>
+              </span>
+              <span class="agent-line2" data-below="false">
+                <span class="agent-session">rebase remote branch</span>
+                <span class="agent-below"></span>
+              </span>
+              <span class="agent-meta">
+                <span class="model">kimi-k2</span>
+                <span class="sep" aria-hidden="true">·</span>
+                <span
+                  ><svg class="icon icon-sm"><use href="#i-branch" /></svg>
+                  <span class="num">1 个子 agent 运行中</span></span
+                >
+                <span class="sep" aria-hidden="true">·</span>
+                <span class="pill pill-inline" data-st="running"
+                  ><svg class="icon icon-sm"><use href="#i-info" /></svg>插件旧于 hub，需 /reload</span
+                >
+              </span>
+            </a>
+          </div>
+          <p class="pv-caption">↑ meta 行的 pill 顶替了「运行中」。</p>
+        </section>
+        <section class="pv-after">
+          <h3 class="pv-col-h">改后<span class="tag after">方案</span></h3>
+          <div class="pv-sidebar">
+            <a class="agent-card" data-st="running" data-density="detailed" data-outdated="true">
+              <span class="agent-row1">
+                <span class="dot dot-live"></span>
+                <span class="agent-main">
+                  <span class="agent-title" title="~/work/alias-afw"><bdi>~/work/alias-afw</bdi></span>
+                  <span class="agent-chips">
+                    <span class="chip">TUI</span>
+                    <button
+                      type="button"
+                      class="chip chip-outdated"
+                      title="插件版本 0.9.4 落后于 hub 0.10.1 — 点击重新加载（/agent reload）"
+                    >
+                      <svg class="icon icon-sm"><use href="#i-info" /></svg>需更新
+                    </button>
+                    <span class="chip chip-xs" role="img" title="xs：唤醒"
+                      ><svg class="icon"><use href="#i-radio" /></svg
+                    ></span>
+                    <span class="chip chip-xs-alias" title="@小w">@小w</span>
+                    <span class="chip chip-xs-channels" title="#core #invest">#core #invest</span>
+                  </span>
+                </span>
+                <span class="agent-end"><span class="agent-cost num">$1.23</span></span>
+              </span>
+              <span class="agent-line2" data-below="false">
+                <span class="agent-session">rebase remote branch</span>
+                <span class="agent-below"></span>
+              </span>
+              <span class="agent-meta">
+                <span class="model">kimi-k2</span>
+                <span class="sep" aria-hidden="true">·</span>
+                <span
+                  ><svg class="icon icon-sm"><use href="#i-branch" /></svg>
+                  <span class="num">1 个子 agent 运行中</span></span
+                >
+                <span class="sep" aria-hidden="true">·</span>
+                <span class="pill pill-inline" data-st="running">运行中</span>
+              </span>
+            </a>
+          </div>
+          <p class="pv-caption">↑ pill 恢复「运行中」；「需更新」chip 在状态类位置、可点击。</p>
+        </section>
+        <section>
+          <h3 class="pv-col-h">详情页提示条（不变，对照用）</h3>
+          <div class="pv-detail">
+            <div class="or-banner">
+              <svg class="icon"><use href="#i-info" /></svg>
+              <span class="or-banner-text"
+                >此会话的插件版本 <span class="mono">0.9.4</span> 落后于 hub
+                <span class="mono">0.10.1</span>。重新加载后生效（会话内容不丢失）。</span
+              >
+              <span class="or-banner-actions">
+                <button class="btn btn-primary" type="button">重新加载</button>
+                <button class="btn" type="button">暂不</button>
+              </span>
+            </div>
+            <div class="pv-detail-body">（详情页正文…）</div>
+          </div>
+        </section>
+      </div>
+
+      <h2 class="pv-h">§4 实现落点（确认后施工）</h2>
+      <p class="pv-note">
+        ① <code>agentCardModel.ts</code> <code>statusLabelOf</code> 删掉 outdated 分支（pill 只表达真实状态）； i18n 的
+        <code>common.status.outdated</code> 随之退役，「需更新」chip 的 tooltip 新增
+        <code>outdated.chipTitle</code>（含版本对比与「点击重新加载」）。② <code>AgentCard.vue</code>：compact/detailed
+        两处 chip 改为 <code>&lt;button&gt;</code>，可选注入 <code>OUTDATED_RELOAD_CTX</code>，点击
+        <code>.prevent.stop</code> 调 <code>request(card.key)</code>
+        （复用 #65 的排队/parked 状态机；无 provider 时退化为纯展示 chip）；卡片根节点加
+        <code>data-outdated="true"</code>；compact 的 pill 不再在 outdated 时塞 info 图标。③
+        <code>agents.css</code>：新增
+        <code>.agent-card[data-outdated="true"] .agent-chips { flex: 0 1 auto; min-width: 0; overflow: hidden }</code>
+        （仅 compact 需要；detailed 有既有 Teleport 折行机制）+ button chip 的 hover/focus。④ wire、协议、 hub
+        零改动；非 outdated 卡片 DOM/样式逐字节不变。
+      </p>
+    </main>
+  </body>
+</html>

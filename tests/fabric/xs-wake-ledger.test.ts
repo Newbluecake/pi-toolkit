@@ -105,3 +105,22 @@ describe("xs token ledger (B1, not a TTL cache)", () => {
     expect(reloaded.getXsWakeLedger().get("token")?.state).toBe("live");
   });
 });
+
+describe("xs token ledger × wake-unknown-optimistic fields", () => {
+  it("optimistic/authorizedAt/gateSightAt survive update and tombstone untouched", () => {
+    const ledger = new XsWakeLedger();
+    ledger.put({ ...entry("t"), optimistic: true });
+    ledger.update("t", { authorizedAt: 5, gateSightAt: 6 });
+    expect(ledger.get("t")).toMatchObject({ optimistic: true, authorizedAt: 5, gateSightAt: 6 });
+    ledger.tombstone("t");
+    expect(ledger.get("t")).toMatchObject({
+      state: "tombstone",
+      optimistic: true,
+      authorizedAt: 5,
+      gateSightAt: 6,
+      abortOnSight: true,
+    });
+    ledger.update("t", { started: true, executionPending: true, abortIssuedAt: 7 });
+    expect(ledger.get("t")).toMatchObject({ optimistic: true, authorizedAt: 5, gateSightAt: 6, abortIssuedAt: 7 });
+  });
+});

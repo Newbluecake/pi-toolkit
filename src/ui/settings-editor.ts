@@ -134,6 +134,7 @@ export interface SettingsEditorSnapshot {
   status?: string;
   closed: boolean;
   path: string;
+  pathNote?: string | undefined;
   budgetOnly: boolean;
 }
 
@@ -183,6 +184,7 @@ export class SettingsEditorModel {
       ...(this.status === undefined ? {} : { status: this.status }),
       closed: this.closedFlag,
       path: this.store.path,
+      pathNote: this.store.pathNote,
       budgetOnly: this.options.budgetOnly ?? false,
     };
   }
@@ -349,7 +351,12 @@ export function renderSettingsEditor(snapshot: SettingsEditorSnapshot, options: 
     return cut + " ".repeat(Math.max(0, inner - visibleWidth(cut)));
   };
   const lines: string[] = [
-    fit(color("title", `${snapshot.budgetOnly ? "Run budget" : "Extension settings"} — ${snapshot.path}`)),
+    fit(
+      color(
+        "title",
+        `${snapshot.budgetOnly ? "Run budget" : "Extension settings"} — ${snapshot.path}${snapshot.pathNote === undefined ? "" : ` (${snapshot.pathNote})`}`,
+      ),
+    ),
     fit(color("muted", "Durations in seconds · budget.* affects new runs now · other keys need /reload")),
   ];
   const rows = snapshot.rows;

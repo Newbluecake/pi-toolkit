@@ -268,6 +268,27 @@ describe("HubConfig.crossSession normalisation (main.ts re-check, §4.6)", () =>
   });
 });
 
+describe("fabric-xs-activation plan §3 P0: HubConfig.crossSession.activation", () => {
+  const base = { limits: { hubSendsPerMin: 60 } };
+  it("key-absence-is-off: absent stays absent (⇒ pre-feature hub, byte-identical)", () => {
+    expect(normalizeHubCrossSessionConfig(base)).toEqual(base);
+  });
+  it("only literal `true` survives (the agent's effective-on write)", () => {
+    expect(normalizeHubCrossSessionConfig({ ...base, activation: true })).toEqual({ ...base, activation: true });
+  });
+  it("false / malformed values drop the key ⇒ off (fail closed)", () => {
+    for (const activation of [false, null, 0, "true", {}, [], 1]) {
+      expect(normalizeHubCrossSessionConfig({ ...base, activation })).toEqual(base);
+    }
+  });
+  it("coexists with the reply/channels keys without disturbing them", () => {
+    const full = { ...base, reply: true, channels: { maxRecipients: 8, wakeMaxRecipients: 2 }, activation: true };
+    expect(normalizeHubCrossSessionConfig(full)).toEqual(full);
+    const dropped = { ...base, reply: true, channels: { maxRecipients: 8, wakeMaxRecipients: 2 } };
+    expect(normalizeHubCrossSessionConfig({ ...full, activation: "yes" })).toEqual(dropped);
+  });
+});
+
 describe("xs reply limits (RX2)", () => {
   it("replies bypass the pair interval, never reserve wake, and still count as sends", () => {
     const { limits } = mk();

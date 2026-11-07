@@ -57,6 +57,10 @@ function makeState(over: Partial<QuotaHintState> = {}): QuotaHintState {
   return {
     enabled: true,
     tickStepPercent: 10,
+    // Legacy grid-only semantics for the pre-existing cases; the turn cooldown has its own
+    // describe below (2026-10-28).
+    l1MinTurns: 0,
+    turns: 0,
     repeatMs: 1_800_000,
     minIntervalMs: 300_000,
     display: true,

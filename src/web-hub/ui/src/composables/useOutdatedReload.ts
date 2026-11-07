@@ -3,16 +3,18 @@
  *
  * `DashboardView.vue` 创建唯一实例并经 `OUTDATED_RELOAD_CTX` provide；详情页
  * `OutdatedReloadBanner.vue`（第 1–4 节）与会话列表 `OutdatedSummaryBanner.vue`
- *（第 6 节）注入消费；AgentCard 的「需更新」chip（第 5 节）不需要它（纯展示
- * `card.outdated`）。无 provider（单测/独立挂载）⇒ 两个横幅都不渲染。
+ *（第 6 节）注入消费；AgentCard 的「需更新」chip（第 5 节，2026-10-27 收敛为可点击）
+ * 可选注入——有点击即 `request(key)`（queued/parked 再点 `cancelQueue`），无 provider
+ *（单测/独立挂载）⇒ chip 退化为纯展示，两个横幅不渲染。
  *
  * 状态真源是 `@logic/outdatedReload.ts` 的 `OrCoordinator`（框架无关、注入定时器、可单
  * 测）；这里只做三件事：
  *  1. 把 hub 的响应式帧（busy / card.pluginVersion / card.outdated）折叠成一个 watch
  *     getter，每次渲染提交后 `notifyTick()` 驱动协调器（queued 放行、到位判成功）；
  *  2. `send()` 经 `ControlHandle.runCommand(key, "agent", "reload", { confirm: true })`
- *     走既有 control-plane `command` op（实证见逻辑层文件头与交付报告）；协调器约定该
- *     promise 必 settle（hub/agent 侧各有 deadline），UI 不再叠加自己的送达超时；
+ *     走既有 control-plane `command` op（实证见逻辑层文件头与交付报告）；transport 的
+ *     deadline 只盖到响应头，body 可能永不 settle（#25 残留）——协调器本地有
+ *     OR_SEND_TIMEOUT_MS 上界（#23 D2），迟到的 settle 由 attempt token 挡掉（D3）；
  *  3. snooze（【暂不】/【关闭】）经 `browserLocalStorage()` 落盘（source-scan 白名单
  *     路径），内存表与磁盘表同步维护，hub 版本一变自动失效。
  *
@@ -25,6 +27,7 @@ import {
   fleetActiveCount,
   isSnoozed,
   outdatedSessions,
+  parseReloadStatus,
   readSnoozeMap,
   sessionOutdatedInfo,
   sessionReloadedToHub,
@@ -38,6 +41,7 @@ import {
   type SnoozeStorage,
 } from "@logic/outdatedReload.js";
 import type { AgentState, HubHandle } from "../types.js";
+import { newCmdId } from "@logic/control.js";
 
 function cardRecord(agent: AgentState | undefined): Record<string, unknown> {
   const c = agent?.card;
@@ -54,11 +58,22 @@ function fleetOf(agent: AgentState | undefined): number {
   return fleetActiveCount(agent?.fleet, agent?.fleetOmitted);
 }
 
+/** #23 D4：下线判据——不在 agents ∨ down ∨ card.state==="stale"。precheck 与协调器的
+ * offline deps 共用同一函数（单一真源）；claiming 在 UI 上不可见，handover 的 10s 内不会
+ * 误判。目标被移出 agents 后（agent_removed / 快照不含）它也返回 true。 */
+export function agentOffline(agent: AgentState | undefined): boolean {
+  if (agent === undefined) return true;
+  if (agent.down) return true;
+  return cardRecord(agent)["state"] === "stale";
+}
+
 export interface OutdatedReloadDeps {
   readonly hub: HubHandle;
   readonly storage: SnoozeStorage | null;
   readonly setTimeout: (fn: () => void, ms: number) => unknown;
   readonly clearTimeout: (handle: unknown) => void;
+  /** #23 D1：时钟注入（协调器的绝对截止时间用；生产传 Date.now，测试注入假钟）。 */
+  readonly now: () => number;
 }
 
 export interface OutdatedReloadHandle {
@@ -112,14 +127,13 @@ export function useOutdatedReload(deps: OutdatedReloadDeps): OutdatedReloadHandl
   const entryTick = ref(0);
 
   /** control-plane 送命令的本地前置（与 AgentDetail/NewSessionMenu 的 gate 同式）：
-   *  hub cmd.v1 ∧ card.control ∧ 会话存活 ∧ commands 槽在（command.v1）。 */
+   *  hub cmd.v1 ∧ card.control ∧ 会话存活（#23 D4：存活判定与协调器 offline 共用
+   *  agentOffline）∧ commands 槽在（command.v1）。 */
   function precheck(key: string): OrPrecheck {
     const st = hub.state.value;
     const agent = st.agents.get(key);
-    if (agent === undefined) return "offline";
+    if (agent === undefined || agentOffline(agent)) return "offline"; // agentOffline(undefined)===true，同一判据
     const card = cardRecord(agent);
-    const live = !agent.down && card["state"] !== "stale";
-    if (!live) return "offline";
     if (hub.control === undefined || st.control !== true || card["control"] !== true) return "unsupported";
     if (!Array.isArray(agent.commands)) return "unsupported";
     return "ok";
@@ -130,13 +144,18 @@ export function useOutdatedReload(deps: OutdatedReloadDeps): OutdatedReloadHandl
     fleetActive: (key) => fleetOf(hub.state.value.agents.get(key)),
     precheck,
     isSettled: (key) => sessionReloadedToHub(cardRecord(hub.state.value.agents.get(key)), hubVersion.value),
-    send: (key) => {
+    offline: (key) => agentOffline(hub.state.value.agents.get(key)),
+    now: deps.now,
+    newCmdId: () => newCmdId(),
+    reloadOutcome: (key) => parseReloadStatus(hub.state.value.agents.get(key)?.status),
+    hubVersion: () => hubVersion.value,
+    send: (key, cmdId) => {
       const control = hub.control;
       if (control === undefined) return Promise.resolve({ ok: false, error: "E_UNSUPPORTED" });
       // 送 `/agent reload` 而非 `/reload`（web 通道不经 TUI 编辑器，editor.ts 的改写不会
       // 触发；/agent reload 自带 deferred-reload 的「等子 agent 结束」保护）。confirm:true
       // —— 按钮本身就是用户确认；/agent reload 在 command-policy 是 confirm 级。
-      return control.runCommand(key, "agent", "reload", { confirm: true }).then(
+      return control.runCommand(key, "agent", "reload", { confirm: true, id: cmdId }).then(
         (outcome): { ok: boolean; error?: string; message?: string } =>
           outcome.ok
             ? { ok: true }
@@ -166,14 +185,18 @@ export function useOutdatedReload(deps: OutdatedReloadDeps): OutdatedReloadHandl
   });
 
   // busy / fleet / 版本帧 → 协调器。getter 折成字符串签名，任意会话的 busy/fleetActive/
-  // pluginVersion/outdated 变化都触发一次 notifyTick（协调器内部自己挑要动的 key）。
+  // pluginVersion/outdated/offline 变化都触发一次 notifyTick（协调器内部自己挑要动的
+  // key）。#23 D5：每段追加 :${offline?1:0}（agent_down/agent_stale/card.state 变化都翻
+  // 这一位）；agent 被移出 agents 后它的段消失，签名自然变化，无需额外字段。
   const stop = watch(
     () => {
       const parts: string[] = [hubVersion.value ?? ""];
       for (const agent of hub.state.value.agents.values()) {
         const card = cardRecord(agent);
+        // #30：追加 reload 事实签名（life/rev；无 reload ⇒ 空段，老 agent 签名不变含义）。
+        const rl = parseReloadStatus(agent.status);
         parts.push(
-          `${agent.key}=${busyOf(agent) ? 1 : 0}:${fleetOf(agent)}:${sessionReloadedToHub(card, hubVersion.value) ? 1 : 0}`,
+          `${agent.key}=${busyOf(agent) ? 1 : 0}:${fleetOf(agent)}:${sessionReloadedToHub(card, hubVersion.value) ? 1 : 0}:${agentOffline(agent) ? 1 : 0}${rl === undefined ? "" : `:${rl.life}/${rl.rev}`}`,
         );
       }
       return parts.join("|");

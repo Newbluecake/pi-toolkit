@@ -7,7 +7,7 @@
  * priority order), re-expressed against the frozen `AgentState`/`AgentCardView` shapes and the
  * shared `common.status.*` i18n vocabulary instead of hard-coded English badge text.
  */
-import { normalizeAlias } from "@protocol/xs-alias.js";
+import { deriveAliasFromDirName, normalizeAlias, XS_ALIAS_MAX_GRAPHEMES } from "@protocol/xs-alias.js";
 import { agentVisualState } from "../../composables/visual-state.js";
 import type { I18nHandle } from "../../composables/useI18n.js";
 import { formatUsd } from "../../format.js";
@@ -126,13 +126,13 @@ function runningBashCountOf(agent: AgentState): number {
   return wire === undefined ? 0 : summaryCounts(wire).running;
 }
 
-/** ui-design.md §5.1's per-card status pill — only shown for a "worth flagging" state. */
-function statusLabelOf(agent: AgentState, visual: RunVisualState, t: I18nHandle["t"]): string | null {
-  const card = record(agent.card);
+/** ui-design.md §5.1's per-card status pill — only shown for a "worth flagging" state.
+ *  2026-10-27 outdated chip 收敛：pill 只表达真实运行状态；outdated 不再顶替它，卡片上
+ *  由唯一的「需更新」chip（tooltip 带完整说明、点击即 reload）承担。 */
+function statusLabelOf(visual: RunVisualState, t: I18nHandle["t"]): string | null {
   if (visual === "offline") return t("common.status.offline");
   if (visual === "waiting") return t("common.status.waiting");
   if (visual === "stale") return t("common.status.stale");
-  if (card["outdated"] === true) return t("common.status.outdated");
   if (visual === "running") return t("common.status.running");
   return null;
 }
@@ -161,10 +161,18 @@ export function toAgentCardView(agent: AgentState, t: I18nHandle["t"], home?: st
     contextPercent: contextPercentOf(agent),
     runningSubCount,
     runningBashCount,
+    activitySource:
+      agent.down || card["state"] === "stale"
+        ? "none"
+        : base === "running" || runningSubCount > 0
+          ? "agent"
+          : runningBashCount > 0
+            ? "bash"
+            : "none",
     costLabel: agentCostLabel(agent),
     ...(costTitleOf(agent, t) ?? {}),
     visualState: visual,
-    statusLabel: statusLabelOf(agent, visual, t),
+    statusLabel: statusLabelOf(visual, t),
     stale: visual === "stale",
     down: agent.down,
     outdated: card["outdated"] === true,
@@ -220,8 +228,15 @@ export function xsChannelChipOf(agent: AgentState | undefined, hubCaps: unknown)
 
 export const XS_ALIAS_CAP = "xs.alias.v1";
 
-/** Q8: the card chip shows at most the first 8 grapheme clusters (title carries the full text). */
-export const XS_ALIAS_CARD_GRAPHEMES = 8;
+/** alias-force-default §3.1 (AFU): v2 adds force-take previews and the cwd-derived auto-claim
+ *  (UI mirror of `XS_ALIAS_V2_HUB_CAP` in protocol/xs.ts). Everything v2-only in the UI gates on
+ *  this cap so a v1/absent hub keeps the pre-AFU UI byte-identical. */
+export const XS_ALIAS_V2_CAP = "xs.alias.v2";
+
+/** Q8 (revised 2026-10-27, user report: `@claude2a…` clipped a 10-char alias while the row had room):
+ *  the card chip shows the whole alias — the cap equals the protocol maximum (16 clusters), so
+ *  truncation is only a defensive backstop against an out-of-contract wire value. */
+export const XS_ALIAS_CARD_GRAPHEMES = XS_ALIAS_MAX_GRAPHEMES;
 
 /** The session's held alias (`status.xs.alias`, written only while held). undefined = no cap /
  *  no field / malformed — the caller renders nothing. Length-capped defensively: the wire caps
@@ -262,11 +277,23 @@ export function truncateGraphemes(s: string, max: number): { readonly text: stri
   return { text, truncated };
 }
 
-/** Card chip text: `@` + the first 8 grapheme clusters, `…` when clipped (Q8). */
+/** Card chip text: `@` + the whole alias (≤ protocol max), `…` only for an out-of-contract value (Q8 r2);
+ *  narrow layouts are clipped by CSS (`.chip-xs-alias`), the title keeps the full text. */
 export function aliasChipText(alias: string): string {
   const t = truncateGraphemes(alias, XS_ALIAS_CARD_GRAPHEMES);
   return `@${t.text}${t.truncated ? "\u2026" : ""}`;
 }
+
+// ---------------------------------------------------------------------------
+// fabric-xs-activation plan §3 P4: cross-session request-progress caps. The canonical UI
+// mirror constants live in `logic/xsRequestState.ts` (the merge/gate logic imports them);
+// re-exported here so any card-side consumer keeps the usual mirror-constants home (the
+// `XS_CHANNEL_CAP`/`XS_ALIAS_CAP` precedent above). No card chrome renders from them today —
+// the request area lives beside QueueList in the dock; "无 cap 不渲染" is enforced by
+// xsRequestState's narrow/gate functions, never by trusting the card.
+// ---------------------------------------------------------------------------
+
+export { XS_STATE_CAP, XS_ACTIVATE_CAP } from "@logic/xsRequestState.js";
 
 export interface AliasSuggestion {
   readonly alias: string;
@@ -300,7 +327,16 @@ export function aliasSuggestions(
   const raw: Array<string | undefined> = [];
   const cwd = cwdOf(self);
   const segments = cwd.split("/").filter((s) => s !== "");
-  raw.push(segments[segments.length - 1]);
+  const base = segments[segments.length - 1];
+  // alias-force-default §5.2-6 (AFU): with hub caps ∋ xs.alias.v2 the cwd chip is derived by the
+  // SAME function the agent's auto-claim uses (chip ≡ auto; underivable names drop the chip).
+  // Without v2 there is no auto-claim, so the chip keeps the raw-basename behaviour.
+  if (base !== undefined && hubCaps.includes(XS_ALIAS_V2_CAP)) {
+    const d = deriveAliasFromDirName(base);
+    raw.push(d.ok ? d.alias : undefined);
+  } else {
+    raw.push(base);
+  }
   const name = record(self.session)["name"];
   if (typeof name === "string") raw.push(ALIAS_RUN_RE.exec(name)?.[0]);
   for (let i = segments.length - 1; i >= 0; i--) {

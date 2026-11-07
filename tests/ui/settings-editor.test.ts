@@ -7,11 +7,11 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 import { DEFAULT_BUDGET } from "../../src/core/deadline.js";
 import {
   DEFAULT_SETTINGS,
-  DEFAULT_WORKFLOW_BUDGET,
   loadSettingsFromFile,
   persistSettingOverride,
   type AgentSettings,
 } from "../../src/config/settings.js";
+import { DEFAULT_WORKFLOW_BUDGET } from "../../src/workflow/settings.js";
 import {
   SETTING_SPECS,
   currentOf,

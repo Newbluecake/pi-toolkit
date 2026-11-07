@@ -12,7 +12,7 @@ const spawn = {
   itemSameCwd: "替换当前会话（/new）",
   itemPickDir: "选择目录新建…",
   unavailableHint:
-    '网页新建会话未开启：在 ~/.pi/agent/pi-subagent.json 中设置 webHub.spawn.enabled: true（LAN 访问还需 webHub.spawn.lan: "known"），然后 /reload 并 /webhub restart。',
+    '网页新建会话未开启：在 ~/.pi/agent/pi-toolkit.json 中设置 webHub.spawn.enabled: true（LAN 访问还需 webHub.spawn.lan: "known"），然后 /reload 并 /webhub restart。',
   retryHint: "正在确认此 hub 是否支持网页新建会话 — 请再点一次。",
   replaceConfirmTitle: "替换当前会话",
   replaceConfirmBody: "当前会话将被替换为一个新会话；旧会话文件保留，可用 /resume 恢复；终端里接入的同一会话也会切换。",

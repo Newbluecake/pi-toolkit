@@ -181,8 +181,10 @@ details.tx-divider-wrap > summary::-webkit-details-marker {
 .avatar {
   display: none;
   place-items: center;
-  width: 28px;
-  height: 28px;
+  /* 24px chip since 2026-11-04 (was 28px): with the 6px column gap this puts the desktop
+   * assistant left indent at 30px (was 40px). Hidden below 481px, so mobile is unaffected. */
+  width: 24px;
+  height: 24px;
   border-radius: 8px;
   background: var(--c-primary-soft);
   color: var(--c-on-primary-soft);
@@ -482,12 +484,25 @@ details.tx-divider-wrap > summary::-webkit-details-marker {
   --pill-fg: var(--st-tool);
   --pill-bg: var(--st-tool-soft);
   --tool-ring-base: color-mix(in srgb, var(--st-tool) 35%, var(--c-border));
-  border-color: var(--tool-ring-base);
-}
-
-/* the sweeping ring (`.tool-progress`) replaces the border line while it is rendered */
-.tool[data-st="running"]:has(> .tool-head > .tool-progress) {
+  /* 2026-10-28 贴合修复: ring painted on the border band itself — see the block at
+   * `.tool-progress` below. The border stays 1px wide but transparent, so the band the
+   * gradient shows through IS where the static border line sits (same 1px, same --r-md). */
+  --tool-ring-peak: color-mix(in srgb, var(--st-tool) 72%, var(--tool-ring-base));
   border-color: transparent;
+  background:
+    linear-gradient(var(--c-surface), var(--c-surface)) padding-box,
+    linear-gradient(
+        90deg,
+        var(--tool-ring-base) 0%,
+        var(--tool-ring-base) 32%,
+        var(--tool-ring-peak) 50%,
+        var(--tool-ring-base) 68%,
+        var(--tool-ring-base) 100%
+      )
+      0 0 / 300% 100% border-box;
+  /* candidate A (chosen 2026-10-28): keep the sweep, but 1.6s linear → 2.4s ease-in-out-ish
+   * (band accelerates mid-sweep, dwells at the edges) and a wider, lower-contrast peak. */
+  animation: transcript-ring-sweep 2.4s cubic-bezier(0.45, 0, 0.55, 1) infinite;
 }
 
 .tool[data-st="failed"] {
@@ -670,6 +685,96 @@ details.tx-divider-wrap > summary::-webkit-details-marker {
   background: var(--c-danger-soft);
 }
 
+/* write-tool content view (#37, `@logic/writeView.ts` + ToolCard.vue): numbered code instead of
+   the escaped-JSON line. The code never soft-wraps (it pans horizontally; the number gutter is
+   the shared `.pv-line` counter CSS from preview.css). `data-fold` is the >18-line default
+   fold: height cap + fade, toggled by `.write-fold-toggle`; expanded keeps the legacy 420px
+   inner scroll on fine pointers and flows with the page on coarse ones (no nested vertical
+   scroller — same scroll-freeze rule as the clamps above). */
+.tool-write-label {
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+
+.tool-write-title {
+  min-width: 0;
+}
+
+.tool-write-meta {
+  text-transform: none;
+  letter-spacing: normal;
+  font-weight: var(--fw-medium, 500);
+}
+
+.tool-write-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.tool-write-path {
+  padding: var(--sp-1) var(--sp-3) 0;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--c-text-2);
+  overflow-wrap: anywhere;
+}
+
+.tool-section .pre.write-code {
+  position: relative;
+  white-space: pre;
+  overflow-wrap: normal;
+  max-height: 420px;
+}
+
+.write-code-wrap {
+  position: relative;
+}
+
+.write-code-wrap[data-fold="folded"] .pre.write-code {
+  max-height: calc(18lh + 2 * var(--sp-3));
+  overflow-y: hidden;
+}
+
+.write-code-wrap[data-fold="folded"]::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 44px;
+  pointer-events: none;
+  background: linear-gradient(to bottom, transparent, var(--c-surface));
+}
+
+.write-fold-toggle {
+  margin: var(--sp-1) var(--sp-3) var(--sp-2);
+}
+
+.tool-write-ok {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  color: var(--c-success);
+  font-size: var(--fs-xs);
+}
+
+@media (pointer: coarse) {
+  .write-code-wrap[data-fold="expanded"] .pre.write-code {
+    max-height: none;
+  }
+
+  .tool-write-actions .btn,
+  .tool-write-actions .tool-md-btn,
+  .write-fold-toggle {
+    min-height: 32px;
+  }
+}
+
 /* edit-tool diff view (logic in `@logic/diff.js`, rendered by `ToolCard.vue`): replaces the
    Input section's raw JSON for parseable `edit` args. Two highlight tiers per side — soft row
    background + a deeper inline-fragment chip (`--diff-*-soft` / `--diff-*-strong`, tokens.css) —
@@ -788,44 +893,32 @@ details.tx-divider-wrap > summary::-webkit-details-marker {
 }
 
 /* 2026-10-09 「进度条希望和 bash 胶囊贴合得更好，不要独立的一条线出现在上边缘下方」: the
- * running indicator IS the card's border now. `.tool[data-st="running"]` hides its own
- * border colour and this overlay paints a 1px ring exactly over the padding-box edge
- * (`.tool`'s overflow:hidden clips to the padding box, so the ring sits where the border
- * line used to be, following the rounded corners), filled with a gradient whose bright band
- * sweeps across — top and bottom edges shimmer, no separate line anywhere. The ring is cut
- * out with the standard two-layer mask (content-box XOR border-box). */
+ * running indicator IS the card's border now. Revised 2026-10-28 (「贴合不好、感觉粗糙」):
+ * the first version painted the ring with a `.tool-progress` overlay at inset:0 — but
+ * `.tool`'s `overflow: hidden` clips children to the PADDING box, so the ring sat 1px INSIDE
+ * the static border band and its corner radius (r-md−1) never matched the border's (r-md);
+ * measured 3 device px of dead space outside the ring at 3× scale. The overlay is gone; the
+ * running card now paints the ring on its own BORDER band with two background layers — the
+ * card surface clipped to `padding-box` over a sweep gradient clipped to `border-box`, under
+ * a transparent 1px border — so the ring's outer edge coincides pixel-for-pixel with the
+ * static border line, rounded corners included, with no dependence on child clipping.
+ * ToolCard.vue still renders the `.tool-progress` span (kept as a hook/test anchor); it must
+ * never lay out — an empty flex item would still cost a `.tool-head` gap. */
 .tool-progress {
-  position: absolute;
-  inset: 0;
-  z-index: 1;
-  padding: 1px;
-  border-radius: calc(var(--r-md) - 1px);
-  pointer-events: none;
-  background: linear-gradient(
-      90deg,
-      var(--tool-ring-base) 0%,
-      var(--tool-ring-base) 35%,
-      var(--st-tool) 50%,
-      var(--tool-ring-base) 65%,
-      var(--tool-ring-base) 100%
-    )
-    0 0 / 300% 100%;
-  -webkit-mask:
-    linear-gradient(#000 0 0) content-box,
-    linear-gradient(#000 0 0);
-  -webkit-mask-composite: xor;
-  mask:
-    linear-gradient(#000 0 0) content-box exclude,
-    linear-gradient(#000 0 0);
-  animation: transcript-ring-sweep 1.6s linear infinite;
+  display: none;
 }
 
+/* both background layers must be positioned in every keyframe (list-valued interpolation) */
 @keyframes transcript-ring-sweep {
   from {
-    background-position: 100% 0;
+    background-position:
+      0 0,
+      100% 0;
   }
   to {
-    background-position: 0% 0;
+    background-position:
+      0 0,
+      0% 0;
   }
 }
 
@@ -841,14 +934,16 @@ details.tx-divider-wrap > summary::-webkit-details-marker {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .spin,
-  .tool-progress {
+  .spin {
     animation: none;
   }
 
-  /* static ring: the running border tint, no sweep */
-  .tool-progress {
-    background: var(--tool-ring-base);
+  /* static ring: the running border tint on the border band, no sweep */
+  .tool[data-st="running"] {
+    animation: none;
+    background:
+      linear-gradient(var(--c-surface), var(--c-surface)) padding-box,
+      linear-gradient(var(--tool-ring-base), var(--tool-ring-base)) border-box;
   }
 
   .caret {
@@ -870,6 +965,13 @@ details.tx-divider-wrap > summary::-webkit-details-marker {
 
 .msg-custom .avatar-notice {
   background: var(--c-sunken);
+  color: var(--c-text-3);
+}
+
+/* fabric-xs-activation P4: the received xs card's status/host metadata badge (English tokens,
+ * translated evidence detail in the title) — same chip anatomy, mono to read as telemetry. */
+.chip-xs-meta {
+  font-family: var(--font-mono, monospace);
   color: var(--c-text-3);
 }
 
@@ -1028,12 +1130,14 @@ details.tx-divider-wrap > summary::-webkit-details-marker {
     padding: var(--sp-4) var(--col-gutter) var(--sp-8);
   }
 
-  /* 2026-10-09: user avatar column mirrors the assistant's (bubble | 28px avatar); the
-   * extra 28px + gap is added on top of the old bubble cap so the bubble keeps its width. */
+  /* 2026-10-09: user avatar column mirrors the assistant's (bubble | avatar chip); the
+   * extra chip + gap is added on top of the old bubble cap so the bubble keeps its width.
+   * 2026-11-04: chip 28px→24px and gap sp-3→6px together with .msg-assistant below
+   * (「缩进太突兀」— desktop assistant left indent 40px→30px). */
   .msg-user {
-    max-width: calc(min(78%, 640px) + 28px + var(--sp-3));
-    grid-template-columns: minmax(0, auto) 28px;
-    column-gap: var(--sp-3);
+    max-width: calc(min(78%, 640px) + 24px + 6px);
+    grid-template-columns: minmax(0, auto) 24px;
+    column-gap: 6px;
   }
 
   .msg-user > * {
@@ -1046,9 +1150,19 @@ details.tx-divider-wrap > summary::-webkit-details-marker {
     align-self: start;
   }
 
+  /* 2026-11-04 「这个缩进感觉太突兀了」: avatar chip 28→24px + gap sp-3→6px narrows the
+   * desktop left indent of the assistant column 40px→30px (mobile keeps the single-column
+   * base rules below untouched — the avatar is display:none there). */
   .msg-assistant,
   .msg-custom {
-    grid-template-columns: 28px minmax(0, 1fr);
+    grid-template-columns: 24px minmax(0, 1fr);
+    column-gap: 6px;
+  }
+
+  /* identity row follows the 24px chip so both centre lines stay matched (base 28px
+   * matched the old 28px chip; mobile keeps the 28px base rule). */
+  .msg-head {
+    min-height: 24px;
   }
 
   .avatar {
@@ -1251,9 +1365,12 @@ details.tx-divider-wrap > summary::-webkit-details-marker {
   text-decoration: underline;
 }
 
+/* Avatar chip shrank 28→24px with .msg-assistant (2026-11-04); the column-gap override
+ * must match the 6px used there or the cmd card's left edge drifts off the column. */
 @media (min-width: 481px) {
   .msg-cmd {
-    grid-template-columns: 28px minmax(0, 1fr);
+    grid-template-columns: 24px minmax(0, 1fr);
+    column-gap: 6px;
   }
 }
 

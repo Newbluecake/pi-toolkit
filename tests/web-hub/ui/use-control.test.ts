@@ -60,6 +60,19 @@ const flush = async (): Promise<void> => {
 };
 
 describe("createControl (§7.3)", () => {
+  it("archiveOmitted: kind-only transport command, no optimistic ctl item (2026-10-28)", async () => {
+    const h = harness({ commandResult: { ok: true, data: { op: "archive_omitted", changed: 3 } } });
+    const outcome = await h.control.archiveOmitted!("agent:1", "bash");
+    expect(outcome).toEqual({ ok: true, data: { op: "archive_omitted", changed: 3 } });
+    expect(h.calls).toHaveLength(1);
+    const req = h.calls[0]!.req as CmdRequest;
+    expect(req).toMatchObject({ agentKey: "agent:1", op: "archive_omitted", kind: "bash" });
+    expect(req.id).toMatch(ID_RE);
+    expect(req.target).toBeUndefined();
+    expect(req.set).toBeUndefined();
+    expect(h.dispatched).toHaveLength(0);
+  });
+
   it("sendPrompt: ctl_send (optimistic, sending) BEFORE the transport resolves; ctl_result after; D21 expect.sessionId", async () => {
     let resolveCmd: ((o: CmdOutcome) => void) | undefined;
     // a manually-gated transport so we can observe the dispatch order

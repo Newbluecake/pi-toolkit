@@ -21,7 +21,7 @@
  * @typedef {{ id: string, kind: string, state: string, text?: string, deliver?: string,
  *   runId?: string, dialogId?: string, name?: string, at: number, behavior?: string,
  *   error?: string, message?: string, retryable?: boolean, effect?: string, reason?: string,
- *   offline?: boolean, lateQuery?: boolean }} PendingItem
+ *   offline?: boolean, lateQuery?: boolean, ctlAt?: number }} PendingItem
  *
  * @typedef {{ type: "result", outcome: CmdOutcome }
  *   | { type: "query_start" }
@@ -368,6 +368,11 @@ export function pendingTransition(item, event) {
           // — once held/handed/tooLate, a later ok result never regresses it (a dup or queryOnly
           // replay re-answers the ORIGINAL delivery; anything else is stale). Y8.1: a degraded
           // native delivery answers observed/unobserved here and never creates a held row.
+          // U1 invariant: 「状态只前进不回退」. The agent publishes its ctl frame BEFORE the HTTP
+          // receipt, so the receipt routinely lands AFTER the ctl slot already advanced this
+          // item (`ctlAt` is only ever set by an applied ctl entry). Such a receipt is stale —
+          // drop it, otherwise `held`/`observed` would overwrite handed/started/queued/….
+          if (typeof item.ctlAt === "number") return item;
           if (data.delivery === "held") {
             return patchItem(item, {
               state: "held",
@@ -517,27 +522,30 @@ export function pendingTransition(item, event) {
         case "observed":
           return patchItem(item, {
             state: "observed",
+            ...ctlAtPatch,
             ...(typeof e.behavior === "string" ? { behavior: e.behavior } : {}),
           });
         case "started":
         case "queued":
         case "running":
-          return patchItem(item, { state: e.state });
+          return patchItem(item, { state: e.state, ...ctlAtPatch });
         case "consumed":
         case "ok":
         case "late_ok":
           return null;
         case "dropped":
-          return patchItem(item, { state: "dropped" });
+          return patchItem(item, { state: "dropped", ...ctlAtPatch });
         case "unconfirmed":
           return patchItem(item, {
             state: "unconfirmed",
+            ...ctlAtPatch,
             ...(typeof e.reason === "string" ? { reason: e.reason } : {}),
           });
         case "failed":
         case "late_failed":
           return patchItem(item, {
             state: "failed",
+            ...ctlAtPatch,
             error: typeof e.code === "string" ? e.code : "E_FAILED",
             retryable: false,
             effect: "none",
@@ -915,4 +923,56 @@ export function isWebSentMessage(ctl, timestamp) {
       return true;
   }
   return false;
+}
+
+/** #40 positive dispatch-evidence signal; never infer it from a version or a missing row.
+ * @param {unknown} status
+ */
+export function unknownSlashTextAvailable(status) {
+  return (
+    status !== null &&
+    typeof status === "object" &&
+    Array.isArray(status.features) &&
+    status.features.includes("unknown-slash-text.v1")
+  );
+}
+
+/** Shared Composer/DetailDock gate. Missing rows are unresolved only on a capable surface.
+ * @param {unknown} text @param {any[]} commands @param {boolean} busy
+ * @param {boolean} enabled @param {unknown} status
+ * @returns {{mode: "text"|"command"|"deny", policy: "allow"|"confirm"|"deny"|null}}
+ */
+export function slashTextRoute(text, commands, busy, enabled, status) {
+  const slash = parseSlash(text);
+  if (!enabled || !slash) return { mode: "text", policy: null };
+  const found = commands.find((c) => c && c.name === slash.name);
+  const capable = unknownSlashTextAvailable(status);
+  const policy = found ? commandPolicyFor(commands, slash.name, busy) : capable ? "allow" : "deny";
+  if (policy === "deny") return { mode: "deny", policy };
+  if (capable && !/^[A-Za-z0-9:_.-]{1,64}$/.test(slash.name)) return { mode: "text", policy: null };
+  return { mode: "command", policy };
+}
+
+/** One page-local A→B intention. No timers, query replay, persistence or effect-unknown retry.
+ * Scope includes capability, session, epoch and the caller's invalidation generation.
+ * @param {()=>string|null} scope @param {()=>Promise<void>} send
+ */
+export function createUnknownSlashFallback(scope, send) {
+  const initial = scope();
+  let consumed = false;
+  /** @param {{ok?: boolean, error?: string, effect?: string}} outcome */
+  return async (outcome) => {
+    if (
+      consumed ||
+      initial === null ||
+      scope() !== initial ||
+      outcome.ok !== false ||
+      outcome.error !== "E_UNKNOWN_COMMAND" ||
+      outcome.effect !== "none"
+    )
+      return false;
+    consumed = true; // BEFORE awaiting: duplicate callbacks cannot mint a second prompt id.
+    await send();
+    return true;
+  };
 }

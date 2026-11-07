@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { xsIdleNoWakeRisk } from "../../src/tools/message-session-tool.js";
 import { FakeClock } from "../../src/core/clock.js";
 import { createSessionFence, type SessionFence } from "../../src/fabric/xs/fence.js";
 import { XsReplyLedger, createXsReplyInboxPort } from "../../src/fabric/xs/reply-ledger.js";
@@ -140,6 +141,8 @@ describe("xs-receiver: pipeline stage rejections (§8.4)", () => {
     const h = makeHarness();
     const first = h.receiver.deliver(h.input({ xid: "dup-1" }));
     expect(first.effect).toBe("applied");
+    // A fresh hub send always uses a NEW xid; replay only preserves historical evidence.
+    h.ctl.setIdle(false);
     const second = h.receiver.deliver(h.input({ xid: "dup-1" }));
     expect(second).toEqual(first);
     expect(h.ctl.sent).toHaveLength(1);
@@ -308,6 +311,28 @@ describe("xs-receiver: evidence table (§6.3)", () => {
     const verdict = receiver.deliver(h.input());
     expect(verdict).toEqual({ effect: "unknown", reason: "accept_unverified", woke: false });
     expect(h.inbox.snapshot()[0]!.mode).toBe("appended"); // conservative hold
+    // fake sender maps the receiver verdict while all other #20 conditions qualify.
+    expect(
+      xsIdleNoWakeRisk({
+        status: "sent",
+        ...verdict,
+        reply: { requestId: "q111111111111111111", dueAt: "d", state: "pending" },
+        wake: { requested: false, decision: "deliver_only" },
+        track: { messageId: "x", activationKey: "k" },
+      }),
+    ).toBe(false);
+  });
+
+  it("accepted #20 residual: re-entry during write changes idle AFTER sample, yet verdict stays applied", () => {
+    const h = makeHarness();
+    const original = h.host.sendMessage.bind(h.host);
+    h.host.sendMessage = (message, options) => {
+      original(message, options); // leaf is this xid
+      h.ctl.setIdle(false); // human input/next turn re-enters while the write is in progress
+    };
+    expect(h.receiver.deliver(h.input())).toEqual({ effect: "applied", woke: false });
+    expect(h.host.isIdle()).toBe(false);
+    expect(h.ctl.sent[0]!.options.triggerTurn).toBe(false);
   });
 
   it("synchronous sendMessage throw ⇒ none{host_rejected} — proof of no effect (§6.3 row 1 / Fpi1)", () => {

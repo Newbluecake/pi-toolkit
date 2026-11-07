@@ -2,8 +2,13 @@
  * Assembly-order guarantee (plan §4.1): web-hub's own `input` observer must be the LAST
  * pi-toolkit `input` handler registered by `src/index.ts`'s `activate()` — everything else
  * (currently `installMentionInput`) runs first, so a `@label` mention that gets `handled` never
- * reaches web-hub's observer (§4.3 step 2's "unobserved" fallback is the intended outcome there,
- * not a wiring accident).
+ * reaches web-hub's observer. Since the 2026-11-04 mention-handled fix that short-circuit is
+ * REPORTED instead of silently accepted: the mention interceptor calls its `onHandled` port
+ * (→ `WebHubControl.noteInputHandled` → `CommandHandler.onInputHandled`) right before answering
+ * `handled`, so the web prompt's ledger entry flips to `consumed` instead of decaying to
+ * `unconfirmed(unobserved)` — §4.3 step 2's "unobserved" fallback is NO LONGER the expected
+ * outcome for a mention-handled web prompt (it remains the fallback for genuinely unattributed
+ * inputs, e.g. third-party handlers).
  *
  * Method: activate() twice against fresh fake `pi`s — once with `webHub.enabled:false` (baseline,
  * every OTHER `input` handler still registers) and once with `webHub.enabled:true` — and diff the

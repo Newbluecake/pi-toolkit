@@ -1,6 +1,11 @@
 import type { Clock } from "../core/clock.js";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { applyStructuredOutputPolicy, validateAgainstSchema } from "../core/json-schema.js";
+import { applyStructuredOutputPolicy, isPersistableSchema, validateAgainstSchema } from "../core/json-schema.js";
+import {
+  STRUCTURED_REPAIR_DEFAULTS,
+  STRUCTURED_REPAIR_PROMPT,
+  type StructuredRepairNote,
+} from "../core/structured-repair.js";
 import { validateVerdictV1Semantics } from "../core/verdict-schema.js";
 import type { SnapshotStore } from "../core/store.js";
 import type {
@@ -52,6 +57,7 @@ import { createAgentTool, type NestedSpawnPort } from "../tools/agent-tool.js";
 import { createStructuredOutputTool } from "../tools/structured-output-tool.js";
 import { createMessageAgentTool } from "../tools/message-agent-tool.js";
 import { createSetModelTool } from "../tools/set-model-tool.js";
+import { createThreadChildTool } from "../tools/thread-child-tool.js";
 import type { NodeRef } from "../core/message.js";
 import type { FabricRouter } from "../fabric/router.js";
 import { createMentionChannel } from "../fabric/mention.js";
@@ -61,6 +67,8 @@ import type { SpawnService } from "./spawn-service.js";
 import type { LifecycleSink, Runner, RunnerCallbacks, RunnerSpec } from "./ports.js";
 
 export interface RuntimeAdapterDeps {
+  /** Same activation-local memory binding as driver; absent when scopes are off. */
+  memoryBindingEnabled?: boolean;
   clock: Clock;
   driver: SessionDriver;
   pool: SlotPool;
@@ -132,6 +140,14 @@ export interface RuntimeAdapterDeps {
       spawn: () => SpawnService | undefined;
     };
   };
+  /** fabric-thread arch r3 §5.3/§9.2 (P3): the stack's thread surface — present ⇔ threads on.
+   * Carries the child-closure tool factory inputs (engine ops + hub link) and the §5.1
+   * direct-run fact recorder; absence keeps this adapter's injections and the tool-scope
+   * policy byte-identical (no `extraReserved`, no `thread` grant — G2a). */
+  threads?: {
+    childOps(runId: string, label: string): import("../tools/thread-child-tool.js").ThreadChildOps;
+    noteRunSpec(runId: string, facts: { callerOwned: boolean; external: boolean }): void;
+  };
   /**
    * Forwarded to RunnerDeps.onReaped (runner calls it after physical reap / late disposal).
    * Must be idempotent.
@@ -194,6 +210,14 @@ export interface RuntimeAdapterDeps {
    * persist 的 droid run 因此不写 transcript。
    */
   externalPersistDefault?: boolean;
+  /**
+   * Structured-output repair turn (plan §2.6.1): `false` disables the repair
+   * turn entirely for runs through THIS adapter; a partial object overrides
+   * individual limits. Test seam + future settings hook — stack.ts passes
+   * nothing, so the feature is always on with STRUCTURED_REPAIR_DEFAULTS
+   * (plan §5 定案 1: no settings switch).
+   */
+  structuredRepair?: false | Partial<import("../core/structured-repair.js").StructuredRepairLimits>;
 }
 
 /**
@@ -408,6 +432,7 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
     (runId, generation, kind, err) => runtime.notifyEffectFailed(runId, generation, kind as RunEffect["kind"], err),
   );
   const runnerDeps: RunnerDeps = {
+    ...(deps.memoryBindingEnabled !== undefined ? { memoryBindingEnabled: deps.memoryBindingEnabled } : {}),
     clock: deps.clock,
     driver: deps.driver,
     pool: deps.pool,
@@ -629,6 +654,18 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
         // Pre-H2 cwd: the fallback when H2 never runs (no resolveSessionSpec hook) or fails.
         const preH2Cwd = spec.cwd ?? process.cwd();
         let sessionSpec: SessionSpec = {
+          ...(!isExternal && spec.request.fastSeed !== undefined
+            ? { fastSeed: { v: 1 as const, mode: spec.request.fastSeed.mode } }
+            : {}),
+          // #39 P2 (memory-scopes arch §6.3): only a `captured` seed reaches the session
+          // spec — the explicit `empty` marker exists to stop admission/dequeue re-reads,
+          // not to write anything (a child of an empty parent simply starts with no
+          // memory entries). The seed object is spawn admission's already-validated
+          // deep-frozen copy, retained by reference on purpose: no re-copy, no
+          // re-sampling of the parent, nothing extra on any external/droid path.
+          ...(!isExternal && spec.request.memorySeed?.state === "captured"
+            ? { memorySeed: spec.request.memorySeed.seed }
+            : {}),
           ...(spec.cwd === undefined ? {} : { cwd: spec.cwd }),
           ...(spec.model === undefined ? {} : { model: spec.model }),
           ...(spec.type.tools === undefined || isExternal ? {} : { tools: spec.type.tools }),
@@ -642,6 +679,15 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
         // further extend — the full customTools list).
         const grantedReserved: string[] = [];
         const customTools: unknown[] = [];
+        // Structured-output repair turn (plan §1f/§2.6.2): one capture-open
+        // flag shared by the tool's onSubmit, the runner's spec and every
+        // close point. Declared at this scope because the StructuredRepairSpec
+        // assembled further down (in the req literal) closes over it too.
+        // Once closed (local repair close / turn cap / settle dispatch /
+        // cancellation), every late submission is REJECTED and never touches
+        // `structured.value`; values accepted before the close are kept (the
+        // policy reads the capture exactly once, after close).
+        let captureOpen = true;
         // A readonly-domain run (toolDomain:"readonly", e.g. /mem tidy) gets NONE of the injected
         // tools (message_agent / set_model / nested Agent) — every injection branch below is
         // explicitly !readonlyDomain-guarded (P0-r §7.0 point 1). StructuredOutput below is the one
@@ -728,6 +774,11 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
             schema,
             ...(spec.request.schemaPreset === undefined ? {} : { schemaPreset: spec.request.schemaPreset }),
             onSubmit: (value) => {
+              if (!captureOpen)
+                return {
+                  ok: false,
+                  errors: ["the result window for this run has closed; this submission was not accepted"],
+                };
               const result = validateAgainstSchema(schema, value);
               if (result.ok) structured.value = value;
               return result;
@@ -764,6 +815,34 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
         // widened to readonlyDomain so a tidy run never gets it either.
         if (!readonlyDomain && !isExternal && (deps.childSwitchContextGrant?.() ?? false)) {
           grantedReserved.push("switch_context");
+        }
+        // fabric-thread arch r3 §5.3/§9.2/§5.1 (P3): the child `thread` closure — injected into
+        // every DIRECT-dispatch run (非 readonly、非 external、非 callerOwned、非嵌套)；readonly
+        // 直派 run 只 reserve 不 grant 不注入（下方 extraReserved）；workflow/嵌套/external 不
+        // reserve（同名 MCP 工具不受影响）。宿主闭包 + 代际检查，不依赖子会话 session_shutdown。
+        const threadsDeps = deps.threads;
+        const threadDirect =
+          threadsDeps !== undefined &&
+          !isExternal &&
+          spec.request.callerOwned !== true &&
+          spec.request.parentRunId === undefined;
+        if (threadsDeps !== undefined) {
+          // §5.1 direct 判定源：非直派（callerOwned/嵌套/external）记录在案；直派显式写 false
+          // （等价于无记录，但让终态清理的 delete 恒有目标）。
+          threadsDeps.noteRunSpec(spec.runId, {
+            callerOwned: spec.request.callerOwned === true || spec.request.parentRunId !== undefined,
+            external: isExternal,
+          });
+        }
+        if (threadDirect && !readonlyDomain) {
+          customTools.push(
+            createThreadChildTool({
+              runId: spec.runId,
+              label: spec.request.label ?? spec.runId,
+              ops: threadsDeps.childOps(spec.runId, spec.request.label ?? spec.runId),
+            }),
+          );
+          grantedReserved.push("thread");
         }
         if (customTools.length)
           sessionSpec = { ...sessionSpec, customTools: [...(sessionSpec.customTools ?? []), ...customTools] };
@@ -902,11 +981,16 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
                 ? buildToolScopePolicy({
                     tools: READONLY_DOMAIN_TOOLS,
                     granted: readonlyHasSchema ? ["StructuredOutput"] : [],
+                    // fabric-thread §9.2（P3）：readonly 直派 run 只 reserve、不 grant、不注入。
+                    ...(threadDirect ? { extraReserved: ["thread"] } : {}),
                     ...(readonlyProvenance ? { provenance: readonlyProvenance } : {}),
                   })
                 : buildToolScopePolicy({
                     ...(spec.type.tools ? { tools: spec.type.tools } : {}),
                     granted: grantedReserved,
+                    // fabric-thread §9.2（P3）：直派 run reserve `thread`（granted 的除外照样剥离
+                    // 未授权同名工具；非直派不 reserve，同名 MCP 工具不受影响）。
+                    ...(threadDirect ? { extraReserved: ["thread"] } : {}),
                   }),
               enforcer: createToolScopeEnforcer({
                 // TS4: never silent. Note: §7.5's literal "WARN + diag.degraded"
@@ -942,6 +1026,28 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
         // (the `prompt` field on SessionSpec itself is always overridden by
         // the request's own prompt on the next line regardless).
         const { promptNotes, ...sessionFields } = sessionSpec;
+        // Structured-output repair turn (plan §2.6.3): runtime-only spec for
+        // the runner. Gated on the injection actually having happened
+        // (grantedReserved), the pi path (!isExternal — droid keeps its
+        // ```json extraction, U6) and the test seam. repairNote is written by
+        // the runner's synchronous report() callback and consumed by the
+        // post-settle policy call below.
+        let repairNote: StructuredRepairNote | undefined;
+        const structuredRepair =
+          !isExternal && grantedReserved.includes("StructuredOutput") && deps.structuredRepair !== false
+            ? {
+                toolName: "StructuredOutput",
+                prompt: STRUCTURED_REPAIR_PROMPT,
+                limits: { ...STRUCTURED_REPAIR_DEFAULTS, ...(deps.structuredRepair || {}) },
+                pending: () => captureOpen && structured.value === undefined,
+                closeCapture: () => {
+                  captureOpen = false;
+                },
+                report: (n: StructuredRepairNote) => {
+                  repairNote = n;
+                },
+              }
+            : undefined;
         const req: ResolvedSpawnRequest = {
           runId: spec.runId,
           ...sessionFields,
@@ -949,6 +1055,7 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
           // F3/F4: includes inputBudget as a runtime-only field; it is
           // consumed by RuntimeRunner and never copied into SessionSpec/pi.
           ...threadThroughRequestFields(spec.request), // F3/F4 (CC4 — also carries deadlineAt)
+          ...(structuredRepair === undefined ? {} : { structuredRepair }),
           ...(toolScope === undefined ? {} : { toolScope }),
           // M-A: display-only metadata for the presentation layer (diag.model/
           // label/agentType). spec.model is already the merged
@@ -965,6 +1072,12 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
             taskPrompt: spec.request.prompt.slice(0, TASK_PROMPT_CAP),
             ...(spec.request.dispatchMeta === undefined ? {} : { dispatchMeta: spec.request.dispatchMeta }),
             ...(spec.request.schemaPreset === undefined ? {} : { schemaPreset: spec.request.schemaPreset }),
+            // #68: persist the inline schema (presets are re-resolved by id) so a schema-less resume can inherit it.
+            ...(spec.request.schema !== undefined &&
+            spec.request.schemaPreset === undefined &&
+            isPersistableSchema(spec.request.schema)
+              ? { schema: spec.request.schema }
+              : {}),
             // fabric-cross-session plan §4.1/§4.5 (W5): write-once wake provenance (claimToken stripped) and the
             // admission verdict. Both are absent unless the wake inbox is wired ⇒ wake-off diag bytes unchanged.
             ...(spec.request.wakeOrigin === undefined
@@ -1019,11 +1132,37 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
             spec.request.schema,
             structured.value,
             spec.request.schemaPreset === "verdict/v1" ? validateVerdictV1Semantics : undefined,
+            repairNote,
           );
+          // Structured-output repair turn (plan §2.6.4): stamp
+          // diag.structuredRepair only when a repair turn was actually sent,
+          // on both the outcome and the persisted terminal snapshot (H3
+          // work-back precedent) — every other run keeps bytes unchanged.
+          if (repairNote === "attempted") {
+            const structuredRepair =
+              outcome.structuredResult === undefined ? ("failed" as const) : ("succeeded" as const);
+            outcome = { ...outcome, diag: { ...outcome.diag, structuredRepair } };
+          }
           settled = outcome;
           try {
             const snapshot = deps.store.get(spec.runId);
-            if (snapshot) deps.store.put({ ...snapshot, outcome, status: outcome.status, updatedAt: deps.clock.now() });
+            if (snapshot) {
+              deps.store.put({
+                ...snapshot,
+                ...(repairNote === "attempted"
+                  ? {
+                      diag: {
+                        ...snapshot.diag,
+                        structuredRepair:
+                          outcome.structuredResult === undefined ? ("failed" as const) : ("succeeded" as const),
+                      },
+                    }
+                  : {}),
+                outcome,
+                status: outcome.status,
+                updatedAt: deps.clock.now(),
+              });
+            }
           } catch (err) {
             console.warn(
               `[pi-subagent] post-policy snapshot persist failed for ${spec.runId}: ${err instanceof Error ? err.message : String(err)}`,
@@ -1094,6 +1233,18 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
     },
     steer(runId, text) {
       return runtime.steerRun(runId, text);
+    },
+    // fabric-thread P4 fix (found by tests/integration/fabric-thread-e2e.test.ts): honest
+    // passthroughs for the thread channel. stack.ts casts the Runner to `ThreadRunnerLike`
+    // (ports.ts's Runner interface was deliberately untouched in P3), but the ADAPTER is the
+    // object that actually lands in `runnerRef` — without these two methods the cast calls
+    // `undefined` at subscribe/steer time. Synchronous registry read + bounded steer, exactly
+    // the runner's own §6.4 semantics (names match ThreadRunnerLike: steerThreadRun/hasActiveSession).
+    steerThreadRun(runId: string, text: string, capMs: number) {
+      return runtime.steerThreadRun(runId, text, capMs);
+    },
+    hasActiveSession(runId: string) {
+      return runtime.hasActiveSession(runId);
     },
     // fleet-drawer plan §4.1: pure synchronous passthroughs to the runner's
     // observeRun/peekRunBranch read port — the runner is the single source

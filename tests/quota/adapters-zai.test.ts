@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ADAPTERS, kimiAdapter, selectAdapters } from "../../src/quota/adapters/index.js";
+import { ADAPTERS, kimiAdapter, opencodeGoAdapter, selectAdapters } from "../../src/quota/adapters/index.js";
 import type { AdapterDeps } from "../../src/quota/adapters/types.js";
 import {
   ZAI_QUOTA_PATH,
@@ -162,9 +162,10 @@ describe("zaiAdapter / zaiOverseasAdapter", () => {
 
 describe("adapter registry", () => {
   it("ADAPTERS covers all provider ids", () => {
-    expect(Object.keys(ADAPTERS).sort()).toEqual(["kimi-coding", "zai", "zai-coding-cn"]);
+    expect(Object.keys(ADAPTERS).sort()).toEqual(["kimi-coding", "opencode-go", "zai", "zai-coding-cn"]);
     expect(ADAPTERS["zai-coding-cn"]).toBe(zaiAdapter);
     expect(ADAPTERS.zai).toBe(zaiOverseasAdapter);
+    expect(ADAPTERS["opencode-go"]).toBe(opencodeGoAdapter);
   });
 
   it("selectAdapters filters the whitelist in registry order", () => {

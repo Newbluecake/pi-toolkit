@@ -129,7 +129,15 @@ function writeSettings(home: string, extra: Record<string, unknown> = {}) {
         // shape both the explicit-timeout and default-budget paths.
         // extendStepS: 0（legacy）——本文件的 E1 算术锁 factor 项硬顶（H = 3·T）
         // 与旧式单笔全额 grant；step 项/单笔钳位由 core/runtime/workflow 单测覆盖。
-        budget: { totalGraceS: 1, maxExtensions: 2, maxTotalFactor: 3, extendStepS: 0, abortGraceS: 0.05, reapS: 0.05 },
+        budget: {
+          minTotalS: 0,
+          totalGraceS: 1,
+          maxExtensions: 2,
+          maxTotalFactor: 3,
+          extendStepS: 0,
+          abortGraceS: 0.05,
+          reapS: 0.05,
+        },
         fleetWidget: false,
         quota: { enabled: false },
         ...extra,
@@ -437,7 +445,7 @@ describe("nested Agent timeout_s (N1-N3, real injected tool)", () => {
     writeAgentFiles(home);
     // G=2s, factor 4 (H=4s): the grace window outlives T by a wide margin.
     writeSettings(home, {
-      budget: { totalGraceS: 2, maxExtensions: 2, maxTotalFactor: 4, abortGraceS: 0.05, reapS: 0.05 },
+      budget: { minTotalS: 0, totalGraceS: 2, maxExtensions: 2, maxTotalFactor: 4, abortGraceS: 0.05, reapS: 0.05 },
     });
     const branch: unknown[] = [];
     const host = fakePi(branch);
@@ -515,7 +523,7 @@ describe("nested Agent timeout_s (N1-N3, real injected tool)", () => {
   it("N2: the MAIN session extends the grandchild by run id mid-grace — it outlives its original grace end", async () => {
     writeAgentFiles(home);
     writeSettings(home, {
-      budget: { totalGraceS: 2, maxExtensions: 2, maxTotalFactor: 4, abortGraceS: 0.05, reapS: 0.05 },
+      budget: { minTotalS: 0, totalGraceS: 2, maxExtensions: 2, maxTotalFactor: 4, abortGraceS: 0.05, reapS: 0.05 },
     });
     const branch: unknown[] = [];
     const host = fakePi(branch);
@@ -570,7 +578,7 @@ describe("nested Agent timeout_s (N1-N3, real injected tool)", () => {
   it("N3: run_in_background nested variant — silent, terminal at T+G; parent abort leaves no orphan", async () => {
     writeAgentFiles(home);
     writeSettings(home, {
-      budget: { totalGraceS: 1, maxExtensions: 2, maxTotalFactor: 4, abortGraceS: 0.05, reapS: 0.05 },
+      budget: { minTotalS: 0, totalGraceS: 1, maxExtensions: 2, maxTotalFactor: 4, abortGraceS: 0.05, reapS: 0.05 },
     });
     const branch: unknown[] = [];
     const host = fakePi(branch);

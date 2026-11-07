@@ -1,6 +1,6 @@
 # 合并插件总览 · 开发者要点
 
-> 何时读：改动 `src/hud/`、`src/web-search/`、`src/feishu-notify/`，或 `hud.*`/`webSearch.*`/`feishuNotify.*` 设置键，或判断某插件在 pre-guard/post-guard 哪一侧注册之前。
+> 何时读：改动 `src/hud/`、`src/web-tools/`、`src/feishu-notify/`，或 `hud.*`/`webSearch.*`/`feishuNotify.*` 设置键，或判断某插件在 pre-guard/post-guard 哪一侧注册之前。
 > 来源：AGENTS.md@fcbf71dc 的对应条目，原文搬运，未改写（仅路径按目录移动更新）。新的实现细节直接写在这里，不要再写回 AGENTS.md。
 > 相关：`merge-plan.md`、`../traffic-merge/README.md`
 
@@ -8,7 +8,7 @@
 
 It also absorbs eight formerly-standalone plugins (see `docs/dev/plugin-merge/merge-plan.md` and
 `docs/dev/traffic-merge/plan.md`), all settings-gated and all wired from the single `pi.extensions` entry (`src/index.ts`):
-a HUD footer (`src/hud/`, `hud.enabled`, main-session TUI only), the `web_search` tool (`src/web-search/`,
+a HUD footer (`src/hud/`, `hud.enabled`, main-session TUI only), the `web_search`/`web_fetch` tools (`src/web-tools/`,
 `webSearch.enabled`), Claude Code-style task tools (`src/todo/`, `todo.enabled`), the interactive
 `ask_user` tool (`src/ask-user/`, `askUser.enabled`), Feishu notification cards
 (`src/feishu-notify/`, `feishuNotify.enabled`), session-navigation enhancements
@@ -40,7 +40,23 @@ the local remote-tracking ref, so without fetch they never see remote commits pu
 in a per-session `HudSession` (single `live` flag, all timers unref'd, all `pi.events`
 subscriptions unsubscribed on session_shutdown — the bus survives /reload).
 
-## src/web-search/
+## src/web-tools/
 
-`src/web-search/` — merged web_search tool: Codex/SerpAPI/Bocha/Tavily failover with retry
-policy; credentials from env or `~/.config/pi/web-search.env`; registered pre-guard.
+`src/web-tools/` (renamed from `src/web-search/` when DeepSeek + web_fetch landed; the settings key
+stays `webSearch.*`, the credentials file stays `~/.config/pi/web-search.env` — user-facing
+identifiers never move) — two tools, both registered pre-guard by the single entry
+`registerWebSearchTool(pi)` under `webSearch.enabled` (default on):
+
+- `web_search` — Codex/SerpAPI/DeepSeek/Bocha/Tavily failover with retry policy; auto order
+  `codex → serpapi → deepseek → bocha → tavily` (a provider participates only when its key is
+  configured). DeepSeek is the official Search API (`POST https://api.deepseek.com/v1/tools/search`,
+  Bearer `DEEPSEEK_API_KEY`); the model-facing snippet is the response's 600-800 char `summary`
+  field (falling back to the 100-200 char UI `snippet`), `rerank_score` maps to `score`,
+  `site_name` to `source`; `need_content` stays `false` (full content is web_fetch's job).
+- `web_fetch` — DeepSeek Fetch API (`POST /v1/tools/fetch`, `{url}` ⇒ `{title, content}` where
+  content is Markdown). http(s) URLs only; needs `DEEPSEEK_API_KEY` and fails fast (no request)
+  without it; same resilience discipline as search (15s `withRequestTimeout`, 1+2 attempts with
+  backoff on retryable errors, secrets redacted from every error path).
+
+Credentials from env or `~/.config/pi/web-search.env`: `CODEX_SEARCH_API_KEY` +
+`CODEX_SEARCH_BASE_URL`, `SERPAPI_API_KEY`, `DEEPSEEK_API_KEY`, `BOCHA_API_KEY`, `TAVILY_API_KEY`.

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { parseLoadSettings } from "../../src/config/settings.js";
+import { parseLoadSettings } from "../../src/sysload/settings.js";
 import { DEFAULT_SETTINGS, type AgentSettings } from "../../src/config/settings.js";
 import { createLoadHintState } from "../../src/sysload/hook.js";
 import type { LoadPort } from "../../src/sysload/types.js";

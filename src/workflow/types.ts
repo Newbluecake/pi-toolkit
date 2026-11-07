@@ -114,6 +114,8 @@ export type ReplayScope = "chain" | "content";
  * for this milestone is host.ts/journal.ts/replay.ts only).
  */
 export interface TaskSemantics {
+  /** Captured host policy only; inherit/disabled omit the key to preserve legacy hashes. */
+  readonly fastMode?: "on" | "off";
   readonly agentType: string;
   /** E2 (§6.3): a content hash of the agent type's *resolved configuration*, not just its name — a `.md` definition edit must miss. Falls back to the bare `agentType` name when the configured `ChildSpawner` cannot report one (documented gap, see host.ts's `ChildSpawner.configHashOf`). */
   readonly agentTypeConfigHash: string;

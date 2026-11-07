@@ -19,6 +19,7 @@
 import { promises as fsp } from "node:fs";
 import { homedir } from "node:os";
 import * as path from "node:path";
+import { resolveAgentDir } from "../core/agent-dir.js";
 import { systemClock, type Clock } from "../core/clock.js";
 import type { Millis } from "../core/types.js";
 import { getMeasureClaim, type MeasurePersistSlot, type MeasurePendingUpdate } from "./measure-claim.js";
@@ -39,11 +40,9 @@ import {
   type RenewsOnRead,
 } from "./measure-types.js";
 
-/** `$PI_CODING_AGENT_DIR` else `~/.pi/agent` (pi's `getAgentDir()` without a pi import). */
+/** Pi-free agentDir resolution; relative overrides fall back to `~/.pi/agent`. */
 export function defaultMeasureStorePath(env: NodeJS.ProcessEnv = process.env, home: string = homedir()): string {
-  const envDir = env.PI_CODING_AGENT_DIR;
-  const agentDir = typeof envDir === "string" && envDir !== "" ? envDir : path.join(home, ".pi", "agent");
-  return path.join(agentDir, MEASURE_STORE_FILE);
+  return path.join(resolveAgentDir(env, home).dir, MEASURE_STORE_FILE);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

@@ -10,18 +10,22 @@
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { AgentSettings } from "../config/settings.js";
+import { wireFastChild, type FastWireOptions } from "../fast/wire.js";
 import { wireChildContextSwitch } from "../context-switch/child.js";
 import { wireChildKeepalive } from "../cache-ttl/child.js";
 import { getInputBudgetRegistry, inputTokensForBytes } from "../runtime/input-budget-registry.js";
 
-export function wireChildSession(pi: ExtensionAPI, settings: AgentSettings): void {
+export function wireChildSession(pi: ExtensionAPI, settings: AgentSettings, fastOptions?: FastWireOptions): void {
   const keepalive = wireChildKeepalive(pi, settings);
+  // Fast must precede even synchronous budget-registry replay (and traffic outside this factory).
+  wireFastChild(pi, settings.fast.enabled, fastOptions);
   const registry = getInputBudgetRegistry();
   // Registration is deferred until the first budgeted run in this process.
   // At most one provider handler is installed for this child pi session; an
   // unregistered session remains a no-op because the handler resolves the
   // current session's entry at request time.
   let installed = false;
+  let unsubscribeBudget: (() => void) | undefined;
   const install = () => {
     if (installed) return;
     installed = true;
@@ -44,9 +48,23 @@ export function wireChildSession(pi: ExtensionAPI, settings: AgentSettings): voi
         );
       }
     });
+    // One-shot: the handler resolves the session's registration at request time,
+    // so no later registry event concerns this session. Unsubscribe immediately;
+    // during `subscribe`'s replay of already-registered sessions the unsubscribe
+    // binding is not assigned yet, hence the post-subscribe guard below.
+    unsubscribeBudget?.();
   };
-  const unsubscribeBudget = registry.subscribe(install);
-  pi.on("session_shutdown", () => unsubscribeBudget());
+  unsubscribeBudget = registry.subscribe(install);
+  if (installed) unsubscribeBudget();
+  pi.on("session_shutdown", () => {
+    // Strong reference from this child session to `install`: the registry holds
+    // listeners only weakly (finished child sessions must not be pinned — they are
+    // disposed via `AgentSession.dispose()`, which never emits `session_shutdown`),
+    // so this handler, which lives inside the session's own object graph, is what
+    // keeps the measurer closure alive for exactly as long as the session lives.
+    void install;
+    unsubscribeBudget?.();
+  });
   wireChildContextSwitch(pi, settings, {
     onSwitchCommitted: () => keepalive?.noteContextSwitch(),
   });

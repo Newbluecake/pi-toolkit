@@ -11,7 +11,7 @@
 ## 安装与首次连接
 
 1. 使用 Node.js ≥22（需原生 WebSocket），正常安装并启动 pi-toolkit，打开 **本地 TUI**。先确认 `/webhub status` 能看到本机 hub。
-2. 在 `~/.pi/agent/pi-subagent.json` 合并以下设置，不要覆盖其他已有键：
+2. 在 `~/.pi/agent/pi-toolkit.json`（旧名 `pi-subagent.json`，跟随 `PI_CODING_AGENT_DIR`）合并以下设置，不要覆盖其他已有键：
 
    ```json
    {
@@ -23,7 +23,7 @@
    所有 `feishuBot.*` 设置均非 live：修改后先 `/reload`，再 `/webhub restart`。`webHub.control:false` 时机器人不启用。无需为机器人开放 LAN 监听，也无需在这个文件填写 app secret。
 
 3. 在本地 TUI 执行 `/webhub feishu setup`，用飞书扫描持续显示的二维码并确认注册。也可用打印出的 HTTPS 链接完成授权。等待成功，再执行 `/webhub feishu status`，应看到 `status=open`。二维码过期重开 setup；取消用 `/webhub feishu cancel`，**不是 Esc**。
-4. 在飞书打开该机器人私聊，发 `/help`，再 `/list`，根据列表发 `/use 1`。编号来自当前发送者最近一次列表，10 分钟内有效；也可用 `/use <sessionId 前缀>` 或精确会话名。绑定后发普通文本。
+4. 在飞书打开该机器人私聊，发 `/help`，再 `/list`，根据列表发 `/use 1`。编号来自当前发送者最近一次列表，10 分钟内有效；也可用 `/use @别名`（或裸别名）或精确会话名；sessionId 前缀仍可用但不在文案中展示。绑定后发普通文本。
 5. 原始请求会带一个由 hub 生成的 `[飞书 · … · #token]` 标头进入 pi；开始处理时原消息加 `Typing` 表情，结束后移除。回复带 `会话名 · sid前6位`，**只在 `agent_settled` 后发最终结果，不逐 token 刷新**。
 
 可选：需要 `/new` 时还须启用 `webHub.spawn.enabled`（Linux，沿用托管会话的平台探测、目录与进程上限）。先在终端或网页打开目标目录，使其进入 known 目录集合；默认 `spawnScope:"known"` 对未知目录直接拒绝。不要只为了消除拒绝而放宽目录范围。
@@ -32,17 +32,18 @@
 
 命令必须位于文本开头第一行；群内还须 **@ 机器人**。这些不是 pi 的任意 slash 命令转发接口。
 
-| 命令                         | 用法与结果                                                                                                                                                                                                            |
-| ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `/help`                      | 短帮助，每个命令一行；未绑定也可使用。                                                                                                                                                                                |
-| `/list`                      | 列出可用会话，含名称、sid 短码和状态；不会自动绑定。在线会话（≤8 个）带可点击按钮卡片：点按钮即绑定/切换当前私聊或群话题，卡片可复用；目标离线/失效时整卡关闭并提示重新 `/list`。卡片能力被拒或超额时退回纯文字列表。 |
-| `/use <n\|sid-prefix\|name>` | 显式绑定当前私聊或群话题。匹配不唯一会拒绝，请用更长 sid。                                                                                                                                                            |
-| `/cur`                       | 显示当前绑定；离线时给出指引。符合 restore 条件的已终止托管会话可出现 Relaunch 按钮，仍受存活身份检查约束。                                                                                                           |
-| `/new <dir> [first message]` | 创建托管会话并在实际收到其 session 坐标后绑定；路径有空格可双引号包裹。后续行也可作为首条请求。需 spawn 开启。                                                                                                        |
-| `/unbind`                    | 解除当前私聊/话题绑定；目前回执文本为 `unbound`。不停止或删除 pi 会话。                                                                                                                                               |
-| `/file <absolute path>`      | 显式发送绑定会话主机上的文件；仍经过权限、绑定、大小与 preview 拒绝链检查。                                                                                                                                           |
+| 命令                         | 用法与结果                                                                                                                                                                                                                                                                                                                                                                          |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/help`                      | 短帮助，每个命令一行；未绑定也可使用。                                                                                                                                                                                                                                                                                                                                              |
+| `/list`                      | 列出可用会话，含名称、`@别名`（hub 持有别名才显示，没有就不展示；卡片/按钮/文字列表均不再出现 sid 短码）和状态；不会自动绑定。在线会话（≤8 个）带可点击按钮卡片：点按钮即绑定/切换当前私聊或群话题，卡片可复用；目标离线/失效时整卡关闭并提示重新 `/list`。卡片能力被拒或超额时退回纯文字列表。                                                                                     |
+| `/use <n\|@alias\|name>`     | 显式绑定当前私聊或群话题（别名匹配按 xs 别名规范化：NFKC + 小写；别名优先于名称；sid 前缀为隐藏能力）。匹配不唯一会拒绝。                                                                                                                                                                                                                                                           |
+| `/cur`                       | 显示当前绑定；离线时给出指引。符合 restore 条件的已终止托管会话可出现 Relaunch 按钮，仍受存活身份检查约束。                                                                                                                                                                                                                                                                         |
+| `/new <dir> [first message]` | 创建托管会话并在实际收到其 session 坐标后绑定；路径有空格可双引号包裹。后续行也可作为首条请求。需 spawn 开启。                                                                                                                                                                                                                                                                      |
+| `/unbind`                    | 解除当前私聊/话题绑定；目前回执文本为 `unbound`。不停止或删除 pi 会话。                                                                                                                                                                                                                                                                                                             |
+| `/file <absolute path>`      | 显式发送绑定会话主机上的文件；仍经过权限、绑定、大小与 preview 拒绝链检查。                                                                                                                                                                                                                                                                                                         |
+| （卡片，非命令）定时任务审批 | **已移除（schedule-auto-approve r2，2026-11-04）**；不再发卡，旧卡点击静默无效，nonce 按 TTL 过期。原 #61：AI 创建/修改 `schedule` 任务后，owner 的 p2p 绑定收到带完整定义的审批卡片，只有「批准 / 拒绝」两个按钮；不是命令、不能由文本触发，也不经 `admission.dispatch` 的 op 白名单（走 `port.decide → sched_decide`）。详见 `docs/dev/scheduled-reports/README.md`「当场确认」。 |
 
-未知首行命令（如 `/oops`）只回复“未知命令”加帮助，**不会送给 agent**。需要字面斜杠开头的请求时用 `//text`（转为 `/text`）。`/home/me/file.txt 帮我看看` 是路径类请求，不是未知命令；普通句子或后续行中的 `/` 不触发命令解析。
+**只有已启用的 bot 命令按命令处理**；它们的参数错误仍显示帮助，执行/授权/绑定错误不会重发为文本。其余斜杠开头输入（如 `/oops`、pi 的 `/model` 或 `/reload`）默认保留原文进入普通请求，不显示“未知命令”，也不会执行 pi 命令。`/schedule` 仅在 schedule 启用时是 bot 命令，`/main` 仅在 threads 启用时是 bot 命令；关闭时两者也是普通文本。命令名区分大小写且精确匹配，`/mainx` 不匹配 `/main`。`//text` 保留既有转义语义（转为 `/text`）；`/home/me/file.txt 帮我看看` 仍是路径类请求，普通句子或后续行中的 `/` 不触发命令解析。普通请求仍需授权、绑定，并经过持久接收/去重和既有 thread/输入安全链；飞书不持有完整 pi 命令注册表，不据 bot 名单判断 pi 命令是否存在。
 
 ### 群话题
 
@@ -95,6 +96,7 @@
 
 ## 安全模型与恢复边界
 
+- **定时任务审批卡片（#61）— 已移除（schedule-auto-approve r2，2026-11-04）：hub 不再生产卡片，下面是历史说明；`/schedule` 列表无「待批准」，`/schedule run` 对新任务直接运行。** 原设计（owner-only fail-closed）：只发 p2p、在线、且 **证明是 owner** 的绑定——`lastRequest(binding).senderOpenId` 必须存在并逐字等于凭据 owner（不复用 `operator()` 的 `?? owner` 回退；无请求记录 / 超过 24 h 元数据保留期 ⇒ 视为未证明、不发卡，该私聊里再发任意一条消息即恢复）；群与话题从不发卡，owner 还须在 allow-list。回调走一次性 nonce（anchor `sched-card` + 按钮 `sched-ok`/`sched-no`，绑定安装代/租户/owner/聊天/消息）→ `admission.callback` → sender 必须等于当前 owner → offer 仍在且 hash 相同 → agent 侧再校验。批准绑定 `defHash`（卡片超 20 KB 只截断 prompt，hash 绑全文）；飞书批准记 `approval.via:"web"`。无法证明的一切（owner、offer 已关闭、任务已删除/已批准）都不推进安全动作：只 PATCH 中性文案或保留卡片。
 - 默认仅注册 owner 在 allow-list；陌生人请求不送 agent，owner 可收到限流的授权卡片。卡片只给 owner 决策，授权后也不补跑陌生人的旧请求。使用 **每应用 open_id**，不是无通讯录权限时为 null 的 user_id。
 - `allow` 代表授权使用本机 pi（可能执行 shell、读写本机文件），与受信 LAN 用户同等级，**不是只读聊天权限**。V12 非创建者能否看到个人应用尚未实测；以实际租户可见性为准。
 - 入站必须匹配 app/tenant；回调 nonce 一次性且绑定安装代、操作者、聊天、消息与 action。hub 命令账本使用私有品牌选择 `fsb:<gen>:<openId>` 命名空间，普通 origin 文本不能伪造。agent 自己的账本仍以 cmdId 为键：受信 LAN 用户刻意复用 bot cmdId 属于已接受的自攻击风险。
@@ -170,6 +172,16 @@ redispatch. Gates: `tests/web-hub/{hub/feishu,hub/hub-feishu.test.ts}` + caps/id
 Design/user/tenant gates: `docs/dev/feishu-bot/{plan,README,acceptance,probe-results,F10-report}.md`;
 V12 non-creator visibility and real client card/form behavior still need tenant acceptance.
 
+**Schedule approval cards (#61) — REMOVED in schedule-auto-approve r2 (2026-11-04); historical notes only**: `hub/feishu/schedule-confirm.ts` (pi-free, closure state, injected clock; persistence is the
+existing nonce table only — no new state key, D9) + taps in `service.ts`. Port: `FeishuSchedulePort.offers?/closedOffers?/decide?`
+(absent ⇒ no confirm controller). Card ownership is judged by `closed(offerId, by)` only — never by reqId. When the offer is
+neither open nor closed (agent `/reload` after a decide) the card consults the hub's ledger evidence port
+(`HubSchedulePort.ledgerTask(sid, taskId, {since: anchor.createdAt})`): `deleted` ⇒ neutral 「任务已删除」, same-hash `approved` ⇒
+「已批准」, anything else (`unknown/stale/degraded`, no port, throwing port) ⇒ keep the card (fail-closed, never recall by guess).
+Gates: `tests/web-hub/hub/feishu/schedule-confirm.test.ts`; `tests/integration/web-hub-feishu-bot.test.ts` block
+「#61 I2 — owner-only schedule approval cards」; full chain `tests/integration/schedule-confirm.test.ts`. Design:
+`docs/dev/scheduled-reports/README.md`「当场确认」.
+
 ## 开发者要点：Cross-session mirror
 
 **Cross-session mirror (feishu-xs-mirror plan r3 + §R1–R3, `docs/dev/feishu-xs-mirror/`; packages P1/P2/P3, reports `P*-report.md`)**:
@@ -195,3 +207,5 @@ stranded notices. Gates: `tests/web-hub/hub/feishu/{xs-mirror,xs-mirror-isolatio
 `tests/integration/web-hub-feishu-bot.test.ts` (「feishu-xs-mirror」 block, I1–I16, real hub child × fake Feishu × fake xs
 agents; every no-card case is compared with the same input under `xsMirror:false`). Real-device checklist:
 `docs/dev/feishu-xs-mirror/acceptance.md`.
+
+**未知斜杠回归（#40）**：`tests/web-hub/hub/feishu/router.test.ts` 固定 enabled-only 命令名单、坏参数 help、禁用 main/schedule 转文本和 mainx 前缀；`tests/integration/unknown-slash-text.test.ts` 通过真实 admission/持久接收/重复事件检查普通请求仅派发一次，无真实租户连接。Web 的能力与回退规则见 `docs/dev/unknown-slash-text/runtime-notes.md`（待合并至 Web Hub README）。

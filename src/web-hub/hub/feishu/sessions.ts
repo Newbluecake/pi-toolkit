@@ -1,6 +1,7 @@
 /** F6: transport-neutral session directory. Durable identity is sessionId, NEVER agentKey. */
 import { basename } from "node:path";
 import { FEISHU_CAPS } from "../../protocol/feishu.js";
+import { normalizeAlias } from "../../protocol/xs-alias.js";
 import type { FeishuBinding } from "./state.js";
 
 /** FA/F8 projects registry.list() into this small port (offline cards are not live views). */
@@ -22,11 +23,16 @@ export interface FeishuSessionSource {
   views(): readonly FeishuSessionView[];
   managed(): readonly FeishuManagedSession[];
   bindings(): readonly FeishuBinding[];
+  /** Hub-held cross-session alias of a session (canonical, no `@`); absent when xs/alias is off. */
+  alias?(sessionId: string): string | undefined;
 }
 export interface FeishuSessionRow {
   sessionId: string;
   name: string;
+  /** `名称 · sid6` — disambiguating label for notifications/schedules (NOT shown on the /list card). */
   label: string;
+  /** hub-held alias (canonical, without `@`); key absent when the session has none. */
+  alias?: string;
   cwd: string;
   mode: "tui" | "rpc" | "managed";
   state: FeishuSessionView["state"] | "offline" | "ambiguous";
@@ -67,9 +73,11 @@ export function createFeishuSessions(source: FeishuSessionSource, now: () => num
         const binding = bound.find((b) => b.sessionId === sessionId);
         const cwd = view?.cwd ?? record?.cwd ?? "";
         const name = view?.name || record?.name || binding?.label || basename(cwd) || sessionId.slice(0, 6);
+        const alias = source.alias?.(sessionId);
         return {
           sessionId,
           name,
+          ...(alias === undefined || alias === "" ? {} : { alias }),
           label: `${name} · ${sessionId.slice(0, 6)}`,
           cwd,
           mode: record !== undefined ? "managed" : (view?.mode ?? "rpc"),
@@ -123,8 +131,17 @@ export function createFeishuSessions(source: FeishuSessionSource, now: () => num
       } else {
         const all = rows();
         const exact = all.filter((r) => r.sessionId === selector);
+        // `@alias` or bare alias: same normalisation as the alias store (NFKC + ASCII lowercase).
+        const n = normalizeAlias(selector, { stripAt: true });
+        const byAlias = exact.length > 0 || !n.ok ? [] : all.filter((r) => r.alias === n.alias);
         candidates =
-          exact.length > 0 ? exact : all.filter((r) => r.sessionId.startsWith(selector) || r.name === selector);
+          exact.length > 0
+            ? exact
+            : byAlias.length > 0
+              ? byAlias
+              : selector.startsWith("@")
+                ? []
+                : all.filter((r) => r.sessionId.startsWith(selector) || r.name === selector);
       }
       if (candidates.length !== 1) return { ok: false, code: candidates.length > 1 ? "ambiguous" : "not-found" };
       const row = candidates[0]!;

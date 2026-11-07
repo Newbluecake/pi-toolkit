@@ -222,6 +222,7 @@ describe("types.test-d.ts (P2 control-plane, plan §3.1/§3.2)", () => {
       | "command"
       | "recall" // steer-recall plan §2.3 S2 (hold.v1)
       | "archive" // web-hub archive plan (docs/dev/web-hub/archive-report.md)
+      | "archive_omitted" // 2026-10-28: bulk-archive the omitted bash tail (additive op, no PROTO bump)
     >();
   });
 
@@ -518,6 +519,7 @@ describe("types.test-d.ts (bash-jobs-panel 包 A0 frozen status-slot surface)", 
       running: number;
       failed: number;
       omitted?: number;
+      rowsOverflowRunning?: number; // 2026-10-28 append-only (no PROTO bump)
       sampledAt: number;
     }>();
     expectTypeOf<BashJobRowWire["exitCode"]>().toEqualTypeOf<number | null>();

@@ -79,6 +79,7 @@ import {
   type MergedValue,
 } from "./merged.js";
 import { isValidHead, projectGraph, type WtHeadCandidate } from "./project.js";
+import { ServedCommitWindows, createCommitFilesRoute, repoKeyOf } from "./commit-files.js";
 
 // ---------------------------------------------------------------------------
 // route constants (§2.5)
@@ -252,6 +253,22 @@ export function createWorktreeGraphRoutes(deps: WorktreeGraphRoutesDeps): Worktr
     itemMaxBytes: WTGRAPH_MERGED_CACHE_ITEM_BYTES,
     store: true,
     now,
+  });
+
+  /** wtgraph.files.v1: the commits this instance served per repository — the ONLY oids the
+   * files endpoint will answer for (`./commit-files.ts` ⑦). */
+  const served = new ServedCommitWindows();
+  const filesRoute = createCommitFilesRoute({
+    denyCtx: deps.denyCtx,
+    registry,
+    run,
+    log,
+    now,
+    limit,
+    fs,
+    tracker,
+    membership,
+    served,
   });
 
   let closing = false;
@@ -595,6 +612,11 @@ export function createWorktreeGraphRoutes(deps: WorktreeGraphRoutesDeps): Worktr
         acc.joined = joined || undefined;
         const body = JSON.stringify(payload);
         acc.bytes = byteLen(body);
+        served.record(
+          repoKeyOf(ps.ids),
+          payload.commits.map((c) => c.h),
+          now(),
+        );
         io.sendJson(res, 200, payload, { "Cache-Control": "no-store", "Cross-Origin-Resource-Policy": "same-origin" });
       } catch (err) {
         if (signal.aborted || err instanceof WtgAbortError) {
@@ -667,6 +689,7 @@ export function createWorktreeGraphRoutes(deps: WorktreeGraphRoutesDeps): Worktr
   const routes: WorktreeGraphRoutes = {
     mode,
     handle: (req, res, query, io) => serve(req, res, query, io),
+    handleFiles: (req, res, query, io) => filesRoute.handle(req, res, query, io),
     dispose(reason: "close" | "startup-failure", deadline: ReqDeadline): Promise<void> {
       if (disposePromise !== undefined) return disposePromise;
       closing = true;
@@ -675,10 +698,13 @@ export function createWorktreeGraphRoutes(deps: WorktreeGraphRoutesDeps): Worktr
         glInflight.abortAll("hub-close");
         mergedCache.abortAll("hub-close");
         for (const e of [...active]) e.ctl.abort("hub-close");
+        const filesDone = filesRoute.dispose(waitMs);
         if (active.size > 0) {
           await Promise.race([Promise.allSettled([...active].map((e) => e.done)), unrefDelay(waitMs)]);
         }
+        await filesDone;
         mergedCache.clear();
+        served.clear();
       })();
       disposePromise.catch(() => undefined);
       return disposePromise;

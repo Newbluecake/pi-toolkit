@@ -1,3 +1,4 @@
+import { xsWebCommandArgs } from "@protocol/xs-web-command.js";
 /**
  * Token-mode `HubTransport` adapter (vue-plan.md v2.1 §3.4, §5.2 — P1). A thin wrapper around
  * `@logic/token-client.js`'s `createClient` (extracted from `app.js` in P0) — never
@@ -57,7 +58,7 @@ import type {
   WtDiffOutcome,
 } from "./types.js";
 import type { WtDiffFileList, WtDiffFilePayload } from "@protocol/worktree-diff.js";
-import type { WtGraphPayload } from "@protocol/worktree-graph.js";
+import type { WtGraphCommitFiles, WtGraphPayload } from "@protocol/worktree-graph.js";
 
 export type TokenTransportDeps = Parameters<typeof createClient>[0];
 
@@ -149,6 +150,18 @@ export function createTokenTransport(deps: TokenTransportDeps): HubTransport {
       if (isFinalAuthFailure(r)) deps.onConn("auth");
       return r;
     },
+    xsActivate: async (req) => {
+      const r = (await client.command({
+        agentKey: req.agentKey,
+        id: req.id,
+        op: "command",
+        name: "fabric",
+        args: xsWebCommandArgs(req),
+        ...(req.expect ? { expect: req.expect } : {}),
+      })) as CmdOutcome;
+      if (isFinalAuthFailure(r)) deps.onConn("auth");
+      return r;
+    },
     dialog: async (req) => {
       const r = (await client.dialog(req)) as CmdOutcome;
       if (isFinalAuthFailure(r)) deps.onConn("auth");
@@ -237,6 +250,12 @@ export function createTokenTransport(deps: TokenTransportDeps): HubTransport {
       // its own (the UI owns the retry, §4.3).
       graph: (req, opts) =>
         withAuthNotice(deps, () => client.worktreeGraph.graph(req, opts) as Promise<WtDiffOutcome<WtGraphPayload>>),
+      // wtgraph.files.v1: same final-E_AUTH rule (a GET, replayed once by `withRelogin`).
+      commitFiles: (req, opts) =>
+        withAuthNotice(
+          deps,
+          () => client.worktreeGraph.commitFiles(req, opts) as Promise<WtDiffOutcome<WtGraphCommitFiles>>,
+        ),
     } satisfies WorktreeGraphTransport,
     // sysload plan §7.1/§7.3/§10 (package P4): thin cast over the logic client's `loadTop` —
     // same final-E_AUTH rule as worktreeGraph/preview above (a GET, replayed once by the

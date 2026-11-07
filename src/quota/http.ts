@@ -7,7 +7,7 @@
  * `Promise<unknown>`，undefined 语义靠文档与本实现共同保证）。额度查询是
  * 后台刷新的旁路数据源，不值得重试三连：`QUOTA_MAX_ATTEMPTS = 2`（1 + 1）。
  *
- * 复用 `src/web-search/resilience.ts` 的 `isRetryableError`（401/403 不重试、
+ * 复用 `src/web-tools/resilience.ts` 的 `isRetryableError`（401/403 不重试、
  * 429/5xx/网络错重试）、`backoffDelay`、`sleep`（timer 已 unref）、
  * `redactSecrets`。注意 `resilience.withRequestTimeout` 的超时是**硬编码
  * 15s**（REQUEST_TIMEOUT_MS 常量、无参数），而 quota 需要可配置的 10s 默认
@@ -17,7 +17,7 @@
  */
 
 import { redactSecrets } from "../core/redact.js";
-import { backoffDelay, isRetryableError, sleep } from "../web-search/resilience.js";
+import { backoffDelay, isRetryableError, sleep } from "../web-tools/resilience.js";
 import type { FetchJson } from "./types.js";
 
 /**

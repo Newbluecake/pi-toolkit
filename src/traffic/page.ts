@@ -11,25 +11,27 @@
  * - Vue 升级步骤见 README「开发与本地安装」
  */
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 
+import { packageRoot } from "../core/package-root.js";
+
 /**
- * 资源目录解析（T4，§4.1「页面组装」行）：app.js 候选 = 模块同级 web/ → 包根 src/traffic/web/。
- * vendor（vue.global.prod.js）仍在 src/traffic/vendor/（由 vendor-vue.mjs + VENDOR.json 锁定）。
- * 禁止 process.cwd() 兜底（扩展工作目录不可控）。
+ * 资源目录解析（T4，§4.1「页面组装」行）：静态资源只来自包内 `src/traffic/{web,vendor}`。
+ *
+ * 早先按「模块同级 web/ → 模块目录向上两级」猜目录：`src/` 布局下两级恰好回到包根（正确），
+ * 但 bundle 后 `import.meta.url` 不再携带层级（startup-bundle plan r3 §3.4）。改为按包根
+ * 内容定位（`packageRoot()`）后三种布局（src / tsc dist / bundle）指向同一目录。
+ *
+ * 定位失败 ⇒ 返回空候选，由 `firstExisting` 抛出「已尝试目录」清单（保持既有降级语义：
+ * 不静默、不 process.cwd() 兜底——扩展工作目录不可控）。
  */
-function moduleDirs(): string[] {
-  const candidates: string[] = [];
+function assetDirs(): string[] {
   try {
-    candidates.push(dirname(fileURLToPath(import.meta.url)));
-  } catch {}
-  try {
-    // @types/node 声明了 __filename 全局；jiti 注入 CJS 风格 __filename，纯 ESM 下为 undefined
-    if (typeof __filename === "string" && __filename) candidates.push(dirname(__filename));
-  } catch {}
-  return candidates;
+    return [join(packageRoot(), "src", "traffic", "web"), join(packageRoot(), "src", "traffic")];
+  } catch {
+    return [];
+  }
 }
 
 /** 在候选目录里找第一个存在的目标文件；找不到抛错（列出全部候选）。 */
@@ -42,16 +44,11 @@ function firstExisting(dirs: string[], fileOf: (dir: string) => string, what: st
 }
 
 function resolveAppJs(): string {
-  const mod = moduleDirs();
-  // 包根候选（模块目录向上两级 = 包根）：覆盖 dist/ 布局的 npm 入口消费者
-  const dirs = [...mod.map((d) => join(d, "web")), ...mod.map((d) => join(d, "..", "..", "src", "traffic", "web"))];
-  return firstExisting(dirs, (dir) => join(dir, "app.js"), "页面资源 web/app.js");
+  return firstExisting(assetDirs(), (dir) => join(dir, "app.js"), "页面资源 web/app.js");
 }
 
 function resolveVueJs(): string {
-  const mod = moduleDirs();
-  const dirs = [...mod, ...mod.map((d) => join(d, "..", "..", "src", "traffic"))];
-  return firstExisting(dirs, (dir) => join(dir, "vendor", "vue.global.prod.js"), "vendor/vue.global.prod.js");
+  return firstExisting(assetDirs(), (dir) => join(dir, "vendor", "vue.global.prod.js"), "vendor/vue.global.prod.js");
 }
 
 /** 内联 sanitize：仅对将要插入 <script> 的文本 blob 转义 </script，防止提前闭合外层 script 标签 */

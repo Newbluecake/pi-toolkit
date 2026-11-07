@@ -1,4 +1,5 @@
-import { applyBudgetPolicy } from "../core/deadline.js";
+import type { FastParentPort } from "../fast/ports.js";
+import { applyBudgetPolicy, clampSpanMs } from "../core/deadline.js";
 import { mergeBudget } from "../config/settings.js";
 import { newRunId, isRunId } from "../core/ids.js";
 import { isLiveSessionFile } from "../core/live-session-files.js";
@@ -10,6 +11,8 @@ import { formatSlots, slotsInfo, type SlotsInfo } from "../core/format.js";
 import type { AgentTypeRegistry } from "../config/agent-types.js";
 import { formatModelCandidates, formatUnknownModelError, type ModelCandidate } from "../config/model-hint.js";
 import type { QuotaGateVerdict } from "../quota/gate.js";
+import type { MemorySeedCapture, MemoryParentPort } from "../memory/scopes/types.js";
+import { validateSeedCapture } from "../memory/scopes/limits.js";
 import { displayAgentType } from "../core/types.js";
 import { createInitialState, TASK_PROMPT_CAP } from "../core/state-machine.js";
 import type {
@@ -25,6 +28,7 @@ import type {
   WorktreeDisposal,
 } from "../core/types.js";
 import type { LifecycleSink, Runner, RunnerSpec, SlotPool } from "./ports.js";
+import { SCHEMA_PRESETS } from "../core/verdict-schema.js";
 import { TombstoneStore } from "./tombstone.js";
 import {
   resolveResumeTarget,
@@ -172,7 +176,47 @@ export interface SpawnService {
    */
   runningIds(): readonly RunId[];
 }
+/**
+ * #39 P2 (memory-scopes arch §6.3): validate a memory-seed capture at the admission
+ * boundary and hand back a DEEP-FROZEN pure copy. `validateSeedCapture` rebuilds
+ * fixed-schema pure data (that rebuild IS the deep copy — never retain the port's
+ * backing object); the freeze closes the door on mutation while the request sits in
+ * a FIFO. Any invalid shape — including the legally reachable exhaustion state
+ * (internal nextN sentinel 1_000_000, which the frozen P0 product validator rejects
+ * by design) — fails CLOSED as a capture error: never dropped, never degraded to
+ * empty, never retried, never privately re-widened.
+ */
+function frozenMemorySeedCapture(value: unknown): MemorySeedCapture {
+  const checked = validateSeedCapture(value);
+  if (!checked.ok) throw new Error(`invalid memory seed capture (${checked.reason})`);
+  const capture = checked.capture;
+  if (capture.state === "empty") return Object.freeze({ v: 1, state: "empty" } as const);
+  const items = capture.seed.items.map((item) =>
+    Object.freeze({
+      ...item,
+      ...(item.grant !== undefined ? { grant: Object.freeze({ ...item.grant }) } : {}),
+    }),
+  );
+  return Object.freeze({
+    v: 1,
+    state: "captured",
+    seed: Object.freeze({
+      ...capture.seed,
+      items: Object.freeze(items) as typeof capture.seed.items,
+    }),
+  });
+}
+
 export interface SpawnServiceDeps {
+  /** Capture once at synchronous admission; absent/undefined preserves the legacy path. */
+  fastParent?: FastParentPort;
+  /**
+   * #39 P2 (memory-scopes arch §6.3): memory-seed capture port — snapshot ONCE at the
+   * synchronous admission point (the fastSeed capture site), before labels/slots/inbox
+   * and any async work. Absent ⇒ no request ever carries `memorySeed` (byte-identical
+   * legacy path); production wiring is P4's assembly, not this service.
+   */
+  memoryParent?: MemoryParentPort;
   types: AgentTypeRegistry;
   pool: SlotPool;
   runner: Runner;
@@ -964,6 +1008,14 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
           // description keeps showing the original one (same terminal-snapshot
           // source rule as dispatchMeta).
           ...(req.title === undefined && resume.title !== undefined ? { title: resume.title } : {}),
+          // #68: Agent-tool resume without `schema` keeps the original run's schema (preset id wins; else inline).
+          ...(req.inheritSchema === true && req.schema === undefined
+            ? resume.schemaPreset !== undefined
+              ? { schema: SCHEMA_PRESETS[resume.schemaPreset], schemaPreset: resume.schemaPreset }
+              : resume.schema !== undefined
+                ? { schema: resume.schema }
+                : {}
+            : {}),
         };
         lockKeys = [targetId, resume.sessionFile];
       }
@@ -974,12 +1026,72 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
         req.timeoutPolicy ??
         resumeTimeoutPolicy ??
         (req.budgetOverride?.totalMs !== undefined ? "fixed" : "extendable");
-      const budget = applyBudgetPolicy(mergeBudget(deps.budget, config.budgetOverride, req.budgetOverride), {
+      const mergedBudget = mergeBudget(deps.budget, config.budgetOverride, req.budgetOverride);
+      // Only the host setting supplies the Agent floor: type/request overrides cannot lower it.
+      // The marker is a host convention, not a security capability; other producers stay unchanged.
+      const floor = req.agentToolDispatch === true ? clampSpanMs(mergeBudget(deps.budget).minTotalMs) : undefined;
+      const admittedBudget =
+        floor === undefined ? mergedBudget : { ...mergedBudget, totalMs: Math.max(mergedBudget.totalMs, floor) };
+      const budget = applyBudgetPolicy(admittedBudget, {
         // "fixed" ⇒ maxTotalFactor 钳 1（H = deadlineAt，无宽限无延长）；"extendable"
         // 保留合并后的 factor（默认 2），Agent 工具的显式 timeout_s 与默认预算同权
         fixedDeadline: resolvedPolicy === "fixed",
         extensionsEnabled: deps.extensionsEnabled ?? true,
       });
+      // Capture only after every admission gate, before inbox/labels/slots/async work. Workflow
+      // seeds were already accepted before its own FIFO and must never be read again.
+      if (!admittedExternal) {
+        try {
+          const seed = resolvedReq.fastSeed ?? deps.fastParent?.snapshot(req.parentRunId);
+          if (seed !== undefined) resolvedReq = { ...resolvedReq, fastSeed: { v: 1, mode: seed.mode } };
+        } catch (error) {
+          for (const key of lockKeys) if (resumeOwners.get(key) === runId) resumeOwners.delete(key);
+          return {
+            error: {
+              kind: "config",
+              message: `Fast parent snapshot failed: ${error instanceof Error ? error.message : String(error)}`,
+              retryable: false,
+              reason: "config",
+            },
+          };
+        }
+      } else if (resolvedReq.fastSeed !== undefined) {
+        const { fastSeed: _fastSeed, ...rest } = resolvedReq;
+        resolvedReq = rest;
+      }
+      // #39 P2 (memory-scopes arch §6.3): the memory seed — fully independent of
+      // fastSeed — is captured ONCE here at the synchronous admission point (after
+      // every gate, before inbox/labels/slots and any async work). A host path that
+      // already captured (workflow `agent()` admission) keeps its value, INCLUDING the
+      // explicit `empty` marker, which exists precisely so neither this admission nor
+      // any later dequeue re-reads the parent. External agents and resumes never carry
+      // a seed (stripped below): an external runtime has no session-memory branch, and a
+      // resumed terminal child restores its OWN session instead of re-inheriting the
+      // current parent. Capture/validate failure (throw OR an invalid capture — e.g.
+      // the exhaustion sentinel) fails closed BEFORE any binding: locks taken above are
+      // released and the spawn is refused with a config error.
+      if (!admittedExternal && resolvedReq.resumeFrom === undefined) {
+        try {
+          const capture =
+            resolvedReq.memorySeed !== undefined
+              ? resolvedReq.memorySeed
+              : deps.memoryParent?.snapshot(req.parentRunId);
+          if (capture !== undefined) resolvedReq = { ...resolvedReq, memorySeed: frozenMemorySeedCapture(capture) };
+        } catch (error) {
+          for (const key of lockKeys) if (resumeOwners.get(key) === runId) resumeOwners.delete(key);
+          return {
+            error: {
+              kind: "config",
+              message: `memory seed capture failed: ${error instanceof Error ? error.message : String(error)}`,
+              retryable: false,
+              reason: "config",
+            },
+          };
+        }
+      } else if (resolvedReq.memorySeed !== undefined) {
+        const { memorySeed: _untrustedMemorySeed, ...rest } = resolvedReq;
+        resolvedReq = rest;
+      }
       // W3: never trust a caller's trackInput. Only a successfully bound reservation may enable W2.
       if (resolvedReq.trackInput !== undefined) {
         const { trackInput: _untrusted, ...rest } = resolvedReq;

@@ -139,7 +139,7 @@ function writeSettings(home: string, extra: Record<string, unknown> = {}) {
     settingsPath,
     JSON.stringify(
       {
-        budget: { totalGraceS: 1, maxExtensions: 2, maxTotalFactor: 3, abortGraceS: 0.05, reapS: 0.05 },
+        budget: { minTotalS: 0, totalGraceS: 1, maxExtensions: 2, maxTotalFactor: 3, abortGraceS: 0.05, reapS: 0.05 },
         fleetWidget: false,
         quota: { enabled: false },
         ...extra,

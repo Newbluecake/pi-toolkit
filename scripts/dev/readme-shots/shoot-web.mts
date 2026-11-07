@@ -75,7 +75,7 @@ await m.page.screenshot({ path: `${OUT}/raw-web-mobile-list.png` });
 await open(m.page);
 await toTop(m.page);
 await m.page.screenshot({ path: `${OUT}/raw-web-mobile-chat.png` });
-await m.page.click(".fleet-summary-bar");
+await m.page.click('button[data-panel="agent"][aria-controls="fleet-drawer"]');
 await m.page.waitForTimeout(1200);
 await m.page.screenshot({ path: `${OUT}/raw-web-mobile-agents.png` });
 await m.close();

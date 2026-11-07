@@ -17,7 +17,7 @@ function record(patch: Partial<FabricRecord> = {}): FabricRecord {
     key: makeMessageKey("r_ABCDEFGH", "root", 1, 1),
     from: "r_ABCDEFGH",
     to: "root",
-    kind: "finding",
+    kind: "report",
     seq: 1,
     generation: 1,
     payload: { text: "hello fabric" },

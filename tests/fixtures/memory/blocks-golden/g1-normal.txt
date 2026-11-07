@@ -1,0 +1,28 @@
+## Memory (proj) — 18 topic(s) · 22 block(s)
+
+### User rules (always on)
+- [general.002] 验收选 deepseek 系时优先 deepseek/deepseek-flash，不默认 v4-pro（2026-11-05 用户令）。
+- [general.001] 该用户拍板的事（方案、范围取舍）主动用 ask_user 提出，不等用户提醒（2026-11-02 用户令）。
+- [general.003] 主会话只负责调度，不亲自执行具体任务（2026-11-03 用户令）。
+
+Topics (relevant blocks are injected automatically; read one with memory view <topic>):
+- general · 5 blocks · 2 decisions
+- cache-ttl — tags: cache-ttl, git-commit · 1 blocks
+- concurrency — tags: concurrency, git-commit · 1 blocks
+- fabric-xs — tags: fabric-xs, git-commit · 1 blocks
+- git-parallel — tags: git-commit, git-parallel · 1 blocks
+- landed-notes — tags: git-commit, landed-notes · 1 blocks
+- live-acceptance — tags: git-commit, live-accepta · 1 blocks
+- memory-predict — tags: git-commit, memory-predi · 1 blocks
+- multi-agent — tags: git-commit, multi-agent · 1 blocks
+- pitfalls-git — tags: git-commit, pitfalls-git · 1 blocks
+- pitfalls-runtime — tags: git-commit, pitfalls-run · 1 blocks
+- pitfalls-subagent — tags: git-commit, pitfalls-sub · 1 blocks
+- quota — tags: git-commit, quota · 1 blocks
+- schedule — tags: git-commit, schedule · 1 blocks
+- topic-switch — tags: git-commit, topic-switch · 1 blocks
+- ui-preview — tags: git-commit, ui-preview · 1 blocks
+- webhub-restore — tags: git-commit, webhub-resto · 1 blocks
+- webhub-ui — tags: git-commit, webhub-ui · 1 blocks
+
+<!-- pi-toolkit:memory proj -->

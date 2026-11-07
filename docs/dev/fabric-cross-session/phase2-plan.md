@@ -470,16 +470,16 @@ hop 判定：Controller 派发前 `hopAllowed(L_s)`（接收端的 `maxLevel`）
 
 `src/fabric/xs/host-cap.ts`：进程级 `Symbol.for("pi-subagent:xs-host-cap")`，粘滞到进程退出（同一进程内 pi 版本不会变；`/reload` 不清）。
 
-| 状态       | 进入条件（可观察来源）                                                                                                                          | 跨会话 `wake:true`                 |
-| ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------- |
-| `unknown`  | 进程启动后尚未观察到任何 `before_agent_start`                                                                                                   | 只投递（`host_unverified`）        |
-| `observed` | 观察到任一 `before_agent_start` 带 `messageType` 字符串（`"user"` 或 `"custom"`）——pi 1.2+ 的联合形状（Fpi11）；人类或 web 的第一次 prompt 即可 | Controller                         |
-| `verified` | Controller 自己的 token 在 `before_agent_start.message.details.wakeToken` 中被读到                                                              | Controller                         |
-| `absent`   | 观察到 `before_agent_start` 无 `messageType` 但有 `prompt`（pi 1.0/1.1）；或 `deferred` 中遇到读不到 `message.details` 的 custom 触发           | 只投递（`host_unsupported`），粘滞 |
+| 状态       | 进入条件（可观察来源）                                                                                                                          | 跨会话 `wake:true`                                                                    |
+| ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `unknown`  | 进程启动后尚未观察到任何 `before_agent_start`                                                                                                   | 乐观派发（2026-11 改判，wake-unknown-optimistic：首轮 BAS 授权或 context 中止，见下） |
+| `observed` | 观察到任一 `before_agent_start` 带 `messageType` 字符串（`"user"` 或 `"custom"`）——pi 1.2+ 的联合形状（Fpi11）；人类或 web 的第一次 prompt 即可 | Controller                                                                            |
+| `verified` | Controller 自己的 token 在 `before_agent_start.message.details.wakeToken` 中被读到                                                              | Controller                                                                            |
+| `absent`   | 观察到 `before_agent_start` 无 `messageType` 但有 `prompt`（pi 1.0/1.1）；或 `deferred` 中遇到读不到 `message.details` 的 custom 触发           | 只投递（`host_unsupported`），粘滞                                                    |
 
-- **首次调用协议**：能力态只由「已经发生的事件」推进，从不为了探测而起 run。`unknown` 时的安全降级是只投递（消息照样送达，只是不起 turn），可执行、无副作用。
+- **首次调用协议**：能力态只由「已经发生的事件」推进，从不为了探测而起 run。`unknown` 时的安全降级是只投递（消息照样送达，只是不起 turn），可执行、无副作用。（2026-11 改判：`unknown` 不再只投递，而是**受监管的乐观派发**——在已验证形状的宿主上（1.0.4/1.1.0 由 legacy conformance、1.4.0 由 C-X12 覆盖）首轮零 provider 请求（BAS 授权或 context 中止）；其它形状未验证的宿主退化为有界受监管（Controller 截止 + 空闲观察 + abort 宽限），最多多一次受监管请求，不会挂起。详见 `wake-unknown-optimistic-plan.md`。）
 - 为什么 `observed` 足够安全：在 `observed` 下 Controller 的同步所有权（Fpi2）不依赖 custom 形状；custom 形状只影响 `deferred` 的迟到识别，而形状异常会被识别为 `absent` 并按「推定归属」失败关闭；C-X1 在 peer 升级前锁定形状。
-- 已知局限：hub restore 出来、从未收到过任何 prompt 的 managed rpc 会话会停在 `unknown`，只能只投递，直到第一次 web/人类 prompt（§14 N1）。
+- ~~已知局限：hub restore 出来、从未收到过任何 prompt 的 managed rpc 会话会停在 `unknown`，只能只投递，直到第一次 web/人类 prompt（§14 N1）。~~ 已由 wake-unknown-optimistic 改判（2026-11）：`unknown` 时乐观派发、首轮在 provider 请求前校验，见 `wake-unknown-optimistic-plan.md` 与 §14 N1 改判小节。
 - `src/adapters/pi-compat.ts`：`readBeforeAgentStartTrigger` 扩展为返回 `{kind:"custom"; customType?: string; details?: unknown}`（结构化读取，I14，旧调用方只看 `kind`，行为不变）；新增 `readTriggerShape(event): "union" | "legacy" | "unknown"`。
 
 ### 6.8 零挂起
@@ -798,6 +798,10 @@ r2 对已拍板项的落实说明：P3 的 `StatusInfo.xs` 保留但降为纯展
 
 - N1：主机能力 `unknown` 时跨会话 `wake:true` **只投递**（`wakeDowngraded:"host_unverified"`），首次人类/web 输入观察到形状后才允许唤醒。
 - N2：接收方流式中**照常投递**，返回 `effect:"unknown", reason:"queued"`，工具说明勿重发。
+
+### N1 改判（2026-11，wake-unknown-optimistic）
+
+- `unknown` ⇒ **受监管的乐观派发 + 首轮在 provider 请求之前校验**（BAS 授权 → `verified`/`bound`/+1；legacy 宿主首轮 `context` 发现「已知记录 BAS 从未见过」⇒ `absent` + 中止一次，零 provider 请求）。当年否决的「以 pi ≥1.2 版本号放行」**继续否决**（I14 不变：不按版本放行、不发探测 run）。审核门禁：真实 pi 1.0.4/1.1.0 legacy conformance（本地、自门控、不进 CI）+ 1.4.0 上 C-X12，升级 peer 前必跑。`host_unverified` 枚举值保留（I10，仅老 agent 产生）。详见 `wake-unknown-optimistic-plan.md` 与 `-report.md`。
 
 ---
 

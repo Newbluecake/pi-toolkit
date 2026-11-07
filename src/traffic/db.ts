@@ -6,7 +6,10 @@
  * - `node:sqlite` 惰性加载：模块顶层不 require，首次显式 DB 访问（`/record on` / `/record status`）
  *   才经 `loadSqlite()` 加载（ExperimentalWarning 只在那一刻出现一次）；不可用时抛
  *   `SqliteUnavailableError`，只让本命令失败。
- * - 路径固定 `homedir()/.pi/agent/records/traffic.db`（调用时计算，不随 PI_CODING_AGENT_DIR）。
+ * - 路径（#54 §3.5 修订拍板 1b）：跟随 `PI_CODING_AGENT_DIR`（`defaultRecordPaths` 的根目录选择：
+ *   P 有库 ⇒ P；否则 H 有库 ⇒ 继承 H；外部 recorder 仍装着 ⇒ 固定 H；都没有 ⇒ P），
+ *   未设变量 / 默认等价时逐字节等于旧固定公式 `homedir()/.pi/agent/records/traffic.db`（且零 fs 探测）。
+ *   不复制、不移动；legacy `dumps/` 检测始终在选中的根上成对判定。
  * - 旧 `dumps/` 目录不再自动搬迁：打开前检测，未迁移 / 半迁移状态拒绝打开并给人工步骤。
  * - 无模块级可变状态：连接句柄归 engine（见 engine.ts 的 ensureDb）。
  */
@@ -17,6 +20,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { resolveAgentDir } from "../core/agent-dir.js";
 import { broadcast } from "./sse.js";
 import type { TrafficEngine } from "./engine.js";
 
@@ -49,20 +53,56 @@ export function loadSqlite(): SqliteModule {
   }
 }
 
-/** 固定路径（§3.3）：与源实现同算法，调用时计算，不随 PI_CODING_AGENT_DIR。 */
-export function defaultRecordPaths(home: string = homedir()): {
-  recordDir: string;
-  dbPath: string;
-  legacyDir: string;
-  legacyDbPath: string;
-} {
-  const agent = join(home, ".pi", "agent");
-  return {
-    recordDir: join(agent, "records"),
-    dbPath: join(agent, "records", "traffic.db"),
-    legacyDir: join(agent, "dumps"),
-    legacyDbPath: join(agent, "dumps", "traffic.db"),
-  };
+/** 根目录来源（#54 §3.5）；`default` 之外会在 `/record status` 的数据库行追加说明。 */
+export type RecordPathSource = "default" | "agentDir" | "inherited" | "external-recorder";
+
+export interface RecordPaths {
+  /** 选中的根目录（`records/` 与 `dumps/` 的父目录）。 */
+  readonly root: string;
+  readonly source: RecordPathSource;
+  readonly recordDir: string;
+  readonly dbPath: string;
+  readonly legacyDir: string;
+  readonly legacyDbPath: string;
+}
+
+export interface RecordPathOptions {
+  readonly home?: string;
+  readonly env?: NodeJS.ProcessEnv;
+  /** 外部 pi-traffic-record 仍装着（index.ts 的 scanExternalTrafficReferences）⇒ 钉在 H，与其写同一个库。 */
+  readonly externalRecorder?: boolean;
+  /** 存在性探测（测试注入）。`source === "default"` 时不做任何探测（零 fs 访问）。 */
+  readonly exists?: (path: string) => boolean;
+}
+
+/**
+ * 默认库路径（#54 §3.5，修订 traffic-merge 拍板 1b 的固定路径）。跟随 `PI_CODING_AGENT_DIR`，
+ * 带 H 继承回退；**不复制、不移动**（SQLite 有 -wal/-shm，外部 recorder 可能正在写）。
+ *
+ * - 未设变量 / 空串 / 默认等价 ⇒ `home/.pi/agent`，与改动前字面公式逐字节一致（短路，不做 fs 探测）；
+ * - 外部 recorder 仍装着 ⇒ 固定 H（跨进程同库，进程内认领协议照旧）；
+ * - P 有 `records/traffic.db` 或 `dumps/` ⇒ P（dumps/ 也算：legacy 检测必须在同一个根上判）；
+ * - 否则 H 有 ⇒ H（inherited：已设变量的老用户继续用原来的库）；
+ * - 都没有 ⇒ P（新建在 P）。
+ */
+export function defaultRecordPaths(opts: RecordPathOptions = {}): RecordPaths {
+  const home = opts.home ?? homedir();
+  const agent = resolveAgentDir(opts.env ?? process.env, home);
+  const build = (root: string, source: RecordPathSource): RecordPaths => ({
+    root,
+    source,
+    recordDir: join(root, "records"),
+    dbPath: join(root, "records", "traffic.db"),
+    legacyDir: join(root, "dumps"),
+    legacyDbPath: join(root, "dumps", "traffic.db"),
+  });
+  if (agent.source === "default") return build(agent.home, "default");
+  if (opts.externalRecorder === true) return build(agent.home, "external-recorder");
+  const exists = opts.exists ?? existsSync;
+  const has = (root: string): boolean => exists(join(root, "records", "traffic.db")) || exists(join(root, "dumps"));
+  if (has(agent.dir)) return build(agent.dir, "agentDir");
+  if (has(agent.home)) return build(agent.home, "inherited");
+  return build(agent.dir, "agentDir");
 }
 
 export type LegacyLayoutState = "unmigrated" | "half-migrated";

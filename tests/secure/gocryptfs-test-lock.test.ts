@@ -6,11 +6,11 @@
  * Uses a private lock file in a mktemp dir, never the shared GOCRYPTFS_TEST_LOCK.
  */
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import { acquireGocryptfsTestLock } from "./gocryptfs-test-lock.js";
+import { acquireGocryptfsTestLock, describeLockHolder, holderFile, procStartTime } from "./gocryptfs-test-lock.js";
 
 const MODULE = join(import.meta.dirname, "gocryptfs-test-lock.ts");
 const dir = mkdtempSync(join(tmpdir(), "pi-secure-lock31-"));
@@ -213,5 +213,63 @@ describe.skipIf(!haveFlock)("gocryptfs test lock (todo #31)", () => {
   it("no detached long-lived holder remains in the module (pin)", () => {
     const src = readFileSync(MODULE, "utf8");
     expect(src).not.toMatch(/sleep 3600|detached:\s*true/);
+  });
+});
+
+describe.skipIf(!haveFlock)("gocryptfs test lock holder diagnostics (test-speed D13)", () => {
+  const priv = () => join(dir, `diag-${Math.random().toString(36).slice(2)}.lock`);
+
+  it("sidecar points at the shell holder (not the worker); timeout message names it, prefix unchanged", async () => {
+    const lf = priv();
+    const rel = await acquireGocryptfsTestLock(5_000, lf);
+    try {
+      const meta = JSON.parse(readFileSync(holderFile(lf), "utf8")) as {
+        pid: number;
+        starttime: string;
+        vitestPid: number;
+      };
+      expect(meta.vitestPid).toBe(process.pid);
+      expect(meta.pid).not.toBe(process.pid);
+      expect(ppidOf(meta.pid)).toBe(process.pid); // the spawned sh holder
+      expect(procStartTime(meta.pid)).toBe(meta.starttime);
+      const err = await acquireGocryptfsTestLock(300, lf).then(
+        () => new Error("unexpectedly acquired"),
+        (e: Error) => e,
+      );
+      expect(err.message).toMatch(/^gocryptfs test lock not acquired \(holder exit \d+\)/);
+      expect(err.message).toContain(`holder pid ${meta.pid}`);
+    } finally {
+      rel();
+    }
+  });
+
+  it("released/killed holder with the sidecar still there ⇒ holder unknown", async () => {
+    const lf = priv();
+    const rel = await acquireGocryptfsTestLock(5_000, lf);
+    expect(describeLockHolder(lf)).toMatch(/^holder pid /);
+    rel();
+    const end = Date.now() + 2_000;
+    while (spawnSync("flock", ["-n", lf, "true"]).status !== 0 && Date.now() < end) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    expect(spawnSync("flock", ["-n", lf, "true"]).status).toBe(0); // holder gone
+    expect(existsSync(holderFile(lf))).toBe(true);
+    expect(describeLockHolder(lf)).toBe("holder unknown");
+  });
+
+  it("starttime mismatch (pid reuse), missing or corrupt sidecar ⇒ holder unknown", () => {
+    const lf = priv();
+    expect(describeLockHolder(lf)).toBe("holder unknown"); // missing
+    writeFileSync(holderFile(lf), JSON.stringify({ pid: process.pid, starttime: "1", vitestPid: 1, file: null }));
+    expect(describeLockHolder(lf)).toBe("holder unknown"); // alive pid, wrong starttime
+    writeFileSync(
+      holderFile(lf),
+      JSON.stringify({ pid: process.pid, starttime: procStartTime(process.pid), vitestPid: 1, file: null }),
+    );
+    expect(describeLockHolder(lf)).toMatch(/^holder pid /); // control: a matching one is reported
+    writeFileSync(holderFile(lf), "{not json");
+    expect(describeLockHolder(lf)).toBe("holder unknown");
+    writeFileSync(holderFile(lf), JSON.stringify({ pid: "x" }));
+    expect(describeLockHolder(lf)).toBe("holder unknown");
   });
 });

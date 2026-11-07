@@ -97,7 +97,7 @@ export function buildUsageTickText(
         : `达到 ${hintCeiling}% 时会再提醒你考虑 ${tool}；现在无需操作。`
       : "现在无需操作。";
   const markerSuffix = marker !== undefined && marker.length > 0 ? ` ${marker}` : "";
-  return `[pi-subagent 上下文通报] 上下文已使用约 ${Math.round(percent)}%。${hintLine}${markerSuffix}`;
+  return `[上下文通报] 上下文已使用约 ${Math.round(percent)}%。${hintLine}${markerSuffix}`;
 }
 
 export function maxThresholdPercent(contextWindow: number, reserveTokens: number): number {
@@ -166,7 +166,7 @@ export function effectiveThresholdPercentWithTokens(
 
 export function buildCompactForceText(percent: number, forceAt: number): string {
   return (
-    `[pi-subagent 上下文警告] 上下文已使用约 ${Math.round(percent)}%，达到强制阈值 ${forceAt}%，` +
+    `[上下文警告] 上下文已使用约 ${Math.round(percent)}%，达到强制阈值 ${forceAt}%，` +
     "正在强制压缩（通用摘要）；压缩不是终止，完成后会自动继续当前任务。"
   );
 }
@@ -179,7 +179,7 @@ export function buildCompactHintText(percent: number, effective: number, forceAt
   const forceLine =
     forceAt > 0 ? `若用量继续涨至 ${forceAt}%，系统将强制压缩并使用通用摘要，你可能丢失想保留的细节；\n` : "";
   return (
-    `[pi-subagent 上下文警告] 上下文已使用约 ${Math.round(percent)}%（阈值 ${effective}%）。\n\n` +
+    `[上下文警告] 上下文已使用约 ${Math.round(percent)}%（阈值 ${effective}%）。\n\n` +
     "建议在当前子任务告一段落后调用 compact_context 主动压缩：\n" +
     "- 通过 instructions 参数写明必须保留的内容（当前目标、关键文件路径、未决决策、TODO），\n" +
     "  这是只有自主压缩才有的控制权；\n" +
@@ -200,7 +200,7 @@ export function buildSwitchHintText(percent: number, effective: number, forceAt 
       ? `- 若用量继续涨至 ${forceAt}%，系统会先硬性要求你切换；仍不照办就回落到通用摘要压缩，\n  届时保留什么由摘要模型决定，你会失去控制权；\n`
       : "";
   return (
-    `[pi-subagent 上下文警告] 上下文已使用约 ${Math.round(percent)}%（阈值 ${effective}%）。\n\n` +
+    `[上下文警告] 上下文已使用约 ${Math.round(percent)}%（阈值 ${effective}%）。\n\n` +
     "建议在当前子任务告一段落后调用 switch_context 主动切换上下文：\n" +
     "- 你在参数里写下的 goal / progress / next_steps / decisions / key_files 就是切换后的全部上下文，\n" +
     "  没有摘要模型替你补救——写全才不丢；\n" +
@@ -216,7 +216,7 @@ export function buildSwitchHintText(percent: number, effective: number, forceAt 
  */
 export function buildSwitchDemandText(percent: number, forceAt: number): string {
   return (
-    `[pi-subagent 上下文警告] 上下文已使用约 ${Math.round(percent)}%，已达强制线 ${forceAt}%。\n\n` +
+    `[上下文警告] 上下文已使用约 ${Math.round(percent)}%，已达强制线 ${forceAt}%。\n\n` +
     "请在本回合内调用 switch_context 完成上下文切换（先把手头这一步收尾，不要开新工作）：\n" +
     "- 把目标、进展、下一步、已定决策、关键文件写进参数，这些就是切换后你能看到的全部内容；\n" +
     "- 如果本回合结束时仍未切换，系统将改为强制通用摘要压缩，保留什么将不再由你决定。"

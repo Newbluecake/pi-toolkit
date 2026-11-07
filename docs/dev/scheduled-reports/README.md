@@ -13,6 +13,18 @@
 - `reportIdOf(sessionId, runKey)`、receipts 键、outbox `sch:<reportId>`、24 h 推送窗口和 pendingReports ≤64 均不变；hub 仍只读账本。hub 将已验证的 reportFile 传给飞书投递器，超长报告附件的新短名 basename 传入 renderer，由同一 fileName 同时生成卡片 fileNote 和上传信息；旧 64-hex 报告回退原有 `reply-<sid6>.md`；重复扫描、hub 重启不重复推送。没有新增 wire 字段/cap/PROTO 或 off 表面。更新运行中的 agent/hub 需 `/reload`、`/webhub restart`，旧 hub 未认识新文件名，不能只更新 agent。
 - 验证记录与完整改动清单：[report-paths-report.md](report-paths-report.md)。
 
+## 当场确认 AI 创建/修改的任务（#61）— 已移除（schedule-auto-approve r2，2026-11-04）
+
+> 方案：`docs/dev/schedule-auto-approve/plan.md`（r2）；验收：`docs/dev/schedule-auto-approve/acceptance.md`。历史设计仍在 `confirm-plan.md` 与 `confirm-*-report.md`（仅供考古）。
+
+任务不再有「待批准」状态：`schedule` 工具 / `/schedule add|edit` 写入即生效（executable ⇔ `enabled`），没有 TUI 确认框、web 审阅弹窗、飞书审批卡片；`/schedule approve|reject|__put` 已删（未知子命令，web 对它们 policy deny）。
+
+- **wire 保留（只为容忍解析，均带 deprecated 注释）**：`sched.confirm.v1` cap 常量、`sched_offers` / `sched_decide(_ack)` schema、`ScheduleApproval`。新 hub / 新 agent 都不再声明该 cap；agent 收到杂散 `sched_decide` 仍回恰好一个存根 ack；hub 丢弃旧 agent 的 `sched_offers`；UI 忽略线上的 `pendingApproval` / `executable` / `offer` / `task.approval`。
+- **混跑矩阵（摘要）**：旧 hub × 新 agent ⇒ 无 offer 帧，旧 UI 可能仍显示「待确认」；新 hub × 旧 agent ⇒ 旧 agent 的 pending 任务在新 hub 显示为启用。`/reload` + `/webhub restart` 后消除（plan §4）。
+- **D7 回滚**：回退到旧版本后，升级期间新建/修改的任务（无有效 approval）变为 pending，需 `/schedule approve`（fail-closed）。
+- **D8 存量**：存量 pending 任务（用户令不迁移）升级即生效；首轮 sweep 把待批准期间的 occurrence 记为 missed，并在 digest 中出现一次。账本里的旧 `approval` 字段是化石：不进 `defHash`、不读、不写、不剥离。
+- **门禁**：`tests/web-hub/protocol/schedule-confirm.test.ts`（schema 容忍）、`tests/schedule/agent/webhub-wiring.test.ts`（hello 不含 confirm cap）、`tests/integration/schedule-hub.test.ts`（旧 approval 账本被容忍）；plan §8.5 残留 grep 在 `src`/`tests` 须为零。
+
 ## src/schedule/
 
 `src/schedule/` — session-aware scheduled tasks (cron/once; `schedule.enabled`, default **false**; design + rulings:
@@ -34,10 +46,9 @@ its own receipt ledger (`sched_receipts` clears the agent's `pendingReports`; hu
 double-push, 24 h report window). Two claim kinds (timer/sweep claim an occurrence inside the writer lock; manual `run` claims
 without moving the watermark), sweep tolerance 60 s, missed occurrences are judged by the sweep and surfaced via `missedLog` +
 digest exactly once.
-**Approval = definition hash**: AI `create` never carries approval; `update` of an execution field voids the old approval; `resume`
-never approves; a user `edit` re-approves only an already-approved task; `approve` shows the full definition, samples the hash BEFORE
-the confirm and CASes under the lock (`E_REV` on drift); web only accepts `approve <id> <64hex>` (hash comes from the review dialog)
-and the form's `__put <json> <hash>`; web `add/edit/repair/--all` writes are deny in the frozen `webCommandPolicy.schedule` table.
+**No approval (r2)**: executable ⇔ `enabled`; AI/user writes take effect immediately (`resume` just re-enables). `defHash` (sha256 of the
+execution definition) still binds runs, occurrences and the `sched_run` CAS (`E_REV` on drift); web `add/edit/repair/--all` writes are deny in
+the frozen `webCommandPolicy.schedule` table, and `approve`/`reject`/`__put` are deny as well. Legacy ledger `approval` fields are tolerated and ignored.
 **Execution authorization (A2 `dispatch.ts`)**: `background` runs go through `bg.ts` (callerOwned spawn + `suppressDelivery`);
 `message`/`handoff` runs are scheduled messages: queued while busy (idle + quiet window + capability gate + fence), written with a
 per-send token, authorized ONLY at the trigger's own `before_agent_start` (token + epoch + context re-check; a forged/stale token or

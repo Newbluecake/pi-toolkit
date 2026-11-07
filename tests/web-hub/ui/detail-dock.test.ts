@@ -3,8 +3,13 @@ import { mount } from "@vue/test-utils";
 import { computed, ref } from "vue";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import DetailDock from "../../../src/web-hub/ui/src/components/detail/DetailDock.vue";
-import { CONTROL_VIEW, type ControlView } from "../../../src/web-hub/ui/src/components/control/controlContext.js";
+import {
+  CONTROL_VIEW,
+  HUB_CTX,
+  type ControlView,
+} from "../../../src/web-hub/ui/src/components/control/controlContext.js";
 import { CONTROL_CTX } from "../../../src/web-hub/ui/src/composables/useControl.js";
+import { __resetCmdHistoryStores, useCmdHistory } from "../../../src/web-hub/ui/src/composables/useCmdHistory.js";
 import type { AgentState, CmdOutcome, ControlHandle } from "../../../src/web-hub/ui/src/types.js";
 
 /**
@@ -24,6 +29,7 @@ vi.stubGlobal("matchMedia", (query: string) => ({
 
 const mounted: Array<ReturnType<typeof mount>> = [];
 afterEach(() => {
+  __resetCmdHistoryStores();
   vi.useRealTimers();
   window.localStorage.clear();
   for (const w of mounted.splice(0)) w.unmount();
@@ -77,6 +83,8 @@ interface ViewOver {
   queue?: readonly unknown[];
   fleet?: readonly unknown[];
   session?: Record<string, unknown>;
+  status?: Record<string, unknown>;
+  card?: Record<string, unknown>;
 }
 
 function fakeView(control: ControlHandle, over: ViewOver = {}): { view: ControlView; agent: { value: AgentState } } {
@@ -85,6 +93,8 @@ function fakeView(control: ControlHandle, over: ViewOver = {}): { view: ControlV
     queue: over.queue ?? [],
     prompts: [],
     fleet: over.fleet ?? [],
+    status: over.status,
+    card: over.card,
     ...(over.session !== undefined ? { session: over.session } : {}),
   } as unknown as AgentState);
   const view: ControlView = {
@@ -225,13 +235,50 @@ describe("DetailDock.vue — orchestration (§7.4/§7.7)", () => {
   it("inline StopButton (inside Composer since 2026-10) ⇒ abort; queue retry/discard ⇒ control.retry/discard", async () => {
     const pendingCtl = [{ id: "f1", kind: "prompt", text: "x", state: "failed", error: "E_NETWORK", at: 0 }];
     const { control, calls } = fakeControl();
-    const w = mountDock(control, { busy: true, pendingCtl });
-    await w.find(".stop-btn").trigger("click");
-    await w.find(".stop-btn").trigger("click");
-    await w.find(".queue-actions .btn").trigger("click"); // retry
-    await flush();
-    expect(calls.map((c) => c.method)).toEqual(["abort", "retry"]);
-    expect(calls[1]!.args).toEqual(["agent-a", "f1"]);
+    const { view } = fakeView(control, {
+      busy: true,
+      pendingCtl,
+      session: { sessionId: "s1" },
+      card: { epoch: "e1" },
+    });
+    vi.useFakeTimers();
+    const w = mount(DetailDock, {
+      props: { following: true, newCount: 0 },
+      global: {
+        provide: {
+          [CONTROL_VIEW as symbol]: view,
+          [CONTROL_CTX as symbol]: { agentKey: "agent-a", control, enabled: true },
+          [HUB_CTX as symbol]: { state: ref({ conn: "open", hub: null }) },
+        },
+      },
+    });
+    mounted.push(w);
+    try {
+      const stop = w.get(".stop-btn");
+      await stop.trigger("click", { detail: 1 });
+      await stop.trigger("click", { detail: 1 });
+      expect(calls).toEqual([]);
+      await stop.trigger("pointerdown", {
+        pointerId: 1,
+        pointerType: "mouse",
+        isPrimary: true,
+        button: 0,
+      });
+      vi.advanceTimersByTime(699);
+      expect(calls).toEqual([]);
+      vi.advanceTimersByTime(1);
+      window.dispatchEvent(new PointerEvent("pointerup", { pointerId: 1 }));
+      await flush();
+      expect(calls).toEqual([{ method: "abort", args: ["agent-a"] }]);
+      await w.find(".queue-actions .btn").trigger("click"); // retry
+      await flush();
+      expect(calls.map((c) => c.method)).toEqual(["abort", "retry"]);
+      expect(calls[1]!.args).toEqual(["agent-a", "f1"]);
+    } finally {
+      w.unmount();
+      mounted.splice(mounted.indexOf(w), 1);
+      vi.useRealTimers();
+    }
   });
 
   it("notExecuted retry re-sends with a NEW id (sendPrompt) and discards the old item (§7.7)", async () => {
@@ -503,4 +550,123 @@ describe("DetailDock.vue — async command finishes via pendingCtl + queryOnly (
     await wrapper.vm.$nextTick();
     expect(wrapper.find(".command-terminal-only").exists()).toBe(true);
   });
+});
+
+describe("#40 unknown slash submissions", () => {
+  const capable = { features: ["unknown-slash-text.v1"] };
+  it.each(["E_BAD_REQUEST", "E_COMMAND_DENIED", "E_UNSUPPORTED", "E_DEADLINE", "E_NETWORK", "E_UNKNOWN_COMMAND"])(
+    "never falls back from %s without exact none evidence",
+    async (error) => {
+      const { control, calls } = fakeControl((method) =>
+        method === "runCommand"
+          ? { ok: false, error, effect: error === "E_UNKNOWN_COMMAND" ? "unknown" : "none" }
+          : { ok: true },
+      );
+      const w = mountDock(control, { commandsEnabled: true, status: capable });
+      await w.find("textarea").setValue("/notregistered raw\n  end  ");
+      await w.find("textarea").trigger("keydown", { key: "Enter" });
+      await flush();
+      expect(calls.filter((c) => c.method === "runCommand")).toHaveLength(1);
+      expect(calls.filter((c) => c.method === "sendPrompt")).toHaveLength(0);
+    },
+  );
+  it("sends unresolved text once after authoritative unknown, preserving the full body", async () => {
+    const { control, calls } = fakeControl((method) =>
+      method === "runCommand" ? { ok: false, error: "E_UNKNOWN_COMMAND", effect: "none" } : { ok: true },
+    );
+    const w = mountDock(control, { commandsEnabled: true, status: capable });
+    const text = "/notregistered\t raw\n  end  ";
+    await w.find("textarea").setValue(text);
+    await w.find("textarea").trigger("keydown", { key: "Enter" });
+    await flush();
+    expect(calls.filter((c) => c.method === "runCommand")).toHaveLength(1);
+    expect(calls.filter((c) => c.method === "sendPrompt").map((c) => c.args)).toEqual([
+      ["agent-a", text, "steer", text],
+    ]);
+    expect(w.find(".command-result").exists()).toBe(false);
+    const a = calls.find((c) => c.method === "runCommand")!;
+    const id = (a.args[3] as { id: string }).id;
+    expect(calls.filter((c) => c.method === "discard").map((c) => c.args)).toEqual([["agent-a", id]]);
+  });
+  it.each(["token", "session", "epoch", "token-returned"])(
+    "cancels the intention when %s changes while A is in flight",
+    async (changed) => {
+      const { control, calls } = fakeControl();
+      let settle!: (r: CmdOutcome) => void;
+      control.runCommand = () =>
+        new Promise((resolve) => {
+          settle = resolve;
+        });
+      const { view, agent } = fakeView(control, {
+        commandsEnabled: true,
+        status: capable,
+        session: { sessionId: "s1" },
+        card: { epoch: "e1" },
+      });
+      const w = mount(DetailDock, {
+        props: { following: true, newCount: 0 },
+        global: {
+          provide: {
+            [CONTROL_VIEW as symbol]: view,
+            [CONTROL_CTX as symbol]: { agentKey: "agent-a", control, enabled: true },
+          },
+        },
+      });
+      mounted.push(w);
+      await w.find("textarea").setValue("/missing");
+      await w.find("textarea").trigger("keydown", { key: "Enter" });
+      if (changed === "token" || changed === "token-returned")
+        agent.value = { ...agent.value, status: { features: [] } } as AgentState;
+      if (changed === "token-returned") agent.value = { ...agent.value, status: capable } as AgentState;
+      if (changed === "session") agent.value = { ...agent.value, session: { sessionId: "s2" } } as AgentState;
+      if (changed === "epoch") agent.value = { ...agent.value, card: { epoch: "e2" } } as AgentState;
+      settle({ ok: false, error: "E_UNKNOWN_COMMAND", effect: "none" });
+      await flush();
+      expect(calls.filter((c) => c.method === "sendPrompt")).toHaveLength(0);
+    },
+  );
+  it("keeps old-agent rejection distinct from commands-disabled direct text", async () => {
+    const { control, calls } = fakeControl();
+    const legacy = mountDock(control, { commandsEnabled: true });
+    await legacy.find("textarea").setValue("/missing");
+    await legacy.find("textarea").trigger("keydown", { key: "Enter" });
+    await flush();
+    expect(calls).toEqual([]);
+    const disabled = mountDock(control, { commandsEnabled: false, status: capable });
+    await disabled.find("textarea").setValue("/missing");
+    await disabled.find("textarea").trigger("keydown", { key: "Enter" });
+    await flush();
+    expect(calls.filter((c) => c.method === "runCommand")).toHaveLength(0);
+    expect(calls.filter((c) => c.method === "sendPrompt")).toHaveLength(1);
+  });
+});
+
+it("#40 command-history mode drops unknown A instead of emitting a false command execution card", async () => {
+  __resetCmdHistoryStores();
+  const { control, calls } = fakeControl((method) =>
+    method === "runCommand" ? { ok: false, error: "E_UNKNOWN_COMMAND", effect: "none" } : { ok: true },
+  );
+  const { view } = fakeView(control, {
+    commandsEnabled: true,
+    status: { features: ["cmd.history.v1", "unknown-slash-text.v1"] },
+  });
+  const w = mount(DetailDock, {
+    props: { following: true, newCount: 0 },
+    global: {
+      provide: {
+        [CONTROL_VIEW as symbol]: view,
+        [CONTROL_CTX as symbol]: { agentKey: "agent-a", control, enabled: true },
+        [HUB_CTX as symbol]: { state: ref({ hub: { caps: ["cmd.history.v1"] } }) },
+      },
+    },
+  });
+  mounted.push(w);
+  await w.find("textarea").setValue("/missing raw");
+  await w.find("textarea").trigger("keydown", { key: "Enter" });
+  await flush();
+  expect(calls.filter((c) => c.method === "runCommand")).toHaveLength(1);
+  expect(calls.filter((c) => c.method === "sendPrompt")).toHaveLength(1);
+  expect(useCmdHistory("agent-a").placeholders).toEqual([]);
+  expect(useCmdHistory("agent-a").notes).toEqual([]);
+  expect(w.find(".command-result").exists()).toBe(false);
 });

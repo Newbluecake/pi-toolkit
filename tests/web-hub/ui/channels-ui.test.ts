@@ -136,6 +136,35 @@ describe("sidebar filter", () => {
     expect(mountList([agents[0]!]).find(".channel-filter").exists()).toBe(false);
     expect(mountList(agents, ["xs.v1"]).find(".channel-filter").exists()).toBe(false);
   });
+  it("collapsed rail does NOT render the chip row (no 全部/# chips); expanding restores it", async () => {
+    const w = mount(AgentList, {
+      props: {
+        cards: agents.map((a) => toAgentCardView(a, (k) => k)),
+        selectedKey: null,
+        filter: "",
+        collapsed: true,
+      } as never,
+      global: { provide: { [HUB_CTX as symbol]: hubOf(agents, CAPS) } },
+    });
+    mounted.push(w);
+    // actual-DOM assertions (not class names): no chip row, no chip buttons, none of the labels
+    // (scoped to .sidebar-head: collapsed keeps the agent LIST in the DOM CSS-only, and cards
+    // legitimately carry their own #channel chips)
+    expect(w.find(".channel-filter").exists()).toBe(false);
+    expect(w.findAll(".channel-filter .chip")).toHaveLength(0);
+    const headText = w.get(".sidebar-head").text();
+    expect(headText).not.toContain("All");
+    expect(headText).not.toContain("#default");
+    expect(headText).not.toContain("#x");
+    expect(headText).not.toContain("#y");
+    // the rail's own controls survive (expand toggle still rendered + pressed)
+    const toggle = w.get(".sidebar-collapse-toggle");
+    expect(toggle.attributes("aria-pressed")).toBe("true");
+    // expand ⇒ the full chip row comes back
+    await w.setProps({ collapsed: false });
+    const chips = w.findAll(".channel-filter .chip");
+    expect(chips.map((c) => c.text().replace(/\s+/g, " "))).toEqual(["All", "#default 2", "#x 1", "#y 1"]);
+  });
 });
 
 describe("@ panel", () => {

@@ -38,6 +38,7 @@ import {
   statSync,
   symlinkSync,
   writeFileSync,
+  realpathSync,
 } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -78,7 +79,7 @@ const SKIP = realSkipReason();
  *    is put with `--path` into a mktemp dir under /tmp (root-owned, sticky).
  * Never the user's real ~/secure or ~/.pi; same token-scoped cleanup as every RealHarness dir.
  */
-const E2E_ROOT = join(REPO, "node_modules", ".cache", "v7");
+const E2E_ROOT = join(realpathSync(join(REPO, "node_modules")), ".cache", "v7");
 /** (Re)create the shared root right before use: a concurrent run's afterAll may rmdir it when empty. */
 function e2eSetup(T: RealHarness): Env {
   for (let i = 0; ; i++) {
@@ -235,6 +236,10 @@ function makeFixture(T: RealHarness, { sessions = true }: { sessions?: boolean }
   symlinkSync("../scripts/tool.sh", join(proj, ".bin", "tool"));
   writeFileSync(join(proj, "sub", "deep", "data.bin"), Buffer.alloc(200 * 1024 + 3, 7));
   git(proj, "init", "-q", "-b", "main");
+  // No detached auto-maintenance/gc after commit (newer git on CI): its transient
+  // .git/objects/maintenance.lock would race the tree snapshots taken below.
+  git(proj, "config", "maintenance.auto", "false");
+  git(proj, "config", "gc.auto", "0");
   git(proj, "add", "-A");
   git(proj, "commit", "-q", "-m", "one");
   writeFileSync(join(proj, "a.txt"), "hello\nworld\n");

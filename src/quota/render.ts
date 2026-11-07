@@ -310,12 +310,6 @@ function directUseText(provider: string, alternatives: AlternativeInput, now: Mi
   return `本轮不要把新任务派给 ${provider}（${promise}）。\n${alternativesAdvice(alternatives, now)}`;
 }
 
-/** 已耗尽的窗口没有「还剩多久耗尽」可言——ETA 子句只给未耗尽窗口。 */
-function liveEtaMs(w: WindowVerdict): number | undefined {
-  if (w.reason === "exhausted" || w.usedPct >= 100) return undefined;
-  return w.etaMs !== undefined && Number.isFinite(w.etaMs) && w.etaMs >= 0 ? w.etaMs : undefined;
-}
-
 /** 紧凑读数串（英文 token）：`5h 0% · 7d 0%`。 */
 function readingsText(v: ProviderVerdict): string {
   return v.windows.map((w) => `${formatScope(w.scope)} ${pctOf(w.usedPct)}%`).join(" · ");
@@ -375,8 +369,10 @@ function withBillingClause(text: string, clause: string | undefined): string {
 }
 
 /**
- * L2 提示块（含 ETA / reset）。2026-09 口径修订：订阅额度窗口内不用就作废，L2 不再建议
+ * L2 提示块（用量 + reset）。2026-09 口径修订：订阅额度窗口内不用就作废，L2 不再建议
  * 改派其它模型、不再降位——只告知走势，明确「照常优先用」，切换留给 L3。
+ * 2026-11-05 拍板：注入文案不写预测耗尽时间——删去「按当前速率…后耗尽」与
+ * 「早于窗口重置（…）」子句，只保留用量与（resetAt 已知时的）窗口重置时刻。
  */
 export function buildQuotaWarnText(
   v: ProviderVerdict,
@@ -403,15 +399,8 @@ export function buildQuotaWarnText(
   } else {
     head = `[quota 预警] ${label} ${formatScope(w.scope)} 已用 ${pctOf(w.usedPct)}%`;
     if (w.reason === "pct") head += `（阈值 ${thresholdText(w.level, w.scope)}%）`;
-    const etaMs = liveEtaMs(w);
-    if (etaMs !== undefined) head += `，按当前速率${formatEta(etaMs)}后耗尽`;
-    if (w.resetAt !== undefined) {
-      if (etaMs !== undefined && now + etaMs < w.resetAt) {
-        head += `，早于窗口重置（${formatResetAt(w.resetAt, now)}）`;
-      } else {
-        head += `（窗口 ${formatResetAt(w.resetAt, now)} 重置）`;
-      }
-    }
+    // 2026-11-05 拍板：不写预测耗尽时间（速率外推误差大），只保留重置时刻。
+    if (w.resetAt !== undefined) head += `（窗口 ${formatResetAt(w.resetAt, now)} 重置）`;
   }
   const l3 = w === undefined ? DEFAULT_THRESHOLDS_BY_WINDOW["5h"].l3 : DEFAULT_THRESHOLDS_BY_WINDOW[w.scope].l3;
   return withBillingClause(
@@ -427,14 +416,14 @@ export function buildQuotaWarnText(
  * 明确「当前用量不高，订阅仍应优先使用；按当前速率可能在窗口重置前用完，留意
  * 即可」。等级、闸门、HUD 均不变（只改文案与分类）；非软化条件（用量 ≥ L1 /
  * eta ≤ 12h / 3a / 百分比阈值 / 降位）仍走 buildQuotaWarnText 的「预警」文案。
+ * 2026-11-05 拍板后首行同样不写预测耗尽时间（软化正文的「可能在窗口重置前用完」
+ * 不是具体时间，保留）。
  */
 export function buildQuotaSoftText(v: ProviderVerdict, now: Millis, label: string = v.provider): string {
   const w = triggerWindow(v);
   let head = `[quota 提示] ${label}`;
   if (w !== undefined) {
     head = `[quota 提示] ${label} ${formatScope(w.scope)} 已用 ${pctOf(w.usedPct)}%`;
-    const etaMs = liveEtaMs(w);
-    if (etaMs !== undefined) head += `，按当前速率${formatEta(etaMs)}后耗尽`;
     if (w.resetAt !== undefined) head += `（窗口 ${formatResetAt(w.resetAt, now)} 重置）`;
   }
   return `${head}。\n当前用量不高，订阅仍应优先使用；按当前速率可能在窗口重置前用完，留意即可。`;
@@ -469,7 +458,7 @@ export function buildQuotaBlockText(
   return withBillingClause(`${quotaBlockHead(v, now, label)}。\n${body}`, billingClause(v));
 }
 
-/** L3 块的首行（读数 + ETA + 重置时刻），不含句号与后续建议。 */
+/** L3 块的首行（读数 + 重置时刻），不含句号与后续建议；2026-11-05 起不写预测耗尽时间。 */
 function quotaBlockHead(v: ProviderVerdict, now: Millis, label: string): string {
   const w = triggerWindow(v);
   let head: string;
@@ -478,8 +467,6 @@ function quotaBlockHead(v: ProviderVerdict, now: Millis, label: string): string 
     head = `[quota 严重] ${label}`;
   } else {
     head = `[quota 严重] ${label} ${formatScope(w.scope)} 已用 ${pctOf(w.usedPct)}%`;
-    const etaMs = liveEtaMs(w); // 已耗尽窗口不报 ETA
-    if (etaMs !== undefined) head += `，预计 ${etaSpanText(etaMs)}内耗尽`;
     if (w.resetAt !== undefined) head += `（窗口 ${formatResetAt(w.resetAt, now)} 重置）`;
   }
   return head;

@@ -130,8 +130,8 @@ describe("DetailHeader.vue — web /clear quick button", () => {
       /@container detail-titlebar \(max-width: 599px\)\s*\{\s*\.head-btn-label\s*\{\s*display: none;/,
     );
     expect(MESSAGES.zh.resume.openLabel).toBe("恢复");
-    expect(MESSAGES.zh.privacy.markLabel).toBe("隐私");
-    expect(MESSAGES.zh.privacy.lockLabel).toBe("锁定");
+    expect(MESSAGES.zh.privacy.markLabel).toBe("锁定");
+    expect(MESSAGES.zh.privacy.unlockLabel).toBe("解锁");
     expect(MESSAGES.zh.detail.clearAria).toBe("清空");
     expect(MESSAGES.zh.detail.clearLabel).toBe("清空");
   });

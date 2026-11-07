@@ -1,5 +1,31 @@
+import {
+  MEMORY_BIND_EVENT,
+  type MemoryBindReply,
+  type MemoryBindRequest,
+  type MemoryChildBindingPort,
+} from "../memory/scopes/child-bind.js";
+import {
+  humanRunId,
+  grantHumanScope,
+  withHumanBinding,
+  type HumanRuntime,
+  type ChildHumanBinding,
+} from "./human-runtime.js";
+import {
+  FAST_BIND_EVENT,
+  FAST_RECORD_TYPE,
+  type FastBindReply,
+  type FastBindRequest,
+  type FastChildStatePort,
+} from "../fast/ports.js";
+import { createEventBus } from "@earendil-works/pi-coding-agent";
+import type { EventBus } from "@earendil-works/pi-coding-agent";
 import { createAgentSession } from "@earendil-works/pi-coding-agent";
-import { assertSessionFileInDomain, secureChildSessionDir } from "../secure/domain.js";
+import { assertSessionFileInDomain, getSecureDomain, secureChildSessionDir } from "../secure/domain.js";
+import { secureSessionWriteGate } from "../secure/memory-gate.js";
+import { SESSION_MEMORY_ENTRY_TYPE } from "../memory/scopes/types.js";
+import type { SessionWriteGate } from "../memory/scopes/types.js";
+import { validateSessionEntry } from "../memory/scopes/limits.js";
 import { DefaultResourceLoader, getAgentDir, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
@@ -12,6 +38,7 @@ import type {
   SessionSpec,
   UsageDelta,
 } from "../core/types.js";
+import { ClassifiedError } from "../core/errors.js";
 import { childActivationAdvanced, childActivationSnapshot } from "../child/activation-signal.js";
 
 export type { KillableHandle, SessionSpec } from "../core/types.js";
@@ -82,6 +109,13 @@ export interface SessionHandle {
   /** Stage-1 input-budget preflight using pi's current effective prompt/tool definitions. */
   measureInputBudget?(prompt: string): { preBytes: number; preTokens: number };
   steer(text: string): Promise<void>;
+  /**
+   * fabric-thread arch r3 §6.4 (P3): the disposition-preserving steer variant. Resolves with
+   * pi's `QueuedInputDisposition` STRING (`"handled" | "queued"` — the engine maps it to an
+   * Outcome; an unknown future value degrades to `unknown`, never throws on its own). Absent on
+   * fakes/older handles ⇒ the caller falls back to `steer()` and reports `"queued"`.
+   */
+  steerDisposition?(text: string): Promise<string>;
   requestAbort(): Promise<void>;
   dispose(): DisposeReport;
   readonly killableHandles: ReadonlySet<KillableHandle>;
@@ -407,15 +441,25 @@ export function toolSourcesOf(session: AgentSession): ReadonlyMap<string, string
 }
 
 class PiSessionHandle implements SessionHandle {
+  private readonly boundManager: AgentSession["sessionManager"];
   readonly sessionId: string;
   readonly sessionFile: string | undefined;
   readonly killableHandles = new Set<KillableHandle>();
   constructor(
     public readonly session: AgentSession,
     readonly childExtensionMissing: boolean = false,
+    private readonly humanCleanup?: () => void,
+    private readonly fastCleanup?: () => void,
   ) {
+    this.boundManager = session.sessionManager;
     this.sessionId = session.sessionId;
     this.sessionFile = session.sessionFile;
+    if (humanCleanup)
+      session.subscribe((event: unknown) => {
+        // Child switch_context commits a boundary draft, not session_compact.
+        // Invalidate on its actual persisted entry, even before bind() runs.
+        if (mapEvent(event)?.t === "context_switch") humanCleanup();
+      });
   }
   measureInputBudget(prompt: string): { preBytes: number; preTokens: number } {
     const byteLength = (value: string) => Buffer.byteLength(value, "utf8");
@@ -453,13 +497,39 @@ class PiSessionHandle implements SessionHandle {
   steer(text: string): Promise<void> {
     return this.session.steer(text).then(() => undefined);
   }
+  /** fabric-thread §6.4 (P3): pi 1.0+ `AgentSession.steer()` resolves to the per-input
+   *  `QueuedInputDisposition`; thread routing NEEDS the raw value (`queued` ⇒ Outcome `queued`,
+   *  `handled` ⇒ `unknown` — never a safe-fallback proof, r3-3). Coerce through `String()` so an
+   *  unknown future disposition degrades instead of throwing; never rejects on its own. */
+  steerDisposition(text: string): Promise<string> {
+    return this.session.steer(text).then(
+      (disposition: unknown) => (typeof disposition === "string" ? disposition : String(disposition ?? "unknown")),
+      (error: unknown) => Promise.reject(error),
+    );
+  }
   requestAbort() {
-    this.session.abort();
+    try {
+      this.fastCleanup?.();
+    } finally {
+      try {
+        this.humanCleanup?.();
+      } finally {
+        this.session.abort();
+      }
+    }
     return Promise.resolve();
   }
   dispose(): DisposeReport {
     try {
-      this.session.dispose();
+      try {
+        this.fastCleanup?.();
+      } finally {
+        try {
+          this.humanCleanup?.();
+        } finally {
+          this.session.dispose();
+        }
+      }
       return { returned: true, killed: 0, unkillable: [] };
     } catch (e) {
       return { returned: false, error: errorInfo(e), killed: 0, unkillable: [] };
@@ -609,7 +679,13 @@ class PiSessionHandle implements SessionHandle {
    * persisted root→leaf order, read-only, same seam as getSwitchTail above.
    */
   getBranchEntries(): readonly unknown[] {
-    return this.session.sessionManager.getBranch();
+    const manager = this.session.sessionManager;
+    if (manager !== this.boundManager || this.session.sessionId !== this.sessionId)
+      throw new Error("session branch owner changed");
+    const branch = manager.getBranch();
+    if (this.session.sessionManager !== manager || this.session.sessionId !== this.sessionId)
+      throw new Error("session branch owner changed during read");
+    return branch;
   }
   /**
    * fleet-drawer plan §4.1 (#7): `session.subscribe` with a swallowing
@@ -662,6 +738,50 @@ export function explainPromptRejection(session: unknown, e: unknown): Error {
 
 export type ModelResolver = (provider: string, id: string) => unknown | undefined;
 
+/** Plain-domain gate used only when no secure verdict was ever frozen in this process. */
+const PLAIN_SESSION_WRITE_GATE: SessionWriteGate = { check: () => ({ ok: true }) };
+
+/** #39 P2: derive the session write gate from the frozen secure-domain verdict (same source
+ *  as the store commit gate). Production assembly (P4) injects the real gate explicitly. */
+function defaultSessionWriteGate(): SessionWriteGate {
+  const domain = getSecureDomain();
+  return domain === undefined ? PLAIN_SESSION_WRITE_GATE : secureSessionWriteGate(domain);
+}
+
+/**
+ * #39 P2 (memory-scopes arch §6.3): build the child's first session-memory entry from the
+ * frozen parent seed, re-validate the FINAL snap DTO against §6.6 product budgets, run the
+ * secure-session write gate synchronously at the append point, then append once via the
+ * ORIGINAL SDK SessionManager. Locked ⇒ refused before any branch read (zero reads, no new
+ * plaintext file); any validation/gate/append failure throws so create() rejects — the child
+ * is never created without its memory seed. `resume()` never calls this.
+ */
+function appendMemorySeedSnap(
+  sm: SessionManager,
+  seed: NonNullable<SessionSpec["memorySeed"]>,
+  gate: SessionWriteGate,
+  secureDir: string | undefined,
+): void {
+  const entry = {
+    v: 1 as const,
+    sid: sm.getSessionId(),
+    op: "snap" as const,
+    items: seed.items,
+    nextN: seed.nextN,
+    inherit: {
+      kind: "spawn" as const,
+      fromSid: seed.fromSid,
+      ...(seed.fromLeaf !== undefined ? { fromLeaf: seed.fromLeaf } : {}),
+      frozenAt: seed.frozenAt,
+    },
+  };
+  const checked = validateSessionEntry(entry, { mode: "write" });
+  if (!checked.ok) throw new Error(`memory seed append failed: invalid seed snap (${checked.reason})`);
+  const verdict = gate.check(secureDir !== undefined ? { sessionDir: secureDir } : {});
+  if (!verdict.ok) throw new Error(`memory seed append failed: write gate refused (${verdict.reason})`);
+  sm.appendCustomEntry(SESSION_MEMORY_ENTRY_TYPE, checked.entry);
+}
+
 /**
  * Turn a SessionSpec into createAgentSession options. `systemPrompt`
  * (prompt_mode: replace types) is not a createAgentSession option: pi only
@@ -670,16 +790,26 @@ export type ModelResolver = (provider: string, id: string) => unknown | undefine
  * shared settingsManager) plus `systemPromptOverride`, so nothing else about
  * the child session changes (extensions, skills, AGENTS.md, APPEND_SYSTEM).
  */
-export async function toCreateOptions(spec: SessionSpec, cwd: string): Promise<Record<string, unknown>> {
-  const { systemPrompt, ...rest } = spec;
-  if (!systemPrompt) return rest;
+export async function toCreateOptions(
+  spec: SessionSpec,
+  cwd: string,
+  fastBus?: EventBus,
+): Promise<Record<string, unknown>> {
+  // #39 P2: `memorySeed` is driver-internal data (like fastSeed) — never a
+  // createAgentSession option. It was already consumed by create() below.
+  const { systemPrompt, fastSeed, memorySeed: _memorySeed, ...rest } = spec;
+  // Fast cancellation is driver control only; SDK create has no signal option.
+  // Keep all legacy no-seed options (including their signal key) untouched.
+  if (fastSeed !== undefined || fastBus !== undefined) delete (rest as { signal?: AbortSignal }).signal;
+  if (!systemPrompt && !fastBus) return rest;
   const agentDir = rest.agentDir ?? getAgentDir();
   const settingsManager = SettingsManager.create(cwd, agentDir);
   const resourceLoader = new DefaultResourceLoader({
     cwd,
     agentDir,
     settingsManager,
-    systemPromptOverride: () => systemPrompt,
+    ...(fastBus ? { eventBus: fastBus } : {}),
+    ...(systemPrompt ? { systemPromptOverride: () => systemPrompt } : {}),
   });
   await resourceLoader.reload();
   return { ...rest, settingsManager, resourceLoader };
@@ -689,6 +819,10 @@ export class PiSessionDriver implements SessionDriver {
   constructor(
     private readonly rememberAgents = true,
     private readonly resolveModel?: ModelResolver,
+    private readonly humanRuntime?: HumanRuntime,
+    private readonly fastChildState?: FastChildStatePort,
+    private readonly sessionWriteGate?: SessionWriteGate,
+    private readonly memoryBinding?: MemoryChildBindingPort,
   ) {}
 
   /** SessionSpec.model arrives as a {provider, id} pair; createAgentSession
@@ -737,20 +871,197 @@ export class PiSessionDriver implements SessionDriver {
     // flushes). Driver-side on purpose: it fires even when the child extension never activated
     // (todo #27). `resume()` above never marks.
     markChildSession(sessionManager, persist);
+    // #39 P2 (memory-scopes arch §6.3): the seed snap is appended EXACTLY ONCE, right
+    // after the child marker (so the marker stays the first entry) and BEFORE any
+    // awaited reload/createAgentSession — a child whose seed cannot be written is
+    // never created: no session handle, no first model prompt. The final snap DTO is
+    // re-validated HERE (§6.6: validating the captured seed once is not enough) and the
+    // write gate is checked synchronously at the append itself (§6.2 step 4/§8.2 — no
+    // await between the check and the append). Buffered append only (C0): the real
+    // SDK's appendCustomEntry is memory-buffered, not fsync — an observed failure is
+    // fatal, success never promises durability, and no torn file is ever cleared.
+    const memorySeed = resolved.memorySeed;
+    if (memorySeed !== undefined) {
+      const gate = this.sessionWriteGate ?? defaultSessionWriteGate();
+      try {
+        appendMemorySeedSnap(sessionManager, memorySeed, gate, secureDir);
+      } catch (error) {
+        return Promise.reject(
+          error instanceof Error ? error : new Error(`memory seed append failed: ${String(error)}`),
+        );
+      }
+    }
     // todo #27: snapshot BEFORE the awaited resourceLoader.reload()/activate() window — see
     // src/child/activation-signal.ts for why "did the counter advance at all" (not "by exactly
     // one") is the correct check here.
     const activationBefore = childActivationSnapshot();
-    return toCreateOptions(resolved, cwd)
-      .then((options) =>
-        createAgentSession({
-          ...options,
-          sessionManager,
-          ...(persist ? {} : { persist: false }),
-        } as Parameters<typeof createAgentSession>[0]),
-      )
-      .then(({ session }) => new PiSessionHandle(session, computeChildExtensionMissing(activationBefore)));
+    return this.createWithHuman(resolved, spec, cwd, secureDir !== undefined, activationBefore, "created", {
+      sessionManager,
+      ...(persist ? {} : { persist: false }),
+    });
   }
+  private async createWithHuman(
+    resolved: SessionSpec,
+    request: SessionSpec,
+    cwd: string,
+    secure: boolean,
+    activationBefore: number,
+    reason: "created" | "resume",
+    extra: Record<string, unknown>,
+  ) {
+    let binding: ChildHumanBinding | undefined;
+    let session: AgentSession | undefined;
+    const seed = resolved.fastSeed;
+    const memoryPort = !secure ? this.memoryBinding : undefined;
+    const bus = seed !== undefined || memoryPort !== undefined ? createEventBus() : undefined;
+    const runtime = request as SessionSpec & { runId?: string; signal?: AbortSignal };
+    const owner = { parentRunId: runtime.runId ?? "", incarnation: {} };
+    let response: FastBindReply | undefined;
+    let memoryResponse: MemoryBindReply | undefined;
+    let unbind: (() => void) | undefined;
+    let live = true;
+    let accepting = false;
+    const cleanup = () => {
+      if (!live) {
+        bus?.clear();
+        return;
+      }
+      live = false;
+      accepting = false;
+      runtime.signal?.removeEventListener("abort", cleanup);
+      try {
+        try {
+          memoryResponse?.dispose();
+        } finally {
+          response?.dispose();
+        }
+      } finally {
+        try {
+          unbind?.();
+        } finally {
+          bus?.clear();
+        }
+      }
+    };
+    try {
+      if (bus) {
+        if (runtime.signal?.aborted) throw new Error("Child creation aborted");
+        runtime.signal?.addEventListener("abort", cleanup, { once: true });
+      }
+      if (seed !== undefined) {
+        // Original manager only; a failed append is fatal, never a successful seed/readback.
+        const manager = extra.sessionManager as SessionManager;
+        manager.appendCustomEntry(FAST_RECORD_TYPE, { v: 1, mode: seed.mode });
+        if (runtime.runId && this.fastChildState) {
+          unbind = this.fastChildState.bind(owner, () => (response ? response.readMode() : seed.mode));
+          if (!live) {
+            unbind();
+            throw new Error("Fast child creation aborted");
+          }
+        }
+      }
+      const runId = !secure && this.humanRuntime ? humanRunId(request) : undefined;
+      binding = runId ? await this.humanRuntime!.prepare(runId) : undefined;
+      if (!live) throw new Error("Fast child creation aborted");
+      let options = await toCreateOptions(resolved, cwd, bus);
+      if (binding) options = await withHumanBinding(options, cwd, binding);
+      if (!live) throw new Error("Fast child creation aborted");
+      ({ session } = await createAgentSession({ ...options, ...extra } as Parameters<typeof createAgentSession>[0]));
+      if (bus && seed) {
+        if (!live) throw new Error("Fast child creation aborted");
+        const manager = extra.sessionManager as SessionManager;
+        const bindRequest: FastBindRequest = {
+          v: 1,
+          owner,
+          manager: Object.freeze({ getBranch: () => manager.getBranch() }),
+          reply: (reply) => {
+            // emit is synchronous. Late replies (including same-id ABA) can only revoke
+            // their OWN returned binding; they never publish a new owner's read callback.
+            if (!accepting || !live || response) {
+              if (reply !== response) reply.dispose();
+              return;
+            }
+            if (
+              reply.v !== 1 ||
+              reply.wired !== true ||
+              typeof reply.readMode !== "function" ||
+              typeof reply.dispose !== "function"
+            )
+              return;
+            response = reply;
+          },
+        };
+        accepting = true;
+        try {
+          bus.emit(FAST_BIND_EVENT, bindRequest);
+        } finally {
+          accepting = false;
+        }
+        if (!response && seed.mode !== "inherit")
+          throw Object.assign(
+            new ClassifiedError({
+              kind: "config",
+              message: "fast_receiver_missing: Fast child receiver missing before first prompt",
+              retryable: false,
+            }),
+            { reason: "fast_receiver_missing" },
+          );
+      }
+      if (!live) throw new Error("Child creation aborted");
+      if (bus && memoryPort) {
+        const bindRequest: MemoryBindRequest = {
+          v: 1,
+          owner: Object.freeze({ runId: runtime.runId ?? "", incarnation: owner.incarnation }),
+          manager: extra.sessionManager as SessionManager,
+          reason,
+          ...(memoryPort.frozenParentHubSlot
+            ? { frozenParentHubSlot: Object.freeze({ ...memoryPort.frozenParentHubSlot }) }
+            : {}),
+          reply: (reply) => {
+            if (!accepting || !live || memoryResponse) {
+              if (reply !== memoryResponse) reply.dispose();
+              return;
+            }
+            if (reply.v !== 1 || reply.wired !== true || typeof reply.dispose !== "function") return;
+            memoryResponse = reply;
+          },
+        };
+        accepting = true;
+        try {
+          bus.emit(MEMORY_BIND_EVENT, bindRequest);
+        } finally {
+          accepting = false;
+        }
+        if (!memoryResponse) {
+          if (memoryPort.strict)
+            throw new Error("memory_receiver_missing: Memory child receiver missing before first prompt");
+          console.warn(
+            "[pi-subagent] memory child receiver missing before first prompt; continuing without scoped child binding",
+          );
+        }
+      }
+      if (!live) throw new Error("Child creation aborted");
+      if (binding) grantHumanScope(request);
+      return new PiSessionHandle(
+        session,
+        computeChildExtensionMissing(activationBefore),
+        binding?.dispose,
+        bus ? cleanup : undefined,
+      );
+    } catch (error) {
+      try {
+        cleanup();
+      } finally {
+        try {
+          binding?.dispose();
+        } finally {
+          session?.dispose();
+        }
+      }
+      throw error;
+    }
+  }
+
   resume(sessionFile: string, spec: SessionSpec) {
     // data-encryption §2.5: cross-domain resume (vault file from a plain process, or a file outside
     // the vault from a secure one) is refused before pi opens — and possibly rewrites — the file.
@@ -760,11 +1071,20 @@ export class PiSessionDriver implements SessionDriver {
       return Promise.reject(error instanceof Error ? error : new Error(String(error)));
     }
     const resolved = this.withResolvedModel(spec);
+    const secure = secureChildSessionDir() !== undefined;
     const sessionManager = SessionManager.open(sessionFile, undefined, resolved.cwd);
     const activationBefore = childActivationSnapshot();
-    return toCreateOptions(resolved, resolved.cwd ?? sessionManager.getCwd())
-      .then((options) => createAgentSession({ ...options, sessionManager } as Parameters<typeof createAgentSession>[0]))
-      .then(({ session }) => new PiSessionHandle(session, computeChildExtensionMissing(activationBefore)));
+    return this.createWithHuman(
+      resolved,
+      spec,
+      resolved.cwd ?? sessionManager.getCwd(),
+      secure,
+      activationBefore,
+      "resume",
+      {
+        sessionManager,
+      },
+    );
   }
   bind(h: SessionHandle, onEvent: (e: DriverEvent) => void) {
     const session = (h as PiSessionHandle)["session"];

@@ -146,6 +146,12 @@ function warningLine(w: string, counts: LanLimiterCounts | undefined): string | 
   }
   if (w === "db-checkpoint-failed") return "警告：数据库 checkpoint 失败，详见 hub.log。";
   if (w === "initial-password-residue") return "警告：旧初始密码在磁盘上可能仍有残留，详见 hub.log。";
+  if (w === "totp-key-missing" || w === "totp-key-mismatch") {
+    const detail = w === "totp-key-missing" ? "缺失" : "不匹配";
+    return `警告：TOTP 密钥${detail}：受影响账号只能用恢复码或飞书登录；本机执行 /webhub 2fa reset --confirm（主账号）或 /webhub 2fa repair --confirm（全部账号），再 /webhub restart 后重新 enroll。repair 同时解除 TOTP 密钥绑定，密钥文件保留。`;
+  }
+  if (w === "totp-plaintext-residue")
+    return "警告：TOTP 迁移后的磁盘明文可能仍有残留，详见 hub.log；/webhub restart 重试 TRUNCATE。";
   if (w === "db-restarting") return "数据库子进程正在重启。";
   if (w === "proxy-xff-warnings") return "警告：最近收到过不受信任的转发头，详见 hub.log。";
   if (w === "db-invalid:kdf") return "警告：检测到损坏的密码 KDF 参数，相关账号登录将失败，详见 hub.log。";
@@ -194,7 +200,7 @@ export function formatLanOffLine(status: Extract<LanStatus, { state: "off" }>, p
       const tfaDetail = /^(?:db-invalid:)?(2fa-at-v1|2fa-schema|2fa-missing-row)$/.exec(detail)?.[1];
       if (tfaDetail !== undefined) {
         // 2FA tables are security data: never suggest moving hub.db away (that would silently drop 2FA).
-        return `未开启：hub.db 的 2FA 数据无法使用（db-invalid:${tfaDetail}）。为避免把「已启用 2FA」误当成「未启用」，局域网入口保持关闭；执行 ${TFA_REPAIR_HINT} 清空并重建 2FA 表（之后请立即重新 enroll），然后 /webhub restart。`;
+        return `未开启：hub.db 的 2FA 数据无法使用（db-invalid:${tfaDetail}）。为避免把「已启用 2FA」误当成「未启用」，局域网入口保持关闭；执行 ${TFA_REPAIR_HINT} 清空并重建 2FA 表（同时解除 TOTP 密钥绑定，密钥文件保留；之后请立即重新 enroll），然后 /webhub restart。`;
       }
       return `未开启：hub.db 无法使用（${detail}）。把 ${paths.dbFile} 移走后执行 /webhub restart 会重建（生成新的初始密码，旧会话失效）。`;
     }
@@ -282,10 +288,20 @@ function formatLocalMinute(ms: number): string {
  * `LanInfoPayload` → the initial-password lines for the given UI mode.
  * `initialPassword` present ⇒ still in use: TUI shows the plaintext + reminder;
  * every other mode shows only the reminder (never the plaintext, plan §11 LE
- * row: "非 TUI 不显示初始密码"). Absent ⇒ already changed ⇒ no lines at all.
+ * row: "非 TUI 不显示初始密码"). Absent + `initialLogin` ⇒ plaintext wiped at first sign-in but
+ * the account still uses it (#66 D4): one warning line; absent + no `initialLogin` ⇒ no lines.
  */
 export function formatInitialPasswordLines(info: LanInfoPayload | undefined, mode: UiMode): string[] {
-  if (info === undefined || info.initialPassword === undefined) return [];
+  if (info === undefined) return [];
+  if (info.initialPassword === undefined) {
+    // #66 D4: the hub wipes the plaintext at the first sign-in; it only reports `initialLogin` while
+    // the generated password is still the account's password, so its presence means "wiped, in use".
+    if (info.initialLogin === undefined) return [];
+    return [
+      `初始密码已于 ${formatLocalMinute(info.initialLogin.at)} 被 ${info.initialLogin.ip} 用于登录，明文已从 hub.db 清除；该账号仍在使用初始密码，若不是你本人登录，立即在本机执行 /webhub passwd。`,
+      "请尽快修改初始密码：在本机执行 /webhub passwd。",
+    ];
+  }
   const lines: string[] = [];
   if (mode === "tui") {
     lines.push(

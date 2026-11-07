@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   DIALOG_BG_HUB_CAPS,
+  EPOCH_UP_AGENT_CAPS,
+  EPOCH_UP_CAP,
   HOLD_AGENT_CAPS,
   HOLD_CAP,
   HOLD_HUB_CAPS,
@@ -89,5 +91,14 @@ describe("constants", () => {
     expect(HOLD_CAP).toBe("hold.v1");
     expect([...HOLD_AGENT_CAPS]).toEqual(["hold.v1"]);
     expect([...HOLD_HUB_CAPS]).toEqual(["hold.v1"]);
+  });
+
+  it("EPOCH_UP cap is stable and agent-face only (#23 web-update-stuck plan §2.2 D12)", () => {
+    expect(EPOCH_UP_CAP).toBe("epoch.up.v1");
+    expect([...EPOCH_UP_AGENT_CAPS]).toEqual(["epoch.up.v1"]);
+    // D12: no hub-face plural export exists — the hub never broadcasts this cap on either
+    // surface (HubInfo.caps / hello_ack.caps). Guard the string itself: no HOLD-style hub
+    // array may ever be added for it either (caps-coexist pins the live surfaces).
+    expect(EPOCH_UP_AGENT_CAPS).not.toContain(HOLD_CAP);
   });
 });

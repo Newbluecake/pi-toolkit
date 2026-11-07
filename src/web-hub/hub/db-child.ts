@@ -27,6 +27,7 @@ import {
   SCHEMA_V1_OBJECTS,
   USER_VERSION,
 } from "./db.js";
+import { HARDENING_PHASE, READER_MARKER_KEY, READER_MARKER_VERSION, WRITER_SOAK_MS } from "./hardening.js";
 import { totpCode, verifyTotpCandidates } from "./totp.js";
 
 export function dbTestModeEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
@@ -83,6 +84,105 @@ function schemaObjectNames(db) {
 }
 `;
 
+// Plain CommonJS, shared by both children; exported only for deterministic fs/crypto fault tests.
+export const TOTP_KEY_PRELUDE = `
+// #66 P6: key bytes never cross IPC. Warnings contain fixed codes, never paths/key/fp.
+const path = require('node:path');
+const TOTP_KEY_PATH = process.env.PI_WEBHUB_TOTP_KEY || '';
+const totpWarnings = new Set();
+function totpWarn(code) {
+  totpWarnings.add(code);
+  try { process.stderr.write('WARN totp-key code=' + code + '\\n'); } catch {}
+}
+function keyFingerprint(key) {
+  return crypto.createHmac('sha256', key).update('pi-webhub-totp-key-check\\0v1').digest();
+}
+function storedFingerprint(db) {
+  const raw = metaGet(db, 'totp_key_fp');
+  return typeof raw === 'string' && /^[A-Za-z0-9_-]{43}$/.test(raw) ? Buffer.from(raw, 'base64url') : undefined;
+}
+function fingerprintMatches(key, fp) {
+  return !!key && !!fp && fp.length === 32 && crypto.timingSafeEqual(keyFingerprint(key), fp);
+}
+function totpAad(userId) {
+  const id = Buffer.alloc(8); id.writeBigUInt64BE(BigInt(userId));
+  return Buffer.concat([Buffer.from('pi-webhub-totp\\0v1\\0'), id]);
+}
+function encryptTotp(secret, key, userId) {
+  const nonce = crypto.randomBytes(12), fp = keyFingerprint(key);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, nonce);
+  cipher.setAAD(totpAad(userId));
+  return Buffer.concat([Buffer.from([1]), fp.subarray(0,4), nonce, cipher.update(secret), cipher.final(), cipher.getAuthTag()]);
+}
+function decryptTotp(row, key, fp, userId) {
+  if (row.length === 20) return Buffer.from(row);
+  if (row.length !== 53 || row[0] !== 1 || !fingerprintMatches(key, fp)) return undefined;
+  if (!crypto.timingSafeEqual(Buffer.from(row).subarray(1,5), fp.subarray(0,4))) return undefined;
+  try {
+    const bytes = Buffer.from(row), cipher = crypto.createDecipheriv('aes-256-gcm', key, bytes.subarray(5,17));
+    cipher.setAAD(totpAad(userId)); cipher.setAuthTag(bytes.subarray(37));
+    return Buffer.concat([cipher.update(bytes.subarray(17,37)), cipher.final()]);
+  } catch { return undefined; }
+}
+function privateKeyDir(create) {
+  if (!TOTP_KEY_PATH) throw new Error('key-path');
+  const dir = path.dirname(TOTP_KEY_PATH);
+  if (create) fs.mkdirSync(dir, {recursive:true, mode:0o700});
+  const st = fs.lstatSync(dir);
+  if (!st.isDirectory() || st.uid !== process.getuid()) throw new Error('key-directory');
+  if ((st.mode & 0o777) !== 0o700) { fs.chmodSync(dir, 0o700); totpWarn('directory-mode'); }
+  return dir;
+}
+function readTotpKey() {
+  let fd;
+  try {
+    if (!TOTP_KEY_PATH) return undefined;
+    privateKeyDir(false);
+    const st = fs.lstatSync(TOTP_KEY_PATH);
+    if (!st.isFile() || st.uid !== process.getuid() || st.size !== 32) { totpWarn('invalid-file'); return undefined; }
+    if ((st.mode & 0o777) !== 0o600) { fs.chmodSync(TOTP_KEY_PATH, 0o600); totpWarn('file-mode'); }
+    fd = fs.openSync(TOTP_KEY_PATH, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+    const actual = fs.fstatSync(fd);
+    if (!actual.isFile() || actual.uid !== process.getuid() || actual.size !== 32 || actual.ino !== st.ino || actual.dev !== st.dev) return undefined;
+    const key = fs.readFileSync(fd);
+    return key.length === 32 ? key : undefined;
+  } catch (err) {
+    if (err.code !== 'ENOENT') totpWarn('unreadable');
+    return undefined;
+  } finally { if (fd !== undefined) try { fs.closeSync(fd); } catch {} }
+}
+function syncKeyDirectory(dir) {
+  let fd;
+  try { fd = fs.openSync(dir, fs.constants.O_RDONLY); fs.fsyncSync(fd); }
+  catch (err) { if (err.code !== 'EINVAL' && err.code !== 'EISDIR') throw err; }
+  finally { if (fd !== undefined) fs.closeSync(fd); }
+}
+// Called ONLY by maintenance, ONLY with rows53=0 and an active writer verdict.
+function createTotpKey() {
+  let tmp, fd;
+  try {
+    const dir = privateKeyDir(true), key = crypto.randomBytes(32);
+    tmp = TOTP_KEY_PATH + '.' + process.pid + '.' + crypto.randomBytes(8).toString('hex') + '.tmp';
+    fd = fs.openSync(tmp, 'wx', 0o600);
+    fs.writeFileSync(fd, key); fs.fsyncSync(fd); fs.closeSync(fd); fd = undefined;
+    fs.renameSync(tmp, TOTP_KEY_PATH); syncKeyDirectory(dir);
+    const read = readTotpKey();
+    if (!read || !crypto.timingSafeEqual(read, key)) throw new Error('key-readback');
+    return read;
+  } catch { totpWarn('create-failed'); return undefined; }
+  finally {
+    if (fd !== undefined) try { fs.closeSync(fd); } catch {}
+    if (tmp !== undefined) try { fs.unlinkSync(tmp); } catch {}
+  }
+}
+function encryptedRows(db, exceptUser) {
+  if (db.prepare('PRAGMA user_version').get().user_version !== 2) return 0;
+  return exceptUser === undefined
+    ? db.prepare('SELECT count(*) AS n FROM twofa WHERE length(totp_secret)=53').get().n
+    : db.prepare('SELECT count(*) AS n FROM twofa WHERE length(totp_secret)=53 AND user_id<>?').get(exceptUser).n;
+}
+`;
+
 // Embedded in each child process, never in the hub's main-thread runtime.
 const SECURITY_PRELUDE = `
 const securityColumns = ${JSON.stringify(LAN_SECURITY_COLUMNS)};
@@ -125,7 +225,7 @@ function hasFactors(row) { return !!row && (row.totp_secret !== null || row.feis
 function factorRowValid(row) {
   return !!row && Number.isSafeInteger(row.factor_gen) && row.factor_gen > 0 &&
     (row.feishu === 0 || row.feishu === 1) &&
-    (row.totp_secret === null || (row.totp_secret.length === 20 && Number.isSafeInteger(row.totp_last_step) && row.totp_last_step >= 0)) &&
+    (row.totp_secret === null || ((row.totp_secret.length === 20 || (row.totp_secret.length === 53 && row.totp_secret[0] === 1)) && Number.isSafeInteger(row.totp_last_step) && row.totp_last_step >= 0)) &&
     (!hasFactors(row) || (row.recovery_salt !== null && row.recovery_salt.length === 16));
 }
 function factorsConsistent(db) {
@@ -145,6 +245,8 @@ function syncEnrolledIds(db) {
 `;
 
 const SECURITY_QUERY = `
+const cachedTotpKey = readTotpKey();
+const totpWrite = process.env.PI_WEBHUB_TOTP_WRITE === '1';
 const totpCode = ${totpCode.toString()};
 const verifyTotpCandidates = ${verifyTotpCandidates.toString()};
 const totpCrypto = {
@@ -163,19 +265,20 @@ function ensureSecurityTables() {
     db.exec('PRAGMA user_version=2');
   } else if (version !== 2) throw new Error('2fa-schema');
 }
-function factorState(userId) {
+function factorState(userId, checkUsable = true) {
   if (securityVersion() === 1) return {state:'none', totp:false, feishu:false, recoveryLeft:0, factorGen:0};
   const row = db.prepare('SELECT * FROM twofa WHERE user_id=?').get(userId);
   const listed = enrolledIds(db).includes(userId);
   const inconsistent = row ? (!factorRowValid(row) || listed !== hasFactors(row)) : listed;
   return { state: inconsistent ? 'inconsistent' : hasFactors(row) ? 'enrolled' : 'none',
     ...(inconsistent ? {repairNeeded:'2fa-missing-row'} : {}),
-    totp: !!row?.totp_secret, feishu: row?.feishu === 1,
+    totp: !!row?.totp_secret,
+    ...(checkUsable && row?.totp_secret && decryptTotp(row.totp_secret, cachedTotpKey, storedFingerprint(db), userId) === undefined ? {totpUsable:false} : {}), feishu: row?.feishu === 1,
     recoveryLeft: row ? db.prepare('SELECT count(*) AS n FROM recovery_codes WHERE user_id=? AND used_at IS NULL').get(userId).n : 0,
     factorGen: row?.factor_gen ?? 0 };
 }
 function assertConsistent(userId) {
-  if (factorState(userId).state === 'inconsistent') throw new Error('2fa-missing-row');
+  if (factorState(userId, false).state === 'inconsistent') throw new Error('2fa-missing-row');
   if (!stmtGetUserById.get(userId)) throw new Error('unknown user');
 }
 function newFactorRow(userId, now) {
@@ -290,7 +393,7 @@ function handleSecurity(op, args) {
     case 'get2faState': return factorState(args.userId);
     case 'beginTotp': {
       assertConsistent(args.userId);
-      const state = factorState(args.userId);
+      const state = factorState(args.userId, false);
       if (state.totp && !args.replace) throw new Error('E_2FA_ENROLLED');
       for (const [id,p] of pendingTotp) if (p.expiresAt <= args.now) pendingTotp.delete(id);
       pendingTotp.delete(args.userId);
@@ -304,13 +407,24 @@ function handleSecurity(op, args) {
       const p = pendingTotp.get(args.userId);
       if (!p || p.expiresAt <= args.now) { pendingTotp.delete(args.userId); return {ok:false,reason:'none'}; }
       assertConsistent(args.userId);
-      const state = factorState(args.userId);
+      const state = factorState(args.userId, false);
       if (p.gen !== args.expectedGen || state.factorGen !== args.expectedGen) return {ok:false,reason:'stale'};
       const step = verifyTotpCandidates(p.secret, args.code, args.now, totpCrypto);
       if (step === undefined) return {ok:false,reason:'bad'};
       const result = tx(db, () => {
         ensureSecurityTables(); newFactorRow(args.userId, args.now);
-        const changed = db.prepare('UPDATE twofa SET totp_secret=?,totp_last_step=?,factor_gen=factor_gen+1,updated_at=? WHERE user_id=? AND factor_gen=?').run(p.secret, step, args.now, args.userId, args.expectedGen).changes;
+        let secret = p.secret;
+        if (totpWrite) {
+          const key = readTotpKey(), others53 = encryptedRows(db, args.userId);
+          if (others53 === 0) {
+            if (key) { metaSet(db, 'totp_key_fp', keyFingerprint(key).toString('base64url')); secret = encryptTotp(p.secret, key, args.userId); }
+            else totpWarn('enroll-plaintext'); // Query never creates/replaces the key file.
+          } else {
+            if (!fingerprintMatches(key, storedFingerprint(db))) throw new Error('E_TOTP_KEY');
+            secret = encryptTotp(p.secret, key, args.userId);
+          }
+        }
+        const changed = db.prepare('UPDATE twofa SET totp_secret=?,totp_last_step=?,factor_gen=factor_gen+1,updated_at=? WHERE user_id=? AND factor_gen=?').run(secret, step, args.now, args.userId, args.expectedGen).changes;
         if (!changed) throw new Error('factor CAS failed');
         const count = db.prepare('SELECT count(*) AS n FROM recovery_codes WHERE user_id=?').get(args.userId).n;
         const recoveryCodes = count === 0 ? recoverySet(args.userId) : [];
@@ -323,18 +437,20 @@ function handleSecurity(op, args) {
     }
     case 'verifyTotp': {
       assertConsistent(args.userId);
-      const state = factorState(args.userId);
+      const state = factorState(args.userId, false);
       if (state.factorGen !== args.expectedGen) return {ok:false,reason:'stale'};
       if (!state.totp) return {ok:false,reason:'none'};
       const row = db.prepare('SELECT * FROM twofa WHERE user_id=?').get(args.userId);
-      const step = verifyTotpCandidates(row.totp_secret, args.code, args.now, totpCrypto);
+      const secret = decryptTotp(row.totp_secret, cachedTotpKey, storedFingerprint(db), args.userId);
+      if (!secret) return {ok:false,reason:'unavailable'};
+      const step = verifyTotpCandidates(secret, args.code, args.now, totpCrypto);
       if (step === undefined) return {ok:false,reason:'bad'};
       const changed = db.prepare('UPDATE twofa SET totp_last_step=? WHERE user_id=? AND factor_gen=? AND totp_last_step<?').run(step, args.userId, args.expectedGen, step).changes;
       return changed ? {ok:true} : {ok:false,reason:'replay'};
     }
     case 'consumeRecovery': return tx(db, () => {
       assertConsistent(args.userId);
-      const state = factorState(args.userId);
+      const state = factorState(args.userId, false);
       if (state.factorGen !== args.expectedGen) return {ok:false,reason:'stale'};
       if (state.state !== 'enrolled') return {ok:false,reason:'none'};
       const row = db.prepare('SELECT recovery_salt FROM twofa WHERE user_id=?').get(args.userId);
@@ -342,11 +458,11 @@ function handleSecurity(op, args) {
       const code = db.prepare('SELECT used_at FROM recovery_codes WHERE user_id=? AND code_hash=?').get(args.userId, hash);
       if (!code) return {ok:false,reason:'bad'};
       const changed = db.prepare('UPDATE recovery_codes SET used_at=? WHERE user_id=? AND code_hash=? AND used_at IS NULL AND EXISTS(SELECT 1 FROM twofa WHERE user_id=? AND factor_gen=?)').run(args.now,args.userId,hash,args.userId,args.expectedGen).changes;
-      return changed ? {ok:true,recoveryLeft:factorState(args.userId).recoveryLeft} : {ok:false,reason:'replay'};
+      return changed ? {ok:true,recoveryLeft:factorState(args.userId, false).recoveryLeft} : {ok:false,reason:'replay'};
     });
     case 'setFeishu2fa': return tx(db, () => {
       assertConsistent(args.userId);
-      const state = factorState(args.userId);
+      const state = factorState(args.userId, false);
       ensureSecurityTables(); newFactorRow(args.userId, args.now);
       db.prepare('UPDATE twofa SET feishu=?,factor_gen=factor_gen+1,updated_at=? WHERE user_id=?').run(args.on ? 1 : 0, args.now, args.userId);
       let recoveryCodes;
@@ -360,7 +476,7 @@ function handleSecurity(op, args) {
     });
     case 'regenRecovery': return tx(db, () => {
       assertConsistent(args.userId);
-      if (factorState(args.userId).state !== 'enrolled') throw new Error('E_2FA_NONE');
+      if (factorState(args.userId, false).state !== 'enrolled') throw new Error('E_2FA_NONE');
       const recoveryCodes = recoverySet(args.userId);
       db.prepare('UPDATE twofa SET factor_gen=factor_gen+1,updated_at=? WHERE user_id=?').run(args.now,args.userId);
       pendingTotp.delete(args.userId);
@@ -413,6 +529,7 @@ export function buildQueryScript(opts: { test?: boolean } = {}): string {
 
   return `${COMMON_PRELUDE}
 ${SECURITY_PRELUDE}
+${TOTP_KEY_PRELUDE}
 if (!DatabaseSync) {
   process.stderr.write('DBG sqlite-unavailable ' + String(__sqliteErr && __sqliteErr.message) + '\\n');
   process.exit(1);
@@ -432,10 +549,13 @@ const stmtTouchSelect = db.prepare('SELECT s.user_id, s.epoch, s.bound_origin, s
 const stmtTouchUpdate = db.prepare('UPDATE sessions SET last_seen_at=?, expires_at=? WHERE sid_hash=? AND last_seen_at <= ?');
 const stmtDeleteSession = db.prepare('DELETE FROM sessions WHERE sid_hash=?');
 const stmtDeleteAllSessions = db.prepare('DELETE FROM sessions WHERE user_id=?');
-const stmtMarkInitialLogin = db.prepare('UPDATE users SET initial_login_at=?, initial_login_ip=? WHERE username=? AND initial_login_at IS NULL');
+// #66 D4: record the first initial-password login AND wipe the plaintext in one statement. No epoch
+// condition: \`initial_password IS NOT NULL\` is already idempotent and survives revokeAll/rehash.
+const stmtMarkInitialLogin = db.prepare('UPDATE users SET initial_login_at=COALESCE(initial_login_at,?), initial_login_ip=COALESCE(initial_login_ip,?), initial_password=NULL WHERE username=? AND initial_password IS NOT NULL');
 const stmtUpdateUser = db.prepare('UPDATE users SET kdf=?, n=?, r=?, p=?, salt=?, hash=?, epoch=epoch+1, initial_password=NULL, initial_created_at=NULL, updated_at=? WHERE username=?');
+const stmtRehashUser = db.prepare('UPDATE users SET n=?, r=?, p=?, salt=?, hash=?, updated_at=? WHERE id=? AND n=? AND r=? AND p=? AND salt=? AND hash=?');
 const stmtInsertUser = db.prepare('INSERT INTO users (username, kdf, n, r, p, salt, hash, epoch, created_at, updated_at) VALUES (?,?,?,?,?,?,?,1,?,?)');
-const stmtInitialInfo = db.prepare('SELECT username, initial_password, initial_login_at, initial_login_ip FROM users ORDER BY id LIMIT 1');
+const stmtInitialInfo = db.prepare('SELECT username, initial_password, initial_created_at, initial_login_at, initial_login_ip FROM users ORDER BY id LIMIT 1');
 const stmtPurge = db.prepare('DELETE FROM sessions WHERE sid_hash IN (SELECT sid_hash FROM sessions WHERE expires_at<=? OR absolute_expires_at<=? LIMIT 256)');
 
 ${SECURITY_QUERY}
@@ -446,7 +566,7 @@ ${testHooks}
       const users = db.prepare('SELECT id,username,epoch FROM users ORDER BY id LIMIT 257').all();
       if (users.length > 256) throw new Error('E_LIMIT: too many LAN accounts');
       return users.map((u, i) => ({username:u.username, primary:i===0,
-        twofa:factorState(u.id).state !== 'none',
+        twofa:factorState(u.id, false).state !== 'none',
         liveSessions:db.prepare('SELECT count(*) AS n FROM sessions WHERE user_id=? AND epoch=? AND expires_at>? AND absolute_expires_at>? AND last_seen_at>?').get(u.id,u.epoch,args.now,args.now,args.now-args.idleMs).n}));
     }
     case 'deleteUser': return tx(db, () => {
@@ -464,14 +584,16 @@ ${testHooks}
     case 'getUserSummary': {
       const row = stmtGetUserById.get(args.userId);
       if (!row) return undefined;
-      return { username: row.username, initialPasswordInUse: row.initial_password !== null };
+      return { username: row.username, initialPasswordInUse: row.initial_created_at !== null || row.initial_password !== null };
     }
     case 'initialInfo': {
       const row = stmtInitialInfo.get();
       if (!row) return undefined;
       const out = { username: row.username };
       if (row.initial_password !== null) out.initialPassword = row.initial_password;
-      if (row.initial_login_ip !== null && row.initial_login_at !== null) {
+      // #66 D4: the first-login record only matters while the generated password is still in use.
+      const inUse = row.initial_created_at !== null || row.initial_password !== null;
+      if (inUse && row.initial_login_ip !== null && row.initial_login_at !== null) {
         out.initialLogin = { ip: row.initial_login_ip, at: row.initial_login_at };
       }
       return out;
@@ -535,9 +657,16 @@ ${crashAfterCommit}
 ${crashAfterCommit}
       return null;
     }
+    case 'rehashPassword': {
+      const old = args.old, next = args.next;
+      const changes = stmtRehashUser.run(next.n, next.r, next.p, unb64(next.salt), unb64(next.hash), args.now,
+        args.userId, old.n, old.r, old.p, unb64(old.salt), unb64(old.hash)).changes;
+${crashAfterCommit}
+      return changes === 1 ? {ok:true} : {ok:false,reason:'stale'};
+    }
     case 'markInitialLogin': {
-      stmtMarkInitialLogin.run(args.at, args.ip, args.username);
-      return null;
+      const changes = stmtMarkInitialLogin.run(args.at, args.ip, args.username).changes;
+      return { cleared: changes === 1 };
     }
     case 'purgeExpired': {
       return stmtPurge.run(args.now, args.now).changes;
@@ -562,7 +691,7 @@ rl.on('line', (line) => {
     const result = handle(req.op, req.args || {});
     out = { id: req.id, ok: true, result: result === undefined ? null : result };
   } catch (err) {
-    out = { id: req.id, ok: false, code: 'E_DB', detail: String(err && err.message ? err.message : err) };
+    out = { id: req.id, ok: false, code: err && err.message === 'E_TOTP_KEY' ? 'E_TOTP_KEY' : 'E_DB', detail: String(err && err.message ? err.message : err) };
   }
   process.stdout.write(JSON.stringify(out) + '\\n');
 });
@@ -575,7 +704,19 @@ process.stdout.on('error', () => {});
 // short-lived maintenance subprocess (§4.2 "维护子进程（短命）")
 // ---------------------------------------------------------------------------
 
-export function buildMaintScript(opts: { initialUsername?: string } = {}): string {
+export function buildMaintScript(
+  opts: {
+    initialUsername?: string;
+    /** #66 test seams: release phase and a fixed clock (default: `HARDENING_PHASE` / `Date.now()` in the child). */
+    hardeningPhase?: 1 | 2;
+    now?: number;
+    totpKeyPath?: string;
+    /** Test-only crash windows; never emitted unless explicitly requested. */
+    totpCrashAt?: "key-created" | "migration-committed";
+  } = {},
+): string {
+  const hardeningPhase = opts.hardeningPhase ?? HARDENING_PHASE;
+  const fixedNow = opts.now === undefined ? "undefined" : JSON.stringify(Math.trunc(opts.now));
   // L8 "用户名默认系统登录名": `lan-store.ts`'s `createLanStore` resolves the real value via
   // `os.userInfo().username` (falling back to the P1 literal `"admin"` on any failure) and
   // passes it in — this module has no `node:os` dependency of its own, so any caller that omits
@@ -584,9 +725,47 @@ export function buildMaintScript(opts: { initialUsername?: string } = {}): strin
   const initialUsername = JSON.stringify(opts.initialUsername ?? "admin");
   const pragmaBusy = `db.exec('PRAGMA busy_timeout=' + Math.max(0, Number(process.env.PI_WEBHUB_DB_DEADLINE_MS || '0') - 500) + ';');`;
   return `${COMMON_PRELUDE}
+${opts.totpKeyPath === undefined ? "" : `process.env.PI_WEBHUB_TOTP_KEY = ${JSON.stringify(opts.totpKeyPath)};`}
 ${SECURITY_PRELUDE}
+${TOTP_KEY_PRELUDE}
 function reply(obj) {
   process.stdout.write(JSON.stringify(obj) + '\\n');
+}
+// #66 (plan §4.0): hardening phase gate. The writerActive verdict is computed HERE, once, at open
+// time (mirror of hub/hardening.ts \`writerActive\`; tests pin both against the same truth table).
+const HARDENING_PHASE = ${hardeningPhase};
+const READER_MARKER_KEY = ${JSON.stringify(READER_MARKER_KEY)};
+const READER_MARKER_VERSION = ${READER_MARKER_VERSION};
+const WRITER_SOAK_MS = ${WRITER_SOAK_MS};
+const FIXED_NOW = ${fixedNow};
+function hardeningNow() { return FIXED_NOW !== undefined ? FIXED_NOW : Date.now(); }
+function parseReaderMarker(raw) {
+  if (typeof raw !== 'string') return undefined;
+  try {
+    const o = JSON.parse(raw);
+    if (typeof o !== 'object' || o === null) return undefined;
+    if (!Number.isSafeInteger(o.v) || !Number.isSafeInteger(o.since) || o.v < 0 || o.since < 0) return undefined;
+    return { v: o.v, since: o.since };
+  } catch { return undefined; }
+}
+function writerActiveVerdict(phase, marker, now) {
+  if (phase !== 2 || marker === undefined) return false;
+  if (marker.v < READER_MARKER_VERSION) return false;
+  return marker.since <= now - WRITER_SOAK_MS;
+}
+function stampReaderMarker(db, now) {
+  // Missing/invalid ⇒ {v:1,since:now}; older v ⇒ only v is raised (since kept); never moves since.
+  let marker = parseReaderMarker(metaGet(db, READER_MARKER_KEY));
+  if (marker === undefined) marker = { v: READER_MARKER_VERSION, since: now };
+  else if (marker.v < READER_MARKER_VERSION) marker = { v: READER_MARKER_VERSION, since: marker.since };
+  else return marker;
+  metaSet(db, READER_MARKER_KEY, JSON.stringify(marker));
+  return marker;
+}
+function securityVersionForMaint(db) { return db.prepare('PRAGMA user_version').get().user_version; }
+function maxStoredKdf(db) {
+  const row = db.prepare('SELECT n,r,p FROM users ORDER BY n*r*p DESC, id ASC LIMIT 1').get();
+  return row ? { n: row.n, r: row.r, p: row.p } : null;
 }
 function openWxIfMissing() {
   try {
@@ -709,6 +888,7 @@ function run() {
           dropNamedTable(db, 'recovery_codes'); dropNamedTable(db, 'twofa');
           db.exec(${JSON.stringify(TWOFA_SQL)});
           metaSet(db, 'twofa_users', '[]');
+          db.prepare("DELETE FROM meta WHERE key='totp_key_fp'").run();
           db.exec('PRAGMA user_version=2');
         });
       } else {
@@ -725,6 +905,7 @@ function run() {
         }
       }
       let loginIpsRebuilt = false;
+      let hardening;
       tx(db, () => {
         // Preserve existing device metadata through this additive migration.
         if (tableMatches(db, 'session_meta', securityColumns.session_meta.filter(c => c[0] !== 'method'))) {
@@ -754,14 +935,45 @@ function run() {
         }
         db.exec('DELETE FROM login_ips WHERE rowid IN (SELECT rowid FROM (SELECT rowid,row_number() OVER (PARTITION BY user_id ORDER BY last_at DESC,rowid DESC) AS n FROM login_ips) WHERE n>256)');
         db.exec('DELETE FROM sessions WHERE rowid IN (SELECT rowid FROM (SELECT rowid,row_number() OVER (PARTITION BY user_id ORDER BY last_seen_at DESC,created_at DESC,rowid DESC) AS n FROM sessions) WHERE n>32)');
+        if (op === 'open-check-migrate') {
+          const hnow = hardeningNow();
+          const marker = stampReaderMarker(db, hnow);
+          hardening = { readerSince: marker.since, writerActive: writerActiveVerdict(HARDENING_PHASE, marker, hnow), maxKdf: maxStoredKdf(db) };
+        }
       });
-      try {
-        db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
-      } catch (err) {
-        reply({ ok: true, loginIpsRebuilt, warning: 'checkpoint-truncate-failed: ' + String(err && err.message) });
-        return;
+      if (hardening) {
+        const rows53 = encryptedRows(db);
+        let key = readTotpKey();
+        hardening.totpKey = rows53 === 0 ? 'none' : !key ? 'missing' : fingerprintMatches(key, storedFingerprint(db)) ? 'ok' : 'mismatch';
+        hardening.totpMigrated = 0;
+        hardening.truncateFailed = false;
+        if (rows53 === 0 && !key && hardening.writerActive) {
+          key = createTotpKey();
+          ${opts.totpCrashAt === "key-created" ? "if (key) process.kill(process.pid, 'SIGKILL');" : ""}
+        }
+        // Existing encrypted rows forbid replacing the key/fp. Migrate plaintext only when paired.
+        if (key && (rows53 === 0 || hardening.totpKey === 'ok')) {
+          tx(db, () => {
+            if (rows53 === 0) metaSet(db, 'totp_key_fp', keyFingerprint(key).toString('base64url'));
+            if (hardening.writerActive && securityVersionForMaint(db) === 2) {
+              for (const row of db.prepare('SELECT user_id,totp_secret FROM twofa WHERE length(totp_secret)=20').all()) {
+                hardening.totpMigrated += db.prepare('UPDATE twofa SET totp_secret=? WHERE user_id=? AND totp_secret=?')
+                  .run(encryptTotp(row.totp_secret, key, row.user_id), row.user_id, row.totp_secret).changes;
+              }
+            }
+          });
+          if (hardening.totpMigrated > 0) hardening.totpKey = 'ok';
+          ${opts.totpCrashAt === "migration-committed" ? "if (hardening.totpMigrated > 0) process.kill(process.pid, 'SIGKILL');" : ""}
+        }
+        hardening.totpWarnings = [...totpWarnings];
       }
-      reply({ ok: true, loginIpsRebuilt });
+      let warning;
+      try {
+        const cp = db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get();
+        if (cp && Number(cp.busy) !== 0) warning = 'checkpoint-truncate-busy';
+      } catch { warning = 'checkpoint-truncate-failed'; }
+      if (hardening) hardening.truncateFailed = warning !== undefined;
+      reply({ ok: true, loginIpsRebuilt, ...(hardening ? { hardening } : {}), ...(warning ? {warning} : {}) });
       return;
     }
     if (op === 'checkpoint-passive') {
@@ -770,7 +982,12 @@ function run() {
       return;
     }
     if (op === 'checkpoint-truncate') {
-      db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+      // wal_checkpoint does not throw when a reader blocks it; busy=1 means the WAL was NOT truncated.
+      const cp = db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get();
+      if (cp && Number(cp.busy) !== 0) {
+        reply({ ok: true, warning: 'checkpoint-truncate-busy' });
+        return;
+      }
       reply({ ok: true });
       return;
     }

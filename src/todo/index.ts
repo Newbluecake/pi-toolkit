@@ -19,6 +19,25 @@
 // (state.ts), LEGACY_STATUS_KEY "claude-code-todo-status", widget key
 // "claude-code-todo", command `/tasklist`.
 //
+// todo-archive-split plan §2.3/§7 (package 1, quick wins): Task* tool results no
+// longer embed a full state snapshot under `details.state` (replayState in state.ts
+// keeps reading that historical shape so old sessions still load), and persist()
+// skips a live snapshot whose content is byte-identical to the last written one —
+// keyed by the closure-scoped `liveKey` below, which restore() always resets
+// (session_start/session_tree/session_compact), so a branch rollback can never
+// leave a stale last-valid-candidate behind (review Major #2).
+//
+// todo-archive-split #92 (package 2, separated storage): persistence is now two-tier.
+// Archived tasks are written as incremental `claude-code-todo-archive` packages
+// (ARCHIVE_ENTRY, {v:1, reset?, put?, drop?}) while the live snapshot keeps the
+// STATE_ENTRY string but is narrowed to unarchived tasks (edge-stripped, OD1-c).
+// persist() derives its writes from planPersist() in the fixed order pre → live →
+// post; restore() replays through replayTodo() (fold + merge + validate, D11) and
+// seeds the two baselines. The in-memory state is UNCHANGED — it still contains
+// archived tasks, so UI/projection/TaskGet are untouched. Details:
+// docs/dev/todo-archive-split/plan.md, decisions D10–D15 in
+// docs/dev/todo-archive/plan.md §9.
+//
 // todo-nudge (L1 feature, opt-in via `deps`): a main-session-only staleness
 // tracker piggybacked on the same closure. `deps` defaults to `{}` so every
 // existing `wireTodo(pi)` call keeps registering zero extra handlers — the
@@ -34,7 +53,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type, type Static } from "@sinclair/typebox";
 import { TodoPanel, TodoWidget, WIDGET_RECENT_COMPLETED } from "./ui.js";
 import { WORKFLOW_NOTIFICATION_TYPE } from "../adapters/workflow-notice.js";
-import { BASH_JOB_NOTIFICATION_TYPE } from "../stack.js";
+import { BASH_JOB_NOTIFICATION_TYPE } from "../bash/notify.js";
 import { TODO_WIDGET_MOUNTED_EVENT } from "../ui/widget-mount-events.js";
 import {
   buildNudgeText,
@@ -52,25 +71,28 @@ import {
 import {
   activeBlockers,
   archiveCompleted,
+  ARCHIVE_ENTRY,
   clearTasks,
-  cloneState,
   completionTime,
   createTask,
   deleteTask,
   emptyState,
+  evictArchived,
   getTask,
   isArchived,
   newlyUnblockedTasks,
   orderTasks,
   partitionTasks,
-  replayState,
+  replayTodo,
   STATE_ENTRY,
+  TODO_ARCHIVE_CAP,
   type Task,
   type TaskInput,
   type TaskPartition,
   type TodoState,
   updateTask,
 } from "./state.js";
+import { applyArchiveEntryToBase, canonicalKey, planPersist } from "./persist-plan.js";
 
 const LEGACY_STATUS_KEY = "claude-code-todo-status";
 const WIDGET_KEY = "claude-code-todo";
@@ -81,7 +103,7 @@ const TaskIdSchema = Type.String({ description: 'Task ID, for example "1" or "#1
 // pi-ai's StringEnum (agent-tool.ts precedent) — @sinclair/typebox is the
 // only runtime dependency; the two typebox versions are not TS-compatible.
 const StatusSchema = Type.Union([Type.Literal("pending"), Type.Literal("in_progress"), Type.Literal("completed")]);
-const DependencyIdsSchema = Type.Optional(Type.Array(Type.String(), { description: 'Task IDs such as ["1", "2"].' }));
+const DependencyIdsSchema = Type.Optional(Type.Array(Type.String(), { description: "Task IDs." }));
 
 const TaskCreateSchema = Type.Object({
   subject: Type.String({ description: "Short imperative task title." }),
@@ -97,8 +119,7 @@ type TaskCreateInput = Static<typeof TaskCreateSchema>;
 const TaskListSchema = Type.Object({
   includeCompleted: Type.Optional(
     Type.Boolean({
-      description:
-        "Also list completed and archived tasks (the default output lists open tasks only and appends a footer with the hidden counts).",
+      description: "Also list completed and archived tasks.",
     }),
   ),
 });
@@ -128,7 +149,6 @@ type TaskDeleteInput = Static<typeof TaskDeleteSchema>;
 type Action = "create" | "list" | "get" | "update" | "delete";
 type ToolDetails = {
   action: Action;
-  state: TodoState;
   task?: Task | undefined;
   changed?: boolean | undefined;
   error?: string | undefined;
@@ -140,7 +160,8 @@ export interface TodoNudgeDeps {
   /** True in a re-activated child subagent session (src/index.ts's `isChildSession`) — the tracker never turns on there. */
   readonly isChildSession?: boolean;
   readonly nudge?: NudgeConfig & { readonly enabled: boolean };
-  /** Injected `pi.sendMessage`, matching the compact-hint/quota-hint hook shape (hidden, never triggers a new turn). */
+  /** Injected `pi.sendMessage`, matching the compact-hint/quota-hint hook shape (visible since
+   * Task59 阶段A — `display: true` — but still `triggerTurn: false`, never a new turn). */
   readonly sendMessage?: (
     message: { customType: string; content: string; display: boolean; details?: unknown },
     options: { triggerTurn: false },
@@ -183,7 +204,7 @@ export interface TodoWireResult {
 
 /** Hidden customType for the nudge message (new, todo-nudge plan); `subagent:*` prefix matches the repo's existing channel convention. */
 export const TODO_NUDGE_CUSTOM_TYPE = "subagent:todo-nudge";
-/** Run/subagent completion notification customType (stack.ts's createNotificationReceiptHook uses the same literal). */
+/** Run/subagent completion notification customType (delivery/stack-hooks.ts's createNotificationReceiptHook uses the same literal). */
 const RUN_NOTIFICATION_CUSTOM_TYPE = "subagent:notification";
 /** Bash tool_execution_start/end correlation map is bounded — a session with hundreds of concurrent bash calls is not realistic, and an unbounded map would be the one module-scope-shaped leak this feature could introduce. */
 const MAX_PENDING_BASH_COMMANDS = 32;
@@ -192,6 +213,18 @@ export function wireTodo(pi: ExtensionAPI, deps: TodoNudgeDeps = {}): TodoWireRe
   let state = emptyState();
   let currentUI: ExtensionUIContext | undefined;
   let queue: Promise<void> = Promise.resolve();
+  // todo-archive-split §2.3/§7 (quick win ②): JSON content key of the last live snapshot
+  // actually written by persist(). Undefined until the first write and always reset by
+  // restore() (comment there) — comparing it against the freshly built key is what turns a
+  // byte-identical persist into a no-op. Closure-scoped per I4 (no module-scope state).
+  let liveKey: string | undefined;
+  // todo-archive-split #92 §4.2: archive persistence baseline — id → canonical content key
+  // of what the ARCHIVE_ENTRY fold on disk holds (advanced after each successful append via
+  // applyArchiveEntryToBase, re-seeded by restore). This is what makes persist incremental:
+  // planPersist diffs the in-memory archived tasks against it (put on change, drop on gone,
+  // reset on clear). Only mutated inside persist() (serialized work) and restore() (session
+  // boundaries) — the R6 argument. Empty while degraded: never drop what we could not read.
+  let archiveBase = new Map<number, string>();
   // Mount-once + update-in-place (same pattern as FleetWidgetController in
   // src/ui/fleet-widget.ts): `mountedWidget` tracks whether WIDGET_KEY is
   // currently registered so an ordinary task-list change only triggers a
@@ -260,7 +293,38 @@ export function wireTodo(pi: ExtensionAPI, deps: TodoNudgeDeps = {}): TodoWireRe
     // degrade to an empty replay instead of throwing (repo convention:
     // graceful degradation on missing host APIs).
     const branch = typeof ctx.sessionManager?.getBranch === "function" ? ctx.sessionManager.getBranch() : [];
-    commit(replayState(branch) ?? emptyState());
+    // todo-archive-split quick win ② (review Major #2): the dedup key restarts at EVERY
+    // session boundary — session_start/session_tree/session_compact all land here, so the
+    // first persist after restore always writes. Without the reset, navigateTree back to
+    // an earlier leaf followed by a change that re-derives byte-identical snapshot content
+    // (e.g. delete A after rolling back to a leaf that still contains A) would skip the
+    // write and leave the pre-rollback snapshot as the branch's last valid candidate —
+    // replay would resurrect the deleted task.
+    liveKey = undefined;
+    // todo-archive-split #92 §4.2: replay through the three-phase reader (fold + merge +
+    // validate) and seed the archive baseline from the fold's ORIGINAL task objects
+    // (pre-tolerant-drop — review Minor #4): keys computed on the pre-drop edges are what
+    // self-heal a dangling on-disk edge with an extra put on the next persist. Copies that
+    // lost to a live snapshot stay in the baseline on purpose — the next persist then emits
+    // a `moved` drop for them (crash-window/reopen self-healing). Degraded (no merge would
+    // validate, review Minor #3): keep an EMPTY baseline and warn — "never actively drop
+    // what we could not read". Two sub-cases share this: (i) the winning candidate is a
+    // live-only split snapshot (archive package missing) — subsequent persists write no
+    // archive data; (ii) the winning candidate is an OLD full snapshot that still contains
+    // archived tasks (written by a pre-#92 extension during a rollback) — the empty baseline
+    // makes the next persist emit a one-shot full put of every archived task (migration,
+    // §4.3 #8; a put is not a drop, so it cannot violate the never-drop rule).
+    const replayed = replayTodo(branch);
+    if (replayed.degraded) {
+      archiveBase = new Map();
+      console.warn(
+        "[pi-subagent] todo archive packages failed validation; degraded to live-only " +
+          "(archived tasks stay on disk and return after the state is fixed)",
+      );
+    } else {
+      archiveBase = new Map([...replayed.archived.entries()].map(([id, task]) => [id, canonicalKey(task)]));
+    }
+    commit(replayed.state ?? emptyState());
     // todo-archive §2: after replay the completion ages restart — register every currently
     // "completed and not archived" task at the CURRENT turnSeq (re-count from here).
     doneSince.clear();
@@ -271,7 +335,27 @@ export function wireTodo(pi: ExtensionAPI, deps: TodoNudgeDeps = {}): TodoWireRe
   };
 
   const persist = (): void => {
-    pi.appendEntry(STATE_ENTRY, cloneState(state));
+    // todo-archive-split #92 §4.2: derive pre → live → post from the two baselines.
+    // Each successful append is applied to its baseline IMMEDIATELY, so a mid-persist
+    // appendEntry failure leaves the baselines at the last written position and the next
+    // persist re-derives and re-writes the remainder (idempotent convergence). persist
+    // runs only inside serialized work (tools via enqueue, sweep/clear via serialize), so
+    // the 2–3 synchronous appends are never interleaved with other entries. persist may
+    // legitimately write nothing (e.g. an archived-task edit changes no live content —
+    // only the pre put fires; a pure no-op change writes zero entries).
+    const plan = planPersist(state, archiveBase, liveKey);
+    if (plan.pre) {
+      pi.appendEntry(ARCHIVE_ENTRY, plan.pre);
+      applyArchiveEntryToBase(archiveBase, plan.pre);
+    }
+    if (plan.live) {
+      pi.appendEntry(STATE_ENTRY, plan.live);
+      liveKey = plan.liveKey;
+    }
+    if (plan.post) {
+      pi.appendEntry(ARCHIVE_ENTRY, plan.post);
+      applyArchiveEntryToBase(archiveBase, plan.post);
+    }
   };
 
   const refreshWidget = (ui = currentUI): void => {
@@ -331,11 +415,15 @@ export function wireTodo(pi: ExtensionAPI, deps: TodoNudgeDeps = {}): TodoWireRe
     return serialize(work);
   };
 
-  /** todo-archive §2: archive the given completed tasks (or "all"), only inside serialized work.
-   *  Persists exactly once per effective change; failures are contained (warn + keep going). */
+  /** todo-archive §2 + todo-archive-split §6 (D14): archive the given completed tasks (or
+   *  "all") and enforce the TODO_ARCHIVE_CAP eviction in the SAME step — eviction only ever
+   *  runs here (the only place the archived count grows); its drops share the pre package with
+   *  the pruned neighbors' puts (atomic, §4.3 #9). Persists exactly once per effective change
+   *  (archiveCompleted and evictArchived both return the same reference on no change); failures
+   *  are contained (warn + keep going). Only inside serialized work. */
   const sweep = (ids: number[] | "all"): void => {
     try {
-      const next = archiveCompleted(state, ids, Date.now());
+      const next = evictArchived(archiveCompleted(state, ids, Date.now()), TODO_ARCHIVE_CAP);
       if (next === state) return;
       commit(next);
       persist();
@@ -350,7 +438,9 @@ export function wireTodo(pi: ExtensionAPI, deps: TodoNudgeDeps = {}): TodoWireRe
     extra: Partial<ToolDetails> = {},
   ): { content: [{ type: "text"; text: string }]; details: ToolDetails } => ({
     content: [{ type: "text", text: formatToolText(action, state, extra.task, extra.changed) }],
-    details: { action, state: cloneState(state), ...extra },
+    // Quick win ① (todo-archive-split §2.3): no `state` snapshot in details — the tool
+    // text already carries what the model needs; replay reads the custom STATE_ENTRY.
+    details: { action, ...extra },
   });
 
   const registerMutation = <T extends object>(
@@ -390,7 +480,8 @@ export function wireTodo(pi: ExtensionAPI, deps: TodoNudgeDeps = {}): TodoWireRe
           notifyUnblocked(ctx, result.unblocked);
           return {
             content: [{ type: "text" as const, text }],
-            details: { action, state: cloneState(state), ...result },
+            // Quick win ① (todo-archive-split §2.3): no `state` snapshot in details.
+            details: { action, ...result },
           };
         });
       },
@@ -586,7 +677,7 @@ export function wireTodo(pi: ExtensionAPI, deps: TodoNudgeDeps = {}): TodoWireRe
   if (nudgeTrackingEnabled) {
     // E1: a completion notification (subagent / workflow / bash job) entered
     // the session. message_start fires for every message regardless of
-    // display, matching stack.ts's createNotificationReceiptHook pattern.
+    // display, matching delivery/stack-hooks.ts's createNotificationReceiptHook pattern.
     pi.on("message_start", (event) => {
       const message = (event as { message?: { role?: string; customType?: string } }).message;
       if (message?.role !== "custom") return;
@@ -633,7 +724,14 @@ export function wireTodo(pi: ExtensionAPI, deps: TodoNudgeDeps = {}): TodoWireRe
       if (isGitWriteCommand(command)) nudgeState = recordEvidence(nudgeState, "e2");
     });
 
-    // E3 + trigger evaluation. Hidden message, never triggers a new turn.
+    // E3 + trigger evaluation. Task59 阶段A: the message is now VISIBLE (`display: true`) —
+    // pi's TUI renders display:true custom messages through CustomMessageComponent (default
+    // box + markdown body) and the web-hub transcript's itemEntry admits them (display:false
+    // non-date customs are dropped there). Still `triggerTurn: false`: sendCustomMessage with
+    // a falsy triggerTurn NEVER starts a run (it only appends the entry + emits
+    // message_start/message_end), so visibility adds no new model turn and no E1 self-loop
+    // (message_start fires regardless of display, and E1 matches only the three completion
+    // customTypes above — TODO_NUDGE_CUSTOM_TYPE is not one of them).
     pi.on("turn_end", () => {
       const precondition: NudgePrecondition = {
         inProgress: state.tasks.filter((task) => task.status === "in_progress").length,
@@ -656,7 +754,7 @@ export function wireTodo(pi: ExtensionAPI, deps: TodoNudgeDeps = {}): TodoWireRe
           {
             customType: TODO_NUDGE_CUSTOM_TYPE,
             content: text,
-            display: false,
+            display: true,
             details: { e1: nudgeState.e1, e2: nudgeState.e2, e3: nudgeState.e3, kind: result.kind },
           },
           { triggerTurn: false },

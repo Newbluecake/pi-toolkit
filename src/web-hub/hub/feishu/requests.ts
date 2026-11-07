@@ -7,10 +7,12 @@ import {
   FEISHU_RECEIVED_BODY_MAX_BYTES,
   formatRequestHeader,
 } from "../../protocol/feishu.js";
+import type { ThreadMeta, ThreadRoutedResult, ThreadRunRef } from "../../protocol/thread.js";
 import { computeRequestToken } from "./credentials.js";
 import { systemFeishuClock, type FeishuClock } from "./http.js";
 import type { FeishuAdmission, FeishuIdentityContext, FeishuInstallation } from "./admission.js";
 import type { FeishuRequestRecord, FeishuState, NewRequestInput } from "./state.js";
+import { feishuHandbackBody, feishuHandbackNote, threadRetainedRequests, type FeishuThreadGate } from "./thread-hub.js";
 
 export const feishuDigest = (text: string): string => createHash("sha256").update(text).digest("hex");
 /** JSON framing is unambiguous even for ids containing ':' or sharing prefixes. */
@@ -23,10 +25,29 @@ export function feishuRequestText(record: FeishuRequestRecord, installSecret: st
   return `${formatRequestHeader(record.senderDisplay, record.chatLabel, computeRequestToken(installSecret, record.id))}\n${record.payload.body}`;
 }
 export type FeishuRequestEvent =
-  | { type: "dispatching"; request: FeishuRequestRecord; text: string }
+  | { type: "dispatching"; request: FeishuRequestRecord; text: string; thread?: true }
   | { type: "accepted"; request: FeishuRequestRecord; text: string; reactionEligible: boolean; recovered: boolean }
   | { type: "rejected" | "uncertain" | "expired"; request: FeishuRequestRecord; code: string }
-  | { type: "merged"; request: FeishuRequestRecord; members: string[] };
+  | { type: "merged"; request: FeishuRequestRecord; members: string[] }
+  /** fabric-thread §8.1: a routed result went durable — the tracker was already detached and
+   * the request migrated to `accepted{thr:routed}` (or straight to `replied{thread-routed}`
+   * when over the §8.2 caps, `retained:false`). Service side: attachments→referenced, Typing
+   * cleanup, receipt, retention timer. `runs` are the wire-validated subscribers. */
+  | {
+      type: "routed";
+      request: FeishuRequestRecord;
+      runs: ThreadRunRef[];
+      retained: boolean;
+      recovered: boolean;
+    };
+/** §8.3 handback outcome — mapped 1:1 onto the `thr_res` error vocabulary by the service. */
+export type FeishuHandbackResult =
+  | { ok: true; requestId: string; dup?: true }
+  | {
+      ok: false;
+      code: "E_THR_STATE" | "E_THR_HANDBACK_GONE" | "E_THR_REBOUND" | "E_THR_REVOKED";
+      effect: "none" | "unknown";
+    };
 export interface FeishuRequestsDeps {
   state: FeishuState;
   installation(): FeishuInstallation | undefined;
@@ -40,6 +61,11 @@ export interface FeishuRequestsDeps {
     reason: "persist-failed" | "background-failed" | "retry-full";
     operation: string;
   }): void;
+  /** fabric-thread §4.2/§8: present iff `feishuBot.threads` exists — the attach gate, the routed
+   *  result validation and the §8.2 retention caps. Absent ⇒ every cmd frame byte-identical. */
+  threads?: FeishuThreadGate;
+  /** §8.1 step 2: `runs.detach(id)` — clear the tracker's timers WITHOUT finishing it. */
+  detachRun?(id: string): void;
 }
 export type FeishuReceiveInput = Omit<NewRequestInput, "id" | "batchId" | "textDigest">;
 interface BufferEntry {
@@ -214,7 +240,18 @@ export function createFeishuRequests(deps: FeishuRequestsDeps) {
         await reject(id, "stale");
         return;
       }
-      if (!queryOnly) deps.emit({ type: "dispatching", request: deps.state.requests.get(id)!, text });
+      // fabric-thread §4.2: attach `cmd.thread` ONLY when the gate, the group topic and the
+      // target agent's `thr.v1` cap all hold — otherwise the frame stays byte-identical (G2b).
+      const threadMeta: ThreadMeta | undefined =
+        deps.threads === undefined ? undefined : deps.threads.metaFor(deps.state.requests.get(id)!, agentKey);
+      if (!queryOnly)
+        deps.emit({
+          type: "dispatching",
+          request: deps.state.requests.get(id)!,
+          text,
+          // §8.1 结果竞争: candidates carry the flag — gap/epoch/session/consumed races defer to the result.
+          ...(threadMeta !== undefined && threadMeta.bypass !== true ? { thread: true } : {}),
+        });
       let outcome;
       try {
         outcome = await deps.admission.dispatch({
@@ -225,7 +262,13 @@ export function createFeishuRequests(deps: FeishuRequestsDeps) {
           bindingRev: record.bindingRev,
           ...(queryOnly ? { queryOnly: true } : {}),
           ...(agentKey ? { expectedAgentKey: agentKey } : {}),
-          cmd: { op: "prompt", deliver: "followUp", expect: { sessionId: record.sessionId }, text },
+          cmd: {
+            op: "prompt",
+            deliver: "followUp",
+            expect: { sessionId: record.sessionId },
+            text,
+            ...(threadMeta !== undefined ? { thread: threadMeta } : {}),
+          },
         });
       } catch {
         if (disposed) return;
@@ -260,6 +303,25 @@ export function createFeishuRequests(deps: FeishuRequestsDeps) {
         outcome = { ...outcome, result: { t: "cmd_result", rid: outcome.result.rid, id, ...data.result } };
       }
       if (outcome.ok && outcome.result.ok) {
+        // fabric-thread §8.1: the routed branch wins over the plain accepted path — detach the
+        // tracker FIRST (same sync step), then migrate, then commit; commit failure parks the
+        // receipt (no回执 until the retry succeeds).
+        const routed =
+          deps.threads === undefined ? undefined : deps.threads.routedResultOk(outcome.result.data, outcome.agentKey);
+        if (routed !== undefined) {
+          // rebind-plan r3 §4.10 段 C (P1): the binding generation may have moved BETWEEN the
+          // forward and this result (a rebind landed in between) — a routed outcome must never
+          // resurrect retention for a thread the session no longer holds. Mismatch ⇒ the legal
+          // finalization chain via closedByRebind instead of routedOutcome.
+          const fresh = deps.state.requests.get(id);
+          const binding = fresh === undefined ? undefined : deps.state.bindings.get(fresh.bindingKey);
+          if (fresh === undefined || binding?.rev !== fresh.bindingRev || binding.sessionId !== fresh.sessionId) {
+            await closedByRebind(id);
+            return;
+          }
+          await routedOutcome(id, routed, outcome.agentKey, queryOnly);
+          return;
+        }
         const transitioned = deps.state.requests.transition(id, "accepted", { agentKey: outcome.agentKey });
         if (transitioned.ok)
           await committed(id, "accepted", async () => {
@@ -286,6 +348,178 @@ export function createFeishuRequests(deps: FeishuRequestsDeps) {
     } finally {
       inflight.delete(id);
     }
+  }
+  /** §8.1 steps 1–4: detach → migrate `accepted{thr:routed}` → (§8.2 caps ⇒ immediate
+   *  `replied{thread-routed}`) → commit → emit `routed`. Shared by dispatch (live + queryOnly
+   *  recovery) and `lateRouted` (uncertain + cmd_late). */
+  async function routedOutcome(
+    id: string,
+    routed: ThreadRoutedResult,
+    agentKey: string | undefined,
+    recovered: boolean,
+  ): Promise<void> {
+    deps.detachRun?.(id); // BEFORE the migration, same synchronous step (no tracker spans the commit)
+    const candidateBytes = Buffer.byteLength(deps.state.requests.get(id)?.payload?.body ?? "");
+    const transitioned = deps.state.requests.transition(id, "accepted", {
+      ...(agentKey !== undefined ? { agentKey } : {}),
+      code: "thr:routed",
+    });
+    if (!transitioned.ok) return;
+    const retained = !(deps.threads?.retainWouldExceed(id, candidateBytes) ?? false);
+    if (!retained) deps.state.requests.transition(id, "replied", { code: "thread-routed" });
+    await committed(id, "routed", async () => {
+      const current = deps.state.requests.get(id);
+      if (
+        current === undefined ||
+        !(
+          (current.state === "accepted" && current.code === "thr:routed") ||
+          (current.state === "replied" && current.code === "thread-routed")
+        )
+      )
+        return;
+      deps.emit({ type: "routed", request: current, runs: routed.runs, retained, recovered });
+    });
+  }
+  /** rebind-plan r3 §4.10 段 C (P1): the legal finalization chain for a request whose binding
+   *  generation moved out from under it (a rebind landed while it was `dispatching`/`uncertain`,
+   *  or while it sat retained as `accepted{thr:routed}`). ALL synchronous, one tick:
+   *    1. `detachRun` FIRST (same order as routedOutcome — no tracker spans the commit);
+   *    2. dispatching/uncertain → `accepted` (a SILENT waypoint — never emitted; if that illegal
+   *       transition is ever refused, `rejected` is legal from both states and is the fallback);
+   *    3. → `replied{thread-closed}` (accepted→replied and uncertain→replied are both legal);
+   *    4. the persistence barrier via the shared `committed()` — a commit failure parks and
+   *       retries (R5: never swallowed); NOTHING is emitted and no retention is armed either way.
+   *  `dispatching` → `replied` directly is an ILLEGAL migration (state.ts REQUEST_TRANSITIONS)
+   *  and is never attempted. */
+  async function closedByRebind(id: string): Promise<void> {
+    if (disposed) return;
+    const record = deps.state.requests.get(id);
+    if (record === undefined) return;
+    const retained = record.state === "accepted" && record.code === "thr:routed";
+    if (record.state !== "dispatching" && record.state !== "uncertain" && !retained) return;
+    deps.detachRun?.(id);
+    if (!retained) {
+      if (!deps.state.requests.transition(id, "accepted", { code: "thr:routed" }).ok) {
+        // Defensive fallback: `rejected` is legal from both dispatching and uncertain and is
+        // already terminal — commit it directly (step 3 would be illegal FROM rejected).
+        if (!deps.state.requests.transition(id, "rejected", { code: "thread-closed" }).ok) return;
+        await committed(id, "closed-by-rebind", async () => {});
+        return;
+      }
+    }
+    if (!deps.state.requests.transition(id, "replied", { code: "thread-closed" }).ok) return;
+    await committed(id, "closed-by-rebind", async () => {});
+  }
+  /** §8.1 晚到 cmd_late: `uncertain` + a routed late result ⇒ the same routed branch; anything
+   *  else stays untouched (the existing resend card already covers it). */
+  async function lateRouted(id: string, data: unknown, agentKey: string): Promise<void> {
+    if (disposed || inflight.has(id)) return;
+    const current = deps.state.requests.get(id);
+    if (current === undefined || current.state !== "uncertain") return;
+    const routed = deps.threads === undefined ? undefined : deps.threads.routedResultOk(data, agentKey);
+    if (routed === undefined) return;
+    inflight.add(id);
+    try {
+      // rebind-plan r3 §4.10 (P1): a generation-mismatched late routed goes to closedByRebind —
+      // it must not resurrect retention for a rebound thread.
+      const binding = deps.state.bindings.get(current.bindingKey);
+      if (binding?.rev !== current.bindingRev || binding.sessionId !== current.sessionId) {
+        await closedByRebind(id);
+        return;
+      }
+      await routedOutcome(id, routed, agentKey, true);
+    } finally {
+      inflight.delete(id);
+    }
+  }
+  /** §8.3 handback (r3-2: 先认后继、再验源). The deterministic successor id
+   *  (`feishuBatchIdentity(["thb:"+eventId])`) makes every repeat/concurrent call return the
+   *  SAME requestId; the persistence barrier never ACKs a memory-only successor. */
+  async function handback(input: {
+    eventId: string;
+    sessionId: string;
+    by: ThreadRunRef | "system";
+    note: string;
+    ctx: { installGen: number; tenantKey: string };
+  }): Promise<FeishuHandbackResult> {
+    // Step 1 — caller recheck on EVERY call (first or repeat).
+    const install = deps.installation();
+    if (!install?.active || install.gen !== input.ctx.installGen || input.ctx.tenantKey !== deps.state.tenant.get())
+      return { ok: false, code: "E_THR_STATE", effect: "none" };
+    const ids = feishuBatchIdentity([`thb:${input.eventId}`]);
+    const successor = deps.state.requests.get(ids.id);
+    const source = deps.state.requests.get(input.eventId);
+    if (successor !== undefined) {
+      // Step 2 — successor identity + revocation, then the barrier.
+      if (
+        successor.batchId !== ids.batchId ||
+        successor.sessionId !== input.sessionId ||
+        (source !== undefined && successor.sessionId !== source.sessionId)
+      )
+        return { ok: false, code: "E_THR_STATE", effect: "none" };
+      if (!deps.state.allowList.has(successor.senderOpenId))
+        return {
+          ok: false,
+          code: "E_THR_REVOKED",
+          effect:
+            successor.state === "received" || successor.state === "revoked" || successor.state === "rejected"
+              ? "none"
+              : "unknown",
+        };
+      if (await deps.state.commit()) return { ok: true, requestId: ids.id, dup: true };
+      return { ok: false, code: "E_THR_STATE", effect: "unknown" };
+    }
+    // Step 3 — only WITHOUT a successor is the source validated.
+    if (
+      source === undefined ||
+      source.state !== "accepted" ||
+      source.code !== "thr:routed" ||
+      source.payload === undefined
+    )
+      return { ok: false, code: "E_THR_HANDBACK_GONE", effect: "none" };
+    if (source.sessionId !== input.sessionId) return { ok: false, code: "E_THR_STATE", effect: "none" };
+    if (!deps.state.allowList.has(source.senderOpenId)) return { ok: false, code: "E_THR_REVOKED", effect: "none" };
+    const binding = deps.state.bindings.get(source.bindingKey);
+    if (binding?.rev !== source.bindingRev || binding.sessionId !== source.sessionId || binding.offline !== undefined)
+      return { ok: false, code: "E_THR_REBOUND", effect: "none" };
+    // Steps 4–6 — successor content, receive + source finalization in ONE sync step, then commit.
+    const body = feishuHandbackBody(
+      feishuHandbackNote({ by: input.by, sourceCreatedAt: source.sourceCreatedAt, note: input.note }),
+      source.payload.body,
+    );
+    const received = deps.state.requests.receive({
+      id: ids.id,
+      batchId: ids.batchId,
+      sessionId: source.sessionId,
+      bindingKey: source.bindingKey,
+      bindingRev: source.bindingRev,
+      senderOpenId: source.senderOpenId,
+      senderDisplay: source.senderDisplay,
+      chatLabel: source.chatLabel,
+      chatId: source.chatId,
+      chatType: source.chatType,
+      ...(source.threadId ? { threadId: source.threadId } : {}),
+      triggerMessageId: source.triggerMessageId,
+      textDigest: feishuDigest(body),
+      payload: { body, uploadIds: [...source.payload.uploadIds], messageIds: [`thb:${input.eventId}`] },
+      sourceCreatedAt: clock.now(), // internal re-dispatch time — passes the stale check (resend() precedent)
+      installGen: input.ctx.installGen,
+      tenantKey: input.ctx.tenantKey,
+    });
+    if (!received.ok) return { ok: false, code: "E_THR_STATE", effect: "none" };
+    deps.state.requests.transition(source.id, "replied", { code: "thread-handback" });
+    if (await deps.state.commit()) {
+      release(ids.id); // into the normal debounce/dispatch (bypass ⇒ native path, §5.5)
+      return { ok: true, requestId: ids.id };
+    }
+    park(
+      ids.id,
+      async () => {
+        release(ids.id);
+      },
+      "handback",
+    );
+    return { ok: false, code: "E_THR_STATE", effect: "unknown" };
   }
   async function close(entry: BufferEntry): Promise<void> {
     clock.clearTimeout(entry.timer);
@@ -471,6 +705,13 @@ export function createFeishuRequests(deps: FeishuRequestsDeps) {
       });
     },
     release,
+    /** §8.1 晚到 cmd_late routed 恢复（service 在 bus cmd_late 事件上调用）。 */
+    lateRouted,
+    /** rebind-plan r3 §4.10 (P1): legal finalization for a generation-mismatched in-flight or
+     *  retained request — `replied{thread-closed}`, no emit, no retention, commit park/retry. */
+    closedByRebind,
+    /** §8.3 专用接口：确定性后继 + 持久化屏障；与 resend() 同级的复核链。 */
+    handback,
     /** Also callable by F8 when the shared persistence health signal heals. */
     retryPending,
     get pendingRetries() {
@@ -504,6 +745,10 @@ export function createFeishuRequests(deps: FeishuRequestsDeps) {
       }
       deps.state.nonces.purgeOperator(openId);
       const ids = deps.state.requests.revokeSender(openId);
+      // fabric-thread §8.2 撤权: state.revokeSender only sweeps `received` — the retained
+      // `thr:routed` of the same sender finalize here (`replied{thread-revoked}`, payload dropped).
+      for (const r of threadRetainedRequests(deps.state))
+        if (r.senderOpenId === openId) deps.state.requests.transition(r.id, "replied", { code: "thread-revoked" });
       await committed(`revoke:${openId}`, "revocation", async () => {});
       return ids;
     },

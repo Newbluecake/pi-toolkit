@@ -745,6 +745,26 @@ describe("/agent settings interactive editor wiring", () => {
     expect(notified[0]).toContain("Extension settings");
   });
 
+  it("`/agent settings list` header carries the same source suffix as the editor title", async () => {
+    const notified: string[] = [];
+    const ctx = { mode: "print", ui: { notify: (m: string) => notified.push(m) } };
+    const withNote = {
+      ...editorDeps(),
+      settings: {
+        current: JSON.parse(JSON.stringify(DEFAULT_SETTINGS)),
+        persist: () => undefined,
+        path: "/tmp/test-pi-toolkit.json",
+        pathNote: "inherited from ~/.pi/agent",
+      },
+    };
+    await createStatusCommand(withNote as never).handler("settings list", ctx as never);
+    expect(notified[0]).toContain("Extension settings — /tmp/test-pi-toolkit.json (inherited from ~/.pi/agent):");
+    notified.length = 0;
+    await createStatusCommand(editorDeps() as never).handler("settings list", ctx as never);
+    expect(notified[0]).toContain("Extension settings — /tmp/test-pi-subagent.json:");
+    expect(notified[0]).not.toContain("(inherited");
+  });
+
   it("falls back to the text listing outside TUI mode (print/rpc) and without ui.custom", async () => {
     const notified: string[] = [];
     const print = { mode: "print", ui: { notify: (m: string) => notified.push(m), custom: async () => undefined } };

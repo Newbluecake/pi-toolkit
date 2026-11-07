@@ -4,7 +4,8 @@ import { wireChildKeepalive } from "../../src/cache-ttl/child.js";
 import { getChildKeepaliveDisposeRegistry } from "../../src/cache-ttl/child-registry.js";
 import { getChildKeepaliveLedger } from "../../src/cache-ttl/ping-ledger.js";
 import { fakePiStreamSimple } from "../cache-ttl/fake-pipeline.js";
-import { DEFAULT_SETTINGS, parseCacheTtlSettings, type AgentSettings } from "../../src/config/settings.js";
+import { DEFAULT_SETTINGS, type AgentSettings } from "../../src/config/settings.js";
+import { parseCacheTtlSettings } from "../../src/cache-ttl/settings.js";
 
 /**
  * child-context-switch plan.md §7 P3 — T-K6/T-K7/T-K8 (integration): `wireChildKeepalive`

@@ -5,7 +5,6 @@
  */
 import { describe, expect, it } from "vitest";
 import { resolveCommandPolicy, schedulePolicy } from "../../../src/web-hub/agent/command-policy.js";
-import { SCHED_HASH_RE } from "../../../src/web-hub/protocol/schedule.js";
 
 const HASH = "fd9fcbba309bbae09b0d3c6d69258712ce12370868bc09012b3649c28daa08e9";
 
@@ -30,23 +29,22 @@ describe("command policy: /schedule (§5.2 web column)", () => {
 
   it("--all write forms are deny", () => {
     for (const sub of ["pause", "resume", "rm", "run"]) expect(policy(`${sub} s_abcd2345 --all`)).toBe("deny");
-    expect(policy(`approve s_abcd2345 ${HASH} --all`)).toBe("deny");
   });
 
-  it("approve is allow ONLY with exactly <id> <64-hex hash>", () => {
-    expect(policy(`approve s_abcd2345 ${HASH}`)).toBe("allow");
-    expect(policy("approve s_abcd2345")).toBe("deny");
-    expect(policy("approve")).toBe("deny");
-    expect(policy(`approve s_abcd2345 ${HASH.slice(0, 8)}`)).toBe("deny");
-    expect(policy(`approve s_abcd2345 ${HASH.toUpperCase()}`)).toBe("deny");
-    expect(policy(`approve s_abcd2345 ${HASH} extra`)).toBe("deny");
-  });
-
-  it("__put <json…> <hash> is allow; without a trailing hash it is deny", () => {
-    expect(policy(`__put {"name":"a b","prompt":"x --all y"} ${HASH}`)).toBe("allow");
-    expect(policy(`__put {"name":"x"}`)).toBe("deny");
-    expect(policy(`__put ${HASH}`)).toBe("deny");
-    expect(policy(`__put {"name":"x"} nothash`)).toBe("deny");
+  it("approve / reject / __put are deny in every shape (removed with the approval concept; tightened from allow)", () => {
+    for (const args of [
+      `approve s_abcd2345 ${HASH}`,
+      "approve s_abcd2345",
+      "approve",
+      `approve s_abcd2345 ${HASH} --all`,
+      `reject s_abcd2345 ${HASH}`,
+      "reject s_abcd2345",
+      "reject",
+      `__put {"name":"a b","prompt":"x --all y"} ${HASH}`,
+      `__put {"name":"x"}`,
+      `__put ${HASH}`,
+    ])
+      expect(policy(args)).toBe("deny");
   });
 
   it("add / edit / repair / unknown are deny", () => {
@@ -57,14 +55,13 @@ describe("command policy: /schedule (§5.2 web column)", () => {
   it("webCommandPolicy.schedule overrides the whole name", () => {
     expect(policy("list", { schedule: "deny" })).toBe("deny");
     expect(policy("add", { schedule: "allow" })).toBe("allow");
-    expect(policy(`approve s_abcd2345 ${HASH}`, { schedule: "confirm" })).toBe("confirm");
+    expect(policy("rm s_abcd2345", { schedule: "allow" })).toBe("allow");
   });
 
-  it("schedulePolicy is the table row and its hash shape mirrors SCHED_HASH_RE", () => {
+  it("schedulePolicy is the table row: bare ⇒ allow, anything unknown ⇒ deny", () => {
     expect(schedulePolicy([])).toEqual({ policy: "allow" });
-    expect(SCHED_HASH_RE.test(HASH)).toBe(true);
-    // Every hash the mirror accepts the protocol accepts too (and vice versa) on a small corpus.
-    for (const h of [HASH, HASH.toUpperCase(), HASH.slice(1), `${HASH}0`, "g".repeat(64)])
-      expect(schedulePolicy(["approve", "s_abcd2345", h]).policy === "allow").toBe(SCHED_HASH_RE.test(h));
+    expect(schedulePolicy(["approve", "s_abcd2345", HASH])).toEqual({ policy: "deny" });
+    expect(schedulePolicy(["__put", "{}", HASH])).toEqual({ policy: "deny" });
+    expect(schedulePolicy(["pause", "s_abcd2345"])).toEqual({ policy: "confirm" });
   });
 });

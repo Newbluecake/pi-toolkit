@@ -93,6 +93,17 @@ describe("bash-jobs-panel StatusInfo.bashJobs wire schema (包 A0 freeze)", () =
     expect(decodedStatus({ t: "status", ...status, bashJobs: withoutOmitted })?.bashJobs).toEqual(withoutOmitted);
   });
 
+  it("rowsOverflowRunning (2026-10-28, append-only) round-trips; a negative/non-integer value drops the frame", () => {
+    const withOverflow = { ...bashJobsWire, rowsOverflowRunning: 5 };
+    expect(decodedStatus({ t: "status", ...status, bashJobs: withOverflow })?.bashJobs).toEqual(withOverflow);
+    expect(decodedStatus({ t: "status", ...status, bashJobs: { ...bashJobsWire, rowsOverflowRunning: -1 } })).toBe(
+      undefined,
+    );
+    expect(decodedStatus({ t: "status", ...status, bashJobs: { ...bashJobsWire, rowsOverflowRunning: 1.5 } })).toBe(
+      undefined,
+    );
+  });
+
   it("rows and the enclosing body stay open to unknown fields and future status values (D5/Q4)", () => {
     const withFuture = {
       ...bashJobsWire,
@@ -246,7 +257,7 @@ describe("bash-jobs-panel StatusInfo.bashJobs wire schema (包 A0 freeze)", () =
       ].sort(),
     );
     expect(Object.keys(BashJobsWireSchema.properties as Record<string, unknown>).sort()).toEqual(
-      ["rows", "total", "running", "failed", "omitted", "sampledAt"].sort(),
+      ["rows", "total", "running", "failed", "omitted", "rowsOverflowRunning", "sampledAt"].sort(),
     );
     expect(BashJobRowSchema.properties).not.toHaveProperty("logPath");
     expect(BashJobsWireSchema.properties).not.toHaveProperty("logPath");

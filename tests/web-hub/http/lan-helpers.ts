@@ -32,6 +32,11 @@ import { captureLog, type LogLine } from "./helpers.js";
 import { freePort } from "../../helpers/free-port.js";
 import { testHubPaths } from "../helpers/paths.js";
 
+/** #66: verify target matching `seedLanUser`'s default seed (N=2^14 r=8 p=1). */
+export const TEST_KDF_POLICY = {
+  verifyTarget: { n: 16384, r: 8, p: 1, keyLen: 32, saltBytes: 16 },
+} as const;
+
 export interface FakeClock {
   now(): number;
   advance(ms: number): void;
@@ -149,7 +154,13 @@ export async function startLan(
         store: privacyStore,
         registry: opts.registry ?? { list: () => [], get: () => undefined },
         verifyPassword: (userId, password, clientIp) =>
-          verifyPassword({ clientIp }, userId, password, { store, kdf, limiter, admission }),
+          verifyPassword({ clientIp }, userId, password, {
+            store,
+            kdf,
+            limiter,
+            admission,
+            kdfPolicy: TEST_KDF_POLICY,
+          }),
         log,
         now: clock.now,
       });
@@ -202,6 +213,9 @@ export async function startLan(
         cfg,
         store,
         kdf,
+        // #66: `seedLanUser` seeds N=2^14 for speed; time the dummy/verify path against that shape so
+        // existing KDF-call-count assertions keep their v0.10 meaning (no padding compensation).
+        kdfPolicy: TEST_KDF_POLICY,
         limiter,
         admission,
         hosts,

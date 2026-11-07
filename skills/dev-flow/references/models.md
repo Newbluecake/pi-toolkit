@@ -15,7 +15,7 @@ SKILL.md 的「阶段→模型」表只给首选/回退；本文件是精确 ID�
 | opus-5.5       | `cr-anthropic/claude-opus-5-5`（**opus 档唯一档**：$4/$20）                                                                                                                                                                                                                                           |
 | fable          | `cr-anthropic/claude-fable-5-1` ⚠️ **须 `ask_user` 批准后才可派**（$10/$50）                                                                                                                                                                                                                          |
 | gpt-6.1-sol    | `copilot-response/gpt-6.1-sol` → `cr-response/gpt-6.1-sol`（2026-10-19 起 cr-response 恢复可用：copilot 报错/429/额度耗尽先换 cr-response 同模型续跑，两线都不行再按阶段回退链换模型；传输中断时 resume 重试；**禁止用于验收**）；$2/$10，cacheRead $0.1（6.1 起缓存读减半），>272k 输入 2×/输出 1.5× |
-| deepseek-flash | `deepseek/deepseek-flash`（验收次选，2026-10-18 起替代 deepseek-v4-pro；与 Claude/GLM/Kimi 系异源）                                                                                                                                                                                                   |
+| deepseek-flash | `deepseek/deepseek-flash`（验收次选，2026-10-18 起替代 deepseek-v4-pro；与 Claude/GLM/Kimi 系异源；2026-10-27 起也可做代码探索，与 glm-5.3 并列）                                                                                                                                                     |
 
 ## 疑难升级阶梯（fable 闸门）
 
@@ -36,7 +36,9 @@ sonnet → opus-5.5（疑难默认天花板） → [ask_user 批准] → fable
 
 ## 渠道与独立性规则
 
-- **gpt-6.1-sol 是评审首选**：与 Claude 系的方案/开发模型天然异源，保证评审独立；实测评审质量好。
+- **评审首选 gpt-6.1-sol ⇄ kimi-k3**：两者都与 Claude 系的方案/开发模型天然异源，保证评审独立。gpt-6.1-sol
+  实测评审质量好；kimi-k3（`kimi-coding/k3-256k`，订阅）2026-10-26 用户令可做评审，与 gpt-6.1-sol 并列——多个方案
+  并行评审时按包分摊，GPT 线 429/503 时直接改派 kimi-k3（kimi 开发/制定的方案不派 kimi 评审）。
   首选 copilot 渠道 `copilot-response/gpt-6.1-sol`，备线 `cr-response/gpt-6.1-sol`（同价，2026-10-19 用户令恢复
   cr-response；cr-response 不接受 reasoning `minimal`/`none`，最低用 `low`）。zhipu-pool 仍不使用；gpt-6-astra /
   gpt-5.6-terra / gpt-5.6-luna / gpt-5.5 虽可调用，但未分配 dev-flow 角色，不进路由表。
@@ -97,3 +99,4 @@ sonnet → opus-5.5（疑难默认天花板） → [ask_user 批准] → fable
 | 2026-10-18 | 第 0 步改为主会话 ask_user 轻量澄清；dev-clarify 降为可选（用户要求）    |
 | 2026-10-24 | 前端开发 kimi-k3 首选、GLM 次之；droid 移出路由表（用户令）              |
 | 2026-10-24 | 方案制定回退链加 kimi-k3（sonnet 之后；用户令）                          |
+| 2026-10-27 | 代码探索加 deepseek-flash，与 glm-5.3 并列（用户令）                     |

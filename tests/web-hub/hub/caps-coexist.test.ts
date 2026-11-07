@@ -7,6 +7,7 @@ import {
   CMD_HISTORY_HUB_CAPS,
   DIALOG_BG_HUB_CAPS,
   HOLD_HUB_CAPS,
+  EPOCH_UP_CAP,
   P2_HUB_CAPS,
   PREVIEW_ABS_HUB_CAP,
   RUNTX_HUB_CAPS,
@@ -127,6 +128,11 @@ describe("§8.4 caps coexistence — hub cap surfaces (upload ∪ spawn ∪ runt
     // P0 declarations alone never advertise an unwired feature.
     expect(browserCaps).not.toContain(LAN_2FA_HUB_CAP);
     expect(browserCaps).not.toContain(LAN_SESSIONS_HUB_CAP);
+    // #23 web-update-stuck plan §2.2 (D12): epoch.up.v1 is AGENT-face only — the hub never
+    // broadcasts it on either cap surface (it is an agent→hub event-policy request, not a hub
+    // feature); set-equality above means this one check pins BOTH faces at once.
+    expect(browserCaps).not.toContain(EPOCH_UP_CAP);
+    expect(agentCaps).not.toContain(EPOCH_UP_CAP);
     for (const cap of [
       ...P2_HUB_CAPS,
       ...UPLOAD_HUB_CAPS,
@@ -547,6 +553,47 @@ it.each([undefined, "all", "toolkit"] as const)(
     expect(fe.deps[0]?.commandComplete !== undefined).toBe(cmdArgs !== undefined);
   },
 );
+
+describe("fabric-thread rebind P0b: thr.rebind.v1 hub caps (rebind-plan r3 §4.2)", () => {
+  it.each([undefined, false, true] as const)(
+    "threads.rebind=%s: thr.rebind.v1 on BOTH surfaces iff true; thr.v1 always rides a threads config",
+    async (rebind) => {
+      const { normalizeFeishuBotHubConfig, FEISHU_BOT_DEFAULTS } =
+        await import("../../../src/web-hub/protocol/feishu.js");
+      const { THREAD_CAP, THREAD_REBIND_CAP } = await import("../../../src/web-hub/protocol/version.js");
+      const bot = normalizeFeishuBotHubConfig(FEISHU_BOT_DEFAULTS)!;
+      const threads = {
+        handbackWindowMin: 10,
+        startTimeoutMin: 8,
+        retainMin: 15,
+        replyPerThreadPerMin: 6,
+        replyPerThreadPerHour: 60,
+        ...(rebind === undefined ? {} : { rebind }),
+      };
+      const result = await startHub(
+        config({ home: tmp.make("wh-thr-rebind-"), feishuBot: { ...bot, threads } }),
+        fakeFrontend().factory,
+      );
+      if ("exists" in result) throw new Error("hub unavailable");
+      hubs.push(result);
+      const client = await connectClient(result.paths.socketPath);
+      client.send(hello());
+      const ack = await client.waitFrame((f) => f.t === "hello_ack");
+      client.sock.destroy();
+      expect(ack.caps).toEqual(result.info.caps); // two surfaces, same source
+      expect(result.info.caps).toContain(THREAD_CAP);
+      expect(result.info.caps.includes(THREAD_REBIND_CAP)).toBe(rebind === true);
+      // #23 D12: epoch.up.v1 never joins a hub surface, whatever the feature gates
+      expect(result.info.caps).not.toContain(EPOCH_UP_CAP);
+      expect(ack.caps).not.toContain(EPOCH_UP_CAP);
+      // tail-appended IMMEDIATELY after thr.v1 when on (§4.2)
+      if (rebind === true) {
+        const i = result.info.caps.indexOf(THREAD_CAP);
+        expect(result.info.caps[i + 1]).toBe(THREAD_REBIND_CAP);
+      }
+    },
+  );
+});
 
 describe("fabric phase-2 X1: xs.v1 cap coexists with the optional hub features", () => {
   it.each([0, 1, 2, 3, 4, 5, 6, 7])(

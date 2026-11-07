@@ -34,8 +34,9 @@
   defensive agent-key watcher re-reads it.
 -->
 <script setup lang="ts">
-import { computed, defineAsyncComponent, inject, onBeforeUnmount, provide, ref, watch } from "vue";
+import { computed, defineAsyncComponent, inject, nextTick, onBeforeUnmount, provide, ref, watch } from "vue";
 import { holdAvailable, heldRowMode, isWebSentMessage, mergeQueue, newCmdId } from "@logic/control.js";
+import { forgetXsRemote, forgetXsSeeds } from "@logic/xsRequestState.js";
 import { RESUME_DIALOG, type ResumeScope } from "@logic/resume.js";
 import { restoringKeys } from "../../logic/spawn.js";
 import { useI18n } from "../../composables/useI18n.js";
@@ -60,6 +61,10 @@ import DetailDock from "./DetailDock.vue";
 import DetailHeader from "./DetailHeader.vue";
 import OutdatedReloadBanner from "./OutdatedReloadBanner.vue";
 import NoticeBanner from "../shell/NoticeBanner.vue";
+import FleetSummaryBar from "../fleet/FleetSummaryBar.vue";
+import { useActivityRail } from "../../composables/useActivityRail.js";
+import { useMedia } from "../../composables/useMedia.js";
+import type { FleetRowWire } from "@protocol/messages.js";
 import FleetDrawer, { useFleetDrawerMode, useFleetDrawerOpen } from "../drawer/FleetDrawer.vue";
 
 const RETRY_NOTICE_ID = "history-error";
@@ -185,7 +190,13 @@ const queueItems = computed<readonly unknown[]>(() =>
 watch(
   () => hub?.state.value.removed?.has(props.agent.key) ?? false,
   (gone) => {
-    if (gone) control.value?.forgetAgent?.(props.agent.key);
+    if (gone) {
+      control.value?.forgetAgent?.(props.agent.key);
+      // fabric-xs-activation P4: the card's mention seeds AND remote-merge rows go with its
+      // original-text partition.
+      forgetXsSeeds(props.agent.key);
+      forgetXsRemote(props.agent.key);
+    }
   },
   { flush: "sync" },
 );
@@ -511,22 +522,20 @@ const dockCtlProps = computed(() => ({
   // steer-recall §7: the dock's hold gating (see the row-mode inputs above).
   holdEnabled: holdOn.value,
   holdLink: holdRowModeOf.value === "recallable" ? ("live" as const) : ("unavailable" as const),
+  // fabric-xs-activation P4: the request area's shared clock (expiry/backoff math).
+  now: props.now,
 }));
 
 // --- fleet drawer (fleet-drawer plan v2 §6.1/§6.2 — F6) --------------------------------------
 
 const drawerMode = useFleetDrawerMode(window).mode;
-const { open: drawerOpen, toggle: toggleDrawerState, close: closeDrawerState } = useFleetDrawerOpen(drawerMode);
+const { open: pinnedOpen } = useFleetDrawerOpen(drawerMode);
 const hasFleet = computed(() => props.agent.fleet.length > 0);
 // 2026-10-15 bash→fleet 迁移:后台 bash 任务住在抽屉树视图的「bash」分组里 —— 无子 agent
 // 但有 bash 任务时抽屉同样挂载(否则分组不可达)。
 const hasBashJobs = computed(() => bashJobsOf(props.agent) !== undefined);
 const selectedRunId = computed(() => props.agent.runSel ?? null);
-/** 2026-10-08 (user field report: fresh session's composer sat in a squashed left column):
- * `data-drawer-open` must only be set when the drawer will actually RENDER (the `v-if` below
- * gates on `hasFleet || selectedRunId !== null`). The persisted docked-open pref defaults to
- * true, so without this gate a fleet-less session got the docked grid's `1fr var(--drawer-w)`
- * tracks with an unmounted drawer — a dead 480-760px column on the pane's right side. */
+// Only rail.open with real content may allocate a docked column. Peek never does.
 
 /** 退选正在看的 run(「没人看就不推」,§2;transport 拆除在 useHub 里)。所有关闭入口统一
  * 走这个语义 —— Esc/外点/关闭按钮(onCloseDrawer)和摘要行按钮的关方向(onToggleDrawer)
@@ -536,14 +545,57 @@ function deselectRun(): void {
   if (typeof props.agent.runSel === "string") hub?.selectRun?.(props.agent.key, null);
 }
 
-function onToggleDrawer(): void {
-  if (drawerOpen.value) deselectRun(); // 关方向:统一退订;开方向不自动重选(展示树)
-  toggleDrawerState();
-}
+const hoverFine = useMedia(window, "(hover: hover) and (pointer: fine)").matches;
+const rail = useActivityRail({
+  mode: drawerMode,
+  pinnedOpen,
+  hoverFine,
+  hasAgent: computed(() => hasFleet.value || selectedRunId.value !== null),
+  hasBash: hasBashJobs,
+  deselectRun,
+});
+const drawerOpen = rail.open;
+const drawerPanel = rail.panel;
+const effectiveMode = rail.effectiveMode;
+const peeking = rail.peeking;
+const openOrigin = rail.origin;
+const trigger = rail.trigger;
+const canPeek = rail.canPeek;
 
+// --- Task60 (docs/dev/activity-rail/compact-panel-plan.md §2.1/§3): 单实例入口双宿主 -------
+// 零预留列后，手动/锁定/fullscreen 展开的入口进 FleetDrawer 公共头部（正常文档流）；
+// hover/held 及收起态留在浮动宿主。唯一一份 FleetSummaryBar 用局部 Teleport 在两个
+// 稳定 HTMLElement 之间移动 —— 不复制组件、不 Teleport 到 body、不用全局 selector 寻址。
+/** peek 或 held 都必须保持浮动 DOM 与几何：hover 打开时不移走 hover 目标（避免振荡），
+ * held(pointerdown 提升后) 不在 click 落地前移动按钮（避免丢 click）。held 时 peeking
+ * 已为 false，所以不能只看 peeking/mode —— 这正是独立派生 floating 的原因。 */
+const panelFloating = computed(() => peeking.value || rail.held.value);
+const floatingHostEl = ref<HTMLElement | null>(null);
+const headerHostEl = ref<HTMLElement | null>(null);
+/** 首选宿主；header 宿主 ref 未就绪时返回 null ⇒ Teleport disabled，内容就地渲染在
+ * 浮动宿主内（Teleport 本身在浮动宿主里），nextTick 后再迁移，绝不向不存在的目标传送。 */
+const railTarget = computed<HTMLElement | null>(() => {
+  if (panelFloating.value || !drawerOpen.value) return floatingHostEl.value;
+  return headerHostEl.value;
+});
+// Teleport 移动可能使浏览器丢焦点：仅当移动前焦点在被移动的 rail 按钮内，且没有更高
+// 优先级的开/关焦点动作接手（activeElement 仍是 body）时，才把焦点还给**同一节点**；
+// 键盘开抽屉聚焦 close、外点/超时关闭不归还 —— 一律不主动抢焦点。
+let railMoveFocus: HTMLElement | null = null;
+watch(railTarget, () => {
+  const active = document.activeElement;
+  railMoveFocus = active instanceof HTMLElement && active.closest(".activity-rail") !== null ? active : null;
+});
+watch(railTarget, async () => {
+  const el = railMoveFocus;
+  railMoveFocus = null;
+  if (el === null) return;
+  await nextTick();
+  if (el.isConnected && document.activeElement === document.body) el.focus();
+});
+const bashJobs = computed(() => bashJobsOf(props.agent));
 function onCloseDrawer(): void {
-  deselectRun();
-  closeDrawerState();
+  rail.close();
 }
 </script>
 
@@ -552,7 +604,9 @@ function onCloseDrawer(): void {
     class="detail"
     aria-labelledby="detail-title"
     :data-drawer="drawerMode"
-    :data-drawer-open="(drawerOpen && (hasFleet || hasBashJobs || selectedRunId !== null)) || undefined"
+    :data-drawer-open="drawerOpen || undefined"
+    :data-docked-open="(drawerOpen && effectiveMode === 'docked') || undefined"
+    :data-peek-open="peeking || undefined"
   >
     <DetailHeader :agent="agent" :narrow="narrow" @back="emit('back')" />
 
@@ -577,11 +631,9 @@ function onCloseDrawer(): void {
           :now="now"
           :following="following"
           :narrow="narrow"
-          :drawer-open="drawerOpen"
           @load-older="emit('load-older')"
           @update:following="onUpdateFollowing"
           @new-count="onNewCount"
-          @toggle-drawer="onToggleDrawer"
         />
 
         <!-- ask_user dialogs: ONE non-modal floating window (user ruling 2026-10-20, mock
@@ -614,6 +666,22 @@ function onCloseDrawer(): void {
         <ResumeDialog v-if="resumeOpen" :scope="resumeScope" @close="resumeOpen = false" />
       </div>
 
+      <!-- Task60 §2.1: 常驻浮动宿主 —— rail 的定位祖先（absolute inset:0 + 点击穿透，零布局
+           占位）。单实例 SummaryBar 默认在这里；只有 settled open 才 Teleport 进抽屉公共头部。 -->
+      <div ref="floatingHostEl" data-rail-host="floating">
+        <Teleport :to="railTarget" :disabled="railTarget === null">
+          <FleetSummaryBar
+            :rows="agent.fleet as unknown as readonly FleetRowWire[]"
+            :bash-jobs="bashJobs"
+            :open="drawerOpen"
+            :panel="drawerPanel"
+            @toggle-panel="rail.toggle"
+            @peek-panel="rail.enter"
+            @peek-end="rail.leave"
+            @peek-keep="rail.keep"
+          />
+        </Teleport>
+      </div>
       <!-- §6.1: 抽屉在 CONTROL_CTX 的 provide 作用域内(原为树上的行内动作,2026-10-17 已移除);
            v-if 按方案冻结:有 fleet 行或有选中 run 才挂载;`id="fleet-drawer"` 在
            FleetDrawer 根元素上(§6.1 的锚点,FleetSummaryBar 的 aria-controls 指它)。 -->
@@ -621,10 +689,27 @@ function onCloseDrawer(): void {
         v-if="hasFleet || hasBashJobs || selectedRunId !== null"
         :agent="agent"
         :now="now"
-        :mode="drawerMode"
+        :mode="effectiveMode"
         :open="drawerOpen"
+        :panel="drawerPanel"
+        :peeking="peeking"
+        :can-peek="canPeek"
+        :open-origin="openOrigin"
+        :trigger="trigger"
+        :floating="panelFloating"
+        @peek-keep="rail.keep"
+        @peek-end="rail.leave"
+        @promote="rail.promote"
+        @interaction-end="rail.releaseInteraction"
+        @toggle-pin="rail.togglePin"
         @close="onCloseDrawer"
-      />
+      >
+        <!-- 公共头部的常驻 header 宿主（在 tree/run 互斥分支之前，不随分支切换销毁）；
+             生产必传 floating，组件内仅局部扩展 props 类型，不改 contracts。 -->
+        <template #activity>
+          <div ref="headerHostEl" data-rail-host="header"></div>
+        </template>
+      </FleetDrawer>
     </div>
   </main>
 </template>

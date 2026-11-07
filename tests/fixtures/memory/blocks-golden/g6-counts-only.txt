@@ -1,0 +1,7 @@
+## Memory (proj) — 2 topic(s) · 2 block(s)
+
+Topics (relevant blocks are injected automatically; read one with memory view <topic>):
+- alpha · 1 blocks
+- beta · 1 blocks
+
+<!-- pi-toolkit:memory proj -->

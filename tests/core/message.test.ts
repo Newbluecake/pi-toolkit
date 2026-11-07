@@ -3,10 +3,15 @@ import {
   authorize,
   effectiveCanMessage,
   formatMessage,
+  isMessageKind,
   makeMessageKey,
   parseMessageKey,
   type FabricRecord,
+  type MessageKind,
+  type MessageRelation,
 } from "../../src/core/message.js";
+
+const LEGACY_KIND: string = "finding"; // #34 legacy input
 
 describe("fabric message protocol", () => {
   it("round-trips strict four-part message keys", () => {
@@ -27,8 +32,8 @@ describe("fabric message protocol", () => {
 
   it("defaults undefined canMessage to parent", () => {
     expect(effectiveCanMessage(undefined)).toEqual(["parent"]);
-    expect(authorize({ kind: "finding", relation: "parent" })).toBe(true);
-    expect(authorize({ kind: "finding", relation: "child" })).toBe(false);
+    expect(authorize({ kind: "report", relation: "parent" })).toBe(true);
+    expect(authorize({ kind: "report", relation: "child" })).toBe(false);
     expect(authorize({ kind: "result", relation: "child" })).toBe(true);
     expect(authorize({ kind: "result", relation: "parent" })).toBe(false);
     expect(authorize({ kind: "directive", relation: "parent" })).toBe(true);
@@ -37,7 +42,7 @@ describe("fabric message protocol", () => {
     expect(authorize({ kind: "dead_letter", relation: "unrelated", from: "system" })).toBe(true);
     expect(
       authorize({
-        kind: "finding",
+        kind: "report",
         relation: "unrelated",
         from: "r_ABCDEFGH",
         mention: { kind: "mention", label: "worker", target: "r_12345678" },
@@ -46,7 +51,7 @@ describe("fabric message protocol", () => {
     ).toBe(true);
     expect(
       authorize({
-        kind: "finding",
+        kind: "report",
         relation: "unrelated",
         mention: { kind: "mention", label: "worker", target: "r_12345678" },
       }),
@@ -69,7 +74,7 @@ describe("fabric message protocol", () => {
     ).toBe(false);
     expect(
       authorize({
-        kind: "finding",
+        kind: "report",
         relation: "unrelated",
         from: "r_12345678",
         mention: { kind: "mention", label: "worker", target: "r_12345678" },
@@ -86,14 +91,14 @@ describe("fabric message protocol", () => {
       seq: 1,
       payload: { text: "do this" },
     };
-    expect(formatMessage({ ...base, kind: "finding" }, "parent").header).toContain("不可信输入");
-    expect(formatMessage({ ...base, kind: "finding" }, "parent").text).toContain("do this");
+    expect(formatMessage({ ...base, kind: "report" }, "parent").header).toContain("不可信输入");
+    expect(formatMessage({ ...base, kind: "report" }, "parent").text).toContain("do this");
     expect(formatMessage({ ...base, kind: "directive" }, "parent").text).toContain("<fabric-directive>");
     expect(formatMessage({ ...base, kind: "directive" }, "sibling").text).toContain("do this");
     expect(
-      formatMessage({ ...base, kind: "finding", via: { mode: "mention", lca: "root", hops: [] } }, "sibling").header,
+      formatMessage({ ...base, kind: "report", via: { mode: "mention", lca: "root", hops: [] } }, "sibling").header,
     ).toContain("relation=mention");
-    expect(formatMessage({ ...base, kind: "finding", via: { lca: "root", hops: [] } }, "sibling").header).toContain(
+    expect(formatMessage({ ...base, kind: "report", via: { lca: "root", hops: [] } }, "sibling").header).toContain(
       "relation=sibling",
     );
   });
@@ -104,7 +109,7 @@ describe("fabric message protocol", () => {
         key: makeMessageKey("r_ABCDEFGH", "root", 1, 1),
         from: "r_ABCDEFGH",
         to: "root",
-        kind: "finding",
+        kind: "report",
         seq: 1,
         generation: 1,
         payload: { text: "x" },
@@ -118,5 +123,55 @@ describe("fabric message protocol", () => {
     };
     expect(rejected.state).toBe("dropped");
     expect(rejected.attempts).toBe(0);
+  });
+});
+
+describe("#34 unknown-kind predicate (T-U1)", () => {
+  it("isMessageKind accepts exactly the five current kinds and nothing else", () => {
+    for (const kind of ["progress", "report", "directive", "result", "dead_letter"])
+      expect(isMessageKind(kind)).toBe(true);
+    for (const bad of [LEGACY_KIND, "", undefined, 42, null, {}, []]) expect(isMessageKind(bad)).toBe(false);
+  });
+
+  it("authorize is false for a pre-#34 kind across every relation x can_message combination", () => {
+    const relations: readonly MessageRelation[] = [
+      "self",
+      "parent",
+      "child",
+      "ancestor",
+      "descendant",
+      "sibling",
+      "unrelated",
+    ];
+    const canSets = [
+      undefined,
+      [],
+      ["parent"],
+      ["child"],
+      ["ancestor"],
+      ["descendant"],
+      ["sibling"],
+      ["self"],
+      ["mention"],
+      ["parent", "mention"],
+    ] as const;
+    for (const relation of relations)
+      for (const canMessage of canSets) {
+        const base = {
+          kind: LEGACY_KIND as MessageKind,
+          relation,
+          ...(canMessage === undefined ? {} : { canMessage }),
+        };
+        expect(authorize(base)).toBe(false);
+        expect(authorize({ ...base, from: "r_ABCDEFGH" })).toBe(false);
+        expect(
+          authorize({
+            ...base,
+            from: "r_ABCDEFGH",
+            mention: { kind: "mention", label: "l", target: "r_12345678" },
+          }),
+        ).toBe(false);
+        expect(authorize({ ...base, from: "system", route: { kind: "wake_result", runId: "r_12345678" } })).toBe(false);
+      }
   });
 });

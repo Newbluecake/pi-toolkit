@@ -1,0 +1,406 @@
+import { describe, expect, it, vi } from "vitest";
+import { createMessageSpeed, type MessageSpeedOwner } from "../../../src/web-hub/agent/message-speed.js";
+import { messageSpeedBinding } from "../../../src/web-hub/agent/message-speed-binding.js";
+import { createEventTap } from "../../../src/web-hub/agent/event-tap.js";
+
+const binding = { responseId: "resp", provider: "openai", api: "openai-responses", model: "fake" };
+const completed = (id = "resp") => ({
+  provider: binding.provider,
+  api: binding.api,
+  model: binding.model,
+  data: {
+    type: "response.completed",
+    response: {
+      id,
+      status: "completed",
+      usage: { output_tokens: 10, output_tokens_details: { reasoning_tokens: 0 } },
+      output: [],
+    },
+  },
+});
+function fixture() {
+  let time = 0;
+  let currentOwner: MessageSpeedOwner | undefined = {
+    sessionId: "session",
+    sessionGeneration: 1,
+    activationGeneration: {},
+    ownerToken: {},
+  };
+  let ctx: object | undefined = {};
+  let sid: unknown = "session";
+  let guard: (() => unknown) | undefined = () => undefined;
+  const append = vi.fn();
+  const speed = createMessageSpeed({
+    monotonicNow: () => time,
+    currentOwner: () => currentOwner,
+    getCurrentContext: () => ctx,
+    sessionId: () => sid,
+    secureRecheckForWrite: () => guard?.(),
+    appendEntry: append,
+  });
+  const message = { role: "assistant", ...binding, content: [{ type: "text", text: "ok" }], usage: { output: 10 } };
+  const event = (type: string, extra: Record<string, unknown> = {}) => speed.event({ type, ...extra });
+  const start = (index: unknown = 0) => {
+    event("agent_start");
+    event("turn_start", { turnIndex: index });
+    event("message_start", { message });
+  };
+  const delta = (kind = "text_delta", b: typeof binding | undefined = binding, text = "a") =>
+    speed.delta(kind, text, b);
+  const generate = () => {
+    delta();
+    time = 500;
+    delta();
+    speed.raw(completed());
+  };
+  const finish = (over: Record<string, unknown> = {}) =>
+    event("turn_end", { message, turnIndex: 0, messageEntryId: "mid", ...over });
+  return {
+    speed,
+    event,
+    start,
+    delta,
+    generate,
+    finish,
+    message,
+    append,
+    setTime: (n: number) => {
+      time = n;
+    },
+    owner: () => currentOwner!,
+    setOwner: (o: MessageSpeedOwner | undefined) => {
+      currentOwner = o;
+    },
+    setCtx: (o: object | undefined) => {
+      ctx = o;
+    },
+    setSid: (s: unknown) => {
+      sid = s;
+    },
+    setGuard: (g: () => unknown) => {
+      guard = g;
+    },
+  };
+}
+const core = { v: 1, tokens: 10, genMs: 500, deltaCount: 2 };
+describe("generation lifecycle and exact-owner persistence", () => {
+  it("consumes proof and pending once, nonassistant end does not consume, final object is unmodified", () => {
+    const f = fixture();
+    f.start();
+    f.generate();
+    expect(f.speed.end({ role: "toolResult" })).toBeUndefined();
+    expect(f.speed.end(f.message)).toEqual(core);
+    expect(f.message).not.toHaveProperty("piToolkitGeneration");
+    f.finish();
+    f.finish();
+    expect(f.append).toHaveBeenCalledTimes(1);
+    expect(f.append).toHaveBeenCalledWith("subagent:web-msg-speed", { piToolkitGeneration: { ...core, mid: "mid" } });
+  });
+  it.each(["agent_end", "agent_settled", "agent_start", "turn_start", "message_start", "reset"])(
+    "clears pending on %s",
+    (type) => {
+      const f = fixture();
+      f.start();
+      f.generate();
+      expect(f.speed.end(f.message)).toEqual(core);
+      if (type === "reset") f.speed.reset();
+      else f.event(type, { turnIndex: 0, message: f.message });
+      f.finish();
+      expect(f.append).not.toHaveBeenCalled();
+    },
+  );
+  it.each(["mid", "index", "copy", "missing-ref"])("skips mismatched %s and consumes pending", (failure) => {
+    const f = fixture();
+    f.start();
+    f.generate();
+    expect(f.speed.end(f.message)).toEqual(core);
+    const over =
+      failure === "mid"
+        ? { messageEntryId: undefined }
+        : failure === "index"
+          ? { turnIndex: 1 }
+          : { message: failure === "copy" ? { ...f.message } : undefined };
+    f.finish(over);
+    f.finish();
+    expect(f.append).not.toHaveBeenCalled();
+  });
+  it.each([
+    "ctx",
+    "session",
+    "token",
+    "generation",
+    "activation",
+    "locked",
+    "throw",
+    "thenable",
+    "guard-revoke",
+    "guard-ctx",
+  ])("write guard %s fails closed", (failure) => {
+    const f = fixture();
+    f.start();
+    f.generate();
+    expect(f.speed.end(f.message)).toEqual(core);
+    if (failure === "ctx") f.setCtx(undefined);
+    if (failure === "session") f.setSid("other");
+    if (failure === "token") f.setOwner({ ...f.owner(), ownerToken: {} });
+    if (failure === "generation") f.setOwner({ ...f.owner(), sessionGeneration: 2 });
+    if (failure === "activation") f.setOwner({ ...f.owner(), activationGeneration: {} });
+    if (failure === "locked") f.setGuard(() => "LOCKED");
+    if (failure === "throw")
+      f.setGuard(() => {
+        throw new Error("stale");
+      });
+    if (failure === "thenable") f.setGuard(() => ({ then() {} }));
+    if (failure === "guard-revoke")
+      f.setGuard(() => {
+        f.setOwner(undefined);
+      });
+    if (failure === "guard-ctx")
+      f.setGuard(() => {
+        f.setCtx({});
+      });
+    f.finish();
+    f.finish();
+    expect(f.append).not.toHaveBeenCalled();
+  });
+  it("append throw consumes pending without retry", () => {
+    const f = fixture();
+    f.append.mockImplementation(() => {
+      throw new Error("write");
+    });
+    f.start();
+    f.generate();
+    f.speed.end(f.message);
+    f.finish();
+    f.finish();
+    expect(f.append).toHaveBeenCalledTimes(1);
+  });
+  it("late subscription, invalid public index and next loop reuse of zero never borrow identity", () => {
+    const f = fixture();
+    f.event("turn_start", { turnIndex: 0 });
+    f.event("message_start", { message: f.message });
+    f.generate();
+    expect(f.speed.end(f.message)).toBeUndefined();
+    for (const index of [null, -1, NaN, 0.5]) {
+      f.start(index);
+      f.generate();
+      expect(f.speed.end(f.message)).toBeUndefined();
+    }
+    f.setTime(0);
+    f.start();
+    f.generate();
+    expect(f.speed.end(f.message)).toEqual(core);
+    f.event("agent_start");
+    f.event("turn_start", { turnIndex: 0 });
+    f.finish();
+    expect(f.append).not.toHaveBeenCalled();
+    f.setTime(0);
+    f.event("turn_start", { turnIndex: 0 });
+    f.event("message_start", { message: f.message });
+    f.generate();
+    expect(f.speed.end(f.message)).toEqual(core);
+    f.finish();
+    expect(f.append).toHaveBeenCalledTimes(1);
+  });
+  it("does not use normalized reasoning, incomplete starts, unknown api, mismatched output or final id", () => {
+    for (const change of ["api", "id", "tokens", "thinking", "missing-proof"]) {
+      const f = fixture();
+      f.start();
+      f.generate();
+      if (change === "api") f.message.api = "unknown";
+      if (change === "id") f.message.responseId = "other";
+      if (change === "tokens") f.message.usage.output = 9;
+      if (change === "thinking") f.message.content.push({ type: "thinking", text: "summary" });
+      if (change === "missing-proof") {
+        f.event("message_start", { message: f.message });
+        f.delta();
+        f.setTime(1000);
+        f.delta();
+      }
+      expect(f.speed.end(f.message)).toBeUndefined();
+    }
+  });
+  it.each([0, 1, 2, 3])("count %i crossed with 0/499/500/501ms exact thresholds", (count) => {
+    for (const span of [0, 499, 500, 501]) {
+      const f = fixture();
+      f.start();
+      for (let i = 0; i < count; i++) {
+        f.setTime(i === 0 ? 0 : span);
+        f.delta();
+      }
+      f.speed.raw(completed());
+      expect(f.speed.end(f.message)).toEqual(
+        count >= 2 && span >= 500 ? { ...core, genMs: span, deltaCount: count } : undefined,
+      );
+    }
+  });
+  it("raw different-id cannot supply proof, duplicate invalidates, each delta needs its own binding", () => {
+    for (const kind of [
+      "warmer-only",
+      "duplicate",
+      "missing-binding",
+      "changed-binding",
+      "backwards",
+      "nan",
+      "thinking",
+    ]) {
+      const f = fixture();
+      f.start();
+      f.delta();
+      f.setTime(500);
+      if (kind === "missing-binding") f.speed.delta("text_delta", "b", undefined);
+      else if (kind === "changed-binding") f.delta("text_delta", { ...binding, responseId: "other" });
+      else {
+        if (kind === "backwards") f.setTime(-1);
+        if (kind === "nan") f.setTime(NaN);
+        f.delta(kind === "thinking" ? "thinking_delta" : "text_delta");
+      }
+      f.speed.raw(completed(kind === "warmer-only" ? "warmer" : "resp"));
+      if (kind === "duplicate") f.speed.raw(completed());
+      expect(f.speed.end(f.message)).toBeUndefined();
+    }
+  });
+  it("host own-data adapter rejects getters/inherited/proxy while content and usage stay unread", () => {
+    let calls = 0;
+    const throwing = () => {
+      calls++;
+      throw new Error("getter");
+    };
+    const m = { ...binding };
+    for (const key of ["content", "usage"]) Object.defineProperty(m, key, { get: throwing });
+    expect(messageSpeedBinding({ message: m })).toEqual(binding);
+    expect(messageSpeedBinding({ message: Object.create(m) })).toBeUndefined();
+    for (const key of ["responseId", "provider", "api", "model"]) {
+      const bad = { ...binding };
+      Object.defineProperty(bad, key, { get: throwing });
+      expect(messageSpeedBinding({ message: bad })).toBeUndefined();
+    }
+    expect(
+      messageSpeedBinding(
+        new Proxy(
+          {},
+          {
+            getOwnPropertyDescriptor() {
+              throw new Error("trap");
+            },
+          },
+        ),
+      ),
+    ).toBeUndefined();
+    expect(calls).toBe(0);
+  });
+  it("tap timer coalescing does not change original count/span and message_end emits once before turn_end", () => {
+    const f = fixture();
+    const events: unknown[] = [];
+    const tap = createEventTap((e) => events.push(e), {
+      speed: f.speed,
+      now: () => 0,
+      setTimer: () => ({ cancel() {} }),
+    });
+    tap.handle({ type: "agent_start" });
+    tap.handle({ type: "turn_start", turnIndex: 0 });
+    tap.handle({ type: "message_start", message: f.message });
+    for (const time of [0, 500]) {
+      f.setTime(time);
+      tap.handle(
+        { type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "a" } },
+        binding,
+      );
+    }
+    f.speed.raw(completed());
+    tap.handle({ type: "message_end", message: f.message });
+    expect(events).toContainEqual({ type: "message_end", message: { ...f.message, piToolkitGeneration: core } });
+    expect(tap.recent()[0]?.message.piToolkitGeneration).toEqual(core);
+    tap.handle({ type: "turn_end", turnIndex: 0, message: f.message, messageEntryId: "mid" });
+    expect(events.filter((e) => (e as { type: string }).type === "message_end")).toHaveLength(1);
+    tap.dispose();
+  });
+});
+
+it("P0 delta-only tap stays positive with hostile snapshot getters and independently supplied own scalar binding", () => {
+  const f = fixture();
+  const emitted: Array<Record<string, unknown>> = [];
+  let getters = 0;
+  const throwing = () => {
+    getters++;
+    throw new Error("snapshot getter");
+  };
+  const tap = createEventTap((e) => emitted.push(e), {
+    speed: f.speed,
+    now: () => 0,
+    setTimer: () => ({ cancel() {} }),
+  });
+  tap.handle({ type: "agent_start" });
+  tap.handle({ type: "turn_start", turnIndex: 0 });
+  tap.handle({ type: "message_start", message: f.message });
+  const ame = { type: "text_delta", delta: "a", contentIndex: 0 };
+  for (const key of ["partial", "message", "error"]) Object.defineProperty(ame, key, { get: throwing });
+  const update = { type: "message_update", assistantMessageEvent: ame };
+  Object.defineProperty(update, "message", { get: throwing });
+  for (const time of [0, 500]) {
+    f.setTime(time);
+    tap.handle(update, binding);
+  }
+  f.speed.raw(completed());
+  tap.handle({ type: "message_end", message: f.message });
+  expect(getters).toBe(0);
+  expect(
+    (emitted.findLast((e) => e.type === "message_end")?.message as Record<string, unknown>).piToolkitGeneration,
+  ).toEqual(core);
+  expect(emitted.find((e) => e.type === "message_update")?.assistantMessageEvent).toEqual({
+    type: "text_delta",
+    delta: "aa",
+    contentIndex: 0,
+  });
+  tap.dispose();
+});
+
+it("raw completed must own response.id, reasoning number zero and output count with no inherited/getter evidence", () => {
+  for (const kind of [
+    "response-id",
+    "reasoning-missing",
+    "reasoning-inherited",
+    "reasoning-getter",
+    "output-mismatch",
+    "status",
+    "unknown-api",
+    "error",
+    "aborted",
+  ]) {
+    const f = fixture();
+    f.start();
+    f.delta();
+    f.setTime(500);
+    f.delta();
+    const raw = completed() as unknown as {
+      api: string;
+      data: { response: Record<string, unknown>; response_id?: string };
+    };
+    const r = raw.data.response;
+    let calls = 0;
+    if (kind === "response-id") {
+      delete r.id;
+      raw.data.response_id = "resp";
+    }
+    if (kind === "reasoning-missing") r.usage = { output_tokens: 10, output_tokens_details: {} };
+    if (kind === "reasoning-inherited")
+      r.usage = { output_tokens: 10, output_tokens_details: Object.create({ reasoning_tokens: 0 }) };
+    if (kind === "reasoning-getter")
+      r.usage = {
+        output_tokens: 10,
+        output_tokens_details: Object.defineProperty({}, "reasoning_tokens", {
+          get() {
+            calls++;
+            return 0;
+          },
+        }),
+      };
+    if (kind === "output-mismatch") r.usage = { output_tokens: 11, output_tokens_details: { reasoning_tokens: 0 } };
+    if (kind === "status") r.status = "failed";
+    if (kind === "unknown-api") raw.api = "unknown";
+    if (kind === "error" || kind === "aborted") Object.assign(f.message, { stopReason: kind });
+    f.speed.raw(raw);
+    expect(f.speed.end(f.message)).toBeUndefined();
+    expect(calls).toBe(0);
+  }
+});

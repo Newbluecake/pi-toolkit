@@ -14,7 +14,7 @@ const base = (over: Partial<FabricRecord> = {}): FabricRecord => ({
   key: KEY,
   from: "r_ABCDEFGH",
   to: "root",
-  kind: "finding",
+  kind: "report",
   seq: 1,
   generation: 1,
   payload: { text: "hello" },

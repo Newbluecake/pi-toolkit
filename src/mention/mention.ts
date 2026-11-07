@@ -50,6 +50,16 @@ export interface MentionRouteDeps {
    *  `subagent:mention-error` channel with `details.source:"mention-session"`; the sent
    *  confirmation rides `subagent:mention-session`). Absent ⇒ notices are dropped. */
   notifySession?: (notice: SessionMentionNotice) => void;
+  /** 2026-11-04 mention-handled fix: late-binding report port — `installMentionInput` calls it
+   *  ONCE with the RAW input-event text, right before answering pi `{action:"handled"}`. The
+   *  web-hub command ledger uses it to flip the still-`dispatched` prompt entry to `consumed`
+   *  (`WebHubControl.noteInputHandled`): a handled input short-circuits pi's input chain, so the
+   *  hub-side `onInputEvent` observer never runs and the entry would otherwise decay to
+   *  `unconfirmed(unobserved)` — "sent · unconfirmed" — even though the mention router really
+   *  applied the message. Never called for `{action:"continue"}`; absent ⇒ no report (legacy
+   *  behavior). Not called by `routeMention` itself — only the input-interceptor site knows the
+   *  text was consumed as a pi INPUT. */
+  onHandled?: (text: string) => void;
 }
 
 /** Build the one mention-routing dependency shape shared by TUI and web input paths. */
@@ -163,6 +173,11 @@ export function installMentionInput(
         );
       },
     });
+    // 2026-11-04 mention-handled fix: report the consumption BEFORE answering `handled` — pi
+    // stops the input chain at a `handled` answer, so this is the only report the web-hub
+    // observer will ever get for this text. Raw `event.text` (never a transformed variant),
+    // exactly once, only on the `handled` branch; `{action:"continue"}` reports nothing.
+    if (result.handled) deps.onHandled?.(event.text);
     return result.handled ? { action: "handled" } : { action: "continue" };
   });
 }

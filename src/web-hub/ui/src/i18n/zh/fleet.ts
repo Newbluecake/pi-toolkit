@@ -8,6 +8,11 @@ import en from "../en/fleet.js";
 type Messages<T> = { [K in keyof T]: string };
 
 const fleet = {
+  commandsTitle: "后台命令",
+  activityTitle: "活动入口",
+  pin: "固定面板",
+  unpin: "取消固定",
+
   panelTitle: "Agents",
   running: "{n} 个运行中",
   totalCost: "共 {n} 个 · {cost}",
@@ -18,6 +23,9 @@ const fleet = {
   archivedFold: "已归档 {n}",
   archivedToast: "已归档 {name}",
   undo: "撤销",
+  archiveOmittedDone: "已归档 {n} 条更早的任务",
+  archiveOmittedNone: "没有可归档的任务",
+  archiveOmittedFailed: "归档失败",
 } satisfies Messages<typeof en>;
 
 export default fleet;

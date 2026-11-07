@@ -1,31 +1,5 @@
-<!--
-  fleet 摘要入口(fleet-drawer plan v2 §6.3 — F6;2026-10 用户现场要求「整个子 Agent 这个
-  点击按钮放到右侧居中的位置作为一个悬浮展开的按钮使用」):原常驻文档流的全宽摘要行改为
-  悬浮竖排 tab —— 一个 `<button aria-controls="fleet-drawer" :aria-expanded>`,absolute 钉在
-  `.detail-body`(detail.css 已 `position:relative`)右缘、垂直居中,点击开合右侧抽屉。
-  DOM 类名 `.fleet-summary-bar` 保持不变(scripts/web-hub/visual/checks-body.ts 的
-  checkFleetDrawerOpen 按 class + aria-expanded 断言;FleetDrawer 的外点豁免/焦点归还也按
-  `[aria-controls="fleet-drawer"]` 找它)。docked 且抽屉已打开时仍由 CSS 整条隐藏
-  (`.detail[data-drawer="docked"][data-drawer-open] .fleet-summary-bar`,drawer.css —— 沿用
-  F6 契约:宽屏 docked 打开时抽屉本身就是常驻视图,× 关闭;悬浮按钮不抢这个位)。overlay/
-  fullscreen 模式下抽屉(z-index 30/40)盖住按钮,抽屉自带关闭。没有子 agent 行时不渲染
-  (沿用 ui-design.md §9「不占位」)。浮层机制(原 FleetPanel 的 document 监听 +
-  `.tree-scroll` 绝对定位)已随 FleetPanel 一起删除;Esc/外点关闭契约移交给 FleetDrawer(§6.4)。
-
-  2026-10-09 「这个单词竖过来感觉很怪」: 竖排面板名去掉,改为「‹ + bot 图标 + 计数徽标」——
-  ‹ 指向抽屉滑出的方向(右侧),面板名只留在 aria-label 里。
-  2026-10-09 「数字应该是进行中的 agent，不需要展示已经结束了的」: 徽标只数 running,没有
-  进行中的子 agent 时不显示徽标(总数/成本仍在 aria-label 与抽屉里)。
-  竖排 tab 的可见内容只有「图标 + 计数徽标」;聚合计数(running/总数/成本)全部
-  收进 `aria-label`(不给 `title` —— ui-design §6.3「不依赖 hover」,visual 的
-  shell-no-title-tooltips 在触屏档位断言全页无 [title])。
-  2026-10-15 bash→fleet 迁移(拍板 ⑤):没有子 agent 但有后台 bash 任务(`bashJobs`
-  prop)时按钮同样渲染 —— 否则抽屉里的 bash 分组不可达。
-  2026-10-15 用户再次拍板:「如果有运行中的命令,这里的数字也要统计进去,不然我以为
-  任务停了」—— 徽标 = 运行中的子 agent 数 + 运行中的后台 bash 命令数(wire 的 `running`
-  = 非终态行数,含 staged,即「仍在跑」口径),两者皆 0 时不显示;aria-label 里 agent
-  与 bash 的分项小计保留(取代同日早些「agent 计数永不混入 bash」的旧拍板)。
--->
+<!-- #41/#42 supersede the 2026-10-15 merged badge: independent agent/bash counts.
+     Both buttons remain usable while docked; AgentDetail owns the common split anchor. -->
 <script setup lang="ts">
 import { computed } from "vue";
 import type { FleetSummaryBarEmits, FleetSummaryBarProps } from "../../contracts.js";
@@ -39,52 +13,62 @@ import { summaryCounts } from "../detail/bashJobsView.js";
 const props = defineProps<FleetSummaryBarProps>();
 const emit = defineEmits<FleetSummaryBarEmits>();
 const { t } = useI18n();
-
 const summary = computed(() => fleetSummary(props.rows));
-const costLabel = computed(() => formatUsd(summary.value.costUsd));
-
-// 2026-10-15 用户再次拍板:徽标计入运行中的 bash —— `badgeCount` = fleet running + bash
-// running(wire 的 `running` 为非终态行数,含 staged,「仍在跑」语义)。`bashJobs` 已由
-// DetailBody 经 bashJobsOf narrowed(零行/缺失 ⇒ undefined);aria-label 的 agent/bash
-// 分项小计不变。
-const bashCounts = computed(() => (props.bashJobs === undefined ? null : summaryCounts(props.bashJobs)));
-const bashTotal = computed(() => {
-  const c = bashCounts.value;
-  return c === null ? 0 : c.running + c.done + c.failed;
+const buttons = computed(() => {
+  const bash = props.bashJobs === undefined ? null : summaryCounts(props.bashJobs);
+  return [
+    {
+      kind: "agent" as const,
+      icon: "bot" as const,
+      running: summary.value.running,
+      total: summary.value.total,
+      label: [
+        t("fleet.panelTitle"),
+        t("fleet.running", { n: summary.value.running }),
+        t("fleet.totalCost", { n: summary.value.total, cost: formatUsd(summary.value.costUsd) }),
+      ].join(" · "),
+    },
+    {
+      kind: "bash" as const,
+      icon: "terminal" as const,
+      running: bash?.running ?? 0,
+      total: bash === null ? 0 : bash.running + bash.done + bash.failed,
+      label: [
+        t("fleet.commandsTitle"),
+        t("fleet.running", { n: bash?.running ?? 0 }),
+        t("detail.bashJobsDone", { n: (bash?.done ?? 0) + (bash?.failed ?? 0) }),
+      ].join(" · "),
+    },
+  ].filter((b) => b.total > 0);
 });
-const visible = computed(() => summary.value.total > 0 || bashTotal.value > 0);
-/** 2026-10-15 拍板:徽标 = 运行中的子 agent + 运行中的后台 bash 命令;两者皆 0 ⇒ 不显示。 */
-const badgeCount = computed(() => summary.value.running + (bashCounts.value?.running ?? 0));
-
-/** 可见面只留图标/标题/计数;running·总数·成本全量进 aria-label(桌面 hover 无 tooltip 依赖)。 */
-const ariaLabel = computed(() => {
-  const parts = [t("fleet.panelTitle")];
-  if (summary.value.running > 0) parts.push(t("fleet.running", { n: summary.value.running }));
-  parts.push(t("fleet.totalCost", { n: summary.value.total, cost: costLabel.value }));
-  const bash = bashCounts.value;
-  if (bash !== null) {
-    if (bash.running > 0) parts.push(`bash ${t("detail.bashJobsRunning", { n: bash.running })}`);
-    else parts.push(`bash ${t("detail.bashJobsDone", { n: bash.done + bash.failed })}`);
-  }
-  return parts.join(" · ");
-});
+function toggle(kind: "agent" | "bash", event: MouseEvent): void {
+  emit("toggle-panel", kind, event.detail === 0 ? "keyboard" : "pointer", event.currentTarget as HTMLElement);
+  // Retain the legacy no-argument event; production only listens to toggle-panel.
+  emit("toggle");
+}
 </script>
 
 <template>
-  <button
-    v-if="visible"
-    class="fleet-summary-bar"
-    type="button"
-    aria-controls="fleet-drawer"
-    :aria-expanded="open"
-    :aria-label="ariaLabel"
-    @click="emit('toggle')"
-  >
-    <AppIcon name="chev-left" class="icon icon-sm chev" />
-    <AppIcon name="bot" class="icon fab-icon" />
-    <span v-if="badgeCount > 0" class="pill fab-count" data-st="running">
-      <span class="dot"></span>
-      <span class="num">{{ badgeCount }}</span>
-    </span>
-  </button>
+  <div v-if="buttons.length > 0" class="activity-rail" role="group" :aria-label="t('fleet.activityTitle')">
+    <button
+      v-for="button in buttons"
+      :key="button.kind"
+      class="fleet-summary-bar"
+      type="button"
+      :data-panel="button.kind"
+      :data-active="button.running > 0 || undefined"
+      aria-controls="fleet-drawer"
+      :aria-expanded="open && (panel ?? (summary.total > 0 ? 'agent' : 'bash')) === button.kind"
+      :aria-label="button.label"
+      @click="toggle(button.kind, $event)"
+      @pointerenter="emit('peek-panel', button.kind, $event)"
+      @pointerleave="emit('peek-end')"
+      @pointermove="emit('peek-keep')"
+    >
+      <AppIcon :name="button.icon" class="icon fab-icon" />
+      <span v-if="button.running > 0" class="pill fab-count" data-st="running">
+        <span class="num">{{ button.running > 99 ? "99+" : button.running }}</span>
+      </span>
+    </button>
+  </div>
 </template>

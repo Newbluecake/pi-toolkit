@@ -124,6 +124,7 @@ type SubPolicyFn = (tokens: readonly string[]) => PolicyDecision;
 const FABRIC_KNOWN_SUBS: ReadonlySet<string> = new Set([
   "replies",
   "status",
+  "__xs", // P3b internal key-only activate/query; the fabric override still governs it.
   "channels", // channel-plan §6.3 (CH3): read-only listing; baseline allow, subject to the `fabric` whole-name override
   "blocks",
   "join",
@@ -135,28 +136,18 @@ const FABRIC_KNOWN_SUBS: ReadonlySet<string> = new Set([
   "alias", // alias-plan §3.5/§7 (AL4): get/set/clear/take preview+exec; baseline allow, governed by `webCommandPolicy.fabric`
 ]);
 
-/** scheduled-reports plan r3 §5.2: sha256 full-hex shape of a defHash (mirror of protocol/schedule.ts's
- * SCHED_HASH_RE — parity pinned by tests/web-hub/protocol/schedule-policy.test.ts). */
-const SCHEDULE_HASH_RE = /^[0-9a-f]{64}$/;
-
 /**
  * `/schedule` web sub-command table (scheduled-reports plan r3 §5.2 「web」 column). Exported for
  * tests only — callers go through `resolveCommandPolicy`. The whole-name override
  * `webHub.webCommandPolicy.schedule` still wins outright (resolveCommandPolicy).
  *   - list / show / log (bare = list; `--all` read forms too) → allow
  *   - pause / resume / rm / run → confirm (generic confirm = anti-misclick only); any `--all` → deny
- *   - approve <id> <64-hex hash> → allow (the hash only comes from the review dialog); bare
- *     approve, wrong arity, non-hash or `--all` → deny
- *   - __put <json…> <64-hex hash> → allow (the panel review form; the JSON may contain spaces, so
- *     only the LAST token is checked as the hash); without a trailing hash → deny
+ *   - approve / reject / __put were removed with the approval concept (schedule-auto-approve r2): they
+ *     fall to `default: deny`, so a stale browser tab's old calls never execute
  *   - add / edit / repair / anything else → deny
  */
 export function schedulePolicy(tokens: readonly string[]): PolicyDecision {
   const sub = tokens[0] ?? "list";
-  if (sub === "__put") {
-    const hash = tokens.length >= 3 ? tokens[tokens.length - 1] : undefined;
-    return { policy: hash !== undefined && SCHEDULE_HASH_RE.test(hash) ? "allow" : "deny" };
-  }
   const all = tokens.includes("--all");
   switch (sub) {
     case "list":
@@ -168,12 +159,6 @@ export function schedulePolicy(tokens: readonly string[]): PolicyDecision {
     case "rm":
     case "run":
       return { policy: all ? "deny" : "confirm" };
-    case "approve": {
-      const hash = tokens[2];
-      return {
-        policy: !all && tokens.length === 3 && hash !== undefined && SCHEDULE_HASH_RE.test(hash) ? "allow" : "deny",
-      };
-    }
     default:
       return { policy: "deny" };
   }
@@ -194,9 +179,33 @@ const PI_TOOLKIT_TABLE: Readonly<Record<string, SubPolicyFn>> = {
   },
   // /mem [list] · path · doctor → read-only. init/import/tidy/restore write files or (tidy/restore)
   // are multi-step interactive flows the web caller cannot drive (§4.9's downgrade-to-cancel row).
+  // J4 (Q35): the read-only jev surfaces — bare `mem jev` (report) and `mem tags` / `mem tags
+  // list` — are allow; the state-changing `mem jev probe|retag|reset-index` and
+  // `mem tags add|rm|disable|enable` follow the generic confirm class (anti-misclick only).
+  // Unknown jev/tags sub-subcommands degrade to a read-only report/usage line, but stay
+  // confirm (over-cautious is safe; the Q35 deny tier stays empty this phase).
   mem(tokens) {
     const sub = tokens[0];
     if (sub === undefined || sub === "list" || sub === "path" || sub === "doctor") return { policy: "allow" };
+    if (sub === "jev") {
+      // bare `mem jev` = read-only report; every named sub-subcommand
+      // (probe/retag/reset-index — and typos, conservatively) confirms.
+      return { policy: tokens[1] === undefined ? "allow" : "confirm" };
+    }
+    if (sub === "tags") {
+      const sub2 = tokens[1];
+      if (sub2 === undefined || sub2 === "list") return { policy: "allow" };
+      return { policy: "confirm" };
+    }
+    // J8 (jev-plan §4 / hygiene-flow Q35): `review --list` is a read-only
+    // listing (allowed in a child session too, server-side); the bare
+    // interactive default and `--run` mutate state (or at least spend a
+    // Jev run) — generic confirm, same anti-misclick class as every other
+    // state-changing /mem subcommand here. `expired` has no read-only form.
+    if (sub === "review") {
+      return { policy: tokens[1] === "--list" ? "allow" : "confirm" };
+    }
+    if (sub === "expired") return { policy: "confirm" };
     // Batch's read-only surfaces are safe to invoke from the web hub. The
     // interactive archive/normalize and lock-break flows remain confirmed.
     if (
@@ -312,6 +321,7 @@ function tokenize(args: string): string[] {
 }
 
 export interface ResolvePolicyOptions {
+  memoryScopes?: boolean;
   name: string;
   args: string;
   kind: CommandKind;
@@ -321,6 +331,10 @@ export interface ResolvePolicyOptions {
 /** Main entry point (§4.6/§4.9): resolves the base decision for a classified command, before
  *  the busy/idle split (`effectivePolicy`) and before the caller checks `cmd.confirm`. */
 export function resolveCommandPolicy(opts: ResolvePolicyOptions): PolicyDecision {
+  if (opts.memoryScopes && opts.name === "mem") {
+    const scoped = scopedMemoryCommandPolicy(opts.args);
+    if (scoped) return scoped;
+  }
   const override = opts.overrides?.[opts.name];
   if (override !== undefined) return { policy: override };
   if (opts.kind === "template" || opts.kind === "skill") return { policy: "allow" };
@@ -335,4 +349,17 @@ export function resolveCommandPolicy(opts: ResolvePolicyOptions): PolicyDecision
 /** Applies the busy/idle split (only `/compact` has a `policyBusy` today). */
 export function effectivePolicy(decision: PolicyDecision, busy: boolean): CommandPolicy {
   return busy && decision.policyBusy !== undefined ? decision.policyBusy : decision.policy;
+}
+
+/** Exact new /mem subroutes only. Web writes are never overrideable. */
+export function scopedMemoryCommandPolicy(args: string): PolicyDecision | undefined {
+  const tokens = tokenize(args);
+  const scope = tokens[0];
+  if (scope !== "session" && scope !== "hub") return undefined;
+  const sub = tokens[1];
+  const read =
+    tokens.length === 1 ||
+    (tokens.length === 2 && ["list", "status", "path"].includes(sub ?? "")) ||
+    (scope === "hub" && ((sub === "show" && tokens.length === 3) || (sub === "trash" && tokens.length === 2)));
+  return { policy: read ? "allow" : "deny" };
 }

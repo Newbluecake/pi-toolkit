@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import activate from "../../src/index.js";
+import { resetSettingsFilesIn } from "./helpers/home-sandbox.js";
 
 /**
  * topic-switch P3b pi-facing assembly, integration-level (plan.md §P3b "tests/integration/
@@ -85,12 +86,12 @@ function writeSettings(raw: unknown): void {
 beforeEach(() => {
   delete (globalThis as Record<symbol, unknown>)[HOST_KEY];
   delete (globalThis as Record<symbol, unknown>)[Symbol.for("pi-subagent:topic-switch-transfer")];
-  rmSync(settingsPath, { force: true });
+  resetSettingsFilesIn(dirname(settingsPath));
 });
 afterEach(() => {
   delete (globalThis as Record<symbol, unknown>)[HOST_KEY];
   delete (globalThis as Record<symbol, unknown>)[Symbol.for("pi-subagent:topic-switch-transfer")];
-  rmSync(settingsPath, { force: true });
+  resetSettingsFilesIn(dirname(settingsPath));
 });
 afterAll(() => {
   if (realHome === undefined) delete process.env.HOME;

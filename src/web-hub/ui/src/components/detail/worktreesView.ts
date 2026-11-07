@@ -9,7 +9,7 @@
  *
  * Render rules the component consumes from here:
  * - a wire with no `rows` array (or an empty one) renders NO panel at all — same empty-state
- *   ruling as `TodoPanel` (absent ⇒ cwd not in a git repo / not sampled yet / web-hub off);
+ *   ruling as the TasksPanel todo section (absent ⇒ cwd not in a git repo / not sampled yet / web-hub off);
  * - unknown future row/body fields (Q4 open schema) are never read, so they never reach the DOM;
  * - `unprobed` is an open string on the wire (schema caps length but not values): any value
  *   outside the known `"cap" | "timeout" | "error"` set maps to the generic error display.

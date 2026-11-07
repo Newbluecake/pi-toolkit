@@ -185,7 +185,10 @@ export function fakeLanStore(options: FakeLanStoreOptions = {}): FakeLanStore {
     async getUserSummary(userId): Promise<LanUserSummary | undefined> {
       const u = userById(userId);
       if (u === undefined) return undefined;
-      return { username: u.username, initialPasswordInUse: u.initialPassword !== undefined };
+      return {
+        username: u.username,
+        initialPasswordInUse: u.initialCreatedAt !== undefined || u.initialPassword !== undefined,
+      };
     },
 
     async initialInfo() {
@@ -194,10 +197,12 @@ export function fakeLanStore(options: FakeLanStoreOptions = {}): FakeLanStore {
           u.initialLoginIp !== undefined && u.initialLoginAt !== undefined
             ? { ip: u.initialLoginIp, at: u.initialLoginAt }
             : undefined;
+        // #66 D4: the first-login record is only reported while the generated password is in use.
+        const inUse = u.initialCreatedAt !== undefined || u.initialPassword !== undefined;
         return {
           username: u.username,
           ...(u.initialPassword === undefined ? {} : { initialPassword: u.initialPassword }),
-          ...(initialLogin === undefined ? {} : { initialLogin }),
+          ...(initialLogin === undefined || !inUse ? {} : { initialLogin }),
         };
       }
       return undefined;
@@ -422,9 +427,17 @@ export function fakeLanStore(options: FakeLanStoreOptions = {}): FakeLanStore {
       });
     },
 
+    // #66 D4: mirrors the real single statement — record (COALESCE) + wipe, only while plaintext remains.
     async markInitialLogin(username, ip, at) {
       const u = users.get(username);
-      if (u !== undefined) users.set(username, { ...u, initialLoginIp: ip, initialLoginAt: at });
+      if (u === undefined || u.initialPassword === undefined) return { cleared: false };
+      const { initialPassword: _wiped, ...rest } = u;
+      users.set(username, {
+        ...rest,
+        initialLoginIp: u.initialLoginIp ?? ip,
+        initialLoginAt: u.initialLoginAt ?? at,
+      });
+      return { cleared: true };
     },
 
     async purgeExpired(now) {
@@ -495,14 +508,22 @@ const securityFakeOps: readonly (keyof LanStorePort)[] = [
 
 /** Real scrypt under the hood (fast test params are the caller's job via `KdfParams`). */
 export function fakeKdf(): KdfPort {
+  const derive = (password: string, params: Parameters<KdfPort["run"]>[1]): Uint8Array =>
+    scryptSync(password, Buffer.from(params.salt), params.keyLen, {
+      N: params.n,
+      r: params.r,
+      p: params.p,
+      maxmem: 128 * params.n * params.r + 1024 * 1024,
+    });
   return {
     async run(password, params) {
-      return scryptSync(password, Buffer.from(params.salt), params.keyLen, {
-        N: params.n,
-        r: params.r,
-        p: params.p,
-        maxmem: 128 * params.n * params.r + 1024 * 1024,
-      });
+      return derive(password, params);
+    },
+    // #66: same contract as the real pool — the REAL result is returned after the compensation ran.
+    async runPadded(password, params, pad) {
+      const real = derive(password, params);
+      derive(password, pad);
+      return real;
     },
   };
 }

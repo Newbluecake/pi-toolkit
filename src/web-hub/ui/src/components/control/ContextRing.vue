@@ -10,14 +10,11 @@
   cost, and the sub-agent cost aside (read-only; `formatUsd`/`formatPercent`/`formatKTokens`
   throughout).
 
-  MERGED STOP (2026-10 user request "把 stop 图标放到上下文比例圆圈中"): while the agent is
-  BUSY the ring's ENTIRE zone becomes the two-step stop button — the arc keeps showing context
-  usage around a centered stop icon, but nothing else may intercept taps inside the zone (stop
-  wins: no click-to-pin, and any open panel — pin or hover peek — drops the instant `busy`
-  flips true). The armed grammar
-  is StopButton's exactly (4s auto-revert, Esc reverts, `aria-live`, queue note when
-  `queueCount > 0`) via the shared `useArmedConfirm` composable; armed turns icon + arc danger.
-  While IDLE there is no stop affordance at all — the ring is today's details toggle.
+  MERGED STOP (#47): while BUSY, the ring zone is the current-turn 700ms hold target.
+  Short pointer clicks do not arm; keyboard/AT open explicit confirmation. useHoldStop shares
+  the grammar with StopButton; Composer owns singleflight across both surfaces. Context usage
+  stays visible and independent of the CSS hold progress. Holding/confirmation suppress peek.
+  While IDLE there is no stop affordance; the ring is the existing details toggle.
 
   HOVER PEEK (2026-10-16 user request 「这个展示做成 hover 展示吧」): a hover-capable pointer
   resting ~150ms on the ring zone opens the details panel as a non-pinned PEEK — QuotaPill's
@@ -26,7 +23,7 @@
   it; touch/coarse pointers never peek). Click still PINS exactly as before (pinned survives
   pointer-leave; Esc / outside click / clicking again close it, Esc refocuses the trigger —
   touch + keyboard path unchanged). The peek is read-only and allowed while BUSY too (it sits
-  above the ring and never intercepts the stop button), but ARMED hides it (armed copy wins).
+  above the ring and never intercepts the stop button), but holding/confirmation hides it (stop wins).
 
   Data arrives via the inject-only `DETAIL_METRICS` channel (`AgentDetail` provides it — the
   frozen `ComposerProps` stay untouched). No provider (dashboard, read-only dock) ⇒ the ring
@@ -43,14 +40,15 @@
   ThemeToggle conventions — no timers, no rAF).
 -->
 <script setup lang="ts">
-import { computed, inject, onBeforeUnmount, ref, watch } from "vue";
-import { useArmedConfirm } from "../../composables/useArmedConfirm.js";
+import { computed, inject, onBeforeUnmount, ref, useId, watch } from "vue";
+import { useHoldStop } from "../../composables/useHoldStop.js";
 import { useI18n } from "../../composables/useI18n.js";
 import { useMedia } from "../../composables/useMedia.js";
 import { formatKTokens, formatPercent, formatUsd, localeFor } from "../../format.js";
 import type { ContextRingEmits, ContextRingProps } from "../../contracts.js";
 import AppIcon from "../../icons/AppIcon.vue";
 import StopButton from "./StopButton.vue";
+import StopConfirm from "./StopConfirm.vue";
 import { DETAIL_METRICS } from "./controlContext.js";
 
 const props = withDefaults(defineProps<ContextRingProps>(), { busy: false, queueCount: 0 });
@@ -92,8 +90,7 @@ const dash = computed(() => {
   return `${(clamped / 100) * CIRC} ${CIRC}`;
 });
 
-/** Color grading (tokens): <75% primary, ≥75% warning, ≥90% danger. (While the merged stop is
- * ARMED the arc is forced to danger by CSS regardless of this tone — armed wins.) */
+/** Context usage tone is independent of #47's CSS-only hold progress. */
 const tone = computed(() => {
   const p = percent.value;
   if (p === null) return "ok";
@@ -104,14 +101,13 @@ const tone = computed(() => {
 
 const ariaLabel = computed(() => t("control.contextRingAria", { p: formatPercent(percent.value, locale.value) }));
 
-// --- merged stop (busy): two-step armed confirm, StopButton's grammar via the shared composable.
-const { armed, disarm, trigger, onKeydown: onStopKeydown } = useArmedConfirm(() => emit("stop"));
-
-/** K12 surfacing, same as StopButton: queued messages survive an abort, so the armed copy
- * says so when `queueCount > 0`. */
-const queueNote = computed(() =>
-  armed.value && props.queueCount > 0 ? t("control.stopQueueNote", { n: props.queueCount }) : "",
+// #47 shares only the gesture; host dispatch/pending lives in Composer.
+const helpId = useId();
+const stop = useHoldStop(
+  () => props.busy && showZone.value,
+  () => emit("stop"),
 );
+const stopActive = computed(() => stop.holding.value || stop.confirming.value || stop.pending.value);
 
 /* ------------------- details panel: click-pinned + hover peek (2026-10-16) ------------------- */
 
@@ -123,9 +119,9 @@ const hoverFine = useMedia(window, "(hover: hover) and (pointer: fine)").matches
 const pinned = ref(false);
 /** Hover "peek" open (hover-capable pointers only): same panel, non-pinned — closes ~200ms
  *  after the pointer leaves BOTH the ring zone and the panel, never steals focus, and a click
- *  on top of it simply pins it. Hidden while the merged stop is ARMED (armed copy wins). */
+ *  on top of it simply pins it. Hidden while stop is holding, confirming or pending. */
 const peek = ref(false);
-const open = computed(() => pinned.value || (peek.value && !armed.value));
+const open = computed(() => !stopActive.value && (pinned.value || peek.value));
 
 const root = ref<HTMLElement | null>(null);
 const trigger_ = ref<HTMLButtonElement | null>(null);
@@ -193,12 +189,12 @@ function onKeydown(ev: KeyboardEvent): void {
 
 // Stop wins the zone: `busy` flipping true force-closes the details panel — pin AND hover
 // peek alike (it must not compete with the stop button for taps); `busy` flipping false drops
-// any pending armed state.
+// any pending hold/confirmation state.
 watch(
   () => props.busy,
   (v) => {
     if (v) closePanel(false);
-    else disarm();
+    else stop.cancel();
   },
 );
 
@@ -228,19 +224,28 @@ onBeforeUnmount(() => {
     @mouseenter="onZoneEnter"
     @mouseleave="onZoneLeave"
   >
-    <!-- Busy: the ring's ENTIRE hit zone is the two-step stop button (stop wins — this button
+    <!-- Busy: the ring's ENTIRE hit zone is the hold-to-stop button (stop wins — this button
          carries no panel toggle; the panel below can only be a read-only hover PEEK, never
          click-pinned, and never intercepts this button's taps). The arc keeps rendering
          around the centered icon so context usage stays visible. -->
     <button
       v-if="busy"
       type="button"
-      class="ctx-ring-btn ctx-ring-stop-btn"
-      :class="{ armed }"
-      :data-armed="armed ? 'true' : undefined"
+      class="ctx-ring-btn ctx-ring-stop-btn stop-hold-target"
+      :class="{ holding: stop.holding.value }"
+      :disabled="!stop.enabled.value"
+      :data-holding="stop.holding.value || undefined"
+      :aria-describedby="helpId"
       :aria-label="t('control.stopAria')"
-      @click="trigger"
-      @keydown="onStopKeydown"
+      @pointerdown="stop.onPointerdown"
+      @pointerleave="stop.onPointerleave"
+      @lostpointercapture="stop.onPointercancel"
+      @contextmenu="stop.onContextmenu"
+      @mousedown.prevent
+      @click="stop.onClick"
+      @keydown="stop.onKeydown"
+      @keyup="stop.onKeyup"
+      @blur="stop.onBlur"
     >
       <!-- Track always renders (the shell); the bar arc sits at 0 while usage is pending and
            fills in when the first contextUsage arrives — the stop icon is centered either way. -->
@@ -249,6 +254,7 @@ onBeforeUnmount(() => {
         <circle class="ctx-ring-bar" cx="10" cy="10" :r="R" :stroke-dasharray="dash" transform="rotate(-90 10 10)" />
       </svg>
       <AppIcon name="stop" class="ctx-ring-stop-icon" />
+      <span class="stop-hold-progress" aria-hidden="true"></span>
     </button>
     <!-- Idle: the details toggle — click pins (hover peeks, see HOVER PEEK); no stop affordance. -->
     <button
@@ -266,8 +272,20 @@ onBeforeUnmount(() => {
         <circle class="ctx-ring-bar" cx="10" cy="10" :r="R" :stroke-dasharray="dash" transform="rotate(-90 10 10)" />
       </svg>
     </button>
-    <span v-if="armed" class="stop-live sr-only" role="status">{{ t("control.stopArmed") }}</span>
-    <span v-if="queueNote" class="ctx-ring-stop-note" role="note">{{ queueNote }}</span>
+    <StopConfirm
+      v-if="busy"
+      :help-id="helpId"
+      :holding="stop.holding.value"
+      :confirming="stop.confirming.value"
+      :cancelled="stop.cancelled.value"
+      :hint="stop.hint.value"
+      :pending="stop.pending.value"
+      :enabled="stop.enabled.value"
+      :queue-count="queueCount"
+      @confirm="stop.confirm"
+      @cancel="stop.dismiss"
+      @alternative="stop.openConfirm"
+    />
     <dl
       v-if="open"
       class="ctx-ring-panel"

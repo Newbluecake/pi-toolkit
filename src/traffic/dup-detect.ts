@@ -10,8 +10,11 @@
  * 纯函数 + 可注入 fs（默认真 fs）；永不抛错（扫描失败 ⇒ 无发现）。
  */
 import { existsSync, readFileSync } from "node:fs";
-import { isAbsolute, join, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+
+import { resolveAgentDir } from "../core/agent-dir.js";
+import { packageRoot } from "../core/package-root.js";
 
 export const EXTERNAL_PACKAGE_NAMES = ["pi-traffic-record", "@bluecake/pi-traffic-record"] as const;
 export const LEGACY_EXTENSION_FILE = "traffic-dump.ts";
@@ -25,8 +28,22 @@ export function isUnder(path: string, root: string): boolean {
   return resolvedPath.startsWith(resolvedRoot + sep);
 }
 
-/** toolkit 包根（本模块即 `<pkg>/src/traffic/dup-detect.ts`）。 */
-export const TOOLKIT_PACKAGE_ROOT = resolve(fileURLToPath(new URL("../..", import.meta.url)));
+/**
+ * toolkit 包根（无尾斜杠）。
+ *
+ * 模块顶层求值——`packageRoot()` 抛错会让整个扩展加载失败，而双副本检测只是告警/辅助、
+ * 永不构成让位依据，因此定位失败时回落旧式「本模块向上两级」推导（bundle 后两级的正确性
+ * 属于巧合，仅作未找到锚点时的非致命兜底；正常安装三种形态都有 package.json，走不到这里）。
+ */
+export const TOOLKIT_PACKAGE_ROOT = resolve(readToolkitRoot());
+
+function readToolkitRoot(): string {
+  try {
+    return packageRoot();
+  } catch {
+    return join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+  }
+}
 
 export interface DupDetectFs {
   readFile?(path: string): string;
@@ -39,10 +56,9 @@ export interface DupFinding {
   readonly detail: string;
 }
 
-/** 默认 agentDir：`$PI_CODING_AGENT_DIR` else `~/.pi/agent`（pi 的 getAgentDir，无 pi import）。 */
+/** 默认 agentDir：复用 pi-free 收敛实现；相对覆盖值回落 `~/.pi/agent`。 */
 export function defaultAgentDir(home: string = process.env.HOME ?? ""): string {
-  const env = process.env.PI_CODING_AGENT_DIR;
-  return env && env.trim() !== "" ? env : join(home, ".pi", "agent");
+  return resolveAgentDir(process.env, home).dir;
 }
 
 /**

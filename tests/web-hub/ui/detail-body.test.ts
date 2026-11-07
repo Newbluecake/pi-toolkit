@@ -54,62 +54,18 @@ describe("DetailBody.vue (P0→P4 seam)", () => {
     expect(wrapper.findComponent({ name: "Transcript" }).exists()).toBe(true);
   });
 
-  it("renders the floating fleet toggle when the agent has subagent rows", async () => {
-    const agent = agentWith(
-      [],
-      [
-        {
-          runId: "r1",
-          label: "worker",
-          status: "running",
-          phaseLabel: "running",
-          elapsedMs: 1000,
-          phaseMs: 0,
-          highlight: "none",
-          terminal: false,
-        },
-      ],
-    );
-    const wrapper = mount(DetailBody, { props: { agent, now: 0, following: true, narrow: false } });
-    const bar = wrapper.find(".fleet-summary-bar");
-    expect(bar.exists()).toBe(true);
-    // 2026-10 悬浮化:可见面只剩图标 + 计数徽标(2026-10-09 竖排面板名改为 bot 图标;行名
-    // 在抽屉里的树上 —— fleet-tree.test.ts 的职责);面板名与聚合计数进 aria-label
-    expect(bar.text()).not.toContain("Agents");
-    expect(bar.attributes("aria-label")).toContain("Agents");
-    expect(bar.get(".fab-count").text()).toBe("1");
-    expect(bar.attributes("aria-controls")).toBe("fleet-drawer");
-    expect(bar.attributes("aria-label")).toContain("1 running");
+  it("does not duplicate the activity rail inside the transcript subtree", () => {
+    const wrapper = mount(DetailBody, {
+      props: { agent: agentWith([], [{ runId: "r1" }]), now: 0, following: true, narrow: false },
+    });
+    expect(wrapper.find(".activity-rail").exists()).toBe(false);
+    expect(wrapper.findComponent({ name: "Transcript" }).exists()).toBe(true);
   });
 
   it("renders no fleet toggle when there are no subagent rows", async () => {
     const agent = agentWith([]);
     const wrapper = mount(DetailBody, { props: { agent, now: 0, following: true, narrow: false } });
     expect(wrapper.find(".fleet-summary-bar").exists()).toBe(false);
-  });
-
-  it("forwards drawerOpen to the summary bar's aria-expanded and bubbles its toggle", async () => {
-    const agent = agentWith(
-      [],
-      [
-        {
-          runId: "r1",
-          label: "worker",
-          status: "running",
-          phaseLabel: "running",
-          elapsedMs: 1000,
-          phaseMs: 0,
-          highlight: "none",
-          terminal: false,
-        },
-      ],
-    );
-    const wrapper = mount(DetailBody, {
-      props: { agent, now: 0, following: true, narrow: false, drawerOpen: true },
-    });
-    expect(wrapper.get(".fleet-summary-bar").attributes("aria-expanded")).toBe("true");
-    await wrapper.get(".fleet-summary-bar").trigger("click");
-    expect(wrapper.emitted("toggle-drawer")).toEqual([[]]);
   });
 
   it("forwards load-older / update:following / new-count from Transcript to its own emit", async () => {

@@ -3,7 +3,7 @@
  * binding table over a REAL `startHub` + agent-server socket.
  *
  *   crossSession absent / crossSession.alias absent ⇒ no table, no file IO, no `xs.alias.v1`
- *   crossSession.alias present ∧ load ready        ⇒ `xs.alias.v1` tail-appended on BOTH surfaces
+ *   crossSession.alias present ∧ load ready        ⇒ `xs.alias.v1` + `xs.alias.v2` tail-appended on BOTH surfaces
  *   crossSession.alias present ∧ load degraded     ⇒ no cap, the file is never touched
  * plus a real-socket set → restart → still held round trip.
  */
@@ -15,6 +15,7 @@ import { startHub, type RunningHub } from "../../../src/web-hub/hub/hub.js";
 import { XS_ALIAS_FILE } from "../../../src/web-hub/hub/xs/aliases.js";
 import {
   XS_ALIAS_HUB_CAP,
+  XS_ALIAS_V2_HUB_CAP,
   XS_CHANNEL_HUB_CAP,
   XS_HUB_CAP,
   XS_REPLY_HUB_CAP,
@@ -106,9 +107,17 @@ describe("hub assembly of the alias binding table", () => {
     expect(capsNone).not.toContain(XS_ALIAS_HUB_CAP);
     expect(capsXs).not.toContain(XS_ALIAS_HUB_CAP);
     expect(capsXs.slice(-3)).toEqual([XS_HUB_CAP, XS_REPLY_HUB_CAP, XS_CHANNEL_HUB_CAP]);
-    expect(capsAlias.slice(-4)).toEqual([XS_HUB_CAP, XS_REPLY_HUB_CAP, XS_CHANNEL_HUB_CAP, XS_ALIAS_HUB_CAP]);
-    // alias on = xs caps + exactly one tail cap; key absent ⇒ byte-identical caps
-    expect(capsAlias.slice(0, -1)).toEqual(capsXs);
+    expect(capsAlias.slice(-5)).toEqual([
+      XS_HUB_CAP,
+      XS_REPLY_HUB_CAP,
+      XS_CHANNEL_HUB_CAP,
+      XS_ALIAS_HUB_CAP,
+      XS_ALIAS_V2_HUB_CAP, // #72: v2 follows v1 under the same `advertised` condition
+    ]);
+    expect(capsNone).not.toContain(XS_ALIAS_V2_HUB_CAP);
+    expect(capsXs).not.toContain(XS_ALIAS_V2_HUB_CAP);
+    // alias on = xs caps + exactly the two tail caps; key absent ⇒ byte-identical caps
+    expect(capsAlias.slice(0, -2)).toEqual(capsXs);
     // a fresh table never creates the file (§3.3: missing ⇒ ready, no write); key absent ⇒ zero IO
     for (const h of [xs, alias]) expect(existsSync(join(h.paths.stateDir, XS_ALIAS_FILE))).toBe(false);
   });
@@ -125,6 +134,7 @@ describe("hub assembly of the alias binding table", () => {
       hub = await start(home, "alias");
       const caps = await ackCaps(hub);
       expect(caps).not.toContain(XS_ALIAS_HUB_CAP);
+      expect(caps).not.toContain(XS_ALIAS_V2_HUB_CAP);
       expect(caps).toContain(XS_CHANNEL_HUB_CAP);
       expect(readFileSync(file).equals(before)).toBe(true);
       expect(readdirSync(hub.paths.stateDir).filter((n) => n.startsWith(XS_ALIAS_FILE))).toEqual([XS_ALIAS_FILE]);

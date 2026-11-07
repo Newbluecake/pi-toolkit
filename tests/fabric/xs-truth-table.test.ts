@@ -49,6 +49,7 @@ interface Stack {
   membership: XsMembership;
   level: CausalLevel;
   clock: FakeClock;
+  wakeLedger: XsWakeLedger | undefined;
   sent: { triggerTurn: boolean; details?: unknown }[];
   input(over?: Partial<XsDeliverInput>): XsDeliverInput;
 }
@@ -114,11 +115,13 @@ function buildStack(options: StackOptions = {}): Stack {
   });
 
   let controller: RootWakeController | undefined;
+  let wakeLedger: XsWakeLedger | undefined;
   if (options.wakeEnabled !== false) {
     const capability = new XsHostCapability();
     if (options.capability === "observed") capability.observe({ messageType: "user", prompt: "hi" });
     if (options.capability === "absent") capability.observe({ prompt: "hi" }); // pi 1.0/1.1 legacy shape
     let wakeCharges = options.wakeQuotaSpent ?? 0;
+    wakeLedger = new XsWakeLedger();
     controller = new RootWakeController({
       sessionId: SESSION,
       rootRunMaxS: options.rootRunMaxS ?? 900,
@@ -132,7 +135,7 @@ function buildStack(options: StackOptions = {}): Stack {
         wakeCharges++;
       },
       level,
-      ledger: new XsWakeLedger(),
+      ledger: wakeLedger,
       capability,
       clock,
       newToken: (() => {
@@ -163,6 +166,7 @@ function buildStack(options: StackOptions = {}): Stack {
     membership,
     level,
     clock,
+    wakeLedger,
     sent,
     input,
     ledger,
@@ -212,13 +216,11 @@ describe("xs truth table §4.5 (row by row)", () => {
     });
   });
 
-  it("row 6: capability unknown ⇒ host_unverified; absent ⇒ host_unsupported (N1, fail closed)", () => {
+  it("row 6: capability unknown ⇒ optimistic Controller dispatch; absent ⇒ host_unsupported (N1 改判 2026-11)", () => {
     const u = buildStack({ capability: "unknown" });
-    expect(u.receiver.deliver(u.input({ wake: true }))).toEqual({
-      effect: "applied",
-      woke: false,
-      wakeDowngraded: "host_unverified",
-    });
+    expect(u.receiver.deliver(u.input({ wake: true }))).toEqual({ effect: "applied", woke: true });
+    expect(u.sent[0]!.triggerTurn).toBe(true);
+    expect(u.wakeLedger!.get(u.controller!.activeToken!)).toMatchObject({ optimistic: true });
     const a = buildStack({ capability: "absent" });
     expect(a.receiver.deliver(a.input({ wake: true }))).toEqual({
       effect: "applied",
@@ -395,7 +397,7 @@ const replyRows: ReplyTruthRow[] = [
   ...(
     [
       ["busy", { hostIdle: false }, "busy"],
-      ["host", { capability: "unknown" }, "host_unverified"],
+      ["host", { capability: "absent" }, "host_unsupported"],
       ["goal", { goalFence: true }, "goal"],
       ["quota", { wakeQuotaSpent: 12 }, "inbound_wake_rate"],
     ] as const

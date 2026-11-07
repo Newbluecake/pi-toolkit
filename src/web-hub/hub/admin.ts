@@ -37,7 +37,8 @@ import { LAN_2FA_HUB_CAP } from "../protocol/version.js";
 // L8 "密码 ≥10 位": shared with the TUI `/webhub passwd` client-side precheck
 // (`agent/passwd-prompt.ts`'s `MIN_LAN_PASSWORD_LENGTH`) so a password the client accepts is
 // never turned around and rejected by the hub — review fix, this used to be a locally-defined 8.
-import { MIN_LAN_PASSWORD_LENGTH } from "../protocol/lan.js";
+import { MAX_LAN_PASSWORD_LENGTH, MIN_LAN_PASSWORD_LENGTH } from "../protocol/lan.js";
+import { checkLanPassword } from "../protocol/password-policy.js";
 import {
   advanceRotateIntentSync,
   cleanupRotateIntentTemps,
@@ -50,7 +51,7 @@ import {
 import { cleanupTokenTemps, generateToken, replaceTokenAtomic } from "../protocol/token-file.js";
 import { auditLan2fa } from "./audit.js";
 import type { Auth } from "./auth.js";
-import { defaultKdfParams } from "./kdf.js";
+import { effectiveWriteTarget, newKdfParams } from "./kdf.js";
 import type { RepairLan2faResult } from "./lan-store.js";
 import type { SecurityEvent } from "./security-events.js";
 import type { HubLog, KdfPort, LanFacade, LanStatus, LanStorePort, LanUserRecord, LoginLimiterPort } from "./ports.js";
@@ -425,9 +426,10 @@ export function createAdminHandler(deps: AdminDeps): AdminHandler {
     const kdf = deps.kdf();
     if (!deps.hasLan() || store === undefined || kdf === undefined) return noLan(rid, "passwd", meta);
     if (
+      password.length < MIN_LAN_PASSWORD_LENGTH ||
+      password.length > MAX_LAN_PASSWORD_LENGTH ||
       username.trim().length === 0 ||
-      (username.includes(":") && (await store.getUser(username)) === undefined) ||
-      password.length < MIN_LAN_PASSWORD_LENGTH
+      (username.includes(":") && (await store.getUser(username)) === undefined)
     ) {
       audit("passwd", { ok: false, code: "E_BAD_REQUEST" }, meta);
       return {
@@ -435,10 +437,15 @@ export function createAdminHandler(deps: AdminDeps): AdminHandler {
         rid,
         ok: false,
         code: "E_BAD_REQUEST",
-        message: `username must be non-empty and must not contain :; password must be at least ${MIN_LAN_PASSWORD_LENGTH} characters`,
+        message: `username must be non-empty and must not contain :; password must be ${MIN_LAN_PASSWORD_LENGTH}..${MAX_LAN_PASSWORD_LENGTH} characters`,
       };
     }
-    const params = defaultKdfParams();
+    const verdict = checkLanPassword(password, { username });
+    if (!verdict.ok) {
+      audit("passwd", { ok: false, code: "E_WEAK_PASSWORD", reason: verdict.reason }, meta);
+      return { t: "lan_res", rid, ok: false, code: "E_WEAK_PASSWORD", message: `password rejected: ${verdict.reason}` };
+    }
+    const params = newKdfParams(effectiveWriteTarget(store.hardening?.writerActive === true));
     const hash = await kdf.run(password, params);
     // §4.2 "撤销的顺序": `setPassword`'s own transaction already bumps epoch, clears
     // initial_password and deletes every session for that user (db-child.ts) — revoke only
@@ -542,6 +549,15 @@ export function createAdminHandler(deps: AdminDeps): AdminHandler {
             return await handleTfaRepair(frame.rid);
         }
       } catch (err) {
+        if ((err as { code?: unknown })?.code === "E_TOTP_KEY") {
+          auditTfa(frame.op, false);
+          return tfaFail(
+            frame.rid,
+            frame.op,
+            "E_TOTP_KEY",
+            "TOTP key unavailable or mismatched; reset or repair 2FA locally, then /webhub restart and enroll again (key file retained)",
+          );
+        }
         deps.log.error("web-hub admin: tfa_req handler threw", sanitizedErrorFields(err));
         auditTfa(frame.op, false);
         return { t: "tfa_res", rid: frame.rid, ok: false, code: "E_INTERNAL", message: "internal error" };

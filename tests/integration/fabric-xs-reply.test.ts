@@ -63,6 +63,7 @@ describe("RXW reply association (real hub × real stacks)", () => {
   it("#2 timeout, quiet path: two due tickets of one session merge into ONE notice and clear owed", async () => {
     h = new XsHarness();
     const { a, bid, cid } = await triple();
+    await a.rpc("event", { type: "before_agent_start", extra: { prompt: "legacy host" } }); // cap absent ⇒ quiet (wake-unknown-optimistic)
     const q1 = (await ask(a, bid, "one", {}, 60)).reply.requestId;
     const q2 = (await ask(a, cid, "two", {}, 60)).reply.requestId;
     await a.rpc("skew", { ms: 61_000 });
@@ -111,6 +112,7 @@ describe("RXW reply association (real hub × real stacks)", () => {
   it("#3b compaction window at due time ⇒ no write; the fence-close event replays the owed notice", async () => {
     h = new XsHarness();
     const { a, bid } = await joinedPair(h);
+    await a.rpc("event", { type: "before_agent_start", extra: { prompt: "legacy host" } }); // cap absent ⇒ quiet (wake-unknown-optimistic)
     const q = (await ask(a, bid, "compaction", {}, 60)).reply.requestId;
     await a.rpc("event", { type: "session_before_compact" });
     await a.rpc("skew", { ms: 61_000 });
@@ -125,6 +127,7 @@ describe("RXW reply association (real hub × real stacks)", () => {
   it("#3c slow session_before_switch ⇒ no write; a cancelled switch is closed by fence reset, then it flushes", async () => {
     h = new XsHarness();
     const { a, bid } = await joinedPair(h);
+    await a.rpc("event", { type: "before_agent_start", extra: { prompt: "legacy host" } }); // cap absent ⇒ quiet (wake-unknown-optimistic)
     const q = (await ask(a, bid, "switch", {}, 60)).reply.requestId;
     await a.rpc("event", { type: "session_before_switch", extra: { reason: "new" } });
     await a.rpc("skew", { ms: 61_000 });
@@ -138,6 +141,7 @@ describe("RXW reply association (real hub × real stacks)", () => {
   it("#3d switch away before due, due while away, switch back ⇒ owed notice appears on restore", async () => {
     h = new XsHarness();
     const { a, bid } = await joinedPair(h);
+    await a.rpc("event", { type: "before_agent_start", extra: { prompt: "legacy host" } }); // cap absent ⇒ quiet (wake-unknown-optimistic)
     const q = (await ask(a, bid, "away", {}, 60)).reply.requestId;
     const file = (await a.rpc("inspect")).sessionFile;
     await a.rpc("replace");

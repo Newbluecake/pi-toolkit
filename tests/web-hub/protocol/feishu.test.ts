@@ -9,7 +9,8 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-import { DEFAULT_FEISHU_BOT_SETTINGS, DEFAULT_SETTINGS, parseFeishuBotBlock } from "../../../src/config/settings.js";
+import { DEFAULT_SETTINGS } from "../../../src/config/settings.js";
+import { DEFAULT_FEISHU_BOT_SETTINGS, parseFeishuBotBlock } from "../../../src/web-hub/agent/settings.js";
 import {
   buildRequestText,
   capabilityDeniedReason,
@@ -101,7 +102,9 @@ describe("identifiers", () => {
 
   it("FA advertises fsb.v1 only from the config-key conditional shared hub cap fold", () => {
     const root = fileURLToPath(new URL("../../../src/web-hub/", import.meta.url));
-    expect(readFileSync(root + "hub/hub.ts", "utf8")).toContain("config.feishuBot === undefined ? [] : [FSB_HUB_CAP]");
+    expect(readFileSync(root + "hub/assembly-channels.ts", "utf8")).toContain(
+      "config.feishuBot === undefined ? [] : [FSB_HUB_CAP]",
+    );
     expect(readFileSync(root + "hub/agent-server.ts", "utf8")).toContain("...(deps.extraHubCaps ?? [])");
   });
 });
@@ -575,6 +578,33 @@ describe("HubConfig.feishuBot normalizer", () => {
     expect(normalizeFeishuBotHubConfig({ ...good, staleMessageS: 30 })?.staleMessageS).toBe(30);
     expect(normalizeFeishuBotHubConfig({ ...good, staleMessageS: 3_600 })?.staleMessageS).toBe(3_600);
     expect(normalizeFeishuBotHubConfig({ ...good, files: { ...good.files, maxInboundMiB: 100 } })).toBeDefined();
+  });
+
+  it("rebind-plan r3 §4.2 (P0b): threads.rebind rides the whitelist ONLY as a real boolean", () => {
+    const threads = {
+      handbackWindowMin: 10,
+      startTimeoutMin: 8,
+      retainMin: 15,
+      replyPerThreadPerMin: 6,
+      replyPerThreadPerHour: 60,
+    };
+    // absent ⇒ absent (byte-identical off state, A16)
+    expect(normalizeFeishuBotHubConfig({ ...good, threads })?.threads).toEqual(threads);
+    expect(normalizeFeishuBotHubConfig({ ...good, threads })?.threads).not.toHaveProperty("rebind");
+    // real booleans pass through verbatim
+    expect(normalizeFeishuBotHubConfig({ ...good, threads: { ...threads, rebind: true } })?.threads).toEqual({
+      ...threads,
+      rebind: true,
+    });
+    expect(normalizeFeishuBotHubConfig({ ...good, threads: { ...threads, rebind: false } })?.threads).toEqual({
+      ...threads,
+      rebind: false,
+    });
+    // wrong types are dropped (the threads block itself survives)
+    for (const bad of [1, "yes", null]) {
+      const out = normalizeFeishuBotHubConfig({ ...good, threads: { ...threads, rebind: bad } });
+      expect(out?.threads).toEqual(threads);
+    }
   });
 });
 

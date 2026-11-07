@@ -52,6 +52,10 @@ const ALLOWED: Readonly<Record<string, { count: number; why: string }>> = {
     why: "frozen golden: reservedToolNames keeps the legacy entry",
   },
   "tests/fixtures/preview-perf/stack-3609.ts.txt": { count: 1, why: "preview-perf corpus (verbatim real file)" },
+  "tests/fixtures/thread-off-golden.json": {
+    count: 2,
+    why: "A-tier frozen golden, captured verbatim (legacy tool cards)",
+  },
   // --- user-facing compatibility docs ---
   "docs/guide/migration.md": { count: 3, why: "the user-facing compatibility note (heading + two mentions)" },
   "docs/guide/subagents.md": { count: 2, why: "'formerly named' note + link anchor to the migration section" },

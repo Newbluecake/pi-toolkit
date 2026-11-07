@@ -168,8 +168,8 @@ describe("wireWebHub — spawn config (plan §SP2: off ⇒ no spawn key; on ⇒ 
       spawn: {
         enabled: true,
         roots: [],
-        maxProcesses: 4,
-        maxPerPrincipal: 2,
+        maxProcesses: 10,
+        maxPerPrincipal: 10,
         ratePerMinute: 3,
         maxLifetimeMinutes: 720,
         registerTimeoutS: 30,
@@ -181,8 +181,8 @@ describe("wireWebHub — spawn config (plan §SP2: off ⇒ no spawn key; on ⇒ 
     const config = await hubConfigFor(settings);
     expect(config.spawn).toEqual({
       roots: [],
-      maxProcesses: 4,
-      maxPerPrincipal: 2,
+      maxProcesses: 10,
+      maxPerPrincipal: 10,
       ratePerMinute: 3,
       maxLifetimeMinutes: 720,
       registerTimeoutS: 30,

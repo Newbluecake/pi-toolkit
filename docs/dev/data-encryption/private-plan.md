@@ -303,15 +303,16 @@ shell
   4. 删除记录（fsync 目录）→ 依次释放 `mount.lock` 与租约。
   - 取租约超时 ⇒ 记录保留，调用方按 75 处理（§3.6）。
   - **唯一例外**：P0 自己的 shell 链以 `BUSY` 退出（从未 exec 出 P1、从未建 ns）时，P0 可在 `mount.lock` 内删除 instanceId 相同、仍为 `starting` 且没有 `ns`/`supervisor` 字段的记录，无需租约（§2.2 第 6 步）。
-- **不变量 I-P3（r3）**：记录只能由 ns 外的执行者，在「真正取得租约 ∧ 持 `mount.lock` 且 instanceId 一致 ∧ 记录 ns 的成员扫描完整为空」时删除；上一条例外除外。由此「无记录」只可能意味着：本实例的所有 fd 9 持有者已退出且 ns 无成员，或该实例从未建过 ns。
+- **不变量 I-P3（r3）**：记录只能由 ns 外的执行者，在「真正取得租约 ∧ 持 `mount.lock` 且 instanceId 一致 ∧ 记录 ns 的成员扫描完整为空」时删除；上一条例外除外。「完整」的定义见 §3.3 r3.2（严格 + 血缘判定）。由此「无记录」只可能意味着：本实例的所有 fd 9 持有者已退出且 ns 无成员，或该实例从未建过 ns。
 
 ### 3.3 判活与终止权
 
 `privateInstanceState(v)` 结合三类证据：租约（只读 `/proc/locks`）、ns 成员扫描、记录。
 
-**stale（可清理）判定（裁定）**：`bootId ≠ 当前`；**或**「租约可获取（`/proc/locks` 无条目）**且**不存在任一进程其 `/proc/<pid>/ns/mnt` 等于记录 `ns.mnt`（扫描完整）」。两项证据任一表明仍有成员 ⇒ 不判 stale、不删除、不允许新挂载（fail closed）。记录没有 `ns` 字段（P1 未登记 ns）时，只看租约与 `owner`/`supervisor` 是否存活。
+**stale（可清理）判定（裁定）**：`bootId ≠ 当前`；**或**「租约可获取（`/proc/locks` 无条目）**且**不存在任一进程其 `/proc/<pid>/ns/mnt` 等于记录 `ns.mnt`（扫描完整——严格 + 血缘，见下「r3.2 不可读进程的血缘判定」）」。两项证据任一表明仍有成员 ⇒ 不判 stale、不删除、不允许新挂载（fail closed）。记录没有 `ns` 字段（P1 未登记 ns）时，只看租约与 `owner`/`supervisor` 是否存活。
 
 - ns 标识复用的约束：只有 `bootId` 与当前一致的记录才参与比对（重启后一律 stale）；扫描中 starttime 早于记录 `supervisor.start` 的进程不计为成员（它们不可能是 P1 的后代，只可能是经 `setns` 加入者——R21 范围，且 gocryptfs 本身必为后代、始终计入）。ns id 被内核回收复用给无关 ns 时，匹配会让判定偏向「仍有成员」——这是 fail closed 的误报，`status` 显示 `ns-in-use (unverified)` 与匹配的 pid，由用户核对（R23）。
+- **r3.2 不可读进程的血缘判定（scan-poison 修复，2026-10-29）**：同 uid、`/proc/<pid>/ns/mnt` 读不到（EACCES/EPERM）、starttime ≥ `supervisor.start` 的进程不再无条件判 `incomplete`。内核前提：**P-SP1**（谱系内可读）——P0 与所有 ns 外调用方都在初始 userns 且是 `ns.user` 的 owner，按 userns 属主规则对谱系内全部嵌套 userns 拥有能力，因此谱系内进程即使 `PR_SET_DUMPABLE=0` 也能被读到 ns 链接；**P-SP2**（不可读意味着 mm 在谱系外）——同 uid 读不到的只可能是初始 userns 中创建且不可 dump 的进程（sshd 特权分离子进程、setuid 辅助、sd-pam——不可能经 fork 成为成员）或被 LSM 拒绝；**P-SP3**（世界可读字段）——`/proc/<pid>/stat` 的 ppid/starttime 对 non-dumpable 进程也可读。规则：这类进程 X 先记入 deferred，第一遍扫完、拿到全部可读同 ns 命中 H 后按 ppid 链上溯（≤64 跳、逐跳遵守 deadline、按 pid memo）——命中记录锚点（supervisor/gocryptfs/pi 的 pid+start，`recordAnchors`）或 H 中可读成员（只比 pid，误差偏向 IN）⇒ `IN`，扫描仍判 `incomplete`（reason 带 `in-lineage`）；链上出现早于 supervisor 的祖先、或到达 pid 1/0 ⇒ `OUT`，跳过并记入 `outside` 诊断数组（仅诊断，非空才带该字段）；祖先中途消失 / 父 start 晚于子（pid 复用）⇒从 X 重走一次（重走时 X 自身已消失 ⇒ `OUT` 且不进 outside——与主循环 GONE 语义一致），再失败 ⇒ `incomplete`；环/超深 ⇒ `incomplete`；Z 态祖先直接穿过。记录没有 `supervisor` 字段（无 `minStart`）时仍判 `incomplete`。调用面：所有 **ns 外**调用方统一传 `lineage: { anchors: recordAnchors(rec) }`——judge（claim / 普通挂载门 / status / lock 视图，经 `privateInstanceState`）、外部收尾（`terminateInstance` 的 collect）、释放（`__private-release`），证明级别一致，judge 判 stale 与 release 能删由同一条规则决定，不会错位；P1 在 ns 内的 finalize 仍用 `deniedMeans:"outside"` 不变；不带 `lineage` 的扫描行为逐字节不变（回滚 = 删掉三处调用点的 `lineage:`）。hidepid≥1 的加固 /proc 上血缘上溯要跨 uid 读 root 祖先的 stat ⇒ 仍判 `incomplete`（该类机器不受益，见 §R3 R-f）。
 
 ```
 记录不存在：
@@ -504,16 +505,17 @@ hub 在初始 ns，vault 路径对它是哨兵 ⇒ 一律 fail closed：
 
 ### 5.4 新增残留（并入 plan.md §5）
 
-| #   | 路径                                                 | 影响                                                                                                                                                   | 缓解                                    |
-| --- | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------- |
-| R20 | 同 uid `/proc/<pid>/root`、`/proc/<pid>/cwd`         | 同 uid 进程可读私有挂载中的明文                                                                                                                        | 独立系统用户                            |
-| R21 | `setns` userns owner 规则                            | 同 uid 可依次加入外层 userns + mntns                                                                                                                   | 同上                                    |
-| R22 | `/proc/<pid>/{maps,mountinfo}`、`/proc/locks` 信息面 | 暴露「存在私有挂载」与 cipher/租约路径                                                                                                                 | 知悉                                    |
-| R23 | 孤儿窗口 / ns id 复用 / 额外 ns 引用                 | 监督者全部丢失时明文持续存在于 ns 直到 `lock`；有进程持有 ns fd 或 nsfs bind mount 时 ns 不随成员退出销毁；ns id 复用由 bootId+starttime+双 ns id 规避 | `status`；`/sys/fs/fuse/connections`    |
-| R24 | 被困守护                                             | ns 内启动的常驻进程收尾时被终止（含 ns 内首启的 tmux server）                                                                                          | 不在私有会话里起常驻服务                |
-| R25 | 旧 hub 的版本替换循环                                | 旧 hub 不认 `agent.nospawn.v1` 时仍可能反复替换                                                                                                        | 在普通会话里 `/webhub restart` 升级 hub |
-| R29 | `--lazy` 后的既有访问                                | 已打开的 fd、cwd 在挂载内的进程、运行中的作业可继续访问到会话结束                                                                                      | `--kill`                                |
-| —   | D1/R12                                               | 私有模式不改变 D1                                                                                                                                      | Q8                                      |
+| #   | 路径                                                 | 影响                                                                                                                                                                                                                                                                                                                                                     | 缓解                                    |
+| --- | ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------- |
+| R20 | 同 uid `/proc/<pid>/root`、`/proc/<pid>/cwd`         | 同 uid 进程可读私有挂载中的明文                                                                                                                                                                                                                                                                                                                          | 独立系统用户                            |
+| R21 | `setns` userns owner 规则                            | 同 uid 可依次加入外层 userns + mntns                                                                                                                                                                                                                                                                                                                     | 同上                                    |
+| R22 | `/proc/<pid>/{maps,mountinfo}`、`/proc/locks` 信息面 | 暴露「存在私有挂载」与 cipher/租约路径                                                                                                                                                                                                                                                                                                                   | 知悉                                    |
+| R23 | 孤儿窗口 / ns id 复用 / 额外 ns 引用                 | 监督者全部丢失时明文持续存在于 ns 直到 `lock`；有进程持有 ns fd 或 nsfs bind mount 时 ns 不随成员退出销毁；ns id 复用由 bootId+starttime+双 ns id 规避                                                                                                                                                                                                   | `status`；`/sys/fs/fuse/connections`    |
+| R24 | 被困守护                                             | ns 内启动的常驻进程收尾时被终止（含 ns 内首启的 tmux server）                                                                                                                                                                                                                                                                                            | 不在私有会话里起常驻服务                |
+| R25 | 旧 hub 的版本替换循环                                | 旧 hub 不认 `agent.nospawn.v1` 时仍可能反复替换                                                                                                                                                                                                                                                                                                          | 在普通会话里 `/webhub restart` 升级 hub |
+| R29 | `--lazy` 后的既有访问                                | 已打开的 fd、cwd 在挂载内的进程、运行中的作业可继续访问到会话结束                                                                                                                                                                                                                                                                                        | `--kill`                                |
+| R37 | 谱系内成员被 LSM 拒绝读取且 ppid 链已断（r3.2 收窄） | 释放/判活时可能被误判 `OUT` 而跳过：LSM 拒绝读 ns 链接 **且**父链全部死亡（被 init/subreaper 收养）⇒ 链上找不到锚点或可读成员；释放已先证明租约空闲（gocryptfs 已退出、FUSE 已断），该进程无法再经挂载读到明文，最多保留进程内已有副本；终止权要求读到 ns 链接，工具本来也无法终止它（对照：链断的**可读**孤儿成员仍计入成员、判 `ns-in-use`，完全不变） | 链未断时仍判 `IN`（incomplete）；知悉   |
+| —   | D1/R12                                               | 私有模式不改变 D1                                                                                                                                                                                                                                                                                                                                        | Q8                                      |
 
 ---
 
@@ -786,3 +788,13 @@ convert（见 convert-plan §8）：V1/V2/V3 随时可并行 ─► V0（N2 之�
 其余条目与 r2 相同，未改动。
 
 补记（2026-10-23 用户拍板）：§9 的 Q-L0、Q2、Q10、Q3 均按原推荐拍板，正文设计不变；统一退出码表随 convert-plan r3（不自动删除）删除 79，`0` 增加「convert 成功但保持挂载」说明，两份文档逐字一致。
+
+---
+
+## §R3 scan-poison 处置（2026-10-29）
+
+- **病例**：ns 成员扫描把「同 uid、ns 链接读不到（EACCES/EPERM）、starttime ≥ supervisor.start」无条件判 `incomplete`（N1-report #1 的规则，当时前提是 sd-pam / sshd 会话早于 supervisor，未覆盖「supervisor 启动后才登录」）。用户从 SSH 登录操作时，`sshd: user@pts/N`（特权分离后 non-dumpable、晚于 supervisor）会持续毒化所有判活：`run` 判 `unknown/scan-incomplete` 拒绝启动、`release` 拒删记录、`status` 显示 `private:unknown`、`lock`/`lock --kill` 拒绝（实测 rsi-evo 的记录残留 5 天）。
+- **选型**：② 血缘判定（已实施）——规则与论证见 §3.3 r3.2，方案全文与评审修订记录（hidepid≥1 盲区、P-SP2 (c) 空集纠错、重走时 X GONE ⇒ OUT、Z 态祖先穿过、memo {start,ppid}、结构断言）见 `docs/dev/secure-scan-poison/plan.md`。新残留 R37 已入 §5.4。测试：`tests/secure/launcher-private-unit.test.ts` 的 `scanNsMembers lineage (scan-poison)` / `r3.2 scan-poison: privateInstanceState / terminateInstance` / `scan-poison premise pins (P-SP1)`（含 `/proc/1/stat` 可读断言）。
+- **① release 捷径不采用**：`inNsDone:true` 只在 finalize 的 verify 扫描（`deniedMeans:"outside"`，对这类进程同样看不见）为空时写入，它证明的东西 ⊆ ② 在 ns 外能证明的东西，且只修 release 一个入口，还给 I-P3 增加第二条删除判据、扩大删除面。
+- **③ `lock --forget-record` 逃生口（包 B）**：用户拍板（2026-10-29）先只做包 A；极端兜底场景（谱系内持续不可读进程、`/proc` 条目 > 4096 的大主机）留待后续评估。
+- **R-f（hidepid≥1 盲区）**：血缘上溯第一次要读 root 祖先（sshd [priv]/监听进程）的 stat，跨 uid 读被拒 ⇒ 重走失败 ⇒ 仍判 `incomplete`——方向 fail-closed 没错，但修复目标在这类机器上不达成；前提钉子测试失败时明确标注「该机器不受益」而非静默。

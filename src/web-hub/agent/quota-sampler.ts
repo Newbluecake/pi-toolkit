@@ -26,6 +26,7 @@
  * `problems` list. Anything else — `pools` unset/false — keeps P7's filtered output
  * byte-identical (old hubs decode closed unions and would drop the WHOLE status frame).
  */
+import { quotaWindowCost, type QuotaCostView, type QuotaCostWindow } from "../../quota/cost-scan.js";
 import type { ProviderVerdict, WindowVerdict } from "../../quota/ladder.js";
 import type { QuotaProblem } from "../../quota/types.js";
 import type {
@@ -42,6 +43,10 @@ export interface QuotaProjectionOptions {
   readonly pools?: boolean;
   /** `QuotaService.problems()` 的当前值；pools !== true 时忽略。 */
   readonly problems?: readonly QuotaProblem[];
+  /** 2026-11-03 费用折算（形态 B，无设置门）：cost-scan 视图的同步快照。两路（legacy/pools）
+   *  都放行——QuotaWindowSchema 是 open schema，旧 hub 忽略未知键不丢帧；缺省 ⇒ 窗口不带
+   *  costUsd（字节不变，legacy golden 钉死）。 */
+  readonly cost?: QuotaCostView | undefined;
 }
 
 /**
@@ -51,7 +56,9 @@ export interface QuotaProjectionOptions {
  * 上加 cap 门控的 pools 模式（看到 `quota.pools.v1` 才放行，§9A.4）。
  */
 const LEGACY_WEB_QUOTA_IDS: readonly string[] = ["zai-coding-cn", "zai", "kimi-coding"];
-const POOLS_WEB_QUOTA_IDS: readonly string[] = [...LEGACY_WEB_QUOTA_IDS, "droid-standard", "droid-core"];
+// pools 白名单（cap `quota.pools.v1` 门控）：droid 池之后追加 opencode-go——legacy 路径依旧
+// 只出三池（字节不变，quota-legacy golden 钉死）。
+const POOLS_WEB_QUOTA_IDS: readonly string[] = [...LEGACY_WEB_QUOTA_IDS, "droid-standard", "droid-core", "opencode-go"];
 
 function isLegacyWebQuotaProviderId(value: string): value is QuotaProviderWire["id"] {
   return LEGACY_WEB_QUOTA_IDS.includes(value);
@@ -78,7 +85,7 @@ export function projectQuota(
     // open enum). P7 默认（pools !== true）: droid pool ids are dropped here (see module doc).
     const known = pools ? isPoolsWebQuotaProviderId(v.provider) : isLegacyWebQuotaProviderId(v.provider);
     if (!known) continue;
-    providers.push(projectProvider(v, pools));
+    providers.push(projectProvider(v, pools, opts?.cost));
   }
   if (!pools) {
     if (providers.length === 0) return undefined;
@@ -92,7 +99,7 @@ export function projectQuota(
   return wire;
 }
 
-function projectProvider(v: ProviderVerdict, pools: boolean): QuotaProviderWire {
+function projectProvider(v: ProviderVerdict, pools: boolean, cost: QuotaCostView | undefined): QuotaProviderWire {
   const id = v.provider as QuotaProviderWire["id"]; // guarded by is{Legacy,Pools}WebQuotaProviderId
   const wire: QuotaProviderWire = {
     id,
@@ -101,7 +108,7 @@ function projectProvider(v: ProviderVerdict, pools: boolean): QuotaProviderWire 
     fetchedAt: v.fetchedAt,
     // pools !== true：month 窗口在封闭枚举之外 ⇒ 丢掉（防御；kimi/zai 适配器本就不产出 month）。
     // pools === true：`month` 来自 droid 快照，wire 已放宽（quota.pools.v1 门控，§9A.4）。
-    windows: (pools ? v.windows : v.windows.filter(isLegacyWireWindow)).map(projectWindow),
+    windows: (pools ? v.windows : v.windows.filter(isLegacyWireWindow)).map((w) => projectWindow(w, id, cost)),
   };
   if (v.plan !== undefined) wire.plan = v.plan;
   if (v.demoted && v.demotedUntil !== undefined) wire.demotedUntil = v.demotedUntil;
@@ -138,10 +145,54 @@ function isLegacyWireWindow(w: WindowVerdict): w is WindowVerdict & { scope: Quo
   return w.scope !== "month";
 }
 
-function projectWindow(w: WindowVerdict & { scope: QuotaWindowWire["scope"] }): QuotaWindowWire {
+/** GLM 账号费用别名（2026-11-04）：`zai`/`zai-coding-cn` 是同一 GLM 订阅账号的两个端点
+ * provider（quota 百分比恒等），但 cost bucket 按 JSONL 里实际调用的 provider 归属——近期
+ * 真实调用都记在 `zai` ⇒ cn 当前窗口可能无 bucket，而 UI 的 GLM worst-of 合并恒挑 cn 侧
+ * ⇒ costUsd 缺失。折算因此在投影层按**账号集合**聚合（`accountWindowCost`）：对集合内各
+ * provider 分别求 `quotaWindowCost`，usd 相加、unpriced 取 OR；全部 undefined 才 undefined。
+ * 两条 GLM wire 行带同一账号费用（UI 合并挑哪侧、单侧出行都有折算），UI 不做二次相加
+ * ⇒ 无双计。非 GLM provider 的集合只有自身，行为逐字节不变。 */
+const GLM_ACCOUNT_COST_IDS: Readonly<Record<string, readonly string[]>> = {
+  "zai-coding-cn": ["zai-coding-cn", "zai"],
+  zai: ["zai-coding-cn", "zai"],
+};
+
+/** 账号窗口费用：GLM 双端点求和（见 `GLM_ACCOUNT_COST_IDS`），其余 provider 退化为单值。 */
+function accountWindowCost(
+  cost: QuotaCostView | undefined,
+  provider: QuotaProviderWire["id"],
+  scope: QuotaWindowWire["scope"],
+  resetAt: number | undefined,
+): QuotaCostWindow | undefined {
+  const ids = GLM_ACCOUNT_COST_IDS[provider] ?? [provider];
+  let usd = 0;
+  let unpriced = false;
+  let any = false;
+  for (const id of ids) {
+    const c = quotaWindowCost(cost, id, scope, resetAt);
+    if (c === undefined) continue;
+    usd += c.usd;
+    unpriced = unpriced || c.unpriced;
+    any = true;
+  }
+  return any ? { usd, unpriced } : undefined;
+}
+
+function projectWindow(
+  w: WindowVerdict & { scope: QuotaWindowWire["scope"] },
+  provider: QuotaProviderWire["id"],
+  cost: QuotaCostView | undefined,
+): QuotaWindowWire {
   const wire: QuotaWindowWire = { scope: w.scope, usedPct: w.usedPct, level: w.displayLevel ?? w.level };
   if (w.resetAt !== undefined) wire.resetAt = w.resetAt;
   if (w.etaMs !== undefined) wire.etaMs = w.etaMs;
+  // 费用折算（形态 B）：按 resetAt−时长 区间从 cost 视图求和；无数据/无 resetAt ⇒ 键缺席。
+  // GLM 双端点按账号聚合（accountWindowCost，见其头注释）。
+  const c = accountWindowCost(cost, provider, w.scope, w.resetAt);
+  if (c !== undefined) {
+    wire.costUsd = c.usd;
+    if (c.unpriced) wire.costUnpriced = true;
+  }
   return wire;
 }
 
@@ -172,6 +223,10 @@ export function quotaFingerprint(wire: QuotaWire | undefined): string {
         usedPct: Math.round(w.usedPct),
         resetAt: w.resetAt === undefined ? undefined : Math.floor(w.resetAt / 60_000),
         etaMs: w.etaMs === undefined ? undefined : Math.floor(w.etaMs / 60_000),
+        // 费用折算进闸：按分四舍五入（子分抖动不值得发帧）；undefined 被 JSON.stringify 省略
+        // ⇒ 无 cost 数据时指纹逐字节不变（legacy golden 钉死）。
+        costUsd: w.costUsd === undefined ? undefined : Math.round(w.costUsd * 100) / 100,
+        costUnpriced: w.costUnpriced,
       })),
     })),
   );

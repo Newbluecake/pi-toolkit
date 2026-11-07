@@ -2,6 +2,7 @@
  * Only the pi host/provider is fake; no live credentials or provider requests are used. */
 import { EventEmitter } from "node:events";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { Socket } from "node:net";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
@@ -24,10 +25,42 @@ const PACKAGE_VERSION = (
 ).version;
 
 const reply = (id: number, value: unknown) => process.send?.({ id, value });
+/**
+ * alias-force-default AF6 (mixed fleets): make this process look like a pre-v2 peer ON THE WIRE by removing
+ * `xs.alias.v2` from the caps of its own outgoing handshake frame (`hello` for an agent, `hello_ack` for the hub).
+ * Test fixture only — production has no such hook. The peers keep running the current code; what changes is
+ * exactly what the other side can see, which is what the v2 gates key on.
+ */
+function stripAliasV2OnWire(frameType: "hello" | "hello_ack", drop: readonly string[] = ["xs.alias.v2"]): void {
+  const original = Socket.prototype.write;
+  const prefix = `{"t":"${frameType}"`;
+  Socket.prototype.write = function (this: Socket, chunk: unknown, ...rest: unknown[]) {
+    if (typeof chunk === "string" && chunk.startsWith(prefix)) {
+      const frame = JSON.parse(chunk) as { caps?: string[] };
+      frame.caps = (frame.caps ?? []).filter((c) => !drop.includes(c));
+      chunk = `${JSON.stringify(frame)}\n`;
+    }
+    return (original as (...a: unknown[]) => boolean).call(this, chunk, ...rest);
+  } as typeof Socket.prototype.write;
+}
+/**
+ * fabric-xs-activation P5 (plan §3 P5 / §2 默认 on 回归基线). Test-only debugging knobs; the committed
+ * default is activation ON on both sides, so every pre-existing suite runs against the new build unchanged:
+ *   XW_ACTIVATION_OFF=1       agent: `fabric.crossSession.activation.enabled=false` (≡ pre-feature agent)
+ *   XW_HUB_ACTIVATION_OFF=1   hub: `crossSession.activation` key absent (≡ pre-feature hub, key-absence-is-off)
+ *   XW_STRIP_STATE=1          agent: drop `xs.state.v1`/`xs.activate.v1` from its outgoing `hello` (wire-only)
+ *   XW_HUB_STRIP_STATE=1      hub: drop them from its outgoing `hello_ack` (wire-only)
+ */
+const STATE_CAPS = ["xs.state.v1", "xs.activate.v1"] as const;
 let handle: (m: any) => Promise<unknown>;
 if (process.argv[2] === "hub") {
+  if (process.env.XW_HUB_STRIP_V2 === "1") stripAliasV2OnWire("hello_ack");
+  if (process.env.XW_HUB_STRIP_STATE === "1") stripAliasV2OnWire("hello_ack", STATE_CAPS);
   let registry!: Registry;
   const slotFrames: Array<{ key: string; t: string; sessionId?: string; joined?: boolean }> = [];
+  // 2026-11-04 mention-handled fix: every agent `ctl` slot frame (prompt ledger projection),
+  // captured raw so tests can assert a cmdId's state trajectory (consumed vs unconfirmed).
+  const ctlFrames: Array<{ key: string; items: Array<{ cmdId: string; state: string }> }> = [];
   // channel-plan §12 (IBW): every agent status frame's `xsInbox` (undefined ⇒ key absent).
   const statusInbox: Array<{ key: string; xsInbox: unknown }> = [];
   const deliveries: Array<{ key: string; frame: XsDeliverFrame }> = [];
@@ -53,6 +86,7 @@ if (process.argv[2] === "hub") {
         : {
             crossSession: {
               limits: { hubSendsPerMin: 600 },
+              ...(process.env.XW_HUB_ACTIVATION_OFF === "1" ? {} : { activation: true as const }),
               ...(process.env.XW_HUB_REPLY_OFF === "1" ? { reply: false } : {}),
               // channel-plan §3.1 (CHW): hub-global broadcast params (absent ⇒ hub defaults 16/4).
               ...(process.env.XW_HUB_CHANNELS_JSON ? { channels: JSON.parse(process.env.XW_HUB_CHANNELS_JSON) } : {}),
@@ -74,6 +108,7 @@ if (process.argv[2] === "hub") {
           });
         if (frame.t === "cmd_late") lates.set((frame as any).id, frame);
         if (frame.t === "status") statusInbox.push({ key, xsInbox: (frame as any).xsInbox });
+        if (frame.t === "ctl") ctlFrames.push({ key, items: (frame as any).items ?? [] });
         return onFrame(key, frame);
       };
       request = registry.request.bind(registry);
@@ -105,7 +140,7 @@ if (process.argv[2] === "hub") {
   );
   if ("exists" in hub) throw new Error("hub unexpectedly already exists");
   handle = async (m) => {
-    if (m.op === "inspect") return { deliveries, slotFrames, statusInbox, agents: registry.list() };
+    if (m.op === "inspect") return { deliveries, slotFrames, statusInbox, ctlFrames, agents: registry.list() };
     if (m.op === "hold") {
       hold = m.mode;
       barrier = new Promise<void>((r) => {
@@ -177,13 +212,16 @@ if (process.argv[2] === "hub") {
     }
     if (m.op === "webPrompt") {
       // MW: a web composer prompt (op:prompt) addressed to one agent — exercises the web mention path.
+      // 2026-11-04 mention-handled fix: an optional explicit cmdId (like webCmd) so a test can
+      // correlate the ledger entry across the agent's ctl slot frames.
       const agent = registry.list().find((a) => a.session?.sessionId === m.sessionId)!;
+      const id = m.cmdId ?? `web-prompt-${Date.now()}`;
       return request(
         agent.agentKey,
         {
           t: "cmd",
-          rid: `wp-${Date.now()}`,
-          id: `web-prompt-${Date.now()}`,
+          rid: `wp-${id}`,
+          id,
           deadlineMs: 4000,
           origin: { listener: "loopback", ip: "127.0.0.1", reqId: "xs-web-prompt" },
           cmd: { op: "prompt", text: m.text, deliver: "steer" },
@@ -199,6 +237,10 @@ if (process.argv[2] === "hub") {
     throw new Error(`unknown hub op ${m.op}`);
   };
 } else {
+  if (process.env.XW_STRIP_V2 === "1") stripAliasV2OnWire("hello");
+  if (process.env.XW_STRIP_STATE === "1") stripAliasV2OnWire("hello", STATE_CAPS);
+  // alias-force-default AF6: per-peer working directory (the cwd basename is what auto-claim derives the alias from).
+  const peerCwd = process.env.XW_CWD ?? process.cwd();
   const agentDir = join(process.env.HOME!, ".pi/agent");
   mkdirSync(agentDir, { recursive: true });
   const config = {
@@ -252,6 +294,7 @@ if (process.argv[2] === "hub") {
         ...(process.env.XW_CHANNELS_JSON ? { channels: JSON.parse(process.env.XW_CHANNELS_JSON) } : {}),
         // alias-plan AL6: `fabric.crossSession.alias` overrides (e.g. {"enabled":false} = a pre-alias agent).
         ...(process.env.XW_ALIAS_JSON ? { alias: JSON.parse(process.env.XW_ALIAS_JSON) } : {}),
+        ...(process.env.XW_ACTIVATION_OFF === "1" ? { activation: { enabled: false } } : {}),
         limits: { listPerMin: 60, pairMinIntervalMs: 5000, pairWakesPerHour: 20, wakesOutPerHour: 60 },
       },
     },
@@ -260,7 +303,7 @@ if (process.argv[2] === "hub") {
   const sessionDir = join(process.env.PI_CODING_AGENT_DIR!, "sessions");
   mkdirSync(sessionDir, { recursive: true });
   const newSession = () => {
-    const session = SessionManager.create(process.cwd(), sessionDir);
+    const session = SessionManager.create(peerCwd, sessionDir);
     session.appendMessage({ role: "user", content: "fixture startup", timestamp: Date.now() });
     // MW: published session name (bare `@name` needs a row `name`); opt-in so older suites stay unnamed.
     if (process.env.XW_SESSION_NAME === "1") session.appendSessionInfo(process.env.XW_NAME!);
@@ -270,7 +313,16 @@ if (process.argv[2] === "hub") {
   let idle = true,
     deferred = false,
     aborts = 0;
+  // wake-unknown-optimistic (L1–L4 harness): XW_LEGACY=1 ⇒ a pi 1.0/1.1-shaped host — a
+  // triggerTurn run fires `context` (never before_agent_start) AFTER sendMessage returned
+  // (F1/F3/F4), and "provider calls" are counted only when the run survived every context handler.
+  const legacy = process.env.XW_LEGACY === "1";
+  let providerCalls = 0;
   let holdResolve = false;
+  // AF7: hold bare alias `get`s (the reconcile) so a test can freeze the agent's alias cache while the hub moves on.
+  let holdAliasGets = false;
+  let aliasGateWaiters: Array<() => void> = [];
+  let aliasGatePatched = false;
   let releaseResolve: (() => void) | undefined;
   const bus = new EventEmitter();
   let handlers = new Map<string, Function[]>();
@@ -291,9 +343,14 @@ if (process.argv[2] === "hub") {
   const messages: any[] = [],
     queued: any[] = [],
     notifications: string[] = [];
+  // alias-force-default AF6: XW_TUI_CONFIRM=1 ⇒ a TUI-mode peer whose `ui.confirm` is recorded and answered by the
+  // `confirmAnswer` op (default yes) — the interactive force/take confirmation path. Absent ⇒ rpc mode, unchanged.
+  const tuiConfirm = process.env.XW_TUI_CONFIRM === "1";
+  let confirmAnswer = true;
+  const confirms: Array<{ title: string; detail: string }> = [];
   const ctx: any = {
-    cwd: process.cwd(),
-    mode: "rpc",
+    cwd: peerCwd,
+    mode: tuiConfirm ? "tui" : "rpc",
     hasUI: process.env.XW_UI === "1",
     get sessionManager() {
       return sm;
@@ -308,8 +365,15 @@ if (process.argv[2] === "hub") {
     getContextUsage: () => undefined,
     ui: {
       notify: (text: string) => notifications.push(text),
+      confirm: async (title: string, detail: string) => {
+        confirms.push({ title, detail });
+        return confirmAnswer;
+      },
       setStatus: (key: string, text: string | undefined) => statuses.push({ key, text }),
       setWidget() {},
+      // a TUI-mode peer (XW_TUI_CONFIRM=1) reaches the TUI-only session_start hooks
+      getEditorComponent: () => undefined,
+      setEditorComponent() {},
       addAutocompleteProvider: (factory: Function) => autocompleteFactories.push(factory),
     },
   };
@@ -345,7 +409,29 @@ if (process.argv[2] === "hub") {
       else queued.push(m);
       if (options?.triggerTurn && !deferred) {
         idle = false;
-        void fire("before_agent_start", { messageType: "custom", message: m, systemPrompt: "host" });
+        if (legacy) {
+          const before = aborts;
+          const timer = setTimeout(() => {
+            void fire("context", {
+              type: "context",
+              messages: [
+                { role: "user", content: "history", timestamp: Date.now() },
+                {
+                  role: "custom",
+                  customType: m.customType,
+                  content: m.content,
+                  details: m.details,
+                  timestamp: Date.now(),
+                },
+              ],
+            }).then(() => {
+              if (aborts === before) providerCalls++; // the run survived every context handler
+            });
+          }, 0);
+          timer.unref?.();
+        } else {
+          void fire("before_agent_start", { messageType: "custom", message: m, systemPrompt: "host" });
+        }
       }
     },
     sendUserMessage(text: string) {
@@ -373,6 +459,8 @@ if (process.argv[2] === "hub") {
   handle = async (m) => {
     if (m.op === "tool")
       return (await tools.get(m.name).execute("xw-call", m.params ?? {}, undefined, undefined, ctx)).details;
+    if (m.op === "toolContent")
+      return await tools.get(m.name).execute("xw-call", m.params ?? {}, undefined, undefined, ctx);
     if (m.op === "cmd") {
       await commands.get(m.name ?? "fabric").handler(m.args ?? "status", ctx);
       return notifications.at(-1);
@@ -432,6 +520,44 @@ if (process.argv[2] === "hub") {
       }) as typeof conn.request;
       return true;
     }
+    if (m.op === "holdAlias") {
+      holdAliasGets = true;
+      const conn = currentConnection()!;
+      if (!aliasGatePatched) {
+        aliasGatePatched = true;
+        const original = conn.request.bind(conn);
+        conn.request = (async (frame: any, cap: any) => {
+          if (
+            holdAliasGets &&
+            frame.t === "xs_req" &&
+            frame.op === "alias" &&
+            frame.alias === undefined &&
+            frame.clear === undefined &&
+            frame.intent === undefined
+          )
+            await new Promise<void>((r) => aliasGateWaiters.push(r));
+          return original(frame, cap);
+        }) as typeof conn.request;
+      }
+      return true;
+    }
+    if (m.op === "releaseAlias") {
+      holdAliasGets = false;
+      for (const r of aliasGateWaiters.splice(0)) r();
+      return true;
+    }
+    // AF7: an arbitrary `op:"alias"` request as THIS peer (origin = its current sid/epoch) — used to forge handoffs.
+    if (m.op === "rawAlias") {
+      const conn = currentConnection()!;
+      const frame = {
+        t: "xs_req",
+        rid: `raw-${Math.random().toString(16).slice(2, 12)}`,
+        op: "alias",
+        origin: { sessionId: sm.getSessionId(), epoch: getXsEpochCounter().value },
+        ...(m.fields ?? {}),
+      };
+      return conn.request(frame as any, "xs.v1");
+    }
     if (m.op === "releaseResolve") {
       holdResolve = false;
       releaseResolve?.();
@@ -465,10 +591,10 @@ if (process.argv[2] === "hub") {
         key: makeMessageKey(run, "root", 1, now),
         from: run,
         to: "root",
-        kind: "finding",
+        kind: "report",
         seq: 1,
         generation: now,
-        payload: { text: "tree finding" },
+        payload: { text: "tree report" },
         ttlMs: 100_000,
         createdAt: now,
         updatedAt: now,
@@ -503,6 +629,10 @@ if (process.argv[2] === "hub") {
       skew += m.ms;
       return skew;
     }
+    if (m.op === "confirmAnswer") {
+      confirmAnswer = m.answer === true;
+      return true;
+    }
     if (m.op === "clearReplyLedger") {
       delete (globalThis as Record<symbol, unknown>)[Symbol.for("pi-subagent:xs-reply-ledger")];
       return true;
@@ -528,11 +658,13 @@ if (process.argv[2] === "hub") {
         ledger: getXsWakeLedger().entries(),
         owned: getXsWakeLedger().hasOwner(sm.getSessionId()),
         capability: getXsHostCapability().state,
+        providerCalls,
         toolNames: [...tools.keys()],
         level: readRootLevel(sm.getBranch()),
         aborts,
         members: sm.getBranch().filter((e) => e.type === "custom" && e.customType === "subagent:xs-membership"),
         notifications,
+        confirms,
         userMessages,
         mentionNotices,
         turns,

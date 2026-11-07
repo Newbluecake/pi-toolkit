@@ -169,6 +169,7 @@ interface MountOpts {
   plaintext?: boolean;
   hubCaps?: readonly string[];
   card?: Record<string, unknown>;
+  features?: string[];
   withUploads?: boolean;
   /** attachment-preview: id → source object fed through the fake's `source` accessor. */
   sources?: Record<string, unknown>;
@@ -189,6 +190,7 @@ function mountComposer(opts: MountOpts = {}) {
         ({
           key: AGENT,
           card: opts.card ?? { upload: true },
+          status: { features: opts.features ?? [] },
           pendingCtl: [],
         }) as unknown as ControlView["agent"] extends ComputedRef<infer A> ? A : never,
     ),
@@ -583,5 +585,39 @@ describe("attachment-preview wiring (2026-10: pre-send tray image preview)", () 
     await w.get(".tray-name-btn").trigger("click");
     await nextTick();
     expect(document.querySelector(".preview-overlay")).not.toBeNull(); // viewer dialog mounted
+  });
+});
+
+describe("#40 unresolved slash attachments", () => {
+  it.each(["enter", "button", "followUp"])(
+    "%s emits the exact once-composed body instead of dropping unresolved input",
+    async (method) => {
+      const { w } = mountComposer({
+        commandsEnabled: true,
+        features: ["unknown-slash-text.v1"],
+        tray: [readyAttachment()],
+      });
+      const text = "/notregistered\t raw\n  tail  ";
+      await w.find("textarea").setValue(text);
+      if (method === "button") await w.find("[data-send]").trigger("click");
+      else await w.find("textarea").trigger("keydown", { key: "Enter", altKey: method === "followUp" });
+      const emitted = w.emitted("send");
+      expect(emitted).toHaveLength(1);
+      const body = String(emitted![0]![0]);
+      expect(body.startsWith(text + "\n\n")).toBe(true);
+      expect(body.split(READY_PATH)).toHaveLength(2);
+      expect(emitted![0]![1]).toBe(method === "followUp" ? "followUp" : "steer");
+    },
+  );
+  it("still blocks exact known deny with the capability present", async () => {
+    const { w } = mountComposer({
+      commandsEnabled: true,
+      features: ["unknown-slash-text.v1"],
+      tray: [readyAttachment()],
+    });
+    await w.find("textarea").setValue("/quit");
+    await w.find("textarea").trigger("keydown", { key: "Enter" });
+    await w.find("[data-send]").trigger("click");
+    expect(w.emitted("send")).toBeUndefined();
   });
 });

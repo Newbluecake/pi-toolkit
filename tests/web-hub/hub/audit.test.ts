@@ -3,16 +3,20 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   auditAdmin,
+  auditXs,
+  XS_AUDIT_KEYS,
   auditControl,
   auditPreview,
   auditWorktreeDiff,
   auditWorktreeGraph,
   WTGRAPH_AUDIT_KEYS,
   auditRemove,
+  auditRun,
   auditSpawn,
   auditUpload,
   createUploadHttpMetrics,
   PREVIEW_AUDIT_KEYS,
+  RUN_AUDIT_KEYS,
   WTDIFF_AUDIT_KEYS,
   REMOVE_AUDIT_KEYS,
   SPAWN_AUDIT_KEYS,
@@ -487,6 +491,41 @@ describe("auditPreview (web-hub-preview plan v3 §4.5, PV3)", () => {
   });
 });
 
+describe("auditRun (2026-11 run-chain observability)", () => {
+  it('writes the whitelisted key set under audit:"run" and drops unknown keys', () => {
+    const log = memLog();
+    auditRun(log, {
+      op: "snapshot",
+      listener: "lan",
+      agentKey: "a1",
+      runTag: "abc123def456",
+      ok: false,
+      code: "E_DEADLINE",
+      ms: 5_001,
+      // deliberately smuggled extras — must be dropped by the whitelist
+      ...({ runId: "r_RAWID", entries: [{ id: "e1" }], content: "raw" } as unknown as Record<string, never>),
+    } as never);
+    expect(log.lines).toHaveLength(1);
+    const line = log.lines[0]!;
+    expect(line.msg).toBe("run");
+    const data = line.data as Record<string, unknown>;
+    expect(data["audit"]).toBe("run");
+    expect(Object.keys(data).sort()).toEqual(
+      ["audit", "op", "listener", "agentKey", "runTag", "ok", "code", "ms"].sort(),
+    );
+    expect(JSON.stringify(data)).not.toContain("r_RAWID");
+    expect(JSON.stringify(data)).not.toContain("raw");
+  });
+
+  it("RUN_AUDIT_KEYS carries no runId/entry/content-bearing key (U7)", () => {
+    expect(RUN_AUDIT_KEYS).not.toContain("runId");
+    expect(RUN_AUDIT_KEYS).not.toContain("entries");
+    expect(RUN_AUDIT_KEYS).not.toContain("content");
+    expect(RUN_AUDIT_KEYS).not.toContain("payload");
+    expect(RUN_AUDIT_KEYS).not.toContain("before");
+  });
+});
+
 describe("auditRemove (web-hub-delete-session plan v2 §4.2, A13)", () => {
   it('writes the whitelisted key set under audit:"remove" and drops unknown keys', () => {
     const log = memLog();
@@ -651,6 +690,9 @@ describe("auditWorktreeGraph (merged-plan §3.7: append-only count keys)", () =>
       "mergedUnk",
       "mergedSkip",
       "mergedMs",
+      // wtgraph.files.v1 (phase:"files"): appended after the merged keys — counts/flags only
+      "files",
+      "cached",
     ]);
   });
 
@@ -692,5 +734,33 @@ describe("auditWorktreeGraph (merged-plan §3.7: append-only count keys)", () =>
     const log = memLog();
     auditWorktreeGraph(log, { phase: "graph", ok: true, commits: 3 });
     expect(log.lines[0]!.data).toEqual({ audit: "wtgraph", phase: "graph", ok: true, commits: 3 });
+  });
+});
+
+describe("P3 receipt/activate audit uses existing sanitized key whitelist", () => {
+  it.each(["receipt", "activate"] as const)("op=%s emits no body/key/token even when smuggled", (op) => {
+    const log = memLog();
+    auditXs(log, {
+      op,
+      xid: "original-id",
+      fromSession: "session-source",
+      toSession: "session-target",
+      outcome: "none",
+      reason: "refused",
+      activationKey: "secret-key",
+      wakeToken: "secret-token",
+      text: "secret-body",
+    } as never);
+    expect(log.lines[0]!.data).toEqual({
+      audit: "xs",
+      op,
+      xid: "original-id",
+      fromSession: "session-",
+      toSession: "session-",
+      outcome: "none",
+      reason: "refused",
+    });
+    expect(XS_AUDIT_KEYS).not.toContain("activationKey");
+    expect(JSON.stringify(log.lines)).not.toContain("secret");
   });
 });

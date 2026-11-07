@@ -25,11 +25,15 @@ import { createSessionFence } from "../../src/fabric/xs/fence.js";
 import { XsMembership, readXsMembershipEntry, XS_MEMBERSHIP_CUSTOM_TYPE } from "../../src/fabric/xs/membership.js";
 import { XsReceiver } from "../../src/fabric/xs/receiver.js";
 import { XsReplyLedger, createXsReplyInboxPort } from "../../src/fabric/xs/reply-ledger.js";
+import { XsReplyNoticeGate } from "../../src/fabric/xs/reply-notice.js";
 import { XsInbox } from "../../src/fabric/xs/inbox.js";
 import { createListSessionsTool } from "../../src/tools/list-sessions-tool.js";
 import { createMessageSessionTool } from "../../src/tools/message-session-tool.js";
 import * as unread from "../../src/fabric/xs/unread.js";
 import { createXsSender } from "../../src/fabric/xs/sender.js";
+import { XsProgressBag } from "../../src/fabric/xs/progress.js";
+import { XS_ACTIVATE_MARKER_CONTENT } from "../../src/fabric/root-wake.js";
+import { createXsActivationReceiver } from "../../src/fabric/xs/session-activation.js";
 import { createBackgroundCompletionHub } from "../../src/service/background-completions.js";
 import wireAskUser from "../../src/ask-user/index.js";
 import { mockTui, stubTheme } from "../ask-user/fixtures.js";
@@ -67,6 +71,9 @@ async function host(
     autoCompact?: boolean;
     /** C-X11: register the alias-description instances (`alias:true`, activate-frozen in production). */
     aliasTools?: boolean;
+    /** C-X12b: record the BAS event but do NOT forward it to the controller (a host that never
+     *  emits before_agent_start for custom runs — the `context` guard is the only line left). */
+    noBasForward?: boolean;
   } = {},
 ) {
   const dir = mkdtempSync(join(tmpdir(), "fabric-xs-conformance-"));
@@ -101,6 +108,12 @@ async function host(
   const audit: RootWakeAudit[] = [];
   const triggers: unknown[] = [];
   const settled: boolean[] = [];
+  // wake-unknown-optimistic (C-X12): every LLM call's context event is forwarded to the real
+  // controller guard (registration order: this factory runs FIRST, the guard returns undefined).
+  const ctxKinds: string[] = [];
+  // Ledger record snapshot taken AT the first `authorized` context sight — under full-suite load
+  // the run can settle (and release the record) before a post-hoc `ledger.get` runs.
+  let authorizedRecord: unknown;
   const errors: unknown[] = [];
   let pi!: ExtensionAPI, ctx!: ExtensionContext, controller!: RootWakeController;
   const loader = new DefaultResourceLoader({
@@ -116,7 +129,16 @@ async function host(
         });
         api.on("before_agent_start", (event) => {
           triggers.push(event);
-          controller.beforeAgentStart(event);
+          if (!options.noBasForward) controller.beforeAgentStart(event);
+        });
+        api.on("context", (event) => {
+          const kind = controller.context(event).kind;
+          ctxKinds.push(kind);
+          if (kind === "authorized" && authorizedRecord === undefined) {
+            const token = controller.activeToken;
+            const rec = token === undefined ? undefined : ledger.get(token);
+            authorizedRecord = rec === undefined ? undefined : { ...rec };
+          }
         });
         api.on("input", (event) => {
           controller.input(event);
@@ -222,6 +244,10 @@ async function host(
     fence,
     audit,
     triggers,
+    ctxKinds,
+    get authorizedRecord() {
+      return authorizedRecord;
+    },
     settled,
     errors,
     pi,
@@ -1007,6 +1033,281 @@ describe("fabric phase-2 real pi contracts", () => {
   }, 30_000);
 
   /**
+   * C-X12 (wake-unknown-optimistic §5.2): capability `unknown` dispatches OPTIMISTICALLY on the
+   * current peer — no priming prompt. The run's BAS carries the custom token (authorization ⇒
+   * verified + authorizedAt), the context guard returns `authorized` on the wake run's first LLM
+   * call, exactly ONE provider request happens, and the details/token stay out of the payload.
+   */
+  it("C-X12: unknown ⇒ optimistic dispatch; BAS authorizes (verified/authorizedAt); context guard authorized; 1 provider request; no details in payload", async () => {
+    const h = await host();
+    expect(h.cap.state).toBe("unknown"); // no prime(): the optimistic path itself
+    const before = h.stub.requests.length;
+    const result = h.wake();
+    expect(result).toMatchObject({ dispatched: true, effect: "applied", woke: true });
+    const token = h.controller.activeToken!;
+    // BAS authorized the token before its first LLM call (Fpi3) — read the record before settlement releases it.
+    await until(() => h.ctxKinds.includes("authorized"), "first LLM call saw the authorized marker");
+    expect(h.triggers.at(-1)).toMatchObject({ messageType: "custom" });
+    expect(h.cap.state).toBe("verified");
+    expect(h.authorizedRecord).toMatchObject({ optimistic: true, authorizedAt: expect.any(Number) });
+    await until(() => h.settled.length === 1, "optimistic run settled");
+    expect(h.stub.requests).toHaveLength(before + 1); // exactly one provider request
+    expect(h.ctxKinds.every((kind) => kind === "authorized" || kind === "other")).toBe(true);
+    const bodies = h.stub.requests
+      .slice(before)
+      .map((r) => r.body)
+      .join("\n");
+    for (const secret of [token, "wakeToken", "xsWake"]) expect(bodies.includes(secret) ? secret : "").toBe("");
+    expect(bodies).toContain("untrusted xs body");
+    expect(h.errors).toEqual([]);
+  }, 20_000);
+
+  /**
+   * C-X12b: a host that fires before_agent_start for the wake run NEVER (harness drops the
+   * forwarding) — the context guard is the only line left, and it aborts the run BEFORE the first
+   * provider request; the capability lands absent and the controller supervises the abort.
+   */
+  it("C-X12b: no BAS at all ⇒ first context sight aborts with ZERO provider requests; absent + supervised", async () => {
+    const h = await host({ noBasForward: true });
+    const before = h.stub.requests.length;
+    const result = h.wake();
+    expect(result).toMatchObject({ dispatched: true, effect: "applied", woke: true }); // woke = accepted dispatch
+    await until(() => h.settled.length === 1, "aborted run settled");
+    expect(h.settled.at(-1)).toBe(true);
+    expect(h.stub.requests).toHaveLength(before); // ZERO provider requests
+    expect(h.cap.state).toBe("absent");
+    expect(h.audit).toContain("wake_shape_absent_aborted");
+    // the abort was supervised through settlement: the settled handler already released the token
+    expect(h.controller.state).toBe("idle");
+    expect(h.ledger.entries()).toEqual([]);
+    expect(h.ctxKinds).toContain("aborted");
+    const bodies = h.stub.requests
+      .slice(before)
+      .map((r) => r.body)
+      .join("\n");
+    expect(bodies).toBe("");
+    expect(h.errors).toEqual([]);
+    // absent is sticky: the next wake is deliver-only
+    h.controller.settled();
+    expect(h.wake()).toEqual({ dispatched: false, wakeDowngraded: "host_unsupported" });
+  }, 20_000);
+
+  /**
+   * C-X13 / C-X14 (fabric-xs-activation plan §3 P5): the pi facts the cross-session progress axis and
+   * the manual activation rely on, on a real pi runner + real provider adapter (loopback stub):
+   *  - the `context` event of a later model turn carries the delivered custom message WITH `details.xid`
+   *    (the only `started` evidence; marker / BAS alone never are);
+   *  - details / token / xid / activation key / control-marker internals never enter provider payloads;
+   *  - progress rows carry only token-shaped reasons and never body text.
+   */
+  function progressStack(h: Env, contextXids: string[][]) {
+    const sessionId = h.manager.getSessionId();
+    const membership = new XsMembership({
+      sessionId,
+      persist: (data) => h.pi.appendEntry(XS_MEMBERSHIP_CUSTOM_TYPE, data),
+      replyEnabled: true,
+    });
+    membership.attach();
+    membership.join();
+    membership.setReceive("wake");
+    const bag = new XsProgressBag(256, h.clock);
+    const origin = new Map<string, string>();
+    const r = new XsReceiver({
+      sessionId,
+      membership,
+      fence: h.fence,
+      inbox: new XsInbox(8),
+      controller: h.controller,
+      recvPerHour: 100,
+      wakesInPerHour: 100,
+      clock: h.clock,
+      progress: {
+        observe: (id, fields) => void bag.observe(id, fields, h.clock.now()),
+        replyWritten: () => {},
+      },
+      host: {
+        isIdle: () => h.session.isIdle,
+        hasPendingMessages: () => h.session.pendingMessageCount > 0,
+        sendMessage: (m, o) => h.pi.sendMessage(m, o),
+        getLeafEntry: () => h.manager.getLeafEntry() ?? undefined,
+      },
+    });
+    let n = 0;
+    const deliver = (over: Record<string, unknown> = {}) => {
+      const xid = `cx13-xid-${++n}`;
+      origin.set(xid, "SOURCE-SESSION-ID");
+      const verdict = r.deliver({
+        xid,
+        to: { sessionId, epoch: membership.epoch },
+        from: { sessionId: "SOURCE-SESSION-ID", ref: "source00001", cwdLabel: "/tmp", agentId: "src-agent" },
+        text: "PROGRESS-BODY",
+        wake: false,
+        expiresAt: h.clock.now() + 5000,
+        ...over,
+      } as never);
+      return { xid, verdict };
+    };
+    const activation = (confirmed: "present" | "absent" | "over_budget" = "present") =>
+      createXsActivationReceiver({
+        sessionId: () => sessionId,
+        epoch: () => membership.epoch,
+        disposed: () => false,
+        now: () => h.clock.now(),
+        membership: {
+          get receive() {
+            return membership.receive;
+          },
+          senderAllowed: () => true,
+        },
+        fence: { check: () => ({ ok: true }) },
+        bag,
+        originOf: (id) => origin.get(id),
+        confirmed: () => confirmed,
+        flushBranch: () => {},
+        hasLiveWake: (id) =>
+          h.ledger
+            .entries()
+            .some((x) => (x.xid === id || x.activateFor === id) && (x.state === "live" || x.executionPending)),
+        controller: () => h.controller,
+        observe: (id, fields) => void bag.observe(id, fields, h.clock.now()),
+      });
+    const frame = (xid: string, over: Record<string, unknown> = {}) => ({
+      t: "xs_activate" as const,
+      rid: `cx14-rid-${++n}`,
+      to: { sessionId, epoch: membership.epoch },
+      from: { sessionId: "SOURCE-SESSION-ID", ref: "source00001", cwdLabel: "/tmp", agentId: "src-agent" },
+      messageId: xid,
+      activationKey: "CX14-SECRET-KEY",
+      expiresAt: h.clock.now() + 5000,
+      level: 0,
+      ...over,
+    });
+    return { r, bag, deliver, activation, frame, contextXids };
+  }
+  const contextProbe = () => {
+    const seen: string[][] = [];
+    return {
+      seen,
+      extension: (pi: ExtensionAPI) => {
+        pi.on("context", (event) => {
+          const ids: string[] = [];
+          for (const m of (event as { messages: Array<Record<string, any>> }).messages)
+            if (m.role === "custom" && m.customType === "subagent:xs" && typeof m.details?.xid === "string")
+              ids.push(m.details.xid as string);
+          seen.push(ids);
+        });
+      },
+    };
+  };
+
+  it("C-X13: delivered ⇒ started only at a later model turn's context carrying the xid; progress rows are token-only; details/token/xid never reach the provider", async () => {
+    const probe = contextProbe();
+    const h = await host({ extensions: [probe.extension] });
+    await prime(h);
+    const s = progressStack(h, probe.seen);
+    const { xid, verdict } = s.deliver();
+    expect(verdict).toMatchObject({ effect: "applied", woke: false });
+    // delivered is proven by the leaf entry written synchronously (Fpi7), NOT by any model turn
+    const row = () => s.bag.rows(h.clock.now()).find((x) => x.messageId === xid)!;
+    expect(row()).toMatchObject({ phase: "delivered", deliveryEffect: "applied" });
+    expect(row().startedAt).toBeUndefined();
+    expect(probe.seen.flat()).not.toContain(xid);
+    const before = h.stub.requests.length;
+    await h.session.prompt("a later human turn");
+    // pi fact: the next turn's context event DOES expose the delivered custom message with details.xid
+    expect(probe.seen.at(-1)).toContain(xid);
+    expect(h.stub.requests.length).toBe(before + 1);
+    // hygiene: the row (a wire-bound projection) never contains body text or the sender's full session id
+    const blob = JSON.stringify(s.bag.rows(h.clock.now()));
+    expect(blob).not.toContain("PROGRESS-BODY");
+    // a wake downgrade surfaces as a bounded token (reason enumerations are English tokens ≤48)
+    const busy = s.deliver({ wake: true, level: 0 });
+    const w = s.bag.rows(h.clock.now()).find((x) => x.messageId === busy.xid)!.wake;
+    if (w?.reason !== undefined) expect(w.reason).toMatch(/^[a-z0-9_:]{1,48}$/);
+    await until(() => h.settled.length >= 2 || h.controller.state === "idle", "wake run quiesced", 8000);
+    // provider payload: body visible as model text, but no host-only details / token / xid / sender session id
+    const bodies = h.stub.requests.map((x) => x.body).join("\n");
+    expect(bodies).toContain("PROGRESS-BODY");
+    for (const secret of ["wakeToken", "xsWake", "activateFor", xid, busy.xid, "SOURCE-SESSION-ID"])
+      expect(bodies.includes(secret) ? secret : "").toBe("");
+    expect(h.errors).toEqual([]);
+  }, 40_000);
+
+  it("C-X14: activation is at-most-once with ONE fixed body-free marker; B1 verifies it; the body is never copied; expired/unconfirmed refuse with zero provider work", async () => {
+    const probe = contextProbe();
+    const h = await host({ extensions: [probe.extension] });
+    await prime(h);
+    const s = progressStack(h, probe.seen);
+    const { xid } = s.deliver();
+    s.bag.observe(xid, { activationKey: "CX14-SECRET-KEY", activationUntil: h.clock.now() + 600_000 }, h.clock.now());
+    const bodyEntries = () =>
+      h.manager
+        .getBranch()
+        .filter((e: any) => e.type === "custom_message" && e.customType === "subagent:xs" && e.details?.xid === xid)
+        .length;
+    expect(bodyEntries()).toBe(1);
+    const before = h.stub.requests.length;
+    const act = s.activation();
+    // expired / unconfirmed ⇒ refused before any trigger
+    expect(act.handle(s.frame(xid, { expiresAt: h.clock.now() }) as never)).toMatchObject({
+      status: "refused",
+      reason: "expired",
+    });
+    expect(s.activation("absent").handle(s.frame(xid) as never)).toMatchObject({
+      status: "refused",
+      reason: "not_delivered",
+    });
+    expect(h.stub.requests).toHaveLength(before);
+    expect(h.controller.state).toBe("idle");
+    // the real activation: one marker, B1 authorizes it, exactly one provider request
+    const ack = act.handle(s.frame(xid) as never);
+    expect(ack).toMatchObject({ status: "accepted", effect: "applied" });
+    const token = h.controller.activeToken!;
+    await until(() => h.ctxKinds.includes("authorized"), "B1 authorized the control marker");
+    expect(h.triggers.at(-1)).toMatchObject({ messageType: "custom" });
+    await until(() => h.settled.length >= 2 && h.controller.state === "idle", "control run settled", 8000);
+    expect(h.stub.requests).toHaveLength(before + 1);
+    // idempotent: the same message activates no second turn, original body still ONE entry
+    const again = act.handle(s.frame(xid) as never);
+    expect(again).toMatchObject({ status: "already_active", effect: "none" });
+    await sleep(50);
+    expect(h.stub.requests).toHaveLength(before + 1);
+    expect(bodyEntries()).toBe(1);
+    // marker entries: fixed content, control xid ≠ message id, no body/key
+    const markers = h.manager
+      .getBranch()
+      .filter((e: any) => e.type === "custom_message" && e.details?.activateFor === xid) as any[];
+    expect(markers).toHaveLength(1);
+    expect(markers[0].content).toBe(XS_ACTIVATE_MARKER_CONTENT);
+    expect(markers[0].details.xid).not.toBe(xid);
+    const last = h.stub.requests.at(-1)!.body;
+    for (const secret of [token, "wakeToken", "xsWake", "activateFor", "CX14-SECRET-KEY", "SOURCE-SESSION-ID"])
+      expect(last.includes(secret) ? secret : "").toBe("");
+    expect(h.errors).toEqual([]);
+  }, 40_000);
+
+  it("C-X14b: a host that loses the custom shape (no BAS) aborts the marker before the provider; the body is not re-sent as a fallback", async () => {
+    const h = await host({ noBasForward: true });
+    h.cap.observe({ messageType: "user", prompt: "p" } as never); // sticky-absent would otherwise be deliver-only
+    const s = progressStack(h, []);
+    const { xid } = s.deliver();
+    s.bag.observe(xid, { activationKey: "CX14-SECRET-KEY", activationUntil: h.clock.now() + 600_000 }, h.clock.now());
+    const before = h.stub.requests.length;
+    expect(s.activation().handle(s.frame(xid) as never)).toMatchObject({ status: "accepted" });
+    await until(() => h.settled.length === 1, "aborted control run settled");
+    expect(h.settled.at(-1)).toBe(true);
+    expect(h.stub.requests).toHaveLength(before); // zero provider requests
+    const entries = h.manager
+      .getBranch()
+      .filter((e: any) => e.type === "custom_message" && e.customType === "subagent:xs") as any[];
+    expect(entries.filter((e) => e.details?.xid === xid)).toHaveLength(1); // original body still once
+    expect(
+      entries.filter((e) => e.content !== XS_ACTIVATE_MARKER_CONTENT && e.details?.activateFor === xid),
+    ).toHaveLength(0);
+    expect(JSON.stringify(entries.filter((e) => e.details?.activateFor === xid))).not.toContain("PROGRESS-BODY");
+  }, 30_000);
+
+  /**
    * C-X10 (channel-plan §12.7): ONLY pi's ordering facts that the unread counter relies on. The real
    * IB1 core is driven from a real pi extension's turn events; the writes are real `pi.sendMessage`s.
    */
@@ -1151,5 +1452,198 @@ describe("fabric phase-2 real pi contracts", () => {
       await sleep(50);
       expect(p.count()).toBe(0);
     });
+  });
+});
+
+describe("#20 C-X15 timeout phase provider hygiene", () => {
+  it.each(["wake", "quiet"] as const)(
+    "C-X15 %s: exact observation copy visible, host credentials absent (quiet waits for a natural turn)",
+    async (path) => {
+      const h = await host();
+      await prime(h);
+      const secrets = {
+        sid: "SID_SENTINEL_x9",
+        xid: "XID_SENTINEL_x9",
+        messageId: "MESSAGEID_SENTINEL_x9",
+        activationKey: "ACTIVATIONKEY_SENTINEL_x9",
+      };
+      let n = 0;
+      const ledger = new XsReplyLedger({ clock: h.clock, newRequestId: () => `q${String(++n).padStart(18, "0")}` });
+      ledger.bindSession({ sessionId: secrets.sid, inbox: createXsReplyInboxPort(new XsInbox(8)) });
+      const rows = new Map<
+        string,
+        { phase: "delivered" | "started"; sid: string; xid: string; messageId: string; activationKey: string }
+      >();
+      for (const phase of ["delivered", "started"] as const) {
+        const issued = ledger.issue({
+          requesterSessionId: secrets.sid,
+          replierSessionId: secrets.sid,
+          replierRef: "cx15-peer",
+          origin: "model",
+          wakeOnReply: path === "wake",
+          requesterLevel: 0,
+          timeoutMs: 60_000,
+          lateGraceMs: 600_000,
+          maxPending: 8,
+          maxPendingPerTarget: 3,
+        });
+        expect(issued.ok).toBe(true);
+        if (!issued.ok) throw new Error("ticket issue failed");
+        // Host-only fields on tickets and mirror rows are deliberately dangerous sentinels.
+        Object.assign(issued.ticket, secrets);
+        rows.set(issued.ticket.requestId, { phase, ...secrets });
+      }
+      let notice = "";
+      const gate = new XsReplyNoticeGate({
+        ledger,
+        sessionId: secrets.sid,
+        getSessionId: () => secrets.sid,
+        disposed: () => false,
+        joined: () => true,
+        receive: () => "wake",
+        fence: h.fence,
+        clock: h.clock,
+        progressOf: (id) => rows.get(id)?.phase,
+        controller: {
+          dispatch: (r) => {
+            notice = r.content;
+            return h.controller.dispatch(r);
+          },
+        },
+        host: {
+          sendMessage: (write) => {
+            notice = write.content;
+            h.pi.sendMessage(write, { triggerTurn: false });
+          },
+        },
+      });
+      const before = h.stub.requests.length;
+      h.clock.advance(60_000);
+      expect(gate.flush()).toMatchObject({ written: path });
+      expect(notice).toContain(" · last seen delivered");
+      expect(notice).toContain(" · started seen");
+      const copy = [
+        '标 last seen delivered 的请求：最后观测为已送达，尚无对方开始处理（started）的证明——观测可能滞后或漏记，不代表对方此刻一定没在处理。需要的话可在宽限期内用 wake_session（action "activate"，原发送结果的 track.messageId/activationKey）尝试激活（对方若已开始处理会返回 no-op），不要重发正文。',
+        "标 started seen 的请求：已观测到对方回合上下文包含该请求，但尚未收到回复；不要重发，宽限期内的回复仍会送达。",
+      ];
+      expect(notice.split("\n").slice(-2)).toEqual(copy);
+      for (const value of Object.values(secrets)) expect(notice).not.toContain(value);
+      if (path === "quiet") {
+        expect(h.stub.requests).toHaveLength(before);
+        await h.session.prompt("A subsequent natural human turn reads the quiet notice");
+      } else {
+        await until(() => h.stub.requests.length > before, "timeout wake reaches provider");
+        await until(() => h.session.isIdle && h.controller.state === "idle", "timeout wake settles");
+      }
+      expect(h.stub.requests).toHaveLength(before + 1);
+      const payload = JSON.stringify(h.stub.requests.slice(before));
+      expect(payload).toContain(" · last seen delivered");
+      expect(payload).toContain(" · started seen");
+      // JSON escapes action quotes; assert decoded HTTP bodies for exact prose.
+      const bodies = h.stub.requests.slice(before).map((request) => JSON.parse(request.body));
+      const text = bodies
+        .flatMap((body) => body.messages)
+        .flatMap((m: { content: unknown }) =>
+          typeof m.content === "string"
+            ? [m.content]
+            : (m.content as Array<{ text?: string }>).map((c) => c.text ?? ""),
+        )
+        .join("\n");
+      for (const sentence of copy) expect(text).toContain(sentence);
+      for (const value of Object.values(secrets)) expect(payload).not.toContain(value);
+      expect(h.errors).toEqual([]);
+      gate.dispose();
+    },
+    40_000,
+  );
+});
+
+/** #21 C-X16 (plan §3 T13): the pi fact D1's blocking wait rests on — an xs answer write
+ * (`sendMessage(triggerTurn:false)`) issued while a tool EXECUTES is persisted after that
+ * tool's result and appears in the SAME run's next provider request (so the model sees ask_user's
+ * answer + the standalone reply copy together); the write's details/token never enter the
+ * provider payload. Only the remote provider is a stub; the session, tool execution and the
+ * message pipeline are real. */
+describe("#21 C-X16 answer-write ordering under tool execution", () => {
+  const SENTINELS = { token: "WAKETOKEN_SENTINEL_cx16", requestId: "Q2_SENTINEL_cx16" };
+  it("mid-execute triggerTurn:false lands after the toolResult, joins the same run's next request, stays out of the payload", async () => {
+    const stub = await AnthropicStub.start({
+      reply: (_r, i) =>
+        i === 0
+          ? { kind: "tool", calls: [{ name: "cx16_probe", input: {} }] }
+          : { kind: "text", text: "probe acknowledged" },
+    });
+    const contexts: Array<Array<{ role?: string; content?: unknown }>> = [];
+    const h = await host({
+      stub,
+      extensions: [
+        (pi) => {
+          pi.on("context", (event) => {
+            const messages = (event as { messages?: Array<{ role?: string; content?: unknown }> }).messages;
+            if (messages !== undefined) contexts.push(messages);
+          });
+          pi.registerTool({
+            name: "cx16_probe",
+            label: "CX16 Probe",
+            description: "C-X16: mid-execute quiet xs answer write.",
+            parameters: Type.Object({}),
+            execute: async () => {
+              // the redirect's answer write: quiet (triggerTurn:false), sent DURING execution
+              pi.sendMessage(
+                {
+                  customType: "subagent:xs",
+                  content: "1: ship it",
+                  display: true,
+                  details: {
+                    inReplyTo: SENTINELS.requestId,
+                    from: { sessionId: "peer-cx16" },
+                    wakeToken: SENTINELS.token,
+                    xsWake: true,
+                  },
+                },
+                { triggerTurn: false },
+              );
+              return { content: [{ type: "text", text: "probe done" }] };
+            },
+          } as never);
+        },
+      ],
+    });
+    await h.session.prompt("run the cx16 probe");
+    expect(contexts.length).toBe(2); // ONE run, two provider calls — the quiet write started no second run
+
+    // (a) branch order: the custom_message entry sits AFTER the toolResult entry
+    const branch = h.manager.getBranch();
+    const toolResultIdx = branch.findIndex(
+      (e) => (e as { type?: string; message?: { role?: string } }).message?.role === "toolResult",
+    );
+    const customIdx = branch.findIndex(
+      (e) =>
+        (e as { type?: string }).type === "custom_message" && (e as { content?: unknown }).content === "1: ship it",
+    );
+    expect(toolResultIdx).toBeGreaterThan(-1);
+    expect(customIdx).toBeGreaterThan(toolResultIdx);
+
+    // (b) the SAME run's next provider request carries it, positioned after the toolResult
+    const second = contexts[1]!;
+    const reqToolResult = second.map((m) => m.role).lastIndexOf("toolResult");
+    expect(reqToolResult).toBeGreaterThan(-1);
+    const reqCustom = second.findIndex((m, i) => {
+      // a custom entry projects with role "custom" and its content as the text
+      if (m.role !== "custom" || i < reqToolResult) return false;
+      const text = typeof m.content === "string" ? m.content : JSON.stringify(m.content);
+      return text.includes("1: ship it");
+    });
+    expect(reqCustom).toBeGreaterThan(reqToolResult);
+
+    // (c) details/token never reach the provider payload — asserted on the RECORDED HTTP bodies
+    // (the context EVENT legitimately still carries details pre-projection; C-X5/C-X9 pin the
+    // projection itself). The stub's parse-guard skips non-object bodies, so len is 1-2.
+    expect(h.stub.requests.length).toBeGreaterThanOrEqual(1);
+    for (const request of h.stub.requests) {
+      for (const value of Object.values(SENTINELS)) expect(request.body).not.toContain(value);
+      expect(request.body).not.toContain("xsWake");
+    }
+    expect(h.errors).toEqual([]);
   });
 });

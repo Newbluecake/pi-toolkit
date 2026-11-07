@@ -10,7 +10,7 @@ import { getSecureDomain, resetSecureDomainForTests } from "../../src/secure/dom
 import { hubSafeEnv } from "../../src/secure/env.js";
 import { secureGuardsNeeded } from "../../src/secure/guards.js";
 import { sandboxHome } from "../integration/helpers/home-sandbox.js";
-import { traceActivation, type ActivationTrace } from "./activation-trace.js";
+import { traceActivation, type ActivationTrace } from "../helpers/activation-trace.js";
 
 interface Golden {
   scenarios: Record<string, unknown>;

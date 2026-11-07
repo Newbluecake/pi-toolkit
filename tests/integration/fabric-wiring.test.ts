@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { sandboxHome } from "./helpers/home-sandbox.js";
 import { DEFAULT_SETTINGS, type AgentSettings } from "../../src/config/settings.js";
 import type { AgentTypeRegistry } from "../../src/config/agent-types.js";
@@ -15,6 +15,8 @@ afterEach(() => {
 });
 
 const run = "r_ABCDEFGH" as const;
+const LEGACY_KIND: string = "finding"; // #34 legacy input
+const LEGACY_BODY = "pre-#34 persisted body";
 const target = "r_12345678" as const;
 
 type Entry = { type: string; customType?: string; data?: unknown };
@@ -99,7 +101,7 @@ describe("fabric stack wiring", () => {
   });
 
   it("T18' repairs an issued dead-letter reference after reload without another put", () => {
-    const orig = record({ kind: "finding", to: target, key: makeMessageKey(run, target, 1, 1) });
+    const orig = record({ kind: "report", to: target, key: makeMessageKey(run, target, 1, 1) });
     const deadKey = makeMessageKey("system", run, 0, 1);
     const dead = {
       ...record({ key: deadKey, from: "system", to: run, kind: "dead_letter", generation: 0 as never, seq: 1 }),
@@ -130,7 +132,7 @@ describe("fabric stack wiring", () => {
   });
 
   it("run-persistence plan D6: a journal-only (non-terminal) run replays as gone — messages to it are dropped as target_gone, never held", () => {
-    const orig = record({ kind: "finding", to: target, key: makeMessageKey(run, target, 1, 1) });
+    const orig = record({ kind: "report", to: target, key: makeMessageKey(run, target, 1, 1) });
     const entries: Entry[] = [
       runEntry("completed"),
       // The target only ever got its session_created journal entry (the
@@ -149,6 +151,50 @@ describe("fabric stack wiring", () => {
     expect(latest.state).toBe("dropped");
     expect(latest.deadLetter?.reason).toBe("target_gone");
     stack.fabric!.dispose();
+  });
+
+  it("#34 T-U6 retires persisted pre-#34-kind messages on stack build: one warn line, no body, idempotent", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const legacyRoot = record({ kind: LEGACY_KIND as FabricRecord["kind"], payload: { text: LEGACY_BODY } });
+      const legacyParked = record({
+        key: makeMessageKey(run, target, 1, 2),
+        to: target,
+        seq: 2,
+        kind: LEGACY_KIND as FabricRecord["kind"],
+        payload: { text: LEGACY_BODY },
+        parked: { at: Date.now(), reason: "wake_false" },
+      });
+      const entries: Entry[] = [
+        runEntry("completed"),
+        { type: "custom", customType: "subagent:fabric", data: legacyRoot },
+        { type: "custom", customType: "subagent:fabric", data: legacyParked },
+      ];
+      const h = harness(entries);
+      const stack = buildSessionStack(h.pi, h.ctx, settings(true), types, []);
+      const dropped = h.appended.filter((entry) => entry.customType === "subagent:fabric");
+      expect(dropped).toHaveLength(2);
+      for (const entry of dropped)
+        expect(entry.data).toMatchObject({ state: "dropped", terminalReason: "unknown_kind" });
+      expect(h.sent).toHaveLength(0);
+      const retireWarns = warn.mock.calls
+        .map((c) => String(c[0]))
+        .filter((t) => /dropped 2 persisted message\(s\) with an unknown kind/.test(t));
+      expect(retireWarns).toHaveLength(1);
+      for (const text of warn.mock.calls.map((c) => String(c[0]))) expect(text).not.toContain(LEGACY_BODY);
+      stack.fabric!.dispose();
+      // Second build over the appended log (a reload): nothing new is retired, nothing warns.
+      warn.mockClear();
+      const second = harness(entries);
+      const stack2 = buildSessionStack(second.pi, second.ctx, settings(true), types, []);
+      expect(second.appended.filter((entry) => entry.customType === "subagent:fabric")).toHaveLength(0);
+      expect(
+        warn.mock.calls.map((c) => String(c[0])).filter((t) => /persisted message\(s\) with an unknown kind/.test(t)),
+      ).toHaveLength(0);
+      stack2.fabric!.dispose();
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("T19 fabric.enabled=false creates no fabric, mailbox, or fabric outbox writes", () => {

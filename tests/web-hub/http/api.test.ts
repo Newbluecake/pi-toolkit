@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { HistoryPayload } from "../../../src/web-hub/protocol/http-contract.js";
+import type { CtlItemWire, StatusInfo } from "../../../src/web-hub/protocol/messages.js";
+import type { HubEvent } from "../../../src/web-hub/hub/ports.js";
 import { createHttpFrontend } from "../../../src/web-hub/hub/http.js";
 import type { HttpFrontend } from "../../../src/web-hub/hub/ports.js";
 import {
@@ -320,6 +322,146 @@ describe("POST /api/subscribe", () => {
     d.resolve(emptyHistory("a1"));
     await new Promise((r) => setTimeout(r, 30));
     expect(conn.events.some((e) => e.event === "history")).toBe(false);
+  });
+});
+
+describe("POST /api/subscribe — #88 directed ctl/status replay", () => {
+  const ctlEvent = (
+    agentKey: string,
+    items: Array<[cmdId: string, state: CtlItemWire["state"], updatedAt: number]>,
+  ): HubEvent => ({
+    type: "ctl",
+    agentKey,
+    epoch: "e1",
+    sessionId: "s1",
+    items: items.map(([cmdId, state, updatedAt]) => ({ cmdId, op: "prompt", state, at: 1, updatedAt })),
+  });
+
+  it("resends the last status and ACTIVE ctl items between history and the buffered/live frames", async () => {
+    const status: StatusInfo = {
+      leafId: "L9",
+      busy: true,
+      pending: true,
+      queue: [{ id: "c1", text: "hi", deliver: "steer", source: "web", cmdId: "c1", at: 5 }],
+    };
+    deps.agents.set("a1", makeAgent("a1", { status }));
+    // Attach AFTER the ctl broadcast so the only directed frames this conn sees are the re-sends.
+    const { conn, clientId } = await events();
+    deps.emit(
+      ctlEvent("a1", [
+        ["c1", "queued", 2], // active — re-sent
+        ["c3", "held", 3], // active — re-sent
+        ["c2", "ok", 9], // terminal — dropped
+        ["c4", "recalled", 8], // terminal — dropped
+        ["c5", "returned", 7], // terminal — dropped
+      ]),
+    );
+    await postJson(port, "/api/subscribe", { clientId, agentKey: "a1" }, { Cookie: cookie });
+    const ctl = await conn.waitFor((e) => e.event === "ctl" && e.id === undefined);
+    const histIdx = conn.events.findIndex((e) => e.event === "history");
+    const statusIdx = conn.events.findIndex((e) => e.event === "status");
+    const ctlIdx = conn.events.indexOf(ctl);
+    expect(histIdx).toBeGreaterThanOrEqual(0);
+    expect(histIdx).toBeLessThan(statusIdx); // history first …
+    expect(statusIdx).toBeLessThan(ctlIdx); // … then the directed status …
+    // … then the directed ctl — all BEFORE any later live frame (asserted at the end)
+    expect(ctl.data).toEqual({
+      agentKey: "a1",
+      epoch: "e1",
+      sessionId: "s1",
+      items: [
+        { cmdId: "c1", op: "prompt", state: "queued", at: 1, updatedAt: 2 },
+        { cmdId: "c3", op: "prompt", state: "held", at: 1, updatedAt: 3 },
+      ],
+    });
+    const st = conn.events.find((e) => e.event === "status")!;
+    expect(st.id).toBeUndefined(); // directed, never in the replay ring
+    expect(st.data).toEqual({ agentKey: "a1", status });
+    // live broadcasts keep flowing after the directed replay, with ring ids
+    deps.emit(ctlEvent("a1", [["c9", "started", 4]]));
+    const live = await conn.waitFor(
+      (e) =>
+        e.event === "ctl" &&
+        e.id !== undefined &&
+        (e.data as { items: Array<{ cmdId: string }> }).items[0]?.cmdId === "c9",
+    );
+    expect((live.data as { items: Array<{ cmdId: string }> }).items[0]!.cmdId).toBe("c9");
+    expect(conn.events.indexOf(live)).toBeGreaterThan(conn.events.indexOf(ctl));
+  });
+
+  it("the directed ctl reflects the NEWEST cached state and never precedes a later live frame", async () => {
+    const { conn, clientId } = await events();
+    const d = deferred<HistoryPayload>();
+    deps.setSnapshot(() => d.promise);
+    deps.emit(ctlEvent("a1", [["old", "queued", 1]]));
+    await postJson(port, "/api/subscribe", { clientId, agentKey: "a1" }, { Cookie: cookie });
+    // a NEWER ctl broadcast lands while the snapshot is still pending
+    deps.emit(ctlEvent("a1", [["new", "running", 5]]));
+    await conn.waitFor(
+      (e) =>
+        e.event === "ctl" &&
+        e.id !== undefined &&
+        (e.data as { items: Array<{ cmdId: string }> }).items[0]?.cmdId === "new",
+    );
+    d.resolve(emptyHistory("a1"));
+    const directed = await conn.waitFor((e) => e.event === "ctl" && e.id === undefined);
+    expect((directed.data as { items: Array<{ cmdId: string }> }).items.map((i) => i.cmdId)).toEqual(["new"]);
+    deps.emit(ctlEvent("a1", [["after", "queued", 6]]));
+    const after = await conn.waitFor(
+      (e, all) => all.indexOf(e) > all.indexOf(directed) && e.event === "ctl" && e.id !== undefined,
+    );
+    expect((after.data as { items: Array<{ cmdId: string }> }).items[0]!.cmdId).toBe("after");
+  });
+
+  it("each subscriber gets its own directed re-send; agents with no ctl/status get neither", async () => {
+    deps.emit(ctlEvent("a1", [["c1", "held", 1]]));
+    const x = await events();
+    const y = await events();
+    const h = { Cookie: cookie };
+    await postJson(port, "/api/subscribe", { clientId: x.clientId, agentKey: "a1" }, h);
+    await postJson(port, "/api/subscribe", { clientId: y.clientId, agentKey: "a2" }, h);
+    const ctlX = await x.conn.waitFor((e) => e.event === "ctl" && e.id === undefined);
+    expect((ctlX.data as { agentKey: string }).agentKey).toBe("a1");
+    await y.conn.waitFor((e) => e.event === "history");
+    await new Promise((r) => setTimeout(r, 30));
+    expect(y.conn.events.some((e) => e.event === "ctl" && e.id === undefined)).toBe(false);
+    expect(y.conn.events.some((e) => e.event === "status" && e.id === undefined)).toBe(false);
+    // a second tab subscribing the SAME agent gets its own copy
+    const z = await events();
+    await postJson(port, "/api/subscribe", { clientId: z.clientId, agentKey: "a1" }, h);
+    await z.conn.waitFor((e) => e.event === "ctl" && e.id === undefined);
+  });
+
+  it("agent_down clears the retained ctl (and a gone record 404s the subscribe — no re-send)", async () => {
+    const { conn, clientId } = await events();
+    deps.emit(ctlEvent("a1", [["c1", "queued", 1]]));
+    deps.emit({ type: "agent_down", agentKey: "a1", reason: "quit" });
+    await conn.waitFor((e) => e.event === "agent_down");
+    // the fake registry still holds the record (the real one drops it — covered next assertion),
+    // but the route's retained ctl must not replay for a down agent
+    await postJson(port, "/api/subscribe", { clientId, agentKey: "a1" }, { Cookie: cookie });
+    await conn.waitFor((e) => e.event === "history");
+    await new Promise((r) => setTimeout(r, 30));
+    expect(conn.events.some((e) => e.event === "ctl" && e.id === undefined)).toBe(false);
+    // real-registry shape: the record is gone ⇒ subscribe 404s, nothing is re-sent at all
+    deps.agents.delete("a1");
+    expect((await postJson(port, "/api/subscribe", { clientId, agentKey: "a1" }, { Cookie: cookie })).status).toBe(404);
+  });
+
+  it("a ledger with only terminal entries produces no directed ctl re-send", async () => {
+    const { conn, clientId } = await events();
+    deps.emit(
+      ctlEvent("a1", [
+        ["c2", "ok", 9],
+        ["c4", "failed", 8],
+      ]),
+    );
+    await postJson(port, "/api/subscribe", { clientId, agentKey: "a1" }, { Cookie: cookie });
+    await conn.waitFor((e) => e.event === "history");
+    await new Promise((r) => setTimeout(r, 30));
+    expect(conn.events.some((e) => e.event === "ctl" && e.id === undefined)).toBe(false);
+    // the status re-send is independent: a1's fake card carries a status, so it still fires
+    expect(conn.events.some((e) => e.event === "status" && e.id === undefined)).toBe(true);
   });
 });
 

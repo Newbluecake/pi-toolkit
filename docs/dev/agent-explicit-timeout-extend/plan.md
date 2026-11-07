@@ -1,5 +1,14 @@
 # 显式 `timeout_s` 也可宽限与延长 · 实施方案 v2
 
+> **Superseded defaults (#62, 2026-11-07):** historical 90s/default-not-changing clauses below are archival.
+> Product Agent-tool admission now floors effective total at host `budget.minTotalS` (default1800, 0=off),
+> including explicitly short timeouts, omitted values and fixed-policy resumes; default grace is600s.
+> Ceilings use effective T after flooring; fixed-policy resumes still have no grace, and phase/absolute/
+> abort/parent bounds remain unchanged. Programmatic spawns and `/task` are outside the floor.
+> Shared workflow grace and schedule settlement fallback intentionally inherit600s (fixed run deadlines do not).
+> Frozen nested `default 90` text remains intentionally stale; current semantics/evidence:
+> `../subagent-core/README.md` → “Agent-tool minimum total and shared grace defaults (#62)”.
+
 > 状态：**v2.1（2026-10-07）**——评审两轮后由主会话按收敛规则裁定剩余 3 项（R2-R4，见文末「v2.1 主会话裁定」），评审闭环，进入施工。
 > 需求拍板：2026-10-07 用户——「显式 `timeout_s` 也要支持宽限与延长」；「嵌套也可延长」（知情选项：CC2 通知抑制、静默 ≤90s）。
 > 上游：`docs/dev/timeout-notify/{arch,plan}.md`（D-10「显式 timeout 的 run 是硬顶」由本方案**部分取代**）、

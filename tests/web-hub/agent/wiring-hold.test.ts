@@ -9,7 +9,13 @@
  * connection-state republish rules.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { wireWebHub, WEB_HUB_STATUS_KEY, statusLineText, type WebHubDeps } from "../../../src/web-hub/agent/index.js";
+import {
+  wireWebHub,
+  WEB_HUB_STATUS_KEY,
+  statusLineText,
+  type WebHubDeps,
+  type WebHubSettings,
+} from "../../../src/web-hub/agent/index.js";
 import type { AgentFrame, CmdFrame } from "../../../src/web-hub/protocol/messages.js";
 import { ackFrame, fakeCtx, fakeNet, fakePi, pathsIn, resetGlobals, SETTINGS, tmpDir } from "./helpers.js";
 
@@ -186,6 +192,41 @@ describe("W1 — holdWired gate: caps + handler registration", () => {
       expect(handlers.get(ev)?.length ?? 0, ev).toBe((base.handlers.get(ev)?.length ?? 0) + 1);
     }
     expect(handlers.get("input")!.length).toBe(base.handlers.get("input")!.length); // no input barrier (Q2)
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #23 web-update-stuck plan §2.2 (D13) — the epoch-up cap rides the agent surface exactly
+// when hold is NOT wired: tail-appended, the ONLY delta vs the pre-#23 hello.
+// ---------------------------------------------------------------------------
+describe("#23 D13 — epoch.up.v1 tail-append (hold-off configs only)", () => {
+  async function helloCapsFor(settings: Partial<WebHubSettings>): Promise<string[]> {
+    resetGlobals(); // close any connection a previous wiring left in the process global
+    const n = fakeNet();
+    const { pi, fire } = fakePi();
+    wireWebHub(pi, deps({ netConnect: n.netConnect, settings: { ...SETTINGS, ...settings } }));
+    const { ctx } = ctxIn(tmp, { mode: "tui" });
+    await goLive(n, fire, ctx);
+    const hello = n.sockets[0]!.frames().find((f) => f.t === "hello") as { caps?: string[] };
+    return hello.caps ?? [];
+  }
+
+  it("steerRecall:false ⇒ hello ENDS with exactly one epoch.up.v1; prefix identical to the default-config caps minus hold.v1 (「只在尾部追加、只多这一个」)", async () => {
+    const off = await helloCapsFor({ steerRecall: false });
+    expect(off.at(-1)).toBe("epoch.up.v1");
+    expect(off.filter((c) => c === "epoch.up.v1")).toHaveLength(1);
+    expect(off).not.toContain("hold.v1");
+    const on = await helloCapsFor({});
+    expect(on.at(-1)).toBe("hold.v1");
+    expect(on).not.toContain("epoch.up.v1"); // default config: no append (A-tier goldens pin this)
+    expect(off.slice(0, -1)).toEqual(on.slice(0, -1)); // everything before the tail is untouched
+  });
+
+  it("control:false ⇒ also tail-appends (the early return never reaches holdWired, so hold.v1 is absent there too)", async () => {
+    const off = await helloCapsFor({ control: false });
+    expect(off.at(-1)).toBe("epoch.up.v1");
+    expect(off.filter((c) => c === "epoch.up.v1")).toHaveLength(1);
+    expect(off).not.toContain("hold.v1");
   });
 });
 

@@ -173,12 +173,12 @@ load gate: 系统负载过高（crit），本次派发已拒绝，未创建任�
 loadavg 18.2 / 15.1 / 9.8 (16 cores) · own runs: fix-auth, review-x (+1)
 top cpu: node×3 380% · cc1plus×8 95% … ｜ top rss: java 9.8G · node×3 4.1G …
 可二选一：① 排查负载来源（上列进程；bash `ps`/`top -bn1`；若是自己派出的 run 可 abort_subagent）；
-② 等待回落——v1 不会自动唤醒，可先做不需派发的工作或结束本轮，回落后下一轮开头会收到 [load] 恢复提示再派发。
+② 等待回落——v1 不会自动唤醒，可先做不需派发的工作或结束本轮，回落后下一轮开头会收到 `[load 恢复]` 提示再派发。
 （settings 文件里把 load.gate 设为 false 可关闭本闸门。）
 ```
 
 嵌套版第二段替换为「请不要再委派：自己完成剩余工作，或带着现状说明交回上层」。升级块：`[load] crit · … — 已暂停派发新子 agent：Agent 调用会被拒绝，
-workflow 的 agent() 会排队。`；恢复块：`[load] ok · CPU 41% · MEM 38% avail · DISK / 12G free — 负载已回落，可以继续派发。`
+workflow 的 agent() 会排队。`；恢复块：`[load 恢复] 负载已回落，可以继续派发。`（2026-11-05 起：不带 warn/crit 级别 token，与 quota 恢复文案同风格；plan 早期的 `[load] ok · CPU 41% …` 示例已作废）
 
 ### 6.5 workflow 等待（Major #9，如实表述）
 

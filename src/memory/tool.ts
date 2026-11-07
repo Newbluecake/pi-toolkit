@@ -39,6 +39,7 @@ export type MemoryToolParams = Static<typeof MemoryToolParams>;
 
 export interface MemoryToolDeps {
   settings: MemorySettings;
+  writeGate?: import("./contracts.js").MemoryWriteGate;
   isChildSession: boolean;
   /** 写成功后由 wireMemory 接线：cache.delete(cwd) 或冻结标记（freezeInjectionAfterWrite）。 */
   onAfterWrite: (cwd: string) => void;
@@ -109,6 +110,7 @@ export function createMemoryTool(deps: MemoryToolDeps): ToolDefinition {
         {
           append: action === "append",
           allowWrite: true,
+          ...(deps.writeGate ? { writeGate: deps.writeGate } : {}),
           maxWriteBytes: settings.maxWriteBytes,
           maxFileBytes: settings.maxFileBytes,
         },

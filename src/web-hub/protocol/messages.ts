@@ -25,6 +25,9 @@ import {
   RunWatchSchema,
 } from "./run-transcript.js";
 import type { LanStatus } from "./lan.js";
+// tokens-speed (task58): `WireEntry.piToolkitGeneration` type lives in protocol/message-generation.ts
+// (its own module); only the type is folded in here — runtime stays in keys.ts condition-spread.
+import type { GenerationMetadata } from "./message-generation.js";
 // feishu-bot plan §9 (F0): `fsb_req`/`fsb_res` schemas + types live in protocol/feishu.ts; only folded in here.
 import { type FsbReqFrame, FsbReqSchema, type FsbResFrame, FsbResSchema } from "./feishu.js";
 import {
@@ -32,6 +35,7 @@ import {
   XS_HUB_FRAME_SCHEMAS,
   XsStatusSchema,
   type XsAckFrame,
+  type XsAliasEvtFrame,
   type XsDeliverFrame,
   type XsEffect,
   type XsMemberFrame,
@@ -40,7 +44,15 @@ import {
   type XsStatusWire,
   xsFrameBytesOk,
 } from "./xs.js";
-export type { XsAckFrame, XsDeliverFrame, XsMemberFrame, XsReqFrame, XsResFrame, XsStatusWire } from "./xs.js";
+export type {
+  XsAckFrame,
+  XsAliasEvtFrame,
+  XsDeliverFrame,
+  XsMemberFrame,
+  XsReqFrame,
+  XsResFrame,
+  XsStatusWire,
+} from "./xs.js";
 // scheduled-reports plan r3 §10.1 (S0): `sched_*` frame schemas + types live in protocol/schedule.ts;
 // only folded in here (cap-gated on `sched.v1`, no PROTO bump — 只加帧不改).
 import {
@@ -48,6 +60,9 @@ import {
   SCHED_HUB_FRAME_SCHEMAS,
   type SchedBoundFrame,
   type SchedChangedFrame,
+  type SchedDecideAckFrame,
+  type SchedDecideFrame,
+  type SchedOffersFrame,
   type SchedReceiptsFrame,
   type SchedRunAckFrame,
   type SchedRunFrame,
@@ -55,6 +70,9 @@ import {
 export type {
   SchedBoundFrame,
   SchedChangedFrame,
+  SchedDecideAckFrame,
+  SchedDecideFrame,
+  SchedOffersFrame,
   SchedReceiptsFrame,
   SchedRunAckFrame,
   SchedRunFrame,
@@ -82,6 +100,63 @@ export type { TfaReqFrame, TfaResFrame } from "./lan-2fa.js";
 // protocol/cmd-record.ts (its own frozen module); only the type is folded in here —
 // TYPE-only in both directions, so no runtime import cycle with keys.ts's projection.
 import type { CmdRecordWire } from "./cmd-record.js";
+// fabric-thread P0 (arch §7): `thr_req`/`thr_res`/`thr_closed` schemas + the `cmd.thread` /
+// `status.threads` / `data.thread` shapes live in protocol/thread.ts; only folded in here
+// (cap-gated on `thr.v1`, no PROTO bump — 只加帧不改, schedule.ts precedent).
+import {
+  THREAD_AGENT_FRAME_SCHEMAS,
+  THREAD_HUB_FRAME_SCHEMAS,
+  type ThreadMeta,
+  ThreadMetaSchema,
+  type ThreadRoutedResult,
+  ThreadsStatusWireSchema,
+  type ThreadStatusSlotWire,
+  type ThrClosedFrame,
+  type ThrReqFrame,
+  type ThrResFrame,
+  thrFrameOk,
+} from "./thread.js";
+// fabric-xs-activation plan §3 P0 (arch §4.7): the `xs_state`/`xs_activate`/`xs_activate_ack`
+// schemas + the `StatusInfo.xsRequests` slot shape live in protocol/xs-activation.ts; only folded
+// in here (cap-gated on `xs.state.v1`/`xs.activate.v1`, no PROTO bump — 只加帧不改, thread.ts
+// precedent). Decoding is inert: nothing routes these frames until P1 (xs_state) / P3 (activate).
+import {
+  XsActivateAckSchema,
+  XsActivateSchema,
+  type XsActivateAckFrame,
+  type XsActivateFrame,
+  type XsActivateResWire,
+  type XsProgress,
+  XsRequestsStatusSchema,
+  type XsRequestsStatusWire,
+  XsStateSchema,
+  type XsStateFrame,
+} from "./xs-activation.js";
+export type {
+  XsActivateAckFrame,
+  XsActivateFrame,
+  XsPhase,
+  XsProgress,
+  XsRequestsStatusWire,
+  XsStateFrame,
+  XsWakeView,
+} from "./xs-activation.js";
+export type {
+  ThreadCloseReason,
+  ThreadErrorCode,
+  ThreadMeta,
+  ThreadRoutedResult,
+  ThreadRunRef,
+  ThreadStatusSlotWire,
+  ThreadWindowChange,
+  ThreadWindowKey,
+  ThreadWindowParams,
+  ThrClosedFrame,
+  ThrHandbackReqFrame,
+  ThrPostReqFrame,
+  ThrReqFrame,
+  ThrResFrame,
+} from "./thread.js";
 
 // ---------------------------------------------------------------------------
 // data types
@@ -130,6 +205,12 @@ export interface WireEntry {
    *  (kind ∈ first|cross-day|idle) so the web divider can label the injection. Absent on every
    *  other entry shape; old entries without details degrade to a content-only parse. */
   details?: { date?: string; kind?: string; at?: number };
+  /** tokens-speed (task58): `subagent:web-msg-speed` custom(data) entries carry the sanitized
+   *  `{v,tokens,genMs,deltaCount,mid}` generation metadata here (the entry otherwise stays a
+   *  display:false tombstone; the projection lives in protocol/keys.ts condition-spread).
+   *  Absent on every other entry shape. `WireEntrySchema` stays open — timing/cmd precedent —
+   *  so an old hub forwards the field verbatim; no PROTO bump. */
+  piToolkitGeneration?: GenerationMetadata;
   display?: boolean;
   truncated?: boolean;
   provider?: string; // model_change
@@ -313,15 +394,23 @@ export interface BashJobsWire {
   total: number; // selected rows before the 20/12 caps (D1)
   running: number; // non-terminal rows
   failed: number; // terminal rows the agent counts as failed
-  /** Dropped by the 20-row/12-terminal caps (D1) or the five-pass byte budget (D6); absent when 0. */
+  /** Terminal rows this session has NOT archived and the wire could not carry (the 20-row /
+   *  12-terminal caps, plus the D6 five-pass byte budget). Absent when 0. This is what the
+   *  drawer's `(+N more)` counts and what `archive_omitted` archives — archived rows never count
+   *  here (they sit in `rows` and show up in the drawer's「已归档」fold instead). */
   omitted?: number;
+  /** 2026-10-28 append-only field (no PROTO bump): running rows the caps/budget pushed OUT of
+   *  `rows`. Running rows are never archivable, so they must not inflate `omitted`; they are
+   *  reported separately and the drawer hints them with one muted line. Absent ⇔ 0. */
+  rowsOverflowRunning?: number;
   sampledAt: number; // agent-clock epoch ms of the projection that produced this content
 }
 
 /** P7w (quota-plan §9A.1): `month` only comes from an agent that saw hello_ack.caps ∋ `quota.pools.v1`. */
 export type QuotaScopeWire = "5h" | "week" | "month";
-/** P7w: `droid-*` ids only come from an agent that saw `quota.pools.v1`. */
-export type QuotaProviderIdWire = "zai-coding-cn" | "zai" | "kimi-coding" | "droid-standard" | "droid-core";
+/** P7w: `droid-*` ids only come from an agent that saw `quota.pools.v1`; same cap gates `opencode-go`. */
+export type QuotaProviderIdWire =
+  "zai-coding-cn" | "zai" | "kimi-coding" | "droid-standard" | "droid-core" | "opencode-go";
 
 /**
  * quota-web plan §1 (D1-D9): one window (`5h`/`week`, displayed as `7d`) of a provider's
@@ -335,6 +424,12 @@ export interface QuotaWindowWire {
   level: 0 | 1 | 2 | 3;
   resetAt?: number; // epoch ms
   etaMs?: number; // 预测耗尽还剩多久；不燃烧/样本不足时缺省
+  /** 2026-11-03 费用折算（形态 B，append-only；schema open ⇒ 免 PROTO bump，legacy/pools 两路都放行）：
+   *  窗口区间 [resetAt−时长, resetAt) 内 pi 会话 JSONL 的 API 目录价折算（src/quota/cost-scan.ts）。
+   *  缺省 ⇒ 无数据 / resetAt 未知 / 扫描器未接线 —— UI 不得自行编造。 */
+  costUsd?: number;
+  /** 区间内有目录价缺失的用量 ⇒ costUsd 是下界，UI 渲染 `≈$X.XX+`。 */
+  costUnpriced?: true;
 }
 
 /**
@@ -670,6 +765,69 @@ export interface StatusInfo {
    *  byte-equal to the pre-feature shape; the open StatusInfoSchema forwards it through old hubs
    *  untouched and old UIs ignore it. */
   archived?: ArchiveWire;
+  /** fabric-thread P0 (arch §7.3): this session's live thread subscriptions, for `/cur` display.
+   *  Sent only while the live link's hello_ack.caps ∋ `thr.v1`; absent ⇔ threads off / no active
+   *  subscription — byte-equal to the pre-feature shape. Wire-only (never a provider payload). */
+  threads?: ThreadStatusSlotWire[];
+  /** fabric-xs-activation plan §3 P0 (arch §4.7/§4.9): this session's tracked cross-session
+   *  request rows (progress axis), merged by session/process/messageId/revision. Written ONLY by
+   *  a `xs.state.v1`-capable live link while this session has records; absent ⇔ activation off /
+   *  no records — byte-equal to the pre-feature status frame. The open StatusInfoSchema forwards
+   *  it through old hubs untouched (xsInbox/threads precedent); old UIs ignore it. No body/hash/
+   *  token ever rides it. */
+  xsRequests?: XsRequestsStatusWire;
+  /** #30 reload-result plan §1 D2: the tracked web-initiated reload lifecycle riding the same
+   *  status slot lifecycle as `todo`/`worktrees`. Absent ⇔ no valid tracked record (TUI-origin
+   *  reloads are never tracked, web-hub off, or the record expired) — byte-equal to the
+   *  pre-feature shape. `state` is the LATEST fact; `open` says whether the request is still in
+   *  flight (a `failed` with `open:true` — e.g. E_RELOAD_IDLE_WAIT — keeps recording later
+   *  facts). The open StatusInfoSchema forwards it through old hubs untouched; old UIs ignore it.
+   *  No PROTO bump, no cap, no new frame (D6). */
+  reload?: ReloadStatusWire;
+}
+
+/** `StatusInfo.reload.state` — the most recent fact of the tracked lifecycle. */
+export type ReloadResultState = "deferred" | "started" | "cancelled" | "failed" | "completed";
+
+/** `StatusInfo.reload.code` — the E_* reason for `failed`, or the cancellation origin. */
+export type ReloadResultCode =
+  | "E_RELOAD_IDLE_WAIT"
+  | "E_RELOAD_UNAVAILABLE"
+  | "E_RELOAD_SETTLE"
+  | "E_RELOAD_REFUSED"
+  | "E_RELOAD_THREW"
+  | "user"
+  | "superseded"
+  | "session"
+  | "quit";
+
+/** #30 reload-result plan §1 D2 — the wire shape of `StatusInfo.reload`. Append-only optional
+ *  fields only; field order here is the projection's byte order. */
+export interface ReloadStatusWire {
+  v: 1;
+  /** The reload lifecycle id (one per request lifecycle, D1). */
+  life: string;
+  /** The web command frame ids attributed to this lifecycle, 1..4 (FIFO beyond 4). */
+  cmdIds: string[];
+  /** Monotone within the life; +1 per new fact (UI dedups on it). */
+  rev: number;
+  /** The current execution's token — only facts of the current execution ever set it. */
+  execId: string;
+  state: ReloadResultState;
+  /** Collector-side: is the request still in flight (an `open:true` failed keeps recording). */
+  open: boolean;
+  /** Agent clock; the UI never judges expiry from it (clocks differ). */
+  at: number;
+  waitingFor?: "runs" | "idle";
+  /** deferred-only: the active run count when `waitingFor === "runs"`. */
+  activeRuns?: number;
+  code?: ReloadResultCode;
+  /** Only `E_RELOAD_THREW` carries it; ≤256 bytes, cut at a UTF-8 boundary. */
+  message?: string;
+  /** Only `completed`, and only when the version is trusted (never empty/"0.0.0"). */
+  version?: string;
+  /** Only `completed`: the taking-over activation's MODULE_INSTANCE. */
+  epoch?: string;
 }
 
 export interface FleetRowWire {
@@ -813,7 +971,8 @@ export type CmdOp =
   | "dialog_cancel"
   | "command"
   | "recall"
-  | "archive";
+  | "archive"
+  | "archive_omitted";
 
 export interface CmdOrigin {
   listener: "loopback" | "lan";
@@ -864,7 +1023,13 @@ export type CmdArgs =
   | { op: "dialog_cancel"; dialogId: string; epoch: string }
   | { op: "command"; name: string; args: string; confirm?: true; deliver?: "steer" | "followUp"; expect?: CmdExpect }
   | { op: "recall"; target: string }
-  | { op: "archive"; kind: "run" | "bash"; id: string; set: "archive" | "unarchive" };
+  | { op: "archive"; kind: "run" | "bash"; id: string; set: "archive" | "unarchive" }
+  /** 2026-10-28 user request (fleet bash 「(+N more)」 either shows or archives): archive every
+   *  terminal bash job the wire had to omit — the rows beyond the projection's row caps
+   *  (`bash-jobs.ts` D1) plus anything the byte budget dropped (D6 ⑤). Kind-only on purpose:
+   *  the agent re-derives the set from its own live snapshot, so the browser never enumerates
+   *  ids it cannot see. `run` stays out (its fold has no wire cap of this shape). */
+  | { op: "archive_omitted"; kind: "bash" };
 export interface CommandOutputEntry {
   kind: "notify" | "widget" | "status" | "text" | "error" | "interactive";
   level?: "info" | "warning" | "error";
@@ -913,6 +1078,8 @@ export interface ResumeSessionsWire {
 /** web-resume plan §2.7: the one `StatusInfo.features` token this version emits. Old agents
  *  never send `features` at all, so its presence is a positive capability signal. */
 export const RESUME_FEATURE_V1 = "resume.v1";
+/** #40: strict unknown evidence + guarded raw slash prompt validation are wired. */
+export const UNKNOWN_SLASH_TEXT_FEATURE_V1 = "unknown-slash-text.v1";
 /** web-hub-cmd-history plan §4.6: the `StatusInfo.features` token this version emits once the
  *  recorder is wired (`webHub.enabled ∧ cmdHistory !== false`) AND the session is persisted
  *  (same gate as `resume.v1`; emitted after it — features order `[resume.v1?, cmd.history.v1?]`).
@@ -946,7 +1113,17 @@ export type RecallResultData =
   | { op: "recall"; outcome: "recalled"; from: "held" | "returned"; deliver: "steer" | "followUp"; text: string }
   | { op: "recall"; outcome: "too_late" };
 export type CmdData =
-  | { op: "prompt"; delivery: PromptDelivery; behavior?: "idle" | "steer" | "followUp"; mention?: MentionResultData }
+  | {
+      op: "prompt";
+      delivery: PromptDelivery;
+      behavior?: "idle" | "steer" | "followUp";
+      mention?: MentionResultData;
+      /** fabric-thread P0 (arch §7.3): present iff the events were routed to thread subscribers
+       *  (`data = {op:"prompt", delivery:"observed", behavior, thread:{outcome:"routed", runs}}`).
+       *  Wire-only — never enters any provider payload (G2c); the hub re-validates with
+       *  ThreadRoutedResultSchema (§8.1 step 1) and treats a malformed value as a plain ok. */
+      thread?: ThreadRoutedResult;
+    }
   | { op: "abort"; wasBusy: boolean }
   | { op: "steer_subagent" }
   | { op: "abort_subagent"; escalatedTo?: "L2" | "L3" | "L4"; alreadyTerminal?: boolean }
@@ -961,6 +1138,10 @@ export type CmdData =
        *  the page of the session list (never paths/cwd/message text). Not retained in the
        *  agent's command ledger (stripped at settle) nor in any origin notify. */
       sessions?: ResumeSessionsWire;
+      /** P3b typed result over existing command.v1; only the internal fabric action supplies it. */
+      xsActivation?:
+        | XsActivateResWire
+        | { status: "known" | "unavailable" | "unsupported"; messageId: string; progress?: XsProgress };
       /** web-hub-cmd-history plan §4.6 (P0): whether a history card will appear for this call
        *  ("recorded") or not ("none"). Written on the sync reply AND both late channels alike
        *  (the extension `sendLate` payload and the builtin late payload — one CmdData shape
@@ -970,7 +1151,9 @@ export type CmdData =
     }
   | { op: "query"; state: "running" | "ok" | "failed"; late?: true; result?: CmdResultBody }
   | RecallResultData
-  | { op: "archive"; set: "archive" | "unarchive"; changed?: boolean };
+  | { op: "archive"; set: "archive" | "unarchive"; changed?: boolean }
+  /** `changed` = how many jobs this call newly archived (0 on a second call — idempotent). */
+  | { op: "archive_omitted"; changed: number };
 export type CmdErrorCode =
   | "E_UNSUPPORTED"
   | "E_STALE_CTX"
@@ -1135,16 +1318,25 @@ export type AgentFrame =
   | HubCtlFrame
   | FsbReqFrame
   | TfaReqFrame
+  // fabric-thread P0 (arch §7.3): agent→hub thread request (post / handback), sent only under
+  // `thr.v1`; decoding wired from day one (inert — nothing routes it until P2/P3).
+  | ThrReqFrame
   // fabric phase-2 XS0 (phase2-plan §8.1/§8.2): cross-session frames. Decoding is wired from
   // day one (inert — nothing routes them until X1/X2); every xs_* frame additionally passes
   // the stricter XS_MAX_FRAME_BYTES byte cap in decodeWith.
   | XsMemberFrame
   | XsReqFrame
   | XsAckFrame
+  // fabric-xs-activation plan §3 P0 (arch §4.7): receiver→hub progress evidence + activate
+  // settlement, sent only under `xs.state.v1`/`xs.activate.v1`; inert until P1/P3 route them.
+  | XsStateFrame
+  | XsActivateAckFrame
   // scheduled-reports S0 (§10.1): inert until A0/H1 route them; sent only under `sched.v1`.
   | SchedChangedFrame
   | SchedBoundFrame
-  | SchedRunAckFrame;
+  | SchedRunAckFrame
+  | SchedOffersFrame
+  | SchedDecideAckFrame;
 
 // ---- S1 LAN control-plane frames (§8.1; 同一个 unix socket，hello 之后才接受，不进 registry/bus/普通日志，不做额外鉴权——同 uid 完全可信) ----
 
@@ -1220,9 +1412,19 @@ export type HubFrame =
   | TfaResFrame
   | XsResFrame
   | XsDeliverFrame
+  | XsAliasEvtFrame // alias-force-default plan §3.2 (AF0): inert until AF2/AF3 route it; v2 members only
+  // fabric-xs-activation plan §3 P0 (arch §4.7): hub→source progress mirror (with sourceRid)
+  // and the text-free control relay to the receiver; inert until P1/P3 route them.
+  | XsStateFrame
+  | XsActivateFrame
   // scheduled-reports S0 (§10.1): inert until A0/H1 route them; sent only under `sched.v1`.
   | SchedRunFrame
-  | SchedReceiptsFrame;
+  | SchedReceiptsFrame
+  | SchedDecideFrame
+  // fabric-thread P0 (arch §7.2): hub→agent thread reply + best-effort close notice, sent only
+  // under `thr.v1`; inert until P2/P3 route them.
+  | ThrResFrame
+  | ThrClosedFrame;
 
 export const TIMING = {
   connectMs: 1_000,
@@ -1450,6 +1652,10 @@ export const BashJobsWireSchema = Type.Object(
     running: Type.Integer({ minimum: 0 }),
     failed: Type.Integer({ minimum: 0 }),
     omitted: Type.Optional(Type.Integer({ minimum: 0 })),
+    // 2026-10-28: running rows the caps/budget dropped (never part of `omitted`). Append-only
+    // optional field on an OPEN schema (`additionalProperties: true`) — an old peer forwards or
+    // ignores it, so no PROTO bump.
+    rowsOverflowRunning: Type.Optional(Type.Integer({ minimum: 0 })),
     sampledAt: Type.Number({ minimum: 0 }),
   },
   { additionalProperties: true },
@@ -1463,6 +1669,9 @@ const QuotaWindowSchema = Type.Object(
     level: Type.Union([Type.Literal(0), Type.Literal(1), Type.Literal(2), Type.Literal(3)]),
     resetAt: Type.Optional(Type.Number()),
     etaMs: Type.Optional(Type.Number()),
+    // 2026-11-03 费用折算：append-only optional on an OPEN schema — 旧 peer 转发/忽略，免 PROTO bump。
+    costUsd: Type.Optional(Type.Number({ minimum: 0 })),
+    costUnpriced: Type.Optional(Type.Literal(true)),
   },
   { additionalProperties: true },
 );
@@ -1482,6 +1691,7 @@ const QuotaProviderSchema = Type.Object(
       Type.Literal("kimi-coding"),
       Type.Literal("droid-standard"),
       Type.Literal("droid-core"),
+      Type.Literal("opencode-go"),
     ]),
     plan: Type.Optional(Type.String({ maxLength: 64 })),
     level: Type.Union([Type.Literal(0), Type.Literal(1), Type.Literal(2), Type.Literal(3)]),
@@ -1683,6 +1893,13 @@ const StatusInfoSchema = Type.Object({
   xs: Type.Optional(XsStatusSchema),
   // channel-plan §12.6 (IBP): open top-level slot, only written while unread > 0.
   xsInbox: Type.Optional(Type.Object({ unread: Type.Integer({ minimum: 1, maximum: 9999 }) })),
+  // fabric-thread P0 (arch §7.3): open slot, only written under the thr.v1 cap while any
+  // subscription is live — absent ⇒ byte-equal to the pre-feature status frame.
+  threads: Type.Optional(ThreadsStatusWireSchema),
+  // fabric-xs-activation plan §3 P0 (arch §4.7): open top-level slot, bounded (rows ≤ 256);
+  // only written under the xs.state.v1 cap while this session has tracked requests —
+  // absent ⇒ byte-equal to the pre-feature status frame.
+  xsRequests: Type.Optional(XsRequestsStatusSchema),
 });
 
 const FleetRowSchema = Type.Object({
@@ -1962,6 +2179,10 @@ const PromptArgsSchema = Type.Object(
     text: Type.String(),
     deliver: Type.Union([Type.Literal("steer"), Type.Literal("followUp")]),
     expect: Type.Optional(CmdExpectSchema),
+    // fabric-thread P0 (arch §7.2): optional Thread metadata — the hub attaches it ONLY when the
+    // target agent's hello caps ∋ thr.v1 (a hub must never send it to an old agent: this is a
+    // CLOSED schema, an unknown field would drop the whole cmd frame). absent ⇒ byte-identical.
+    thread: Type.Optional(ThreadMetaSchema),
   },
   { additionalProperties: false },
 );
@@ -2021,6 +2242,12 @@ export const ArchiveArgsSchema = Type.Object(
   },
   { additionalProperties: false },
 );
+// 2026-10-28 (fleet bash 「(+N more)」): the bulk archive of the omitted tail. Closed schema like
+// `archive`/`recall` — exactly {op, kind}; the id set is derived agent-side from the live snapshot.
+export const ArchiveOmittedArgsSchema = Type.Object(
+  { op: Type.Literal("archive_omitted"), kind: Type.Literal("bash") },
+  { additionalProperties: false },
+);
 const CmdSchema = Type.Object(
   {
     t: Type.Literal("cmd"),
@@ -2040,6 +2267,7 @@ const CmdSchema = Type.Object(
       CommandArgsSchema,
       RecallArgsSchema,
       ArchiveArgsSchema,
+      ArchiveOmittedArgsSchema,
     ]),
   },
   { additionalProperties: false },
@@ -2335,8 +2563,15 @@ const agentFrameSchemas: Readonly<Record<string, TSchema>> = {
   run_gap: RunGapSchema,
   run_end: RunEndSchema,
   ...XS_AGENT_FRAME_SCHEMAS,
+  // fabric-xs-activation plan §3 P0 (arch §4.7): receiver→hub frames — `xs_state` (progress
+  // evidence; also hub→source, see hubFrameSchemas) and `xs_activate_ack` (one settlement per
+  // `xs_activate` relay). Inert until P1/P3 route them.
+  xs_state: XsStateSchema,
+  xs_activate_ack: XsActivateAckSchema,
   // scheduled-reports S0 (§10.1): schemas from protocol/schedule.ts
   ...SCHED_AGENT_FRAME_SCHEMAS,
+  // fabric-thread P0 (arch §7.3): schemas from protocol/thread.ts
+  ...THREAD_AGENT_FRAME_SCHEMAS,
 };
 
 const hubFrameSchemas: Readonly<Record<string, TSchema>> = {
@@ -2358,8 +2593,15 @@ const hubFrameSchemas: Readonly<Record<string, TSchema>> = {
   fsb_res: FsbResSchema,
   tfa_res: TfaResSchema,
   ...XS_HUB_FRAME_SCHEMAS,
+  // fabric-xs-activation plan §3 P0 (arch §4.7): hub→agent frames — `xs_state` mirrored to the
+  // original source (with `sourceRid`) and `xs_activate` (the text-free control relay). Inert
+  // until P1/P3 route them.
+  xs_state: XsStateSchema,
+  xs_activate: XsActivateSchema,
   // scheduled-reports S0 (§10.1): schemas from protocol/schedule.ts
   ...SCHED_HUB_FRAME_SCHEMAS,
+  // fabric-thread P0 (arch §7.2): schemas from protocol/thread.ts
+  ...THREAD_HUB_FRAME_SCHEMAS,
 };
 
 // ---------------------------------------------------------------------------
@@ -2384,6 +2626,10 @@ function decodeWith(schemas: Readonly<Record<string, TSchema>>, raw: unknown): o
   // fabric phase-2 (protocol/xs.ts §8.2): xs_* frames carry a STRICTER 16 KiB byte cap than the
   // global ndjson budget — an oversize xs frame is invalid exactly like an unknown one.
   if (t.startsWith("xs_") && !xsFrameBytesOk(raw)) return undefined;
+  // fabric-thread P0 (arch §7.3): every thr_* frame (thr_req AND thr_res/thr_closed) passes the
+  // STRICTER 12 KiB serialized-JSON budget, and thr_req{op:"post"} the byte-precise 8 KiB text
+  // cap — same posture as xs_*; inert until P2/P3 route the frames.
+  if (t.startsWith("thr_") && !thrFrameOk(raw)) return undefined;
   const schema = schemas[t];
   if (schema === undefined) return undefined; // unknown t + RESERVED_FRAME_TYPES
   return Value.Check(schema, raw) ? (raw as object) : undefined;

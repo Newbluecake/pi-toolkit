@@ -1,0 +1,9 @@
+## Memory (proj) — 1 topic(s) · 1 block(s)
+
+### User rules (always on)
+- [general.001] 现行规则：验收优先 deepseek-flash。
+
+Topics (relevant blocks are injected automatically; read one with memory view <topic>):
+- general · 1 blocks
+
+<!-- pi-toolkit:memory proj -->

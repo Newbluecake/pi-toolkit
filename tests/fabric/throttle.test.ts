@@ -6,7 +6,7 @@ const record = (patch: Partial<FabricRecord>): FabricRecord => ({
   key: "r_ABCDEFGH:root:1:1" as FabricRecord["key"],
   from: "r_ABCDEFGH",
   to: "root",
-  kind: "finding",
+  kind: "report",
   seq: 1,
   generation: 1,
   payload: { text: "x" },
@@ -61,11 +61,11 @@ describe("fabric throttle", () => {
   });
 
   it("rebuilds to the same root deadline when caps are unchanged and f=0", () => {
-    const records = [record({ state: "delivered", deliveredAt: 100, kind: "finding" })];
+    const records = [record({ state: "delivered", deliveredAt: 100, kind: "report" })];
     const throttle = new FabricThrottle({ minIntervalMs: 10, rootMinIntervalMs: 50, backoffMs: 0, records });
-    const original = throttle.rootNotBefore(record({ to: "root", kind: "finding" }));
+    const original = throttle.rootNotBefore(record({ to: "root", kind: "report" }));
     throttle.rebuild(records);
-    expect(throttle.rootNotBefore(record({ to: "root", kind: "finding" }))).toBe(original);
+    expect(throttle.rootNotBefore(record({ to: "root", kind: "report" }))).toBe(original);
   });
 
   it("turns off the root interval at zero", () => {

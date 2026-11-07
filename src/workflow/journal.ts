@@ -70,6 +70,7 @@ export function taskKeyOf(sem: TaskSemantics): TaskKey {
     agentType: sem.agentType,
     agentTypeConfigHash: sem.agentTypeConfigHash,
     prompt: sem.prompt,
+    ...(sem.fastMode !== undefined ? { fastMode: sem.fastMode } : {}),
     ...(sem.model !== undefined ? { model: sem.model } : {}),
     ...(sem.thinking !== undefined ? { thinking: sem.thinking } : {}),
     ...(sem.isolation !== undefined ? { isolation: sem.isolation } : {}),

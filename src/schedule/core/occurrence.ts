@@ -51,7 +51,7 @@ export function initOcc(task: ScheduleTask, now: number): OccState {
   return { defHash: defHash(task), decidedThrough: now, firedTotal: 0, missedTotal: 0, skippedTotal: 0, missedLog: [] };
 }
 
-/** Pause→resume, approval, definition change: occurrences before `now` are void, never missed. */
+/** Pause→resume, definition change: occurrences before `now` are void, never missed. */
 export function voidUntil(occ: OccState, now: number): void {
   occ.decidedThrough = Math.max(occ.decidedThrough, now);
 }

@@ -117,7 +117,9 @@ export function sandbox(prefix = "pi-sched-i1-"): Sandbox {
     cleanup() {
       if (realHome === undefined) delete process.env.HOME;
       else process.env.HOME = realHome;
-      rmSync(home, { recursive: true, force: true });
+      // CI flake 2026-10-28 (activate-trace): an activation's async bash-jobs store write can
+      // land while the tree is being removed ⇒ ENOTEMPTY. rmSync retries EBUSY/ENOTEMPTY/EPERM.
+      rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     },
   };
 }
@@ -215,3 +217,16 @@ export const wakeEvent = (details: unknown) => ({
   messageType: "custom",
   message: { customType: "subagent:schedule", details },
 });
+
+/** Like `pi.emit`: every handler in registration order, each awaited; a throwing handler is recorded, not fatal. */
+export async function emitAll(h: FakePi, event: string, payload: unknown, ctx: unknown): Promise<unknown[]> {
+  const out: unknown[] = [];
+  for (const fn of h.handlers.get(event) ?? []) {
+    try {
+      out.push(await fn(payload, ctx));
+    } catch (error) {
+      out.push(error);
+    }
+  }
+  return out;
+}

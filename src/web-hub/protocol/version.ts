@@ -179,6 +179,20 @@ export const HOLD_CAP = "hold.v1";
 export const HOLD_AGENT_CAPS = ["hold.v1"] as const;
 export const HOLD_HUB_CAPS = ["hold.v1"] as const;
 
+/** #23 web-update-stuck plan §2.2 (D12): the epoch-refresh complement to `hold.v1` — an agent
+ *  advertising it asks the hub to publish `agent_up` on an epoch-changing reclaim (D14) even
+ *  though its config keeps hold unwired (`holdWired = control ∧ steerRecall`; the default has
+ *  both on ⇒ `hold.v1` present ⇒ this cap never joins a default hello). AGENT face ONLY: the
+ *  agent appends it TAIL-ONLY when the computed caps lack `HOLD_CAP` (D13), so every default
+ *  hello stays byte-identical — pinned by the five A-tier goldens (thread-off/thread-rebind-off/
+ *  fabric-xs-off/fabric-xs-reply-off/schedule-off), which all carry `hold.v1` and must never
+ *  regenerate. The hub NEVER broadcasts it on any cap surface (`HubInfo.caps` / `hello_ack.caps`;
+ *  pinned by caps-coexist) — it is an agent→hub REQUEST about event policy, not a hub feature;
+ *  an old hub ignores the unknown string exactly like any other future cap (compat golden
+ *  `tests/fixtures/web-hub/epoch-up-compat-golden.json` s3). No new frames ⇒ no PROTO bump. */
+export const EPOCH_UP_CAP = "epoch.up.v1";
+export const EPOCH_UP_AGENT_CAPS = ["epoch.up.v1"] as const;
+
 /** web-hub-avatar plan §4.2: the single hub capability for the avatar surface. */
 export const AVATAR_HUB_CAP = "avatar.v1";
 
@@ -322,6 +336,42 @@ export const PROXY_LAN_HUB_CAP = "proxy.lan.v1";
 export const FSB_HUB_CAP = "fsb.v1";
 
 /**
+ * fabric-thread arch §7.1 (P0 frozen surface, r3): the `thr.v1` cap — BOTH faces declare the
+ * same string. AGENT side: advertised in `hello.caps` iff `fabric.enabled ∧ fabric.threads.enabled
+ * ∧ 非 secure` (P3 wires `capsExtra`; the agent sends `thr_req` ONLY while the live link's
+ * `hello_ack.caps ∋ thr.v1`). HUB side: advertised on BOTH hub cap surfaces (`HubInfo.caps` /
+ * `hello_ack.caps`, kept byte-identical) iff the hub config has the `feishuBot.threads` key (only a
+ * hub launched by an agent with the feature on ever gets that key) — the hub attaches
+ * `cmd.thread`, sends `thr_closed`/`thr_res` and reads `status.threads` only under the cap. A
+ * missing cap on either side degrades silently: no field, no frame, `hub_unsupported` from the
+ * subscribe tool (§7.1 table). New optional frames are cap-gated, so there is no PROTO bump (the
+ * same 只加帧不改 rule as fsb_req / xs_* / sched_*). In P0 the constants alone are INERT — nothing folds
+ * them into any caps array yet (P2 hub / P3 agent own the folding). The frame schemas + the
+ * shared window clamp live in protocol/thread.ts.
+ */
+export const THREAD_CAP = "thr.v1";
+export const THREAD_HUB_CAPS = [THREAD_CAP] as const;
+export const THREAD_AGENT_CAPS = [THREAD_CAP] as const;
+
+/**
+ * fabric-thread rebind plan r3 §4.2 (P0b frozen surface): the `thr.rebind.v1` cap — BOTH faces
+ * declare the same string. AGENT side: advertised in `hello.caps` iff `threadsCapOn() ∧
+ * fabric.threads.rebind` (src/index.ts computes both at ACTIVATE level; secure domains force
+ * rebind off in the settings parser — D8/I11/A17), TAIL-appended right after `thr.v1`. HUB side:
+ * advertised on BOTH hub cap surfaces (`HubInfo.caps` / `hello_ack.caps`, kept byte-identical)
+ * iff the hub config carries `feishuBot.threads.rebind === true` (only an agent with the gate on
+ * ever writes that key). Either side missing the cap degrades silently: the agent answers
+ * `E_THR_UNSUPPORTED` LOCALLY with ZERO frames (D3 — an old hub silently drops unknown ops), the
+ * hub never attaches `ThreadMeta.rev` (§6 实施要点 4 — a closed-schema old agent would drop the
+ * whole cmd frame otherwise), and rebind/acquire ops stay unrouted. New optional ops ride the
+ * existing `thr_req`/`thr_res` frames, so there is NO PROTO bump (same 只加帧不改 rule as every
+ * cap above). Gate off ⇒ both caps arrays stay byte-identical (A16).
+ */
+export const THREAD_REBIND_CAP = "thr.rebind.v1";
+export const THREAD_REBIND_HUB_CAPS = [THREAD_REBIND_CAP] as const;
+export const THREAD_REBIND_AGENT_CAPS = [THREAD_REBIND_CAP] as const;
+
+/**
  * web-hub-slash-args plan §4.1 (P0 frozen surface): the cap advertising the `/` command
  * argument hint/completion channel — `CommandInfoWire.args` (§3.1) + the `complete_req` /
  * `complete_reply` frame pair (§4.1) + `POST /api/command/complete` (§4.2). r1 评审 #2
@@ -362,3 +412,9 @@ export const LAN_SESSIONS_HUB_CAP = "lan.sessions.v1";
  * surfaces). Without it clients keep the legacy query and 35 s deadline. No frames or
  * SSE events are added, so PROTO and all pre-existing cap arrays stay unchanged. */
 export const WTGRAPH_MERGED_HUB_CAP = "wtgraph.merged.v1";
+
+/** worktree-graph commit-files: optional `GET /api/worktree-graph/files` (one commit's changed
+ * files against its first parent). Declared under the same preview + /proc gate as
+ * WTGRAPH_HUB_CAP; LAN width rides `preview.lan.v1`. Without it the UI keeps graph rows inert.
+ * A new path + cap only — no frames, no SSE events, no PROTO bump. */
+export const WTGRAPH_FILES_HUB_CAP = "wtgraph.files.v1";

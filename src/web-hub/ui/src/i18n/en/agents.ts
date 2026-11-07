@@ -64,7 +64,6 @@ const agents = {
   // hub-global `schedules` slot; absent ⇒ no badge at all). Count-only chip, visible on
   // privacy-marked cards like the needsAnswer badge (content stays behind the lock).
   schedBadge: "{n} scheduled task(s)",
-  schedBadgePending: "{n} scheduled task(s) — review pending",
 } satisfies Record<string, string>;
 
 export default agents;

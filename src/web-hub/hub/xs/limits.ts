@@ -127,6 +127,31 @@ export interface XsLimitsBroadcast {
   settleBroadcast(ticket: XsBroadcastTicket): void;
 }
 
+/** fabric-xs-activation P3 (arch §4.6): control-attempt admission. An attempt is a NEW control
+ *  cost (send/min/hour + hub/min + in-flight + one wake in the sender's AND the pair's wake
+ *  windows) — it skips ONLY the pair-min-interval CHECK of a body send and carries its own
+ *  per-pair attempt spacing. */
+export const XS_ACTIVATE_PAIR_INTERVAL_MS = 30_000;
+export type XsActivateRefusal =
+  | "rate_in_flight"
+  | "rate_sends_min"
+  | "rate_sends_hour"
+  | "rate_hub"
+  | "rate_activate_interval"
+  | "outbound_wake_rate"
+  | "pair_wake_rate";
+export interface XsActivateTicket {
+  readonly agentKey: string;
+  readonly pairKey: string;
+  readonly at: number;
+  settled: boolean;
+}
+export type XsActivateAdmit =
+  | { ok: true; ticket: XsActivateTicket }
+  /** `retryAfterAt` = the LATEST known constraint's recovery (sliding-window oldest occupant +
+   *  window); absent when any failing constraint has no knowable recovery (in-flight). */
+  | { ok: false; reason: XsActivateRefusal; retryAfterAt?: number };
+
 export interface XsLimitsSnapshot {
   senders: number;
   pairs: number;
@@ -145,6 +170,11 @@ export interface XsLimits extends XsLimitsBroadcast {
   }): XsAdmit;
   /** Idempotent: a ticket settles at most once. */
   settle(ticket: XsTicket, input: XsSettleInput): void;
+  /** fabric-xs-activation P3: reserve one control attempt (atomic: every check first, then commit). */
+  admitActivate(args: { agentKey: string; pairKey: string; limits: XsMemberLimitsWire }): XsActivateAdmit;
+  /** Idempotent. `none:true` (the attempt is PROVEN ineffective) releases ONLY this attempt's
+   *  wake reservation; send/min/hour and hub counts are never refunded; unknown never refunds. */
+  settleActivate(ticket: XsActivateTicket, input: { none: boolean }): void;
   snapshot(): XsLimitsSnapshot;
 }
 
@@ -161,6 +191,8 @@ interface SenderState {
 interface PairState {
   lastAt: number;
   wakes: number[];
+  /** fabric-xs-activation P3: last control-attempt admission (its own 30s spacing). */
+  lastActAt?: number;
 }
 
 function prune(arr: number[], now: number, windowMs: number): void {
@@ -282,6 +314,72 @@ export function createXsLimits(deps: { now: () => number; hubSendsPerMin: number
       }
     },
 
+    admitActivate({ agentKey, pairKey, limits }) {
+      const now = deps.now();
+      sweep(now);
+      const s = sender(agentKey);
+      prune(s.min, now, MIN_MS);
+      prune(s.hour, now, HOUR_MS);
+      prune(s.wakes, now, HOUR_MS);
+      prune(hubWindow, now, MIN_MS);
+      const pair = pairs.get(pairKey);
+      if (pair !== undefined) prune(pair.wakes, now, HOUR_MS);
+      // Evaluate EVERY constraint (no early return) so the refusal can carry the LATEST known
+      // recovery instant; nothing is reserved on a refusal.
+      let reason: XsActivateRefusal | undefined;
+      let retry: number | undefined;
+      let unknownRecovery = false;
+      const fail = (r: XsActivateRefusal, at: number | undefined): void => {
+        reason ??= r;
+        if (at === undefined) unknownRecovery = true;
+        else retry = Math.max(retry ?? 0, at);
+      };
+      if (s.inFlight >= limits.inFlightPerSession) fail("rate_in_flight", undefined);
+      if (pair?.lastActAt !== undefined && now - pair.lastActAt < XS_ACTIVATE_PAIR_INTERVAL_MS)
+        fail("rate_activate_interval", pair.lastActAt + XS_ACTIVATE_PAIR_INTERVAL_MS);
+      if (s.min.length >= limits.sendsOutPerMin)
+        fail("rate_sends_min", s.min[s.min.length - limits.sendsOutPerMin]! + MIN_MS);
+      if (s.hour.length >= limits.sendsOutPerHour)
+        fail("rate_sends_hour", s.hour[s.hour.length - limits.sendsOutPerHour]! + HOUR_MS);
+      if (hubWindow.length >= hubCap) fail("rate_hub", hubWindow[hubWindow.length - hubCap]! + MIN_MS);
+      if (s.wakes.length >= limits.wakesOutPerHour)
+        fail("outbound_wake_rate", s.wakes[s.wakes.length - limits.wakesOutPerHour]! + HOUR_MS);
+      const pw = pair?.wakes ?? [];
+      if (pw.length >= limits.pairWakesPerHour)
+        fail("pair_wake_rate", pw[pw.length - limits.pairWakesPerHour]! + HOUR_MS);
+      if (reason !== undefined) {
+        return {
+          ok: false,
+          reason,
+          ...(!unknownRecovery && retry !== undefined ? { retryAfterAt: retry } : {}),
+        };
+      }
+      s.min.push(now);
+      s.hour.push(now);
+      s.wakes.push(now);
+      s.inFlight++;
+      hubWindow.push(now);
+      let p = pair;
+      if (p === undefined) {
+        p = { lastAt: now, wakes: [] };
+        pairs.set(pairKey, p);
+      }
+      p.wakes.push(now);
+      p.lastActAt = now;
+      return { ok: true, ticket: { agentKey, pairKey, at: now, settled: false } };
+    },
+
+    settleActivate(ticket, input) {
+      if (ticket.settled) return;
+      ticket.settled = true;
+      const s = senders.get(ticket.agentKey);
+      if (s !== undefined && s.inFlight > 0) s.inFlight--;
+      if (!input.none) return;
+      if (s !== undefined) removeOne(s.wakes, ticket.at);
+      const p = pairs.get(ticket.pairKey);
+      if (p !== undefined) removeOne(p.wakes, ticket.at);
+    },
+
     admitBroadcast({ agentKey, recipients, limits, wantWake, wakeMaxRecipients }) {
       const now = deps.now();
       sweep(now);
@@ -380,6 +478,11 @@ export interface HubCrossSessionConfig {
   /** Channel-plan §3.1: hub-global broadcast params ONLY — absence means the defaults
    *  (16 / 4), NEVER "channels off" (the `xs.channel.v1` cap rides `crossSession` itself). */
   channels?: HubXsChannelsConfig;
+  /** fabric-xs-activation plan §3 P0 (arch §3.2): KEY-ABSENCE-IS-OFF — the hub assembles the
+   *  activation services (state/activate relay, the relation bag) ONLY when this key exists.
+   *  The agent writes it (as `true`) only while effective, so a missing key means an old agent
+   *  or activation off ⇒ the hub is byte-identical to the pre-feature build. */
+  activation?: true;
 }
 
 export interface HubXsChannelsConfig {
@@ -423,8 +526,9 @@ function normalizeChannelsConfig(raw: unknown): HubXsChannelsConfig | undefined 
  * yields `undefined` ⇒ the caller DROPS the whole key ⇒ xs off (no relay, no cap, no frame
  * handling). Optional `reply` is retained only as a boolean (malformed ⇒ false); absent stays
  * absent, meaning on. Optional `channels` (channel-plan §3.1) is kept iff both params are integers
- * in `XS_HUB_CHANNELS_BOUNDS`, else that sub-key alone is dropped (defaults). All other extra keys
- * are ignored. Never throws.
+ * in `XS_HUB_CHANNELS_BOUNDS`, else that sub-key alone is dropped (defaults). Optional `activation`
+ * (fabric-xs-activation plan §3 P0) survives only as literal `true` — anything else drops the
+ * key (⇒ off; key-absence-is-off). All other extra keys are ignored. Never throws.
  */
 export function normalizeHubCrossSessionConfig(raw: unknown): HubCrossSessionConfig | undefined {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return undefined;
@@ -436,10 +540,15 @@ export function normalizeHubCrossSessionConfig(raw: unknown): HubCrossSessionCon
   const reply = (raw as Record<string, unknown>)["reply"];
   // Channel-plan §3.1: a malformed `channels` drops only that sub-key (defaults apply).
   const channels = normalizeChannelsConfig((raw as Record<string, unknown>)["channels"]);
+  // fabric-xs-activation plan §3 P0: only literal `true` survives (the agent's effective-on
+  // write); false/malformed ⇒ the key is dropped ⇒ activation off — key-absence-is-off, fail
+  // closed, and the normalized output for every pre-activation config stays byte-identical.
+  const activation = (raw as Record<string, unknown>)["activation"];
   // Fail closed for a malformed reply knob, without disabling the legacy relay.
   return {
     limits: { hubSendsPerMin: v },
     ...(reply === undefined ? {} : { reply: reply === true }),
     ...(channels === undefined ? {} : { channels }),
+    ...(activation === true ? { activation: true } : {}),
   };
 }

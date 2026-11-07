@@ -16,6 +16,8 @@ import type { CausalLevel } from "./wake-level.js";
 export interface WakeInputDeps {
   /** Live read of the current stack's causal level (undefined when wake is off / no stack). Read per event. */
   level: () => CausalLevel | undefined;
+  /** Same stack-owned budget, absent with wake off. RPC is not a trusted user arrival for this budget. */
+  rootBudget?: () => { observeAcceptedUserArrival(event: object): boolean } | undefined;
   /** Web-hub attribution port; late-bound because the web hub is wired after this hook is registered. */
   attributeInput: () => ((text: string) => "web_prompt" | undefined) | undefined;
 }
@@ -44,8 +46,11 @@ export function createWakeInputHook(deps: WakeInputDeps): (event: WakeInputEvent
       const level = deps.level();
       if (level === undefined) return { action: "continue" };
       // Preserve the old lazy port read: interactive/rpc input never consults web attribution.
-      if (classifyHumanInput(event, event.source === "extension" ? deps.attributeInput() : undefined))
+      if (classifyHumanInput(event, event.source === "extension" ? deps.attributeInput() : undefined)) {
+        // Keep legacy RPC causal reset, but never turn machine RPC into a fresh wake window.
+        if (event.source !== "rpc") deps.rootBudget?.()?.observeAcceptedUserArrival(event);
         level.resetRoot();
+      }
     } catch {
       /* attribution is advisory: a failure here must never disturb input handling */
     }

@@ -1,3 +1,4 @@
+import { takeHumanWebDispatch } from "../../../src/fabric/xs/human-grant.js";
 /**
  * fabric reply-plan §9.3 (package M): the web prompt path's @session branch — the SYNC
  * determination gains `sessions?.parse` and the `MentionResultData` `action:"session"` variant
@@ -58,9 +59,11 @@ interface SessionHarness {
   setOutcome(next: MentionSessionSendOutcome | ((call: number) => MentionSessionSendOutcome)): void;
   setJoined(joined: boolean): void;
   dispose(): void;
+  lastState(): string | undefined;
+  fire(ms: number): void;
 }
 
-function makeSessionHarness(joined = true): SessionHarness {
+function makeSessionHarness(joined = true, enhanced = false): SessionHarness {
   const { pi } = fakePi();
   const { ctx } = fakeCtx({ mode: "tui" });
   const sent: Array<CmdResultFrame | CmdLateFrame> = [];
@@ -75,6 +78,7 @@ function makeSessionHarness(joined = true): SessionHarness {
   const rows: XsDirectoryRow[] = [row("ab12cd34", "builder")];
   const port = createMentionSessionPort({
     joined: () => isJoined,
+    ...(enhanced ? { enhanced: () => true } : {}),
     isLabel: (name) => registry.resolve(name) !== undefined,
     cwd: () => "/tmp",
     lookupExact: (name) => {
@@ -100,11 +104,14 @@ function makeSessionHarness(joined = true): SessionHarness {
     execute: vi.fn(() => ({ ok: false, code: "E_UNSUPPORTED", retryable: false, effect: "none" })),
     isQuiet: () => false,
   };
+  const ledger = createCommandLedger();
+  const timers = fakeTimerQueue();
+  let lastId = "";
   const deps: CommandHandlerDeps = {
     pi,
     getCtx: () => ctx,
     getSessionId: () => "s1",
-    ledger: createCommandLedger(),
+    ledger,
     queueMirror: createQueueMirror(),
     compactionState: { manualCompacting: false, dispose() {} },
     originEntry: { appendOrigin: vi.fn(), notify: vi.fn(), dispose: vi.fn() },
@@ -113,12 +120,18 @@ function makeSessionHarness(joined = true): SessionHarness {
     now: () => 1000,
     send: (f) => sent.push(f),
     onChanged: () => undefined,
-    setTimer: fakeTimerQueue().setTimer,
+    setTimer: timers.setTimer,
     mention: () => mentionDeps,
   };
   const handler = createCommandHandler(deps);
   return {
-    handle: (text) => handler.handle(frame(text)),
+    handle: (text) => {
+      const f = frame(text);
+      lastId = f.id;
+      handler.handle(f);
+    },
+    lastState: () => ledger.get(lastId)?.promptState,
+    fire: (ms) => timers.fireByMs(ms),
     sent,
     sendUserMessage: vi.spyOn(pi, "sendUserMessage"),
     notifies,
@@ -254,5 +267,73 @@ describe("web prompt op: @session mentions (reply-plan §9.3)", () => {
     });
     expect(h.sends).toHaveLength(1);
     h.dispose();
+  });
+});
+
+describe("P2 new-cap web mention projection", () => {
+  it("sync web route preserves track/progress/wake reason with no native send", async () => {
+    const h = makeSessionHarness(true, true);
+    h.setOutcome({
+      status: "sent",
+      effect: "applied",
+      track: { messageId: "original", activationKey: "key" },
+      wakeDowngraded: "pair_wake_rate",
+      wake: { requested: true, decision: "downgraded", stage: "hub", reason: "pair_wake_rate" },
+      progress: {
+        messageId: "original",
+        revision: 1,
+        phase: "delivered",
+        deliveryEffect: "applied",
+        observation: "live",
+        wake: { requested: true, decision: "downgraded", reason: "pair_wake_rate" },
+      },
+    });
+    h.handle("@session:ab12cd34 body");
+    await flush();
+    expect(h.sendUserMessage).not.toHaveBeenCalled();
+    expect(h.lastState()).toBe("consumed");
+    h.fire(30_000);
+    expect(h.lastState()).toBe("consumed");
+    expect(h.sent[0]).toMatchObject({
+      ok: true,
+      data: {
+        mention: {
+          action: "session",
+          track: { messageId: "original", activationKey: "key" },
+          wakeDowngraded: "pair_wake_rate",
+          progress: { phase: "delivered" },
+        },
+      },
+    });
+    expect(h.notifies[0]!.message).toContain("pair_wake_rate");
+    h.dispose();
+  });
+});
+
+describe("P2 policy-admitted web dispatch proof", () => {
+  it("native web prompt (including no-hold owner) mints one exact, once-only proof", () => {
+    delete (globalThis as Record<symbol, unknown>)[LEDGER_KEY];
+    const h = makeSessionHarness(true, true);
+    h.handle("fresh human request");
+    expect(h.sendUserMessage).toHaveBeenCalledOnce();
+    expect(takeHumanWebDispatch("wrong-session", "fresh human request")).toBeUndefined();
+    expect(takeHumanWebDispatch("s1", "fresh human request")).toMatchObject({
+      text: "fresh human request",
+      inputId: expect.any(String),
+      owner: expect.any(String),
+    });
+    expect(takeHumanWebDispatch("s1", "fresh human request")).toBeUndefined();
+    h.dispose();
+  });
+  it("off and disposed owners do not leave an authorization", () => {
+    delete (globalThis as Record<symbol, unknown>)[LEDGER_KEY];
+    const off = makeSessionHarness();
+    off.handle("legacy prompt");
+    expect(takeHumanWebDispatch("s1", "legacy prompt")).toBeUndefined();
+    off.dispose();
+    const on = makeSessionHarness(true, true);
+    on.handle("disposed prompt");
+    on.dispose();
+    expect(takeHumanWebDispatch("s1", "disposed prompt")).toBeUndefined();
   });
 });

@@ -80,6 +80,12 @@ export interface GoalLoopHook {
    * MUST stay side-effect-free and never throw.
    */
   goalBusy(): boolean;
+  /**
+   * Session shutdown (7b G9): cancel the delivery watchdog and every evaluation timer, and make every in-flight or
+   * later continuation inert — nothing may talk through this activation's pi after its session ended. Permanent:
+   * pi creates a fresh activation (and a fresh hook) per session (tests/conformance/lifecycle-entries.test.ts).
+   */
+  dispose(): void;
 }
 
 interface Verdict {
@@ -97,7 +103,7 @@ class EvalTimeoutError extends Error {
 export function createGoalLoopHook(holder: { current?: GoalHookStack }, deps: GoalHookDeps): GoalLoopHook {
   const now = deps.now ?? (() => Date.now());
   const warn = deps.warn ?? ((message: string) => console.warn(`[pi-subagent] ${message}`));
-  const startTimer =
+  const rawStartTimer =
     deps.startTimer ??
     ((ms: number, fn: () => void): GoalTimerHandle => {
       const timer = setTimeout(fn, ms);
@@ -105,6 +111,23 @@ export function createGoalLoopHook(holder: { current?: GoalHookStack }, deps: Go
       (timer as { unref?: () => void }).unref?.();
       return { cancel: () => clearTimeout(timer) };
     });
+  /** G9: every pending timer (delivery watchdog + evaluation latches) so `dispose()` can cancel them all. */
+  const liveTimers = new Set<GoalTimerHandle>();
+  let disposed = false;
+  const startTimer = (ms: number, fn: () => void): GoalTimerHandle => {
+    const inner = rawStartTimer(ms, () => {
+      liveTimers.delete(tracked);
+      fn();
+    });
+    const tracked: GoalTimerHandle = {
+      cancel: () => {
+        liveTimers.delete(tracked);
+        inner.cancel();
+      },
+    };
+    liveTimers.add(tracked);
+    return tracked;
+  };
 
   /** 评估 in-flight 闩锁（防抖三件套之一，compact-hint forcing 同款）。 */
   let evalInFlight = false;
@@ -144,7 +167,11 @@ export function createGoalLoopHook(holder: { current?: GoalHookStack }, deps: Go
 
   /** epoch 校验贯穿评估全链路（v4 条件 7）：不等 / 非 active / 被替换 → 丢弃。 */
   const epochValid = (goal: GoalSession, record: GoalRecord, epoch: number): boolean =>
-    holder.current?.goal === goal && goal.record === record && record.epoch === epoch && record.state === "active";
+    !disposed &&
+    holder.current?.goal === goal &&
+    goal.record === record &&
+    record.epoch === epoch &&
+    record.state === "active";
 
   /** 撞线/达成收尾：迁移 + 报告注入（不静默消失，v1 §4）+ toast。 */
   const stopGoal = (
@@ -175,6 +202,7 @@ export function createGoalLoopHook(holder: { current?: GoalHookStack }, deps: Go
     text: string,
   ) => {
     deliveryTimer?.cancel();
+    if (disposed) return;
     const branchLength = () => {
       try {
         return (ctx.sessionManager as { getBranch?: () => readonly unknown[] } | undefined)?.getBranch?.().length ?? 0;
@@ -355,6 +383,12 @@ export function createGoalLoopHook(holder: { current?: GoalHookStack }, deps: Go
   };
 
   return {
+    dispose(): void {
+      disposed = true;
+      deliveryTimer = undefined;
+      for (const timer of [...liveTimers]) timer.cancel();
+    },
+
     goalBusy(): boolean {
       // T1 read-only: an active goal keeps injecting continuations even between evaluations;
       // evalInFlight additionally covers the paused-tail window where a verifier/continuation
@@ -390,6 +424,7 @@ export function createGoalLoopHook(holder: { current?: GoalHookStack }, deps: Go
     },
 
     onAgentSettled(_event: AgentSettledEvent, ctx: ExtensionContext): void {
+      if (disposed) return;
       // v2 C8：一期只支持交互 TUI（字面值 "tui"，不是 "interactive"）。
       if (ctx.mode !== "tui") return;
       const goal = holder.current?.goal;

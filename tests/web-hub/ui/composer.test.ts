@@ -5,9 +5,13 @@ import { mount } from "@vue/test-utils";
 import { computed, nextTick, ref } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Composer from "../../../src/web-hub/ui/src/components/control/Composer.vue";
-import { CONTROL_VIEW, type ControlView } from "../../../src/web-hub/ui/src/components/control/controlContext.js";
+import {
+  CONTROL_VIEW,
+  HUB_CTX,
+  type ControlView,
+} from "../../../src/web-hub/ui/src/components/control/controlContext.js";
 import { CONTROL_CTX } from "../../../src/web-hub/ui/src/composables/useControl.js";
-import type { AgentState, ControlHandle } from "../../../src/web-hub/ui/src/types.js";
+import type { AgentState, ControlHandle, HubHandle } from "../../../src/web-hub/ui/src/types.js";
 
 /**
  * `control/Composer.vue` (control-plan.md v2.1 §7.4/§7.7 — C5): key map (Enter / Shift+Enter /
@@ -69,6 +73,7 @@ function controlView(over: Partial<ControlView> = {}): ControlView {
 
 const mounted: Array<ReturnType<typeof mount>> = [];
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   window.localStorage.clear();
   for (const w of mounted.splice(0)) w.unmount();
@@ -78,12 +83,14 @@ function mountComposer(opts: {
   busy?: boolean;
   view?: ControlView;
   ctx?: { agentKey: string; control: ControlHandle; enabled: boolean };
+  hub?: HubHandle;
 }) {
   const wrapper = mount(Composer, {
     props: { enabled: true, busy: opts.busy ?? false },
     global: {
       provide: {
         ...(opts.view ? { [CONTROL_VIEW as symbol]: opts.view } : {}),
+        ...(opts.hub ? { [HUB_CTX as symbol]: opts.hub } : {}),
         ...(opts.ctx ? { [CONTROL_CTX as symbol]: opts.ctx } : {}),
       },
     },
@@ -453,6 +460,16 @@ describe("Composer.vue — command palette keyboard (2026-10: Tab 补全, TUI-li
 });
 
 describe("Composer.vue — inline StopButton (2026-10 user request: stop lives inside the input edge)", () => {
+  const stopHub = { state: ref({ conn: "open", hub: null }) } as unknown as HubHandle;
+  function stopView(control: ControlHandle | null): ControlView {
+    return controlView({
+      control,
+      busy: computed(() => true),
+      agent: computed(
+        () => ({ pendingCtl: [], card: { epoch: "e1" }, session: { sessionId: "s1" } }) as unknown as AgentState,
+      ),
+    });
+  }
   function abortingControl(calls: Array<{ method: string; args: readonly unknown[] }>): ControlHandle {
     const base = fakeControl();
     return {
@@ -466,25 +483,29 @@ describe("Composer.vue — inline StopButton (2026-10 user request: stop lives i
 
   it("busy + CONTROL_VIEW with control ⇒ stop button renders INSIDE .composer-input", async () => {
     const calls: Array<{ method: string; args: readonly unknown[] }> = [];
-    const w = mountComposer({ busy: true, view: controlView({ control: abortingControl(calls) }) });
+    const w = mountComposer({ busy: true, view: stopView(abortingControl(calls)), hub: stopHub });
     const wrap = w.find(".composer-input");
     expect(wrap.exists()).toBe(true);
     expect(wrap.find(".stop-btn").exists()).toBe(true);
   });
 
   it("busy ⇒ the card carries .busy (呼吸动画挂钩); idle ⇒ it does not", async () => {
-    const busyW = mountComposer({ busy: true, view: controlView({ control: abortingControl([]) }) });
+    const busyW = mountComposer({ busy: true, view: stopView(abortingControl([])), hub: stopHub });
     expect(busyW.find(".composer-input").classes()).toContain("busy");
-    const idleW = mountComposer({ view: controlView({ control: abortingControl([]) }) });
+    const idleW = mountComposer({ view: stopView(abortingControl([])), hub: stopHub });
     expect(idleW.find(".composer-input").classes()).not.toContain("busy");
   });
 
-  it("two-step click ⇒ view.control.abort(view.agentKey) — the dock's old channel, unchanged", async () => {
+  it("hold ⇒ view.control.abort(view.agentKey) — the dock's old channel, unchanged", async () => {
     const calls: Array<{ method: string; args: readonly unknown[] }> = [];
-    const w = mountComposer({ busy: true, view: controlView({ control: abortingControl(calls) }) });
-    await w.find(".stop-btn").trigger("click"); // arm
+    const w = mountComposer({ busy: true, view: stopView(abortingControl(calls)), hub: stopHub });
+    vi.useFakeTimers();
+    await w
+      .find(".stop-btn")
+      .trigger("pointerdown", { pointerId: 1, pointerType: "mouse", isPrimary: true, button: 0 });
     expect(calls).toEqual([]);
-    await w.find(".stop-btn").trigger("click"); // confirm
+    vi.advanceTimersByTime(700);
+    await nextTick();
     expect(calls).toEqual([{ method: "abort", args: ["agent-a"] }]);
   });
 

@@ -120,7 +120,7 @@ describe("preview namespace — chunked stream keys (chunked-plan §4.7)", () =>
   });
 });
 
-// todo-archive plan v2.1 §3（包 B）：TodoPanel 折叠尾行的两个新 key（含占位符一致性；
+// todo-archive plan v2.1 §3（包 B）：todo 分区折叠尾行的两个新 key（含占位符一致性；
 // detail 命名空间整体的中英 key 集合相等由上方第一个断言覆盖）。
 describe("detail namespace — todo-archive fold tail keys (todo-archive v2.1 §2)", () => {
   const KEYS = ["todoCompletedHidden", "todoArchived"];

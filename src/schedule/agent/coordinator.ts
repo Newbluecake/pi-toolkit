@@ -6,7 +6,10 @@
  *     and once per `hello_ack` carrying `sched.v1` (reconnect / hub restart);
  *   - pushes `sched_bound{agentKey, runKey}` for the message dispatcher (A2, §7.5);
  *   - answers every `sched_run` with EXACTLY ONE `sched_run_ack` (manual claim §4.5b);
- *   - applies `sched_receipts` by removing the acknowledged `pendingReports` entries under the lock.
+ *   - applies `sched_receipts` by removing the acknowledged `pendingReports` entries under the lock;
+ *   - schedule-auto-approve r2: the #61 confirm module is gone. A `sched_decide` (an old hub's Feishu card
+ *     decision; cap-gated, so normally unreachable) is still answered with EXACTLY ONE `sched_decide_ack`
+ *     — `refused:"unsupported"` (expired / foreign-session frames keep their old refusals).
  *
  * Two layers:
  *   - `createScheduleHubRouter()` — ONE per activate (the web-hub connection is process-level and
@@ -20,6 +23,7 @@
 import type {
   HubScheduleConfig,
   SchedAgentFrame,
+  SchedDecideFrame,
   SchedReceiptsFrame,
   SchedRunFrame,
 } from "../../web-hub/protocol/schedule.js";
@@ -43,6 +47,8 @@ export interface ScheduleCoordinator {
   onHubCaps(): void;
   onRun(frame: SchedRunFrame): void;
   onReceipts(frame: SchedReceiptsFrame): void;
+  /** An old hub's `sched_decide`: exactly one `sched_decide_ack` per received frame (always a refusal). */
+  onDecide(frame: SchedDecideFrame): void;
   dispose(): void;
 }
 
@@ -53,6 +59,7 @@ export const NULL_SCHEDULE_COORDINATOR: ScheduleCoordinator = Object.freeze({
   onHubCaps: () => undefined,
   onRun: () => undefined,
   onReceipts: () => undefined,
+  onDecide: () => undefined,
   dispose: () => undefined,
 });
 
@@ -102,6 +109,22 @@ export function createHubCoordinator(deps: HubCoordinatorDeps): ScheduleCoordina
     }
   };
 
+  /** Exactly one `sched_decide_ack` per received frame, sent under the same readiness as run acks. */
+  const decideAck = (reqId: string, reason: string): void => {
+    const link = deps.link();
+    if (link === undefined || !link.ready()) return;
+    try {
+      link.send({
+        t: "sched_decide_ack",
+        reqId,
+        result: "refused",
+        reason: reason.slice(0, REASON_MAX) || "E_INVALID",
+      });
+    } catch {
+      /* ignore */
+    }
+  };
+
   return {
     kind: "hub",
     changed() {
@@ -117,6 +140,12 @@ export function createHubCoordinator(deps: HubCoordinatorDeps): ScheduleCoordina
     },
     onHubCaps() {
       send({ t: "sched_changed", sessionId: deps.sessionId });
+    },
+    onDecide(frame) {
+      // Exactly one ack per received frame (confirm/approval no longer exist ⇒ always refused).
+      if (disposed || frame.sessionId !== deps.sessionId) return decideAck(frame.reqId, "E_NOT_OWNER");
+      if (frame.expiresAt <= now()) return decideAck(frame.reqId, "expired");
+      decideAck(frame.reqId, "unsupported");
     },
     onRun(frame) {
       // Exactly one ack per received frame (a hub re-send of the same reqId gets the same verdict).
@@ -160,6 +189,8 @@ export interface ScheduleWebHubPort {
   bindLink(link: SchedHubLink): void;
   onSchedRun(frame: SchedRunFrame): void;
   onSchedReceipts(frame: SchedReceiptsFrame): void;
+  /** Legacy hub→agent Feishu-card decision (stub since r2); the port answers EXACTLY ONE `sched_decide_ack`. */
+  onSchedDecide(frame: SchedDecideFrame): void;
   onHubCaps(): void;
 }
 
@@ -199,6 +230,17 @@ export function createScheduleHubRouter(opts: { hubConfig: () => HubScheduleConf
     },
     onSchedReceipts(frame) {
       active?.onReceipts(frame);
+    },
+    onSchedDecide(frame) {
+      if (active !== undefined) return active.onDecide(frame);
+      // No session attached (between session swaps): still exactly one ack.
+      if (link?.ready() === true) {
+        try {
+          link.send({ t: "sched_decide_ack", reqId: frame.reqId, result: "refused", reason: "E_NOT_OWNER" });
+        } catch {
+          /* ignore */
+        }
+      }
     },
     onHubCaps() {
       active?.onHubCaps();

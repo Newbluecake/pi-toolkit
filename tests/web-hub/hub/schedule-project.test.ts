@@ -69,7 +69,7 @@ const noBot = { configured: false, open: false };
 const openBot = { configured: true, open: true, installedAt: NOW - 10 * DAY };
 
 describe("projectSession — tasks", () => {
-  it("carries the definition, defHash, derived approval flags, totals and droppedReports", () => {
+  it("carries the definition, defHash, execution flags, totals and droppedReports", () => {
     const t = task();
     const s = state({
       tasks: [t],
@@ -98,48 +98,22 @@ describe("projectSession — tasks", () => {
     expect(tp.totals).toEqual({ fired: 3, missed: 2, skipped: 1, manual: 5 });
   });
 
-  it("unapproved / paused tasks derive pendingApproval / executable independently (S2)", () => {
-    const approved = task();
-    const unapproved = task({ id: "s_efgh6789", approval: null as never });
-    const paused = task({ id: "s_ijkl1234", enabled: false });
-    const s = state({
-      tasks: [approved, unapproved, paused],
-      occ: {
-        s_abcd2345: {
-          defHash: defHash(approved),
-          decidedThrough: NOW,
-          firedTotal: 0,
-          missedTotal: 0,
-          skippedTotal: 0,
-          missedLog: [],
-        },
-        s_efgh6789: {
-          defHash: defHash(unapproved),
-          decidedThrough: NOW,
-          firedTotal: 0,
-          missedTotal: 0,
-          skippedTotal: 0,
-          missedLog: [],
-        },
-        s_ijkl1234: {
-          defHash: defHash(paused),
-          decidedThrough: NOW,
-          firedTotal: 0,
-          missedTotal: 0,
-          skippedTotal: 0,
-          missedLog: [],
-        },
-      },
-    });
-    const p = projectSession(s, { now: NOW, receipts: new Map(), bot: noBot });
-    const byId = Object.fromEntries(p.tasks.map((t) => [t.task.id, t]));
-    expect(byId["s_abcd2345"]!.executable).toBe(true);
-    expect(byId["s_efgh6789"]!.executable).toBe(false);
-    expect(byId["s_efgh6789"]!.pendingApproval).toBe(true);
-    // Paused but approved: not executable, NOT pending approval.
-    expect(byId["s_ijkl1234"]!.executable).toBe(false);
-    expect(byId["s_ijkl1234"]!.pendingApproval).toBe(false);
-  });
+  it.each(["missing", "stale", "matching"])(
+    "ignores %s legacy metadata: executable equals enabled and no offer is projected",
+    (kind) => {
+      const enabled = task();
+      if (kind === "missing") delete enabled.approval;
+      else if (kind === "stale") enabled.approval!.hash = "a".repeat(64);
+      const paused = { ...enabled, id: "s_ijkl1234", enabled: false };
+      const p = projectSession(state({ tasks: [enabled, paused] }), { now: NOW, receipts: new Map(), bot: noBot });
+      expect(p.tasks.map((t) => t.executable)).toEqual([true, false]);
+      for (const row of p.tasks) {
+        expect(row.pendingApproval).toBe(false);
+        expect(row).not.toHaveProperty("offer");
+      }
+      expect(p.tasks[0]!.task).toBe(enabled);
+    },
+  );
 
   it("computes nextAt with the shared cron core in the task tz; a paused task has none", () => {
     const t = task(); // daily 09:00 UTC

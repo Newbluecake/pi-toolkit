@@ -28,8 +28,32 @@
 -->
 <script setup lang="ts">
 import { computed, inject, onUnmounted, ref, watch } from "vue";
-import { commandPolicyFor, newCmdId, parseSlash, validRecallText } from "@logic/control.js";
+import {
+  createUnknownSlashFallback,
+  slashTextRoute,
+  unknownSlashTextAvailable,
+  newCmdId,
+  parseSlash,
+  validRecallText,
+} from "@logic/control.js";
 import { cmdHistoryModeOn } from "@logic/cmdRecord.js";
+import {
+  acceptXsStatus,
+  narrowMentionSession,
+  narrowXsRequests,
+  seedXsMention,
+  xsActivateGate,
+  xsMentionSeeds,
+  xsQueryGate,
+  xsRemoteRows,
+  xsRequestRows,
+  xsRowNoteKey,
+  xsRowPhaseToken,
+  xsRowReplyToken,
+  xsRowWakeToken,
+  XS_STATE_CAP,
+  type XsRowView,
+} from "@logic/xsRequestState.js";
 import { parseResumeIntent, resumeAvailable, RESUME_DIALOG } from "@logic/resume.js";
 import { clientImageBudget, previewScopeOf } from "@logic/preview.js";
 import {
@@ -46,6 +70,8 @@ import Composer from "../control/Composer.vue";
 import CommandConfirm from "../control/CommandConfirm.vue";
 import CommandResult from "../control/CommandResult.vue";
 import QueueList from "../control/QueueList.vue";
+import XsRequestList from "../control/XsRequestList.vue";
+import { registerXsExtra } from "../../i18n/xs-extra.js";
 import { CONTROL_ENV, CONTROL_VIEW } from "../control/controlContext.js";
 import { HUB_CTX } from "../control/controlContext.js";
 import { useClipboard, type ClipboardWindow } from "../../composables/useClipboard.js";
@@ -112,9 +138,11 @@ async function runCommandHistory(
   name: string,
   args: string,
   confirm: boolean,
+  fallback?: (outcome: import("../../types.js").CmdOutcome) => Promise<boolean>,
+  commandId?: string,
 ): Promise<void> {
   const store = useCmdHistory(key);
-  const id = newCmdId();
+  const id = commandId ?? newCmdId();
   store.begin({ cmdId: id, name, args, startedAt: Date.now() });
   cmdWaitingTerminal.value = false;
   // §7.7's terminal-interaction banner survives historyMode (第三方命令占位卡) — same 2 s probe.
@@ -125,6 +153,10 @@ async function runCommandHistory(
   }, 2000);
 
   const outcome = await c.runCommand(key, name, args, { id, ...(confirm ? { confirm: true as const } : {}) });
+  if (fallback && (await fallback(outcome))) {
+    store.drop(id);
+    return;
+  }
   if (!outcome.ok) {
     if (outcome.error === "E_CONFIRM_REQUIRED") {
       store.drop(id);
@@ -145,7 +177,139 @@ async function runCommandHistory(
 const mentionResult = ref<{ kind: "ok" | "error"; label: string; action?: "steer" | "resume"; error?: string } | null>(
   null,
 );
+/** P4: the session-mention note — its own line (distinct from the steer/resume toast): the
+ *  i18n key distinguishing queued / delivered / dispatch-pending / started / unknown. */
+const mentionSessionNote = ref<{ key: string; label: string } | null>(null);
+/** Pick the note key from the seed's own evidence (arch §4.8: "提示区分 queued/delivered/
+ *  dispatch pending/started"). A wake still pending execution reads as dispatch-pending. */
+function mentionSessionNoteKey(seed: ReturnType<typeof narrowMentionSession>): string {
+  const p = seed?.row;
+  if (p?.phase === "queued") return "xs.mentionQueued";
+  if (p?.phase === "started") return "xs.mentionStarted";
+  if (p?.phase === "delivered")
+    return p.wake.requested && p.wake.decision !== "downgraded" ? "xs.mentionPending" : "xs.mentionDelivered";
+  return "xs.mentionUnknown";
+}
 let mentionResultTimer: ReturnType<typeof setTimeout> | undefined;
+
+// --- cross-session request area (fabric-xs-activation plan §3 P4) -------------------------
+registerXsExtra();
+
+/** The CURRENT hub frame's caps — the one reader for every cap gate below (the `useHub`
+ *  precedent; `hub` may be null in standalone mounts ⇒ no caps ⇒ no area, byte-identical). */
+const xsHubCaps = computed<unknown>(() =>
+  hub !== null ? (hub.state.value.hub as { caps?: unknown } | null | undefined)?.caps : undefined,
+);
+/** Merged rows for the CURRENT session: mention seeds (generic unconfirmed) under the
+ *  session-matched `status.xsRequests` snapshot. Wrong-session snapshots are dropped
+ *  wholesale ("错 session 丢弃"); a cap-less hub narrows to undefined ⇒ empty rows. */
+const xsAgent = computed(() => view?.agent.value);
+const xsSnapshot = computed(() => {
+  const snap = narrowXsRequests(xsAgent.value?.status, xsHubCaps.value);
+  if (snap === undefined) return undefined;
+  const sid = sessionId();
+  return sid !== "" && snap.sessionId === sid ? snap : undefined;
+});
+/** Root fix #4: every accepted, session-matched snapshot folds into the PERSISTENT per-agent
+ *  store — an older frame arriving after a newer one cannot regress anything (the revision
+ *  gate evaluates against the stored row). Pure side effect of the watcher; the computeds
+ *  below only read. */
+watch(
+  xsSnapshot,
+  (snap) => {
+    const key = agentKey();
+    const sid = sessionId();
+    if (snap !== undefined && key !== null && sid !== "") acceptXsStatus(key, sid, snap);
+  },
+  { immediate: true },
+);
+const xsRows = computed<readonly XsRowView[]>(() => {
+  // Root fix #6: the DISPLAY gate mirrors the seed gate — a hub whose CURRENT frame lacks
+  // `xs.state.v1` renders nothing at all (stored history included), byte-identical off/legacy.
+  if (!Array.isArray(xsHubCaps.value) || !(xsHubCaps.value as readonly unknown[]).includes(XS_STATE_CAP)) return [];
+  const key = agentKey();
+  const sid = sessionId();
+  if (key === null || sid === "") return [];
+  return xsRequestRows(xsMentionSeeds(key, sid), xsRemoteRows(key, sid));
+});
+/** The per-row gate inputs, folded once per render — the component itself trusts these. */
+const xsNow = computed(() => props.now ?? Date.now());
+const xsHasSurface = computed(() => handle()?.xsActivate !== undefined);
+const xsOnline = computed(() => xsAgent.value !== undefined && xsAgent.value.down !== true);
+const xsActivatable = computed<ReadonlyMap<string, { retryAfterAt?: number }>>(() => {
+  const out = new Map<string, { retryAfterAt?: number }>();
+  if (!xsHasSurface.value) return out;
+  for (const row of xsRows.value) {
+    const gate = xsActivateGate({
+      hubCaps: xsHubCaps.value,
+      row,
+      now: xsNow.value,
+      hasSurface: xsHasSurface.value,
+      online: xsOnline.value,
+    });
+    if (gate.visible && row.activationKey !== undefined)
+      out.set(row.messageId, { ...(gate.retryAfterAt !== undefined ? { retryAfterAt: gate.retryAfterAt } : {}) });
+  }
+  return out;
+});
+const xsQueryable = computed<ReadonlySet<string>>(() => {
+  const out = new Set<string>();
+  if (!xsHasSurface.value) return out;
+  for (const row of xsRows.value) if (xsQueryGate(xsHubCaps.value, xsHasSurface.value, row)) out.add(row.messageId);
+  return out;
+});
+/** messageIds with an action in flight — singleflight itself lives in `useControl`; this is
+ *  only the button's disabled state (bounded by the visible rows). */
+const xsInFlight = ref<ReadonlySet<string>>(new Set());
+/** The component's pre-merged row views (`contracts.ts`'s XsRequestRowView). */
+const xsRowViews = computed(() =>
+  xsRows.value.map((row) => ({
+    messageId: row.messageId,
+    phaseToken: xsRowPhaseToken(row),
+    wakeToken: xsRowWakeToken(row) ?? null,
+    replyToken: xsRowReplyToken(row) ?? null,
+    noteKey: xsRowNoteKey(row),
+    seeded: row.seeded === true,
+    ...(row.activationKey !== undefined ? { activationKey: row.activationKey } : {}),
+    expired: row.activationUntil !== undefined && row.activationUntil <= xsNow.value,
+  })),
+);
+
+async function runXsAction(
+  messageId: string,
+  activationKey: string | null,
+  action: "activate" | "query",
+): Promise<void> {
+  const c = handle();
+  const key = agentKey();
+  if (!c || key === null || c.xsActivate === undefined) return; // the gate vanished mid-click — server revalidates anyway
+  if (xsInFlight.value.has(messageId)) return;
+  const next = new Set(xsInFlight.value);
+  next.add(messageId);
+  xsInFlight.value = next;
+  try {
+    await c.xsActivate(key, {
+      action,
+      messageId,
+      ...(activationKey !== null ? { activationKey } : {}),
+    });
+    // No optimistic surface of its own: the next `status.xsRequests` frame carries the outcome.
+  } catch {
+    /* transport errors surface via the row's own state; nothing retries automatically */
+  } finally {
+    const done = new Set(xsInFlight.value);
+    done.delete(messageId);
+    xsInFlight.value = done;
+  }
+}
+
+function onXsActivate(messageId: string, activationKey: string): void {
+  void runXsAction(messageId, activationKey, "activate");
+}
+
+function onXsQuery(messageId: string, activationKey: string | null): void {
+  void runXsAction(messageId, activationKey, "query");
+}
 
 /** pendingCtl id of the in-flight async command we're tracking (found by kind+name after the
  * optimistic item lands in the reducer). `captured` is the runCommand response's own
@@ -163,12 +327,18 @@ function handle(): import("../../types.js").ControlHandle | null {
   return view?.control ?? props.control ?? null;
 }
 
-async function runCommand(name: string, args: string, confirm: boolean): Promise<void> {
+async function runCommand(
+  name: string,
+  args: string,
+  confirm: boolean,
+  fallback?: (outcome: import("../../types.js").CmdOutcome) => Promise<boolean>,
+  commandId?: string,
+): Promise<void> {
   const c = handle();
   const key = agentKey();
   if (!c || key === null) return;
   pendingConfirm.value = null;
-  if (historyMode.value) return runCommandHistory(c, key, name, args, confirm); // §4.7 — no CommandResult
+  if (historyMode.value) return runCommandHistory(c, key, name, args, confirm, fallback, commandId); // §4.7 — no CommandResult
   cmdResult.value = { name, state: "running" };
   cmdWaitingTerminal.value = false;
   trackingCmd = { id: null, name };
@@ -182,7 +352,20 @@ async function runCommand(name: string, args: string, confirm: boolean): Promise
     cmdWaitingTerminal.value = promptCount() > promptsBefore;
   }, 2000);
 
-  const outcome = await c.runCommand(key, name, args, confirm ? { confirm: true } : undefined);
+  const outcome = await c.runCommand(
+    key,
+    name,
+    args,
+    commandId !== undefined
+      ? { id: commandId, ...(confirm ? { confirm: true as const } : {}) }
+      : confirm
+        ? { confirm: true }
+        : undefined,
+  );
+  if (fallback && (await fallback(outcome))) {
+    trackingCmd = null;
+    return;
+  }
   if (!outcome.ok) {
     trackingCmd = null;
     if (outcome.error === "E_CONFIRM_REQUIRED") {
@@ -308,6 +491,33 @@ function watchCommandItem(): void {
   );
 }
 
+// A transient loss of token/identity cancels old intentions even if that value later returns.
+let slashGeneration = 0;
+let slashDisposed = false;
+const slashIdentity = computed(() => {
+  if (
+    !view?.enabled.value ||
+    !view.commandsEnabled.value ||
+    !unknownSlashTextAvailable(view.agent.value.status) ||
+    view.agent.value.down
+  )
+    return null;
+  return JSON.stringify([agentKey(), sessionId(), view.agent.value.card?.epoch]);
+});
+watch(
+  slashIdentity,
+  () => {
+    slashGeneration++;
+  },
+  { flush: "sync" },
+);
+onUnmounted(() => {
+  slashDisposed = true;
+});
+function slashFallbackScope(): string | null {
+  return slashDisposed || slashIdentity.value === null ? null : `${slashGeneration}:${slashIdentity.value}`;
+}
+
 function onSend(text: string, deliver: "steer" | "followUp"): void {
   const c = handle();
   const key = agentKey();
@@ -323,11 +533,36 @@ function onSend(text: string, deliver: "steer" | "followUp"): void {
   }
   const slash = parseSlash(text);
   const commands = view?.commands.value ?? [];
-  const commandMode = slash !== undefined && (view?.commandsEnabled.value ?? false);
-  if (commandMode && slash) {
-    const policy = commandPolicyFor([...commands], slash.name, busy.value);
-    if (policy === "deny") return; // palette already shows the reason; never falls back to text
-    void runCommand(slash.name, slash.args, false);
+  const route = slashTextRoute(
+    text,
+    [...commands],
+    busy.value,
+    view?.commandsEnabled.value ?? false,
+    view?.agent.value.status,
+  );
+  if (route.mode === "deny") return;
+  if (route.mode === "command" && slash) {
+    const commandId = unknownSlashTextAvailable(view?.agent.value.status) ? newCmdId() : undefined;
+    const fallback = createUnknownSlashFallback(slashFallbackScope, async () => {
+      if (commandId !== undefined) {
+        c.discard(key, commandId);
+        if (historyMode.value) useCmdHistory(key).drop(commandId);
+      }
+      trackingCmd = null;
+      cmdResult.value = null;
+      cmdWaitingTerminal.value = false;
+      if (waitPromptTimer !== undefined) clearTimeout(waitPromptTimer);
+      // B is a new prompt id, never a mutation/retry of A; do not compose attachments again.
+      const result = await c.sendPrompt(key, text, deliver, text);
+      if (!result.ok)
+        cmdResult.value = {
+          name: slash.name,
+          state: "failed",
+          error: result.error ?? "E_FAILED",
+          ...(result.message !== undefined ? { message: result.message } : {}),
+        };
+    });
+    void runCommand(slash.name, slash.args, false, fallback, commandId);
     return;
   }
   // @mention routing belongs to the agent's live registry. Even a label omitted by the
@@ -348,6 +583,31 @@ function onSend(text: string, deliver: "steer" | "followUp"): void {
       };
       const mention = data.mention;
       if (!mention || typeof mention.label !== "string" || mention.label === "") return;
+      // fabric-xs-activation P4 (P2's frozen mention port — BOTH branches, the sync web path
+      // and `onSessionRouted`, settle this same shape): a session mention seeds the request
+      // area's generic-unconfirmed row and shows the phase-distinguishing note. The seed is
+      // display-only — nothing here can wake, activate or resend anything.
+      // Root fix #6: the seed path is cap-gated — without `xs.state.v1` on the CURRENT hub
+      // frame the session action falls through to the legacy no-op below, so a legacy/off hub
+      // renders byte-identical DOM (no row, no note).
+      const stateCapOn =
+        Array.isArray(xsHubCaps.value) && (xsHubCaps.value as readonly unknown[]).includes(XS_STATE_CAP);
+      const sessionSeed = narrowMentionSession(data);
+      if (sessionSeed !== undefined && stateCapOn) {
+        const sid = sessionId();
+        if (sid !== "") seedXsMention(key, sid, sessionSeed, Date.now());
+        if (mentionResultTimer !== undefined) clearTimeout(mentionResultTimer);
+        // Root fix #8: the early return must not leave a previous steer/resume toast on a
+        // dead timer — clear BOTH notes before arming the new one.
+        mentionResult.value = null;
+        mentionSessionNote.value = { key: mentionSessionNoteKey(sessionSeed), label: mention.label };
+        mentionResultTimer = setTimeout(() => {
+          mentionSessionNote.value = null;
+          mentionResult.value = null;
+          mentionResultTimer = undefined;
+        }, 6_000);
+        return;
+      }
       if (mentionResultTimer !== undefined) clearTimeout(mentionResultTimer);
       if (mention.action === "error") {
         mentionResult.value = {
@@ -362,6 +622,7 @@ function onSend(text: string, deliver: "steer" | "followUp"): void {
       }
       mentionResultTimer = setTimeout(() => {
         mentionResult.value = null;
+        mentionSessionNote.value = null;
         mentionResultTimer = undefined;
       }, 6_000);
     })
@@ -574,6 +835,18 @@ onUnmounted(() => {
     <!-- steer-recall §7: a persistent live region — the text swap itself announces (a v-if
          mount would not, since the region must exist BEFORE the update for SRs to read it). -->
     <span class="sr-only" role="status" aria-live="polite">{{ recallAnnounce }}</span>
+    <!-- fabric-xs-activation P4: the LIGHT request area beside QueueList. Empty rows render
+         nothing at all — an old/off hub keeps the pre-feature dock byte-identical. -->
+    <XsRequestList
+      :rows="xsRowViews"
+      :omitted="xsSnapshot === undefined ? 0 : (xsSnapshot.omitted ?? 0)"
+      :activatable="xsActivatable"
+      :queryable="xsQueryable"
+      :in-flight="xsInFlight"
+      :now="xsNow"
+      @activate="onXsActivate"
+      @query="onXsQuery"
+    />
     <QueueList
       :items="visibleQueue"
       :hold-enabled="holdOn"
@@ -585,6 +858,9 @@ onUnmounted(() => {
       @discard-held="onQueueDiscardHeld"
       @copy-held="onQueueCopyHeld"
     />
+    <p v-if="mentionSessionNote" class="fleet-actions-note" role="status">
+      {{ t(mentionSessionNote.key, { label: mentionSessionNote.label }) }}
+    </p>
     <p
       v-if="mentionResult"
       class="fleet-actions-note"

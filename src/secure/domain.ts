@@ -38,7 +38,9 @@ import {
   type SecureConfigIo,
   type SecureVault,
 } from "./config.js";
+import { resolveAgentDir } from "../core/agent-dir.js";
 import { PI_SECURE_NS, PI_SECURE_ORIG_ENV, PI_SECURE_SESSION, PI_SECURE_VAULT, origEnvSnapshot } from "./env.js";
+import { resolveSettingsLocation, type SettingsLocation } from "./settings-lock.js";
 
 export const SECURE_DOMAIN_KEY = Symbol.for("pi-subagent:secure-domain");
 
@@ -104,7 +106,7 @@ export interface SecureDomainDeps {
   /** Env read for PI_SECURE_VAULT and MUTATED on entering secure (default `process.env`). */
   env?: Record<string, string | undefined>;
   cwd?: string;
-  /** Settings file to read the raw `secure` section from (default `~/.pi/agent/pi-subagent.json`). */
+  /** Settings file to read the raw `secure` section from (default: resolved via the agentDir + settings-file protocol, `~/.pi/agent/pi-toolkit.json` / legacy `pi-subagent.json`). */
   settingsPath?: string;
   home?: string;
   readMountinfo?: () => string;
@@ -225,6 +227,39 @@ export function readSecureSettingsRaw(path: string): SecureSettingsRead {
       message: `${path}: JSON 无法解析（${error instanceof Error ? error.message : String(error)}）`,
     };
   }
+}
+
+function stableStringify(x: unknown): string {
+  if (x === undefined) return "undefined";
+  if (Array.isArray(x)) return `[${x.map(stableStringify).join(",")}]`;
+  if (x !== null && typeof x === "object")
+    return `{${Object.keys(x)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${stableStringify((x as Record<string, unknown>)[k])}`)
+      .join(",")}}`;
+  return JSON.stringify(x);
+}
+
+function secureSectionOf(read: SecureSettingsRead): unknown {
+  return read.kind === "ok" && read.value !== null && typeof read.value === "object"
+    ? (read.value as Record<string, unknown>).secure
+    : undefined;
+}
+
+/**
+ * The settings read for the domain judgment over a resolved location. Normally just the location's
+ * file; in the S6b conflict (two diverging files) the `secure` sections of BOTH must agree — a
+ * mismatch is an invalid secure section (fail-closed, plan §3.6.3), never a silent "NEW wins".
+ */
+export function readSecureSettingsForLocation(loc: SettingsLocation): SecureSettingsRead {
+  const primary = readSecureSettingsRaw(loc.path);
+  if (loc.kind !== "new" || loc.legacy !== "conflict") return primary;
+  const other = readSecureSettingsRaw(loc.legacyPath);
+  if (other.kind === "missing") return primary;
+  if (other.kind === "error") return other;
+  if (primary.kind === "error") return primary;
+  if (stableStringify(secureSectionOf(primary)) === stableStringify(secureSectionOf(other))) return primary;
+  return { kind: "error", message: `两份设置文件的 secure 段不一致：${loc.newPath} 与 ${loc.legacyPath}` };
 }
 
 /** The settings read folded into a SecureConfig (an unreadable file is an enabled-but-invalid section). */
@@ -544,13 +579,36 @@ export function vaultUnfinishedReason(v: SecureVault): string | undefined {
   return undefined;
 }
 
+/** The first vault whose dir/mnt nests with `agentDir` (either way; lexical AND canonical families). */
+export function agentDirVaultOverlap(
+  agentDir: string,
+  vaults: readonly SecureVaultRoots[],
+): SecureVaultRoots | undefined {
+  const lex = resolve(agentDir);
+  const phys = canonicalPath(agentDir);
+  const nested = (a: string, b: string): boolean => pathWithin(a, b) || pathWithin(b, a);
+  return vaults.find(
+    (v) =>
+      nested(lex, resolve(v.vault.dir)) ||
+      nested(lex, resolve(v.vault.mnt)) ||
+      nested(phys, v.root) ||
+      nested(phys, v.mntReal),
+  );
+}
+
 /** Side-effect-free judgment (reads settings, realpath, mountinfo). */
 export function computeSecureDomain(deps: SecureDomainDeps = {}): SecureDomain {
   const env = deps.env ?? process.env;
   const home = deps.home ?? homedir();
-  const settingsPath = deps.settingsPath ?? join(home, ".pi", "agent", "pi-subagent.json");
+  const agent = resolveAgentDir(env, home);
+  const location = deps.settingsPath === undefined ? resolveSettingsLocation(agent) : undefined;
+  const settingsPath = deps.settingsPath ?? location?.path ?? "";
   const readMountinfo = deps.readMountinfo ?? readProcMountinfo;
-  const config = secureConfigFromRead(readSecureSettingsRaw(settingsPath), home, { legacyMntDir: legacyMntDirProbe });
+  const config = secureConfigFromRead(
+    location === undefined ? readSecureSettingsRaw(settingsPath) : readSecureSettingsForLocation(location),
+    home,
+    { legacyMntDir: legacyMntDirProbe },
+  );
   const usable = config.enabled && config.valid;
   const vaults = usable ? config.vaults.map(vaultRoots) : [];
   // private-plan §2.9: judged once with the domain verdict and frozen with it (the optional `ns`
@@ -561,6 +619,20 @@ export function computeSecureDomain(deps: SecureDomainDeps = {}): SecureDomain {
     readPrivateRecord: deps.readPrivateRecord ?? readPrivateRecordFd,
   });
   const nsKey = ns === undefined ? {} : { ns };
+  // settings-rename §3.6.2: an env-selected agentDir nested with a registered vault would hide the
+  // registry inside the vault it describes — unsupported ⇒ locked (never active for the default dir).
+  if (usable && agent.source === "env") {
+    const hit = agentDirVaultOverlap(agent.dir, vaults);
+    if (hit !== undefined)
+      return {
+        kind: "locked",
+        reason: `PI_CODING_AGENT_DIR（${agent.dir}）位于保险库 ${hit.vault.name} 内：不支持（设置登记会藏进它自己描述的保险库）`,
+        vaultName: hit.vault.name,
+        vaults,
+        config,
+        ...nsKey,
+      };
+  }
   const envVault = env[PI_SECURE_VAULT];
   const fromVault = (v: SecureVaultRoots, via: "env" | "cwd"): SecureDomain => {
     // convert-plan §4 (V6): an unfinished convert/import (`pending`) or relocation ⇒ locked, even
@@ -587,7 +659,11 @@ export function computeSecureDomain(deps: SecureDomainDeps = {}): SecureDomain {
     if (!v)
       return {
         kind: "locked",
-        reason: `PI_SECURE_VAULT=${envVault} 不是已登记的保险库`,
+        reason: `PI_SECURE_VAULT=${envVault} 不是已登记的保险库${
+          agent.source === "env" && settingsPath !== ""
+            ? `（设置文件 ${settingsPath}；agentDir 来自 PI_CODING_AGENT_DIR，请确认 pi-secure 在同一环境下运行）`
+            : ""
+        }`,
         vaultName: envVault,
         vaults,
         config,

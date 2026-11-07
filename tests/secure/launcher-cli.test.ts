@@ -14,6 +14,8 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -36,7 +38,7 @@ const HAVE_SCRIPT = which("script") !== undefined && which("flock") !== undefine
 
 const scratch: string[] = [];
 function tmp(prefix: string): string {
-  const d = mkdtempSync(join(tmpdir(), prefix));
+  const d = realpathSync(mkdtempSync(join(tmpdir(), prefix))); // #28: physical root (spelling = what verdicts compare)
   chmodSync(d, 0o700);
   scratch.push(d);
   return d;
@@ -338,6 +340,21 @@ describe.skipIf(!HAVE_SCRIPT)("unlock: password retries (D9) with a fake gocrypt
     expect(calls).toHaveLength(3);
     expect(calls[0]).toBe(`gocryptfs -nonempty -- ${d}/cipher ${join(c.home, "secure", "acme")}`);
     expect(spawnSync("flock", ["-n", join(d, "mount.lock"), "true"]).status).toBe(0);
+  }, 30_000);
+  it("#28 symlinked ancestor of <dir>: gocryptfs is called with the PHYSICAL cipher path, mnt unchanged", async () => {
+    const c = ctx({ gocryptfsExit: 12 });
+    register(c, "acme");
+    const d = layout(c);
+    const share = join(c.home, ".local", "share");
+    const target = join(c.root, "data-share");
+    renameSync(share, target);
+    symlinkSync(target, share);
+    expect(realpathSync(d)).not.toBe(d);
+    const r = await runTty(c, `${BIN} unlock acme`);
+    expect(r.code, r.text).toBe(77);
+    const calls = readFileSync(c.log, "utf8").trim().split("\n");
+    expect(calls[0]).toBe(`gocryptfs -nonempty -- ${realpathSync(d)}/cipher ${join(c.home, "secure", "acme")}`);
+    expect(calls[0]).not.toContain(`${d}/cipher`);
   }, 30_000);
   it("a failed sentinel check refuses to mount (gocryptfs never called)", async () => {
     const c = ctx({ gocryptfsExit: 0 });

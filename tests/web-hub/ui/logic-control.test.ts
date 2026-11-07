@@ -2,6 +2,8 @@
 import { describe, expect, it } from "vitest";
 import {
   buildDialogAnswers,
+  slashTextRoute,
+  createUnknownSlashFallback,
   commandPolicyFor,
   composerKeyAction,
   dialogComplete,
@@ -212,6 +214,24 @@ const err = (error, extra = {}) => ({ ok: false, error, retryable: false, effect
 
 describe("pendingTransition (§7.7)", () => {
   describe('event "result" (HTTP response of the initial send)', () => {
+    it("U1: a receipt that lands after a ctl frame advanced the item never regresses it", () => {
+      const ctl = (state: string, updatedAt: number) => ({ type: "ctl", entry: { state, updatedAt } });
+      // held → (ctl) handed → late held receipt: stays handed
+      let it: any = pendingTransition(item({ state: "held", ctlAt: 0 }), ctl("dispatched", 5));
+      expect(it).toMatchObject({ state: "handed", ctlAt: 5 });
+      expect(pendingTransition(it, { type: "result", outcome: ok({ delivery: "held" }) })).toBe(it);
+      // sending → (ctl) started → late observed / unobserved receipt: stays started
+      it = pendingTransition(item(), ctl("started", 7));
+      expect(it).toMatchObject({ state: "started", ctlAt: 7 });
+      for (const delivery of ["observed", "unobserved"]) {
+        expect(pendingTransition(it, { type: "result", outcome: ok({ delivery }) })).toBe(it);
+      }
+      // no ctl seen yet ⇒ the receipt still applies
+      expect(pendingTransition(item(), { type: "result", outcome: ok({ delivery: "held" }) })).toMatchObject({
+        state: "held",
+      });
+    });
+
     it("prompt ok observed ⇒ observed (+behavior); unobserved otherwise", () => {
       expect(
         pendingTransition(item(), { type: "result", outcome: ok({ delivery: "observed", behavior: "steer" }) }),
@@ -950,5 +970,55 @@ describe("isWebSentMessage (§7.7 transcript web badge)", () => {
     expect(isWebSentMessage(ctl, deq + 60_000)).toBe(false); // far from both windows
     // a still-`started` entry gets no updatedAt slack (only the dequeue stamps it)
     expect(isWebSentMessage([{ state: "started", at, updatedAt: deq }], deq)).toBe(false);
+  });
+});
+
+describe("#40 slash text routing", () => {
+  const status = { features: ["unknown-slash-text.v1"] };
+  const commands = [
+    { name: "quit", policy: "deny" },
+    { name: "foo:2", policy: "allow" },
+  ];
+  it("only treats missing names as unresolved on capable command surfaces", () => {
+    expect(slashTextRoute("/oops", commands, false, true, status)).toEqual({ mode: "command", policy: "allow" });
+    expect(slashTextRoute("/quit", commands, false, true, status).mode).toBe("deny");
+    expect(slashTextRoute("/oops", commands, false, true, {}).mode).toBe("deny");
+    expect(slashTextRoute("/oops", commands, false, false, status).mode).toBe("text");
+    for (const text of ["/名字\n  body  ", "/foo/bar", "/", " /foo", "//foo"])
+      expect(slashTextRoute(text, commands, false, true, status).mode).toBe("text");
+  });
+  it("consumes exact terminal unknown-none once; all other failures stay commands", async () => {
+    for (const error of ["E_BAD_REQUEST", "E_COMMAND_DENIED", "E_UNSUPPORTED", "E_DEADLINE", "E_NETWORK"]) {
+      let sent = 0;
+      const accept = createUnknownSlashFallback(
+        () => "scope",
+        async () => {
+          sent++;
+        },
+      );
+      expect(await accept({ ok: false, error, effect: "none" })).toBe(false);
+      expect(sent).toBe(0);
+    }
+    let scope: string | null = "scope";
+    let sent = 0;
+    const accept = createUnknownSlashFallback(
+      () => scope,
+      async () => {
+        sent++;
+      },
+    );
+    expect(await accept({ ok: false, error: "E_UNKNOWN_COMMAND", effect: "unknown" })).toBe(false);
+    expect(await accept({ ok: false, error: "E_UNKNOWN_COMMAND", effect: "none" })).toBe(true);
+    expect(await accept({ ok: false, error: "E_UNKNOWN_COMMAND", effect: "none" })).toBe(false);
+    expect(sent).toBe(1);
+    const cancelled = createUnknownSlashFallback(
+      () => scope,
+      async () => {
+        sent++;
+      },
+    );
+    scope = null;
+    expect(await cancelled({ ok: false, error: "E_UNKNOWN_COMMAND", effect: "none" })).toBe(false);
+    expect(sent).toBe(1);
   });
 });

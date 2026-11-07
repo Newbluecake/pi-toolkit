@@ -3,6 +3,7 @@ import type { RunId } from "../core/types.js";
 import {
   authorize,
   effectiveChannel,
+  isMessageKind,
   makeMessageKey,
   type FabricRecord,
   type MentionRoute,
@@ -16,10 +17,11 @@ import {
 import type { FabricTree, TreeTargetState } from "./tree.js";
 import type { FabricThrottle } from "./throttle.js";
 import type { InboxDurability } from "./wake.js";
+import { retireUnknownKind } from "./unknown-kind.js";
 
 export interface FabricRouterConfig {
   maxPerRun: number;
-  findingQuota: number;
+  reportQuota: number;
   directiveQuota: number;
   deadLetterQuota: number;
   maxChars: number;
@@ -50,14 +52,21 @@ export interface WakePolicy {
   hopAllowed(level: number): boolean;
   /** Effective `wake:true` sends allowed per sender run (`fabric.wake.perRunQuota`). */
   perRunQuota: number;
+  /** Optional host window gate. Absent preserves the legacy root level/rate policy byte-for-byte. */
+  rootAdmission?(input: { from: NodeRef; kind: MessageKind; level: number; messageKey: MessageKey }): {
+    action: "deliverOnly" | "requestWake";
+    reason?: RootWakeDowngrade;
+  };
   /**
-   * W5: synchronous admission-time gate for a `wake:true` finding/directive to a FINISHED non-root target (the revive
+   * W5: synchronous admission-time gate for a `wake:true` report/directive to a FINISHED non-root target (the revive
    * path). `refuse` ⇒ the message is not admitted at all (`not_wakeable`); `downgrade` ⇒ it is admitted deliver-only
    * (parked) with the reason reported. `rootWakes` is the sender's effective wake:true sends to the root so far — they
    * share the one per-run expensive-class quota with revives. Absent ⇒ no revive gate (wake off).
    */
   reviveGate?(input: { from: NodeRef; to: NodeRef; level: number; rootWakes: number }): ReviveGate;
 }
+/** Additive receipt-only reasons; never written into non-root parked records. */
+export type RootWakeDowngrade = WakeDowngrade | `root_${import("./root-wake-budget.js").RootWakeBudgetReason}`;
 export type ReviveGate = { ok: true } | { refuse: WakeExclusion } | { downgrade: WakeDowngrade };
 export interface AdmissionInput {
   to: NodeRef;
@@ -79,7 +88,7 @@ export type AdmissionResult =
       /** Effective wake of an explicit `wake` request (after a downgrade); absent when the sender omitted it. */
       wake?: boolean;
       /** Why an explicit `wake:true` to the root was delivered deliver-only instead (plan §3.1 / L5). */
-      wakeDowngraded?: WakeDowngrade;
+      wakeDowngraded?: RootWakeDowngrade;
       parkUnavailable?: "stack_memory";
       inboxDurability?: "session-memory";
     }
@@ -107,7 +116,7 @@ const truncate = (text: string, max: number): string =>
     : [...text].slice(0, Math.ceil(max * 0.75)).join("") + [...text].slice(-Math.floor(max * 0.25)).join("");
 
 export class FabricRouter {
-  private readonly used = new Map<NodeRef, Record<"progress" | "finding" | "directive", number>>();
+  private readonly used = new Map<NodeRef, Record<"progress" | "report" | "directive", number>>();
   private readonly deadLetterUsed = new Map<NodeRef, number>();
   private readonly dlRefs = new Map<MessageKey, DeadLetterOutcome>();
   private readonly dlPlaceholders = new Set<MessageKey>();
@@ -127,7 +136,7 @@ export class FabricRouter {
   hydrate(records: readonly FabricRecord[]): void {
     for (const r of records) {
       this.seq.set(this.link(r.from, r.to), Math.max(this.seq.get(this.link(r.from, r.to)) ?? 0, r.seq));
-      if (r.rejected === undefined && (r.kind === "progress" || r.kind === "finding" || r.kind === "directive"))
+      if (r.rejected === undefined && (r.kind === "progress" || r.kind === "report" || r.kind === "directive"))
         this.count(r.from, r.kind);
       // plan §3.1: an effective wake:true to the root (records to the root store the post-downgrade value)
       if (r.rejected === undefined && r.to === "root" && r.wake === true)
@@ -144,6 +153,21 @@ export class FabricRouter {
             : { status: r.deadLetter.status },
         );
     }
+  }
+
+  /**
+   * #34 (E3): drop every persisted non-terminal record whose kind is no longer a MessageKind (written by an older
+   * version). One synchronous bounded pass at stack build; idempotent (terminal records never match again). Frozen
+   * engine ⇒ nothing to do. No dead letter, no `onChanged()`, no logging — the caller reports the count.
+   */
+  retireUnknownKinds(): { dropped: number } {
+    if (this.frozen) return { dropped: 0 };
+    let dropped = 0;
+    for (const r of this.engine.select(
+      (r) => !isMessageKind(r.kind) && (r.state === "pending" || r.state === "claimed"),
+    ))
+      if (retireUnknownKind(this.engine, r)) dropped++;
+    return { dropped };
   }
 
   /** Display-only sender label lookup (config.senderLabel); sanitized to a non-empty string or undefined. */
@@ -165,10 +189,10 @@ export class FabricRouter {
     )
       throw new Error("mention target is gone");
     // canMessage describes the target relationship as seen by the sender.
-    // Only configurable progress/finding messages use that inverse relation;
+    // Only configurable progress/report messages use that inverse relation;
     // result/directive keep their protocol-defined direction checks.
     const relation =
-      input.kind === "progress" || input.kind === "finding"
+      input.kind === "progress" || input.kind === "report"
         ? this.tree.relation(input.to, from, this.now())
         : this.tree.relation(from, input.to, this.now());
     const authorization = mention
@@ -216,26 +240,37 @@ export class FabricRouter {
     if (!rejection && input.to === "root" && channel === "context" && this.rootInbox() >= this.config.rootInboxCap)
       rejection = { ok: false, status: "target_backpressure", key, seq, retryAfterMs: 0 };
     // plan §3.1 root matrix + §3.3 L2/L5: the host stamps the sender's level; an explicit wake:true to the ROOT is the
-    // expensive class — it must pass the level gate and the per-run quota, otherwise it is delivered deliver-only
-    // (downgraded, never rejected). Any other target keeps the sender's intent verbatim (a running target is steered
+    // expensive class — use the optional host root window gate, or the legacy level/per-run gate when absent.
+    // Downgrades still deliver the body. Any other target keeps the sender's intent verbatim (a running target is steered
     // either way; a finished one is W3–W5's business).
     const senderLevel = wakePolicy ? wakePolicy.levelOf(from) : undefined;
     let wake = wakePolicy ? input.wake : undefined;
-    let wakeDowngraded: WakeDowngrade | undefined;
+    let wakeDowngraded: RootWakeDowngrade | undefined;
     if (reviveDowngrade !== undefined) {
       wakeDowngraded = reviveDowngrade;
       wake = false;
     } else if (wakePolicy && wake === true && input.to === "root" && senderLevel !== undefined) {
-      if (!wakePolicy.hopAllowed(senderLevel)) wakeDowngraded = "level_limit";
-      else if ((this.wakeSent.get(from) ?? 0) >= wakePolicy.perRunQuota) wakeDowngraded = "rate_limited";
-      if (wakeDowngraded !== undefined) wake = false;
+      if (wakePolicy.rootAdmission) {
+        // Do not reserve a start for an envelope rejected by the ordinary body/inbox gates.
+        if (!rejection) {
+          const admission = wakePolicy.rootAdmission({ from, kind: input.kind, level: senderLevel, messageKey: key });
+          if (admission.action === "deliverOnly") {
+            wake = false;
+            wakeDowngraded = admission.reason;
+          }
+        }
+      } else {
+        if (!wakePolicy.hopAllowed(senderLevel)) wakeDowngraded = "level_limit";
+        else if ((this.wakeSent.get(from) ?? 0) >= wakePolicy.perRunQuota) wakeDowngraded = "rate_limited";
+        if (wakeDowngraded !== undefined) wake = false;
+      }
     }
     const parkRequested =
       this.config.inbox !== undefined &&
       wake === false &&
       input.to !== "root" &&
       this.targetState(input.to) === "gone" &&
-      (input.kind === "finding" || input.kind === "directive");
+      (input.kind === "report" || input.kind === "directive");
     const canPark = parkRequested && this.config.inbox!.durability !== "stack-memory";
     if (
       !rejection &&
@@ -266,7 +301,7 @@ export class FabricRouter {
       ...(senderLevel !== undefined && from !== "system" ? { level: senderLevel } : {}),
       ...(wake !== undefined ? { wake } : {}),
       ...(!rejection && canPark
-        ? { parked: { at: this.now(), reason: wakeDowngraded ?? ("wake_false" as const) } }
+        ? { parked: { at: this.now(), reason: reviveDowngrade ?? ("wake_false" as const) } }
         : {}),
       ...(from !== "system"
         ? {
@@ -285,7 +320,7 @@ export class FabricRouter {
       if (old) this.engine.transition(old.key, "pending", "consumed", { terminalReason: "superseded" });
     }
     this.engine.put(record);
-    if (!rejection && (input.kind === "progress" || input.kind === "finding" || input.kind === "directive"))
+    if (!rejection && (input.kind === "progress" || input.kind === "report" || input.kind === "directive"))
       this.count(from, input.kind);
     if (!rejection && wake === true && input.to === "root") this.wakeSent.set(from, (this.wakeSent.get(from) ?? 0) + 1);
     this.onChanged();
@@ -319,7 +354,7 @@ export class FabricRouter {
     if (
       !this.config.inbox ||
       this.config.inbox.durability === "stack-memory" ||
-      (record.kind !== "finding" && record.kind !== "directive")
+      (record.kind !== "report" && record.kind !== "directive")
     )
       return "unavailable";
     if (record.parked) return "parked";
@@ -567,19 +602,19 @@ export class FabricRouter {
   freeze(): void {
     this.frozen = true;
   }
-  private count(from: NodeRef, kind: "progress" | "finding" | "directive"): void {
-    const value = this.used.get(from) ?? { progress: 0, finding: 0, directive: 0 };
+  private count(from: NodeRef, kind: "progress" | "report" | "directive"): void {
+    const value = this.used.get(from) ?? { progress: 0, report: 0, directive: 0 };
     value[kind]++;
     this.used.set(from, value);
   }
   private getUsed(from: NodeRef, kind: MessageKind): number {
-    return kind === "progress" || kind === "finding" || kind === "directive" ? (this.used.get(from)?.[kind] ?? 0) : 0;
+    return kind === "progress" || kind === "report" || kind === "directive" ? (this.used.get(from)?.[kind] ?? 0) : 0;
   }
   private quota(kind: MessageKind): number | undefined {
     return kind === "progress"
       ? this.config.maxPerRun
-      : kind === "finding"
-        ? this.config.findingQuota
+      : kind === "report"
+        ? this.config.reportQuota
         : kind === "directive"
           ? this.config.directiveQuota
           : undefined;

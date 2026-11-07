@@ -7,6 +7,453 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.6] - 2026-11-05
+
+### Added
+
+- **reflex**: answer opted-in status questions without a model turn (`1cc71b60`)
+- **reflex**: add cross-session shadow promotion report (`26d6bdd1`)
+- **reflex**: record shadow reflex decisions and add /reflex (`b669a255`)
+- **reflex**: add pi-free reflex decision core (`645050a4`)
+- **reflex**: add read-only status ports (`18aad043`)
+- **reflex**: add disabled-by-default Jev reflex skeleton (`ab14948b`)
+- **fabric**: enable wake_session and web activation controls (`d77a42ac`)
+- **fabric**: carry trusted wake grants into child agents (`e74467bd`)
+- **web-hub**: show cross-session delivery progress in detail views (`08a195ea`)
+- **fabric**: add idempotent activation for delivered cross-session messages (`163cb4b6`)
+- **fabric**: enable default wake for trusted direct cross-session sends (`3cb35058`)
+- **schedule**: retire scheduled-task confirmation capability (`c286d5c5`)
+- **web-hub**: show schedules in the composer task chip (`023edaa0`)
+- **fabric**: add trusted human wake grants for cross-session sends (`a8d431c3`)
+- **web-hub**: show todos and schedules in one task panel (`884f24b7`)
+- **schedule**: remove approval gates from scheduled tasks (`86216fec`)
+- **web-hub**: remove hub-side scheduled-task approvals (`40c41b8b`)
+- **web-hub**: remove scheduled-task approval UI (`30584e1c`)
+- **fabric**: track cross-session delivery progress across hub and agents (`1cb62cb6`)
+- **web-hub**: derive schedule rows and summary for task panels (`9110b7bb`)
+- **fabric**: add cross-session progress state machine (`0f8043bf`)
+- **web-hub**: allow up to ten managed web sessions by default (`91220bf6`)
+- **fabric**: add cross-session activation protocol and setting (`c53daddb`)
+- **memory**: add bounded deepseek prediction and session cache (`6db71845`)
+- **bash**: strip ANSI controls from displayed output (`db355cf1`)
+- **memory**: wire predictive recall into turn-start injection (`0f6716c3`)
+- **memory**: add the pi-free prediction rule engine (`4f01b9ca`)
+- **memory**: remove the Jev action gate (`ff5400bc`)
+- **web-hub-ui**: add external todo chip to Composer (`554783ff`)
+- **web-tools**: add Tavily extract as web_fetch fallback provider (`4ebf352b`)
+
+### Fixed
+
+- **web-hub**: simplify task chip counts and read-only schedule rows (`a1922c2a`)
+- **memory**: make Jev tagging failures diagnosable and less flaky (`e6d19357`)
+- **web-hub**: mark handled mention prompts as consumed (`58f850a0`)
+- **quota**: keep GLM account costs visible across mixed peers (`a2726921`)
+- **web-hub-ui**: reduce assistant message indentation (`c139e852`)
+- **web-hub-ui**: hide channel filters when the sidebar collapses (`6bb1041a`)
+- **web-hub-ui**: shorten quota exhaustion copy (`57cbd6f2`)
+- **quota**: aggregate GLM account cost across provider aliases (`10e5b467`)
+- **web-hub-ui**: improve Composer todo chip interactions (`132584e3`)
+
+### Changed
+
+- **reflex**: share the budget race between ports and core (`f833a129`)
+
+### Documentation
+
+- **reflex**: document auto answers and the shadow promotion report (`66fb114b`)
+- **jev-reflex**: add feasibility, architecture and plan for reflex MVP (`1e69e50a`)
+- **guide**: add a new-environment configuration guide (`1069250d`)
+
+### Tests
+
+- **web-hub**: pin the reflex settings import closure (`0aee25c2`)
+- **fabric**: add cross-session activation gates (`8efdad1d`)
+- **schedule**: pin clock for schedule status wiring (`bee1b89d`)
+- **memory**: prove the turn-start merged-message channel (`0daa59ae`)
+
+Stats: 30 feat, 9 fix, 1 refactor/perf, 3 docs, 4 test
+
+## [0.10.5] - 2026-11-04
+
+### Added
+
+- **web-hub-ui**: marked sessions show an Unlock header button (`6189922e`)
+- **quota**: scan all projects' sessions for the cost estimate (`61253b5a`)
+- **quota**: API-price cost estimate per subscription window (`993b4988`)
+- **web-tools**: DeepSeek Search & Fetch API + module rename (`75872cae`)
+- **ui**: running rows without a deadline keep showing elapsed time (`1fbcabe4`)
+- **build**: single-file bundle entry — 10.3s to 0.9s startup (`ac60f407`)
+- **quota**: OpenCode Go subscription support (`3fbdb017`)
+- **fabric**: hub-side rebind/acquire — ownership, CAS, dedup, in-flight closing (`86b51d8b`)
+- **fabric**: agent-side rebind/acquire — thread tool, directory rev, reopen (`d5a2caa5`)
+- **fabric**: rebind foundation — shared binding transfer + wire/cap/settings gate (`3ef29397`)
+- **ui**: drop the pi-subagent prefix from user-facing notices (`5fd4f461`)
+- **schedule**: auto-dismiss the TUI confirm box when approved elsewhere (`d8032fb8`)
+- **fabric**: thread subscription integration and acceptance (P4) (`7817c374`)
+- **fabric**: wire thread subscription fast path (P3) (`ac340986`)
+- **feishu**: thread subscription hub side (fabric-thread P2, arch §8) (`96501405`)
+- **web-hub**: thread hub wiring points (fabric-thread P2, root ruling A) (`18dfdf4c`)
+- **fabric**: thread subscription pure-logic engine (P1) (`10ef5c0d`)
+- **fabric**: thread subscription MVP contracts (P0) (`2007d494`)
+- **memory**: web confirmation card for the user-order guard in headless sessions (`0d28994b`)
+
+### Fixed
+
+- **memory**: cut jev injection noise — fast-path whitelist + cross-session cooldown (`ec659c2e`)
+- **build**: cache-bust the bundle import so /reload picks up a rebuild (`4301dfbe`)
+- **web-hub**: hubMainPath anchors on the package root (bundle layout) (`729cd96c`)
+- **web-hub-ui**: stop highlight flood from wedging the renderer (`41bc2a1d`)
+- **memory**: keep child-session jev diagnostics out of the host TUI (`f0ca2b70`)
+- **feishu**: thread P2 verifier fixes F1-F3 (r_21YKEYEQ) (`55fe42f8`)
+- **memory**: exempt pure-readonly shell commands from the jev gate (`c981b961`)
+- **fabric**: thread engine P1 review findings (r_1AJQ6AC7) (`cdc0cb5c`)
+- **bash**: adopt orphaned jobs only from the session's own cwd (`5f8c0596`)
+
+### Changed
+
+- **core**: locate the package root by content anchor, not url depth (`228631bc`)
+- **web-hub**: tail-window lazy projection for live run transcripts + run-chain audit (`3f5ba340`)
+
+### Documentation
+
+- **fabric**: thread subscription fast-path architecture (r3) (`8d40b873`)
+
+### Tests
+
+- **governance**: bundle parity across src/bundle/dispatcher paths (`7737946d`)
+- **fabric**: end-to-end rebind chain + local-off zero-frame gate (`2c7a60a5`)
+- **config**: regenerate settings corpus for the declared windowClamped marker (`8193ca81`)
+- **fabric**: thread engine unit + seeded property suites (P1) (`63be3c3b`)
+- **boundary**: pin legacy result-tool name occurrences in thread-off golden (`b7f4ff55`)
+- **integration**: seed bash-jobs-wiring orphans in the session's cwd (`da4a04d7`)
+
+### Chores
+
+- **ui**: drop pi-subagent from user/model-facing strings outside the subagent surface (`ed85e284`)
+
+Stats: 19 feat, 9 fix, 2 refactor/perf, 1 docs, 6 test, 1 chore
+
+## [0.10.4] - 2026-11-02
+
+### Added
+
+- **runtime**: one structured-output repair turn before settling a schema run (`94e7a472`)
+- **core**: structured-output repair window, close point and failure suffix (`88167520`)
+- **web-hub**: show the delete-session button inline on wide desktop headers (`0c63e575`)
+- **memory**: [J9] jev wrap-up — user guide, developer README, AGENTS.md registration, e2e (`64af0452`)
+- **memory**: [J7] jev tool-call gate and production wiring (`2e0ec520`)
+- **memory**: [J5] jev write path — tag after write, echo, user-rule guard (`9245e476`)
+- **memory**: [J8] jev review and expiry — /mem review, /mem expired, doctor D17–D19 (`f175fa4d`)
+- **memory**: [J6] jev recall runtime — wire and segment record (`49e3267b`)
+- **memory**: [J4] jev sidecar index, tagging orchestration, /mem jev and /mem tags (`b6b3fed0`)
+- **memory**: [E0] jev eval stage 2 — rule-based gate set, relation review set, measured context-overflow wording (`487e45db`)
+- **memory**: [J2] jev engine — client, failover, health table, budgets, proxy fetch, questions, decisions (`199f4897`)
+- **memory**: [J1] jev pure domain — contracts, entry splitting, taxonomy, redaction, shell parsing (`4c8fd7f0`)
+- **memory**: [J3] jev settings and secure-domain force-off (`2d6082ff`)
+
+### Fixed
+
+- **fabric**: wake a cross-session recipient that has not run a prompt yet (`fe615cf9`)
+- **memory**: keep jev diagnostics off the terminal while the TUI is up (`9444adcd`)
+- **runtime**: stop finished subagent sessions from leaking via the input-budget registry (`c373b531`)
+- **memory**: trash ids match what /mem restore --trash lists (`9bc556b8`)
+- **memory**: show the jev proxy (credentials masked) in /mem jev (`7584097c`)
+- **memory**: [J2] jev proxy fetch returns a real Response so pi-ai accepts classifier answers (`f30b52b5`)
+- **memory**: jev recall sync wait becomes the integer-seconds key memory.jev.recall.waitS (default 2s) (`e59b272d`)
+- **memory**: [J1] treat interpreter short-flag clusters containing c as -c (`31e845ce`)
+- **memory**: [J2] per-tier jev timeout fails over instead of aborting the ask (`510a0678`)
+- **memory**: [J1] route jev entry index reads through safe-fs (`f89e1fea`)
+- **secure**: judge unreadable same-uid processes by ppid lineage (#99) (`042f24ba`)
+- **archive**: monotonic settlement horizon — auto-archive never stalls at a full cap (#91) (`c53c2e77`)
+
+### Changed
+
+- **todo**: persist archived tasks as incremental claude-code-todo-archive entries (#92) (`f0df4a6d`)
+- **todo**: stop embedding full state in tool results, dedup live snapshot writes (`f86e327d`)
+
+### Documentation
+
+- **subagent-core**: document the structured-output repair turn (`bd41ccf2`)
+- **memory**: Jev real-machine acceptance report (`022a6599`)
+- **memory**: tidy only reads .trash (`0da5bc76`)
+- **memory**: record the /mem jev proxy line; FetchResponseLike declares headers.entries() (`2d77dae6`)
+- **memory**: E0 stage-1 baseline — recall wording B + threshold 0.6 (Q36), hard negatives, jev-eval proxy/tag fixes (`6d9923f0`)
+- **memory**: Jev implementation plan review r2 + main-session closure check (`9e7218ae`)
+- **memory**: Jev architecture v2.1 fix-up (web review/expired confirm+degrade, pi-api allowed-diff proof) (`a870071b`)
+- **memory**: Jev implementation plan v2 (review r1 disposition) (`bd7f3d0a`)
+- **memory**: Jev architecture v2.1 errata (9 items from plan review; Q34/Q35) (`747b1304`)
+- **memory**: round-9 decisions (empty classifier list = off, web confirm) (`5ac3627c`)
+- **memory**: Jev implementation plan review r1 (verbatim) (`23f4335f`)
+- **memory**: Jev memory implementation plan draft (jev-plan.md, J0-J9) (`223df995`)
+- **memory**: Jev architecture review r2 (pass) + N1 decision (`573812fe`)
+- **memory**: Jev architecture v2 (partial mode, gate evidence tier, scope trims, r1 disposition) (`05e7066b`)
+- **memory**: round-8 decisions D2/D6/D7 + scope trims for Jev architecture (`893a6d3d`)
+- **memory**: Jev architecture review r1 (verbatim) (`d3816838`)
+- **memory**: round-8 decisions on Jev architecture (D1/D3/D4/D5) (`f79edb74`)
+- **memory**: Jev-centric memory architecture draft (jev-arch.md) (`ccb103d0`)
+- **memory**: current-state inventory + Jev scale measurements for the Jev-centric redesign; decisions Q22-Q24 (`15fbee7f`)
+- **memory**: hygiene plan v4.1 (classifier proxy) archived as superseded; round-6/7 decisions (Jev-centric redesign) (`a9dd9291`)
+- **memory**: hygiene plan v4 (classifier failover list + error classes) + reviews r3/r4 + live classifier test (`678da127`)
+- **memory**: hygiene plan v3 (A/B/C/E action triggers, classifier judge) + round-5 decisions (`2da3d363`)
+- **memory**: hygiene flow round-4 decisions (action-trigger extensions A/B/C/E, classifier judge) (`72cbf3cd`)
+- **memory**: hygiene technical plan v2 (review r1 applied, O1-O11 decided) (`052796b4`)
+- **memory**: proactive-injection capability exploration report (`8cd44ab3`)
+- restore the AGENTS.md anchors the guard test pins (fixes red CI since v0.10.3) (`f13d1b09`)
+- **memory**: hygiene flow round-3 decisions (visibility, child sessions, core trim) (`87bf3ffe`)
+- **memory**: proactive injection trigger design (T1-T3, gate, cooldown) from discussion (`bd7d826e`)
+- **memory**: hygiene flow — user-confirmed five-stage memory lifecycle design (`962625b1`)
+- prettier-format the archive-full forensics report (`2731b5eb`)
+- apply reviewer amendments to the secure scan-poison plan (#99) (`fb807dea`)
+- apply reviewer amendments to the #91/#92 plans (`b42c87c5`)
+- forensics + plans for archive-full (#91) and todo archive split (#92) (`cd0abb34`)
+
+### Tests
+
+- **memory-jev,fabric**: isolate gate evidence from host /proc; snapshot C-X12 ledger at authorization (`3e6be927`)
+- **integration**: real-session structured-output repair turn with child wiring (`08251c90`)
+- **workflow**: workflow children never get a structured-output repair turn (`39cfde2e`)
+- **memory**: pin trash restore end to end; document the .trash id invariant (`c5faade9`)
+- **memory**: account for jev's by-design hooks in child-inertness and teardown counts (`18bf99e0`)
+- **memory**: pin tool-written mtimes in the jev off harness (`98b279e4`)
+- **memory**: fix misleading C-J4 conformance test name (`318759b7`)
+- **memory**: [J0] jev baseline — off golden, conformance C-J1–C-J15, eval sets (`6bd3f92f`)
+
+Stats: 13 feat, 12 fix, 2 refactor/perf, 33 docs, 8 test
+
+## [0.10.3] - 2026-10-29
+
+### Added
+
+- **web-hub**: replay recent status/ctl to a subscriber on (re)subscribe (`64112684`)
+- **web-hub**: expand commit rows in the worktree graph with changed files (`d2e23968`)
+- **web-hub**: read the hub version from its own package.json, and restart the hub after a release (`e0146f85`)
+- **web-hub**: archive the (+N more) bash rows with one click (`b1d9d250`)
+- **quota**: require a turn cooldown before L1 re-announces on a grid step (`2257c369`)
+
+### Fixed
+
+- **archive**: skip redundant snapshot writes + write-rate regression guard (`bc88f62d`)
+- **web-hub**: a11y + test follow-ups from the gitgraph files review (`9484b6c1`)
+- **web-hub**: paint the running-tool ring on the card's own border band (`b2915618`)
+- **web-hub**: clear ghost held queue rows and stop receipt regressions (`36ca30e3`)
+- **web-hub**: align fleet drawer bash group icon with the Agents header (`c199ad5e`)
+- **web-hub**: unify rename pencil, fold stop into overflow on touch, move delete to detail (`70ca25ae`)
+- **web-hub**: drop whitespace-only thinking blocks from the transcript (`0f2fefb6`)
+- **web-hub**: finish the archive-omitted toast and fold alignment (`5d3b8430`)
+- **bash**: keep background jobs alive, logged, and exit-coded across pi exit (`caca7be5`)
+
+### Changed
+
+- **web-hub**: tail-read session history for snapshot/page, defuse the 256MiB cliff (`bb8f0d60`)
+- **web-hub**: project branch replies newest-first up to the byte budget (`00cba546`)
+- **web-hub**: read only the tail of huge session files in runTail (`89c817a1`)
+
+### Documentation
+
+- **web-hub**: prettier-format the refresh-slow docs (fixes CI format:check) (`5f5b83f3`)
+- **web-hub**: refresh-slow live acceptance numbers (7.4s -> 0.7-1.1s) (`4d60e256`)
+- **web-hub**: format the README after the history-tail + self-version sections (`06f5fb19`)
+
+### Tests
+
+- **external-agent**: stop counting the background catalog probe in cwd-pin echo assertions (`7705b77e`)
+- **bash**: normalise wall_time_seconds out of the golden equivalence (`e24cdea7`)
+- **web-hub**: align spawn e2e agent version with the hub's self-resolved one (`a7fee42d`)
+- **web-hub**: pin wtgraph.files.v1 audit keys, source scan and transport contract (`3dbdb208`)
+- **config**: format the specs pin with prettier (`218f4974`)
+- **config**: re-pin the settings corpus and specs pin for quota.l1MinTurns (`4758bae5`)
+
+Stats: 5 feat, 9 fix, 3 refactor/perf, 3 docs, 6 test
+
+## [0.10.2] - 2026-10-28
+
+### Added
+
+- **web-hub**: size the fleet drawer's Agents and Bash lists to fill its height (`e86909d3`)
+- **feishu**: show aliases instead of session ids in /list (`da978b9e`)
+- **fabric**: hand the session alias to the new session on /new (#72 AF7) (`7e5e329e`)
+- **fabric**: wire alias auto-claim and forced takeover into the session (`fbe58af2`)
+- **web-hub**: alias force-take button and cwd-derived suggestion chip in ChannelsDialog (#72 AFU) (`ce7f44b3`)
+- **fabric**: document AF4 delivery and assembly ports (`6e855c75`)
+- **fabric**: preview and confirm forced alias takeovers (`41c1b773`)
+- **fabric**: remember human alias decisions per session (`3a51da37`)
+- **fabric**: agent alias v2 bridge — xs.alias.v2 cap, intent ops, auto-claim engine, xs_alias_evt (#72 AF3) (`3da2c094`)
+- **web-hub**: route alias auto-claim and forced takeover, push a nudge to the loser (#72 AF2) (`824c6692`)
+- **fabric**: hub alias table learns auto-claim and forced takeover (#72 AF1) (`e2ca385c`)
+- **fabric**: define the alias v2 contract for forced takeover and default aliases (`eab22312`)
+
+### Fixed
+
+- **web-hub**: let the fleet drawer's Bash list use the full drawer height (`e616b65b`)
+- **web-hub**: vertically centre the @alias chip text on session cards (`ea782652`)
+- **archive**: stop archived agents and bash jobs from flipping back (`cd57bdf9`)
+- **fabric**: re-run the alias reconcile after /fabric join (`d813a793`)
+- **fabric**: a failing decided-mark write no longer blocks /fabric alias writes (`270ae377`)
+- **web-hub**: show the whole @alias on session cards (`e009a1ba`)
+- **web-hub**: explain hidden bash jobs when every listed job is archived (`820ccc4c`)
+- **web-hub**: show one compact update chip on outdated session cards (`6d599f7f`)
+
+### Changed
+
+- **tools**: trim duplicated wording from tool descriptions (`a4e575f9`)
+
+### Documentation
+
+- **fabric**: document the /new alias handoff (#72 AF7) (`e74c0981`)
+- **fabric**: document alias force takeover, cwd auto-claim and the v2 gate (#72) (`c90c2dda`)
+- **fabric**: AFW report — alias auto-claim and forced takeover assembly (#72) (`fec15027`)
+- **web-hub**: explain the two-layer v2 gate on the force offer (`2d80bf33`)
+- **fabric**: AFU report — web force-take button and cwd chip delivery notes (#72) (`ff569e77`)
+- **fabric**: AF3 delivery report — agent alias v2 bridge (#72) (`2f0350b5`)
+- **fabric**: AF1/AF2 delivery report for the hub alias table and routing (#72) (`1ac76ea3`)
+
+### Tests
+
+- retry sandbox removal when a late write races cleanup (`684724cd`)
+- **web-hub**: watch highlight batches from the first frame (`f447fc39`)
+- **fabric**: cover the /new alias handoff end to end (#72 AF7) (`b700df20`)
+- **fabric**: end-to-end coverage of alias force takeover and cwd auto-claim (#72) (`6d6dda82`)
+- **web-hub**: no force offer after a no-holder or stale --take refusal (`a480b41f`)
+- **fabric**: make the alias auto-retry unref assertion discriminating (`7f0b5ada`)
+- **fabric**: AF3 agent-bridge coverage — intent frames, auto engine, evt reconcile (#72) (`24e4bb95`)
+
+Stats: 12 feat, 8 fix, 1 refactor/perf, 7 docs, 7 test
+
+## [0.10.1] - 2026-10-27
+
+### Added
+
+- **config**: move the settings file to pi-toolkit.json (`ab6bdc05`)
+- **traffic**: keep traffic records in the pi agent directory (`bf530982`)
+- **web-hub**: warn when the hub and a session use different agent directories (`293ef8c4`)
+- **secure**: resolve and migrate the settings file as pi-toolkit.json (`0b20c95e`)
+- **schedule**: show deleted tasks on Feishu confirmation cards; document in-place confirmation (`50c98825`)
+- **web-hub**: confirm AI-created schedules from the web UI (`0c62defc`)
+- **schedule**: connect schedule confirmations to the web hub (`414e306b`)
+- **web-hub**: relay schedule confirmations and send Feishu approval cards (`28764841`)
+- **schedule**: ask in the terminal to confirm AI-created schedules (`b5dcaf55`)
+- **web-hub**: add wire types for confirming AI-created schedules (`3d5b37f3`)
+- **web-hub**: prepare encrypted storage for LAN 2FA secrets (`303710a8`)
+- **web-hub**: wipe the generated LAN password plaintext at first sign-in (`de0f1f52`)
+- **web-hub**: transparently re-hash LAN passwords after login (`c2a1293e`)
+- **web-hub**: read stronger LAN password hashes and even out login timing (`3001afde`)
+- **web-hub**: reject weak LAN passwords (`3b62a6eb`)
+- **agent**: keep a run's result schema when it is resumed (`c0e604f3`)
+- **archive**: archive finished runs only beyond a keep count (`43d892fd`)
+
+### Fixed
+
+- **stack**: stop a shut-down session's stack from answering late calls (`8ceb6c63`)
+- **fabric**: keep a session's channels when starting a new session (`5d27213b`)
+- **stack**: stop the old bash-job poll from double-announcing finished jobs on /reload (`ecdb5a95`)
+- **stack**: drop unsent merged notices at shutdown instead of leaking them (`5fedc710`)
+- **stack**: stop the live usage ticker when the session shuts down (`22c1ea1e`)
+- **stack**: stop notification retries from firing after the session ended (`39f28881`)
+- **stack**: cancel the /goal watchdogs when the session shuts down (`77f92fe2`)
+- **stack**: stop piling up child-switch disable alerts across /reload (`46c09204`)
+- **stack**: stop the external-agent directory probe on session shutdown (`3bbc30bb`)
+- **secure**: allow more time for the vault lease to release during conversion (`edf7c88b`)
+
+### Changed
+
+- **config**: split SETTING_SPECS into per-subsystem setting-specs.ts shards (`82eeaff9`)
+- **config**: tidy the settings.ts header after the subsystem split (`b875d3a7`)
+- **service**: move agent dispatch settings into service/dispatch-settings.ts (`f486cdb3`)
+- **delivery**: move extend settings into delivery/extend-settings.ts (`18b91f96`)
+- **sysprompt**: move systemPrompt settings into sysprompt/settings.ts (`edd6c7a7`)
+- **reload**: move reload settings into reload/settings.ts (`f6b0923a`)
+- **title**: move title settings into title/settings.ts (`c61102a0`)
+- **goal**: move goal settings into goal/settings.ts (`610d1b39`)
+- **hud**: move hud settings into hud/settings.ts (`ba6da4c4`)
+- **todo**: move todo settings into todo/settings.ts (`32b44757`)
+- **ask-user**: move askUser settings into ask-user/settings.ts (`1a09c642`)
+- **config**: move the shared EnabledGroup helper into config/enabled-group.ts (`8405b5ca`)
+- **external-agent**: move externalAgents settings into external-agent/settings.ts (`945b6970`)
+- **schedule**: move schedule settings into schedule/settings.ts (`82c66a84`)
+- **traffic**: move traffic settings into traffic/settings.ts (`fe7377e4`)
+- **workflow**: move workflow settings into workflow/settings.ts (`a526a2e5`)
+- **memory**: move memory settings into memory/settings.ts (`d00d684c`)
+- **bash**: move bashJobs settings into bash/settings.ts (`54f74f85`)
+- **compact-hint**: move compact settings into compact-hint/settings.ts (`44d91e0d`)
+- **sysload**: move load settings into sysload/settings.ts (`a9c71937`)
+- **quota**: move quota settings into quota/settings.ts (`60184f0c`)
+- **cache-ttl**: move cacheTtl settings into cache-ttl/settings.ts (`d45fdbfc`)
+- **web-hub**: move webHub and feishuBot settings into web-hub/agent/settings.ts (`ee84d2e3`)
+- **fabric**: move fabric settings into fabric/settings.ts (`fb53c0a2`)
+- **secure**: move the --private command bodies out of helper.mjs into private.mjs (`6c718438`)
+- **secure**: move the in-namespace finalize steps into finalize.mjs (`35b7ebd4`)
+- **secure**: move cmdInit out of helper.mjs into init.mjs (`c619a2ed`)
+- **web-hub**: extract runtime monitor assembly (`6d5e0683`)
+- **web-hub**: extract spawn preview and feishu assembly (`b1b5a0c2`)
+- **web-hub**: extract storage registry and channel assembly (`4a47b9b3`)
+- **web-hub**: move the password client's stream lifecycle onto transport-core.js (`cc72df75`)
+- **web-hub**: extract the shared EventSource lifecycle into transport-core.js (token side) (`d8f51a76`)
+- **web-hub**: extract the LAN application router and login from hub/http.ts into hub/http-lan.ts (`c50ef12b`)
+- **web-hub**: extract createLanTransport from hub/http.ts into hub/http-lan.ts (`aedf5f97`)
+- **web-hub**: extract the /api/cmd|/api/dialog pipeline from hub/http.ts into hub/http-cmd.ts (`a3112234`)
+- **web-hub**: extract hold wiring into agent/hold-wire.ts (`b0cf6f9a`)
+- **web-hub**: extract dialog bridge wiring into agent/dialogs-wire.ts (`3eed858c`)
+- **web-hub**: extract StatusInfo slot projections into agent/status-slots.ts (`8064a1b5`)
+- **stack**: route all teardown paths through Stack.dispose (`81ba9934`)
+- **config**: resolve the pi agent dir in one place (`f1f199e6`)
+- **mention**: wire mentions from mention/wire.ts (`a44ec55d`)
+- **fabric**: wire cross-session activation from fabric/xs/activate.ts (`0946509d`)
+- **compact-hint**: register compact hooks and tools from compact-hint/register.ts (`928d54db`)
+- **bash**: register the bash tools from bash/host.ts (`a888c5de`)
+- **index**: register the subagent core tools from tools/register.ts (`25900cd3`)
+- **index**: move holder forwarders to src/holder.ts (`afe62587`)
+- **index**: drop imports left behind by the stack extraction (`15279916`)
+- **stack**: move holder-routed delivery hooks out of stack.ts (`3efaf78e`)
+- **stack**: move the cross-session stack builder out of stack.ts (`f0e1162f`)
+- **stack**: move buildFabric out of stack.ts (`26a245b0`)
+- **stack**: move the compact hint hook out of stack.ts (`50988ddf`)
+- **stack**: move host bash job manager assembly and recovery out of stack.ts (`b25d2c0a`)
+- **stack**: move bash job notice formatting out of stack.ts (`86c8705a`)
+
+### Documentation
+
+- **toolchain**: pi 1.4 adaptation report (`c1bbb1fc`)
+- **fabric**: plan forced alias takeover and directory-name default aliases (`483b8433`)
+- **governance**: batch2 ⑧ settings decomposition implementation report (`3e83764c`)
+- **governance**: record the 7b teardown gap fixes and the parked G8 (`23bc3278`)
+- **dev-flow**: allow deepseek-flash for code exploration (`fc23386a`)
+- **governance**: report batch 2 step 10-S (helper.mjs split) (`72097769`)
+- **secure**: describe the helper.mjs / init / private / finalize split (`ddc8d64d`)
+- **source-governance**: add batch2 step 9-H3 report (`3863faee`)
+- **governance**: batch2 ⑩-U implementation report (`90dbb88e`)
+- **governance**: batch2 ⑨-H2 implementation report (`3557fb36`)
+- **governance**: add batch2 ⑨-H1 implementation report (`7581a07f`)
+- **governance**: record the G2/G3 shutdown decision (`efa4ea3a`)
+- **governance**: record the remaining step-7 decisions (`74703578`)
+- describe the pi-toolkit.json settings file (`92322bee`)
+- **source-governance**: add batch2 step 5 report (`e84062d3`)
+- **source-governance**: add batch2 step 4 report (`69d2c6f2`)
+- plan in-place confirmation for AI-created schedules and source-governance batch 2 (`9bd7b975`)
+- **settings**: record the agent-dir transition decision (`58913ab0`)
+- **settings**: plan renaming the settings file to pi-toolkit.json (`4ffcba7c`)
+- **web-hub**: plan LAN password storage hardening (`8accf3cc`)
+- **dev-flow**: let kimi-k3 review plans alongside gpt-6.1-sol (`a61231ba`)
+
+### Tests
+
+- **web-hub**: take the reference timestamp before settling upload pins (`64219a08`)
+- **conformance**: follow pi 1.4 tool restore in the result-tool rename suite (`76798840`)
+- **config**: follow the hub agentDir consumers into the assembly files (`5406bf49`)
+- **config**: pin SETTING_SPECS order and content before sharding it (`788f7ff1`)
+- **config**: pin the settings parse output byte for byte before the ⑧ decomposition (`13f8498b`)
+- **stack**: pin teardown order per entry and component (`b8135fd4`)
+- **conformance**: pin the extension module lifecycle per session entry (`a6939ec5`)
+- **web-hub**: make the deferred-highlight selection test deterministic (`45f6274c`)
+- **web-hub**: gate markdown growth on a fitted exponent, not a timing ratio (`a9cf414b`)
+- **governance**: pin activate() call traces as a registration-order golden (`2d7a51aa`)
+- harden the CI flakes left over from the v0.9.0 release (`26ed77a9`)
+
+### Chores
+
+- **deps**: support pi 1.4 (`1ab814c9`)
+
+Stats: 17 feat, 10 fix, 53 refactor/perf, 21 docs, 11 test, 1 chore
+
 ## [0.10.0] - 2026-10-26
 
 ### Added
@@ -1244,7 +1691,13 @@ First public release: anti-hang subagent extension for pi — drop-in replacemen
 
 Stats: 30 feat, 12 fix, 1 refactor, 1 docs, 3 chore/test · 970+ tests (state-machine transition matrix, seeded property invariants, widget rendering)
 
-[Unreleased]: https://github.com/Newbluecake/pi-toolkit/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/Newbluecake/pi-toolkit/compare/v0.10.6...HEAD
+[0.10.6]: https://github.com/Newbluecake/pi-toolkit/compare/v0.10.5...v0.10.6
+[0.10.5]: https://github.com/Newbluecake/pi-toolkit/compare/v0.10.4...v0.10.5
+[0.10.4]: https://github.com/Newbluecake/pi-toolkit/compare/v0.10.3...v0.10.4
+[0.10.3]: https://github.com/Newbluecake/pi-toolkit/compare/v0.10.2...v0.10.3
+[0.10.2]: https://github.com/Newbluecake/pi-toolkit/compare/v0.10.1...v0.10.2
+[0.10.1]: https://github.com/Newbluecake/pi-toolkit/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/Newbluecake/pi-toolkit/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/Newbluecake/pi-toolkit/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/Newbluecake/pi-toolkit/compare/v0.8.0...v0.8.1

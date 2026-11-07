@@ -22,8 +22,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { fileURLToPath } from "node:url";
-import { basename, join } from "node:path";
+import { basename, join, sep } from "node:path";
 import {
   type BuildCardOverrides,
   type CardStatus,
@@ -42,16 +41,20 @@ import {
 import { getGitBranch } from "./git.js";
 import { readBackgroundStatus } from "../service/background-status.js";
 import { readBeforeAgentStartTrigger } from "../adapters/pi-compat.js";
+import { packageRoot } from "../core/package-root.js";
 
 /**
  * 本扩展所在包的根目录（<root>/src/feishu-notify 或 <root>/dist/feishu-notify → <root>/）。
  * 冲突检测据此识别"本包自己注册的 ask_user/feishu_notify 工具"，
  * 不能用硬编码路径片段（如 /pi-subagent/）：包改名 pi-subagent → pi-toolkit 后
  * 安装路径不再含旧名，会把合并版自己的工具误判为旧版冲突。
+ *
+ * 尾分隔符保留：下列 `startsWith(ownRoot)` 用**前缀**判定，`/pkg` 会误吞 `/pkg-old/...`。
+ * 定位失败时仍返回 `""`（fail-open，通知功能不因自检失败自我禁用）。
  */
 function ownPackageRoot(): string {
   try {
-    return fileURLToPath(new URL("../..", import.meta.url));
+    return `${packageRoot()}${sep}`;
   } catch {
     return "";
   }

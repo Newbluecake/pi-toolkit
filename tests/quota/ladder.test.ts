@@ -416,7 +416,8 @@ describe("providerVerdict per-window thresholds", () => {
 });
 
 // quota-plan r2 §11 ladder.test.ts（P7）：month 默认阈值、forecastBeforeReset:false、billing 条件透传。
-describe("month window + forecastBeforeReset (droid, D9/D10)", () => {
+// 2026-11-05 拍板：5h 窗口同样默认关闭规则 3b（与 month 同）；week 仍开启，3a 保留。
+describe("month/5h windows + forecastBeforeReset (droid D9/D10; 5h 2026-11-05)", () => {
   const month = DEFAULT_THRESHOLDS_BY_WINDOW.month;
   const monthWin = (usedPct: number, resetAt?: number) => ({
     scope: "month" as const,
@@ -424,9 +425,15 @@ describe("month window + forecastBeforeReset (droid, D9/D10)", () => {
     ...(resetAt === undefined ? {} : { resetAt }),
   });
 
-  it("pins the month defaults to 50/95/98 with the forecast-before-reset rule off; 5h/week keep theirs", () => {
+  it("pins the month defaults to 50/95/98 with the forecast-before-reset rule off; 5h keeps 50/75/90 with 3b off too, week keeps 50/95/98 with 3b on", () => {
     expect(month).toEqual({ l1: 50, l2: 95, l3: 98, l3EtaMs: 1_800_000, forecastBeforeReset: false });
-    expect(DEFAULT_THRESHOLDS_BY_WINDOW["5h"]).toEqual({ l1: 50, l2: 75, l3: 90, l3EtaMs: 1_800_000 });
+    expect(DEFAULT_THRESHOLDS_BY_WINDOW["5h"]).toEqual({
+      l1: 50,
+      l2: 75,
+      l3: 90,
+      l3EtaMs: 1_800_000,
+      forecastBeforeReset: false,
+    });
     expect(DEFAULT_THRESHOLDS_BY_WINDOW.week).toEqual({ l1: 50, l2: 95, l3: 98, l3EtaMs: 1_800_000 });
   });
 
@@ -468,9 +475,31 @@ describe("month window + forecastBeforeReset (droid, D9/D10)", () => {
     expect(v).toMatchObject({ level: 3, reason: "forecast-eta" });
   });
 
-  it("providerVerdict resolves per-scope thresholds so a month window ignores the forecast while 5h keeps it", () => {
+  it("5h default keeps 3b off (2026-11-05): below-L1 usage exhausting before reset stays L0, week still raises, 3a still fires", () => {
+    const win = (scope: "5h" | "week") => ({ scope, usedPct: 40, resetAt: NOW + 3 * HOUR });
+    // 40% < L1，外推 1h 后耗尽且早于重置：旧规则 3b 会抬 L2，5h 默认关闭 ⇒ 不抬。
+    expect(
+      windowLevel(win("5h"), { now: NOW, etaMs: HOUR, thresholds: DEFAULT_THRESHOLDS_BY_WINDOW["5h"] }),
+    ).toMatchObject({
+      level: 0,
+      reason: "none",
+    });
+    // 同形状的 week 窗口仍抬 L2（3b 开启）。
+    expect(
+      windowLevel(win("week"), { now: NOW, etaMs: HOUR, thresholds: DEFAULT_THRESHOLDS_BY_WINDOW.week }),
+    ).toMatchObject({
+      level: 2,
+      reason: "forecast-before-reset",
+    });
+    // 3a（ETA < l3EtaMs ⇒ L3）不受 3b 开关影响，5h 照常硬线抬级。
+    expect(
+      windowLevel(win("5h"), { now: NOW, etaMs: 20 * 60_000, thresholds: DEFAULT_THRESHOLDS_BY_WINDOW["5h"] }),
+    ).toMatchObject({ level: 3, reason: "forecast-eta" });
+  });
+
+  it("providerVerdict resolves per-scope thresholds so a month window ignores the forecast while week keeps it", () => {
     const snap = windowsSnapshot("droid-standard", [
-      { scope: "5h", usedPct: 62, resetAt: NOW + 3 * HOUR },
+      { scope: "week", usedPct: 62, resetAt: NOW + 3 * HOUR },
       { scope: "month", usedPct: 62, resetAt: NOW + 3 * HOUR },
     ]);
     const v = providerVerdict(snap, {
@@ -480,7 +509,7 @@ describe("month window + forecastBeforeReset (droid, D9/D10)", () => {
       etaOf: () => HOUR,
       demoted: false,
     });
-    expect(v.windows.find((x) => x.scope === "5h")).toMatchObject({ level: 2, reason: "forecast-before-reset" });
+    expect(v.windows.find((x) => x.scope === "week")).toMatchObject({ level: 2, reason: "forecast-before-reset" });
     expect(v.windows.find((x) => x.scope === "month")).toMatchObject({ level: 0, reason: "under-pace" });
     expect(v.level).toBe(2);
   });

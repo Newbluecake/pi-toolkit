@@ -1,10 +1,11 @@
+import type { InvocationRef } from "../fabric/xs/human-grant.js";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "@sinclair/typebox";
 import type { XsSendOutcome, XsSender } from "../fabric/xs/sender.js";
 
 /**
  * fabric phase-2 X3 (phase2-plan §4.3 + r3 M2/S3): `message_session` — the send half of the
- * main-session cross-session tool pair. Finding semantics only (P5: no `kind` parameter); the
+ * main-session cross-session tool pair. Report semantics only (P5: no `kind` parameter); the
  * recipient reads the body as UNTRUSTED input (fenced header, §8.8 — receiver side). The sender
  * identity is never a parameter: the hub stamps `from` after the four-way bind (§8.1).
  *
@@ -98,18 +99,35 @@ export const XS_REPLY_TO_REJECTED_HINT = "对方未接收（已收到过回复�
 
 export interface MessageSessionToolDeps {
   sender: XsSender;
+  activation?: boolean;
+  /** Main-session activation ∧ wake gate, frozen at activate; children never receive it. */
+  idleWakeAdvice?: boolean;
+  invocation?(toolCallId: string): InvocationRef | undefined;
   /** `fabric.crossSession.reply.enabled` frozen at activate: selects the schema instance and the
    *  description. Omitted/false ⇒ the legacy tool, byte-identical to pre-reply. */
   reply?: boolean;
   /** `alias.enabled` ∧ hub cap frozen at activate (alias-plan §6): selects the alias description (schema
    *  identical to the same reply-mode instance; `to` already accepts any ≤128-char string). Omitted/false ⇒ byte-identical. */
   alias?: boolean;
+  /** rebind-plan r3 §3.2 step 7 (agent package): `fabric.threads.enabled ∧ rebind` frozen at
+   *  activate ⇒ appends the topic-handover dispatch convention. Omitted/false ⇒ NEVER appended
+   *  (threads-on × rebind-off stays byte-identical, A16). */
+  threadRebind?: boolean;
 }
 
 const ALIAS_TO_SUFFIX =
   ' When the user refers to a session by a short word (e.g. "给前端发消息"), pass that word verbatim as `to`: aliases are ' +
   "unique on this hub and matched before names. If the result is no_target or ambiguous, call list_sessions and ask " +
   "the user — never guess or pick the closest one.";
+
+/** rebind-plan r3 §3.2 steps 6–7: the topic-handover dispatch convention — appended ONLY while
+ *  `fabric.threads.rebind` is on (off ⇒ never appended, A16 byte-parity). */
+const THREAD_REBIND_SUFFIX =
+  " Feishu topic handover: to make a group topic follow your dispatch, first call " +
+  'thread(action:"rebind", h, to) and send with `to` set to the FULL sessionId its result returns; put the ' +
+  'thread handle in your text and require the worker to run thread(action:"acquire", h) BEFORE subscribing or ' +
+  "replying (acquire is the only trusted directory entry — skipping it degrades safely: subscribe answers " +
+  "thread_unknown and the events keep going to the main session).";
 
 /** alias-plan §6 prose for `E_XS_ALIAS_UNAVAILABLE` (advice block ⇒ Chinese). */
 export const XS_ALIAS_UNAVAILABLE_HINT = "hub 别名服务暂不可用，请用 list_sessions 给出的 ref";
@@ -128,7 +146,8 @@ const REPLY_DESCRIPTION =
   "reply only; wake is ignored). " +
   'effect "applied" = delivery confirmed; "none" = provably NOT delivered (safe to retry later); "unknown" = the ' +
   "message may have entered the recipient's queue — it usually becomes visible at the recipient's next turn " +
-  "boundary; do NOT blindly resend a request (a replyTo resend is idempotent but may be refused).";
+  "boundary; do NOT blindly resend a request (a replyTo resend is idempotent but may be refused). " +
+  "While working on a request that carried reply_to, send any intermediate question to its requester as a NEW message with expectReply (wake:true) — never the original replyTo (it accepts exactly one reply: your final result) — and do not block on ask_user: the requester cannot see your local dialog (the host redirects ask_user for you when it can).";
 
 export function createMessageSessionTool(
   deps: MessageSessionToolDeps,
@@ -137,14 +156,22 @@ export function createMessageSessionTool(
   return {
     name: "message_session",
     label: "message_session",
-    description: (replyOn ? REPLY_DESCRIPTION : LEGACY_DESCRIPTION) + (deps.alias === true ? ALIAS_TO_SUFFIX : ""),
+    description:
+      (replyOn ? REPLY_DESCRIPTION : LEGACY_DESCRIPTION) +
+      (deps.alias === true ? ALIAS_TO_SUFFIX : "") +
+      (deps.threadRebind === true ? THREAD_REBIND_SUFFIX : "") +
+      (deps.activation === true
+        ? " With expectReply and omitted wake, a verified one-use host human delegation requests wake only when all three peers support xs.state.v1; ordinary agent messages default to deliver-only. Explicit false always wins. One human input shares one allowance across its real call tree; parallel or additional targets need explicit true. wake is quota/policy limited; woke means dispatch accepted, not started. Keep the returned track.messageId/activationKey for read-only query or eligible activation; never resend unknown body delivery."
+        : ""),
     parameters: (replyOn ? MessageSessionParamsReply : MessageSessionParamsLegacy) as typeof MessageSessionParamsLegacy,
-    async execute(_toolCallId, rawParams, signal) {
+    async execute(toolCallId, rawParams, signal) {
       const params = rawParams as MessageSessionParams;
       // legacy instance: the new fields can never legitimately arrive, and are never forwarded
       const expectReply = replyOn ? params.expectReply : undefined;
       const replyTo = replyOn ? params.replyTo : undefined;
+      const invocation = deps.activation === true ? deps.invocation?.(toolCallId) : undefined;
       const outcome: XsSendOutcome = await deps.sender.message({
+        ...(invocation ? { invocation } : {}),
         ...(signal !== undefined ? { signal } : {}),
         to: params.to,
         text: params.text,
@@ -162,7 +189,36 @@ export function createMessageSessionTool(
         } else if (outcome.effect === "unknown") hint += `\n${XS_UNKNOWN_HINT}`;
       } else if (outcome.effect === "unknown") hint = `\n${XS_UNKNOWN_HINT}`;
       if (deps.alias === true && outcome.status === "alias_unavailable") hint += `\n${XS_ALIAS_UNAVAILABLE_HINT}`;
+      if (deps.activation === true && outcome.wakeDowngraded)
+        hint += `\n${xsWakeDowngradedHint(outcome.wakeDowngraded, outcome.effect)}`;
+      if (deps.idleWakeAdvice === true && xsIdleNoWakeRisk(outcome)) hint += `\n${XS_IDLE_NO_WAKE_HINT}`;
       return { content: [{ type: "text", text: JSON.stringify(outcome) + hint }], details: outcome };
     },
   };
+}
+
+/** #20 D1–D4: applied is evidence of idle at the receiver's pre-write sample, not current idleness. */
+export const XS_IDLE_NO_WAKE_HINT =
+  '注意：本次 expectReply 未请求唤醒，且投递时（接收端采样）对方会话空闲——这次写入不会触发对方处理，大概率等到超时也收不到回复。正文已送达，不要重发；需要对方处理请调用 wake_session（action "activate"，to 用本结果 to.ref，messageId/activationKey 取本结果 track）激活这条请求。只有正文未送达（effect none）时才改用 wake:true 重发。';
+
+/** C1–C11. C11 also excludes contradictory applied+queued evidence (defense D-q). */
+export function xsIdleNoWakeRisk(outcome: XsSendOutcome): boolean {
+  return (
+    outcome.status === "sent" &&
+    outcome.effect === "applied" &&
+    outcome.reply?.state === "pending" &&
+    outcome.replyTo === undefined &&
+    outcome.wake !== undefined &&
+    outcome.wake.requested === false &&
+    outcome.wakeDowngraded === undefined &&
+    outcome.woke !== true &&
+    outcome.track !== undefined &&
+    outcome.track.activationKey !== undefined &&
+    (outcome.progress?.phase === undefined || outcome.progress.phase === "delivered")
+  );
+}
+
+export function xsWakeDowngradedHint(reason: string, effect: string): string {
+  const quota = reason === "pair_wake_rate" ? "（hub，每会话对默认 2 次/小时）" : "";
+  return `唤醒因 ${reason} 降级${quota}；${effect === "none" ? "正文未送达" : effect === "applied" ? "正文投递已确认，非 started 证明" : "正文可能已进入队列"}，不要重发。仅已确认送达且未开始的有效原 receipt 可人工 activate；配额降级须等待配额，unknown 只查询。`;
 }

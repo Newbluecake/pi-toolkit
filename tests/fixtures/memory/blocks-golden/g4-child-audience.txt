@@ -1,0 +1,10 @@
+## Memory (proj) — 2 topic(s) · 2 block(s)
+
+### User rules (always on)
+- [general.001] 全局规则：对所有会话生效。
+
+Topics (relevant blocks are injected automatically; read one with memory view <topic>):
+- general · 1 blocks
+- quota · 1 blocks
+
+<!-- pi-toolkit:memory proj -->

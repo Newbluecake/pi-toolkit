@@ -111,6 +111,41 @@ describe("resolveCommandPolicy — pi-toolkit sub-command table (§4.6 pi-toolki
     expect(resolve("mem", "tidy --break-lock", "extension").policy).toBe("confirm");
   });
 
+  // J4 (Q35, jev-plan §4 J4 / §10 #9): read-only jev surfaces allow;
+  // state-changing jev/tags subcommands confirm; NO new deny rows this phase
+  // (every subcommand has a text fallback).
+  it("mem jev/tags: read-only allow, mutating confirm (Q35)", () => {
+    // read-only
+    expect(resolve("mem", "jev", "extension").policy).toBe("allow");
+    expect(resolve("mem", "tags", "extension").policy).toBe("allow");
+    expect(resolve("mem", "tags list", "extension").policy).toBe("allow");
+    // state-changing
+    expect(resolve("mem", "jev probe", "extension").policy).toBe("confirm");
+    expect(resolve("mem", "jev retag", "extension").policy).toBe("confirm");
+    expect(resolve("mem", "jev retag --all", "extension").policy).toBe("confirm");
+    expect(resolve("mem", "jev reset-index", "extension").policy).toBe("confirm");
+    expect(resolve("mem", 'tags add my-tag --label "L" --desc "D"', "extension").policy).toBe("confirm");
+    expect(resolve("mem", "tags rm my-tag", "extension").policy).toBe("confirm");
+    expect(resolve("mem", "tags disable docs", "extension").policy).toBe("confirm");
+    expect(resolve("mem", "tags enable docs", "extension").policy).toBe("confirm");
+    // unknown jev/tags sub-subcommands stay confirm (conservative; the
+    // terminal handler degrades them to a read-only report/usage line)
+    expect(resolve("mem", "jev typo", "extension").policy).toBe("confirm");
+    expect(resolve("mem", "tags frobnicate", "extension").policy).toBe("confirm");
+  });
+
+  // J8 (Q35, jev-plan §4 J8): `review --list` is a read-only listing —
+  // allowed even server-side, same tier as `mem list`/`mem doctor`; the
+  // bare interactive default and `--run` spend a Jev run (or at least
+  // change review state) — generic confirm. `expired` has no read-only
+  // form at all, so it is always confirm.
+  it("mem review/expired: --list allows, everything else confirms (jev-plan §4 J8)", () => {
+    expect(resolve("mem", "review --list", "extension").policy).toBe("allow");
+    expect(resolve("mem", "review", "extension").policy).toBe("confirm");
+    expect(resolve("mem", "review --run", "extension").policy).toBe("confirm");
+    expect(resolve("mem", "expired", "extension").policy).toBe("confirm");
+  });
+
   it("/cache-ttl: no-args/status allow; every mode switch confirms", () => {
     expect(resolve("cache-ttl", "", "extension").policy).toBe("allow");
     expect(resolve("cache-ttl", "status", "extension").policy).toBe("allow");
@@ -304,5 +339,40 @@ describe("cache-ttl measure web policy", () => {
         overrides: { "cache-ttl": "deny" },
       }),
     ).toEqual({ policy: "deny" });
+  });
+});
+
+describe("#39 scopes-on exact command policy", () => {
+  it.each([
+    "session",
+    "session list",
+    "session path",
+    "session status",
+    "hub",
+    "hub list",
+    "hub path",
+    "hub status",
+    "hub show rule.123",
+    "hub trash",
+  ])("read %s", (args) => {
+    expect(
+      resolveCommandPolicy({ name: "mem", args, kind: "extension", memoryScopes: true, overrides: { mem: "deny" } }),
+    ).toEqual({ policy: "allow" });
+  });
+  it.each([
+    "session add raw",
+    "hub add raw",
+    "hub rm rule.123",
+    "hub restore trash",
+    "hub adopt",
+    "hub nope",
+    "session list extra",
+  ])("write %s cannot override", (args) => {
+    expect(
+      resolveCommandPolicy({ name: "mem", args, kind: "extension", memoryScopes: true, overrides: { mem: "allow" } }),
+    ).toEqual({ policy: "deny" });
+    expect(resolveCommandPolicy({ name: "mem", args, kind: "extension", overrides: { mem: "allow" } })).toEqual({
+      policy: "allow",
+    });
   });
 });

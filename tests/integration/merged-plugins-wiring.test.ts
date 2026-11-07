@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import activate from "../../src/index.js";
+import { resetSettingsFilesIn } from "./helpers/home-sandbox.js";
 
 /**
  * plugin-merge wiring (merge-plan D2/D6 + review B1/S6):
@@ -60,12 +61,12 @@ function writeSettings(raw: unknown): void {
 beforeEach(() => {
   delete (globalThis as Record<symbol, unknown>)[HOST_KEY];
   delete (globalThis as Record<symbol, unknown>)[FEISHU_HOST_KEY];
-  rmSync(settingsPath, { force: true });
+  resetSettingsFilesIn(dirname(settingsPath));
 });
 afterEach(() => {
   delete (globalThis as Record<symbol, unknown>)[HOST_KEY];
   delete (globalThis as Record<symbol, unknown>)[FEISHU_HOST_KEY];
-  rmSync(settingsPath, { force: true });
+  resetSettingsFilesIn(dirname(settingsPath));
 });
 afterAll(() => {
   if (realHome === undefined) delete process.env.HOME;

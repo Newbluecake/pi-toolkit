@@ -93,36 +93,118 @@ const GIT_FILE_CLOSURE: Record<string, Array<{ spec: string; typeOnly: boolean }
  */
 const SYSLOAD_FILE_CLOSURE: Record<string, string[]> = {
   "src/core/clock.ts": [],
+  "src/core/agent-dir.ts": ["node:path", "node:url"],
+  "src/web-hub/protocol/agent-dir.ts": ["node:path", "node:url"],
   "src/config/settings.ts": [
     "node:fs",
     "node:os",
     "node:path",
-    "../cache-ttl/keepalive-state.js",
-    "../compact-hint/threshold.js",
+    // #56 ⑧: the `cacheTtl` block lives in cache-ttl/settings.ts (pinned below) — config no longer imports keepalive-state.
+    "../cache-ttl/settings.js",
+    "../bash/settings.js",
+    "../compact-hint/settings.js",
+    // settings-rename P2 (plan §6.3): settingsLocation()/prepareSettingsFile() resolve the agentDir through the
+    // pi-free core resolver (node:path + node:url only; pinned above). A conscious table update — the hub
+    // whitelist is NOT loosened: the hub reaches agent-dir through its own protocol mirror.
+    "../core/agent-dir.js",
     "../core/deadline.js",
     "../extensions/worktree-link-paths.js",
-    // channel-plan CH0: pure channel-name rules (imports only the protocol xs schema module).
-    "../fabric/xs/channel.js",
-    "../memory/tidy/batch-settings.js",
-    "../sysload/types.js",
+    // #56 ⑧: the `fabric` block lives in fabric/settings.ts (pinned below).
+    "../fabric/settings.js",
+    "../quota/settings.js",
+    "../memory/settings.js",
+    "../workflow/settings.js",
+    "../traffic/settings.js",
+    "../schedule/settings.js",
+    "../external-agent/settings.js",
+    "../ask-user/settings.js",
+    "../todo/settings.js",
+    "../hud/settings.js",
+    "../goal/settings.js",
+    "../title/settings.js",
+    "../reload/settings.js",
+    "../sysprompt/settings.js",
+    "../delivery/extend-settings.js",
+    "../service/dispatch-settings.js",
+    "../sysload/settings.js",
     "../topic-switch/settings.js",
-    "../web-hub/protocol/lan.js",
-    // LAN security P0: browser-safe, import-free shared CIDR parser.
-    "../web-hub/protocol/client-allow.js",
+    // jev-reflex R0: the `reflex` block lives in reflex/core/settings.ts (pinned below; no imports at all).
+    "../reflex/core/settings.js",
+    // #56 ⑧: the `webHub` / `feishuBot` blocks live in web-hub/agent/settings.ts (pinned below).
+    "../web-hub/agent/settings.js",
     // external-agent plan §2.8: droid pricing refs validated with parseStrictModelRef (pure, zero imports).
-    "./model-hint.js",
     // data-encryption P2 §2.4 step 2: the secure-domain settings override (pi-free closure below).
     "../secure/domain.js",
     // data-encryption P1 review #5: cross-process settings-file lock (flock child, pi-free).
     "../secure/settings-lock.js",
+    "./enabled-group.js",
     "./time-units.js",
   ],
   "src/secure/settings-lock.ts": ["node:child_process", "node:fs", "node:path"],
-  "src/secure/domain.ts": ["node:fs", "node:os", "node:path", "./config.js", "./env.js"],
+  // settings-rename P1: domain resolves the settings file through the agentDir + file-name protocol.
+  "src/secure/domain.ts": [
+    "node:fs",
+    "node:os",
+    "node:path",
+    "../core/agent-dir.js",
+    "./config.js",
+    "./env.js",
+    "./settings-lock.js",
+  ],
   "src/secure/config.ts": ["node:path"],
   "src/secure/env.ts": [],
   "src/config/model-hint.ts": [],
   "src/fabric/xs/channel.ts": ["../../web-hub/protocol/xs.js"],
+  // #56 ⑧: fabric block settings — channel-plan CH0 pure channel-name rules + the pure receive/session-id rules.
+  // fabric-thread P0 (arch §11.1): + the SHARED window clamp from web-hub/protocol/thread.js (typebox-only,
+  // pi-free — the same reach-out precedent as fabric/xs/channel.ts → protocol/xs.js; the hub re-clamps
+  // HubConfig with the very same function, §8.2 "agent 与 hub 用同一个纯函数").
+  "src/fabric/settings.ts": ["./xs/channel.js", "./xs/receive.js", "../web-hub/protocol/thread.js"],
+  "src/fabric/xs/receive.ts": [],
+  "src/cache-ttl/settings.ts": ["./keepalive-state.js"],
+  // #56 ⑧: quota block settings — `./types.js` is type-only (erased), so no value import at all.
+  "src/quota/settings.ts": [],
+  // #56 ⑧: load block settings — the frozen sysload domain constants.
+  "src/sysload/settings.ts": ["./types.js"],
+  // #56 ⑧: compact block settings — the pure threshold defaults.
+  "src/compact-hint/settings.ts": ["./threshold.js"],
+  // #56 ⑧: bashJobs block settings — self-contained (no imports at all).
+  "src/bash/settings.ts": [],
+  // #56 ⑧: agent dispatch settings — self-contained (no imports at all).
+  "src/service/dispatch-settings.ts": [],
+  // #56 ⑧: extend block settings — self-contained (no imports at all).
+  "src/delivery/extend-settings.ts": [],
+  // #56 ⑧: systemPrompt block settings — self-contained (no imports at all).
+  "src/sysprompt/settings.ts": [],
+  // #56 ⑧: reload block settings — self-contained (no imports at all).
+  "src/reload/settings.ts": [],
+  // #56 ⑧: title block settings — self-contained (no imports at all).
+  "src/title/settings.ts": [],
+  // #56 ⑧: goal block settings — self-contained (no imports at all).
+  "src/goal/settings.ts": [],
+  // #56 ⑧: hud block settings — EnabledGroup is a type-only import.
+  "src/hud/settings.ts": [],
+  // #56 ⑧: todo block settings — EnabledGroup is a type-only import.
+  "src/todo/settings.ts": [],
+  // #56 ⑧: askUser block settings — EnabledGroup is a type-only import.
+  "src/ask-user/settings.ts": [],
+  // #56 ⑧: the shared { enabled } group — self-contained.
+  "src/config/enabled-group.ts": [],
+  // #56 ⑧: externalAgents block settings — droid pricing refs use the pure model-hint parser.
+  "src/external-agent/settings.ts": ["../config/model-hint.js"],
+  // #56 ⑧: schedule block settings — self-contained (no imports at all).
+  "src/schedule/settings.ts": [],
+  // jev-reflex R0: reflex block settings — self-contained (no imports at all; same precedent as schedule, 82c66a84).
+  "src/reflex/core/settings.ts": [],
+  // #56 ⑧: traffic block settings — self-contained (no imports at all).
+  "src/traffic/settings.ts": [],
+  // #56 ⑧: workflow block settings — self-contained (type-only core/types import).
+  "src/workflow/settings.ts": [],
+  // #56 ⑧: memory block settings — the tidy batch limits (pinned below: only ../contracts.js).
+  "src/memory/settings.ts": ["./tidy/batch-settings.js"],
+  // #56 ⑧: webHub/feishuBot block settings — LAN host/origin classification (L16 第一处) + the browser-safe,
+  // import-free shared CIDR parser (LAN security P0). The hub whitelist is NOT loosened: these are the same two files.
+  "src/web-hub/agent/settings.ts": ["../protocol/client-allow.js", "../protocol/lan.js"],
   "src/sysload/io-ledger.ts": [],
   // P0's compatibility re-export keeps the shared file limits available to pi-free callers.
   "src/memory/tidy/batch-settings.ts": ["../contracts.js"],

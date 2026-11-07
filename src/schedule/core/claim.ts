@@ -47,7 +47,6 @@ import {
   autoRunKey,
   defHash,
   isExecutable,
-  isApproved,
   manualRunKey,
   SCHED_COUNT_CAP,
   SCHED_FIRE_TOLERANCE_MS,
@@ -234,7 +233,7 @@ export interface ManualClaimInput {
   taskId: string;
   /** Web cmdId / Feishu deterministic cmdId / local random id (SCHED_REQ_ID_RE). */
   reqId: string;
-  /** Required from web / Feishu callers: must equal the current definition AND approval hash. */
+  /** Required from web / Feishu callers: must equal the current definition hash. */
   defHash?: string;
   holder: Holder;
   gate?: ClaimGate;
@@ -270,7 +269,6 @@ export async function manualClaim(store: SessionStore, input: ManualClaimInput):
     };
     const task = draft.tasks.find((t) => t.id === input.taskId);
     if (task === undefined) return refuse("E_INVALID");
-    if (!isApproved(task)) return refuse("E_UNAPPROVED");
     if (!task.enabled) return refuse("E_INVALID");
     const hash = defHash(task);
     if (input.defHash !== undefined && input.defHash !== hash) return refuse("E_REV");
@@ -358,10 +356,8 @@ export type TaskChange =
 
 /**
  * Mutate one task under §4.4's rule: FIRST sweep the OLD definition (cut = now − tol), THEN apply
- * `mutate`; if the definition hash changed — or the task just became executable (resume /
- * approval) — the watermark jumps to `now` (`voidUntil`): the old definition's future occurrences
- * and anything owed while paused/unapproved are void, never missed. `mutate` may refuse.
- * Approval is NEVER touched here: an execution-field edit invalidates it by construction (S2).
+ * `mutate`; if the definition hash changed — or the task just became executable (resume) — the watermark jumps to `now` (`voidUntil`): the old definition's future occurrences
+ * and anything owed while paused are void, never missed. `mutate` may refuse.
  */
 export async function changeTask(
   store: SessionStore,
@@ -417,20 +413,3 @@ export async function changeTask(
 
 /** Sweep rounds `changeTask` may spend settling the old definition (each ≤ 64 × 10 000). */
 export const CHANGE_BACKLOG_ROUNDS = 4;
-
-/**
- * `/schedule approve <id>` / web review (§4.3): CAS on the hash the reviewer SAW (sampled before
- * the confirm dialog). Mismatch ⇒ `E_REV` (re-review). Only user surfaces call this.
- */
-export function approveTask(
-  store: SessionStore,
-  taskId: string,
-  reviewedHash: string,
-  via: "tui" | "web",
-): Promise<TaskChange> {
-  return changeTask(store, taskId, (task, now) => {
-    if (defHash(task) !== reviewedHash) return { refuse: "E_REV", detail: "definition changed since review" };
-    task.approval = { hash: reviewedHash, by: "user", via, at: now };
-    return undefined;
-  });
-}

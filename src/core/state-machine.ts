@@ -799,6 +799,7 @@ export function reduce(
         // consult A/B instrumentation plan (§3/§4): same write-once display metadata pattern as the M-A fields above.
         ...(input.meta?.dispatchMeta === undefined ? {} : { dispatchMeta: input.meta.dispatchMeta }),
         ...(input.meta?.schemaPreset === undefined ? {} : { schemaPreset: input.meta.schemaPreset }),
+        ...(input.meta?.schema === undefined ? {} : { schema: input.meta.schema }),
         // fabric-cross-session plan §4.1/§4.5 (W5): write-once wake provenance / wake-ability verdict. Absent unless the
         // wake inbox is wired, so a wake-off run's diag is byte-identical.
         ...(input.meta?.wakeOrigin === undefined ? {} : { wakeOrigin: input.meta.wakeOrigin }),

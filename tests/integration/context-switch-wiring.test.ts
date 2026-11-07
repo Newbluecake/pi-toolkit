@@ -7,6 +7,7 @@ import activate from "../../src/index.js";
 import { SWITCH_RESUME_TEXT } from "../../src/context-switch/tool.js";
 import { RESUME_TEXT as COMPACT_RESUME_TEXT } from "../../src/compact-hint/compact-tool.js";
 import { DROP_ALL_SENTINEL } from "../../src/context-switch/hook.js";
+import { resetSettingsFilesIn } from "./helpers/home-sandbox.js";
 
 /**
  * context-switch 端到端接线（context-switch-plan §2/§3/§6）：
@@ -58,12 +59,12 @@ function writeSettings(raw: unknown): void {
 beforeEach(() => {
   delete (globalThis as Record<symbol, unknown>)[HOST_KEY];
   delete (globalThis as Record<symbol, unknown>)[FEISHU_HOST_KEY];
-  rmSync(settingsPath, { force: true });
+  resetSettingsFilesIn(dirname(settingsPath));
 });
 afterEach(() => {
   delete (globalThis as Record<symbol, unknown>)[HOST_KEY];
   delete (globalThis as Record<symbol, unknown>)[FEISHU_HOST_KEY];
-  rmSync(settingsPath, { force: true });
+  resetSettingsFilesIn(dirname(settingsPath));
 });
 afterAll(() => {
   if (realHome === undefined) delete process.env.HOME;

@@ -147,7 +147,7 @@ export const SCHEDULE_ERROR_CODES = [
   "E_LIMIT",
   "E_INVALID",
   "E_REV",
-  "E_UNAPPROVED",
+  "E_UNAPPROVED", // legacy — no longer produced; an old ledger's manualReqs replay may still replay it
   "E_NOT_OWNER",
   "E_OVERLAP",
   "E_BUSY",
@@ -385,19 +385,12 @@ export function defHash(task: ScheduleTask): string {
   return sha256Hex(canonicalJson(executionDefinition(task)));
 }
 
-/** Approved ⇔ an approval exists AND binds the current definition. */
-export function isApproved(task: ScheduleTask): boolean {
-  return task.approval !== undefined && task.approval.hash === defHash(task);
-}
-
-/** UI 「待确认」 — derived, never stored (§4.3). Independent of `enabled`. */
-export function isPendingApproval(task: ScheduleTask): boolean {
-  return !isApproved(task);
-}
-
-/** Executable ⇔ `enabled ∧ approval.hash === defHash` — checked under the lock by every entry. */
+/**
+ * Executable ⇔ `enabled`. Approval was removed (schedule-auto-approve r2): a legacy ledger's `approval`
+ * field is tolerated and ignored (never read here, never written, never stripped).
+ */
 export function isExecutable(task: ScheduleTask): boolean {
-  return task.enabled && isApproved(task);
+  return task.enabled;
 }
 
 // ----------------------------------------------------------------- keys (§4.2/§4.5b/§7.1)

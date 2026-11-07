@@ -127,7 +127,7 @@ export function detectPiCapabilities(pi: MinimalPiHost, version = "unknown"): Pi
   };
 }
 
-export const TESTED_PI_RANGE = "1.0.0 - 1.3.0";
+export const TESTED_PI_RANGE = "1.5.0 - 1.5.0";
 
 /**
  * Child-context-switch boundary capability (docs/dev/child-context-switch/plan.md §3.1):
@@ -240,17 +240,15 @@ export function assertCompatible(caps: PiCapabilities): CompatResult {
   return outsideTestedRange
     ? {
         ok: true,
-        warning: `pi-subagent has not been validated against pi ${caps.version} (tested range ${TESTED_PI_RANGE}); all required capabilities were detected, proceeding.`,
+        warning: `pi-toolkit has not been validated against pi ${caps.version} (tested range ${TESTED_PI_RANGE}); all required capabilities were detected, proceeding.`,
       }
     : { ok: true };
 }
 
 function isWithinTestedRange(version: string): boolean {
-  const parts = version.split(".").map((n) => Number.parseInt(n, 10));
-  if (parts.length < 2 || parts.some((n) => Number.isNaN(n))) return false;
-  const [major, minor] = parts as [number, number];
-  // Matches the peer range >=1.0.0 <1.4.0 (0.87's type surface is no longer compatible).
-  return major === 1 && minor >= 0 && minor <= 3;
+  // Support permits future 1.5 patches, but only the exact 1.5.0 release was measured.
+  // Keep warning-only: required capabilities above remain structural, never version-gated.
+  return version === "1.5.0";
 }
 
 /**
@@ -270,6 +268,26 @@ export function readTriggerShape(event: unknown): "union" | "legacy" | "unknown"
   const e = event as { messageType?: unknown; prompt?: unknown };
   if (e.messageType === "user" || e.messageType === "custom") return "union";
   return e.messageType === undefined && typeof e.prompt === "string" ? "legacy" : "unknown";
+}
+
+/**
+ * wake-unknown-optimistic §2.1: structural read of the TRAILING message of a `context` event
+ * (fired before every LLM call, all hosts). Returns the last message's custom shape only when it
+ * is `role:"custom"`; the guard compares token/xid against the ledger in O(1). Never throws, never
+ * reads `content`. A shape probe, not a version gate (I14) — the same reading style as
+ * {@link readBeforeAgentStartTrigger}.
+ */
+export function readContextTrailingCustom(event: unknown): { customType?: string; details?: unknown } | undefined {
+  if (event === null || typeof event !== "object") return undefined;
+  const messages = (event as { messages?: unknown }).messages;
+  if (!Array.isArray(messages) || messages.length === 0) return undefined;
+  const last: unknown = messages[messages.length - 1];
+  if (last === null || typeof last !== "object" || (last as { role?: unknown }).role !== "custom") return undefined;
+  const m = last as { customType?: unknown; details?: unknown };
+  return {
+    ...(typeof m.customType === "string" ? { customType: m.customType } : {}),
+    ...(m.details !== undefined ? { details: m.details } : {}),
+  };
 }
 
 export function readBeforeAgentStartTrigger(event: unknown): BeforeAgentStartTrigger {

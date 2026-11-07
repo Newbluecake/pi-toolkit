@@ -6,6 +6,7 @@ import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-w
 import activate from "../../src/index.js";
 import { readBackgroundStatus } from "../../src/service/background-status.js";
 import { WORKFLOW_NOTICE_ENTRY_TYPE, WORKFLOW_NOTIFICATION_TYPE } from "../../src/adapters/workflow-notice.js";
+import { resetSettingsFilesIn } from "./helpers/home-sandbox.js";
 
 /**
  * Background SubagentWorkflow end-to-end through the real activate() / stack
@@ -108,7 +109,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   for (const key of [HOST_KEY, FEISHU_HOST_KEY, STATUS_KEY]) delete (globalThis as Record<symbol, unknown>)[key];
-  rmSync(settingsPath, { force: true });
+  resetSettingsFilesIn(dirname(settingsPath));
 });
 afterAll(() => {
   if (realHome === undefined) delete process.env.HOME;

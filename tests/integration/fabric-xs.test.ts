@@ -13,8 +13,14 @@ describe("XW real hub child × two activate-built stacks × real sockets", () =>
     expect((await list(a)).rows).toEqual([expect.objectContaining({ ref: bid.slice(0, 12), receive: "wake" })]);
     expect(await a.rpc("cmd", { name: "agent", args: "status" })).toContain("xs joined · recv wake · cap unknown");
     expect(await send(a, bid, "deliver-only")).toMatchObject({ effect: "applied" });
-    // Different direction avoids pairMinInterval; a fresh host is still unverified (N1).
-    expect(await send(b, aid, "N1", true)).toMatchObject({ effect: "applied", wakeDowngraded: "host_unverified" });
+    // wake-unknown-optimistic: a fresh host (a) dispatches OPTIMISTICALLY on its first wake; the
+    // host's BAS authorizes the token ⇒ verified, and the controller stays occupied until settle.
+    expect(await send(b, aid, "N1", true)).toMatchObject({ effect: "applied", woke: true });
+    const woken = await a.rpc("inspect");
+    expect(woken.capability).toBe("verified");
+    expect(woken.messages.at(-1)).toMatchObject({ triggerTurn: true, details: { xsWake: true } });
+    expect(woken.owned).toBe(true);
+    await a.rpc("settle");
     await b.rpc("prime");
     // New hub quota window without sleeps (also exercises member replay).
     const reset = await a.rpc("replace");
@@ -243,3 +249,42 @@ it("web /new exec claim fences actual socket ingress before its command trampoli
   });
   expect((await b.rpc("inspect")).messages).toHaveLength(0);
 }, 25_000);
+
+it("/new (web 清空) keeps the joined channels: the new sid re-joins and stays reachable; fork still does not inherit", async () => {
+  h = new XsHarness();
+  const hub = await h.boot("hub");
+  const [a, b] = await Promise.all([h.boot("agent", "alpha"), h.boot("agent", "beta")]);
+  await a.rpc("cmd", { args: "join #team" });
+  await b.rpc("cmd", { args: "join #team" });
+  const aid = (await a.rpc("inspect")).sessionId;
+  const bid = (await b.rpc("inspect")).sessionId;
+  await until(
+    () => list(b),
+    (l) => l.rows?.some((r: any) => aid.startsWith(r.ref)),
+    "a visible in #team",
+  );
+  expect(await a.rpc("cmd")).toContain("channels #team");
+
+  // Web 「清空」/ builtin /new: session_shutdown{new} → session_start{new} with a fresh sessionId.
+  const moved = await a.rpc("replace");
+  expect(moved.sessionId).not.toBe(aid);
+  // The membership rides the /new boundary: the local status AND the hub member table keep #team.
+  const status = await a.rpc("cmd");
+  expect(status).toContain("xs: joined");
+  expect(status).toContain("channels #team");
+  await until(
+    () => list(b),
+    (l) => l.rows?.some((r: any) => moved.sessionId.startsWith(r.ref)),
+    "new sid joined #team",
+  );
+  expect(await send(b, moved.sessionId, "still in the channel after /new")).toMatchObject({ effect: "applied" });
+  expect((await a.rpc("inspect")).messages.map((m: any) => m.content)).toEqual([
+    expect.stringContaining("still in the channel after /new"),
+  ]);
+  // A reload after the /new still restores the inherited membership (adopt persisted it).
+  await a.rpc("reload");
+  expect(await a.rpc("cmd")).toContain("channels #team");
+  // The OLD session keeps its own membership: resuming it restores #team on the old sid.
+  // (fork semantics stay untouched — covered by the dedicated fork tests above.)
+  await send(a, bid, "pair throttle separator");
+}, 30_000);

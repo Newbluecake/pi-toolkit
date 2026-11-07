@@ -7,3 +7,9 @@
 ## src/ask-user/
 
 `src/ask-user/` — merged interactive `ask_user` tool and TUI/RPC question components; emits `ask-user:activity` while an active TUI component receives input. `normalize.ts` repairs presentation-layer input instead of failing the call: explicit headers are always trimmed/width-capped (a blank one is dropped so the RPC answer key falls back to the question text), and missing headers are derived + de-duplicated in multi-question calls **only** (a single question never gets one invented, so its answer key stays the question text). Headers the model duplicated verbatim are still rejected — they collide as RPC answer keys. `remote.ts`'s `AskUserRemotePort` (P2, #32) is a late-bound, optional web-hub port: when `webHub.remoteAskUser` is on and a browser is connected, `wireAskUser` races the TUI component against the remote answer for the same dialog (whichever settles first wins; the loser gets cancelled/closed) — `remote()` returning `undefined` (web-hub off or disconnected) reproduces pre-P2 behavior byte-for-byte.
+
+For delegated-turn redirection (#21 xs ask-redirect) see `../fabric-cross-session/README.md` 「Ask redirect
+(#21)」 and `../xs-ask-redirect/plan.md`: `wireAskUser`'s optional `redirect` port (default on via
+`fabric.crossSession.askRedirect.*`) turns ask_user into a host-mediated question to the requester in
+trusted delegated turns; the option absent or `ask()` returning `undefined` keeps the local path
+byte-for-byte.

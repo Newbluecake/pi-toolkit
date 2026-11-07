@@ -1,0 +1,54 @@
+{
+  "note": "#30 P-A compat golden — captured on UNMODIFIED dev (pre reload-result). Never regenerate to fix a diff.",
+  "scenarios": {
+    "s1-tui-reload-idle-handover": {
+      "frames": [
+        "{\"t\":\"hello\",\"proto\":{\"major\":1,\"minor\":2},\"pluginVersion\":\"1.2.3\",\"buildId\":\"b1@t\",\"agentId\":{\"pid\":0,\"nonce\":\"<n>\"},\"epoch\":\"<epoch>\",\"kind\":\"tui\",\"launcher\":[\"<exec>\",\"<argv1>\"],\"cwd\":\"/tmp/wa\",\"caps\":[\"ev.v1\",\"fleet.v1\",\"snapshot.v1\",\"branch.v1\",\"runtx.v1\",\"runtx.lan.v1\",\"cmd.v1\",\"dialog.v1\",\"command.v1\",\"cmd.args.v1\",\"upload.v1\",\"upload.lan.v1\",\"hold.v1\"]}",
+        "{\"t\":\"session\",\"sessionId\":\"sess-1\",\"cwd\":\"/tmp/wa\",\"reason\":\"startup\",\"leafId\":\"L1\",\"mode\":\"tui\",\"sessionFile\":\"/tmp/fake-session.jsonl\",\"model\":{\"provider\":\"p\",\"id\":\"m\"},\"thinkingLevel\":\"high\",\"models\":{\"status\":\"error\",\"items\":[],\"total\":0,\"policy\":{\"model\":\"allow\",\"thinking\":\"allow\"},\"sampledAt\":1700000000000,\"levels\":[\"off\"]}}",
+        "{\"t\":\"status\",\"leafId\":\"L1\",\"busy\":false,\"pending\":false,\"contextUsage\":{\"tokens\":1000,\"contextWindow\":200000,\"percent\":0.5},\"costUsd\":0,\"features\":[\"resume.v1\",\"cmd.history.v1\"]}",
+        "{\"t\":\"fleet\",\"runs\":[]}",
+        "{\"t\":\"status\",\"leafId\":\"L1\",\"busy\":false,\"pending\":false,\"contextUsage\":{\"tokens\":1000,\"contextWindow\":200000,\"percent\":0.5},\"costUsd\":0,\"features\":[\"resume.v1\",\"cmd.history.v1\"]}",
+        "{\"t\":\"status\",\"leafId\":\"L1\",\"busy\":false,\"pending\":false,\"contextUsage\":{\"tokens\":1000,\"contextWindow\":200000,\"percent\":0.5},\"costUsd\":0,\"features\":[\"resume.v1\",\"cmd.history.v1\"]}",
+        "{\"t\":\"session_detached\",\"reason\":\"reload\"}",
+        "{\"t\":\"status\",\"leafId\":\"L1\",\"busy\":false,\"pending\":false,\"contextUsage\":{\"tokens\":1000,\"contextWindow\":200000,\"percent\":0.5},\"features\":[\"resume.v1\",\"cmd.history.v1\"]}",
+        "{\"t\":\"session\",\"sessionId\":\"sess-1\",\"cwd\":\"/tmp/wa\",\"reason\":\"reload\",\"leafId\":\"L1\",\"mode\":\"tui\",\"sessionFile\":\"/tmp/fake-session.jsonl\",\"model\":{\"provider\":\"p\",\"id\":\"m\"},\"thinkingLevel\":\"high\",\"models\":{\"status\":\"error\",\"items\":[],\"total\":0,\"policy\":{\"model\":\"allow\",\"thinking\":\"allow\"},\"sampledAt\":1700000000000,\"levels\":[\"off\"]}}",
+        "{\"t\":\"status\",\"leafId\":\"L1\",\"busy\":false,\"pending\":false,\"contextUsage\":{\"tokens\":1000,\"contextWindow\":200000,\"percent\":0.5},\"features\":[\"resume.v1\",\"cmd.history.v1\"]}",
+        "{\"t\":\"status\",\"leafId\":\"L1\",\"busy\":false,\"pending\":false,\"contextUsage\":{\"tokens\":1000,\"contextWindow\":200000,\"percent\":0.5},\"features\":[\"resume.v1\",\"cmd.history.v1\"]}",
+        "{\"t\":\"fleet\",\"runs\":[]}",
+        "{\"t\":\"status\",\"leafId\":\"L1\",\"busy\":false,\"pending\":false,\"contextUsage\":{\"tokens\":1000,\"contextWindow\":200000,\"percent\":0.5},\"costUsd\":0,\"features\":[\"resume.v1\",\"cmd.history.v1\"]}"
+      ]
+    },
+    "s2-web-reload-idle": {
+      "frames": [
+        "{\"t\":\"hello\",\"proto\":{\"major\":1,\"minor\":2},\"pluginVersion\":\"1.2.3\",\"buildId\":\"b1@t\",\"agentId\":{\"pid\":0,\"nonce\":\"<n>\"},\"epoch\":\"<epoch>\",\"kind\":\"tui\",\"launcher\":[\"<exec>\",\"<argv1>\"],\"cwd\":\"/tmp/wa\",\"caps\":[\"ev.v1\",\"fleet.v1\",\"snapshot.v1\",\"branch.v1\",\"runtx.v1\",\"runtx.lan.v1\",\"cmd.v1\",\"dialog.v1\",\"command.v1\",\"cmd.args.v1\",\"upload.v1\",\"upload.lan.v1\",\"hold.v1\"]}",
+        "{\"t\":\"session\",\"sessionId\":\"sess-1\",\"cwd\":\"/tmp/wa\",\"reason\":\"startup\",\"leafId\":\"L1\",\"mode\":\"tui\",\"sessionFile\":\"/tmp/fake-session.jsonl\",\"model\":{\"provider\":\"p\",\"id\":\"m\"},\"thinkingLevel\":\"high\",\"models\":{\"status\":\"error\",\"items\":[],\"total\":0,\"policy\":{\"model\":\"allow\",\"thinking\":\"allow\"},\"sampledAt\":1700000000000,\"levels\":[\"off\"]}}",
+        "{\"t\":\"status\",\"leafId\":\"L1\",\"busy\":false,\"pending\":false,\"contextUsage\":{\"tokens\":1000,\"contextWindow\":200000,\"percent\":0.5},\"costUsd\":0,\"features\":[\"resume.v1\",\"cmd.history.v1\"]}",
+        "{\"t\":\"fleet\",\"runs\":[]}",
+        "{\"t\":\"status\",\"leafId\":\"L1\",\"busy\":false,\"pending\":false,\"contextUsage\":{\"tokens\":1000,\"contextWindow\":200000,\"percent\":0.5},\"costUsd\":0,\"features\":[\"resume.v1\",\"cmd.history.v1\"]}",
+        "{\"t\":\"status\",\"leafId\":\"L1\",\"busy\":false,\"pending\":false,\"contextUsage\":{\"tokens\":1000,\"contextWindow\":200000,\"percent\":0.5},\"costUsd\":0,\"features\":[\"resume.v1\",\"cmd.history.v1\"]}",
+        "{\"t\":\"session_detached\",\"reason\":\"reload\"}",
+        "{\"t\":\"status\",\"leafId\":\"L1\",\"busy\":false,\"pending\":false,\"contextUsage\":{\"tokens\":1000,\"contextWindow\":200000,\"percent\":0.5},\"features\":[\"resume.v1\",\"cmd.history.v1\"]}",
+        "{\"t\":\"session\",\"sessionId\":\"sess-1\",\"cwd\":\"/tmp/wa\",\"reason\":\"reload\",\"leafId\":\"L1\",\"mode\":\"tui\",\"sessionFile\":\"/tmp/fake-session.jsonl\",\"model\":{\"provider\":\"p\",\"id\":\"m\"},\"thinkingLevel\":\"high\",\"models\":{\"status\":\"error\",\"items\":[],\"total\":0,\"policy\":{\"model\":\"allow\",\"thinking\":\"allow\"},\"sampledAt\":1700000000000,\"levels\":[\"off\"]}}",
+        "{\"t\":\"status\",\"leafId\":\"L1\",\"busy\":false,\"pending\":false,\"contextUsage\":{\"tokens\":1000,\"contextWindow\":200000,\"percent\":0.5},\"features\":[\"resume.v1\",\"cmd.history.v1\"]}",
+        "{\"t\":\"status\",\"leafId\":\"L1\",\"busy\":false,\"pending\":false,\"contextUsage\":{\"tokens\":1000,\"contextWindow\":200000,\"percent\":0.5},\"features\":[\"resume.v1\",\"cmd.history.v1\"]}",
+        "{\"t\":\"fleet\",\"runs\":[]}",
+        "{\"t\":\"status\",\"leafId\":\"L1\",\"busy\":false,\"pending\":false,\"contextUsage\":{\"tokens\":1000,\"contextWindow\":200000,\"percent\":0.5},\"features\":[\"resume.v1\",\"cmd.history.v1\"]}",
+        "{\"t\":\"cmd_result\",\"rid\":\"r-c1\",\"id\":\"cmdrr000000000001\",\"ok\":true,\"data\":{\"op\":\"command\",\"kind\":\"extension\",\"completion\":\"unknown\",\"captured\":true,\"history\":\"none\"}}",
+        "{\"t\":\"status\",\"leafId\":\"L1\",\"busy\":false,\"pending\":false,\"contextUsage\":{\"tokens\":1000,\"contextWindow\":200000,\"percent\":0.5},\"costUsd\":0,\"features\":[\"resume.v1\",\"cmd.history.v1\"]}"
+      ]
+    },
+    "s3-web-reload-busy-cancel": {
+      "frames": [
+        "{\"t\":\"hello\",\"proto\":{\"major\":1,\"minor\":2},\"pluginVersion\":\"1.2.3\",\"buildId\":\"b1@t\",\"agentId\":{\"pid\":0,\"nonce\":\"<n>\"},\"epoch\":\"<epoch>\",\"kind\":\"tui\",\"launcher\":[\"<exec>\",\"<argv1>\"],\"cwd\":\"/tmp/wa\",\"caps\":[\"ev.v1\",\"fleet.v1\",\"snapshot.v1\",\"branch.v1\",\"runtx.v1\",\"runtx.lan.v1\",\"cmd.v1\",\"dialog.v1\",\"command.v1\",\"cmd.args.v1\",\"upload.v1\",\"upload.lan.v1\",\"hold.v1\"]}",
+        "{\"t\":\"session\",\"sessionId\":\"sess-1\",\"cwd\":\"/tmp/wa\",\"reason\":\"startup\",\"leafId\":\"L1\",\"mode\":\"tui\",\"sessionFile\":\"/tmp/fake-session.jsonl\",\"model\":{\"provider\":\"p\",\"id\":\"m\"},\"thinkingLevel\":\"high\",\"models\":{\"status\":\"error\",\"items\":[],\"total\":0,\"policy\":{\"model\":\"allow\",\"thinking\":\"allow\"},\"sampledAt\":1700000000000,\"levels\":[\"off\"]}}",
+        "{\"t\":\"status\",\"leafId\":\"L1\",\"busy\":false,\"pending\":false,\"contextUsage\":{\"tokens\":1000,\"contextWindow\":200000,\"percent\":0.5},\"costUsd\":0,\"features\":[\"resume.v1\",\"cmd.history.v1\"]}",
+        "{\"t\":\"fleet\",\"runs\":[]}",
+        "{\"t\":\"status\",\"leafId\":\"L1\",\"busy\":false,\"pending\":false,\"contextUsage\":{\"tokens\":1000,\"contextWindow\":200000,\"percent\":0.5},\"costUsd\":0,\"features\":[\"resume.v1\",\"cmd.history.v1\"]}",
+        "{\"t\":\"status\",\"leafId\":\"L1\",\"busy\":false,\"pending\":false,\"contextUsage\":{\"tokens\":1000,\"contextWindow\":200000,\"percent\":0.5},\"costUsd\":0,\"features\":[\"resume.v1\",\"cmd.history.v1\"]}",
+        "{\"t\":\"cmd_result\",\"rid\":\"r-c2\",\"id\":\"cmdrr000000000002\",\"ok\":true,\"data\":{\"op\":\"command\",\"kind\":\"extension\",\"completion\":\"sync\",\"captured\":true,\"output\":{\"entries\":[{\"kind\":\"notify\",\"text\":\"1 run(s) active — reload deferred until they settle. `/agent reload now` to force, `/agent reload cancel` to cancel.\",\"level\":\"info\"}]},\"history\":\"none\"}}",
+        "{\"t\":\"status\",\"leafId\":\"L1\",\"busy\":false,\"pending\":false,\"contextUsage\":{\"tokens\":1000,\"contextWindow\":200000,\"percent\":0.5},\"costUsd\":0,\"features\":[\"resume.v1\",\"cmd.history.v1\"]}",
+        "{\"t\":\"cmd_result\",\"rid\":\"r-c3\",\"id\":\"cmdrr000000000003\",\"ok\":true,\"data\":{\"op\":\"command\",\"kind\":\"extension\",\"completion\":\"sync\",\"captured\":true,\"output\":{\"entries\":[{\"kind\":\"notify\",\"text\":\"Deferred reload cancelled.\",\"level\":\"info\"}]},\"history\":\"none\"}}"
+      ]
+    }
+  }
+}

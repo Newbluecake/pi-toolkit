@@ -56,6 +56,14 @@ import { AskUserComponent } from "./component.js";
 import { answerValueText } from "./submit-view.js";
 import { validateInput } from "./validate.js";
 import { createDialogRace, type AskUserRemotePort, type AskUserRemoteSession, type RemoteOutcome } from "./remote.js";
+import {
+  redirectDetails,
+  redirectRenderMarker,
+  redirectResultText,
+  renderRedirectBody,
+  type AskUserRedirectPort,
+  type AskUserRedirectResult,
+} from "./redirect.js";
 
 /**
  * execute returns the SDK's normal tool result. Errors are thrown so Pi can
@@ -474,11 +482,11 @@ const DESCRIPTION = `Ask the user to resolve ambiguity you cannot resolve yourse
 
 Do NOT use this tool to outsource judgment you should make — if you can form a defensible recommendation from the codebase, proceed and state your choice. Do NOT use for trivia answerable by reading code/docs, or for simple confirmations ("I'll delete X") where plain text suffices. You cannot use this tool to collect free-form requirements, long-form feedback, or multi-paragraph input — it returns short selections only.
 
-If you recommend an option, prefix its label with "(Recommended)" and list it first. For structured multi-option decisions, prefer this tool over plain-text questions; for everything else, reply in plain text. In multi-question mode give each question a short header (<=12 chars) for the tab bar; if you omit it, one is derived from the question text.
+If you recommend an option, prefix its label with "(Recommended)" and list it first. For structured multi-option decisions, prefer this tool over plain-text questions; for everything else, reply in plain text.
 
-The user can skip any question instead of answering it. A skipped question comes back in answers as {selected: [], other: null, skipped: true} — treat it as "you decide": proceed with your own judgment for that question and do NOT immediately re-ask it.
+The user can skip any question. A skipped question comes back as {selected: [], other: null, skipped: true} — treat it as "you decide": proceed with your own judgment and do NOT immediately re-ask it.
 
-If a previous ask_user call was paused by a background-completion interrupt and the background result already settles the question(s), call {"dismissParked":true} (no questions) once to clear the parked entries instead of re-asking. dismissParked cannot be combined with questions.
+If a previous ask_user call was paused by a background-completion interrupt and the background result already settles the question(s), call {"dismissParked":true} (no questions) once to clear the parked entries instead of re-asking.
 
 Examples:
 {"questions":[{"question":"Which DB?","context":"Need ACID + JSON columns.","options":[{"label":"(Recommended) Postgres","description":"Mature, strong consistency."},{"label":"SQLite","description":"Zero-ops, embedded."}]}]}
@@ -486,9 +494,7 @@ Examples:
 {"questions":[{"header":"DB","question":"Which database?","options":[{"label":"Postgres","description":"..."},{"label":"SQLite","description":"..."}]},{"header":"Region","question":"Which region?","options":[{"label":"us-east-1","description":"..."},{"label":"eu-west-1","description":"..."}]}]}
 
 Don't:
-- Passing options as a string array ("options":["A","B"]) — each option must be {"label","description"}.
-- Flattening question/header/options to the top level — wrap them in questions:[...].
-- Including an "Other" option — it is added automatically.`;
+- Flattening question/header/options to the top level — wrap them in questions:[...].`;
 
 export interface AskUserWireOptions {
   remote?: () => AskUserRemotePort | undefined;
@@ -501,6 +507,11 @@ export interface AskUserWireOptions {
   /** P2 wiring point (§6.1): raw `askUser.backgroundInterrupt` settings record, normalized
    *  per call (field-wise fallback). Absent = defaults. */
   interrupt?: () => unknown;
+  /** #21 B2 wiring point: the xs ask-redirect port. Late-bound like `remote`/`background`;
+   *  when this option itself is absent, or the port's ask() returns undefined (feature off /
+   *  not a delegated turn — O-class), ask_user is byte-for-byte identical to the pre-feature
+   *  behavior (I9). */
+  redirect?: () => AskUserRedirectPort | undefined;
   /** Testing seam: clock override (fake clocks in tests; production uses the unref'd real one). */
   clock?: Clock;
 }
@@ -601,15 +612,8 @@ export default function (pi: ExtensionAPI, opts?: AskUserWireOptions): void {
     promptSnippet:
       "Ask the user structured clarifying questions with options — only when you cannot resolve the ambiguity yourself",
     promptGuidelines: [
-      "Use ask_user only when the request has ≥2 reasonable approaches you cannot resolve from context. Models over-ask because asking feels safer than deciding — resist this: if context makes the answer clear, proceed without asking.",
-      "Gather context first (read/grep) and pass a short summary via the context field — don't ask blind. If the answer becomes clear after gathering context, proceed and state your choice.",
-      "Ask focused questions; each question = one decision with mutually exclusive options. Batch related decisions into one call (1-4 questions).",
-      "In multi-question mode (2-4 questions) give each question a short header (<=12 chars) — it labels the tab; an omitted header is auto-derived from the question text.",
-      "Do NOT use ask_user for trivia answerable by reading code/docs, or to confirm simple actions ('I'll delete X') — plain text suffices there.",
-      "Do NOT outsource judgment you can make yourself: if you can form a defensible recommendation from the codebase, proceed and state it instead of asking.",
-      "Do NOT include an 'Other' option yourself — it is always available automatically.",
-      "The user may skip any question; a skipped answer has skipped:true and means 'you decide' — do not immediately re-ask it.",
-      "If a background completion already settles question(s) parked by an earlier interrupt, call ask_user({dismissParked:true}) once to clear them instead of re-asking.",
+      "Models over-ask because asking feels safer than deciding — resist this: if context makes the answer clear, proceed and state your choice.",
+      "Gather context first (read/grep) and pass a short summary via the context field — don't ask blind. Batch related decisions into one call (1-4 questions).",
     ],
     parameters: InputSchema,
 
@@ -655,6 +659,32 @@ export default function (pi: ExtensionAPI, opts?: AskUserWireOptions): void {
       }
 
       if (signal?.aborted) return cancelledResult(questions, AGENT_ABORTED_TEXT);
+
+      // #21 B2: trusted delegated turn (tui/rpc only — the HEADLESS throw and the pre-aborted
+      // early return above are unchanged, so print mode never reaches here). ask() is
+      // synchronous: undefined ⇔ O-class, the original local path below runs byte-identically.
+      // A redirect outcome is final — it returns directly, never entering the queue, the
+      // background/parked machinery, or the remote race. render(budget) returning undefined
+      // makes the port settle `unavailable(too_large)` on its side; no local dialog is shown.
+      const redirectPort = opts?.redirect?.();
+      if (redirectPort !== undefined) {
+        const redirectedAsk = redirectPort.ask({
+          render: (budgetChars) => renderRedirectBody(questions, budgetChars),
+          ...(signal !== undefined ? { signal } : {}),
+        });
+        if (redirectedAsk !== undefined) {
+          const outcome: AskUserRedirectResult = await redirectedAsk;
+          return {
+            content: [{ type: "text", text: redirectResultText(outcome) }],
+            details: {
+              questions,
+              answers: {},
+              cancelled: outcome.kind !== "answered",
+              redirected: redirectDetails(outcome),
+            } satisfies AskUserDetails,
+          };
+        }
+      }
 
       const isTui = ctx.mode === "tui";
       if (bgWired && isTui) currentUI = ctx.ui;
@@ -809,6 +839,15 @@ export default function (pi: ExtensionAPI, opts?: AskUserWireOptions): void {
       if (details?.interrupted !== undefined) return new Text(theme.fg("warning", INTERRUPTED_RENDER_TEXT), 0, 0);
       if (details?.dismissed !== undefined)
         return new Text(theme.fg("success", `✓ dismissed ${details.dismissed} parked`), 0, 0);
+      if (details?.redirected !== undefined)
+        return new Text(
+          theme.fg(
+            details.redirected.state === "answered" ? "success" : "warning",
+            redirectRenderMarker(details.redirected),
+          ),
+          0,
+          0,
+        );
       if (!details || details.cancelled) return new Text(theme.fg("warning", "Cancelled"), 0, 0);
 
       const box = new Box(0, 0);

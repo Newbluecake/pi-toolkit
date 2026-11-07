@@ -20,6 +20,7 @@ import {
   type FeishuReceiveInput,
 } from "../../../src/web-hub/hub/feishu/requests.js";
 import { createFeishuRouter, type FeishuRouterIntent } from "../../../src/web-hub/hub/feishu/router.js";
+import { createBindingTransfer } from "../../../src/web-hub/hub/feishu/bindings-transfer.js";
 import {
   createFeishuInbound,
   type FeishuInboundIntent,
@@ -96,6 +97,7 @@ export async function f6Rig(
     state,
     sessions,
     requests,
+    bindingTransfer: createBindingTransfer({ state, log: () => {} }),
     groupRootTopics: options.roots ?? false,
     spawnScope: options.roots ? "roots" : "known",
     emit: (e) => intents.push(e),

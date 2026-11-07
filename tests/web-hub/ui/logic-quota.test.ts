@@ -6,6 +6,7 @@ import {
   etaDurationKey,
   fmtResetAt,
   freshestQuota,
+  glmPair,
   pillDisplay,
   pillGroups,
   pillView,
@@ -346,6 +347,124 @@ describe("pillGroups — GLM merge (2026-10-14 ruling: ALWAYS one GLM group, wor
     expect(groups).toHaveLength(2);
     expect(groups[0]).toMatchObject({ ids: ["kimi-coding"], labelId: "kimi-coding" });
     expect(groups[1]).toMatchObject({ ids: ["zai-coding-cn", "zai"], labelId: "zai-coding-cn", usedPct: 42 });
+  });
+});
+
+// 2026-11-04 GLM 账号费用：agent 投影层把账号费用（两 provider bucket 之和）写在双侧
+// wire 行上 ⇒ merged 窗口对象无论挑到哪一侧，costUsd/costUnpriced 都在（UI 不再相加）。
+// 独立 describe：上面 GLM merge describe 里有个同名局部 helper `glmPair`，会遮蔽导入。
+describe("glmPair — cost 字段保留（2026-11-04 账号费用）", () => {
+  it("merged windows keep the chosen side's costUsd/costUnpriced — worst-of pick never loses the account cost", () => {
+    const pair = glmPair([
+      provider("zai-coding-cn", [window("5h", 42, 0, { resetAt: 1_000, costUsd: 4.6, costUnpriced: true })]),
+      provider("zai", [window("5h", 42, 1, { resetAt: 2_000, costUsd: 4.6, costUnpriced: true })]),
+    ]);
+    // intl 的 L1 赢了 worst-of ⇒ merged 窗口是 intl 侧的对象，cost 字段随对象保留
+    expect(pair.source.windows).toEqual([
+      { scope: "5h", usedPct: 42, level: 1, resetAt: 2_000, costUsd: 4.6, costUnpriced: true },
+    ]);
+    // 完全打平 ⇒ 保留 cn 侧的窗口对象（cn 先比）——cost 字段同样随对象保留，不多不少
+    const tie = glmPair([
+      provider("zai-coding-cn", [window("week", 41, 0, { costUsd: 4.6 })]),
+      provider("zai", [window("week", 41, 0, { costUsd: 4.6, costUnpriced: true })]),
+    ]);
+    expect(tie.source.windows).toEqual([{ scope: "week", usedPct: 41, level: 0, costUsd: 4.6 }]);
+  });
+
+  // 2026-11-04 F1（GLM 合并丢费用修复）：旧 peer 帧只在 zai 侧写 costUsd（cn 侧无），打平的
+  // cn-first 规则会选中无费用的 cn 窗把费用丢掉；freshestQuota 在新旧 agent 间交错胜出时
+  // 费用闪烁。修复：打平优先有费用的一侧；选中侧缺费则仅补 costUsd/costUnpriced
+  //（其余字段保持选中侧同源，两侧绝不相加 —— 都是账号总额，相加会双计）。
+  it("F1 打平且仅 intl 侧带费用（旧 peer 帧）⇒ 优先选有费用的一侧 —— 费用不再被丢", () => {
+    const pair = glmPair([
+      provider("zai-coding-cn", [window("5h", 62, 0, { resetAt: 1_000 })]),
+      provider("zai", [window("5h", 62, 0, { resetAt: 2_000, costUsd: 4.6 })]),
+    ]);
+    // intl 整窗胜出（含它自己的时钟）——不再是打平保 cn 把费用丢掉
+    expect(pair.source.windows).toEqual([{ scope: "5h", usedPct: 62, level: 0, resetAt: 2_000, costUsd: 4.6 }]);
+  });
+
+  it("F1 反向：打平且仅 cn 侧带费用 ⇒ cn 先项不变（费用保留）", () => {
+    const pair = glmPair([
+      provider("zai-coding-cn", [window("5h", 62, 0, { resetAt: 1_000, costUsd: 4.6 })]),
+      provider("zai", [window("5h", 62, 0, { resetAt: 2_000 })]),
+    ]);
+    expect(pair.source.windows).toEqual([{ scope: "5h", usedPct: 62, level: 0, resetAt: 1_000, costUsd: 4.6 }]);
+  });
+
+  it("F1 非打平、选中侧（cn L1 赢）缺费 ⇒ 仅补 costUsd/costUnpriced；usedPct/resetAt/etaMs 保持选中侧同源，不搬对侧 reset/ETA", () => {
+    const pair = glmPair([
+      provider("zai-coding-cn", [window("5h", 62, 1, { resetAt: 1_000, etaMs: 900 })]),
+      provider("zai", [window("5h", 61, 1, { resetAt: 9_999, etaMs: 123_456, costUsd: 4.6, costUnpriced: true })]),
+    ]);
+    // cn 的窗口 + intl 的费用二字段；resetAt/etaMs 仍 cn 自己的，绝不被对侧覆盖
+    expect(pair.source.windows).toEqual([
+      { scope: "5h", usedPct: 62, level: 1, resetAt: 1_000, etaMs: 900, costUsd: 4.6, costUnpriced: true },
+    ]);
+  });
+
+  it("F1 非打平、选中侧（intl L1 赢）缺费 ⇒ 反向从 cn 侧补，仅费用二字段", () => {
+    const pair = glmPair([
+      provider("zai-coding-cn", [window("week", 41, 0, { resetAt: 1_000, costUsd: 4.6 })]),
+      provider("zai", [window("week", 55, 1, { resetAt: 2_000 })]),
+    ]);
+    expect(pair.source.windows).toEqual([{ scope: "week", usedPct: 55, level: 1, resetAt: 2_000, costUsd: 4.6 }]);
+  });
+
+  it("两侧都有费用 ⇒ 只显示一次（账号总额，绝不相加成 9.2）", () => {
+    const tie = glmPair([
+      provider("zai-coding-cn", [window("5h", 62, 0, { costUsd: 4.6 })]),
+      provider("zai", [window("5h", 62, 0, { costUsd: 4.6 })]),
+    ]);
+    expect(tie.source.windows[0].costUsd).toBe(4.6); // 打平双费 ⇒ cn 先项，仍 4.6
+    const worstIntl = glmPair([
+      provider("zai-coding-cn", [window("5h", 61, 1, { costUsd: 4.6 })]),
+      provider("zai", [window("5h", 62, 1, { costUsd: 4.6 })]),
+    ]);
+    expect(worstIntl.source.windows).toEqual([{ scope: "5h", usedPct: 62, level: 1, costUsd: 4.6 }]); // 不双计
+  });
+});
+
+// 2026-11-04 F1：新旧 agent 帧交错胜出 freshestQuota 时，GLM 合并行的费用不再闪烁 ——
+// 旧 peer 帧只把账号费用写在 zai 侧，修复后的合并（打平优先有费用侧 + 缺侧补值）让
+// 无论哪帧胜出，merged 费用都在且恒为同一账号总额。
+describe("freshestQuota × glmPair — 新旧帧交错胜出，费用不闪（F1）", () => {
+  const oldPeer = (at, fetchedAt) =>
+    quota(
+      [
+        provider("zai-coding-cn", [window("5h", 62, 0, { resetAt: 1_000 })], { fetchedAt }),
+        provider("zai", [window("5h", 62, 0, { resetAt: 2_000, costUsd: 4.6 })], { fetchedAt }),
+      ],
+      at,
+    );
+  const newPeer = (at, fetchedAt) =>
+    quota(
+      [
+        provider("zai-coding-cn", [window("5h", 62, 0, { resetAt: 1_000, costUsd: 4.6 })], { fetchedAt }),
+        provider("zai", [window("5h", 62, 0, { resetAt: 2_000, costUsd: 4.6 })], { fetchedAt }),
+      ],
+      at,
+    );
+
+  it("时间轴上交错胜出（旧→新→旧→新），每一拍 merged GLM 窗口都带同一费用 —— 不闪", () => {
+    const ticks = [
+      [oldPeer(1_000, 100), newPeer(2_000, 50)], // 旧帧胜（fetchedAt 更新）
+      [oldPeer(1_000, 100), newPeer(2_000, 300)], // 新帧胜
+      [oldPeer(9_000, 400), newPeer(2_000, 300)], // 旧帧胜（回退帧 republish，at 也新）
+      [oldPeer(9_000, 400), newPeer(9_500, 500)], // 新帧胜
+    ];
+    for (const [oldW, newW] of ticks) {
+      const winner = freshestQuota([{ status: { quota: oldW } }, { status: { quota: newW } }])!;
+      const merged = glmPair(winner.providers).source.windows;
+      expect(merged).toHaveLength(1);
+      expect(merged[0].costUsd).toBe(4.6); // 每一拍都在且恒为账号总额
+    }
+    // 反向入参顺序同样稳定
+    const winner2 = freshestQuota([
+      { status: { quota: newPeer(2_000, 300) } },
+      { status: { quota: oldPeer(9_000, 400) } },
+    ])!;
+    expect(glmPair(winner2.providers).source.windows[0].costUsd).toBe(4.6);
   });
 });
 

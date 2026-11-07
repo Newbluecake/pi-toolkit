@@ -680,3 +680,139 @@ function parseWtGraphMerged(raw: unknown, payload: WtGraphPayload, commits: Read
   if (omitted !== undefined) merged.omitted = omitted as number;
   return merged;
 }
+
+// ---------------------------------------------------------------------------
+// Optional commit-files extension (`wtgraph.files.v1`): `GET /api/worktree-graph/files`
+// (`X-PWH: 1`; query `agentKey`, `sessionId`, `wt`, `h`). Append-only: a separate path, its own
+// cap, its own budgets — the graph endpoint, its payload and its parser above are untouched.
+// ---------------------------------------------------------------------------
+
+/** The per-commit changed-file list endpoint (same `X-PWH: 1` + query scope as the graph). */
+export const WTGRAPH_FILES_PATH = "/api/worktree-graph/files";
+/** The commit query key: a full-length lowercase-hex oid the hub served in a graph window. */
+export const WTGRAPH_FILES_QUERY = "h";
+/** At most this many entries ride one answer (`limits.files` beyond; same figure as wtdiff). */
+export const WTGRAPH_FILES_MAX = 1_000;
+/** Gf (`log --raw --numstat`) stdout cap — over ⇒ `limits.output`, the cut tail is dropped. */
+export const WTGRAPH_FILES_LOG_MAX_BYTES = 512 * 1024;
+/** Complete-response cap (decoded UTF-8 bytes) — over ⇒ entries dropped from the tail + `limits.bytes`. */
+export const WTGRAPH_FILES_BODY_MAX_BYTES = 256 * 1024;
+/** Gf's own per-command cap. */
+export const WTGRAPH_FILES_CMD_MS = 5_000;
+/** git phase: Cc 2 s + info/attributes 2 s + Gf 5 s + recheck ≈ 10 s. */
+export const WTGRAPH_FILES_GIT_PHASE_MS = 10_000;
+/** admission 8 s + git 10 s + close 1 s = 19 s; + 10 s transfer = 29 s ≤ 30 s. */
+export const WTGRAPH_FILES_CLIENT_TIMEOUT_MS = 30_000;
+
+/** Raw status letters a non-merge diff against the FIRST parent can produce (`-M`, no `-C`). */
+export type WtGraphFileStatus = "M" | "A" | "D" | "R" | "T";
+export const WTGRAPH_FILE_STATUSES: readonly WtGraphFileStatus[] = ["M", "A", "D", "R", "T"];
+
+export interface WtGraphFileEntry {
+  /** Repo-relative post-image path (git `-z` output as-is; ≤ `WTGRAPH_PATH_MAX_BYTES`). */
+  path: string;
+  /** Pre-image path; only (and always) on `R`. */
+  orig?: string;
+  status: WtGraphFileStatus;
+  /** numstat counts; absent for binary entries or when numstat was cut (`limits.output`). */
+  add?: number;
+  del?: number;
+  /** numstat reported `-\t-` (never together with `add`/`del`). */
+  binary?: true;
+}
+
+export interface WtGraphCommitFiles {
+  v: 1;
+  /** The commit this list answers (echo of the request's `h`). */
+  h: string;
+  /** Diff order = git output order. Semantics: the commit against its FIRST parent (a root
+   *  commit against the empty tree; a merge commit only what it brought onto parent 1). */
+  entries: WtGraphFileEntry[];
+  /** Parsed, NOT-hidden entry count (denylist hits never count); lower bound under `limits.output`. */
+  total: number;
+  /** `entries.length < total || limits.output` (parser-enforced). */
+  truncated: boolean;
+  limits: { files: boolean; bytes: boolean; output: boolean };
+  /** The repository is shallow: a boundary commit diffs against the empty tree. */
+  shallow?: true;
+}
+
+const FILES_KEYS = ["v", "h", "entries", "total", "truncated", "limits", "shallow"] as const;
+const FILE_ENTRY_KEYS = ["path", "orig", "status", "add", "del", "binary"] as const;
+const FILES_LIMIT_KEYS = ["files", "bytes", "output"] as const;
+const ANY_OID_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+
+function isFilePathWire(v: unknown): v is string {
+  return typeof v === "string" && v !== "" && !v.includes("\0") && byteLen(v) <= WTGRAPH_PATH_MAX_BYTES;
+}
+
+/**
+ * Strict validation of a `WtGraphCommitFiles` body (same posture as `parseWtGraphPayload`: key
+ * whitelist at every level, own properties only, never throws). `byteLength` is the DECODED
+ * body's UTF-8 size — over `WTGRAPH_FILES_BODY_MAX_BYTES` ⇒ `null`.
+ */
+export function parseWtGraphCommitFiles(raw: unknown, byteLength: number): WtGraphCommitFiles | null {
+  try {
+    if (!isNonNegSafeInt(byteLength) || byteLength > WTGRAPH_FILES_BODY_MAX_BYTES) return null;
+    if (!isPlainObject(raw) || !hasOnlyKeys(raw, FILES_KEYS)) return null;
+    if (getOwn(raw, "v") !== 1) return null;
+    const h = getOwn(raw, "h");
+    if (typeof h !== "string" || !ANY_OID_RE.test(h)) return null;
+    const rawEntries = getOwn(raw, "entries");
+    if (!Array.isArray(rawEntries) || rawEntries.length > WTGRAPH_FILES_MAX) return null;
+    const entries: WtGraphFileEntry[] = [];
+    for (const re of rawEntries as unknown[]) {
+      if (!isPlainObject(re) || !hasOnlyKeys(re, FILE_ENTRY_KEYS)) return null;
+      const path = getOwn(re, "path");
+      const status = getOwn(re, "status");
+      if (!isFilePathWire(path)) return null;
+      if (!WTGRAPH_FILE_STATUSES.includes(status as WtGraphFileStatus)) return null;
+      const entry: WtGraphFileEntry = { path, status: status as WtGraphFileStatus };
+      const orig = getOwn(re, "orig");
+      if (status === "R") {
+        if (!isFilePathWire(orig)) return null;
+        entry.orig = orig;
+      } else if (orig !== undefined) {
+        return null;
+      }
+      const add = getOwn(re, "add");
+      const del = getOwn(re, "del");
+      const binary = getOwn(re, "binary");
+      if ((add === undefined) !== (del === undefined)) return null;
+      if (add !== undefined) {
+        if (!isNonNegSafeInt(add) || !isNonNegSafeInt(del)) return null;
+        entry.add = add;
+        entry.del = del as number;
+      }
+      if (binary !== undefined) {
+        if (binary !== true || add !== undefined) return null;
+        entry.binary = true;
+      }
+      entries.push(entry);
+    }
+    const total = getOwn(raw, "total");
+    if (!isNonNegSafeInt(total) || total < entries.length) return null;
+    const rawLimits = getOwn(raw, "limits");
+    if (!isPlainObject(rawLimits) || !hasOnlyKeys(rawLimits, FILES_LIMIT_KEYS)) return null;
+    const lf = getOwn(rawLimits, "files");
+    const lb = getOwn(rawLimits, "bytes");
+    const lo = getOwn(rawLimits, "output");
+    if (typeof lf !== "boolean" || typeof lb !== "boolean" || typeof lo !== "boolean") return null;
+    const truncated = getOwn(raw, "truncated");
+    if (typeof truncated !== "boolean" || truncated !== (entries.length < total || lo)) return null;
+    const shallow = getOwn(raw, "shallow");
+    if (shallow !== undefined && shallow !== true) return null;
+    const out: WtGraphCommitFiles = {
+      v: 1,
+      h,
+      entries,
+      total,
+      truncated,
+      limits: { files: lf, bytes: lb, output: lo },
+    };
+    if (shallow === true) out.shallow = true;
+    return out;
+  } catch {
+    return null;
+  }
+}

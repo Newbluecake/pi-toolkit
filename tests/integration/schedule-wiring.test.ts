@@ -155,8 +155,8 @@ async function until(cond: () => boolean, label: string, ms = 8_000): Promise<vo
   throw new Error(`timeout: ${label}`);
 }
 
-describe("background form: create → approve → run → report → note", () => {
-  it("AI creates (pending), user approves, /schedule run executes through the real executor; result is a QUIET message with a report file and a note that becomes `written`", async () => {
+describe("background form: create → run → report → note", () => {
+  it("AI creates (active at once, no approval), /schedule run executes through the real executor; result is a QUIET message with a report file and a note that becomes `written`", async () => {
     const s = await openSession();
     const r = await s.tool({
       action: "create",
@@ -165,14 +165,10 @@ describe("background form: create → approve → run → report → note", () =
       tz: "UTC",
       prompt: "summarize commits",
     });
-    expect(r.details).toMatchObject({ ok: true, pending: true });
+    expect(r.details).toEqual({ ok: true, id: r.details.id });
     const id = r.details.id as string;
-    // not approved ⇒ a run is refused (S2)
-    await s.cmd(`run ${id}`);
-    expect(s.c.notices.at(-1)).toMatch(/E_UNAPPROVED/);
-    expect(harness.requests).toHaveLength(0);
-
-    await s.cmd(`approve ${id}`); // ctx.ui.confirm → true (review dialog)
+    expect(s.ledger().tasks[0]).not.toHaveProperty("approval");
+    // the very first run is accepted — there is no approval step any more
     await s.cmd(`run ${id}`);
     await until(() => s.ledger().runs.some((x: any) => x.state === "completed"), "run completed");
 
@@ -209,7 +205,6 @@ describe("note proof is driven by agent_settled", () => {
     const s = await openSession();
     const r = await s.tool({ action: "create", name: "busy", cron: "0 8 * * *", tz: "UTC", prompt: "p" });
     const id = r.details.id as string;
-    await s.cmd(`approve ${id}`);
     s.c.state.idle = false; // pi is streaming: no idle-time proof can run
     await s.cmd(`run ${id}`);
     await until(() => s.h.sent.some((m) => m.message.details?.kind === "result"), "result sent");
@@ -234,7 +229,6 @@ describe("handoff and its fall-back", () => {
       handoff: true,
     });
     const id = r.details.id as string;
-    await s.cmd(`approve ${id}`);
     await emit(s.h, "before_agent_start", userTrigger(), s.c.ctx); // capability: unknown → observed
     await s.cmd(`run ${id}`);
     await until(() => s.h.sent.some((m) => m.message.details?.kind === "handoff"), "handoff wake sent");
@@ -280,7 +274,6 @@ describe("handoff and its fall-back", () => {
       handoff: true,
     });
     const id = r.details.id as string;
-    await s.cmd(`approve ${id}`);
     await emit(
       s.h,
       "before_agent_start",
@@ -310,7 +303,6 @@ describe("pause revokes a QUEUED handoff in the in-memory dispatcher", () => {
       handoff: true,
     });
     const id = r.details.id as string;
-    await s.cmd(`approve ${id}`);
     await s.cmd(`run ${id}`); // capability stays `unknown` ⇒ the handoff is queued in the dispatcher
     await until(() => s.ledger().runs[0]?.state === "completed", "bg completed");
     await new Promise((r2) => setTimeout(r2, 300));
@@ -341,7 +333,6 @@ describe("I1 review r1 #3: pause while an AUTO once background run is still work
     });
     expect(r.details).toMatchObject({ ok: true });
     const id = r.details.id as string;
-    await s.cmd(`approve ${id}`);
     await emit(s.h, "before_agent_start", userTrigger(), s.c.ctx); // capability observed
     for (let i = 0; i < 80 && harness.requests.length === 0; i++) await vi.advanceTimersByTimeAsync(500);
     expect(harness.requests).toHaveLength(1); // the auto claim ran: the once task is now enabled:false (the claim's own write)
@@ -385,7 +376,6 @@ describe("message form: authorization + settle", () => {
       feishu: true,
     });
     const id = r.details.id as string;
-    await s.cmd(`approve ${id}`);
     await emit(s.h, "before_agent_start", userTrigger(), s.c.ctx);
     await s.cmd(`run ${id}`);
     await until(() => s.h.sent.some((m) => m.message.details?.kind === "message"), "message wake sent");
@@ -436,7 +426,6 @@ describe("message form: authorization + settle", () => {
       prompt: "say hi",
     });
     const id = r.details.id as string;
-    await s.cmd(`approve ${id}`);
     // capability stays `unknown` (no union-shaped event yet) ⇒ the run waits in the queue
     await s.cmd(`run ${id}`);
     await until(() => s.ledger().runs.some((x: any) => x.state === "queued"), "queued");
@@ -463,7 +452,6 @@ describe("local escape hatches", () => {
       prompt: "say hi",
     });
     const id = r.details.id as string;
-    await s.cmd(`approve ${id}`);
     await emit(s.h, "before_agent_start", userTrigger(), s.c.ctx);
     await emit(s.h, "ui_prompt_start", { kind: "select", title: "pick" }, s.c.ctx); // its `end` is lost
     await s.cmd(`run ${id}`);
@@ -500,7 +488,6 @@ describe("modes and teardown", () => {
       feishu: true,
     });
     const id = r.details.id as string;
-    await s.cmd(`approve ${id}`);
     await s.cmd(`run ${id}`);
     await until(() => s.ledger().runs[0]?.state === "running", "running");
     await s.shutdown(); // schedule.shutdown() (closeEpoch) first, then background.dispose()
@@ -531,7 +518,6 @@ describe("clock: due time fires the executor", () => {
     });
     expect(r.details).toMatchObject({ ok: true });
     const id = r.details.id as string;
-    await s.cmd(`approve ${id}`);
     for (let i = 0; i < 80 && !(s.ledger().runs ?? []).some((x: any) => x.state === "completed"); i++)
       await vi.advanceTimersByTimeAsync(500);
     const runs = s.ledger().runs as any[];

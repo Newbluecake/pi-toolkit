@@ -77,17 +77,15 @@ describe("J1 #2 — NumberedCode progressive line-block application", () => {
     expect(w.element.querySelectorAll(".pv-line").length).toBe(149);
     expect(w.element.querySelectorAll("span.tok-keyword").length).toBe(0); // plain first frame
 
-    // wait for SOME highlight, then assert a partial state exists (batches in flight)
-    await vi.waitFor(() => {
-      expect(w.element.querySelectorAll("span.tok-keyword").length).toBeGreaterThan(0);
-    });
     const kw = () => w.element.querySelectorAll("span.tok-keyword").length;
     const total = () => w.element.querySelectorAll(".pv-line").length;
     // intermediate: not all 149 lines highlighted yet (line count never changes).
-    // Poll every MACROTASK — each batch is one timer slot, so a 0 ms sweep catches the
-    // in-between states a coarse waitFor would sleep through.
+    // Sweep every MACROTASK from the first frame on — each batch is one timer slot, so a 0 ms
+    // sweep catches the in-between states. (CI flake 2026-10-28: a coarse `vi.waitFor` for the
+    // FIRST keyword polled at 50 ms and on a slow runner woke only after the last batch, so the
+    // partial state was already gone. Sweeping from mount removes that blind window.)
     let sawPartial = false;
-    for (let i = 0; i < 400 && !sawPartial; i++) {
+    for (let i = 0; i < 20_000 && !sawPartial && kw() < 149; i++) {
       sawPartial = kw() > 0 && kw() < 149 && total() === 149;
       if (!sawPartial) await new Promise((r) => setTimeout(r, 0));
     }
@@ -104,31 +102,59 @@ describe("J1 #2 — NumberedCode progressive line-block application", () => {
     setHighlightWorkerClientForTests(spansClient());
     const text = TS_LINES(200); // ≥4 batches
     const w = mount(NumberedCode, { props: { text, lang: "typescript" } });
-    await vi.waitFor(() => {
-      expect(w.element.querySelectorAll("span.tok-keyword").length).toBeGreaterThan(0);
-    });
-    // select across two plain lines near the tail (a Range the next batch would rewrite)
-    const lines = [...w.element.querySelectorAll<HTMLElement>(".pv-line")];
-    const a = lines[100]!.firstChild!;
-    const b = lines[101]!.lastChild!;
-    const range = document.createRange();
-    range.setStart(a, 0);
-    range.setEnd(b, Math.min(2, (b.textContent ?? "").length)); // clamp — staging rewrites line shapes
-    const sel = document.getSelection();
-    sel?.removeAllRanges();
-    sel?.addRange(range);
-    expect(sel?.isCollapsed).toBe(false);
+    const kw = () => w.element.querySelectorAll("span.tok-keyword").length;
 
-    await new Promise((r) => setTimeout(r, 120)); // several batch intervals pass…
-    const kwHeld = w.element.querySelectorAll("span.tok-keyword").length;
-    expect(kwHeld).toBeGreaterThan(0);
-    expect(kwHeld).toBeLessThan(200); // …and the run is HELD (not completed)
-
-    sel?.removeAllRanges(); // clear ⇒ resume
-    await vi.waitFor(() => {
-      expect(w.element.querySelectorAll("span.tok-keyword").length).toBe(200);
+    // Deterministic timing seam: a MutationObserver callback is a MICROTASK, so it runs
+    // after batch 1's DOM swap but BEFORE the next batch's `setTimeout(step, 0)` macrotask
+    // fires — on any runner, however loaded. (The old `waitFor(kw>0)` → select sequence raced
+    // the chained 0 ms batch timers: on a busy shared CI runner waitFor's 50 ms poll only
+    // observed kw>0 AFTER the whole run had completed, so the selection never held anything
+    // and kwHeld was 200. The product-side deferral check itself is synchronous at each step
+    // boundary — this was a test-side race only.)
+    let heldKw = -1; // partial keyword count AT selection time; -1 = not established yet
+    const observer = new MutationObserver(() => {
+      if (heldKw >= 0 || kw() === 0) return; // wait for the first highlight swap
+      // select across two plain lines near the tail (a Range the next batch would rewrite)
+      const lines = [...w.element.querySelectorAll<HTMLElement>(".pv-line")];
+      const a = lines[100]!.firstChild!;
+      const b = lines[101]!.lastChild!;
+      const range = document.createRange();
+      range.setStart(a, 0);
+      range.setEnd(b, Math.min(2, (b.textContent ?? "").length)); // clamp — staging rewrites line shapes
+      const sel = document.getSelection();
+      sel?.removeAllRanges();
+      sel?.addRange(range);
+      heldKw = kw();
     });
-    expect(w.element.textContent).toBe(text);
+    observer.observe(w.element, { childList: true, subtree: true, characterData: true });
+    try {
+      await vi.waitFor(
+        () => {
+          expect(heldKw).toBeGreaterThanOrEqual(0);
+        },
+        { timeout: 4000 },
+      );
+      observer.disconnect();
+      expect(heldKw).toBeGreaterThan(0); // an early prefix of batches landed…
+      expect(heldKw).toBeLessThan(200); // …with the remaining batches still pending
+      const sel = document.getSelection();
+      expect(sel?.isCollapsed).toBe(false);
+
+      await new Promise((r) => setTimeout(r, 650)); // cross ≥1 deferral poll (500 ms)
+      expect(kw()).toBe(heldKw); // HELD — no further batch landed while the selection stood
+      expect(w.element.textContent).toBe(text); // staging never corrupts the text
+
+      sel?.removeAllRanges(); // clear ⇒ resume
+      await vi.waitFor(
+        () => {
+          expect(kw()).toBe(200);
+        },
+        { timeout: 4000 },
+      );
+      expect(w.element.textContent).toBe(text);
+    } finally {
+      observer.disconnect();
+    }
     w.unmount();
   });
 

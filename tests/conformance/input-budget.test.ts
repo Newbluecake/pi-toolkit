@@ -92,15 +92,28 @@ async function realSession(baseUrl: string, tools: string[] = ["read"], withExte
       ? [
           (pi) => {
             markChildExtensionActivated();
+            // Hand-written minimal settings stub (not the production normalized shape):
+            // fast.enabled:false isolates the input-budget hooks from Fast child wiring
+            // (wireChildSession reads settings.fast.enabled unconditionally — it must stay
+            // required in production code, so the stub supplies it instead).
             wireChildSession(pi, {
               cacheTtl: { keepalive: false },
               compact: { enabled: false },
+              fast: { enabled: false },
             } as unknown as AgentSettings);
           },
         ]
       : [],
   });
   await loader.reload();
+  // The SDK's DefaultResourceLoader swallows extension constructor errors into
+  // extensionsResult.errors (0 registered hooks => measured 0, over-budget never aborts,
+  // budget tests silently pass vacuously). Gate on the public loader surface so a
+  // swallowed extension failure fails loudly instead of running a vacuous budget test.
+  const extensionErrors = loader.getExtensions().errors;
+  if (extensionErrors.length > 0) {
+    throw new Error(`extension load errors (budget test would be vacuous): ${JSON.stringify(extensionErrors)}`);
+  }
   const selectedModel = model(baseUrl);
   const modelRuntime = {
     streamSimple: (m: typeof selectedModel, context: any, options: any) =>

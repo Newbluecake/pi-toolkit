@@ -225,6 +225,7 @@ export const QUERY_OPS = [
   "untrustLoginIps",
   "deleteAllSessions",
   "setPassword",
+  "rehashPassword",
   "markInitialLogin",
   "purgeExpired",
   "revokeAllSessions",

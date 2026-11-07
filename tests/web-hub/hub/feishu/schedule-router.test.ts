@@ -5,7 +5,8 @@ import {
   parseFeishuCommand,
   type FeishuRouterIntent,
 } from "../../../../src/web-hub/hub/feishu/router.js";
-import { cleanupF6, f6Rig, normalizedMessage, OTHER } from "../../../fixtures/feishu/f6.js";
+import { createBindingTransfer } from "../../../../src/web-hub/hub/feishu/bindings-transfer.js";
+import { cleanupF6, f6Rig, normalizedMessage, OTHER, untilF6 } from "../../../fixtures/feishu/f6.js";
 
 afterEach(cleanupF6);
 const ON = { schedule: true } as const;
@@ -21,14 +22,17 @@ describe("parseFeishuCommand with schedule enabled", () => {
     ["/schedule run 1 2", { op: "help" }],
     ["/schedule rm 1", { op: "help" }],
     ["/schedule\nbody", { op: "help" }],
-    ["/scheduler", { op: "help", unknown: "/scheduler" }],
+    ["/scheduler", { op: "prompt", text: "/scheduler" }],
     ["//schedule", { op: "prompt", text: "/schedule" }],
   ])("%s", (text, expected) => {
     expect(parseFeishuCommand(text as string, ON)).toEqual(expected);
   });
-  it("schedule disabled/absent ⇒ unknown command, byte-identical to before", () => {
-    expect(parseFeishuCommand("/schedule")).toEqual({ op: "help", unknown: "/schedule" });
-    expect(parseFeishuCommand("/schedule run 1", { schedule: false })).toEqual({ op: "help", unknown: "/schedule" });
+  it("schedule disabled/absent ⇒ original plain text, not an executable bot command", () => {
+    expect(parseFeishuCommand("/schedule")).toEqual({ op: "prompt", text: "/schedule" });
+    expect(parseFeishuCommand("/schedule run 1", { schedule: false })).toEqual({
+      op: "prompt",
+      text: "/schedule run 1",
+    });
   });
 });
 
@@ -39,6 +43,7 @@ async function scheduleRouter() {
     state: r.state,
     sessions: r.sessions,
     requests: r.requests,
+    bindingTransfer: createBindingTransfer({ state: r.state, log: () => {} }),
     groupRootTopics: false,
     spawnScope: "known",
     schedule: true,
@@ -86,14 +91,50 @@ describe("router /schedule", () => {
     void run;
   });
 
-  it("a router without the schedule flag treats /schedule as an unknown command", async () => {
-    const r = await f6Rig();
-    const p = await r.router.prepare(normalizedMessage("u", "/schedule"), r.identity);
+  it("a router without schedule submits the original text once through normal admission", async () => {
+    const r = await f6Rig({ debounceMs: 0 });
+    const text = "/schedule run 1\n  /reload raw  ";
+    const deliver = async () => {
+      const p = await r.router.prepare(normalizedMessage("u", text), r.identity);
+      await r.state.commit();
+      p.durable?.();
+      await r.requests.flushChat("chat");
+    };
+    await deliver();
+    await untilF6(() => r.request.mock.calls.length === 1);
+    const frame = r.request.mock.calls[0]![0];
+    expect(frame.cmd.op).toBe("prompt");
+    if (frame.cmd.op !== "prompt") throw new Error("not a text admission");
+    expect(frame.cmd.text.slice(frame.cmd.text.indexOf("\n") + 1)).toBe(text);
+    expect(r.state.requests.list()[0]?.payload?.body).toBe(text);
+    expect(r.intents).toEqual([]); // no schedule/schedule-run or unknown-help intent
+    await deliver();
+    expect(r.request).toHaveBeenCalledTimes(1);
+    r.state.bindings.remove("p2p:chat");
+    const refused = await r.router.prepare(normalizedMessage("unbound", text), r.identity);
     await r.state.commit();
-    p.durable?.();
-    expect(r.intents.map((i) => (i.type === "notice" ? `${i.code}:${i.unknownCommand}` : i.type))).toEqual([
-      "help:/schedule",
-    ]);
+    refused.durable?.();
+    expect(r.intents).toMatchObject([{ type: "notice", code: "no-session-bound" }]);
+    const stranger = await r.router.prepare(normalizedMessage("stranger", text), {
+      ...r.identity,
+      senderOpenId: OTHER,
+    });
+    expect(stranger).toEqual({ drop: true });
+    expect(r.request).toHaveBeenCalledTimes(1);
+  });
+
+  it("/scheduler is plain text even when schedule is enabled; enabled bad arguments remain help", async () => {
+    const { r, intents, run } = await scheduleRouter();
+    const text = "/scheduler  raw  ";
+    await run("prefix", text);
+    await r.requests.flushChat("chat");
+    await untilF6(() => r.request.mock.calls.length === 1);
+    expect(r.request.mock.calls[0]![0].cmd).toMatchObject({ op: "prompt" });
+    const cmd = r.request.mock.calls[0]![0].cmd;
+    expect(cmd.op === "prompt" && cmd.text.slice(cmd.text.indexOf("\n") + 1)).toBe(text);
+    await run("bad-args", "/schedule run nope");
+    expect(intents).toMatchObject([{ type: "notice", code: "help" }]);
+    expect(r.request).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -103,6 +144,7 @@ async function scheduleRouterRaw() {
     state: r.state,
     sessions: r.sessions,
     requests: r.requests,
+    bindingTransfer: createBindingTransfer({ state: r.state, log: () => {} }),
     groupRootTopics: false,
     spawnScope: "known",
     schedule: true,

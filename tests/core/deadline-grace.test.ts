@@ -287,6 +287,19 @@ describe("core/deadline: extendability", () => {
 });
 
 describe("core/deadline: graceWindow", () => {
+  it("#62: actual default runtime grace is 600 seconds, including nested runs; fixed remains none", () => {
+    const s = state({ deadlines: { deadlineAt: 1_800_000, hardDeadlineAt: 12_600_000 } });
+    expect(graceWindow(s, DEFAULT_BUDGET, 1_800_000)).toBe(2_400_000);
+    const fixed = state({ deadlines: { deadlineAt: 1_800_000, hardDeadlineAt: 1_800_000 } });
+    expect(
+      graceWindow(
+        fixed,
+        applyBudgetPolicy(DEFAULT_BUDGET, { fixedDeadline: true, extensionsEnabled: true }),
+        1_800_000,
+      ),
+    ).toBeUndefined();
+    expect(DEFAULT_BUDGET.minTotalMs).toBe(1_800_000);
+  });
   it("is at + totalGraceMs clamped to the hard ceiling (D-7)", () => {
     const b = { ...budget, totalGraceMs: 90_000 };
     expect(graceWindow(state({}), b, 100_000)).toBe(190_000);

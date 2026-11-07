@@ -97,6 +97,28 @@ export function setHighlightWorkerClientForTests(client: HighlightWorkerClient |
   testWorkerClient = client;
 }
 
+/* ------------------------------------------------------------------------- *
+ * 2026-11-03 transcript-flood fix (root cause: a sub-agent detail page mounts ~300 history
+ * CodeBlocks at once; every 150 ms debounce fires into the SAME worker's sequential queue,
+ * the queue tail outlives the 3 s deadline ⇒ killWorker()+failAllPending() stampedes every
+ * in-flight request onto the main-thread idle tokenize ⇒ multi-second render-process long
+ * tasks, the whole page frozen). Two guards on the NON-virtual path (`useHighlightParts`):
+ *
+ *  1. in-flight cap below: at most HIGHLIGHT_MAX_IN_FLIGHT worker requests process-wide;
+ *     over-cap history blocks render plain (a later invalidation — text change, remount —
+ *     can still highlight them; they are read-far-less-often history rows, not the stream
+ *     tail). A sticky-DEAD client is exempt (`unavailable === true`): its requests resolve
+ *     `fallback` synchronously without occupying a worker slot, and capping them would
+ *     strangle the documented K10/§5.1 main-thread degrade for CSP-blocked workers.
+ *  2. `onTimeout: "plain"` on the request itself (see highlight-worker-client.ts): when a
+ *     deadline still fires, the request resolves plain instead of re-running the same slow
+ *     tokenize on the main thread.
+ * ------------------------------------------------------------------------- */
+
+/** Process-wide in-flight cap for non-virtual highlight worker requests (see above). */
+export const HIGHLIGHT_MAX_IN_FLIGHT = 3;
+let highlightInFlight = 0;
+
 export function useHighlightParts(
   source: () => { readonly text: string; readonly lang: string | null },
   opts?: UseHighlightPartsOpts,
@@ -193,9 +215,17 @@ export function useHighlightParts(
     if (lang === null || !shouldHighlight(text)) return; // original gates stand (J1 choice)
     const myEpoch = epoch;
     const client = opts?.workerClient ?? testWorkerClient ?? getHighlightWorkerClient();
-    const handle = client.request(text, lang, { maxTokens: HIGHLIGHT_MAX_TOKENS });
+    // Flood guard (see the module-level note): cap concurrent worker requests; a sticky-dead
+    // client is exempt — its request never reaches a worker and resolves `fallback` at once.
+    const capped = !client.unavailable;
+    if (capped && highlightInFlight >= HIGHLIGHT_MAX_IN_FLIGHT) return; // plain stands
+    if (capped) highlightInFlight += 1;
+    const handle = client.request(text, lang, { maxTokens: HIGHLIGHT_MAX_TOKENS, onTimeout: "plain" });
     pendingWorker = handle;
     void handle.result.then((outcome) => {
+      // EVERY settle path (spans/plain/fallback/cancelled) funnels through here — release the
+      // in-flight slot BEFORE the epoch guard so a superseded/cancelled request never leaks it.
+      if (capped) highlightInFlight -= 1;
       if (disposed || myEpoch !== epoch) return; // superseded (epoch 作废) — drop silently
       pendingWorker = null;
       if (outcome.status === "spans") {
@@ -203,13 +233,19 @@ export function useHighlightParts(
         parts.value = decoded === null ? null : (markRaw(decoded) as FlatPart[]); // invalid ⇒ plain
         return;
       }
-      if (outcome.status === "fallback") queueMainThread(myEpoch); // worker out ⇒ §5.1
-      // "plain" (grammar/budget/encode) and "cancelled": plain stands, nothing to do
+      if (outcome.status === "fallback") queueMainThread(myEpoch); // worker STICKY-dead ⇒ §5.1
+      // "plain" (grammar/budget/encode, or a flood-timeout with onTimeout:"plain") and
+      // "cancelled": plain stands, nothing to do — NO main-thread retry.
     });
   }
 
+  // 2026-11-03: `prism.value` was REMOVED from this watcher's dependencies. The worker path
+  // never needs the main-thread engine, and having it there meant the engine chunk's late
+  // arrival fired dropPending()+re-request on EVERY mounted instance at once — the ×2 flood
+  // amplifier behind the detail-page freeze (hundreds of in-flight worker requests cancelled
+  // and re-issued mid-stampede). Text/lang changes keep the exact old behavior.
   watch(
-    () => [source().text, source().lang, prism.value] as const,
+    () => [source().text, source().lang] as const,
     () => {
       dropPending(); // also the text-change path: pending work for the OLD text is dropped
       if (immediate && prism.value !== null) {
@@ -229,6 +265,17 @@ export function useHighlightParts(
     },
     { immediate: true },
   );
+
+  // Only the §5.2 immediate path still reacts to the engine's late ARRIVAL (a cold engine
+  // renders plain first and swaps exactly once when it lands — the small-file contract).
+  // The debounced/worker path deliberately does not (see the watcher's note above).
+  if (immediate) {
+    watch(prism, (engine) => {
+      if (disposed || engine === null) return; // failed load ⇒ plain forever
+      dropPending(); // cancel any debounced worker request — the sync tokenize supersedes it
+      recomputeMain(engine);
+    });
+  }
 
   onBeforeUnmount(() => {
     disposed = true;

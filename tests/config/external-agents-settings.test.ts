@@ -2,13 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  DEFAULT_EXTERNAL_AGENTS_SETTINGS,
-  loadSettings,
-  loadSettingsFromFile,
-  parseExternalAgentsSettings,
-  TIME_SETTING_MS_PATHS,
-} from "../../src/config/settings.js";
+import { loadSettings, loadSettingsFromFile, TIME_SETTING_MS_PATHS } from "../../src/config/settings.js";
+import { DEFAULT_EXTERNAL_AGENTS_SETTINGS, parseExternalAgentsSettings } from "../../src/external-agent/settings.js";
 import { secondsKeyOf } from "../../src/config/time-units.js";
 
 /**

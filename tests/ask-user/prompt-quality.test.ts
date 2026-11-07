@@ -8,11 +8,11 @@ const EXPECTED_DESCRIPTION = `Ask the user to resolve ambiguity you cannot resol
 
 Do NOT use this tool to outsource judgment you should make — if you can form a defensible recommendation from the codebase, proceed and state your choice. Do NOT use for trivia answerable by reading code/docs, or for simple confirmations ("I'll delete X") where plain text suffices. You cannot use this tool to collect free-form requirements, long-form feedback, or multi-paragraph input — it returns short selections only.
 
-If you recommend an option, prefix its label with "(Recommended)" and list it first. For structured multi-option decisions, prefer this tool over plain-text questions; for everything else, reply in plain text. In multi-question mode give each question a short header (<=12 chars) for the tab bar; if you omit it, one is derived from the question text.
+If you recommend an option, prefix its label with "(Recommended)" and list it first. For structured multi-option decisions, prefer this tool over plain-text questions; for everything else, reply in plain text.
 
-The user can skip any question instead of answering it. A skipped question comes back in answers as {selected: [], other: null, skipped: true} — treat it as "you decide": proceed with your own judgment for that question and do NOT immediately re-ask it.
+The user can skip any question. A skipped question comes back as {selected: [], other: null, skipped: true} — treat it as "you decide": proceed with your own judgment and do NOT immediately re-ask it.
 
-If a previous ask_user call was paused by a background-completion interrupt and the background result already settles the question(s), call {"dismissParked":true} (no questions) once to clear the parked entries instead of re-asking. dismissParked cannot be combined with questions.
+If a previous ask_user call was paused by a background-completion interrupt and the background result already settles the question(s), call {"dismissParked":true} (no questions) once to clear the parked entries instead of re-asking.
 
 Examples:
 {"questions":[{"question":"Which DB?","context":"Need ACID + JSON columns.","options":[{"label":"(Recommended) Postgres","description":"Mature, strong consistency."},{"label":"SQLite","description":"Zero-ops, embedded."}]}]}
@@ -20,19 +20,10 @@ Examples:
 {"questions":[{"header":"DB","question":"Which database?","options":[{"label":"Postgres","description":"..."},{"label":"SQLite","description":"..."}]},{"header":"Region","question":"Which region?","options":[{"label":"us-east-1","description":"..."},{"label":"eu-west-1","description":"..."}]}]}
 
 Don't:
-- Passing options as a string array ("options":["A","B"]) — each option must be {"label","description"}.
-- Flattening question/header/options to the top level — wrap them in questions:[...].
-- Including an "Other" option — it is added automatically.`;
+- Flattening question/header/options to the top level — wrap them in questions:[...].`;
 const EXPECTED_GUIDELINES = [
-  "Use ask_user only when the request has ≥2 reasonable approaches you cannot resolve from context. Models over-ask because asking feels safer than deciding — resist this: if context makes the answer clear, proceed without asking.",
-  "Gather context first (read/grep) and pass a short summary via the context field — don't ask blind. If the answer becomes clear after gathering context, proceed and state your choice.",
-  "Ask focused questions; each question = one decision with mutually exclusive options. Batch related decisions into one call (1-4 questions).",
-  "In multi-question mode (2-4 questions) give each question a short header (<=12 chars) — it labels the tab; an omitted header is auto-derived from the question text.",
-  "Do NOT use ask_user for trivia answerable by reading code/docs, or to confirm simple actions ('I'll delete X') — plain text suffices there.",
-  "Do NOT outsource judgment you can make yourself: if you can form a defensible recommendation from the codebase, proceed and state it instead of asking.",
-  "Do NOT include an 'Other' option yourself — it is always available automatically.",
-  "The user may skip any question; a skipped answer has skipped:true and means 'you decide' — do not immediately re-ask it.",
-  "If a background completion already settles question(s) parked by an earlier interrupt, call ask_user({dismissParked:true}) once to clear them instead of re-asking.",
+  "Models over-ask because asking feels safer than deciding — resist this: if context makes the answer clear, proceed and state your choice.",
+  "Gather context first (read/grep) and pass a short summary via the context field — don't ask blind. Batch related decisions into one call (1-4 questions).",
 ];
 
 function registeredTool(): any {
@@ -53,10 +44,15 @@ describe("registered prompt quality", () => {
     expect(tool.description).toBe(EXPECTED_DESCRIPTION);
     expect(tool.description).toContain('"options":[{"label"');
     expect(tool.description).toContain("Don't:");
-    expect(tool.description).toContain('Passing options as a string array ("options":["A","B"])');
-    expect(tool.description).toContain("give each question a short header (<=12 chars)");
     expect(tool.description).toContain("Flattening question/header/options to the top level");
-    expect(tool.description).toContain('Including an "Other" option');
+    // Contracts stated once, in the parameter descriptions (not repeated in description/guidelines):
+    const question = tool.parameters.properties.questions.items;
+    expect(question.properties.options.description).toContain("never a bare string");
+    expect(question.properties.options.description).toContain("'Other' option");
+    expect(question.properties.header.description).toContain(`<=${HEADER_MAX_CHARS} chars`);
+    expect(tool.description).toContain("skipped: true");
+    expect(tool.description).toContain('{"dismissParked":true}');
+    expect(tool.parameters.properties.dismissParked.description).toContain("Cannot be combined with questions");
   });
 
   it("keeps schema descriptions consistent with runtime validation thresholds", () => {

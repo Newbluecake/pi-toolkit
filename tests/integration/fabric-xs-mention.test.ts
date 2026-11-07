@@ -218,6 +218,45 @@ describe("MW @session mention wiring (real hub × real stacks)", () => {
     expect(errors[0]).toMatchObject({ display: true, triggerTurn: false, details: { source: "mention-session" } });
     expect(errors[0].content).toContain("找不到会话");
   }, 40_000);
+  it("2026-11-04 mention-handled fix: a handled mention input reports the web dispatch — the ctl entry is consumed and never decays to unconfirmed(unobserved)", async () => {
+    h = new XsHarness();
+    const { hub, a } = await joinedPair(h);
+    const label = "webfixer";
+    const text = `@${label} hello from the web`;
+    const cmdId = `web-mention-${Date.now()}`;
+
+    // 1) Dispatch the web prompt BEFORE the label exists: handlePrompt's SYNC mention check
+    //    misses (no such subagent label, no such session name) ⇒ native dispatch ⇒ the ledger
+    //    entry sits `dispatched`. The fixture's sendUserMessage fires no input event, so the
+    //    hub-side observer stays short-circuited — exactly the incident state (the 3s HTTP
+    //    reply answers the legacy "unobserved").
+    const result = await hub.rpc("webPrompt", { sessionId: (await a.rpc("inspect")).sessionId, text, cmdId });
+    expect(result).toMatchObject({ ok: true, data: { op: "prompt", delivery: "unobserved" } });
+
+    // 2) Register the label (a run owns it), then let the REAL mention input interceptor handle
+    //    the SAME text through the TUI input chain: it answers {action:"handled"} — pi's chain
+    //    would stop before the web observer, and the 2026-11-04 fix reports the consumption
+    //    (onHandled → WebHubControl.noteInputHandled → CommandHandler.onInputHandled).
+    const run = await a.rpc("tool", {
+      name: "Agent",
+      params: { prompt: "x", description: label, subagent_type: "general-purpose" },
+    });
+    expect(run.label).toBe(label);
+    expect(wasHandled(await mention(a, text))).toBe(true);
+
+    // 3) Past the 30s unobserved finalize the ctl slot must carry `consumed` for that cmdId —
+    //    never `unconfirmed` ("sent · unconfirmed"), in any frame, at any time.
+    await new Promise((r) => setTimeout(r, 31_000));
+    const frames = (await hub.rpc("inspect")).ctlFrames as Array<{
+      items: Array<{ cmdId: string; state: string }>;
+    }>;
+    const states = frames.flatMap((f) => f.items.filter((i) => i.cmdId === cmdId).map((i) => i.state));
+    expect(states.length).toBeGreaterThan(0);
+    expect(states).toContain("consumed");
+    expect(states).not.toContain("unconfirmed");
+    expect(states.at(-1)).toBe("consumed");
+  }, 70_000);
+
   it("a subagent label wins over a same-named session (cache warm, session unique): routed to the subagent, B untouched", async () => {
     h = new XsHarness();
     await h.boot("hub");

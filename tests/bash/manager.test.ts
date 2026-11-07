@@ -15,6 +15,7 @@ import {
 import { createJobStore, type JobStore } from "../../src/bash/job-store.js";
 import type {
   JobExit,
+  JobStdioOptions,
   KillJobTreeOptions,
   KillOutcome,
   PidIdentity,
@@ -32,6 +33,8 @@ import {
 } from "../../src/bash/types.js";
 import { FakeClock } from "../../src/core/clock.js";
 import { handoffInProcess } from "../../src/bash/session-dirs.js";
+import { readBashJobTail } from "../../src/bash/notify.js";
+import { createBashJobTool } from "../../src/bash/job-tool.js";
 
 /**
  * §3 manager suite. The process boundary is faked (`tests/bash/process.test.ts`
@@ -67,6 +70,7 @@ class FakeProc {
       stderr: this.stderr,
       processExitPromise: this.processExitPromise,
       drainedPromise: this.drainedPromise,
+      logWrittenByChild: false,
       ...(this.procStartTime !== undefined ? { procStartTime: this.procStartTime } : {}),
     };
   }
@@ -101,7 +105,7 @@ class FakePort implements ProcessPort {
   readonly ownership = new Map<number, PidOwnership>();
   readonly alivePids = new Set<number>();
 
-  async spawnJob(command: string, cwd: string, env?: NodeJS.ProcessEnv): Promise<SpawnedJob> {
+  async spawnJob(command: string, cwd: string, env?: NodeJS.ProcessEnv, _stdio?: JobStdioOptions): Promise<SpawnedJob> {
     this.spawns.push({ command, cwd, ...(env !== undefined ? { env } : {}) });
     if (this.spawnError) throw this.spawnError;
     const proc = new FakeProc(this.nextPid++, this.procStartTime);
@@ -1180,6 +1184,123 @@ describe("bash job manager: recover (§3.6)", () => {
 });
 
 /**
+ * cwd-strict adoption (user-ruled 2026-11-02): with `sessionCwd` set, recover()
+ * refuses to adopt non-terminal records whose resolved `record.cwd` differs —
+ * no entries (invisible to bash_job list/status/kill/extend), no polling, no
+ * notice, no kill, no status change. staged / foreign-live-host / §3.9
+ * subagent branches all sit BEFORE the gate and keep their semantics.
+ */
+describe("bash job manager: cwd-strict adoption (recover sessionCwd filter)", () => {
+  it("a matching cwd is adopted exactly as without the filter", async () => {
+    const h = await harness({ sessionCwd: "/repo" });
+    await seed(h.store, "b_CWD00001", { status: "running", pid: 9111, spawnedAt: 600, command: "npm run build" });
+    h.port.ownership.set(9111, "alive");
+
+    const summary = await h.manager.recover();
+    expect(summary).toMatchObject({
+      adopted: ["b_CWD00001"],
+      cwdSkipped: [],
+      exitedUnknown: [],
+      orphaned: [],
+      foreign: [],
+    });
+    expect(h.manager.get("b_CWD00001")?.backgroundedAt).toBe(1_000);
+  });
+
+  it("omitting sessionCwd keeps the legacy adopt-any-cwd behaviour", async () => {
+    const h = await harness();
+    await seed(h.store, "b_CWD1GY01", { status: "running", pid: 9112, spawnedAt: 600, cwd: "/elsewhere" });
+    h.port.ownership.set(9112, "alive");
+
+    const summary = await h.manager.recover();
+    expect(summary.adopted).toEqual(["b_CWD1GY01"]);
+    expect(summary.cwdSkipped).toEqual([]);
+  });
+
+  it("a foreign-cwd orphan is cwdSkipped: invisible, never settled, never notified", async () => {
+    const h = await harness({ sessionCwd: "/repo" });
+    await seed(h.store, "b_CWD00001", {
+      status: "running",
+      pid: 9110,
+      spawnedAt: 600,
+      backgroundedAt: 650,
+      cwd: "/elsewhere",
+    });
+    // Even a certainly-dead pid must not be adjudicated: dead would settle+
+    // notify from the wrong session.
+    h.port.ownership.set(9110, "dead");
+
+    const summary = await h.manager.recover();
+    expect(summary.cwdSkipped).toEqual(["b_CWD00001"]);
+    expect(summary.adopted).toEqual([]);
+    expect(summary.exitedUnknown).toEqual([]);
+    expect(summary.orphaned).toEqual([]);
+    // Not in entries ⇒ invisible to every bash_job surface.
+    expect(h.manager.get("b_CWD00001")).toBeUndefined();
+    expect(h.manager.list().some((r) => r.jobId === "b_CWD00001")).toBe(false);
+    expect(h.port.killCalls).toEqual([]);
+
+    // Clock advances + polls + settles: nothing ever touches it.
+    h.clock.advance(2_000);
+    await settle();
+    h.clock.advance(2_000);
+    await settle();
+    const skipped = await h.store.load("b_CWD00001");
+    expect(skipped).toMatchObject({ status: "running" });
+    // Never notified: the key was never stamped (undefined ⇒ absent on disk).
+    expect(skipped?.notifiedAt).toBeUndefined();
+    expect(h.notified).toEqual([]);
+    expect(h.manager.get("b_CWD00001")).toBeUndefined();
+  });
+
+  it("§3.9 subagent orphans are killed regardless of cwd (the filter never shields them)", async () => {
+    const h = await harness({ sessionCwd: "/repo" });
+    await seed(h.store, "b_CWDSKB01", {
+      status: "running",
+      pid: 9113,
+      spawnedAt: 600,
+      owner: "subagent",
+      cwd: "/elsewhere",
+    });
+    h.port.ownership.set(9113, "alive");
+
+    const summary = await h.manager.recover();
+    expect(summary.subagentKilled).toEqual(["b_CWDSKB01"]);
+    expect(summary.cwdSkipped).toEqual([]);
+    expect(h.port.killCalls).toHaveLength(1);
+    expect(h.port.killCalls[0]?.pid).toBe(9113);
+  });
+
+  it("a foreign live-host job stays foreign even with a mismatching cwd", async () => {
+    const h = await harness({ sessionCwd: "/repo" });
+    await seed(h.store, "b_CWDFRG01", {
+      status: "running",
+      pid: 9114,
+      spawnedAt: 600,
+      hostPid: 7901,
+      cwd: "/elsewhere",
+    });
+    h.port.alivePids.add(7901);
+    h.port.ownership.set(9114, "alive");
+
+    const summary = await h.manager.recover();
+    expect(summary.foreign).toEqual(["b_CWDFRG01"]);
+    expect(summary.cwdSkipped).toEqual([]);
+    expect(h.manager.get("b_CWDFRG01")?.status).toBe("running");
+  });
+
+  it("a staged job still fails with its spawn outcome lost, regardless of cwd", async () => {
+    const h = await harness({ sessionCwd: "/repo" });
+    await seed(h.store, "b_CWDSTG01", { status: "staged", cwd: "/elsewhere" });
+
+    const summary = await h.manager.recover();
+    expect(summary.lostStaged).toEqual(["b_CWDSTG01"]);
+    expect(summary.cwdSkipped).toEqual([]);
+    expect(await h.store.load("b_CWDSTG01")).toMatchObject({ status: "failed" });
+  });
+});
+
+/**
  * 2026-10-19 live bug: a backgrounded job (`sleep 1260 && echo …`) whose
  * process exited while unmanaged stayed "running" in `bash_job list` for
  * hours after an in-process /reload (same store, same host pid) until a
@@ -2133,5 +2254,409 @@ describe("bash job manager: recover() §3.9 subagent branch (T14)", () => {
     expect(summary.partial).toBe(true);
     expect(summary.pruned).toEqual(["b_ALREADY1"]);
     expect(manager.list()).toEqual([]);
+  });
+});
+
+// ── Issue #73 (plan A+): the child tree writes the log, the wrapper writes the
+// exit code — recovery reads both instead of conceding "exit code lost". ─────
+
+describe("bash job manager: exit-file recovery (issue #73)", () => {
+  /** Seed a `running` backgrounded job whose pid is dead, plus its on-disk artefacts. */
+  async function seedDead(
+    h: Harness,
+    jobId: string,
+    pid: number,
+    files: { log?: string; exit?: string | undefined },
+    patch: Partial<JobRecord> = {},
+  ): Promise<void> {
+    await seed(h.store, jobId, { status: "running", pid, spawnedAt: 600, backgroundedAt: 650, ...patch });
+    h.port.ownership.set(pid, "dead");
+    await mkdir(h.store.dir, { recursive: true });
+    if (files.log !== undefined) await writeFile(h.store.logPath(jobId), files.log, "utf8");
+    if (files.exit !== undefined) await writeFile(h.store.exitPath(jobId), files.exit, "utf8");
+  }
+
+  it("recover(): dead pid + exit file 0 → completed, footer appended, logBytes from the file, notified once", async () => {
+    const h = await harness();
+    await seedDead(h, "b_EX1T0001", 9201, { log: "build ok\n", exit: "0\n" });
+
+    const summary = await h.manager.recover();
+    expect(summary.recovered).toEqual(["b_EX1T0001"]);
+    expect(summary.exitedUnknown).toEqual([]);
+    expect(summary.pendingNotices).toEqual(["b_EX1T0001"]);
+
+    const record = h.manager.get("b_EX1T0001")!;
+    expect(record.status).toBe("completed");
+    expect(record.exitCode).toBe(0);
+    const log = await readFile(h.store.logPath("b_EX1T0001"), "utf8");
+    expect(log.startsWith("build ok\n")).toBe(true);
+    expect(log.trimEnd().split("\n").at(-1)).toMatch(/^\[pi-subagent\] job b_EX1T0001 completed \(exit 0\) after /);
+    // The record's byte count is the real file size, not the stale 0.
+    expect(record.logBytes).toBe(log.length);
+    expect((await h.store.load("b_EX1T0001"))?.logBytes).toBe(log.length);
+
+    h.clock.advance(2_000);
+    await waitFor(() => h.notified.length > 0, "recovered job notified");
+    await settle();
+    expect(h.notified.map((r) => [r.jobId, r.status, r.exitCode])).toEqual([["b_EX1T0001", "completed", 0]]);
+  });
+
+  it("recover(): a non-zero exit file → failed(exitCode)", async () => {
+    const h = await harness();
+    await seedDead(h, "b_EX1T0002", 9202, { log: "boom\n", exit: "3\n" });
+    const summary = await h.manager.recover();
+    expect(summary.recovered).toEqual(["b_EX1T0002"]);
+    expect(h.manager.get("b_EX1T0002")).toMatchObject({ status: "failed", exitCode: 3 });
+  });
+
+  it("recover(): a job that finished while nobody watched becomes notification-eligible even without backgroundedAt", async () => {
+    const h = await harness();
+    // A foreground-started job whose pi died before the tool call returned:
+    // no `backgroundedAt`. It is ownerless now, exactly like an adopted one.
+    const { backgroundedAt: _unused, ...rest } = await seed(h.store, "b_EX1T0003", {
+      status: "running",
+      pid: 9203,
+      spawnedAt: 600,
+    });
+    void rest;
+    h.port.ownership.set(9203, "dead");
+    await writeFile(h.store.logPath("b_EX1T0003"), "x\n", "utf8");
+    await writeFile(h.store.exitPath("b_EX1T0003"), "0\n", "utf8");
+    const summary = await h.manager.recover();
+    expect(summary.recovered).toEqual(["b_EX1T0003"]);
+    expect(h.manager.get("b_EX1T0003")?.backgroundedAt).toBeTypeOf("number");
+    expect(summary.pendingNotices).toEqual(["b_EX1T0003"]);
+  });
+
+  it("recover(): dead pid and NO exit file → still exited_unknown (the code really is lost)", async () => {
+    const h = await harness();
+    await seedDead(h, "b_N0EX1T01", 9204, { log: "partial\n" });
+    const summary = await h.manager.recover();
+    expect(summary.exitedUnknown).toEqual(["b_N0EX1T01"]);
+    expect(summary.recovered).toEqual([]);
+    expect(h.manager.get("b_N0EX1T01")).toMatchObject({ status: "exited_unknown", exitCode: null });
+  });
+
+  it("recover(): a torn / empty / garbage exit file is 'no code', never a guess", async () => {
+    const h = await harness();
+    await seedDead(h, "b_B4DEX1T1", 9205, { exit: "" });
+    await seedDead(h, "b_B4DEX1T2", 9206, { exit: "oops\n" });
+    await seedDead(h, "b_B4DEX1T3", 9207, { exit: "999\n" });
+    const summary = await h.manager.recover();
+    expect(summary.exitedUnknown.sort()).toEqual(["b_B4DEX1T1", "b_B4DEX1T2", "b_B4DEX1T3"]);
+    expect(summary.recovered).toEqual([]);
+  });
+
+  it("recover(): an alive or unverifiable pid never consults the exit file (pid-reuse safety unchanged)", async () => {
+    const h = await harness();
+    await seed(h.store, "b_A11VE0E1", { status: "running", pid: 9208, spawnedAt: 600, backgroundedAt: 650 });
+    await seed(h.store, "b_7N5AFE01", { status: "running", pid: 9209, spawnedAt: 600, backgroundedAt: 650 });
+    h.port.ownership.set(9208, "alive");
+    h.port.ownership.set(9209, "unsafe");
+    // A (stale, e.g. from a previous run of a recycled id) exit file must not matter.
+    await mkdir(h.store.dir, { recursive: true });
+    await writeFile(h.store.exitPath("b_A11VE0E1"), "0\n", "utf8");
+    await writeFile(h.store.exitPath("b_7N5AFE01"), "0\n", "utf8");
+
+    const summary = await h.manager.recover();
+    expect(summary.adopted).toEqual(["b_A11VE0E1"]);
+    expect(summary.orphaned).toEqual(["b_7N5AFE01"]);
+    expect(summary.recovered).toEqual([]);
+    expect(h.manager.get("b_A11VE0E1")?.status).toBe("running");
+  });
+
+  it("recover(): repeated recovery does not stack footers (idempotent)", async () => {
+    const h = await harness();
+    await seedDead(h, "b_EX1T1DE0", 9210, { log: "once\n", exit: "0\n" });
+    await h.manager.recover();
+    const first = await readFile(h.store.logPath("b_EX1T1DE0"), "utf8");
+    // A second manager over the same directory sees a terminal record: nothing to redo.
+    const again = h.rebuild();
+    await again.recover();
+    expect(await readFile(h.store.logPath("b_EX1T1DE0"), "utf8")).toBe(first);
+    expect(first.match(/\[pi-subagent\] job b_EX1T1DE0/g)?.length).toBe(1);
+  });
+
+  it("recover(): a capped log that never got its notice gains exactly one, and outputTruncated", async () => {
+    const h = await harness({ maxLogBytes: 8 });
+    await seedDead(h, "b_CA99ED01", 9211, { log: "0123456789", exit: "2\n" });
+    await h.manager.recover();
+    const log = await readFile(h.store.logPath("b_CA99ED01"), "utf8");
+    expect(log).toContain(formatLogTruncationNotice(8).trim());
+    expect(log.match(/\[log truncated at 8 bytes\]/g)?.length).toBe(1);
+    expect(h.manager.get("b_CA99ED01")).toMatchObject({ status: "failed", exitCode: 2, outputTruncated: true });
+  });
+
+  it("recover(): a terminal record with a stale logBytes is reconciled against the file", async () => {
+    const h = await harness();
+    // The previous pi persisted the status, then died before the logBytes write.
+    await seed(h.store, "b_5TA1E0B1", {
+      status: "completed",
+      pid: 9212,
+      spawnedAt: 600,
+      endedAt: 900,
+      exitCode: 0,
+      backgroundedAt: 650,
+      notifiedAt: 950,
+      logBytes: 0,
+    });
+    await mkdir(h.store.dir, { recursive: true });
+    await writeFile(h.store.logPath("b_5TA1E0B1"), "twelve bytes", "utf8");
+    await h.manager.recover();
+    await waitFor(() => (h.manager.get("b_5TA1E0B1")?.logBytes ?? 0) === 12, "logBytes reconciled");
+    expect((await h.store.load("b_5TA1E0B1"))?.logBytes).toBe(12);
+  });
+
+  it("the adopted-liveness poll also prefers the exit file when an adopted pid dies", async () => {
+    const h = await harness();
+    await seed(h.store, "b_90110E71", { status: "running", pid: 9213, spawnedAt: 600, hostPid: HOST_PID });
+    h.port.ownership.set(9213, "alive");
+    await h.manager.recover();
+    expect(h.manager.get("b_90110E71")?.status).toBe("running");
+
+    await writeFile(h.store.logPath("b_90110E71"), "late output\n", "utf8");
+    await writeFile(h.store.exitPath("b_90110E71"), "6\n", "utf8");
+    h.port.ownership.set(9213, "dead");
+    h.clock.advance(2_000);
+    await waitFor(() => h.manager.get("b_90110E71")?.status === "failed", "poll settled from the exit file");
+    expect(h.manager.get("b_90110E71")?.exitCode).toBe(6);
+  });
+
+  it("kill() on an adopted job whose pid is already dead settles from the exit file, signalling nothing", async () => {
+    const h = await harness();
+    await seed(h.store, "b_K111E071", { status: "running", pid: 9214, spawnedAt: 600, hostPid: HOST_PID });
+    h.port.ownership.set(9214, "alive");
+    await h.manager.recover();
+    await writeFile(h.store.exitPath("b_K111E071"), "0\n", "utf8");
+    h.port.ownership.set(9214, "dead");
+
+    const result = await h.manager.kill("b_K111E071");
+    expect(result.outcome).toBe("already-dead");
+    expect(result.record).toMatchObject({ status: "completed", exitCode: 0 });
+    expect(h.port.killCalls).toEqual([]);
+  });
+
+  it("recover(): the subagent branch also surfaces a job that had finished on its own", async () => {
+    const h = await harness();
+    await seed(h.store, "b_5BA6E071", {
+      status: "running",
+      pid: 9215,
+      spawnedAt: 600,
+      backgroundedAt: 650,
+      owner: "subagent",
+    });
+    h.port.ownership.set(9215, "dead");
+    await mkdir(h.store.dir, { recursive: true });
+    await writeFile(h.store.exitPath("b_5BA6E071"), "0\n", "utf8");
+    const summary = await h.manager.recover();
+    expect(summary.subagentKilled).toEqual([]);
+    expect(summary.recovered).toEqual(["b_5BA6E071"]);
+    expect(h.manager.get("b_5BA6E071")?.status).toBe("completed");
+  });
+});
+
+describe("bash job manager: file-fd stdio handles (issue #73)", () => {
+  /** A fake proc whose `spawned` claims the child writes the log itself. */
+  class FileFdProc extends FakeProc {
+    override get spawned(): SpawnedJob {
+      return { ...super.spawned, logWrittenByChild: true };
+    }
+  }
+
+  async function fileFdHarness(overrides: Partial<BashJobManagerOptions> = {}) {
+    const h = await harness(overrides);
+    const spawnJob = h.port.spawnJob.bind(h.port);
+    // The manager hands `spawnJob` a stdio descriptor: assert on it, then swap in a file-fd fake.
+    const seen: unknown[] = [];
+    h.port.spawnJob = async (command, cwd, env, stdio) => {
+      seen.push(stdio);
+      const spawned = await spawnJob(command, cwd, env);
+      const proc = h.port.last();
+      void proc;
+      return {
+        ...spawned,
+        logWrittenByChild: true,
+        ...(stdio !== undefined ? { exitFilePath: stdio.exitPath } : {}),
+      };
+    };
+    return { h, seen };
+  }
+
+  it("passes the job's own log/exit paths and the cap to the process port", async () => {
+    const { h, seen } = await fileFdHarness({ maxLogBytes: 4096 });
+    const job = await h.manager.create({ command: "x", cwd: "/repo" });
+    expect(seen).toEqual([
+      { logPath: h.store.logPath(job.jobId), exitPath: h.store.exitPath(job.jobId), maxLogBytes: 4096 },
+    ]);
+  });
+
+  it("does not write the stream's bytes into the log a second time (the child already did), but still relays and counts them", async () => {
+    const { h } = await fileFdHarness();
+    const relayed: string[] = [];
+    const job = await h.manager.create({ command: "x", cwd: "/repo", onData: (c) => relayed.push(c) });
+    // The "child" wrote the file; the stream is only the tail's view of it.
+    await writeFile(job.logPath, "from-child\n", "utf8");
+    h.port.last().stdout.write("from-child\n");
+    await settle();
+    expect(relayed).toEqual(["from-child\n"]);
+    expect(h.manager.get(job.jobId)?.logBytes).toBe(11);
+    h.port.last().exit({ exitCode: 0 });
+    await job.exit;
+    const log = await readFile(job.logPath, "utf8");
+    expect(log.match(/from-child/g)?.length).toBe(1); // not duplicated
+    expect(log.trimEnd().split("\n").at(-1)).toContain(`job ${job.jobId} completed (exit 0)`);
+  });
+
+  it("the exit FILE is the authority for the terminal code when it exists", async () => {
+    const { h } = await fileFdHarness();
+    const job = await h.manager.create({ command: "x", cwd: "/repo" });
+    // The event says 0 (e.g. a wrapper bug); the file, written by the inner shell's wrapper, says 9.
+    await writeFile(h.store.exitPath(job.jobId), "9\n", "utf8");
+    h.port.last().exit({ exitCode: 0 });
+    const final = await job.exit;
+    expect(final).toMatchObject({ status: "failed", exitCode: 9 });
+  });
+
+  it("past the cap it appends the truncation notice once, flags outputTruncated, and keeps the exit code", async () => {
+    const { h } = await fileFdHarness({ maxLogBytes: 8 });
+    const job = await h.manager.create({ command: "x", cwd: "/repo" });
+    await writeFile(job.logPath, "0123456789", "utf8"); // 10 bytes > cap 8
+    h.port.last().stdout.write("0123456789");
+    await settle();
+    expect(h.manager.get(job.jobId)?.outputTruncated).toBe(true);
+    await h.store.save({ ...(await h.store.load(job.jobId))!, outputTruncated: true });
+    h.port.last().exit({ exitCode: 0 });
+    const final = await job.exit;
+    expect(final.status).toBe("completed");
+    const log = await readFile(job.logPath, "utf8");
+    expect(log.match(/\[log truncated at 8 bytes\]/g)?.length).toBe(1);
+  });
+
+  it("an external SIGTERM of the shell (exit 143, no signal) settles failed(143) — accepted semantics change", async () => {
+    const { h } = await fileFdHarness();
+    const job = await h.manager.create({ command: "x", cwd: "/repo" });
+    await writeFile(h.store.exitPath(job.jobId), "143\n", "utf8");
+    h.port.last().exit({ exitCode: 143, signal: null });
+    expect(await job.exit).toMatchObject({ status: "failed", exitCode: 143 });
+  });
+
+  it("a manager-initiated kill still labels the job killed even if an exit file exists", async () => {
+    const { h } = await fileFdHarness();
+    const job = await h.manager.create({ command: "x", cwd: "/repo" });
+    await h.manager.markBackgrounded(job.jobId);
+    h.manager.noteTermination(job.jobId, "killed");
+    await writeFile(h.store.exitPath(job.jobId), "143\n", "utf8");
+    h.port.last().exit({ exitCode: 143, signal: null });
+    expect((await job.exit).status).toBe("killed");
+  });
+});
+
+// ── stripAnsi 包（B 点）：readOutput 返回值清洗 ─────────────────────────────
+
+describe("bash job manager: readOutput stripAnsi (B point)", () => {
+  it("strips the returned content while offsets/cursor/disk bytes stay raw (default on)", async () => {
+    const h = await harness();
+    const job = await h.manager.create({ command: "cmd", cwd: "/repo" });
+    const proc = h.port.last();
+    const raw = "\x1b[1;32mgreen\x1b[0m plain \x1b]0;title\x07after\n";
+    proc.stdout.write(raw);
+    await settle();
+
+    const read = await h.manager.readOutput(job.jobId);
+    expect(read.content).toBe("green plain after\n");
+    // 偏移量与 cursor 是原始日志的字节数（清洗只作用于返回值）。
+    expect(read.startOffset).toBe(0);
+    expect(read.nextOffset).toBe(Buffer.byteLength(raw, "utf8"));
+    expect((await h.store.load(job.jobId))?.readCursor).toBe(Buffer.byteLength(raw, "utf8"));
+    // 磁盘日志逐字节保留原始输出。
+    expect(await readFile(job.logPath, "utf8")).toBe(raw);
+  });
+
+  it("replays from offset 0 cleaned, and the raw cursor never rewinds", async () => {
+    const h = await harness();
+    const job = await h.manager.create({ command: "cmd", cwd: "/repo" });
+    h.port.last().stdout.write("done\x1b[31m\n");
+    await settle();
+    await h.manager.readOutput(job.jobId);
+    const replay = await h.manager.readOutput(job.jobId, { offset: 0 });
+    expect(replay.content).toBe("done\n");
+    expect((await h.store.load(job.jobId))?.readCursor).toBe(Buffer.byteLength("done\x1b[31m\n", "utf8"));
+  });
+
+  it("drops a trailing half sequence at the end of the read (one-shot semantics)", async () => {
+    const h = await harness();
+    const job = await h.manager.create({ command: "cmd", cwd: "/repo" });
+    h.port.last().stdout.write("ok\x1b[38;5;");
+    await settle();
+    const read = await h.manager.readOutput(job.jobId);
+    expect(read.content).toBe("ok");
+  });
+
+  it("a non-zero offset landing mid-CSI cleans the leading fragment via the ≤256B lookback", async () => {
+    const h = await harness();
+    const job = await h.manager.create({ command: "cmd", cwd: "/repo" });
+    const prefix = "A".repeat(40);
+    const seq = "\x1b[38;5;196m";
+    const raw = `${prefix}${seq}RED\n`;
+    h.port.last().stdout.write(raw);
+    await settle();
+    // offset 落在参数区中间（指向 '8'）：lookback 框住 `\x1b[`，content 不漏 `196m` 残片。
+    const offset = prefix.length + 2;
+    const read = await h.manager.readOutput(job.jobId, { offset, advanceCursor: false });
+    expect(read.content).toBe("RED\n");
+    expect(read.startOffset).toBe(offset);
+    expect(read.nextOffset).toBe(Buffer.byteLength(raw, "utf8"));
+  });
+
+  it("an offset past a param run longer than the old 16B window still cleans (introducer now in the 256B window)", async () => {
+    const h = await harness();
+    const job = await h.manager.create({ command: "cmd", cwd: "/repo" });
+    const raw = `${"A".repeat(8)}\x1b[${"1;".repeat(12)}mTAIL\n`;
+    h.port.last().stdout.write(raw);
+    await settle();
+    // 引导符在旧 16B 窗口之外、但在 256B 窗口内 ⇒ 看到明确 ESC 证据，按参数序列续扫。
+    const offset = 8 + 2 + 24;
+    const read = await h.manager.readOutput(job.jobId, { offset, advanceCursor: false });
+    expect(read.content).toBe("TAIL\n");
+  });
+
+  it("stripAnsi:false returns the raw bytes untouched", async () => {
+    const h = await harness({ stripAnsi: false });
+    const job = await h.manager.create({ command: "cmd", cwd: "/repo" });
+    const raw = "\x1b[31mred\x1b[0m\n";
+    h.port.last().stdout.write(raw);
+    await settle();
+    const read = await h.manager.readOutput(job.jobId);
+    expect(read.content).toBe(raw);
+    expect(await readFile(job.logPath, "utf8")).toBe(raw);
+  });
+
+  it("readBashJobTail (completion notice) sees the same cleaned content and keeps coversWholeLog same-source", async () => {
+    const h = await harness();
+    const job = await h.manager.create({ command: "cmd", cwd: "/repo" });
+    const raw = "start\n\x1b[31mtail line\x1b[0m\n";
+    h.port.last().stdout.write(raw);
+    await settle();
+    const record = h.manager.get(job.jobId)!;
+    const tail = await readBashJobTail(h.manager, { ...record, status: "completed", endedAt: 2_000 });
+    // 通知尾巴与 readOutput 同源：同为清洗后文本，整日志判据不受影响。
+    expect(tail?.text).toBe("start\ntail line");
+    expect(tail?.coversWholeLog).toBe(true);
+  });
+
+  it("bash_job status (real manager seam) shows the cleaned tail with no ESC", async () => {
+    const h = await harness();
+    const job = await h.manager.create({ command: "cmd", cwd: "/repo" });
+    h.port.last().stdout.write("\x1b[32mall good\x1b[0m\n");
+    await settle();
+    h.manager.markBackgrounded(job.jobId);
+    const tool = createBashJobTool({ manager: () => h.manager });
+    const result = (await tool.execute("call-s", { action: "status", job_id: job.jobId }, undefined, undefined, {
+      cwd: "/repo",
+      sessionManager: { getSessionId: () => "s1" },
+    } as unknown as Parameters<typeof tool.execute>[4])) as { content: { type: "text"; text: string }[] };
+    const text = result.content.map((part) => (part.type === "text" ? part.text : "")).join("");
+    expect(text).toContain("all good");
+    expect(text).not.toContain("\x1b");
   });
 });

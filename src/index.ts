@@ -1,106 +1,62 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { initSecureDomain } from "./secure/domain.js";
+import { wireMemoryScopes } from "./memory/scopes/wire.js";
+import { secureSessionWriteGate } from "./secure/memory-gate.js";
+import { secureMemoryWriteGate } from "./secure/memory-gate.js";
 import { secureGuardsNeeded, wireSecureGuards } from "./secure/guards.js";
 import { registerSecureCommand, secureCommandWanted } from "./secure/command.js";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { getAgentDir, getMarkdownTheme } from "@earendil-works/pi-coding-agent";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { systemClock } from "./core/clock.js";
+import { wireFastMain } from "./fast/wire.js";
 import { wireCacheTtl } from "./cache-ttl/cache-ttl.js";
 import { getProviderEvidenceStore } from "./cache-ttl/provider-evidence.js";
-import { MemoryOutboxStore, MemoryRunStore } from "./core/store.js";
-import type { RunSnapshot, SpawnRequest, SubagentExtensionPoints, UsageDelta } from "./core/types.js";
-import {
-  assertCompatible,
-  detectPiCapabilities,
-  probeReadBackEntries,
-  readBeforeAgentStartTrigger,
-} from "./adapters/pi-compat.js";
-import { createPiOutboxStore } from "./adapters/pi-outbox-store.js";
+import type { SubagentExtensionPoints } from "./core/types.js";
+import { assertCompatible, detectPiCapabilities } from "./adapters/pi-compat.js";
 import { FABRIC_ENTRY_CUSTOM_TYPE, createFabricEntryRenderer } from "./adapters/fabric-entry-renderer.js";
-import { wrapWithRunLog } from "./adapters/pi-run-log.js";
 import { createAgentTypeRegistry } from "./config/agent-types.js";
 import {
-  defaultSettingsPath,
   loadSettingsFromFile,
   loadWebHubLanSettingsWarnings,
   loadWebHubProxyWarnings,
   persistSettingOverride,
+  prepareSettingsFile,
   readSettingsNoMigrate,
+  settingsPathNote,
   type AgentSettings,
 } from "./config/settings.js";
-import { createNotifier, type Notifier, type PersistedDelivery } from "./delivery/notifier.js";
 import { mergeExtensionPoints } from "./extensions/registry.js";
+import { buildSessionStack } from "./stack.js";
+import type { ActivationTeardown } from "./stack-teardown.js";
 import {
-  buildSessionStack,
-  bashJobsEnabled,
-  BASH_JOB_SEAL_GRACE_MS,
-  createCompactHintHook,
-  createBackgroundCompletionEventHook,
-  createNotificationReceiptHook,
-  readBashJobTail,
-  type Stack,
-} from "./stack.js";
-import { createMentionRouteDeps, installMentionInput } from "./mention/mention.js";
+  createTidyPort,
+  forwardNotifier,
+  forwardOrphans,
+  forwardQuery,
+  forwardResolveRun,
+  forwardWorkflow,
+  requireStack,
+  type StackHolder,
+} from "./holder.js";
+import { registerSubagentTools } from "./tools/register.js";
+import { createBackgroundCompletionEventHook, createNotificationReceiptHook } from "./delivery/stack-hooks.js";
+import { readBashJobTail } from "./bash/notify.js";
+import { registerCompactHooks, registerCompactTools } from "./compact-hint/register.js";
+import { bashJobsEnabled, BASH_JOB_SEAL_GRACE_MS, registerBashTools } from "./bash/host.js";
+import { createMentionRouteDeps } from "./mention/mention.js";
+import { createMentionWiring, mentionAutocompleteEntries } from "./mention/wire.js";
 import { createWakeInputHook } from "./fabric/wake-input.js";
-import { observeRootWakeTrigger } from "./fabric/root-wake.js";
-import { getXsWakeLedger } from "./fabric/xs/wake-ledger.js";
-import { getXsHostCapability } from "./fabric/xs/host-cap.js";
-import { display as unreadDisplay, XS_INBOX_STATUS_KEY } from "./fabric/xs/unread.js";
-import { xsOn } from "./fabric/xs/switch.js";
-import { getXsReplyLedger } from "./fabric/xs/reply-ledger.js";
-import { createXsSender, detectXsToolCollisions, type XsSender } from "./fabric/xs/sender.js";
-import { createListSessionsTool, listSessionsParamsFor } from "./tools/list-sessions-tool.js";
-import { createMessageChannelTool, MessageChannelParams } from "./tools/message-channel-tool.js";
-import type { XsChannelView } from "./fabric/xs/types-channel.js";
+import { createXsActivation } from "./fabric/xs/activate.js";
 import { currentConnection } from "./web-hub/agent/connection.js";
-import { XS_CHANNEL_HUB_CAP } from "./web-hub/protocol/xs.js";
-import { createMessageSessionTool, messageSessionParamsFor } from "./tools/message-session-tool.js";
-import { createFabricXsCommand } from "./commands/fabric-xs.js";
-import { aliasSuggestions } from "./fabric/xs/alias-suggest.js";
-import type { XsHubLimitsWire } from "./web-hub/protocol/xs.js";
-import { createMentionAutocompleteProvider, type MentionAutocompleteEntry } from "./mention/autocomplete.js";
-import {
-  SESSION_MENTION_ERROR_SOURCE,
-  SESSION_MENTION_SENT_CUSTOM_TYPE,
-  createMentionSessionPort,
-  sessionCompletionBare,
-  sessionCompletionAlias,
-  type MentionSessionPort,
-  type MentionSessionSendOutcome,
-  type SessionMentionNotice,
-} from "./mention/session.js";
 import { createPiWorktreeExtension } from "./extensions/worktree.js";
 import { worktreeRoot } from "./extensions/worktree-orphans.js";
-import { EscalatingReaper, type OrphanRegistry } from "./runtime/reaper.js";
-import { PiSessionDriver } from "./runtime/session-driver.js";
-import { SingleSlotPool } from "./runtime/slot-pool.js";
-import { EventWatchdog } from "./runtime/watchdog.js";
-import { createQueryService, type QueryService } from "./service/query-service.js";
-import { createRunRegistry } from "./service/run-registry.js";
-import { createRuntimeRunnerAdapter } from "./service/runtime-adapter.js";
-import { createSpawnService, type SpawnService } from "./service/spawn-service.js";
 import { publishBackgroundStatus } from "./service/background-status.js";
-import { createAgentTool } from "./tools/agent-tool.js";
-import { createResultTool, legacyResultToolRenderer } from "./tools/result-tool.js";
 import { createResultToolActivation } from "./tools/result-tool-activation.js";
-import { createListSubagentsTool } from "./tools/list-subagents-tool.js";
-import { createSteerTool } from "./tools/steer-tool.js";
-import { createSetModelTool } from "./tools/set-model-tool.js";
-import { createAbortTool } from "./tools/abort-tool.js";
-import { createExtendTimeoutTool } from "./tools/extend-timeout-tool.js";
-import { createCompactTool } from "./compact-hint/compact-tool.js";
-import { createSwitchContextTool } from "./context-switch/tool.js";
 import { PendingHandoffStore } from "./context-switch/store.js";
 import { createQuotaHintHook, QUOTA_AVAILABLE_ENTRY_TYPE } from "./quota/index.js";
 import { parseSubscriptionProviders, pickAlternatives } from "./quota/gate.js";
-import { createSwitchContextCompactHook } from "./context-switch/hook.js";
 import { getChildSwitchCapability } from "./context-switch/capability.js";
-import { createSessionFactsProvider } from "./context-switch/session-facts.js";
-import { createSetCompactThresholdTool } from "./compact-hint/threshold-tool.js";
-import { createBashTool } from "./bash/tool.js";
-import { createBashJobTool } from "./bash/job-tool.js";
-import type { BashJobManager } from "./bash/manager.js";
-import { isTerminalJobStatus, type JobRecord } from "./bash/types.js";
+import type { JobRecord } from "./bash/types.js";
 import { createStatusCommand } from "./commands/status.js";
 import { createWebHubCommand } from "./commands/webhub.js";
 import { wireWebHub, type WebHubControl } from "./web-hub/agent/index.js";
@@ -109,6 +65,8 @@ import { installMessageScheduler, installScheduleOrphanGuard } from "./schedule/
 import { wireScheduleSurface } from "./schedule/agent/surface.js";
 import { createScheduleCommand } from "./commands/schedule.js";
 import { createScheduleTool } from "./tools/schedule-tool.js";
+import { createThreadTool } from "./tools/thread-tool.js";
+import { createThreadCommand } from "./commands/thread.js";
 import { scheduleSection } from "./sysprompt/schedule-section.js";
 import { renderXsMessage } from "./fabric/xs/render.js";
 import { renderToolkitMessage, TOOLKIT_LABELLED_CUSTOM_TYPES } from "./ui/toolkit-message-renderer.js";
@@ -117,11 +75,10 @@ import { createGoalCommand } from "./goal/command.js";
 import { createGoalLoopHook } from "./goal/hook.js";
 import { persistGoalRecord } from "./goal/store.js";
 import { createDisabledWorkflowToolStub, createWorkflowTool } from "./tools/workflow-tool.js";
-import { registerWebSearchTool } from "./web-search/index.js";
+import { registerWebSearchTool } from "./web-tools/index.js";
 import { wireDate } from "./date/index.js";
 import { wireTodo } from "./todo/index.js";
 import { wireMemory } from "./memory/index.js";
-import type { TidySpawnRequest } from "./memory/contracts.js";
 import { wireChildBashJobs } from "./bash/child.js";
 import { wireChildSession } from "./child/wire.js";
 import { markChildExtensionActivated } from "./child/activation-signal.js";
@@ -142,12 +99,15 @@ import { wireTitle } from "./title/index.js";
 import { wireDeferredReload, type DeferredReloadDeps } from "./reload/index.js";
 import { createReloadCommandPort } from "./reload/command-port.js";
 import { countActiveRuns, type DeferredReloadController } from "./reload/defer.js";
-import type { WorkflowToolDeps } from "./tools/workflow-tool.js";
 import type { AskUserRemotePort } from "./ask-user/remote.js";
-import type { WorkflowQueryPort } from "./tools/workflow-target.js";
 import { wireTopicSwitch } from "./topic-switch/wire.js";
+import { wireReflex } from "./reflex/wire.js";
+import { createGitRunner } from "./git/run.js";
 import type { PromptGatePort } from "./web-hub/agent/prompt-gate.js";
 import { createLoadHintHook, createLoadHintState } from "./sysload/hook.js";
+
+// Public package export (package.json exports "." → dist/index.js): kept stable across the move.
+export { mentionAutocompleteEntries } from "./mention/wire.js";
 
 /**
  * M2 Wave 1 (architecture §7.1): the single merge point for the four
@@ -227,6 +187,21 @@ export default function activate(rawPi: ExtensionAPI): void {
     ? wireSecureGuards(pi, { domain: secureDomain, isChildSession })
     : undefined;
 
+  const memoryScopes =
+    preGuardSettings.memory.enabled &&
+    secureDomain.kind === "plain" &&
+    (preGuardSettings.memory.scopes.session || preGuardSettings.memory.scopes.hub)
+      ? wireMemoryScopes(pi, {
+          settings: preGuardSettings.memory,
+          child: isChildSession,
+          domain: secureDomain.kind,
+          gate: secureSessionWriteGate(secureDomain),
+          locked: () => secureGuards?.lockedReason() !== undefined,
+          remote: () => askUserRemoteRef.current?.(),
+          hubPaths: () => webHubRef.current?.memoryHubPaths?.(),
+        })
+      : undefined;
+
   if (preGuardSettings.webSearch.enabled) registerWebSearchTool(pi);
   // date 模块：首轮 + 跨日以隐藏消息注入当前日期（主/子会话都注入；pre-guard）。
   // enabled=false ⇒ wireDate 零注册。
@@ -264,8 +239,34 @@ export default function activate(rawPi: ExtensionAPI): void {
   // session returns before that code ever runs) can attach a real
   // `TidyPort` for `/mem tidy`/`/mem restore`.
   let memoryWiring: ReturnType<typeof wireMemory> | undefined;
+  // #26 (no-user-guard-confirm plan): the memory touched>0 commits' session
+  // lifecycle controller — a FRESH controller on every session_start,
+  // aborted on session_shutdown (incl. /reload, which fires shutdown before
+  // re-activating). Swapped/aborted inside the MAIN session's existing
+  // session_start/session_shutdown registrations below (no new hook
+  // registration — jev off-golden pins wireMemory's registration list
+  // byte-for-byte); child sessions are never handed this signal.
+  let sessionAbort: AbortController | undefined;
   if (preGuardSettings.memory.enabled)
-    memoryWiring = wireMemory(pi, { settings: preGuardSettings.memory, isChildSession, sections: promptHub });
+    memoryWiring = wireMemory(pi, {
+      settings: preGuardSettings.memory,
+      ...(memoryScopes ? { scopes: memoryScopes, systemPromptMode: () => preGuardSettings.systemPrompt.mode } : {}),
+      isChildSession,
+      sections: promptHub,
+      secureDomainKind: secureDomain.kind,
+      writeGate: secureMemoryWriteGate(secureDomain),
+      ...(isChildSession ? {} : { sessionSignal: () => sessionAbort?.signal }),
+      // memory-predict plan §11.1 signal T: forward the todo snapshot (todo
+      // module disabled ⇒ undefined ⇒ P1b sees an empty todo list).
+      ...(todoWiring
+        ? {
+            todo: () => ({
+              list: () =>
+                todoWiring.getTodoSnapshot().tasks.map((t) => ({ id: t.id, subject: t.subject, status: t.status })),
+            }),
+          }
+        : {}),
+    });
 
   // bash-timeout-grace plan §3.4 (P5): the child (subagent) session half of
   // the auto-background feature — pre-guard, same rationale as memory/todo/
@@ -291,7 +292,7 @@ export default function activate(rawPi: ExtensionAPI): void {
   // `-e`/`--no-extensions`, outside settings.json). Must not depend on any feature setting.
   if (isChildSession) {
     markChildExtensionActivated();
-    wireChildSession(pi, preGuardSettings);
+    wireChildSession(pi, preGuardSettings, { canUse: (ctx) => secureGuards?.recheckForWrite(ctx) === undefined });
     // traffic-merge T3（§2.3）：子会话只注册录制钩子（含 agent_settled / cache_warming_decision），
     // 无命令/服务/重放；isActive = 进程内 toolkit claim 存活（主会话发布；secure 域 settings 已强制
     // enabled=false，这里双保险在 assemble 内部复查）。childSessions=false 只禁落库不禁改写归属（拍板①）。
@@ -321,106 +322,31 @@ export default function activate(rawPi: ExtensionAPI): void {
   // Registered before the compat gate below so even the disabled-stub path
   // releases its claim (otherwise a bad-compat activation would wedge every
   // later reload into the inert branch).
-  const settings = loadSettingsFromFile();
+  const settingsFile = prepareSettingsFile();
+  const settings = loadSettingsFromFile(settingsFile.path);
   // data-encryption §2.2: the one read-only plugin command — only when there is something to report
   // (non-plain verdict, configured vaults, or an enabled-but-broken section). No `secure` section or
   // `secure.enabled=false` ⇒ command list unchanged (secure-off golden).
   if (secureCommandWanted(secureDomain))
     registerSecureCommand(pi, { domain: secureDomain, runtimeLock: () => secureGuards?.lockedReason() });
-  const holder: { current?: Stack } = {};
+  const holder: StackHolder = {};
   const reloadRef: { current?: DeferredReloadController } = {};
   const isReloadPending = () => reloadRef.current?.pending ?? false;
-  const xsEnabled = xsOn({
-    fabric: settings.fabric,
-    webHub: { enabled: settings.webHub.enabled, control: settings.webHub.control !== false },
-  }); // frozen per activate: tools/caps/stack all share this gate
   const webHubRef: { current?: WebHubControl } = {};
   const xsFencePorts: { topicSwitch?: () => boolean; goal?: () => boolean } = {};
-  const replyEnabled = xsEnabled && settings.fabric.crossSession.reply.enabled; // frozen per activate
-  // Channel-plan §3.1/§6 (CHW): frozen per activate (non-live). Off ⇒ old-agent shape: no
-  // `xs.channel.v1` cap, no `message_channel`, the legacy `list_sessions` instance, named channels suspended.
-  const channelsOn = xsEnabled && settings.fabric.crossSession.channels.enabled;
-  // Alias-plan §3.6/§6 (ALW): frozen per activate (non-live). Picks the alias tool descriptions, the agent cap
-  // `xs.alias.v1` and the hub config key. Deliberately NOT the hub cap: a late/missing hub cap must never swap a
-  // registered tool's description (provider cache prefix) — without it the runtime falls back to legacy addressing.
-  const aliasOn = xsEnabled && settings.fabric.crossSession.alias.enabled;
-  const xsLedger = getXsWakeLedger();
-  const xsCapability = getXsHostCapability();
-  const xsSessionOf = (ctx: { sessionManager?: { getSessionId(): string } }): string | undefined => {
-    try {
-      return ctx.sessionManager?.getSessionId();
-    } catch {
-      return undefined;
-    }
-  };
-  let xsAttached = false;
-  // Channel-plan §12.6 (IBW): TUI inbox badge + web status republish. The ctx is the latest session_start's.
-  const xsInboxCtx: { current?: { ui?: { setStatus?: (key: string, text: string | undefined) => void } } } = {};
-  let xsInboxShown: string | undefined;
-  let xsInboxPublished = -1; // last count handed to the web publisher (-1 ⇒ force)
-  const refreshXsInbox = () => {
-    const n = holder.current?.xs?.unread?.() ?? 0;
-    const text = n > 0 ? `inbox ${unreadDisplay(n)}` : undefined;
-    if (text !== xsInboxShown) {
-      xsInboxShown = text;
-      try {
-        xsInboxCtx.current?.ui?.setStatus?.(XS_INBOX_STATUS_KEY, text);
-      } catch {
-        /* stale ctx after a session switch: the next session_start re-renders */
-      }
-    }
-    if (n === xsInboxPublished) return; // turn events fire often; only a changed count republishes
-    xsInboxPublished = n;
-    try {
-      webHubRef.current?.xs?.notifyUnreadChanged();
-    } catch {
-      /* display hint only */
-    }
-  };
-  let xsSessionId: string | undefined;
-  let xsCollisions: string[] = [];
-  let xsHubLimits: XsHubLimitsWire | undefined;
-  // B1 stays installed even after an xs-off reload: old queued marked triggers still need
-  // authorization. Never return the library TriggerResult as a pi hook result.
-  pi.on("before_agent_start", (event, ctx) => {
-    const trigger = readBeforeAgentStartTrigger(event);
-    const marked =
-      trigger.kind === "custom" &&
-      trigger.customType === "subagent:xs" &&
-      (trigger.details as { xsWake?: unknown } | undefined)?.xsWake === true;
-    // Off means zero new context reads, except B1's mandatory orphan/old-authorization guard.
-    if (!xsEnabled && xsLedger.size === 0 && !marked) return;
-    const xs = xsAttached ? holder.current?.xs : undefined;
-    if (xs?.controller) xs.beforeAgentStart(event);
-    else if (xsAttached && holder.current?.rootWakeRecovery) {
-      xs?.beforeAgentStart(event);
-      holder.current.rootWakeRecovery.beforeAgentStart(event);
-    } else {
-      xs?.beforeAgentStart(event);
-      // No owner yet (including the pre-stack window): never authorize an unsupervised
-      // delayed action. Preserve the record as a tombstone until execution/teardown proof.
-      const sessionId = xsSessionOf(ctx);
-      for (const record of xsLedger.entries()) {
-        if (sessionId !== undefined && record.sessionId === sessionId && record.state === "live")
-          xsLedger.tombstone(record.token);
-      }
-      observeRootWakeTrigger(event, {
-        sessionId: sessionId ?? "",
-        abort: () => ctx.abort(),
-        ledger: xsLedger,
-        capability: xsCapability,
-        ...(holder.current?.wake ? { level: holder.current.wake.level } : {}),
-        audit: (event) => console.warn(`[pi-subagent] fabric xs ${event}`),
-      });
-    }
+  // child-context-switch plan.md §3.1: latest live session_start ctx (see the `onDisabled` alert below); declared
+  // up here because the xs activation shares it (alias suggestions / alias-lost notice).
+  const notifyCapabilityCtx: { current?: ExtensionContext } = {};
+  const xs = createXsActivation({
+    settings,
+    holder,
+    webHubRef,
+    fencePorts: xsFencePorts,
+    notifyCtx: notifyCapabilityCtx,
+    // built much later in activate(); only read at `/fabric fence reset` time
+    scheduleMessage: () => scheduleMessage,
   });
-  if (xsEnabled) {
-    // Channel-plan §12.3 (IBW): unread inbox clearing rides the extension turn events (message_end is
-    // unusable: pi runs extension handlers BEFORE persisting). Forwarders only; counting lives in unread.ts.
-    pi.on("turn_start", () => holder.current?.xs?.unreadTurnStart());
-    pi.on("turn_end", () => holder.current?.xs?.unreadTurnEnd());
-    pi.on("agent_end", () => holder.current?.xs?.unreadAgentEnd()); // fallback when turn_end never fired
-  }
+  xs.registerTriggerGuard(pi);
   // web-hub archive plan (docs/dev/web-hub/archive-report.md): re-seed the per-session archive
   // control off the CURRENT branch (session_tree / session_compact — the stack itself seeds at
   // build time). Never throws; a missing sessionManager degrades to "keep current state".
@@ -447,60 +373,12 @@ export default function activate(rawPi: ExtensionAPI): void {
     activateResultTool(ctx);
   });
   pi.on("session_compact", (_event, ctx) => restoreArchive(ctx));
-  if (xsEnabled) {
-    // Registered ahead of other async mutation hooks: the window closes BEFORE their awaits.
-    pi.on("session_before_compact", () => {
-      holder.current?.xs?.fence.onEvent({ type: "session_before_compact" });
-    });
-    pi.on("session_compact", () => {
-      holder.current?.xs?.fence.onEvent({ type: "session_compact" });
-      holder.current?.xs?.reply?.flush(); // §7.2: fence close evidence ⇒ retry owed notices
-    });
-    pi.on("session_compact_failed", () => {
-      holder.current?.xs?.fence.onEvent({ type: "session_compact_failed" });
-      holder.current?.xs?.reply?.flush(); // §7.2: fence close evidence ⇒ retry owed notices
-    });
-    pi.on("session_before_tree", () => {
-      holder.current?.xs?.fence.onEvent({ type: "session_before_tree" });
-    });
-    pi.on("session_tree", () => {
-      holder.current?.xs?.fence.onEvent({ type: "session_tree" });
-      holder.current?.xs?.reply?.flush(); // §7.2: fence close evidence ⇒ retry owed notices
-    });
-    pi.on("session_before_switch", () => {
-      holder.current?.xs?.fence.onEvent({ type: "session_before_switch" });
-    });
-    pi.on("session_before_fork", () => {
-      holder.current?.xs?.fence.onEvent({ type: "session_before_fork" });
-    });
-  }
-  pi.on("agent_settled", () => {
-    holder.current?.xs?.settled();
-    holder.current?.rootWakeRecovery?.settled();
-  });
-  // Same synchronous phase as session destruction, not the later (awaiting) fleet drain.
-  // Fpi10: replacement first aborts the outgoing AgentSession; reload does NOT, so preserve
-  // its authorizations/leases for explicit recovery. No time-based ledger cleanup.
-  pi.on("session_shutdown", (event, ctx) => {
-    xsAttached = false;
-    holder.current?.xs?.fence.onEvent({ type: "session_shutdown" });
-    holder.current?.xs?.dispose();
-    holder.current?.rootWakeRecovery?.dispose();
-    if (event.reason !== "reload") {
-      const sessionId = xsSessionId ?? (xsEnabled || xsLedger.size > 0 ? xsSessionOf(ctx) : undefined);
-      if (sessionId !== undefined) xsLedger.teardown(sessionId);
-    }
-  });
+  xs.registerFenceHooks(pi);
   // todo #22 optimize-plan P0-b (§7's spawn port): reads the CURRENT session
   // stack, same late-bound `holder.current` pattern as `forwardSpawn` below.
   // Only reached for the main session — structurally guaranteed by the
   // HOST_KEY early-return above, so this never runs for a child session.
-  memoryWiring?.attachTidy({
-    spawn: (req) => requireStack(holder).spawn.spawn(mapTidySpawnRequest(req)),
-    waitOutcome: (runId, waitMs) => requireStack(holder).spawn.waitOutcome(runId, waitMs),
-    abort: (runId, cause) => requireStack(holder).spawn.abort(runId, cause),
-    snapshot: (runId) => holder.current?.query.get(runId),
-  });
+  memoryWiring?.attachTidy(createTidyPort(holder));
   const releaseBackgroundStatus = publishBackgroundStatus(() => {
     const stack = holder.current;
     // Background workflows count as running subagent work (between child runs they have no live run).
@@ -527,22 +405,30 @@ export default function activate(rawPi: ExtensionAPI): void {
   // always points at the latest live session_start ctx, so the toast still uses fresh UI state.
   // No ctx yet (disablement happened before the very first session_start, or a headless main
   // process) — falls back to `console.warn`, same convention as every other startup warning.
-  const notifyCapabilityCtx: { current?: ExtensionContext } = {};
-  getChildSwitchCapability().onDisabled((reason) => {
-    const message =
-      `\u5b50\u4f1a\u8bdd switch_context \u5df2\u5728\u672c\u8fdb\u7a0b\u505c\u7528\uff1a${reason}` +
-      `\uff08pi \u8fd0\u884c\u65f6\u80fd\u529b\u68c0\u6d4b\u672a\u901a\u8fc7\uff09\uff0c\u5b50\u4f1a\u8bdd\u56de\u9000\u4e3a\u4ec5 pi \u81ea\u52a8\u538b\u7f29\u3002`;
-    try {
-      const ctx = notifyCapabilityCtx.current;
-      if (ctx?.hasUI && typeof ctx.ui?.notify === "function") {
-        ctx.ui.notify(message, "warning");
-        return;
+  //
+  // G11 (7b): the capability record is process-global (Symbol.for) and outlives /reload, so a listener that is never
+  // unsubscribed piles up one per activate() — one disabling event then toasts N times, N-1 of them on dead contexts.
+  // The shutdown teardown releases it (`releaseCapabilityAlert`); this activation's own session_start re-arms it
+  // idempotently, so a session_start that follows a shutdown on the same activation is still covered.
+  let capabilityAlertOff: (() => void) | undefined;
+  const subscribeCapabilityAlert = (): void => {
+    capabilityAlertOff ??= getChildSwitchCapability().onDisabled((reason) => {
+      const message =
+        `\u5b50\u4f1a\u8bdd switch_context \u5df2\u5728\u672c\u8fdb\u7a0b\u505c\u7528\uff1a${reason}` +
+        `\uff08pi \u8fd0\u884c\u65f6\u80fd\u529b\u68c0\u6d4b\u672a\u901a\u8fc7\uff09\uff0c\u5b50\u4f1a\u8bdd\u56de\u9000\u4e3a\u4ec5 pi \u81ea\u52a8\u538b\u7f29\u3002`;
+      try {
+        const ctx = notifyCapabilityCtx.current;
+        if (ctx?.hasUI && typeof ctx.ui?.notify === "function") {
+          ctx.ui.notify(message, "warning");
+          return;
+        }
+      } catch {
+        // fall through to console.warn below.
       }
-    } catch {
-      // fall through to console.warn below.
-    }
-    console.warn(`[pi-subagent] ${message}`);
-  });
+      console.warn(`[pi-subagent] ${message}`);
+    });
+  };
+  subscribeCapabilityAlert();
 
   // Merged ask_user (plugin-merge): HOST-SESSION ONLY. A child subagent session
   // runs in print mode (createAgentSession never binds a UI/mode), so the tool
@@ -558,6 +444,12 @@ export default function activate(rawPi: ExtensionAPI): void {
       // ask_user 与今天逐字节一致。interrupt 设置逐字段回落默认（§6.1）。
       background: () => holder.current?.backgroundCompletions,
       interrupt: () => settings.askUser.backgroundInterrupt,
+      // #21 B3 wiring (plan §2 包 B3): the xs ask-redirect port, late-bound through the
+      // holder exactly like `background` — /reload 后自然指向新 stack 的端口；非委派回合 /
+      // askRedirect off / 未建 stack ⇒ 端口缺席或 ask() 同步返回 undefined ⇒ ask_user 原路径
+      // 字节不变（I9）。Option only while the activation-frozen gate holds (xs ∧ reply ∧ wake ∧
+      // leaf; secure keeps xsOn false ⇒ 自动关闭, D9/I11) — absent option is itself the I9 off shape.
+      ...(xs.askRedirectOn ? { redirect: () => holder.current?.xs?.askRedirect } : {}),
     });
 
   const cacheTtl = wireCacheTtl(pi, settings, {
@@ -572,6 +464,9 @@ export default function activate(rawPi: ExtensionAPI): void {
   // duplicate entries across same-module activations — the stale ones closing
   // over an invalidated pi (observed in the wild: H2 fan-out hit a dead
   // worktree extension and crashed the run).
+  const fast = wireFastMain(pi, settings.fast.enabled, {
+    canUse: (ctx) => secureGuards?.recheckForWrite(ctx) === undefined,
+  });
   const extensionPoints: SubagentExtensionPoints[] = [wireWorktree(pi, settings)];
   const types = createAgentTypeRegistry();
   // Eager warm-up: session_start's awaited reload() is authoritative, but a
@@ -601,35 +496,7 @@ export default function activate(rawPi: ExtensionAPI): void {
   // session_before_compact 钩子之间的交接槽。每次 activate() 新建（/reload 后必须干净）。
   const handoffStore = new PendingHandoffStore();
   const loadHintState = createLoadHintState();
-  pi.on(
-    "turn_end",
-    createCompactHintHook(holder, {
-      sendMessage: (message, options) => pi.sendMessage(message, options),
-      // deliverAs:"followUp": pi 1.2 counts the whole _prepareRun window (pre-compaction check +
-      // all before_agent_start handlers) as busy, so the post-force onComplete resume can land
-      // while a new run is starting — without deliverAs the text is silently dropped there
-      // (extension_error only); idle runs ignore the option byte-for-byte (pi-1.2-compat §6.1).
-      sendUserMessage: (text) => pi.sendUserMessage(text, { deliverAs: "followUp" }),
-      handoffPending: () => handoffStore.hasFresh(),
-    }),
-  );
-  // compact-hint 动态阈值（dynamic-threshold-plan.md D3 §5.4）：三个新事件 handler。全部经
-  // holder 读当前会话的 runtime（/reload 后自然指向新 stack），mode=off / 惰性 runtime 下
-  // 全部 no-op（§11.3 回滚保证 1：首行判空）。注册一次 per activate()（I7）。
-  pi.on("tool_call", (event) => {
-    if (!holder.current?.dynamic) return;
-    // 纯辅助诊断：只记「叫过 switch_context」，恒不拦截、不改 event.input（T-D3-TOOLCALL-PASSTHRU）。
-    const toolName = (event as { toolName?: unknown }).toolName;
-    if (toolName === "switch_context") holder.current.dynamic.onToolCall(toolName);
-  });
-  pi.on("session_compact", (event, ctx) => {
-    if (!holder.current?.dynamic) return;
-    holder.current.dynamic.onSessionCompact(event, ctx);
-  });
-  pi.on("model_select", (event) => {
-    if (!holder.current?.dynamic) return;
-    holder.current.dynamic.noteModelSelected((event as { model?: unknown }).model);
-  });
+  registerCompactHooks(pi, { holder, handoffStore });
   // 额度感知派单（docs/dev/quota/quota-plan.md §4.2 / §5）：与 compact-hint 同一
   // turn_end 通道、同一 sendMessage 形状；状态在 stack 里（每次 session_start 重建，
   // 经 holder 读当前会话——/reload 存活）。alternatives 由 gate.ts 的
@@ -689,7 +556,7 @@ export default function activate(rawPi: ExtensionAPI): void {
     pi.registerTool({
       name: "Agent",
       label: "Agent (unavailable)",
-      description: `pi-subagent is disabled: ${compat.reason}`,
+      description: `pi-toolkit is disabled: ${compat.reason}`,
       parameters: { type: "object", properties: {}, required: [] } as never,
       async execute() {
         throw new Error(compat.reason);
@@ -697,6 +564,10 @@ export default function activate(rawPi: ExtensionAPI): void {
     });
     return;
   }
+
+  // fabric-thread P3（arch §11.1）：唯一门控（secure 域的 D8 强制关闭已在设置层完成）。
+  // 决定：栈面构造、主会话 thread 工具、/thread 命令、hello cap、HubConfig 键。
+  const threadsOn = settings.fabric.enabled && settings.fabric.threads.enabled;
 
   // scheduled-reports A0 (plan r3 §3/§12): post-guard, after the compat gate; default off ⇒ never
   // wired (no hook, no disk, no cap, no HubConfig key). Per-session agents are built by
@@ -765,184 +636,26 @@ export default function activate(rawPi: ExtensionAPI): void {
     );
   }
 
-  // Reply-plan §9 (MW): the @session port reuses the SAME sender instance as the tools.
-  let xsSender: XsSender | undefined;
-  // Channel-plan §2.3 (CHW): live probe — local channels on ∧ live link ∧ the hub declared xs.channel.v1.
-  const xsHubChannelCap = (): boolean => webHubRef.current?.xs?.hubPort().hubChannelCap?.() === true;
-  // Alias-plan §3.6 (ALW): live probe — local alias on ∧ live link ∧ the hub declared xs.alias.v1 (AL3's state).
-  const xsAliasUsable = (): boolean => aliasOn && webHubRef.current?.xs?.hubPort().aliasUsable?.() === true;
-  // Channel-plan §2.3/§10 (CHW): the sender's channel view delegates to the CURRENT stack's membership
-  // (rebuilt per session_start); no attached stack ⇒ empty sets / not joined (fail closed).
-  const xsChannelView: XsChannelView = {
-    pref: () => (xsAttached ? (holder.current?.xs?.membership.pref() ?? []) : []),
-    effective: () => (xsAttached ? (holder.current?.xs?.membership.effective() ?? []) : []),
-    link: (hubCap) => (xsAttached ? (holder.current?.xs?.membership.link(hubCap) ?? []) : []),
-    linkJoined: (hubCap) => (xsAttached ? holder.current?.xs?.membership.linkJoined(hubCap) === true : false),
-  };
-  if (xsEnabled) {
-    const sender = createXsSender({
-      port: {
-        list: (args) => webHubRef.current?.xs?.hubPort().list(args) ?? Promise.resolve({ kind: "off" }),
-        resolve: (args) => webHubRef.current?.xs?.hubPort().resolve(args) ?? Promise.resolve({ kind: "off" }),
-        send: (args) => webHubRef.current?.xs?.hubPort().send(args) ?? Promise.resolve({ kind: "off" }),
-        ...(replyEnabled ? { replyCapable: () => webHubRef.current?.xs?.hubPort().replyCapable?.() === true } : {}),
-        // Alias-plan §5.2 (ALW): alias mode ⇒ send pins the resolved full sessionId; off ⇒ key absent (legacy sender).
-        ...(aliasOn ? { aliasUsable: xsAliasUsable } : {}),
-        // Channel-plan §5.5/§4.1 (CHW): the channel ops ride the same late-bound bridge; absent bridge ⇒ off.
-        ...(channelsOn
-          ? {
-              hubChannelCap: xsHubChannelCap,
-              broadcast: (args) =>
-                webHubRef.current?.xs?.hubPort().broadcast?.(args) ?? Promise.resolve({ kind: "off" as const }),
-              channels: (args) =>
-                webHubRef.current?.xs?.hubPort().channels?.(args) ?? Promise.resolve({ kind: "off" as const }),
-            }
-          : {}),
-      },
-      origin: {
-        current: () => {
-          const xs = xsAttached ? holder.current?.xs : undefined;
-          return xs ? { sessionId: xs.sessionId(), epoch: xs.membership.epoch } : undefined;
-        },
-      },
-      maxChars: settings.fabric.maxChars,
-      ...(replyEnabled
-        ? {
-            reply: {
-              ledger: getXsReplyLedger(),
-              defaultTimeoutS: settings.fabric.crossSession.reply.defaultTimeoutS,
-              maxTimeoutS: settings.fabric.crossSession.reply.maxTimeoutS,
-              lateGraceS: settings.fabric.crossSession.reply.lateGraceS,
-              maxPending: settings.fabric.crossSession.reply.maxPending,
-              maxPendingPerTarget: settings.fabric.crossSession.reply.maxPendingPerTarget,
-              receivable: (target: string) =>
-                (xsAttached ? holder.current?.xs?.reply?.receivable(target) : undefined) ?? "not_joined",
-              inbound: (requestId: string) => (xsAttached ? holder.current?.xs?.reply?.inbound(requestId) : undefined),
-            },
-          }
-        : {}),
-      ...(channelsOn ? { channels: xsChannelView } : {}),
-      wakeOn: settings.fabric.wake.enabled,
-      ...(settings.fabric.wake.enabled
-        ? {
-            level: {
-              levelOfRoot: () => holder.current?.wake?.level.root ?? 0,
-              hopAllowed: (level: number) => holder.current?.wake?.level.hopAllowed(level) ?? false,
-            },
-          }
-        : {}),
-    });
-    xsSender = sender;
-    // Alias-plan §6 (ALW): instances/descriptions frozen at activate by the LOCAL alias setting (see `aliasOn`).
-    pi.registerTool(createListSessionsTool({ sender, channels: channelsOn, ...(aliasOn ? { alias: true } : {}) }));
-    pi.registerTool(createMessageSessionTool({ sender, reply: replyEnabled, ...(aliasOn ? { alias: true } : {}) }));
-    // Channel-plan §6.1 (CHW): main session only (this whole block is post-guard), xsOn ∧ channels.enabled.
-    if (channelsOn) pi.registerTool(createMessageChannelTool({ sender }));
-    const command = createFabricXsCommand({
-      enabled: () => xsEnabled,
-      sessionId: () => holder.current?.xs?.sessionId() ?? "",
-      membership: () => holder.current?.xs?.membership,
-      fence: () => holder.current?.xs?.fence,
-      // Channel-plan §2.3 (CHW): not joined on THIS link ⇒ no resolve frame; the command falls back to
-      // its offline full-id rule (an old hub would otherwise resolve for a non-member, C4).
-      resolve: (query) =>
-        channelsOn && !xsChannelView.linkJoined(xsHubChannelCap())
-          ? Promise.resolve({ ok: false, kind: "offline" })
-          : (webHubRef.current?.xs?.resolveBlock(query) ?? Promise.resolve({ ok: false, kind: "offline" })),
-      replies: () => {
-        const reply = holder.current?.xs?.reply;
-        return reply ? { ledger: reply.ledger, maxPending: reply.maxPending } : undefined;
-      },
-      onPolicyChange: () => holder.current?.xs?.reply?.flush(),
-      afterFenceReset: () => scheduleMessage?.resetBlockers(),
-      // Alias-plan §7 (ALW, AL4 port): always wired while xs is on — `localEnabled:false` still renders the
-      // `alias n/a (alias.enabled=false)` status line; bridge/cache are AL3's (absent web-hub wiring ⇒ local refusal).
-      alias: () => {
-        const xs = aliasOn ? webHubRef.current?.xs : undefined;
-        return {
-          localEnabled: aliasOn,
-          ...(xs ? { bridge: xs.aliasBridge(), cache: xs.aliasCache() } : {}),
-          leaseDays: Math.round((settings.fabric.crossSession.alias.offlineLeaseH / 24) * 10) / 10,
-          coolMin: settings.fabric.crossSession.alias.coolMin,
-          suggestions: () =>
-            aliasSuggestions({
-              cwd: notifyCapabilityCtx.current?.cwd,
-              sessionName: (() => {
-                try {
-                  return notifyCapabilityCtx.current?.sessionManager.getSessionName();
-                } catch {
-                  return undefined;
-                }
-              })(),
-            }),
-        };
-      },
-      // Channel-plan §6.3 (CHW): the hub listing (also the completion cache's refresh source — the
-      // command itself refreshes after status/channels/join/leave; the completer never does I/O).
-      ...(channelsOn
-        ? {
-            channels: async () => {
-              const out = await sender.channels();
-              return out.status === "ok"
-                ? { ok: true as const, channels: out.channels ?? [] }
-                : { ok: false as const, reason: out.reason ?? out.status };
-            },
-            broadcast: () => ({
-              outPerHour: settings.fabric.crossSession.channels.broadcast.outPerHour,
-              wakeOutPerHour: settings.fabric.crossSession.channels.broadcast.wakeOutPerHour,
-              wakeMaxRecipients: settings.fabric.crossSession.channels.broadcast.wakeMaxRecipients,
-            }),
-          }
-        : {}),
-      hubChannelCap: () => {
-        // `undefined` ⇔ no live hub link (n/a); otherwise whether THIS hub declared xs.channel.v1.
-        const conn = webHubRef.current?.xs !== undefined ? currentConnection() : undefined;
-        return conn !== undefined && conn.status().state === "live"
-          ? conn.caps.includes(XS_CHANNEL_HUB_CAP)
-          : undefined;
-      },
-      directoryChannels: () => {
-        const directory = xsAttached ? holder.current?.xs?.directory : undefined;
-        return directory ? directory.rows().flatMap((row) => row.channels ?? []) : [];
-      },
-      autoJoinInvalid: () =>
-        settings.fabric.crossSession.autoJoin && settings.fabric.crossSession.channels.autoJoinInvalid,
-      statusView: () => {
-        const xs = holder.current?.xs;
-        const quota = xs?.receiver.wakeQuota();
-        return {
-          capability: xsCapability.state,
-          lines: [
-            ...(quota
-              ? [`in ${quota.recvUsed}/${quota.recvCap} h · wakes ${quota.wakesUsed}/${quota.wakesCap} h`]
-              : []),
-            ...(xs
-              ? [
-                  `inbox unread ${xs.unread?.() ?? 0}`,
-                  `controller ${xs.controller?.state ?? "off"} · inbox ${xs.inbox.occupied}/${xs.inbox.cap}`,
-                  `counts ${JSON.stringify(xs.receiver.countersSnapshot())}`,
-                  `audit ${JSON.stringify(xs.audit)}`,
-                ]
-              : []),
-            ...(xsHubLimits
-              ? [
-                  `hub sends ${xsHubLimits.hubSendsPerMin}/min · local ${settings.fabric.crossSession.limits.hubSendsPerMin}/min${xsHubLimits.hubSendsPerMin !== settings.fabric.crossSession.limits.hubSendsPerMin ? " · differs" : ""}`,
-                ]
-              : ["hub limits unavailable"]),
-            ...(xsCollisions.length ? [`tool collisions: ${xsCollisions.join(", ")}`] : []),
-          ],
-        };
-      },
-    });
-    pi.registerCommand("fabric", {
-      ...command,
-      handler: async (args, ctx) => {
-        if (args.trim() === "" || args.trim() === "status") xsHubLimits = await webHubRef.current?.xs?.hubInfo();
-        await command.handler(args, ctx);
-      },
-    });
-  }
-
+  xs.registerSurface(pi);
+  // fabric-thread arch r3 §9.2/§9.3（P3）：主会话 `thread` 工具 — post-guard，紧跟 fabric 工具组
+  // （message_channel 之后；trace 断言钉住该顺序）。threads 关 ⇒ 不注册，工具表逐字节不变（G2a）。
+  if (threadsOn)
+    pi.registerTool(
+      createThreadTool({
+        current: () => holder.current?.threads,
+        // rebind-plan r3 §4.8：schema 实例/描述二选一，activate 时冻结（off ⇒ Legacy 逐字节）。
+        ...(settings.fabric.threads.rebind === true ? { rebind: true } : {}),
+      }),
+    );
+  // fabric-thread P3：/thread 本地人命令（status/drop/sub），同一 threadsOn 门控。
+  if (threadsOn)
+    pi.registerCommand(
+      "thread",
+      createThreadCommand({
+        current: () => holder.current?.threads,
+        ...(settings.fabric.threads.rebind === true ? { rebind: true } : {}),
+      }),
+    );
   if (caps.canRenderEntries) {
     // Renderer lives in adapters/fabric-entry-renderer.ts and renders ONLY
     // delivered records: the fabric outbox store appends one entry per state
@@ -964,199 +677,18 @@ export default function activate(rawPi: ExtensionAPI): void {
   } else {
     console.warn("[pi-subagent] registerEntryRenderer unavailable; fabric display messages fall back to context");
   }
-  // Markdown body rendering for the Agent / get_run_result cards.
-  // getMarkdownTheme() reads pi's global theme, which throws before the
-  // interactive theme subsystem is initialized (headless/print mode, tests)
-  // — the tools fall back to their legacy plain-text cards in that case.
-  const resolveMarkdownTheme = () => {
-    try {
-      return getMarkdownTheme();
-    } catch {
-      return undefined;
-    }
-  };
-  pi.registerTool(
-    createAgentTool({
-      // Top-level Agent always runs in the background (docs/dev/agent-background-only):
-      // only spawn() is reached; the outcome arrives through the notification outbox.
-      spawn: forwardSpawn(holder),
-      isReloadPending,
-      markdownTheme: resolveMarkdownTheme,
-      // L1 (agent-tool pool-full plan §2): read fresh on every call so a
-      // live `/agent settings` edit (or /reload) takes effect immediately,
-      // same convention as worktreeAvailable above.
-      queueWhenFull: () => settings.agent.queueWhenFull,
-      loadGate: () => holder.current?.load?.port().verdict().gating === true,
-    }),
-  );
-  const resultTool = createResultTool({
-    query: forwardQuery(holder),
-    resolveRun: forwardResolveRun(holder),
-    notifier: forwardNotifier(holder),
-    resultMaxChars: () => settings.resultMaxChars,
-    markdownTheme: resolveMarkdownTheme,
-    workflows: forwardWorkflowQuery(holder),
-    wake: { inboxCount: (runId) => holder.current?.wake?.inboxCount(runId) ?? 0 },
-  });
-  pi.registerTool(resultTool);
-  // Resumed transcripts still carry calls under the pre-rename name: draw them with the same cards
-  // (pi ≥ 1.0.1; absent on older pi / stub hosts, where history simply falls back to the generic card).
-  if (typeof pi.registerToolRenderer === "function") pi.registerToolRenderer(legacyResultToolRenderer(resultTool));
-  pi.registerTool(
-    createListSubagentsTool({
-      query: forwardQuery(holder),
-      spawn: { slots: () => requireStack(holder).spawn.slots() },
-      workflow: { activity: { list: () => requireStack(holder).workflow.activity.list() } },
-      now: () => systemClock.now(),
-    }),
-  );
-  // steer reply (steer-tool reply param): same fabric signal as the @mention
-  // wiring below (`holder.current?.fabric != null`) — read live at call time
-  // so a /reload or settings change takes effect without re-registration.
-  pi.registerTool(
-    createSteerTool({
-      query: forwardQuery(holder),
-      resolveRun: forwardResolveRun(holder),
-      fabricEnabled: () => holder.current?.fabric != null,
-    }),
-  );
-  // set_model host form (plan §4.11): self-switch goes through the ExtensionAPI
-  // (only available when the pi build exposes it — otherwise `host` stays
-  // absent and self-switching degrades to a clear error while switching a
-  // running subagent keeps working). All stack reads go through the holder at
-  // call time so the tool survives session_start rebuilds.
-  pi.registerTool(
-    createSetModelTool({
-      ...(caps.canSetModel
-        ? {
-            host: {
-              setModel: (model) => pi.setModel(model as never),
-              getThinkingLevel: () => pi.getThinkingLevel(),
-              setThinkingLevel: (level) => pi.setThinkingLevel(level as never),
-              findModel: (p, id) => holder.current?.models.find(p, id),
-            },
-          }
-        : {}),
-      runs: { setModel: (runId, model, opts) => requireStack(holder).query.setModel(runId, model, opts) },
-      resolveHint: (hint) => holder.current?.models.resolveHint(hint),
-      available: () => holder.current?.models.available() ?? [],
-      // external-agent plan §5.4/§5.5（P5）：仅 externalAgents.droid.enabled 时注入（settings
-      // 在 activate() 快照；enabled ⇒ 每个 session stack 都带端口）。谓词经 holder 晚绑定，
-      // /reload 后新栈缺席即自动失效；缺席 ⇒ droid/x 走原未知模型路径（字节一致，评审 #7）。
-      ...(settings.externalAgents.droid.enabled
-        ? { externalOwns: (p: string) => holder.current?.external?.owns(p) === true }
-        : {}),
-      resolveRun: forwardResolveRun(holder),
-      labelOf: (runId) => holder.current?.query.get(runId)?.diag.label,
-    }),
-  );
-  pi.registerTool(
-    createAbortTool({
-      query: forwardQuery(holder),
-      resolveRun: forwardResolveRun(holder),
-      workflows: forwardWorkflowQuery(holder),
-    }),
-  );
-  // timeout-notify：extend.enabled=false 时工具不注册（spawn 侧同步钳 maxExtensions=0，D-16）。
-  if (settings.extend.enabled) {
-    pi.registerTool(
-      createExtendTimeoutTool({
-        query: forwardQuery(holder),
-        resolveRun: forwardResolveRun(holder),
-        workflows: forwardWorkflowQuery(holder),
-        now: () => systemClock.now(),
-      }),
-    );
-  }
+  registerSubagentTools(pi, { holder, settings, caps, isReloadPending });
   // HOST_KEY guard above means this registration is visible only in the main session.
-  if (settings.compact.enabled) {
-    if (settings.compact.switchTool) {
-      pi.registerTool(
-        createSwitchContextTool({
-          store: handoffStore,
-          // deliverAs:"followUp": on pi 1.2 the onComplete resume can race a run that is still
-          // inside its startup window (busy) — queue instead of dropping (pi-1.2-compat §6.1);
-          // idle behavior is byte-identical on every supported pi version.
-          sendUserMessage: (text) => pi.sendUserMessage(text, { deliverAs: "followUp" }),
-          // todo-nudge switch-before hint (L1 feature): only wired when the
-          // tracker is actually active — wireTodo returns no port at all
-          // when todo.nudge is disabled or todo itself is off, so a disabled
-          // feature stays byte-identical to "not injected".
-          ...(todoWiring?.getTrackerSnapshot ? { todoTracker: todoWiring.getTrackerSnapshot } : {}),
-        }),
-      );
-      // 模型自写的交接文本在这里变成 pi 压缩条目的 summary（零摘要 LLM 调用）。
-      pi.on(
-        "session_before_compact",
-        createSwitchContextCompactHook({
-          store: handoffStore,
-          sessionFacts: createSessionFactsProvider(holder, settings),
-          // R2-1：唯一因果信号——交接文本真的被采用时开火（带 seq），供动态遥测建 handoffMarker。
-          onApplied: (info) => holder.current?.dynamic?.noteHandoffApplied(info),
-          debug: process.env.PI_SUBAGENT_DEBUG_COMPACT_HINT === "1",
-        }),
-      );
-      // 压缩失败/被取消：交接文本作废，绝不能留给下一次（可能是几十轮后）的压缩。
-      // 动态遥测的两个 marker 同步清（§5.4 清除③；归因不能落在失败的一次上）。
-      pi.on("session_compact_failed", () => {
-        handoffStore.clear();
-        holder.current?.dynamic?.clearMarkers("compact-failed");
-      });
-      pi.on("session_shutdown", () => handoffStore.clear());
-    }
-    // 彻底替换为默认：switchTool 开启时不再暴露 compact_context，
-    // 除非显式 compact.keepCompactTool=true（回退开关）。
-    if (!settings.compact.switchTool || settings.compact.keepCompactTool) {
-      // Same deliverAs rationale as the switch_context closure above (pi-1.2-compat §6.1).
-      pi.registerTool(
-        createCompactTool({ sendUserMessage: (text) => pi.sendUserMessage(text, { deliverAs: "followUp" }) }),
-      );
-    }
-    pi.registerTool(
-      createSetCompactThresholdTool({
-        getState: () => holder.current?.compactHint,
-        compactToolEnabled: () => settings.compact.enabled,
-        toolName: settings.compact.switchTool ? "switch_context" : "compact_context",
-        dynamic: { view: () => holder.current?.dynamic?.statusView() },
-      }),
-    );
-  }
+  registerCompactTools(pi, {
+    holder,
+    settings,
+    handoffStore,
+    ...(todoWiring?.getTrackerSnapshot ? { todoTracker: todoWiring.getTrackerSnapshot } : {}),
+  });
   // bash auto-background (§2.6/R6): the same-name `bash` override and its
   // `bash_job` management tool exist only when the feature is on — off means
   // pi's built-in bash stays in place with zero behaviour change.
-  if (bashJobsEnabled(settings)) {
-    pi.registerTool(
-      createBashTool({
-        manager: forwardBashJobs(holder),
-        autoBackgroundMs: () => settings.bashJobs.autoBackgroundMs,
-        // 2026-10-17 shell-resolution revision: pi's `shellCommandPrefix`,
-        // honoured exactly like pi's built-in bash tool (`${prefix}\n${command}`)
-        // — read off the current stack (rebuilt per session_start, non-live).
-        commandPrefix: () => holder.current?.bashShell?.shellCommandPrefix,
-        // P5b: without this the main session's `timeoutGraceMs`/`maxExtensions`/
-        // `maxTimeoutFactor` settings never reach the tool surface (the
-        // description suffix stays off even when the manager's own
-        // deadlinePolicy — src/stack.ts's `buildBashJobManager` — is enabled).
-        deadline: () => ({
-          graceMs: settings.bashJobs.timeoutGraceMs,
-          maxExtensions: settings.bashJobs.maxExtensions,
-          maxTimeoutFactor: settings.bashJobs.maxTimeoutFactor,
-        }),
-      }),
-    );
-    pi.registerTool(
-      createBashJobTool({
-        manager: forwardBashJobs(holder),
-        // P5b: same as above — without this `bash_job`'s schema never gains
-        // the `extend` action for the main session, no matter the settings.
-        deadline: () => ({
-          graceMs: settings.bashJobs.timeoutGraceMs,
-          maxExtensions: settings.bashJobs.maxExtensions,
-          maxTimeoutFactor: settings.bashJobs.maxTimeoutFactor,
-        }),
-      }),
-    );
-  }
+  if (bashJobsEnabled(settings)) registerBashTools(pi, { holder, settings });
   // Inject the registered agent types and available models through the hub.
   // The hub owns the stable/live/legacy mode, persistence, updates, and wake
   // replay capture. Its registration order is the existing types -> models
@@ -1232,6 +764,16 @@ export default function activate(rawPi: ExtensionAPI): void {
     if (!stack) return 0;
     return countActiveRuns(stack.query.list(), stack.spawn.runningIds()) + stack.workflow.activity.list().length;
   };
+  // memory-predict plan §11.1: late-bound W-signal ports (bashJobs/fleet) —
+  // a plain function call, not a registration (governance's activate-trace
+  // golden is unaffected). `memoryWiring` is undefined when `memory.enabled`
+  // is false; `attachJevPredictPorts` itself no-ops when Jev is unwired.
+  memoryWiring?.attachJevPredictPorts({
+    bashJobs: {
+      list: () => (holder.current?.bashJobs?.list() ?? []).map((r) => ({ status: r.status, command: r.command })),
+    },
+    fleet: { activeRuns: () => activeSubagentRunCount() },
+  });
   pi.registerCommand(
     "agent",
     createStatusCommand({
@@ -1264,7 +806,7 @@ export default function activate(rawPi: ExtensionAPI): void {
       xs: () => {
         const stack = holder.current?.xs;
         return stack
-          ? { stack, capability: xsCapability.state, outCap: settings.fabric.crossSession.limits.sendsOutPerHour }
+          ? { stack, capability: xs.capabilityState(), outCap: settings.fabric.crossSession.limits.sendsOutPerHour }
           : undefined;
       },
       load: () => {
@@ -1284,6 +826,8 @@ export default function activate(rawPi: ExtensionAPI): void {
         const port = holder.current?.external;
         return port === undefined ? undefined : { droidUnavailableReason: port.unavailableReason("droid") };
       },
+      // fabric-thread P4（§6.7）：thread 行晚绑定当前栈面；threads 关 ⇒ 栈面缺席 ⇒ 不渲染该行。
+      threads: () => holder.current?.threads?.statusLine(),
       // compact-hint 动态阈值（§10.3，P1-11）：经 holder 读当前会话（/reload 后自然指向新 stack）。
       // facts() 只读快照 compactHint 的 force/reserve 配置；窗口由命令时点的 ctx.getContextUsage 给。
       dynamic: {
@@ -1309,7 +853,8 @@ export default function activate(rawPi: ExtensionAPI): void {
         // command tells the user to /reload for those.
         current: settings,
         persist: (key, value) => persistSettingOverride(key, value),
-        path: defaultSettingsPath(),
+        path: settingsFile.path,
+        pathNote: settingsPathNote(settingsFile.location),
         // L1 (agent-tool pool-full plan §4): concurrencyLimit is the one
         // exception — the SlotPool captures it once in its constructor
         // (stack.ts), so mutating settings.concurrencyLimit in place does not
@@ -1322,7 +867,14 @@ export default function activate(rawPi: ExtensionAPI): void {
           if (key === "concurrencyLimit" && typeof value === "number") holder.current?.spawn.setConcurrencyLimit(value);
         },
       },
-      reload: createReloadCommandPort(() => reloadRef.current, pi),
+      reload: createReloadCommandPort(
+        () => reloadRef.current,
+        pi,
+        (event) =>
+          // #30 D1/D6: late-bound phase sink — the web-hub tracker, iff wired (webHub off ⇒
+          // webHubRef.current stays undefined and the port's events simply go nowhere).
+          webHubRef.current?.onReloadPhase?.(event),
+      ),
     }),
   );
 
@@ -1344,90 +896,7 @@ export default function activate(rawPi: ExtensionAPI): void {
     for (const type of TOOLKIT_LABELLED_CUSTOM_TYPES) pi.registerMessageRenderer(type, renderToolkitMessage);
   }
 
-  // X6: @handle mentions. Registered once; resolves through the current
-  // session's stack like the tools above. Conservative by contract: unknown
-  // labels and @file/paths fall through to pi untouched.
-  // Reply-plan §9.1 static facts shared by routing and completion (all LIVE reads).
-  const sessionParseDeps = () => ({
-    isLabel: (name: string) => holder.current?.mention.resolve(name) !== undefined,
-    cwd: () => notifyCapabilityCtx.current?.cwd ?? process.cwd(),
-    lookupExact: (name: string) => {
-      const directory = xsAttached ? holder.current?.xs?.directory : undefined;
-      const row = directory?.lookupExact(name);
-      // A miss on a shape-valid bare name warms the (throttled, single-flight) cache so the NEXT
-      // attempt can match; this attempt still passes through to pi (RR8).
-      if (row === undefined) void directory?.refresh("lookup");
-      return row;
-    },
-    // Alias-plan §5.4 (ALW, AL5b): LIVE alias mode + the directory's unique alias lookup. Absent while alias is off
-    // ⇒ the parse path is byte-identical to the pre-alias one.
-    ...(aliasOn
-      ? {
-          aliasMode: xsAliasUsable,
-          lookupAlias: (alias: string) => {
-            const directory = xsAttached ? holder.current?.xs?.directory : undefined;
-            const row = directory?.lookupAlias(alias);
-            // §5.4 step 6: a miss on an alias-shaped token (only reached after normalizeAlias ∧ label/file checks)
-            // warms the throttled single-flight cache; this attempt still falls through.
-            if (row === undefined) void directory?.refresh("mention");
-            return row;
-          },
-        }
-      : {}),
-  });
-  // Reply-plan §9.4/§9.6: human-origin @session notices are display-only (never triggerTurn).
-  const sessionNoticeMessage = (notice: SessionMentionNotice) =>
-    notice.kind === "error"
-      ? {
-          customType: "subagent:mention-error",
-          content: notice.message,
-          display: true,
-          details: { source: SESSION_MENTION_ERROR_SOURCE },
-        }
-      : {
-          customType: SESSION_MENTION_SENT_CUSTOM_TYPE,
-          content: notice.message,
-          display: true,
-          details: { source: SESSION_MENTION_ERROR_SOURCE },
-        };
-  // Reply-plan §9.3: present iff xs is on. `joined` is a LIVE read (join/leave/connect are
-  // call-time facts, §9.3/§9.7) — xs off / not joined / left ⇒ parse() undefined ⇒ `@` passes through.
-  const mentionSessions: MentionSessionPort | undefined = xsSender
-    ? createMentionSessionPort({
-        ...sessionParseDeps(),
-        // Channel-plan §2.3 (CHW): the LINK set — a named-channel-only session on an old hub passes `@` through.
-        joined: () =>
-          xsAttached &&
-          holder.current?.xs?.membership.linkJoined(channelsOn && xsHubChannelCap()) === true &&
-          webHubRef.current?.xs !== undefined,
-        send: async (target, message, options) => {
-          const out = await xsSender!.message({
-            to: target,
-            text: message,
-            wake: true,
-            ...(options?.expectReply === false ? {} : { expectReply: {} }),
-            origin: "human",
-            levelOverride: 0,
-          });
-          return mapMentionSendOutcome(out, settings.fabric.crossSession.reply.maxPending);
-        },
-      })
-    : undefined;
-  const mentionRouteDeps = createMentionRouteDeps({
-    ...(mentionSessions ? { sessions: mentionSessions } : {}),
-    registry: {
-      register: () => false, // registrations flow from spawn labels inside the stack
-      resolve: (label) => holder.current?.mention.resolve(label),
-      labels: () => holder.current?.mention.labels() ?? [],
-      reassign: () => undefined, // label re-pointing is driven by the stack's onLabel wiring
-    },
-    query: forwardQuery(holder),
-    spawn: forwardSpawn(holder),
-    // message_agent reply hint only when fabric is on (subagents own the tool then)
-    fabricEnabled: () => holder.current?.fabric != null,
-    // X6b: surface the user's raw @ message in the fleet widget under the target run
-    noteMention: (runId, message, pendingSince) => holder.current?.mentionNotes.set(runId, message, pendingSince),
-  });
+  const mention = createMentionWiring({ settings, holder, xs, webHubRef, notifyCtx: notifyCapabilityCtx });
   const wakeAttributeRef: { current?: (text: string) => "web_prompt" | undefined } = {};
   // fabric-cross-session plan §3.3 L7 (W1): proven human input resets the root causal level. Registered once per
   // activate() (post-guard: main session only) BEFORE the mention / topic-switch input handlers so a `handled` answer
@@ -1436,6 +905,7 @@ export default function activate(rawPi: ExtensionAPI): void {
     "input",
     createWakeInputHook({
       level: () => holder.current?.wake?.level,
+      rootBudget: () => holder.current?.wake?.rootBudget,
       attributeInput: () => wakeAttributeRef.current,
     }),
   );
@@ -1443,134 +913,70 @@ export default function activate(rawPi: ExtensionAPI): void {
     (holder.current?.xs?.controller ?? holder.current?.rootWakeRecovery)?.input(event, wakeAttributeRef.current);
     return { action: "continue" };
   });
-  installMentionInput(pi, mentionRouteDeps);
+  mention.install(pi);
+
+  // The activate-level pieces that run BETWEEN stack steps during teardown (see ActivationTeardown); C1/C2/C3 stay in
+  // their own session_shutdown handlers — their registration order is pinned (activation-trace golden).
+  const activationTeardown: ActivationTeardown = {
+    defensiveXsTeardown: (nextXsSessionId) => xs.defensiveTeardown(nextXsSessionId),
+    scheduleSurfaceShutdown: () => scheduleSurface?.shutdown(), // status bar cleared + digest disposed BEFORE the executor closes its runs
+    disposeGoalHook: () => goalHook.dispose(),
+    releaseCapabilityAlert: () => {
+      capabilityAlertOff?.();
+      capabilityAlertOff = undefined;
+    },
+    sealChildBashJobs: () =>
+      getChildBashRegistry()
+        .sealAll(BASH_JOB_SEAL_GRACE_MS)
+        .catch(() => undefined),
+  };
 
   pi.on("session_start", async (_event, ctx) => {
     activateResultTool(ctx);
-    xsAttached = false;
-    const nextXsSessionId = xsEnabled || xsLedger.size > 0 ? xsSessionOf(ctx) : undefined;
+    const nextXsSessionId = xs.beginSessionStart(ctx, _event.reason);
     notifyCapabilityCtx.current = ctx;
+    subscribeCapabilityAlert();
     if (compat.warning) console.warn(`[pi-subagent] ${compat.warning}`);
-    // Defensive: if pi ever fires session_start without a paired shutdown,
-    // stop the previous stack's timer/RPC surfaces so they cannot double-fire.
+    // #26: swap the memory commits' session controller — a stale signal
+    // must never authorize a commit in the new session.
+    sessionAbort?.abort();
+    sessionAbort = new AbortController();
+    // Defensive: if pi ever fires session_start without a paired shutdown, stop the previous stack's timer/RPC
+    // surfaces so they cannot double-fire (path B of src/stack-teardown.ts; synchronous, like the block it replaced).
     if (holder.current) {
-      // ask-user-async §3.3 (P2): stop the old hub's broadcast FIRST so a
-      // completion flushed by the teardown below can never reach the new
-      // session's ask_user (idempotent; shutdown is the other path).
-      holder.current.xs?.dispose();
-      holder.current.rootWakeRecovery?.dispose();
-      // Defensive replacement without shutdown: a NEW identity proves the old session ended.
-      // Same-session reload is deliberately not proof.
-      if (xsSessionId && nextXsSessionId !== undefined && xsSessionId !== nextXsSessionId)
-        xsLedger.teardown(xsSessionId);
-      holder.current.backgroundCompletions.dispose();
-      holder.current.fleetWidget?.dispose();
-      holder.current.archive?.dispose(); // web-hub archive plan: stop the stale auto-sweep (dual-path with buildSessionStack)
-      holder.current.keepalive?.dispose();
-      holder.current.quota?.dispose();
-      holder.current.external?.dispose(); // external-agent plan §5.5（P5）：停目录探测（与 /reload 重建双保险）
-      holder.current.dynamic?.dispose(ctx); // P1-4：防御性清理（与 shutdown 双保险，幂等）
-      holder.current.load?.dispose();
-      holder.current.schedule?.dispose(); // defensive: the next stack recovers this epoch's runs (unknown(reload))
-      holder.current.scheduleBackground?.dispose();
-      holder.current.rpc.close();
-      holder.current.fabric?.dispose();
-      holder.current.workflow.runs.abandon(); // stop orphaned background workflows; their notices are dropped
+      holder.current.dispose({ kind: "defensive", nextXsSessionId }, { ctx, settings, activation: activationTeardown });
     }
-    await types.reload();
-    const stack = buildSessionStack(
-      pi,
-      ctx,
-      settings,
-      types,
-      [mergeExtensionPoints(extensionPoints)],
-      _event.reason,
-      loadHintState,
-      // external-agent plan §5.5（P5）：memory 的外部导出（P4a renderForExternal）经
-      // holder 晚绑定——wireMemory 在 activate() 早期已返回，这里只传 getter；是否
-      // 真正注入由 buildSessionStack 按 externalAgents.droid.{enabled,injectMemory} 判定。
-      memoryWiring !== undefined ? { memoryBlock: (cwd: string) => memoryWiring?.renderForExternal(cwd) } : undefined,
-      xsEnabled
-        ? {
-            ports: {
-              webExec: () => webHubRef.current?.webExecBusy?.() === true,
-              topicSwitch: () => xsFencePorts.topicSwitch?.(),
-              goal: () => xsFencePorts.goal?.(),
-            },
-            memberChanged: () => webHubRef.current?.xs?.publishMember(),
-            unreadChanged: refreshXsInbox,
-            ...(channelsOn ? { hubChannelCap: xsHubChannelCap } : {}),
-            ...(aliasOn ? { aliasUsable: xsAliasUsable } : {}),
-            listRows: async (origin) => {
-              const reply = await webHubRef.current?.xs?.hubPort().list({ origin });
-              return reply?.kind === "res" && reply.res.ok ? (reply.res.rows ?? []) : undefined;
-            },
-          }
-        : undefined,
-      scheduleWiring,
-    );
-    holder.current = stack;
-    xsSessionId = nextXsSessionId;
-    if (xsEnabled) {
-      xsInboxCtx.current = ctx;
-      xsInboxPublished = -1;
-      xsInboxShown = "\u0000"; // new session/reload: force one re-render of the (possibly retained) count
-      refreshXsInbox();
-    }
-    xsAttached = xsSessionId !== undefined && (stack.xs !== undefined || stack.rootWakeRecovery !== undefined);
-    if (xsEnabled) {
-      // The toolkit's own two declarations are not collisions. Keep foreign declarations and
-      // duplicates (when the host exposes them); C-X7 tests host-specific name arbitration.
-      try {
-        // Channel-plan §6 (CHW): compare against the instances THIS activation registered.
-        const own = new Map<string, unknown>([
-          ["list_sessions", listSessionsParamsFor(channelsOn)],
-          ["message_session", messageSessionParamsFor(replyEnabled)],
-          ...(channelsOn ? ([["message_channel", MessageChannelParams]] as const) : []),
-        ]);
-        xsCollisions = detectXsToolCollisions(
-          pi
-            .getAllTools()
-            .filter(
-              (tool) => !own.has(tool.name) || JSON.stringify(tool.parameters) !== JSON.stringify(own.get(tool.name)),
-            )
-            .map((tool) => tool.name),
-          { channels: channelsOn },
-        );
-        if (xsCollisions.length) console.warn(`[pi-subagent] fabric xs tool collisions: ${xsCollisions.join(", ")}`);
-      } catch {
-        /* older host / unbound runtime: diagnostic only */
-      }
-    }
-    if (ctx.hasUI && typeof ctx.ui.addAutocompleteProvider === "function") {
-      ctx.ui.addAutocompleteProvider((current) =>
-        createMentionAutocompleteProvider(current, {
-          entries: () => mentionAutocompleteEntries(holder),
-          ...(mentionSessions
-            ? {
-                sessions: () => {
-                  const directory = xsAttached ? holder.current?.xs?.directory : undefined;
-                  if (!directory) return [];
-                  void directory.refresh("complete"); // never awaited (§9.5)
-                  return directory.rows().map((row) => ({
-                    ref: row.ref,
-                    ...(row.name !== undefined ? { name: row.name } : {}),
-                    cwdLabel: row.cwdLabel,
-                    receive: row.receive,
-                    busy: row.busy,
-                    ...(row.channels !== undefined && row.channels.length > 0 ? { channels: row.channels } : {}),
-                    ...(aliasOn && row.alias !== undefined ? { alias: row.alias } : {}),
-                  }));
-                },
-                sessionBareName: (name: string) => sessionCompletionBare(sessionParseDeps(), name),
-                ...(aliasOn
-                  ? { sessionBareAlias: (alias: string) => sessionCompletionAlias(sessionParseDeps(), alias) }
-                  : {}),
-              }
-            : {}),
-        }),
+    let stack: ReturnType<typeof buildSessionStack>;
+    try {
+      await types.reload();
+      stack = buildSessionStack(
+        pi,
+        ctx,
+        settings,
+        types,
+        [mergeExtensionPoints(extensionPoints)],
+        _event.reason,
+        loadHintState,
+        // external-agent plan §5.5（P5）：memory 的外部导出（P4a renderForExternal）经
+        // holder 晚绑定——wireMemory 在 activate() 早期已返回，这里只传 getter；是否
+        // 真正注入由 buildSessionStack 按 externalAgents.droid.{enabled,injectMemory} 判定。
+        memoryWiring !== undefined ? { memoryBlock: (cwd: string) => memoryWiring?.renderForExternal(cwd) } : undefined,
+        xs.stackInput(),
+        scheduleWiring,
+        // fabric-thread P3（§11.1）：threads 开启时才传跨接线（replySink → web-hub 命令处理器；
+        // conn → 激活级 hub 连接）。关闭 ⇒ buildSessionStack 收到 undefined ⇒ 栈面缺席（G2a）。
+        threadsOn ? { replySink: () => webHubRef.current?.threadSink, conn: currentConnection } : undefined,
+        settingsFile,
+        fast,
+        memoryScopes?.group(),
       );
+    } catch (error) {
+      memoryScopes?.group()?.dispose();
+      throw error;
     }
+    holder.current = stack;
+    xs.attach(stack, ctx, pi, nextXsSessionId);
+    mention.attachAutocomplete(ctx);
     stack.notifier.reconcile();
     // Background workflows (plan §3.2): notices the previous stack persisted while shutting down.
     stack.workflow.redeliverPendingNotices();
@@ -1585,103 +991,31 @@ export default function activate(rawPi: ExtensionAPI): void {
   });
 
   pi.on("session_shutdown", async (event, ctx) => {
+    // #26: abort any in-flight memory touched>0 commit — it must refuse
+    // instead of leaking past the session boundary.
+    sessionAbort?.abort();
+    sessionAbort = undefined;
     const stack = holder.current;
-    if (!stack) return;
-    // ask-user-async §3.3 (P2): FIRST — the hub stops broadcasting before the
-    // drain/seal below settles anything; completions surfacing during shutdown
-    // must not interrupt whatever session comes next. Idempotent (the next
-    // buildSessionStack's top-of-build dispose is the same call).
-    stack.backgroundCompletions.dispose();
-    // scheduled-reports A0 (§4.6): the schedule executor goes FIRST — dispose, then this epoch's
-    // non-terminal runs become unknown(owner-closed) (lock wait ≤ 500 ms) BEFORE the run drain
-    // below can land a shutdown `aborted` (first terminal write wins).
-    scheduleSurface?.shutdown(); // status bar cleared + digest disposed BEFORE the executor closes its runs
-    await stack.schedule?.shutdown();
-    stack.scheduleBackground?.dispose(); // AFTER closeEpoch wrote unknown(owner-closed): late outcomes only append lateOutcome
-    // X7b: kill the fleet widget FIRST and unconditionally. pi's /reload
-    // re-imports this extension as a fresh module (jiti moduleCache:false), so
-    // the module-level previousFleetWidget handoff in buildSessionStack never
-    // sees the pre-reload controller — and because the stale ctx.ui closures
-    // keep working (setWidget has no assertActive), its self-rescheduling 1Hz
-    // tick would otherwise outlive the session forever, pushing
-    // setWidget(undefined) over the new session's frames: the agent tree
-    // blinks off/on at the combined tick rate, worse with every reload.
-    stack.fleetWidget?.dispose();
-    stack.archive?.dispose(); // web-hub archive plan: same fresh-module /reload rationale as the widget above
-    stack.keepalive?.dispose();
-    stack.quota?.dispose();
-    stack.dynamic?.dispose(ctx); // P1-4：flush 遥测观察窗 + 估计量落盘（T-D3-DISPOSE）
-    stack.load?.dispose();
-    stack.rpc.close(); // X8
-    // bash-timeout-grace plan §2.5 step 4/6 (P5): abort whichever recovery/
-    // cleanup phase this stack still has outstanding — covers the fresh-
-    // module `/reload` case (buildSessionStack's own module-level handoff
-    // only sees a same-module rebuild).
-    stack.bashJobRecovery?.dispose();
-    // Fabric must freeze before run shutdown so late verdicts from the old
-    // stack cannot write into the shared outbox; the next stack owns pending records.
-    stack.fabric?.dispose();
-    const drainMs = Math.min(settings.budget.abortGraceMs * 3, 15_000);
-    // Background workflows (docs/dev/workflow-background/plan.md §4): request a stop on every
-    // running workflow first (so no script spawns another child), then stop runs; both drains
-    // share one bound. seal() finalizes any workflow still settling with its degraded snapshot
-    // — its notice is persisted into THIS session while it is still current.
-    stack.workflow.runs.shutdown();
-    const pending = stack.query
-      .list()
-      .filter((s) => !["completed", "failed", "timed_out", "aborted"].includes(s.status));
-    // admitted-run-visibility fix (2026-10-08 incident): spawn.abort() (unlike query.stop(),
-    // which calls straight into the runtime adapter's activeCancels map) also falls back to
-    // the admission-time AbortController wired into start() when the runtime adapter does not
-    // know this runId yet — the exact state a just-admitted, not-yet-entered resume is in. Gated
-    // on `running.has(runId)` (SpawnService's own admission-time truth), same as fix 1/2 above.
-    await Promise.all(pending.map((s) => stack.spawn.abort(s.runId, "shutdown")));
-    await Promise.all([
-      stack.query.waitAll({ runIds: pending.map((s) => s.runId), waitMs: drainMs }),
-      stack.workflow.runs.drain(drainMs),
-    ]);
-    // run-persistence plan D5: synchronous best-effort journal flush for runs the drain did not
-    // settle — written into THIS session while pi has not yet invalidated the ctx.
-    stack.runJournal.flushPending(
-      pending.map((s) => s.runId),
-      event.reason,
-    );
-    stack.workflow.runs.seal();
-    // workflow-worktree plan D13 (v2.1 condition 2): tear down THIS stack's
-    // spawn-service worktree waiters/timers, flip the runtime-adapter's
-    // write-back to redirect-only, and release its disposition-sink
-    // registration. Placed after seal() (same ordering rationale as the
-    // fabric-before-workflow-shutdown note above): any run this stack is
-    // still settling must get its chance to write through the normal path
-    // first; only truly late reports after this point are redirected.
-    stack.worktreeLate?.dispose();
-    // workflow-worktree plan §3 (P4 fix, 2026 review): stop this stack's fire-and-forget
-    // startup orphan scan from ever firing a notify after shutdown — same rationale as
-    // worktreeLate.dispose() just above (a scan still resolving when the session ends must
-    // never surface a stale prompt into a torn-down UI).
-    stack.worktreeOrphansStartup?.dispose();
-    // child-bash no-host-view diag plan (L1 todo #20): covers the fresh-
-    // module `/reload` case the same way as worktreeOrphansStartup just
-    // above — idempotent, so this and buildSessionStack's own top-of-build
-    // release can never double-release.
-    stack.hostBashViewCapability.dispose();
-    // bash auto-background §3.7: reload/new/resume/fork always keep the
-    // processes (the next stack adopts them); only a real `quit` consults
-    // shutdownPolicy, and even `kill` is bounded best-effort — a background
-    // job that refuses to die must never delay pi's exit.
-    if (stack.bashJobs && event.reason === "quit" && settings.bashJobs.shutdownPolicy === "kill") {
-      await killBashJobsBounded(stack.bashJobs, settings.budget.abortGraceMs);
+    if (!stack) {
+      activationTeardown.releaseCapabilityAlert(); // no stack (compat gate failed): still drop the G11 subscription
+      return;
     }
-    // bash-timeout-grace plan §3.3 S6: same "only a real quit" gate as the
-    // main session's own jobs above — a child subagent that is STILL
-    // RUNNING when the main session merely `/reload`s must keep its
-    // background jobs (they are not this stack's to kill); only when the
-    // whole process is exiting does every still-registered child session's
-    // bash jobs get a bounded best-effort kill.
-    if (event.reason === "quit") {
-      await getChildBashRegistry()
-        .sealAll(BASH_JOB_SEAL_GRACE_MS)
-        .catch(() => undefined);
+    // /new channel handoff (new-session-channels-fix): stash the outgoing membership BEFORE
+    // dispose so the next session_start{new} can adopt it (a no-op for any other reason).
+    xs.stashMembershipHandoff(event.reason);
+    // Path C4 of src/stack-teardown.ts: the ordered, awaited shutdown (background completions first, schedule
+    // closeEpoch before the run drain, fabric before run shutdown, worktree disposal after seal, bash kill/seal on quit).
+    try {
+      await stack.dispose(
+        { kind: "shutdown", reason: event.reason },
+        { ctx, settings, activation: activationTeardown },
+      );
+    } finally {
+      // G8 (7b): the torn-down stack must not keep serving. A holder-routed call that arrives afterwards now fails
+      // with "no active session yet" (holder.ts `requireStack`) or reads `undefined` (`holder.current?.…` getters)
+      // instead of being answered by a dead stack whose notifier/outbox/pi are gone. Identity-checked, and in
+      // `finally` so a throwing teardown step cannot leave the stale stack published.
+      if (holder.current === stack) delete holder.current;
     }
   });
 
@@ -1740,55 +1074,30 @@ export default function activate(rawPi: ExtensionAPI): void {
     const proxyWarnings = settings.webHub.proxy?.enabled === true ? loadWebHubProxyWarnings() : [];
     webHubRef.current = wireWebHub(pi, {
       settings: settings.webHub,
-      ...(xsEnabled
+      ...xs.webHubDeps(),
+      feishuBot: settings.feishuBot,
+      // fabric-thread P3（§6.1/§7.1/§8.2）：栈面晚绑定、cap 门控、HubConfig 键。threads 关 ⇒
+      // 三者全部缺席，hello caps / status / spawn config 逐字节不变（G2a，A 类 golden 钉住）。
+      ...(threadsOn
         ? {
-            xs: {
-              stack: () => (xsAttached ? holder.current?.xs : undefined),
-              // Channel-plan §3.2/§6.4 (CHW): the three broadcast keys ride along only when channels are on;
-              // the bridge writes them only into a named-channel frame (default-only frames stay byte-identical).
-              memberLimits: () =>
-                channelsOn
-                  ? {
-                      ...settings.fabric.crossSession.limits,
-                      broadcastsOutPerHour: settings.fabric.crossSession.channels.broadcast.outPerHour,
-                      broadcastMinIntervalMs: settings.fabric.crossSession.channels.broadcast.minIntervalS * 1000,
-                      broadcastWakesOutPerHour: settings.fabric.crossSession.channels.broadcast.wakeOutPerHour,
-                    }
-                  : settings.fabric.crossSession.limits,
-              hubSendsPerMin: () => settings.fabric.crossSession.limits.hubSendsPerMin,
-              // Reply-plan §5.1: frozen per activate (non-live, §8.1); unset ⇒ pre-reply byte shape.
-              replyEnabled: () => replyEnabled,
-              // Channel-plan §3.1 (CHW): agent cap `xs.channel.v1` + hub-global broadcast params.
-              channelsEnabled: () => channelsOn,
-              channelsHubConfig: () => ({
-                maxRecipients: settings.fabric.crossSession.channels.broadcast.maxRecipients,
-                wakeMaxRecipients: settings.fabric.crossSession.channels.broadcast.wakeMaxRecipients,
-              }),
-              // Alias-plan §3.6/§4 (ALW): agent cap `xs.alias.v1` + `HubConfig.crossSession.alias` (AL2 deviation 1:
-              // alias off ⇒ the key is never written ⇒ the spawned hub builds no table). Keys absent while off.
-              ...(aliasOn
-                ? {
-                    aliasEnabled: () => true,
-                    aliasHubConfig: () => ({
-                      offlineLeaseH: settings.fabric.crossSession.alias.offlineLeaseH,
-                      coolMin: settings.fabric.crossSession.alias.coolMin,
-                      takeMinOfflineMin: settings.fabric.crossSession.alias.takeMinOfflineMin,
-                    }),
-                    // Q3: display-only one-shot notice (the bridge de-duplicates by (sessionId, lost.at)).
-                    notifyAliasLost: (text: string) => {
-                      try {
-                        const ctx = notifyCapabilityCtx.current;
-                        if (ctx?.hasUI && typeof ctx.ui?.notify === "function") ctx.ui.notify(text, "info");
-                      } catch {
-                        /* display hint only */
-                      }
-                    },
-                  }
-                : {}),
-            },
+            threads: () => holder.current?.threads,
+            threadsCapOn: () => settings.fabric.enabled && settings.fabric.threads.enabled,
+            // rebind-plan r3 §4.2 (P0b): the rebind cap is advertised only when BOTH gates hold
+            // (secure domains already forced `rebind:false` in the settings parser, A17).
+            threadsRebindCapOn: () =>
+              settings.fabric.enabled && settings.fabric.threads.enabled && settings.fabric.threads.rebind === true,
+            threadsHubConfig: () => ({
+              handbackWindowMin: settings.fabric.threads.handbackWindowMin,
+              startTimeoutMin: settings.fabric.threads.startTimeoutMin,
+              retainMin: settings.fabric.threads.retainMin,
+              replyPerThreadPerMin: settings.fabric.threads.replyPerThreadPerMin,
+              replyPerThreadPerHour: settings.fabric.threads.replyPerThreadPerHour,
+              // rebind-plan r3 §4.2 (P0b): the hub-side rebind switch — written ONLY when on, so
+              // a rebind-off HubConfig stays byte-identical (A16).
+              ...(settings.fabric.threads.rebind === true ? { rebind: true } : {}),
+            }),
           }
         : {}),
-      feishuBot: settings.feishuBot,
       // scheduled-reports A0: present ⇔ schedule.enabled ∧ plain domain (router exists).
       ...(scheduleWiring?.webHubPort !== undefined ? { schedule: scheduleWiring.webHubPort } : {}),
       proxyWarnings: () => proxyWarnings,
@@ -1796,7 +1105,7 @@ export default function activate(rawPi: ExtensionAPI): void {
       query: () => holder.current?.query,
       mention: () =>
         createMentionRouteDeps({
-          ...mentionRouteDeps,
+          ...mention.routeDeps,
           reportError: (message) =>
             pi.sendMessage({
               customType: "subagent:mention-error",
@@ -1804,9 +1113,10 @@ export default function activate(rawPi: ExtensionAPI): void {
               display: true,
               details: { source: "mention" },
             }),
-          notifySession: (notice) => pi.sendMessage(sessionNoticeMessage(notice)),
+          notifySession: (notice) => pi.sendMessage(mention.sessionNoticeMessage(notice)),
         }),
       askUserEnabled: () => settings.askUser.enabled,
+      ...(memoryScopes ? { memoryProof: () => memoryScopes.proof } : {}),
       ownedCommandNames,
       // web-hub-cmd-history plan §4.3/§5.4 (A1, M1): the recorder's pre-write LOCKED query.
       // Unassigned (plain domain without guards) ⇒ the deps stay unset ⇒ treated as writable.
@@ -1850,6 +1160,15 @@ export default function activate(rawPi: ExtensionAPI): void {
       // absent `deps.quota` as "feature off", so the sampler never runs and the wire field never
       // appears — byte-equal to the pre-feature shape).
       ...(settings.webHub.quota !== false ? { quota: () => holder.current?.quota?.verdicts() ?? [] } : {}),
+      // 费用折算（2026-11-03 形态 B，推翻 quota-web D8：直接显示、无设置门）：与 quota 同一
+      // `webHub.quota` 门——getter 随 stack 重建晚绑定；stack 未建 / quota 关 ⇒ undefined ⇒
+      // 窗口不带 costUsd（wire 字节不变）。tick 驱动扫描推进（scanner 内部节流 + single-flight）。
+      ...(settings.webHub.quota !== false
+        ? {
+            quotaCost: () => holder.current?.quotaCost?.view(),
+            quotaCostTick: () => holder.current?.quotaCost?.maybeAdvance(),
+          }
+        : {}),
       // external-agent quota-plan r2 §9A.4 (P7wa): auth-class problems (401/402/403) ride the
       // same gate — `holder.current.quota` is the QuotaService itself (K9); problems() is a
       // synchronous, family-deduped in-memory read.
@@ -1888,6 +1207,31 @@ export default function activate(rawPi: ExtensionAPI): void {
     );
   }
 
+  // jev-reflex arch §4.2/§4.9 (D2): the R layer registers after web-hub and before topic-switch — it only answers
+  // zero-cost introspection questions, and its fallback is always `continue` (the original text reaches
+  // topic-switch untouched); while topic-switch holds/releases, the R layer yields via the fence below.
+  // post-guard (a child's prompt also reports source:"interactive", F §2.7 / C-R5). off ⇒ not called (I9).
+  const reflexFence: { topicSwitch?: () => boolean } = {};
+  if (settings.reflex.enabled) {
+    wireReflex(pi, {
+      settings: () => settings.reflex,
+      secureDomainKind: secureDomain.kind,
+      ports: {
+        bashJobs: () => holder.current?.bashJobs,
+        fleet: () => holder.current?.query,
+        quota: () => holder.current?.quota,
+        git: createGitRunner(),
+      },
+      fences: {
+        topicSwitchActive: () => reflexFence.topicSwitch?.() ?? false,
+        goalBusy: () => {
+          const s = holder.current?.goal.record?.state;
+          return s === "active" || s === "paused";
+        },
+      },
+    });
+  }
+
   // topic-switch (docs/dev/topic-switch/plan.md): registered LAST in activate() — later than
   // mention/feishu/session-nav/web-hub's own `input` registration — so none of those handlers ever
   // see a message we ourselves re-injected as already "handled" by someone else first (arch §10's
@@ -1911,6 +1255,8 @@ export default function activate(rawPi: ExtensionAPI): void {
       remote: () => askUserRemoteRef.current?.(),
     });
     xsFencePorts.topicSwitch = () => topicSwitch.fenceActive();
+    // Late-bound like xsFencePorts above: the R layer is wired BEFORE topic-switch (jev-reflex arch D2).
+    reflexFence.topicSwitch = () => topicSwitch.fenceActive();
     promptGateRef.current = topicSwitch.webGate; // D2 flip point
   }
 
@@ -1918,211 +1264,4 @@ export default function activate(rawPi: ExtensionAPI): void {
   // 协议同步执行：external-active ⇒ 整体让位零注册，否则发布 claim + session_start 权威复核）。
   // enabled=false（默认）/ secure 域 ⇒ assembleTrafficHost 首行即返回，零注册零 IO 零全局符号。
   assembleTrafficHost(pi, { settings: settings.traffic, cwd: process.cwd() });
-}
-
-/** §3.7 `shutdownPolicy: "kill"` — signal every live job, wait at most `graceMs`. */
-async function killBashJobsBounded(bashJobs: BashJobManager, graceMs: number): Promise<void> {
-  const live = bashJobs
-    .list()
-    .filter((record) => !isTerminalJobStatus(record.status) || bashJobs.hasOpenLocalHandle(record.jobId));
-  if (live.length === 0) return;
-  const kills = Promise.allSettled(live.map((record) => bashJobs.kill(record.jobId).catch(() => undefined)));
-  await Promise.race([kills, new Promise<void>((resolve) => systemClock.setTimer(Math.max(0, graceMs), resolve))]);
-}
-
-/**
- * Each session_start rebuilds the stack (ctx.sessionManager is only
- * available there); tools/command are registered once at activate() time,
- * so they forward every call through `holder.current` at call time rather
- * than closing over a specific instance. Explicit per-method forwarding
- * (not a Proxy) keeps `this` binding correct for methods like
- * QueryService.waitAll() that call other methods on `this` internally.
- */
-/** D-M7: live root-child mention view shared by the @ autocomplete wrapper
- *  and `/agent status`. Reads through the holder at call time, so wrappers
- *  registered on an earlier session_start keep seeing the rebuilt stack. */
-export function mentionAutocompleteEntries(holder: { current?: Stack }): readonly MentionAutocompleteEntry[] {
-  const stack = holder.current;
-  if (!stack) return [];
-  const terminal = new Set(["completed", "failed", "timed_out", "aborted"]);
-  return stack.mention.labels().flatMap((label) => {
-    const target = stack.mention.resolve(label);
-    // v2 hard constraint: only root-direct runs are mentionable (D-M7).
-    if (!target || target.parent !== "root") return [];
-    const status = stack.query.get(target.runId)?.status;
-    return [
-      {
-        label,
-        type: target.type,
-        runId: target.runId,
-        status: status === "running" ? "running" : status && terminal.has(status) ? "settled" : "other",
-      } satisfies MentionAutocompleteEntry,
-    ];
-  });
-}
-
-/** Reply-plan §9.3/§9.6 (MW): project the fabric sender's outcome onto the mention layer's port
- *  shape. Anything the notices do not name (stale/changed origin, unreceivable, bad args, …) is an
- *  `error` carrying the sender's reason, with the sender's own effect (none ⇒ safe to retry). */
-function mapMentionSendOutcome(
-  out: Awaited<ReturnType<XsSender["message"]>>,
-  maxPending: number,
-): MentionSessionSendOutcome {
-  const base = { effect: out.effect, ...(out.to !== undefined ? { to: out.to } : {}) };
-  switch (out.status) {
-    case "sent": {
-      const dueAt = out.reply ? Date.parse(out.reply.dueAt) : Number.NaN;
-      return {
-        status: "sent",
-        ...base,
-        ...(out.reason !== undefined ? { reason: out.reason } : {}),
-        ...(out.reply ? { requestId: out.reply.requestId } : {}),
-        ...(Number.isFinite(dueAt) ? { replyDueAt: dueAt } : {}),
-      };
-    }
-    case "no_target":
-    case "ambiguous":
-    case "reply_unsupported":
-      return { status: out.status, ...base, ...(out.reason !== undefined ? { reason: out.reason } : {}) };
-    case "reply_quota":
-      return { status: "reply_quota", ...base, pendingReplies: maxPending };
-    case "reply_unreceivable":
-      return { status: "error", ...base, reason: `reply_unreceivable:${out.unreceivable ?? "unknown"}` };
-    default:
-      return { status: "error", ...base, reason: out.reason ?? out.code ?? out.status };
-  }
-}
-
-function requireStack(holder: { current?: Stack }): Stack {
-  if (!holder.current) throw new Error("pi-subagent: no active session yet");
-  return holder.current;
-}
-/** todo #22 optimize-plan §7.0 (P0-b): projects the memory module's narrow
- *  `TidySpawnRequest` onto a real `SpawnRequest`, always forcing the P0-r
- *  readonly tool domain literal through untouched — `wireMemory`'s
- *  `TidyPort` is the only caller. */
-function mapTidySpawnRequest(req: TidySpawnRequest): SpawnRequest {
-  return {
-    type: req.type,
-    prompt: req.prompt,
-    ...(req.label === undefined ? {} : { label: req.label }),
-    ...(req.cwd === undefined ? {} : { cwd: req.cwd }),
-    ...(req.modelOverride === undefined ? {} : { modelOverride: req.modelOverride }),
-    ...(req.thinkingOverride === undefined ? {} : { thinkingOverride: req.thinkingOverride }),
-    ...(req.totalMs === undefined ? {} : { budgetOverride: { totalMs: req.totalMs } }),
-    ...(req.schema === undefined ? {} : { schema: req.schema }),
-    ...(req.inputBudget === undefined ? {} : { inputBudget: req.inputBudget }),
-    toolDomain: req.toolDomain,
-    expectAck: req.expectAck,
-    suppressDelivery: req.suppressDelivery,
-  };
-}
-function forwardSpawn(holder: { current?: Stack }): SpawnService {
-  return {
-    spawn: (req) => requireStack(holder).spawn.spawn(req),
-    spawnAndWait: (req) => requireStack(holder).spawn.spawnAndWait(req),
-    abort: (runId, cause) => requireStack(holder).spawn.abort(runId, cause),
-    waitAll: (opts) => requireStack(holder).spawn.waitAll(opts),
-    waitOutcome: (runId, waitMs) => requireStack(holder).spawn.waitOutcome(runId, waitMs),
-    expectsAck: (runId) => requireStack(holder).spawn.expectsAck(runId),
-    // CC1: forwarded for parity with the rest of SpawnService; no caller yet
-    // (the workflow orchestrator that will use this lands in M3.1+).
-    stopChildrenOf: (parentId, cause) => requireStack(holder).spawn.stopChildrenOf(parentId, cause),
-    resolveRun: (handle) => requireStack(holder).spawn.resolveRun(handle),
-    resolveResume: (handle) => requireStack(holder).spawn.resolveResume(handle),
-    successorOf: (sessionFile) => requireStack(holder).spawn.successorOf(sessionFile),
-    setConcurrencyLimit: (n) => requireStack(holder).spawn.setConcurrencyLimit(n),
-    slots: () => requireStack(holder).spawn.slots(),
-    runningIds: () => requireStack(holder).spawn.runningIds(),
-  };
-}
-function forwardResolveRun(holder: { current?: Stack }) {
-  return (handle: string) => {
-    const result = requireStack(holder).spawn.resolveRun?.(handle);
-    if (!result) throw new Error("pi-subagent: run resolver unavailable");
-    return result;
-  };
-}
-function forwardQuery(holder: { current?: Stack }): QueryService {
-  return {
-    get: (runId) => requireStack(holder).query.get(runId),
-    list: (filter) => requireStack(holder).query.list(filter),
-    wait: (runId, opts) => requireStack(holder).query.wait(runId, opts),
-    waitAll: (opts) => requireStack(holder).query.waitAll(opts),
-    steer: (runId, text, origin) => requireStack(holder).query.steer(runId, text, origin),
-    setModel: (runId, model, opts) => requireStack(holder).query.setModel(runId, model, opts),
-    stop: (runId, cause) => requireStack(holder).query.stop(runId, cause),
-    extendTimeout: (runId, extendMs, opts) => requireStack(holder).query.extendTimeout(runId, extendMs, opts),
-  };
-}
-function forwardWorkflow(holder: { current?: Stack }, isReloadPending: () => boolean): WorkflowToolDeps {
-  return {
-    isReloadPending,
-    get defaultBudget() {
-      return requireStack(holder).workflow.defaultBudget;
-    },
-    runs: { start: (req) => requireStack(holder).workflow.runs.start(req) },
-  };
-}
-/** Background workflow management for get_run_result / abort_subagent (plan §2.3). Lenient when no
- *  session exists yet: nothing resolves as a workflow, so the run path produces its usual error. */
-function forwardWorkflowQuery(holder: { current?: Stack }): WorkflowQueryPort {
-  return {
-    resolve: (handle) => holder.current?.workflow.runs.resolve(handle) ?? { kind: "none" },
-    resolveLabel: (handle) => holder.current?.workflow.runs.resolveLabel(handle) ?? { kind: "none" },
-    get: (workflowId) => holder.current?.workflow.runs.get(workflowId),
-    wait: (workflowId, opts) => requireStack(holder).workflow.runs.wait(workflowId, opts),
-    stop: (workflowId, cause, opts) => requireStack(holder).workflow.runs.stop(workflowId, cause, opts),
-    extend: (workflowId, extendMs, opts) => requireStack(holder).workflow.runs.extend(workflowId, extendMs, opts),
-    activity: (workflowId) => holder.current?.workflow.activity.list().find((w) => w.workflowId === workflowId),
-    snapshotOf: (runId) => holder.current?.query.get(runId),
-    usageOf: (runId) => holder.current?.query.get(runId)?.diag.usage,
-  };
-}
-/** bash auto-background: the current session's job manager (absent before the
- *  first session_start, or when the feature is off) — both bash tools read it
- *  at call time so they survive session rebuilds. */
-function forwardBashJobs(holder: { current?: Stack }): () => BashJobManager | undefined {
-  return () => holder.current?.bashJobs;
-}
-function forwardOrphans(holder: { current?: Stack }): OrphanRegistry {
-  return {
-    register: (r) => requireStack(holder).orphans.register(r),
-    recordLateRecovered: (runId, gen) => requireStack(holder).orphans.recordLateRecovered(runId, gen),
-    get recent() {
-      return requireStack(holder).orphans.recent;
-    },
-    get totalCount() {
-      return requireStack(holder).orphans.totalCount;
-    },
-    get lateRecoveredCount() {
-      return requireStack(holder).orphans.lateRecoveredCount;
-    },
-    countInWindow: (ms) => requireStack(holder).orphans.countInWindow(ms),
-    get byReason() {
-      return requireStack(holder).orphans.byReason;
-    },
-    resetCircuit: (op) => requireStack(holder).orphans.resetCircuit(op),
-  };
-}
-function forwardNotifier(holder: { current?: Stack }): Notifier {
-  return {
-    enqueue: (p, opts) => requireStack(holder).notifier.enqueue(p, opts),
-    finalize: (runId, generation, patch) => requireStack(holder).notifier.finalize(runId, generation, patch),
-    settleBatch: (keys, ok) => requireStack(holder).notifier.settleBatch(keys, ok),
-    ack: (runId, generation, by) => requireStack(holder).notifier.ack(runId, generation, by),
-    peek: (key) => requireStack(holder).notifier.peek(key),
-    consume: (key, by) => requireStack(holder).notifier.consume(key, by),
-    reconcile: (persisted) => requireStack(holder).notifier.reconcile(persisted),
-    verifyPersisted: (keys) => requireStack(holder).notifier.verifyPersisted(keys),
-    get stats() {
-      return requireStack(holder).notifier.stats;
-    },
-    get degraded() {
-      return requireStack(holder).notifier.degraded;
-    },
-    get ackedSuppressions() {
-      return requireStack(holder).notifier.ackedSuppressions;
-    },
-  };
 }

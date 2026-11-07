@@ -20,7 +20,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import activate from "../../src/index.js";
 import { FORWARDED_EVENTS } from "../../src/web-hub/protocol/messages.js";
 import { webHubStateDir } from "../../src/web-hub/protocol/paths.js";
-import { sandboxHome } from "./helpers/home-sandbox.js";
+import { resetSettingsFiles, sandboxHome } from "./helpers/home-sandbox.js";
 
 const wireMock = vi.hoisted(() => ({
   calls: 0,
@@ -143,7 +143,7 @@ describe("web-hub disabled ⇒ zero side effects (plan §6, §9 #7)", () => {
     // ② real module, default settings (webHub.enabled=false).
     wireMock.calls = 0;
     wireMock.passthrough = true; // even if called, delegate to the real wiring
-    rmSync(join(home.home, ".pi", "agent", "pi-subagent.json"), { force: true });
+    resetSettingsFiles(home.home);
     writeSettings({});
     const real = fakePi();
     activate(real.pi);

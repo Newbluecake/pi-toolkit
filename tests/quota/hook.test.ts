@@ -46,6 +46,10 @@ function makeState(over: Partial<QuotaHintState> = {}): QuotaHintState {
   return {
     enabled: true,
     tickStepPercent: 10,
+    // Legacy grid-only semantics for the pre-existing cases; the turn cooldown has its own
+    // describe below (2026-10-28).
+    l1MinTurns: 0,
+    turns: 0,
     repeatMs: 1_800_000,
     minIntervalMs: 300_000,
     display: true,
@@ -121,6 +125,30 @@ describe("shouldAnnounce (pure, plan §5.4)", () => {
     const decision = shouldAnnounce(verdict(), undefined, input);
     expect(decision.announce).toBe(true);
     expect(decision.next).toMatchObject({ level: 1, step: 60, usedPct: 62 });
+  });
+
+  it("L1 turn cooldown (2026-10-28): a grid step waits for l1MinTurns since the last announce", () => {
+    const latch: QuotaAnnounceLatch = { level: 1, step: 60, at: 1_000, usedPct: 62, turn: 5 };
+    const v = verdict({ windows: [w("5h", 71, 1)] }); // crosses 60 → 70
+    const cooldown = { ...input, l1MinTurns: 10 };
+    // 5 turns later: the step is swallowed and the latch does NOT advance (nothing is lost).
+    const soon = shouldAnnounce(v, latch, { ...cooldown, turn: 10 });
+    expect(soon.announce).toBe(false);
+    expect(soon.next).toBe(latch);
+    // Exactly at the cooldown boundary it fires.
+    expect(shouldAnnounce(v, latch, { ...cooldown, turn: 15 }).announce).toBe(true);
+    // A latch from before the field existed has no turn ⇒ treated as long ago.
+    const legacy: QuotaAnnounceLatch = { level: 1, step: 60, at: 1_000, usedPct: 62 };
+    expect(shouldAnnounce(v, legacy, { ...cooldown, turn: 6 }).announce).toBe(true);
+    // The cooldown is L1-only: L2 grid advance and the level-raise gate ignore it.
+    expect(
+      shouldAnnounce(verdict({ level: 2, windows: [w("5h", 71, 2)] }), latch, { ...cooldown, turn: 6 }).announce,
+    ).toBe(true);
+    expect(
+      shouldAnnounce(verdict({ level: 2, windows: [w("5h", 62, 2)] }), latch, { ...cooldown, turn: 6 }).announce,
+    ).toBe(true);
+    // l1MinTurns=0 keeps the legacy grid-only behaviour.
+    expect(shouldAnnounce(v, latch, { ...input, turn: 6, l1MinTurns: 0 }).announce).toBe(true);
   });
 
   it("gate 1 level raise / gate 2 grid advance / gate 3 L3-only repeat", () => {

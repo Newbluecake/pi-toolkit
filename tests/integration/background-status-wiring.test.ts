@@ -1,7 +1,8 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import activate from "../../src/index.js";
 import { readBackgroundStatus } from "../../src/service/background-status.js";
+import { sandboxHome } from "./helpers/home-sandbox.js";
 
 const HOST_KEY = Symbol.for("pi-subagent:host");
 const STATUS_KEY = Symbol.for("pi-subagent:background-status");
@@ -53,9 +54,15 @@ const sessionContext = {
   ui: {},
 } as unknown as ExtensionContext;
 
+// #54: activate() now migrates the settings file (lock + link), so it must never run on the developer's real HOME.
+let sandbox: ReturnType<typeof sandboxHome>;
+beforeEach(() => {
+  sandbox = sandboxHome();
+});
 afterEach(() => {
   delete (globalThis as Record<symbol, unknown>)[HOST_KEY];
   delete (globalThis as Record<symbol, unknown>)[STATUS_KEY];
+  sandbox.restore();
 });
 
 describe("background-status host wiring", () => {

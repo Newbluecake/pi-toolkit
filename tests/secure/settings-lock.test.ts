@@ -188,3 +188,31 @@ describe("loadSettingsFromFile migration write-back", () => {
     }
   });
 });
+
+describe("settings-rename P1: fixed lock name and requireLock", () => {
+  it("the lock file name never follows the settings file name (old and new names contend on one lock)", () => {
+    for (const n of ["pi-toolkit.json", "pi-subagent.json", "x.json"])
+      expect(settingsLockPath(join(tmp, ".pi", "agent", n))).toBe(join(tmp, ".pi", "agent", ".pi-subagent.json.lock"));
+  });
+
+  it("requireLock refuses to run fn without a flock binary (reason no-flock); without it fn still runs", () => {
+    const fn = vi.fn(() => 1);
+    expect(withSettingsFileLock(settingsPath, fn, { flockBin: "/nonexistent/flock", requireLock: true })).toMatchObject(
+      {
+        ok: false,
+        reason: "no-flock",
+      },
+    );
+    expect(fn).not.toHaveBeenCalled();
+    expect(withSettingsFileLock(settingsPath, fn, { flockBin: "/nonexistent/flock" })).toEqual({
+      ok: true,
+      value: 1,
+      locked: false,
+    });
+  });
+
+  it("lock failures carry a reason (an unusable lock file ⇒ open)", () => {
+    symlinkSync(join(tmp, "elsewhere"), settingsLockPath(settingsPath));
+    expect(withSettingsFileLock(settingsPath, () => 1)).toMatchObject({ ok: false, reason: "open" });
+  });
+});

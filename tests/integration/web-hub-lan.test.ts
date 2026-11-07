@@ -24,7 +24,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createServer as createNetServer, request as httpRequest, type Server as HttpServer } from "node:http";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { networkInterfaces } from "node:os";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -269,6 +269,59 @@ describe.skipIf(NO_NODE_SQLITE)("web-hub LAN e2e (real hub, plan §11 LI row)", 
 
     const stale = await lanRequest(port, { path: "/api/session", headers: { Cookie: oldCookie }, host, destHost: ip });
     expect(stale.status).toBe(401);
+  });
+
+  it("#66 D4 first login wipes the initial plaintext: one wipe, in-use stays true, disk clean, passwd flips it off", async () => {
+    const ip = firstLanIPv4() ?? "127.0.0.1";
+    const { hub: up, port } = await bringUp();
+    const { username, initialPassword } = await readInfo(admin!);
+    expect(initialPassword).toBeDefined();
+    const host = `${ip}:${port}`;
+    const login = () =>
+      lanPostJson(port, "/api/login", { username, password: initialPassword }, { Host: host }, undefined, ip);
+
+    const first = await login();
+    expect(first.status).toBe(200);
+    expect(JSON.parse(first.body)).toEqual({ ok: true, initialPassword: true });
+    const cookie = (first.headers["set-cookie"]?.[0] ?? "").split(";")[0]!;
+
+    // TUI side: no plaintext any more, but the first-login fact is reported.
+    const infoAfter = await readInfo(admin!);
+    expect(infoAfter.initialPassword).toBeUndefined();
+    expect(infoAfter.initialLogin).toMatchObject({ ip: expect.any(String) });
+    // The generated password is still the account's password.
+    const session = await lanRequest(port, { path: "/api/session", headers: { Cookie: cookie }, host, destHost: ip });
+    expect(JSON.parse(session.body)).toMatchObject({ initialPasswordInUse: true });
+    // Hub-side disk: neither hub.db nor -wal hold the plaintext once the coalesced TRUNCATE ran.
+    const files = [up.paths.dbFile, `${up.paths.dbFile}-wal`];
+    await waitUntil(
+      () =>
+        files.every((f) => {
+          try {
+            return !readFileSync(f).includes(initialPassword as string);
+          } catch {
+            return true;
+          }
+        }),
+      8_000,
+      "plaintext gone from hub.db/-wal",
+    );
+    // The wiped password keeps working, and the response still says it is the initial one.
+    const second = await login();
+    expect(second.status).toBe(200);
+    expect(JSON.parse(second.body)).toEqual({ ok: true, initialPassword: true });
+    expect((await readInfo(admin!)).initialLogin).toEqual(infoAfter.initialLogin); // first record kept
+
+    const passwdRes = await sendLanReq(admin!, {
+      t: "lan_req",
+      op: "passwd",
+      username,
+      password: "a-much-longer-new-password-1",
+    });
+    expect(passwdRes.ok).toBe(true);
+    const changed = await readInfo(admin!);
+    expect(changed.initialPassword).toBeUndefined();
+    expect(changed.initialLogin).toBeUndefined();
   });
 
   it("restart: session persists across a fresh RunningHub on the same home + lan.port", async () => {

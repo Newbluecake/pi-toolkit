@@ -458,7 +458,7 @@ describe("W5 admission-time gate (router) and rate limits", () => {
     rig.tree.markRunning("r_RN000001");
     const res = rig.router.admit(sender, {
       to: "r_RN000001",
-      kind: "finding",
+      kind: "report",
       text: "steer",
       generation: 1,
       canMessage: ["sibling", "parent"],

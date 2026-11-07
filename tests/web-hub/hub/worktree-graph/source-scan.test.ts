@@ -16,7 +16,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const DIR = fileURLToPath(new URL("../../../../src/web-hub/hub/worktree-graph/", import.meta.url));
-const FILES = ["routes.ts", "project.ts", "merged.ts"] as const;
+const FILES = ["routes.ts", "project.ts", "merged.ts", "commit-files.ts"] as const;
 
 function src(name: (typeof FILES)[number]): string {
   return readFileSync(join(DIR, name), "utf8");
@@ -119,6 +119,35 @@ describe("worktree-graph P2 source-scan (§2.6)", () => {
     for (const spec of valueImports) {
       expect(["../../../git/graph.js", "../../protocol/worktree-graph.js"]).toContain(spec);
     }
+  });
+
+  it("commit-files.ts: every pinned call is Cc/Gf with argv straight from wtGraphArgs.driverScan()/wtGraphFilesArgs(...)", () => {
+    const text = src("commit-files.ts");
+    expect(text).not.toContain("deps.run(");
+    expect(text).not.toContain("WTDIFF_GIT_PATH");
+    const sites = [...text.matchAll(/pinned\.run\(/g)];
+    const good = [...text.matchAll(/pinned\.run\("(Cc|Gf)",\s*(?:argv|wtGraphArgs\.driverScan\(\)),/g)];
+    expect(sites.length).toBe(2);
+    expect(good.map((m) => m[1]).sort()).toEqual(["Cc", "Gf"]);
+    expect([...text.matchAll(/argv = ([^;]+);/g)].map((m) => m[1])).toEqual(["wtGraphFilesArgs(h, format, drivers)"]);
+    // the driver union is validated BEFORE the argv builder (which throws on an unsafe name)
+    const check = text.indexOf("drivers.every((d) => WTDIFF_DRIVER_NAME_RE.test(d))");
+    expect(check).toBeGreaterThan(-1);
+    expect(check).toBeLessThan(text.indexOf("argv = wtGraphFilesArgs("));
+    expect(text).not.toMatch(/WTDIFF_DRIVER_NAME_RE\s*=/);
+    // the served-window gate runs before the first git-phase spawn
+    expect(text.indexOf("served.has(")).toBeGreaterThan(-1);
+    expect(text.indexOf("served.has(")).toBeLessThan(text.indexOf('pinned.run("Cc"'));
+    // never diff-tree (index + work-tree reads); the log form is the frozen one
+    const code = text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+    expect(code).not.toContain('"diff-tree"');
+    expect(text.match(/auditWorktreeGraph\(/g)?.length).toBe(1);
+  });
+
+  it("commit-files.ts keeps fs access on the injected PreviewFs (previewFsStep / readProcFdFile only)", () => {
+    const text = src("commit-files.ts");
+    for (const m of text.matchAll(/\bfs\.(\w+)\(/g)) expect(["stat"]).toContain(m[1]);
+    expect(text).toContain("previewFsStep(() => fs.stat(");
   });
 
   it("routes.ts never retains/logs the raw stderr text it reads for classification", () => {

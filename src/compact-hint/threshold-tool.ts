@@ -9,7 +9,7 @@ import {
   windowScaledForcePercent,
 } from "./threshold.js";
 import type { DynamicStatusView } from "./dynamic/wire.js";
-import type { CompactHintState } from "../stack.js";
+import type { CompactHintState } from "./hook.js";
 
 export const SetCompactThresholdParams = Type.Object({
   percent: Type.Optional(
@@ -66,7 +66,7 @@ export function createSetCompactThresholdTool(
     label: "Set Compact Threshold",
     description:
       "Query, set, or disable the context-usage percentage (or absolute used-token line, unit k) at which " +
-      `pi-subagent reminds you to call ${toolName}. Calling it with no arguments reports the current ` +
+      `pi-toolkit reminds you to call ${toolName}. Calling it with no arguments reports the current ` +
       "context usage and thresholds without changing anything.",
     promptSnippet:
       "set_compact_threshold(percent?, tokens?) - query or set the model-triggered compaction reminder threshold",

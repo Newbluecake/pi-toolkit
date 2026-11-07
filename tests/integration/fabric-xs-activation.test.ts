@@ -1,3 +1,4 @@
+// Scope: extension activate() tool-surface registration (message_session/list_sessions/wake_session). Not the wake_session end-to-end suite (fabric-xs-activate-session) nor the mixed-version suite (fabric-xs-activation-compat).
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -68,6 +69,12 @@ describe("XW activate-frozen main-session surface", () => {
     expect(s.tools.has("list_sessions")).toBe(false);
     expect(s.tools.has("message_channel")).toBe(false);
     expect(s.commands).not.toContain("fabric");
+  });
+  it.each([false, true])("wake_session is registered under activationOn even when wake=%s (query survives)", (wake) => {
+    const s = setup(true, true, true, true, wake);
+    expect(s.tools.has("wake_session")).toBe(true);
+    expect(s.tools.get("wake_session").parameters.properties.action).toBeDefined();
+    expect(s.tools.get("wake_session").parameters.properties.text).toBeUndefined();
   });
   it.each([false, true])("wake=%s never changes either schema; settings edits do not re-register tools", (wake) => {
     const s = setup(true, true, true, true, wake);
@@ -216,4 +223,10 @@ it("xs-off minimal host does not read sessionManager in B1/shutdown hooks", asyn
   // Only the early XW shutdown hook; later general host cleanup has its own contract.
   await s.handlers.get("session_shutdown")?.[0]?.({ reason: "quit" }, ctx);
   expect(read).not.toHaveBeenCalled();
+});
+
+it("activation off omits wake_session, state hooks and extra activation registration", () => {
+  const tools = activateWith({ activation: { enabled: false } });
+  expect(tools.has("wake_session")).toBe(false);
+  expect(tools.has("message_session")).toBe(true);
 });

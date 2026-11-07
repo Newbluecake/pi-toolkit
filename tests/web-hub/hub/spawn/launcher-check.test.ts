@@ -7,12 +7,14 @@
  * `compareDotVersions`/`versionInRange`/`findPiPackageVersion` pin the pure helpers.
  */
 import { describe, expect, it } from "vitest";
+import { SUPPORTED_PI_RANGE } from "../../../../src/web-hub/protocol/spawn.js";
 import { createReqDeadline } from "../../../../src/web-hub/hub/req-deadline.js";
 import {
   checkLauncherAsync,
   compareDotVersions,
   findPiPackageVersion,
   recheckLauncherSync,
+  versionInRange,
   type LauncherFs,
 } from "../../../../src/web-hub/hub/spawn/launcher-check.js";
 
@@ -73,6 +75,19 @@ function pkg(version: string): string {
 }
 
 describe("compareDotVersions / versionInRange (pure helpers)", () => {
+  it.each([
+    ["0.99.0", false],
+    ["1.0.0", false],
+    ["1.4.0", false],
+    ["1.5.0", true],
+    ["1.5.1", true],
+    ["1.5.99", true],
+    ["1.6.0", false],
+    ["2.0.0", false],
+  ] as const)("support boundary %s ⇒ %s", (version, accepted) => {
+    expect(versionInRange(version, SUPPORTED_PI_RANGE.min, SUPPORTED_PI_RANGE.maxExclusive)).toBe(accepted);
+  });
+
   it("orders dot versions and treats missing parts as 0", () => {
     expect(compareDotVersions("1.0.2", "1.0.2")).toBe(0);
     expect(compareDotVersions("1.0.10", "1.0.9")).toBeGreaterThan(0);
@@ -127,7 +142,7 @@ describe("checkLauncherAsync (arch §4.2 init check)", () => {
   });
 
   it("version outside SUPPORTED_PI_RANGE ⇒ incompatible", async () => {
-    for (const v of ["0.99.0", "1.4.0", "2.0.0"]) {
+    for (const v of ["0.99.0", "1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.4.99", "1.6.0", "2.0.0"]) {
       const fs = fakeFs({ files: { "/repo/package.json": pkg(v) } });
       const res = (await checkLauncherAsync(LAUNCHER, D(), fs)) as { ok: false; reason: string; detail?: string };
       expect(res.reason).toBe("incompatible");
@@ -135,8 +150,8 @@ describe("checkLauncherAsync (arch §4.2 init check)", () => {
     }
   });
 
-  it("1.1.0, 1.2.0 and 1.3.0 are within SUPPORTED_PI_RANGE", async () => {
-    for (const v of ["1.1.0", "1.2.0", "1.3.0"]) {
+  it("1.5.0 and future 1.5 patches are within SUPPORTED_PI_RANGE", async () => {
+    for (const v of ["1.5.0", "1.5.1", "1.5.99"]) {
       const fs = fakeFs({ files: { "/repo/package.json": pkg(v) } });
       const res = (await checkLauncherAsync(LAUNCHER, D(), fs)) as { ok: boolean; version?: string };
       expect(res.ok).toBe(true);
@@ -147,12 +162,12 @@ describe("checkLauncherAsync (arch §4.2 init check)", () => {
   it("happy path captures BOTH fingerprints and the version", async () => {
     const fs = fakeFs({
       stats: { "/usr/bin/node": st({ ino: 10, size: 50_000_000, mtimeMs: 5 }), "/repo/cli.js": st({ ino: 11 }) },
-      files: { "/repo/package.json": pkg("1.0.5") },
+      files: { "/repo/package.json": pkg("1.5.0") },
     });
     const res = await checkLauncherAsync(LAUNCHER, D(), fs);
     expect(res.ok).toBe(true);
     if (!res.ok) return;
-    expect(res.version).toBe("1.0.5");
+    expect(res.version).toBe("1.5.0");
     expect(res.fp[0]).toMatchObject({ realpath: "/usr/bin/node", ino: 10, size: 50_000_000, mtimeMs: 5 });
     expect(res.fp[1]).toMatchObject({ realpath: "/repo/cli.js", ino: 11 });
   });
@@ -169,7 +184,7 @@ describe("checkLauncherAsync (arch §4.2 init check)", () => {
         return st();
       },
       readFileSync: (p) => {
-        if (p === "/repo/package.json") return pkg("1.0.5");
+        if (p === "/repo/package.json") return pkg("1.5.0");
         throw new Error("ENOENT");
       },
       statSync: () => {
@@ -185,10 +200,10 @@ describe("checkLauncherAsync (arch §4.2 init check)", () => {
   });
 
   it("the package.json walk-up is budget-checked too (review re-run #4)", async () => {
-    const fs = fakeFs({ files: { "/repo/package.json": pkg("1.0.5") } });
+    const fs = fakeFs({ files: { "/repo/package.json": pkg("1.5.0") } });
     // budget exhausted before the first level ⇒ unverifiable, no file read at all
     expect(findPiPackageVersion("/repo/cli.js", fs, () => 0)).toBeUndefined();
-    expect(findPiPackageVersion("/repo/cli.js", fs, () => 1)).toBe("1.0.5");
+    expect(findPiPackageVersion("/repo/cli.js", fs, () => 1)).toBe("1.5.0");
   });
 
   it("deadline exhausted ⇒ unverifiable (fail closed, restart re-runs the check)", async () => {

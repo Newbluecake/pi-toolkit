@@ -325,7 +325,13 @@ function widgetRowMain(
     { name: "phase", value: fixed },
     // deadline sits with phase ("is this run healthy?"), ahead of the resource
     // stats (context/cost/total).
-    ...(row.remainingMs === undefined ? [] : [{ name: "deadline", value: deadlineField(row) }]),
+    // Running rows without a deadline still show elapsed time (⏱), so the timer never
+    // disappears mid-run; the ⏳ deadline suffix only appears while a budget remains.
+    ...(row.remainingMs !== undefined
+      ? [{ name: "deadline", value: deadlineField(row) }]
+      : row.terminal
+        ? []
+        : [{ name: "deadline", value: `⏱${formatDuration(row.elapsedMs)}` }]),
     { name: "context", value: row.contextUsage ? formatContextUsage(row.contextUsage) : "" },
     ...(row.usage ? [{ name: "cost", value: formatWidgetCost(row.usage.costUsd, row.usage.unpriced) }] : []),
     { name: "total", value: `Σ${formatDuration(row.elapsedMs)}` },

@@ -414,6 +414,25 @@ suite("LAN security open/check/migrate and explicit repair", () => {
     expect(await store.getUser("extra")).toBeUndefined();
     expect(await store.get2faState(1)).toMatchObject({ state: "none" });
   });
+  it.each([20, 53, 19, 21, 52, 54, 0])(
+    "#66 P6 factor envelope length %i is validated without decryption",
+    async (length) => {
+      await enroll();
+      const blob = Buffer.alloc(length);
+      if (length === 53) blob[0] = 1;
+      sql((db) => db.prepare("UPDATE twofa SET totp_secret=?,totp_last_step=1 WHERE user_id=1").run(blob));
+      if (length === 20 || length === 53) {
+        const r = await open();
+        expect(r.hardening.totpKey).toBe(length === 53 ? "missing" : "none");
+        expect((await store.get2faState(1)).state).toBe("enrolled");
+      } else await refuse("2fa-missing-row");
+    },
+  );
+  it("#66 P6 unknown 53B envelope version remains fail-closed", async () => {
+    await enroll();
+    sql((db) => db.prepare("UPDATE twofa SET totp_secret=?,totp_last_step=1 WHERE user_id=1").run(Buffer.alloc(53, 2)));
+    await refuse("2fa-missing-row");
+  });
 });
 
 it("bounds a never-settling main-thread file check instead of hanging LAN startup", async () => {

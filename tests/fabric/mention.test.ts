@@ -54,7 +54,7 @@ describe("fabric mention channel", () => {
   ] as const)("returns %s as a structured domain error", async (status, targetStatus, permissions) => {
     const h = setup(targetStatus);
     if (status === "unknown_label")
-      await expect(h.channel.send("missing", "finding", "x")).resolves.toEqual({
+      await expect(h.channel.send("missing", "report", "x")).resolves.toEqual({
         ok: false,
         status,
         label: "missing",
@@ -71,7 +71,7 @@ describe("fabric mention channel", () => {
         generation: () => 3,
         canMessage: permissions,
       });
-      await expect(channel.send("builder", "finding", "x")).resolves.toMatchObject({ ok: false, status });
+      await expect(channel.send("builder", "report", "x")).resolves.toMatchObject({ ok: false, status });
     }
     expect(h.admit).not.toHaveBeenCalled();
     expect(h.spawn).not.toHaveBeenCalled();
@@ -79,7 +79,7 @@ describe("fabric mention channel", () => {
 
   it("passes a running mention through router admission with a route", async () => {
     const h = setup();
-    await expect(h.channel.send("builder", "finding", "status")).resolves.toMatchObject({
+    await expect(h.channel.send("builder", "report", "status")).resolves.toMatchObject({
       ok: true,
       status: "accepted",
     });
@@ -87,7 +87,7 @@ describe("fabric mention channel", () => {
       from,
       expect.objectContaining({
         to: target,
-        kind: "finding",
+        kind: "report",
         text: "status",
         generation: 3,
         route: { kind: "mention", label: "builder", target },
@@ -97,7 +97,7 @@ describe("fabric mention channel", () => {
 
   it("resumes a terminal target with label, resumeFrom, and the Chinese untrusted banner", async () => {
     const h = setup("completed");
-    await expect(h.channel.send("builder", "finding", "continue")).resolves.toEqual({
+    await expect(h.channel.send("builder", "report", "continue")).resolves.toEqual({
       ok: true,
       status: "resumed",
       label: "builder",
@@ -125,7 +125,7 @@ describe("fabric mention channel", () => {
       generation: () => 3,
       canMessage: ["parent"],
     });
-    await expect(channel.send("builder", "finding", "continue")).resolves.toMatchObject({ status: "not_authorized" });
+    await expect(channel.send("builder", "report", "continue")).resolves.toMatchObject({ status: "not_authorized" });
     expect(h.spawn).not.toHaveBeenCalled();
   });
 
@@ -135,7 +135,7 @@ describe("fabric mention channel", () => {
       throw new Error("mention target is gone");
     });
     h.spawn.mockResolvedValue({ error: { kind: "config", message: "busy", retryable: false } });
-    await expect(h.channel.send("builder", "finding", "retry")).resolves.toEqual({
+    await expect(h.channel.send("builder", "report", "retry")).resolves.toEqual({
       ok: false,
       status: "resume_failed",
       label: "builder",
@@ -166,8 +166,8 @@ describe("fabric mention channel — wake (plan §3.1 / §3.3 L4, W1)", () => {
 
   it("a running target gets the explicit wake on the router input (and none when omitted)", async () => {
     const h = withLevel("running");
-    await h.channel.send("builder", "finding", "x", false);
-    await h.channel.send("builder", "finding", "x");
+    await h.channel.send("builder", "report", "x", false);
+    await h.channel.send("builder", "report", "x");
     const inputs = h.admit.mock.calls.map((c) => (c as unknown as [string, Record<string, unknown>])[1]);
     expect(inputs[0]).toMatchObject({ wake: false });
     expect(inputs[1]).not.toHaveProperty("wake");
@@ -175,7 +175,7 @@ describe("fabric mention channel — wake (plan §3.1 / §3.3 L4, W1)", () => {
 
   it("wake:false parks through the router and never resumes a finished @label (W3)", async () => {
     const h = withLevel("completed", () => 1);
-    await expect(h.channel.send("builder", "finding", "x", false)).resolves.toMatchObject({
+    await expect(h.channel.send("builder", "report", "x", false)).resolves.toMatchObject({
       ok: true,
       status: "accepted",
     });
@@ -188,14 +188,14 @@ describe("fabric mention channel — wake (plan §3.1 / §3.3 L4, W1)", () => {
 
   it("a legacy @label resume of a finished run is never blocked but carries the sender's level as a hop", async () => {
     const h = withLevel("completed", (n) => (n === from ? 2 : 0));
-    await expect(h.channel.send("builder", "finding", "x")).resolves.toMatchObject({ ok: true, status: "resumed" });
+    await expect(h.channel.send("builder", "report", "x")).resolves.toMatchObject({ ok: true, status: "resumed" });
     expect(h.spawn).toHaveBeenCalledTimes(1);
     expect(h.spawn.mock.calls[0]![0]).toMatchObject({ resumeFrom: target, wakeHopLevel: 2 });
   });
 
   it("W5: an explicit wake:true to a finished @label goes through the mailbox (WakeService revive), never a direct spawn", async () => {
     const h = withLevel("completed", (n) => (n === from ? 2 : 0));
-    await expect(h.channel.send("builder", "finding", "x", true)).resolves.toMatchObject({
+    await expect(h.channel.send("builder", "report", "x", true)).resolves.toMatchObject({
       ok: true,
       status: "accepted",
     });
@@ -209,7 +209,7 @@ describe("fabric mention channel — wake (plan §3.1 / §3.3 L4, W1)", () => {
   it("W5: a not_wakeable admission result is passed back to the sender verbatim", async () => {
     const h = withLevel("completed", () => 0);
     h.admit.mockReturnValueOnce({ ok: false, status: "not_wakeable", reason: "legacy_unknown" } as never);
-    await expect(h.channel.send("builder", "finding", "x", true)).resolves.toEqual({
+    await expect(h.channel.send("builder", "report", "x", true)).resolves.toEqual({
       ok: false,
       status: "not_wakeable",
       reason: "legacy_unknown",
@@ -218,7 +218,7 @@ describe("fabric mention channel — wake (plan §3.1 / §3.3 L4, W1)", () => {
 
   it("wake off (no level dep): the resume spawn request has no wakeHopLevel key — byte-identical", async () => {
     const h = withLevel("completed");
-    await h.channel.send("builder", "finding", "x");
+    await h.channel.send("builder", "report", "x");
     expect(h.spawn.mock.calls[0]?.[0]).not.toHaveProperty("wakeHopLevel");
   });
 });

@@ -64,7 +64,7 @@
   the card's right-edge vertical center whenever the row is collapsed (typing / no switcher —
   the `.composer-input` wrapper; the textarea's constant `padding-right` makes room via `:has`
   in BOTH states). IDLE ⇒ the ring's details toggle; BUSY ⇒
-  the ring's whole zone is the two-step stop button (stop wins — nothing else intercepts taps
+  the ring's whole zone is the 700ms hold-to-stop button (stop wins — nothing else intercepts taps
   there). It injects `DETAIL_METRICS` itself and self-hides the ring without a provider (then
   falls back to the standalone stop look) — nothing here reads the metrics.
 
@@ -86,11 +86,33 @@
   ring overlays mid-right exactly as before 5cc081d. Pickers still open upward from the chips
   and keep their usePopoverClamp viewport fitting — opening one moves focus into the panel,
   which the chips' hidden state can never interrupt (hidden ⇒ not clickable).
+
+  Tasks chip (todo-web follow-up 2026-11 + schedule-auto-approve r2 W3): an ALWAYS-VISIBLE
+  aggregated chip (`.composer-todo-external`) — absolutely positioned at the composer card's
+  top-left, OUTSIDE the border but still a SIBLING of `.composer-chips` in the bottom row's
+  DOM, so the typing-time `.chips-off` fade never applies. One pill, two segments: `✓ N`
+  (open todo: pending + in_progress, off `AgentState.todo` — the status reducer's mirror of
+  `StatusInfo.todo`, straight off the injected CONTROL_VIEW) and `⏰ N` (scheduled tasks off
+  the injected HUB_CTX's `schedules` slot + `sched.v1` cap, clock icon spinning while a run
+  is live). It hides itself when BOTH sides are empty, OR while QueueList renders queue/held
+  rows above the composer (2026-11-04 screenshot ruling: the chip's top:-24px seat would
+  cover the held steer card's bottom-left text — hidden by a render condition, `queueAbove`,
+  never by z-index). On `(hover: hover) and (pointer: fine)`
+  pointers, hovering the chip/panel auto-expands a read-only OPEN-ONLY task panel (pending +
+  in_progress rows; completed tasks surface only as the header's grey `X done` summary) in
+  the mention panel's slot above the input card — hover is IGNORED on coarse/touch pointers
+  (the browser's synthetic pre-click mouseenter would otherwise eat the first tap), where a
+  click pins/unpins directly; an outside pointerdown closes it. The expanded panel carries
+  the open-only todo section plus a READ-ONLY sched section (`ScheduleRows` compact with
+  `plain-names` — no action buttons, run links still jump to the fleet drawer).
 -->
 <script setup lang="ts">
-import { computed, inject, nextTick, onMounted, onUnmounted, ref, useId, watch } from "vue";
+import { computed, inject, nextTick, onMounted, onUnmounted, provide, ref, shallowRef, useId, watch } from "vue";
+import { useTicker } from "../../composables/useTicker.js";
 import {
   commandPolicyFor,
+  slashTextRoute,
+  unknownSlashTextAvailable,
   composerKeyAction,
   matchCommandRows,
   mergeRecalledDraft,
@@ -120,20 +142,27 @@ import {
   parseCompleteResponse,
 } from "@logic/cmdArgs.js";
 import { API } from "@logic/contract.js";
+import { schedSummaryOf, sessionProjectionOf, taskRowsOf } from "@logic/schedule.js";
 import { useI18n } from "../../composables/useI18n.js";
 import type { ComposerEmits, ComposerProps } from "../../contracts.js";
 import type { ControlHandle } from "../../types.js";
 import { CONTROL_CTX } from "../../composables/useControl.js";
 import AppIcon from "../../icons/AppIcon.vue";
+import type { IconName } from "../../icons/names.js";
+import type { TodoTaskWire, TodoWire } from "../../types.js";
 import { addAttachments } from "./attachmentAdd.js";
 import AttachmentTray from "./AttachmentTray.vue";
 import CommandPalette from "./CommandPalette.vue";
 import CommandArgPalette from "./CommandArgPalette.vue";
 import ContextRing from "./ContextRing.vue";
+import { HOLD_STOP_HOST } from "../../composables/useHoldStop.js";
 import ModelSwitcher from "./ModelSwitcher.vue";
 import { CONTROL_ENV, CONTROL_VIEW, HUB_CTX } from "./controlContext.js";
 import { useDeliverDefault } from "../../composables/useDeliverDefault.js";
 import { browserLocalStorage } from "../shell/themeStorage.js";
+import "../../styles/composer-todo.css";
+import ScheduleRows from "../schedule/ScheduleRows.vue";
+import type { TaskRow } from "../schedule/taskRow.js";
 import "../../styles/upload.css";
 
 const props = defineProps<ComposerProps>();
@@ -185,9 +214,10 @@ const resumeSlash = computed(() => {
   if (s === undefined || !commandsEnabled.value || !resumeOn.value) return false;
   return s.name === "resume" || s.name === "resume-recent";
 });
-const commandMode = computed(
-  () => slash.value !== undefined && commandsEnabled.value && !sendAsText.value && !resumeSlash.value,
+const slashRoute = computed(() =>
+  slashTextRoute(text.value, [...commands.value], busy.value, commandsEnabled.value, view?.agent.value.status),
 );
+const commandMode = computed(() => slashRoute.value.mode !== "text" && !sendAsText.value && !resumeSlash.value);
 
 // ---------------------------------------------------------------------------
 // @mention completion (web-hub task #11) + @文件补全 (file-mention)
@@ -379,10 +409,12 @@ function pickPanelRow(row: PanelRow): void {
 }
 
 function onDocPointerDown(ev: Event): void {
-  if (!mentionOpen.value) return;
   const root = rootEl.value;
-  if (root !== null && ev.target instanceof Node && root.contains(ev.target)) return;
-  mentionDismissed.value = true;
+  const inside = root !== null && ev.target instanceof Node && root.contains(ev.target);
+  if (inside) return;
+  if (mentionOpen.value) mentionDismissed.value = true;
+  if (todoOpen.value) todoOpen.value = false; // outside click closes the todo panel too
+  if (todoHover.value) todoHover.value = false; // outside click also clears hover state
 }
 onMounted(() => document.addEventListener("pointerdown", onDocPointerDown, true));
 
@@ -411,9 +443,185 @@ function mentionKeydown(ev: KeyboardEvent): boolean {
   }
   return false;
 }
-const policy = computed(() =>
-  commandMode.value && slash.value ? commandPolicyFor([...commands.value], slash.value.name, busy.value) : null,
+// ---------------------------------------------------------------------------
+// composer todo chip (2026-11 user request — see the file header)
+// ---------------------------------------------------------------------------
+// Read-only open-tasks chip + panel. Data comes straight off the injected CONTROL_VIEW's
+// reactive agent: `@logic/state.js`'s status reducer already mirrors `StatusInfo.todo` onto
+// `AgentState.todo` (absent-means-cleared), so no prop / contracts / AgentDetail change is
+// needed. The chip renders ONLY while a wire exists AND the open count is > 0 (空态拍板).
+/** The main session's todo wire, if the status slot currently carries one. */
+const todoWire = computed<TodoWire | undefined>(() => view?.agent.value.todo);
+/** Wire semantics (`src/web-hub/agent/todo.ts` countsOf): `counts.open` = PENDING ONLY and
+ * `inProgress` is counted separately — the chip's "open" headline is pending + inProgress
+ * (completed never counted). */
+const todoOpenCount = computed(() => {
+  const w = todoWire.value;
+  return w === undefined ? 0 : w.counts.open + w.counts.inProgress;
+});
+/** steer/held 场景 (2026-11-04 screenshot ruling): QueueList renders the mergeQueue rows
+ * (held steer cards, queued/sending rows) directly ABOVE the composer whenever the control
+ * queue is non-empty, and the chip's absolute top:-24px seat then covers the card's
+ * bottom-left text — hide chip + panel ENTIRELY by render condition (z-index tuning was
+ * tried and ruled out). A plain main-session composer (empty queue) keeps the chip
+ * untouched. Same `queueItems` slot the ContextRing already reads — no new prop. */
+const queueAbove = computed(() => (view?.queueItems.value.length ?? 0) > 0);
+/** Either chip segment has content (todo open tasks / a schedule projection) — the chip
+ *  renders for EITHER, still never while queue/held rows sit above the composer. */
+const todoSegOn = computed(() => todoWire.value !== undefined && todoOpenCount.value > 0);
+const chipOn = computed(() => !queueAbove.value && (todoSegOn.value || schedWire.value !== undefined));
+/** Panel visibility — a plain local ref, NOT persisted (source-scan's persistence allowlist
+ * doesn't cover this component; same precedent as TasksPanel's own fold state). */
+const todoOpen = ref(false);
+/** Hover state: hovering the chip or the panel auto-expands (no click needed). */
+const todoHover = ref(false);
+/** Effective visibility: click-toggle OR hover. */
+const todoExpanded = computed(() => todoOpen.value || todoHover.value);
+// Entering the steer/held scenario with the panel up must drop it immediately AND must not
+// restore a stale expanded state when the queue drains — reset both sources on entry.
+watch(queueAbove, (up) => {
+  if (!up) return;
+  todoOpen.value = false;
+  todoHover.value = false;
+});
+/** Open-only rows: completed tasks never list here — they surface as the header's grey
+ * `X done` summary instead. */
+const todoRows = computed<readonly TodoTaskWire[]>(() =>
+  (todoWire.value?.tasks ?? []).filter((task) => task.status !== "completed"),
 );
+/** `+N more` tail = wire-capped rows minus the completed fold the `X done` line already
+ * accounts for (TasksPanel's moreCount formula — degrades to the raw `omitted` on an old wire
+ * without `completedHidden`). */
+const todoMoreCount = computed(() => {
+  const w = todoWire.value;
+  if (w === undefined) return 0;
+  return Math.max(0, (w.omitted ?? 0) - (w.completedHidden ?? 0));
+});
+
+// schedule-auto-approve r2 W3: the chip's ⏰ segment + the panel's read-only sched section.
+// Same inputs as DetailHeader's TasksPanel (hub caps + the hub-global `schedules` slot + the
+// view agent's sessionId, straight off the injected HUB_CTX/CONTROL_VIEW) — no new props or
+// contracts; without a hub both stay undefined and the chip is exactly the todo-only one.
+const schedSessionId = computed(() => {
+  const s = view?.agent.value.session as { sessionId?: unknown } | undefined;
+  return typeof s?.sessionId === "string" && s.sessionId !== "" ? s.sessionId : undefined;
+});
+const schedWire = computed(() =>
+  schedSummaryOf(hub?.state.value.hub?.["caps"], hub?.state.value.schedules, schedSessionId.value),
+);
+const schedProj = computed(() => sessionProjectionOf(hub?.state.value.schedules, schedSessionId.value));
+/** 30s ticker for the rows' relative tokens (TasksPanel/SchedulePanel precedent) — MANAGED:
+ * created only while a sched projection exists and disposed the moment it goes away (no
+ * cap / no sessionId / no payload ⇒ no resident interval at all; useTicker has no lifecycle
+ * registration of its own, so creating it from a watcher is safe). The handle's `now` ref is
+ * re-exposed through a shallowRef so swapping it stays reactive. */
+function makeSchedTicker() {
+  return useTicker({
+    doc:
+      typeof document === "undefined" ? { hidden: false, addEventListener() {}, removeEventListener() {} } : document,
+    win: typeof window === "undefined" ? { addEventListener() {}, removeEventListener() {} } : window,
+    setTimeout: (fn, ms) => setTimeout(fn, ms),
+    clearTimeout: (h) => clearTimeout(h),
+    now: () => Date.now(),
+    intervalMs: 30_000,
+  });
+}
+const schedNowSrc = shallowRef<ReturnType<typeof makeSchedTicker> | null>(null);
+const schedNow = computed(() => schedNowSrc.value?.now.value ?? 0);
+watch(
+  schedWire,
+  (w) => {
+    if (w === undefined) {
+      schedNowSrc.value?.dispose();
+      schedNowSrc.value = null;
+    } else if (schedNowSrc.value === null) {
+      schedNowSrc.value = makeSchedTicker();
+    }
+  },
+  { immediate: true },
+);
+onUnmounted(() => {
+  schedNowSrc.value?.dispose();
+  schedNowSrc.value = null;
+});
+const schedRows = computed<readonly TaskRow[]>(() =>
+  schedWire.value === undefined ? [] : (taskRowsOf(schedProj.value, schedNow.value) as TaskRow[]),
+);
+/** Both chip segments showing — the inline-numbers mode (each seg carries its own count);
+ *  a SINGLE-segment chip drops the inline number and surfaces it as the badge instead
+ *  (2026-11-05 user rulings, screenshot feedback round 2). */
+const bothSegs = computed(() => todoSegOn.value && schedWire.value !== undefined);
+const badgeCount = computed(() => todoOpenCount.value + (schedWire.value?.count ?? 0));
+/** Badge = single-segment mode only (it then carries that one segment's count — the sum
+ *  equals it); both-segments mode shows the numbers inline and NO badge. Hidden while
+ *  expanded (composer-todo.css, unchanged). */
+const badgeOn = computed(() => todoSegOn.value !== (schedWire.value !== undefined) && badgeCount.value > 0);
+/** The aria label always carries the REAL counts (compact English tokens in both locales —
+ *  the i18n copy stays count-free), even where the visuals drop the inline number. */
+const chipAria = computed(() => {
+  const parts = [t("detail.composerTasksAria")];
+  if (todoSegOn.value) parts.push(`✓ ${todoOpenCount.value}`);
+  if (schedWire.value !== undefined) parts.push(`⏰ ${schedWire.value.count}`);
+  return parts.join(" · ");
+});
+/** The panel's run link ⇒ the fleet drawer's run view (FleetDrawer's selectRun precedent). */
+function onSchedOpenRun(runId: string): void {
+  if (view === null) return;
+  hub?.selectRun?.(view.agentKey, runId);
+}
+
+/** Status-icon semantics沿用 detail 头部任务面板: pending=clock, in_progress=loader (spinning). */
+const TODO_STATUS_ICON: Readonly<Record<TodoTaskWire["status"], IconName>> = {
+  pending: "clock",
+  in_progress: "loader",
+  completed: "check",
+};
+
+function todoStatusLabel(status: TodoTaskWire["status"]): string {
+  switch (status) {
+    case "pending":
+      return t("detail.todoStatusPending");
+    case "in_progress":
+      return t("detail.todoStatusInProgress");
+    case "completed":
+      return t("detail.todoStatusCompleted");
+  }
+}
+
+function todoBlockedLabel(task: TodoTaskWire): string {
+  return t("detail.todoBlockedBy", { ids: task.blockedBy.map((id) => `#${id}`).join(", ") });
+}
+
+function onTodoChipClick(): void {
+  // Pin/unpin semantics: click always toggles the panel, regardless of hover state.
+  // This avoids the "second click looks broken" issue when hover already expanded the panel.
+  todoOpen.value = !todoExpanded.value;
+  todoHover.value = false;
+}
+
+/** Coarse/touch pointers synthesize `mouseenter` immediately before the first click — if it
+ * set `todoHover`, the click's `!todoExpanded` toggle would close the panel it never saw open
+ * (first tap = no-op; verifier major, 2026-11-04). Hover expansion is therefore gated to
+ * `(hover: hover) and (pointer: fine)` — real hover pointers only; touch clicks pin/unpin
+ * directly. Evaluated per event so a pointer change never leaves stale state. */
+function supportsRealHover(): boolean {
+  return (
+    typeof window !== "undefined" &&
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(hover: hover) and (pointer: fine)").matches
+  );
+}
+
+function onTodoMouseEnter(): void {
+  if (!supportsRealHover()) return; // touch/coarse: the browser's pre-click synthetic hover
+  todoHover.value = true;
+}
+
+function onTodoMouseLeave(): void {
+  todoHover.value = false;
+}
+
+const policy = computed(() => (commandMode.value ? slashRoute.value.policy : null));
 // §2.6 decoratePalette: the /resume + /resume-recent rows render RUNNABLE with the
 // 「恢复会话」 description while available (the agent advertises them deny for old UIs).
 // The decoration rides BOTH surfaces: the `commands` prop (CommandPalette re-derives its
@@ -996,11 +1204,9 @@ function sendGate() {
     // they are NOT command-routed — the advertised deny must not block them at the gate.
     // DetailDock still re-derives the policy from the ROUTED text (sendAsText only changes
     // composer display), so the non-resume branches keep seeing exactly the routed answer.
-    commandRouted: slash.value !== undefined && commandsEnabled.value && !resumeSlash.value,
+    commandRouted: slashRoute.value.mode !== "text" && !resumeSlash.value,
     policy:
-      slash.value !== undefined && commandsEnabled.value && !resumeSlash.value
-        ? commandPolicyFor([...commands.value], slash.value.name, busy.value)
-        : policy.value,
+      slash.value !== undefined && commandsEnabled.value && !resumeSlash.value ? slashRoute.value.policy : policy.value,
   });
   // §2.6 "intent ∧ available ∧ empty tray": with attachments the composed text stops
   // matching the intent (bare form) — the slash form would still pass as plain text, so it
@@ -1091,12 +1297,83 @@ function onSendClick(): void {
   doSend(deliverDefault.deliver.value);
 }
 
-/** Stop (2026-10 user request: moved INTO the input's inner edge): same channel the dock used —
- * `CONTROL_VIEW`'s `ControlHandle` straight from the inject, no emit hop. Renders only when a
- * view with a live control handle is present (the dock's control-ON context). */
+/** #47 current-turn abort host. Its lock survives ContextRing/StopButton surface changes.
+ * Missing old-host scope/connection data fails closed; no contracts or transport changes. */
+// Read the already-existing reducer snapshot synchronously: parent props are render-batched,
+// and can otherwise hide an SSE A→B→A scope/permission change within one browser task.
+const stopAgent = computed(() => {
+  const agents = hub?.state.value.agents;
+  return agents instanceof Map ? agents.get(view?.agentKey ?? "") : view?.agent?.value;
+});
+const stopScope = computed(() => {
+  if (view === null) return null;
+  const sid = (stopAgent.value?.session as { sessionId?: unknown } | undefined)?.sessionId;
+  const epoch = stopAgent.value?.card?.epoch;
+  const key = view.agentKey;
+  return typeof sid === "string" &&
+    sid !== "" &&
+    typeof epoch === "string" &&
+    epoch !== "" &&
+    typeof key === "string" &&
+    key !== ""
+    ? JSON.stringify([key, sid, epoch])
+    : null;
+});
+const stopFlight = shallowRef<{ scope: string; token: object } | null>(null);
+const abortPending = computed(() => stopFlight.value !== null && stopFlight.value.scope === stopScope.value);
+const stopEligible = computed(() => {
+  const state = hub?.state.value;
+  const agent = stopAgent.value;
+  const snapshotOk =
+    !(state?.agents instanceof Map) ||
+    (state.selected === view?.agentKey &&
+      state.control === true &&
+      agent !== undefined &&
+      !agent.down &&
+      agent.card.state !== "stale" &&
+      agent.card.control === true &&
+      (agent.status as { busy?: unknown } | undefined)?.busy === true);
+  return (
+    props.enabled &&
+    busy.value &&
+    view?.busy?.value === true &&
+    view.enabled?.value === true &&
+    view.control != null &&
+    state?.conn === "open" &&
+    stopScope.value !== null &&
+    snapshotOk
+  );
+});
+provide(HOLD_STOP_HOST, { scope: stopScope, eligible: stopEligible, abortPending });
+watch(
+  stopScope,
+  () => {
+    stopFlight.value = null;
+  },
+  { flush: "sync" },
+);
+onUnmounted(() => {
+  stopFlight.value = null;
+});
+
 function onStopInline(): void {
-  if (view === null || view.control === null) return;
-  void view.control.abort(view.agentKey).catch(() => {});
+  const scope = stopScope.value;
+  const control = view?.control;
+  const key = view?.agentKey;
+  if (!stopEligible.value || abortPending.value || scope === null || !control || key === undefined) return;
+  const flight = { scope, token: {} };
+  // Set singleflight BEFORE abort() can mint a cmdId or synchronously publish optimistic ctl.
+  stopFlight.value = flight;
+  try {
+    void control
+      .abort(key)
+      .catch(() => {})
+      .finally(() => {
+        if (stopFlight.value === flight && stopScope.value === scope) stopFlight.value = null;
+      });
+  } catch {
+    if (stopFlight.value === flight && stopScope.value === scope) stopFlight.value = null;
+  }
 }
 
 /** The 44px touch-target floor lives on the CARD (control.css, 2026-10-07 symmetric-gap
@@ -1151,6 +1428,7 @@ watch(
       :busy="busy"
       :active="paletteActiveIndex"
       :listbox-id="paletteId"
+      :unknown-as-text="unknownSlashTextAvailable(view?.agent.value.status)"
       @pick="completeCommand"
       @hover="paletteActive = $event"
     />
@@ -1232,6 +1510,58 @@ watch(
       </button>
       <p v-if="panelRows.length === 0" class="mention-empty">{{ t("control.mentionEmpty") }}</p>
     </div>
+    <!-- Composer tasks chip (2026-11 user request + schedule-auto-approve r2 W3): the todo
+         chip's read-only OPEN-ONLY task list PLUS the read-only sched section, mounted in the
+         mention panel's slot (in-flow above the input card, so it opens upward from the
+         bottom-pinned composer). Hover expands it, click pins/unpins, and an outside
+         pointerdown closes it. Hidden together with the chip while queue/held rows render
+         above the composer (`chipOn`, see `queueAbove`).
+         Todo rows mirror the detail TasksPanel's structure (status icon + #id subject +
+         optional truncated description + open-blocker label) minus completed tasks — those
+         are the header's grey `X done` summary. The sched section renders `ScheduleRows`
+         compact with `plain-names` and WITHOUT `canWrite` — strictly read-only (no action
+         buttons, no focusable name affordances), only the run links are live. -->
+    <div
+      v-if="chipOn && todoExpanded"
+      class="composer-todo-panel"
+      role="region"
+      :aria-label="t('detail.composerTasksTitle')"
+      aria-readonly="true"
+      @mouseenter="onTodoMouseEnter"
+      @mouseleave="onTodoMouseLeave"
+    >
+      <p class="composer-todo-head">
+        <span class="composer-todo-title">{{ t("detail.composerTasksTitle") }}</span>
+        <span v-if="todoWire !== undefined && todoWire.counts.completed > 0" class="composer-todo-done">{{
+          t("detail.composerTodoDone", { n: todoWire.counts.completed })
+        }}</span>
+      </p>
+      <ul v-if="todoSegOn" class="composer-todo-list">
+        <li v-for="task in todoRows" :key="task.id" class="composer-todo-item" :data-status="task.status">
+          <AppIcon
+            :name="TODO_STATUS_ICON[task.status]"
+            class="icon-sm composer-todo-ico"
+            :class="{ spin: task.status === 'in_progress' }"
+          />
+          <span class="sr-only">{{ todoStatusLabel(task.status) }}</span>
+          <span class="composer-todo-body">
+            <span class="composer-todo-subject">#{{ task.id }} {{ task.subject }}</span>
+            <span v-if="task.description" class="composer-todo-desc"
+              >{{ task.description }}{{ task.descTruncated ? "…" : "" }}</span
+            >
+            <span v-if="task.blockedBy.length > 0" class="composer-todo-blocked">{{ todoBlockedLabel(task) }}</span>
+          </span>
+        </li>
+        <li v-if="todoMoreCount > 0" class="composer-todo-more">
+          {{ t("detail.composerTodoMore", { n: todoMoreCount }) }}
+        </li>
+      </ul>
+      <div v-if="schedWire !== undefined" class="composer-tasks-sec">
+        <p class="composer-tasks-sec-title">{{ t("detail.tasksSchedSec", { n: schedWire.count }) }}</p>
+        <ScheduleRows :rows="schedRows" :now="schedNow" compact plain-names @open-run="onSchedOpenRun" />
+        <p class="composer-sched-readonly">{{ t("detail.composerSchedReadonly") }}</p>
+      </div>
+    </div>
     <AttachmentTray
       v-if="trayItems.length > 0"
       :items="trayItems"
@@ -1287,6 +1617,45 @@ watch(
           <div class="composer-chips" :class="{ 'chips-off': text !== '' }">
             <ModelSwitcher />
           </div>
+          <!-- Tasks chip (2026-11 user request + schedule-auto-approve r2 W3): positioned
+               OUTSIDE the composer card, top-left corner (absolute, top:-24px). One pill with
+               up to two segments — ✓ (open todo: pending + in_progress) and ⏰ (scheduled
+               tasks, the clock icon spins while a run is live). BOTH segments present ⇒ the
+               inline `✓ N`/`⏰ M` numbers, NO badge; a SINGLE segment ⇒ icon only with that
+               count as the corner badge (the aria-label always carries the real counts). The
+               badge hides while expanded. Hover auto-expands the read-only
+               panel on `(hover: hover) and (pointer: fine)` pointers ONLY (touch's synthetic
+               pre-click mouseenter is ignored — the first tap pins directly); click
+               pins/unpins. Always visible while either side has content (not affected by
+               chips-off) — EXCEPT while queue/held rows render above the composer (the
+               steer/held scenario, `queueAbove`): not rendered at all then, so it can never
+               cover the held card's bottom-left text. -->
+          <div
+            v-if="chipOn"
+            class="composer-todo-external"
+            @mouseenter="onTodoMouseEnter"
+            @mouseleave="onTodoMouseLeave"
+          >
+            <button
+              type="button"
+              class="composer-todo-btn"
+              :aria-expanded="todoExpanded"
+              :aria-label="chipAria"
+              @click="onTodoChipClick"
+            >
+              <span v-if="todoSegOn" class="seg">
+                <AppIcon name="check" class="icon-sm" /><span v-if="bothSegs" class="n">{{ todoOpenCount }}</span>
+              </span>
+              <span v-if="schedWire !== undefined" class="seg" :class="{ live: schedWire.live }">
+                <AppIcon name="clock" class="icon-sm" :class="{ spin: schedWire.live }" /><span
+                  v-if="bothSegs"
+                  class="n"
+                  >{{ schedWire.count }}</span
+                >
+              </span>
+              <span v-if="badgeOn" class="composer-todo-badge">{{ badgeCount }}</span>
+            </button>
+          </div>
           <div class="composer-end">
             <!-- Attach (2026-10-07 user request 「附件按钮放到上下文进度的左侧」): moved INSIDE
                  the card, immediately left of the ring, following the ring's two placements —
@@ -1306,7 +1675,7 @@ watch(
             <!-- Context ring + stop, merged (right end of the bottom row while the row is
                  expanded; absolute mid-right overlay otherwise — control.css's `:not(.has-text)`
                  tier). Idle ⇒ ring details toggle; busy + live control ⇒ the whole ring zone is
-                 the two-step stop button. Self-hides the ring when no DETAIL_METRICS provider/
+                 the 700ms hold-to-stop button. Self-hides the ring when no DETAIL_METRICS provider/
                  contextUsage exists, falling back to the standalone stop look so stop stays
                  reachable. Same stop channel the dock used — no emit hop (see `onStopInline`). -->
             <ContextRing

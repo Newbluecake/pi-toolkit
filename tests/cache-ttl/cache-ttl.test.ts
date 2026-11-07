@@ -6,7 +6,8 @@ import {
   createInitialWindowState,
 } from "../../src/cache-ttl/keepalive-state.js";
 import { wireCacheTtl, legacyCapNote } from "../../src/cache-ttl/cache-ttl.js";
-import { DEFAULT_SETTINGS, loadSettings, parseCacheTtlSettings } from "../../src/config/settings.js";
+import { DEFAULT_SETTINGS, loadSettings } from "../../src/config/settings.js";
+import { parseCacheTtlSettings } from "../../src/cache-ttl/settings.js";
 import type { KeepalivePort } from "../../src/cache-ttl/keepalive-service.js";
 
 function setup(mode: "auto" | "on" | "off" = "auto", persist = vi.fn()) {

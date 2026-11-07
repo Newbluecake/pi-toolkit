@@ -806,3 +806,136 @@ describe("registry.remove (web-hub-delete-session plan v2 §2.3)", () => {
     expect(types(h.events)).toEqual(["agent_up"]);
   });
 });
+
+// #23 web-update-stuck plan §2.2 (D14) + P-B §3：the epoch-refresh gate widened from hold.v1 to
+// hold.v1 ∨ epoch.up.v1. The compat matrix (byte-level SSE/hello evidence) is
+// epoch-up-compat.test.ts's golden; this block pins the registry-side event policy itself:
+// claiming AND live reclaims refresh the card BEFORE the gap, stale stays a single agent_up,
+// same-epoch rebinds stay silent, and an agent carrying NEITHER cap keeps the pre-feature
+// gap-only wire (already pinned by Y7.2's control case above — not repeated here).
+describe("registry: #23 epoch refresh via epoch.up.v1 (claiming/live/stale/silent)", () => {
+  const EPOCH_UP_CAPS = ["ev.v1", "cmd.v1", "epoch.up.v1"] as const;
+
+  it("claiming reconnect + changed epoch + epoch.up.v1 (no hold.v1) ⇒ agent_up carries the NEW epoch AND version, before gap", () => {
+    const h = harness();
+    const conn = fakeConn();
+    const { agentKey } = h.reg.register(
+      hello({ caps: [...EPOCH_UP_CAPS], epoch: "e-old", pluginVersion: "1.0.0" }),
+      conn,
+    );
+    h.reg.onClose(agentKey, false); // socket dropped, no bye ⇒ claiming window
+    h.events.length = 0;
+    h.reg.register(hello({ caps: [...EPOCH_UP_CAPS], epoch: "e-new", pluginVersion: "1.1.0" }), fakeConn());
+    expect(types(h.events)).toEqual(["agent_up", "gap"]); // card FIRST, then the resnapshot signal
+    const up = h.events[0]!;
+    expect(up.type === "agent_up" && up.agent.epoch).toBe("e-new");
+    expect(up.type === "agent_up" && up.agent.pluginVersion).toBe("1.1.0");
+    expect(h.reg.get(agentKey)!.epoch).toBe("e-new");
+  });
+
+  it("LIVE reclaim (old socket replaced) with a changed epoch also refreshes under epoch.up.v1", () => {
+    const h = harness();
+    const conn = fakeConn();
+    h.reg.register(hello({ caps: [...EPOCH_UP_CAPS], epoch: "e-old" }), conn);
+    h.events.length = 0;
+    // same agentId, different socket, new epoch while still live (e.g. a fast /reload handover)
+    h.reg.register(hello({ caps: [...EPOCH_UP_CAPS], epoch: "e-new" }), fakeConn());
+    expect(types(h.events)).toEqual(["agent_up", "gap"]);
+    expect(conn.closedWith).toContain("reclaimed");
+  });
+
+  it("stale reconnect + changed epoch + epoch.up.v1 ⇒ exactly ONE agent_up, then gap (never a double)", () => {
+    const h = harness();
+    const conn = fakeConn();
+    const { agentKey } = h.reg.register(hello({ caps: [...EPOCH_UP_CAPS], epoch: "e-old" }), conn);
+    h.reg.onClose(agentKey, false);
+    h.clock.t += TIMING.detachGraceMs + 1;
+    h.reg.tick(h.clock.t); // ⇒ stale
+    h.events.length = 0;
+    h.reg.register(hello({ caps: [...EPOCH_UP_CAPS], epoch: "e-new" }), fakeConn());
+    expect(types(h.events)).toEqual(["agent_up", "gap"]);
+    expect(h.events.filter((e) => e.type === "agent_up")).toHaveLength(1); // never a double
+  });
+
+  it("a claiming reconnect with the SAME epoch stays silent even under epoch.up.v1 (Y7.2 silent-rebind parity)", () => {
+    const h = harness();
+    const conn = fakeConn();
+    const { agentKey } = h.reg.register(hello({ caps: [...EPOCH_UP_CAPS], epoch: "e-same" }), conn);
+    h.reg.onClose(agentKey, false);
+    h.events.length = 0;
+    h.reg.register(hello({ caps: [...EPOCH_UP_CAPS], epoch: "e-same" }), fakeConn());
+    expect(types(h.events)).toEqual([]); // ordinary silent rebind — no agent_up, no gap
+  });
+
+  it("both caps present (hold.v1 ∧ epoch.up.v1) ⇒ still exactly ONE agent_up (the gate is a disjunction)", () => {
+    const h = harness();
+    const conn = fakeConn();
+    const { agentKey } = h.reg.register(
+      hello({ caps: ["ev.v1", "cmd.v1", "hold.v1", "epoch.up.v1"], epoch: "e-old" }),
+      conn,
+    );
+    h.reg.onClose(agentKey, false);
+    h.events.length = 0;
+    h.reg.register(hello({ caps: ["ev.v1", "cmd.v1", "hold.v1", "epoch.up.v1"], epoch: "e-new" }), fakeConn());
+    expect(types(h.events)).toEqual(["agent_up", "gap"]);
+    expect(h.events.filter((e) => e.type === "agent_up")).toHaveLength(1);
+  });
+});
+
+// #23 web-update-stuck plan r3 处置 #7（P-C §1 的时间窗在 registry 层的镙钉）：reap
+// （down("reaped")，记录与 byAgentId 删除）之后的重新注册走 newAgentKey 的全新路径，
+// 但同 pid+nonce 的 identity 会拿回同一个 base key。断言用 register() 实际返回的 key，
+// 不预设是否换 key：同进程同 identity ⇒ 同 key、reclaimed:false、全新 agent_up；
+// 新进程新 identity ⇒ 新 key，旧 key 已随 agent_down 消失。上层（P-C/UI 的 D6「不跨 key
+// 追认」）据此判定旧请求收敛 done 还是保持 E_OFFLINE。
+describe("registry: #23 post-reap re-registration keys (reap window, real register() keys)", () => {
+  const NEW_CAPS = ["ev.v1", "cmd.v1", "epoch.up.v1"] as const;
+
+  it("same process, same identity (same pid+nonce) re-registers after reap ⇒ SAME key, reclaimed:false, fresh agent_up", () => {
+    const h = harness();
+    const id = { pid: 4242, nonce: "nonceAAAAAAAAAAAAAAA" };
+    const first = h.reg.register(hello({ caps: [...NEW_CAPS], epoch: "e-old", agentId: id }), fakeConn());
+    h.reg.onClose(first.agentKey, false); // → claiming
+    h.clock.t += TIMING.detachGraceMs + 1;
+    h.reg.tick(h.clock.t); // ⇒ stale
+    h.clock.t += TIMING.reapMs + 1;
+    h.reg.tick(h.clock.t); // ⇒ down("reaped")
+    h.events.length = 0;
+    const second = h.reg.register(
+      hello({ caps: [...NEW_CAPS], epoch: "e-new", pluginVersion: "1.1.0", agentId: id }),
+      fakeConn(),
+    );
+    expect(second.agentKey).toBe(first.agentKey); // newAgentKey base is free again ⇒ same key
+    expect(second.reclaimed).toBe(false); // brand-new record — NOT the reclaim path
+    expect(types(h.events)).toEqual(["agent_up"]); // fresh registration always publishes agent_up
+    const up = h.events[0]!;
+    expect(up.type === "agent_up" && up.agent.epoch).toBe("e-new");
+    expect(up.type === "agent_up" && up.agent.pluginVersion).toBe("1.1.0");
+  });
+
+  it("new process, new identity (different pid+nonce) ⇒ a DIFFERENT key; the old key died with agent_down at reap", () => {
+    const h = harness();
+    const first = h.reg.register(
+      hello({ caps: [...NEW_CAPS], epoch: "e-old", agentId: { pid: 4242, nonce: "nonceAAAAAAAAAAAAAAA" } }),
+      fakeConn(),
+    );
+    h.reg.onClose(first.agentKey, false);
+    h.clock.t += TIMING.detachGraceMs + 1;
+    h.reg.tick(h.clock.t); // ⇒ stale
+    h.clock.t += TIMING.reapMs + 1;
+    h.reg.tick(h.clock.t); // ⇒ down("reaped") + agent_down
+    const downAt = h.events.length;
+    expect(h.events.slice(0, downAt).some((e) => e.type === "agent_down" && e.agentKey === first.agentKey)).toBe(true);
+    h.events.length = 0;
+    const second = h.reg.register(
+      hello({ caps: [...NEW_CAPS], epoch: "e-new", agentId: { pid: 5151, nonce: "otherNonceBBBBBBBBBB" } }),
+      fakeConn(),
+    );
+    expect(second.agentKey).not.toBe(first.agentKey); // genuinely new identity ⇒ new key
+    expect(second.reclaimed).toBe(false);
+    expect(h.reg.get(first.agentKey)).toBeUndefined(); // the old key never comes back
+    expect(types(h.events)).toEqual(["agent_up"]);
+    const up = h.events[0]!;
+    expect(up.type === "agent_up" && up.agent.agentKey).toBe(second.agentKey);
+  });
+});

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { fakeLanStore } from "./fakes.js";
+import { WRITER_SOAK_MS } from "../../../src/web-hub/hub/hardening.js";
 import { createLanStore } from "../../../src/web-hub/hub/lan-store.js";
 import type { LanStorePort } from "../../../src/web-hub/hub/ports.js";
 import { hashSid } from "../../../src/web-hub/hub/sid-hash.js";
@@ -22,7 +23,7 @@ const crypto = {
   timingSafeEqual,
 };
 const at = 1_800_000_000_000;
-for (const kind of ["fake", "sqlite"] as const)
+for (const kind of ["fake", "sqlite", "sqlite-encrypted"] as const)
   describe(`LAN security shared contract: ${kind}`, () => {
     let store: LanStorePort, userId: number, epoch: number;
     let cleanup: () => Promise<void>;
@@ -35,7 +36,18 @@ for (const kind of ["fake", "sqlite"] as const)
         cleanup = async () => {};
       } else {
         const dir = mkdtempSync(join(tmpdir(), "lan-I-contract-"));
-        const opened = await createLanStore({ dbFile: join(dir, "hub.db"), log: memLog(), idleMs: 300000 });
+        const params = {
+          dbFile: join(dir, "hub.db"),
+          log: memLog(),
+          idleMs: 300000,
+          totpKeyPath: join(dir, "key-dir", "totp.key"),
+        };
+        let opened = await createLanStore({ ...params, maintHardening: { now: at - WRITER_SOAK_MS } });
+        if (opened.ok && kind === "sqlite-encrypted") {
+          await opened.store.close();
+          opened = await createLanStore({ ...params, maintHardening: { hardeningPhase: 2, now: at } });
+          expect(opened.ok && opened.hardening.writerActive).toBe(true);
+        }
         if (!opened.ok) {
           rmSync(dir, { recursive: true, force: true });
           throw Error(JSON.stringify(opened));

@@ -6,8 +6,9 @@
  * evaluate it, always with values read at their own frozen points.
  *
  * Truth table (§4.5): xs send/receive needs ONLY `xsOn` — the RootWakeController additionally
- * needs `fabric.wake.enabled ∧ rootRunMaxS > 0 ∧ host capability observed/verified ∧
- * receive === "wake"`; any miss degrades `wake:true` to deliver-only. Cross-session traffic
+ * needs `fabric.wake.enabled ∧ rootRunMaxS > 0 ∧ host capability ≠ absent ∧ receive === "wake"`
+ * (`unknown` dispatches optimistically, first run verified before any provider request —
+ * wake-unknown-optimistic); any miss degrades `wake:true` to deliver-only. Cross-session traffic
  * NEVER falls back to an unsupervised legacy `triggerTurn:true` path (review #8).
  *
  * Pi-free by construction (XS0 source-scan gate: `src/fabric/xs/**` must not import pi).

@@ -157,6 +157,11 @@ describe("WC14 ③/L3: the production factory fails fast if __testHooks is smugg
 describe("WC14 ④/L4: no production entry point references the test-only module or its hooks", () => {
   const productionGlobs = [
     join(repoRoot, "src", "index.ts"),
+    join(repoRoot, "src", "holder.ts"),
+    join(repoRoot, "src", "fabric", "xs", "activate.ts"),
+    join(repoRoot, "src", "mention", "wire.ts"),
+    join(repoRoot, "src", "compact-hint", "register.ts"),
+    join(repoRoot, "src", "bash", "host.ts"),
     join(repoRoot, "src", "tools"),
     join(repoRoot, "src", "commands"),
     join(repoRoot, "src", "ui"),
@@ -176,7 +181,7 @@ describe("WC14 ④/L4: no production entry point references the test-only module
     }
   }
 
-  it("zero occurrences of '__testHooks' or 'orchestrator.testing' across src/index.ts, src/tools/**, src/commands/**, src/ui/**", () => {
+  it("zero occurrences of '__testHooks' or 'orchestrator.testing' across src/index.ts, the index sub-wires, src/tools/**, src/commands/**, src/ui/**", () => {
     const files = productionGlobs.flatMap(collectTsFiles);
     const hits: string[] = [];
     for (const file of files) {

@@ -1,0 +1,18 @@
+## Memory (proj) — 1 topic(s) · 9 block(s)
+
+### User rules (always on)
+- [general.009] 常设规则 9：每轮都必须遵守的长规则，正文长度接近典型值（约一百字节）以满足预算测试需要。
+- [general.008] 常设规则 8：每轮都必须遵守的长规则，正文长度接近典型值（约一百字节）以满足预算测试需要。
+- [general.007] 常设规则 7：每轮都必须遵守的长规则，正文长度接近典型值（约一百字节）以满足预算测试需要。
+- [general.006] 常设规则 6：每轮都必须遵守的长规则，正文长度接近典型值（约一百字节）以满足预算测试需要。
+- [general.005] 常设规则 5：每轮都必须遵守的长规则，正文长度接近典型值（约一百字节）以满足预算测试需要。
+- [general.004] 常设规则 4：每轮都必须遵守的长规则，正文长度接近典型值（约一百字节）以满足预算测试需要。
+- [general.003] 常设规则 3：每轮都必须遵守的长规则，正文长度接近典型值（约一百字节）以满足预算测试需要。
+- [general.002] 常设规则 2：每轮都必须遵守的长规则，正文长度接近典型值（约一百字节）以满足预算测试需要。
+- [general.001] 常设规则 1：每轮都必须遵守的长规则，正文长度接近典型值（约一百字节）以满足预算测试需要。
+- resident: 1.2k/0.5k over budget — consolidate (/mem review)
+
+Topics (relevant blocks are injected automatically; read one with memory view <topic>):
+- general · 9 blocks
+
+<!-- pi-toolkit:memory proj -->

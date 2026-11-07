@@ -1,0 +1,328 @@
+{
+  "v": 2,
+  "set": "review",
+  "note": "J0 质量评测集·整理 30 对（jev-plan §4 J0；按 jev-arch §6.3.3 重建）。每对给出 A/B 两条真实项目记忆，expected 与 buildReviewQuestions 的 p<n> 关系选项一致：unrelated / duplicate / conflict / a_supersedes_b / b_supersedes_a / complementary，note 写明判定理由。每项 a/b 可带 updated（YYYY-MM-DD，缺省按今天代入）；取代类样例靠 updated 体现新旧，冲突类样例两边都不标日期（谁也没明确取代谁）。取材本仓记忆主题，已人工脱敏。",
+  "cases": [
+    {
+      "id": "v01",
+      "a": {
+        "file": "pitfalls-git.md",
+        "excerpt": "基线对照改用 git show origin/dev:<path> 或 git diff -- <path>，不用 stash。"
+      },
+      "b": {
+        "file": "pitfalls.md",
+        "excerpt": "需要基线对照时用 git show HEAD:<path>；禁止 git stash / checkout / reset 等整树操作。"
+      },
+      "expected": "duplicate",
+      "note": "同一规则（基线对照不用 stash，改用 git show/diff）的两次记录；细节差异不构成独立知识，可删一条。"
+    },
+    {
+      "id": "v02",
+      "a": {
+        "file": "pitfalls-git.md",
+        "updated": "2026-10-26",
+        "excerpt": "GitHub 直连不通 ⇒ 走代理 export https_proxy=http://proxy.example:7897（本机 7890/1080 实测不可用）。"
+      },
+      "b": {
+        "file": "pitfalls-git.md",
+        "updated": "2026-09-20",
+        "excerpt": "GitHub 不通时先试本机 7890/1080 代理端口。"
+      },
+      "expected": "a_supersedes_b",
+      "note": "A 记录了实测（7890/1080 不可用）与替代端口，B 的端口已被证伪 ⇒ A 让 B 过时。"
+    },
+    {
+      "id": "v03",
+      "a": { "file": "core.md", "excerpt": "发版规则：默认 patch；feat ≥50 才 minor；BREAKING 才 major。" },
+      "b": { "file": "pitfalls.md", "excerpt": "版本号裁决：拿不准就 patch；minor 看 feat 提交数是否 ≥50。" },
+      "expected": "duplicate",
+      "note": "同一套版本号规则，B 只是把 A 换了个说法（缺 major 一句）⇒ 同内容，可合并。"
+    },
+    {
+      "id": "v04",
+      "a": { "file": "core.md", "excerpt": "验收通过自动 commit（精确路径，绝不 git add -A）。" },
+      "b": {
+        "file": "pitfalls-git.md",
+        "excerpt": "commit 只 add 精确路径；同仓库常有另一会话并发提交，开工前 git log 查重复。"
+      },
+      "expected": "complementary",
+      "note": "A 定自动提交纪律，B 补并发提交前的查重步骤；删任一条都会丢信息。"
+    },
+    {
+      "id": "v05",
+      "a": {
+        "file": "pitfalls-runtime.md",
+        "excerpt": "pi 用 jiti moduleCache:false 加载扩展，子会话读最新源码、宿主仍是旧代码 ⇒ 契约改动后必须 reload。"
+      },
+      "b": {
+        "file": "pitfalls-runtime.md",
+        "excerpt": "HUD 末尾 toolkit v…@<commit> 显示宿主加载的提交，用来核对版本错位。"
+      },
+      "expected": "complementary",
+      "note": "A 讲 reload 的必要性，B 给核对宿主版本的取证手段；主题相关但知识不同。"
+    },
+    {
+      "id": "v06",
+      "a": {
+        "file": "cache-ttl.md",
+        "updated": "2026-10-08",
+        "excerpt": "1h 缓存值得开：adaptive 模式按需把会话升级到 1h，命中即可省钱。"
+      },
+      "b": {
+        "file": "cache-ttl.md",
+        "updated": "2026-10-16",
+        "excerpt": "adaptive 与保活预算耗尽后的自动 →1h 升级已整体删除（6203d41，用户拍板）：现场 78 会话净亏 −$16.21，193/263 次升级根本没写出 1h 条目。"
+      },
+      "expected": "b_supersedes_a",
+      "note": "B 更新且是用户拍板的删除结论，A 的设计已被移除 ⇒ B 取代 A。"
+    },
+    {
+      "id": "v07",
+      "a": { "file": "quota.md", "excerpt": "恢复倒计时用文字 token resets 2d11h（否决 ↻ 图标）。" },
+      "b": { "file": "quota.md", "excerpt": "HUD >95% 显示 resets；L3 多 provider 合并播报。" },
+      "expected": "complementary",
+      "note": "A 定显示格式（文字而非图标），B 定触发条件与合并播报；两者各自独立。"
+    },
+    {
+      "id": "v08",
+      "a": { "file": "quota.md", "excerpt": "用户决策：零定时器，turn_end 懒刷新，空闲时 HUD 行冻结。" },
+      "b": { "file": "pitfalls.md", "excerpt": "别给 quota 加周期轮询定时器——用户已拍板懒刷新。" },
+      "expected": "duplicate",
+      "note": "同一条用户决策的两处记录（决策本体 + 由它推出的禁止项），可合并。"
+    },
+    {
+      "id": "v09",
+      "a": { "file": "pitfalls-runtime.md", "excerpt": "长命令一律 timeout，全量 timeout 280 npx vitest run。" },
+      "b": { "file": "core.md", "excerpt": "长命令加 timeout（同 pitfalls-runtime 的全量口径）。" },
+      "expected": "duplicate",
+      "note": "B 只是 A 的缩写并指向 A，没有新信息 ⇒ 重复。"
+    },
+    {
+      "id": "v10",
+      "a": { "file": "pitfalls-runtime.md", "excerpt": "release.sh 别 | tail：管道吞掉退出码。" },
+      "b": { "file": "pitfalls-git.md", "excerpt": "git merge … | tail 会吞失败码。" },
+      "expected": "complementary",
+      "note": "同一类「管道吞退出码」坑的两个具体场景（发版脚本、合并），各自点名不同命令 ⇒ 都保留。"
+    },
+    {
+      "id": "v11",
+      "a": {
+        "file": "multi-agent-experiments.md",
+        "excerpt": "结构化交接使下游成本 −34~53%、游荡文件 −91~100%，已固化为 skill skills/agent-handoff/。"
+      },
+      "b": { "file": "core.md", "excerpt": "串行交接用 agent-handoff skill（结构化交接包）。" },
+      "expected": "complementary",
+      "note": "A 是实证数据与出处，B 是落地指令；一个回答「为什么」，一个回答「怎么做」。"
+    },
+    {
+      "id": "v12",
+      "a": { "file": "pitfalls.md", "excerpt": "429 按路由换线。" },
+      "b": { "file": "pitfalls.md", "excerpt": "传输层故障直接 resume 换线续跑，不问；升 opus/用 fable 先问。" },
+      "expected": "complementary",
+      "note": "两类故障（限流 429 vs 传输层）的处置不同，删掉任一条都会漏掉一类场景。"
+    },
+    {
+      "id": "v13",
+      "a": { "file": "pitfalls-runtime.md", "excerpt": "调 buildSessionStack 的集成测试必须 sandboxHome()。" },
+      "b": { "file": "pitfalls-runtime.md", "excerpt": "本机真 key 会发真请求——集成测试先沙箱化 HOME。" },
+      "expected": "duplicate",
+      "note": "同一条要求（集成测试先沙箱化 HOME），一处点名函数、一处讲原因 ⇒ 可合并成一条。"
+    },
+    {
+      "id": "v14",
+      "a": { "file": "pitfalls-git.md", "excerpt": "isolation 只能从 master HEAD 建 worktree。" },
+      "b": {
+        "file": "pitfalls-git.md",
+        "excerpt": "别的分支要手工 git worktree add -b <br> /tmp/x <base> + ln -s node_modules。"
+      },
+      "expected": "complementary",
+      "note": "A 是默认约束，B 是绕开约束的手工步骤（含 node_modules 软链）；两者都需要。"
+    },
+    {
+      "id": "v15",
+      "a": {
+        "file": "live-acceptance-tmux.md",
+        "excerpt": "斜杠命令第一次 Enter 会被补全菜单吃掉 ⇒ 隔 ~1s 再补一次 Enter。"
+      },
+      "b": {
+        "file": "live-acceptance-tmux.md",
+        "excerpt": "tmux send-keys 后轮询 capture-pane 直到连续 3 次（12s）不变。"
+      },
+      "expected": "complementary",
+      "note": "A 是输入技巧（回车被吃），B 是判定输出稳定的方法；同一流程的两个不同环节。"
+    },
+    {
+      "id": "v16",
+      "a": { "file": "pitfalls.md", "excerpt": "consult 停用：子 agent 用 message_agent 问 root，主会话 steer 应答。" },
+      "b": {
+        "file": "multi-agent-experiments.md",
+        "excerpt": "consult 必须是专用工具——有「新起一个 agent」退路时下游会问错对象。"
+      },
+      "expected": "complementary",
+      "note": "A 是已采纳的做法，B 是这条做法背后的设计理由；不是同一句话，也不是互相矛盾。"
+    },
+    {
+      "id": "v17",
+      "a": {
+        "file": "pitfalls-runtime.md",
+        "excerpt": "tests/commands/ 不在 tsconfig.typecheck.json 的 include 里，typecheck 有盲区。"
+      },
+      "b": {
+        "file": "pitfalls-runtime.md",
+        "excerpt": "改共享接口后必须实际跑 npx vitest run tests/commands/，不能只信 typecheck。"
+      },
+      "expected": "complementary",
+      "note": "A 陈述盲区这一事实，B 是据此得出的必跑命令；事实与动作各自有信息。"
+    },
+    {
+      "id": "v18",
+      "a": {
+        "file": "pitfalls-git.md",
+        "excerpt": "同树并发 dev agent 时，commit 前一刻 git diff --cached 核对待提交内容的归属。"
+      },
+      "b": {
+        "file": "pitfalls-git.md",
+        "excerpt": "后台 dev agent 施工期间，主会话 git add 共享文件会把半成品扫进提交（历史事故：中间提交不可构建）。"
+      },
+      "expected": "complementary",
+      "note": "A 是操作步骤，B 是事故依据与失败后果；删任一条都缺一环。"
+    },
+    {
+      "id": "v19",
+      "a": { "file": "core.md", "excerpt": "A 级 golden 永不重生；任何 diff 都是行为变化。" },
+      "b": {
+        "file": "pitfalls-runtime.md",
+        "excerpt": "golden 类测试拒绝在文件已存在时用环境变量覆盖（generate-once 规则）。"
+      },
+      "expected": "duplicate",
+      "note": "同一条「永不重生」原则：A 说规则，B 说它在测试里的实现方式 ⇒ 可合并。"
+    },
+    {
+      "id": "v20",
+      "a": { "file": "pitfalls-runtime.md", "excerpt": "改 web-hub 设置后先 /reload 再 /webhub restart。" },
+      "b": {
+        "file": "pitfalls-runtime.md",
+        "excerpt": "未 reload 的旧 pi 实例可能抢先拉起不带 LAN 的 hub（hub 配置由拉起它的 pi 传入）。"
+      },
+      "expected": "complementary",
+      "note": "A 是操作顺序，B 是这个顺序的原因；顺序与原理互补。"
+    },
+    {
+      "id": "v21",
+      "a": { "file": "pitfalls.md", "excerpt": "release.sh 运行期间禁止往发版分支提交任何东西。" },
+      "b": {
+        "file": "cache-ttl.md",
+        "excerpt": "保活默认 240s 间隔 + 5m TTL ⇒ 截止 285s、最多 5 次尝试。"
+      },
+      "expected": "unrelated",
+      "note": "发版提交纪律 vs 缓存保活预算，没有任何共同话题或共享标签。"
+    },
+    {
+      "id": "v22",
+      "a": {
+        "file": "pitfalls.md",
+        "excerpt": "用户终端是 zellij：Alt+方向键/Alt+hjkl 用于切窗格，pi 收不到 Alt+Up。"
+      },
+      "b": { "file": "core.md", "excerpt": "发版规则：默认 patch；feat ≥50 才 minor；BREAKING 才 major。" },
+      "expected": "unrelated",
+      "note": "终端按键排查 vs 版本号裁决，纯属两个主题。"
+    },
+    {
+      "id": "v23",
+      "a": {
+        "file": "live-acceptance-tmux.md",
+        "excerpt": "tmux send-keys 后轮询 capture-pane 直到画面连续不变。"
+      },
+      "b": {
+        "file": "pitfalls-git.md",
+        "excerpt": "GitHub 直连不通 ⇒ git push / gh / curl 带上 https_proxy=http://proxy.example:7897。"
+      },
+      "expected": "unrelated",
+      "note": "终端自动化技巧 vs 出网代理配置；无共享话题。"
+    },
+    {
+      "id": "v24",
+      "a": { "file": "pitfalls-runtime.md", "excerpt": "全量测试一律 timeout 280 npx vitest run。" },
+      "b": { "file": "pitfalls-runtime.md", "excerpt": "全量测试一律给 900s（实测全量常超 20min）。" },
+      "expected": "conflict",
+      "note": "同一条命令的超时上限互相矛盾，且两边都没标日期/权威来源 ⇒ 谁也没明确取代谁，交人裁决。"
+    },
+    {
+      "id": "v25",
+      "a": { "file": "pitfalls-git.md", "excerpt": "提交时用 git add -A 一并收口，避免漏文件。" },
+      "b": { "file": "core.md", "excerpt": "提交只用精确路径，绝不 git add -A。" },
+      "expected": "conflict",
+      "note": "「用 add -A」与「绝不用 add -A」正面矛盾，无日期可判新旧 ⇒ conflict。"
+    },
+    {
+      "id": "v26",
+      "a": { "file": "pitfalls-git.md", "excerpt": "多写包并行一律用 isolation: worktree 隔离后再合并。" },
+      "b": {
+        "file": "skills/dev-flow/references/parallel-safety.md",
+        "excerpt": "不要为并行而 worktree：文件域无交集时同树直接并行，worktree 徒增合并成本。"
+      },
+      "expected": "conflict",
+      "note": "「一律隔离」与「不要为并行而隔离」是两条粒度不同的硬要求，直接冲突；未标注谁取代谁。"
+    },
+    {
+      "id": "v27",
+      "a": {
+        "file": "pitfalls.md",
+        "updated": "2026-10-21",
+        "excerpt": "GPT 系模型已解禁（2026-10-21 确认）：按 dev-flow 路由表可派 GPT 系；项目记忆里残留的「避免 GPT」旧规则作废。"
+      },
+      "b": {
+        "file": "pitfalls.md",
+        "updated": "2026-10-14",
+        "excerpt": "GPT 系临时禁用，派单避免 GPT（评审与验收同样禁派）。"
+      },
+      "expected": "a_supersedes_b",
+      "note": "A 日期更晚且明文作废旧令，B 的禁用已解除 ⇒ A 取代 B。"
+    },
+    {
+      "id": "v28",
+      "a": {
+        "file": "pitfalls-runtime.md",
+        "updated": "2026-10-18",
+        "excerpt": "bash 工具自 2026-10-17 起经 bashJobs.shellPath=/bin/bash 跑真 bash，不再是 zsh。"
+      },
+      "b": {
+        "file": "pitfalls-runtime.md",
+        "updated": "2026-09-20",
+        "excerpt": "bash 工具是 zsh：$VAR 不分词、无 declare -A、--include=*.ts 会被 glob，脚本要按 zsh 写。"
+      },
+      "expected": "a_supersedes_b",
+      "note": "解释器已切换为 bash，B 的 zsh 前提不再成立 ⇒ A 让 B 过时。"
+    },
+    {
+      "id": "v29",
+      "a": {
+        "file": "pitfalls.md",
+        "updated": "2026-09-28",
+        "excerpt": "发版测试步卡住或 flake 时直接带 --skip-tests 跳过，先发出去再补验证。"
+      },
+      "b": {
+        "file": "pitfalls.md",
+        "updated": "2026-10-29",
+        "excerpt": "发版测试 flake：重跑并带 PI_TOOLKIT_TEST_WORKERS=2 规避 gocryptfs 锁竞争；--skip-tests 只在用户明确点头时用。"
+      },
+      "expected": "b_supersedes_a",
+      "note": "B 更新且给出更细的处置口径（保守路线），把「直接跳过」收紧 ⇒ B 取代 A。"
+    },
+    {
+      "id": "v30",
+      "a": {
+        "file": "pitfalls.md",
+        "updated": "2026-09-26",
+        "excerpt": "开发与验收走 sonnet，评审走 gpt-5.6-sol。"
+      },
+      "b": {
+        "file": "pitfalls.md",
+        "updated": "2026-10-04",
+        "excerpt": "模型路由：探索/开发/验收优先订阅线 zai/glm-5.3；前端真 UI 优先 kimi-coding/k3-256k → k3。"
+      },
+      "expected": "b_supersedes_a",
+      "note": "B 是更晚的完整路由表（覆盖旧令），A 的 sonnet 首选已作废 ⇒ B 取代 A。"
+    }
+  ]
+}

@@ -29,16 +29,14 @@ describe("renderStatus", () => {
     expect(nextLabel(tomorrow, NOW)).toBe("01-02 07:00");
     expect(renderStatus({ state: s, now: NOW, busy: false, capability: "verified" })).not.toMatch(/[\u4e00-\u9fff]/);
   });
-  it("earliest next wins across tasks; paused / pending tasks do not arm; pending counted", () => {
+  it("earliest next wins across tasks; paused tasks do not arm; never a `pending` segment", () => {
     const s = stateWith([
       daily(),
       daily({ when: { kind: "cron", expr: "15 9 * * *", tz: "Asia/Shanghai" } }),
       daily({ enabled: false, when: { kind: "cron", expr: "5 9 * * *", tz: "Asia/Shanghai" } }),
-      makeTask({ when: { kind: "cron", expr: "1 9 * * *", tz: "Asia/Shanghai" } }), // never approved
+      makeTask({ when: { kind: "cron", expr: "1 9 * * *", tz: "Asia/Shanghai" } }), // no approval ⇒ armed like any other
     ]);
-    expect(renderStatus({ state: s, now: NOW, busy: false, capability: "verified" })).toBe(
-      "sched 4 · next 09:15 · pending 1",
-    );
+    expect(renderStatus({ state: s, now: NOW, busy: false, capability: "verified" })).toBe("sched 4 · next 09:01");
   });
   it("run count, busy, and capability markers", () => {
     const s = stateWith([daily({ form: "message" })]);
@@ -75,11 +73,13 @@ describe("controller", () => {
     });
     ctl.start();
     expect(sets).toEqual([]); // nothing to show ⇒ never touches the bar
-    await createTask(env.ports, basicRaw(), { by: "agent", via: "tool" });
+    const c = await createTask(env.ports, basicRaw(), { by: "agent", via: "tool" });
+    if (!c.ok) throw new Error(c.detail);
     ctl.refresh();
     ctl.refresh();
     expect(sets).toHaveLength(1);
-    expect(sets[0]).toBe("sched 1 · pending 1"); // pending tasks never arm ⇒ no `next`
+    expect(sets[0]).toMatch(/^sched 1 · next /); // no approval gate ⇒ the task arms at once
+    expect(sets[0]).not.toMatch(/pending/);
     env.fake.advance(15_100); // timer tick: nothing changed ⇒ no new call
     expect(sets).toHaveLength(1);
     ctl.dispose();

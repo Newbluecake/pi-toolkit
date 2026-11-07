@@ -38,7 +38,7 @@ import { recordBashDiag } from "./diag.js";
  * Condition to call this at all (index.ts): `isChildSession &&
  * bashJobsEnabled(preGuardSettings) && preGuardSettings.bashJobs.childSessions`.
  *
- * Mirrors `src/stack.ts`'s main-session wiring (`buildBashJobManager` +
+ * Mirrors `src/bash/host.ts`'s main-session wiring (`buildBashJobManager` +
  * `createBashTool`/`createBashJobTool` registration in `src/index.ts`) but:
  *  - the manager is `owner: "subagent"` and gated by `admit()` on the process-
  *    global `ChildBashRegistry`'s seal state (§3.6 S1);
@@ -291,6 +291,8 @@ export function wireChildBashJobs(pi: ExtensionAPI, opts: WireChildBashJobsOptio
         maxTimeoutFactor: config.maxTimeoutFactor,
       },
       owner: "subagent",
+      // stripAnsi 包（B 点）：与主会话 buildBashJobManager 同源的设置。
+      stripAnsi: config.stripAnsi,
       // §3.6 S1: a sealed run refuses new jobs synchronously (reserve() throws before spawning).
       admit: () => !registry.isSealed(sessionId),
       onDeadline: (record, kind) => {
@@ -348,6 +350,8 @@ export function wireChildBashJobs(pi: ExtensionAPI, opts: WireChildBashJobsOptio
           maxExtensions: config.maxExtensions,
           maxTimeoutFactor: config.maxTimeoutFactor,
         }),
+        // stripAnsi 包（A 点）：child 侧同样从本次 wire 的设置快照读取（非 live）。
+        stripAnsi: () => config.stripAnsi,
         // L1 todo #20: lets `bash-tool.ts` stay agnostic about the registry
         // — this closure decides whether the one-time "no host view
         // attached" notice is worth recording at all (host-view capability

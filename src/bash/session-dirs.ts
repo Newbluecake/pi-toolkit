@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { mkdir, readFile, readdir, rename, rmdir, stat, unlink, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import type { Clock } from "../core/clock.js";
 import type { Millis } from "../core/types.js";
 import { isJobId } from "./ids.js";
@@ -35,6 +35,14 @@ export interface SessionDirOptions {
   sessionId?: string;
   warn?: (message: string) => void;
   isRoot?: boolean;
+  /**
+   * cwd-strict adoption: when set, `adoptOrphans` leaves records whose
+   * resolved `record.cwd` differs from this session's cwd in place (they stay
+   * in their original directory for a same-cwd session to adopt); moving them
+   * into this session's directory would only hand them to `recover()`'s skip
+   * list. Omitted = adopt regardless of cwd (legacy behaviour).
+   */
+  sessionCwd?: string | undefined;
 }
 
 function warning(options: SessionDirOptions, message: string): void {
@@ -184,6 +192,10 @@ export async function adoptOrphans(
       if (aborted(signal)) return;
       if (!record || isTerminalJobStatus(record.status)) continue;
       if (record.hostPid > 0 && options.processPort.probePid(record.hostPid)) continue;
+      // cwd-strict adoption (user-ruled 2026-11-02): do not physically move a
+      // foreign-cwd record into this session's directory — it must remain in
+      // its original directory so any *same-cwd* session can adopt it later.
+      if (options.sessionCwd !== undefined && resolve(record.cwd) !== resolve(options.sessionCwd)) continue;
       await moveRecordFiles(
         fromDir,
         join(options.rootDir, self),

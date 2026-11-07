@@ -1,14 +1,16 @@
 // @vitest-environment happy-dom
 /**
- * `SchedulePanel.vue` / `ScheduleReview.vue` (scheduled-reports W1, plan r3 §5.6) — mounted
+ * `SchedulePanel.vue` / `ScheduleTaskDetail.vue` (scheduled-reports W1, plan r3 §5.6) — mounted
  * against the mock `SchedulesPayloadWire` fixtures (`fixtures/schedule.ts`; the hub producer
- * is H1). Covers: task list + run records + chips, the pending-approval 「审阅」 path, offline
- * read-only (E3), degraded store note, stale (hub down ⇒ feishu "?"), plain-text prompt
- * rendering (a `<script>` payload stays inert text — source-scan pins no-v-html separately),
- * the lazy `schedule` i18n namespace parity, and the DetailHeader 「定时」 entry gating.
+ * is H1). Covers: task list + run records + chips, the read-only 「详情」 swap (approval UI
+ * removed, schedule-auto-approve r2 §6-W1 — legacy `pendingApproval` / `offer` wire fields
+ * are ignored), offline read-only (E3), degraded store note, stale (hub down ⇒ feishu "?"),
+ * plain-text prompt rendering (a `<script>` payload stays inert text — source-scan pins
+ * no-v-html separately), the lazy `schedule` i18n namespace parity, and the DetailHeader
+ * 「定时」 entry gating + no offer auto-open.
  */
 import { DOMWrapper, flushPromises, mount } from "@vue/test-utils";
-import { computed, ref } from "vue";
+import { computed, nextTick, ref } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import AgentCard from "../../../src/web-hub/ui/src/components/agents/AgentCard.vue";
 import { toAgentCardView } from "../../../src/web-hub/ui/src/components/agents/agentCardModel.js";
@@ -20,9 +22,9 @@ import {
   type ControlView,
 } from "../../../src/web-hub/ui/src/components/control/controlContext.js";
 import { SCHEDULE_EXTRA } from "../../../src/web-hub/ui/src/i18n/schedule-extra.js";
-import type { AgentState, CmdOutcome, ControlHandle, HubHandle, HubState } from "../../../src/web-hub/ui/src/types.js";
+import type { AgentState, CmdOutcome, ControlHandle, HubHandle } from "../../../src/web-hub/ui/src/types.js";
 import type { SchedulesPayloadWire } from "../../../src/web-hub/protocol/schedule.js";
-import { makePayload, makeSession, makeTask, SCHED_SID } from "./fixtures/schedule.js";
+import { makePayload, makePendingTask, makeRun, makeSession, makeTask, SCHED_SID } from "./fixtures/schedule.js";
 import { setDetailedListForTests } from "./helpers/list-density.js";
 
 const SCHED_CAP = "sched.v1";
@@ -77,27 +79,33 @@ interface FakeHub {
   hub: HubHandle;
   state: { value: Record<string, unknown> };
 }
-function hubOf(agent: AgentState, over: HubOver = {}): FakeHub {
+function hubOf(agent: AgentState, over: HubOver & { selectRuns?: string[][] } = {}): FakeHub {
   const state = ref({
     agents: new Map([[agent.key, agent]]),
     hub: { caps: over.caps ?? [SCHED_CAP] },
     conn: over.conn ?? "open",
     schedules: over.schedules,
   });
-  return { hub: { state } as unknown as HubHandle, state };
+  const hub = {
+    state,
+    selectRun: (agentKey: string, runId: string) => {
+      over.selectRuns?.push([agentKey, runId]);
+    },
+  } as unknown as HubHandle;
+  return { hub, state };
 }
 
 interface ViewOver {
   enabled?: boolean;
   commandsEnabled?: boolean;
-  runCommand?: (name: string, args: string) => Promise<CmdOutcome>;
+  runCommand?: (name: string, args: string, opts?: { confirm?: true; id?: string }) => Promise<CmdOutcome>;
 }
-function viewOf(agent: AgentState, over: ViewOver = {}): { view: ControlView; runs: string[][] } {
-  const runs: string[][] = [];
+function viewOf(agent: AgentState, over: ViewOver = {}) {
+  const runs: Array<[string, string, string, { confirm?: true; id?: string } | undefined]> = [];
   const control = {
-    runCommand: (k: string, n: string, a: string) => {
-      runs.push([k, n, a]);
-      return over.runCommand !== undefined ? over.runCommand(n, a) : Promise.resolve({ ok: true } as CmdOutcome);
+    runCommand: (k: string, n: string, a: string, opts?: { confirm?: true; id?: string }) => {
+      runs.push([k, n, a, opts]);
+      return over.runCommand !== undefined ? over.runCommand(n, a, opts) : Promise.resolve({ ok: true } as CmdOutcome);
     },
     query: () => Promise.resolve({ ok: true } as CmdOutcome),
   } as unknown as ControlHandle;
@@ -117,9 +125,9 @@ function viewOf(agent: AgentState, over: ViewOver = {}): { view: ControlView; ru
   return { view, runs };
 }
 
-function mountPanel(over: HubOver & ViewOver = {}) {
+function mountPanel(over: HubOver & ViewOver & { selectRuns?: string[][] } = {}) {
   const agent = agentOf(over);
-  const { hub } = hubOf(agent, over);
+  const { hub, state } = hubOf(agent, over);
   const { view, runs } = viewOf(agent, over);
   const w = mount(SchedulePanel, {
     props: { sessionId: SCHED_SID },
@@ -127,7 +135,7 @@ function mountPanel(over: HubOver & ViewOver = {}) {
     attachTo: document.body,
   });
   mounted.push(w);
-  return { w: new DOMWrapper(document.body), runs };
+  return { w: new DOMWrapper(document.body), state, runs, selectRuns: over.selectRuns ?? [] };
 }
 
 // --- tests --------------------------------------------------------------------
@@ -141,9 +149,15 @@ describe("SchedulePanel", () => {
     expect(tasks[0]!.text()).toContain("0 8 * * *");
     expect(tasks[0]!.text()).toContain("Asia/Shanghai");
     expect(tasks[1]!.text()).toContain("周五归档提醒");
-    // pending task gets the 审阅 primary; the approved one gets 详情
-    expect(tasks[1]!.find(".sched-task-act .btn-primary").exists()).toBe(true);
-    expect(tasks[0]!.find(".sched-task-act .btn-primary").exists()).toBe(false);
+    // r2: EVERY row is the read-only ghost 「详情」 — no primary 审阅 button anywhere,
+    // and the legacy pendingApproval task shows the plain 已启用/enabled chip (no 待确认).
+    expect(w.findAll(".sched-task-act .btn-primary")).toHaveLength(0);
+    expect(w.findAll(".sched-task-act .btn-ghost")).toHaveLength(2);
+    // the legacy taskPending/taskExecutable copy (removed with the keys, r2) never renders
+    expect(w.text()).not.toContain("review pending");
+    expect(w.text()).not.toContain("待确认");
+    expect(w.text()).not.toContain("approved");
+    expect(w.text()).not.toContain("已批准");
     const runs = w.findAll(".sched-run");
     expect(runs).toHaveLength(3);
     expect(w.text()).toContain("reports/");
@@ -154,7 +168,6 @@ describe("SchedulePanel", () => {
     const { w } = mountPanel({ schedules: makePayload(), down: true });
     expect(w.find(".sched-note[data-kind='info']").exists()).toBe(true);
     expect(w.text()).toContain("--all");
-    // 审阅 primary is gone (canWrite false) — every row action is the read-only 详情
     expect(w.find(".sched-task-act .btn-primary").exists()).toBe(false);
   });
 
@@ -194,61 +207,146 @@ describe("SchedulePanel", () => {
     expect(w.find(".sched-task .sched-chip-missed").exists()).toBe(true);
   });
 
-  it("review view: full prompt as INERT text (a <script> payload stays literal)", async () => {
+  it("detail view: full prompt as INERT text (a <script> payload stays literal), bg kv rows", async () => {
     const { w } = mountPanel({ schedules: makePayload() });
-    await w.findAll(".sched-task-act .btn")[1]!.trigger("click"); // pending task → 审阅
+    await w.findAll(".sched-task-act .btn")[0]!.trigger("click"); // 详情
     const prompt = w.find(".review-prompt");
     expect(prompt.exists()).toBe(true);
     expect(prompt.element.tagName).toBe("PRE");
-    // the approved task's prompt contains a <script> string; open ITS review instead:
-    await w.find(".sched-head .btn-ghost").trigger("click"); // back
-    await w.findAll(".sched-task-act .btn")[0]!.trigger("click"); // 详情
-    const pre = w.find(".review-prompt");
-    expect(pre.text()).toContain("<script>alert(1)</script>");
-    expect(pre.element.querySelector("script")).toBeNull();
+    expect(prompt.text()).toContain("<script>alert(1)</script>");
+    expect(prompt.element.querySelector("script")).toBeNull();
     // background form renders the bg kv rows
     expect(w.text()).toContain("claude-sonnet-4-5");
     expect(w.text()).toContain("1800s");
-    expect(w.text()).toContain("fd9fcbba");
+  });
+
+  it("detail view is READ-ONLY: no approve/reject actions, no hash note (r2 §6-W1)", async () => {
+    const { w } = mountPanel({ schedules: makePayload() });
+    // the legacy-pending task (pendingApproval:true + offer on the wire) opens the SAME
+    // read-only view — no action row, no hash note, no tracked command of any kind
+    await w.findAll(".sched-task-act .btn")[1]!.trigger("click");
+    expect(w.find(".review-actions").exists()).toBe(false);
+    expect(w.find(".review-hash").exists()).toBe(false);
+    expect(w.text()).not.toContain("defHash");
+    expect(w.findAll("button.review-actions .btn")).toHaveLength(0);
+    // back returns to the list
+    await w.find(".sched-head .btn-ghost").trigger("click");
+    expect(w.find(".sched-list").exists()).toBe(true);
+  });
+
+  it("a task vanishing mid-detail falls back to the list silently (no note)", async () => {
+    const { w, state } = mountPanel({ schedules: makePayload() });
+    await w.findAll(".sched-task-act .btn")[0]!.trigger("click");
+    expect(w.find(".review-kv").exists()).toBe(true);
+    state.value.schedules = makePayload([makeSession({ tasks: [], runs: [] })]);
+    await nextTick();
+    await flushPromises();
+    expect(w.find(".review-kv").exists()).toBe(false);
+    expect(w.find(".sched-empty").exists()).toBe(true);
+    expect(w.find(".sched-note[data-kind='info']").exists()).toBe(false);
   });
 });
 
-describe("ScheduleReview approve (hash-bound, §4.3/§5.6)", () => {
-  it("sends /schedule approve <id> <fullHash> with the projection's defHash", async () => {
-    const { w, runs } = mountPanel({ schedules: makePayload() });
-    await w.findAll(".sched-task-act .btn")[1]!.trigger("click");
-    const approveBtn = w.find(".review-actions .btn-primary");
-    expect(approveBtn.exists()).toBe(true);
-    await approveBtn.trigger("click");
+describe("SchedulePanel task actions + run jump (r2 §6-W2)", () => {
+  it("online + canWrite: task rows carry pause/resume/delete icon buttons", () => {
+    const { w } = mountPanel({ schedules: makePayload() });
+    // fixture: both tasks enabled ⇒ pause + delete per row
+    expect(w.findAll(".sched-task-act .icon-btn")).toHaveLength(4);
+    expect(w.findAll(".sched-task-act .icon-btn.danger")).toHaveLength(2);
+  });
+
+  it("pause goes through the policy confirm: bare send → E_CONFIRM_REQUIRED → bar → confirm:true re-send", async () => {
+    const { w, runs } = mountPanel({
+      schedules: makePayload(),
+      runCommand: (_n, _a, opts) =>
+        opts?.confirm === true
+          ? Promise.resolve({ ok: true } as CmdOutcome)
+          : Promise.resolve({ ok: false, error: "E_CONFIRM_REQUIRED" } as CmdOutcome),
+    });
+    await w.findAll(".sched-task-act .icon-btn")[0]!.trigger("click"); // pause s_abcd2345
     await flushPromises();
     expect(runs).toHaveLength(1);
-    expect(runs[0]![0]).toBe("agent-1");
-    expect(runs[0]![1]).toBe("schedule");
-    expect(runs[0]![2]).toBe("approve s_efgh6789 1b4611e2ff4f7bc06a36a751b84306214878c05506d49e70aec1d8394ec06655");
+    expect(runs[0]![2]).toBe("pause s_abcd2345");
+    expect(runs[0]![3]).toEqual({ id: expect.any(String) }); // first send carries NO confirm
+    expect(w.find(".command-confirm").exists()).toBe(true);
+    await w.find(".command-confirm-run").trigger("click");
+    await flushPromises();
+    expect(runs).toHaveLength(2);
+    expect(runs[1]![2]).toBe("pause s_abcd2345");
+    expect(runs[1]![3]).toEqual({ id: expect.any(String), confirm: true });
   });
 
-  it("E_REV ⇒ 「内容已变更，请重新审阅」 note", async () => {
+  it("a failed action surfaces the warn note", async () => {
     const { w } = mountPanel({
       schedules: makePayload(),
-      runCommand: () => Promise.resolve({ ok: false, error: "E_FAILED", message: "E_REV: definition changed" }),
+      runCommand: () => Promise.resolve({ ok: false, error: "E_FAILED", message: "boom" } as CmdOutcome),
     });
-    await w.findAll(".sched-task-act .btn")[1]!.trigger("click");
-    await w.find(".review-actions .btn-primary").trigger("click");
+    await w.findAll(".sched-task-act .icon-btn.danger")[0]!.trigger("click");
     await flushPromises();
-    expect(w.find(".review-status[data-kind='err']").exists()).toBe(true);
-    expect(w.find(".review-status").text()).toBeTruthy();
+    const note = w.find(".sched-note[data-kind='warn'][role='alert']");
+    expect(note.exists()).toBe(true);
+    expect(note.text()).toContain("boom");
   });
 
-  it("offline ⇒ no approve button at all", async () => {
+  it("offline (E3): no action buttons — the read-only 详情 stays", () => {
     const { w } = mountPanel({ schedules: makePayload(), down: true });
-    await w.findAll(".sched-task-act .btn")[1]!.trigger("click"); // 详情 (read-only)
-    expect(w.find(".review-actions .btn-primary").exists()).toBe(false);
+    expect(w.findAll(".sched-task-act .icon-btn")).toHaveLength(0);
+    expect(w.findAll(".sched-task-act .btn-ghost")).toHaveLength(2);
   });
 
-  it("a non-pending task shows no action row", async () => {
-    const { w } = mountPanel({ schedules: makePayload() });
-    await w.findAll(".sched-task-act .btn")[0]!.trigger("click"); // approved task 详情
-    expect(w.find(".review-actions").exists()).toBe(false);
+  it("run rows with a runId jump to the fleet (hub.selectRun); legacy runs without one render no button", async () => {
+    const p = makePayload([
+      makeSession({
+        runs: [
+          makeRun({ runKey: "s_abcd2345@new", runId: "run-jmp1" }),
+          makeRun(), // legacy wire: no runId
+        ],
+      }),
+    ]);
+    const selectRuns: string[][] = [];
+    const { w, selectRuns: recorder } = mountPanel({ schedules: p, selectRuns });
+    expect(w.findAll(".sched-run-open")).toHaveLength(1);
+    await w.find(".sched-run-open").trigger("click");
+    expect(recorder).toEqual([["agent-1", "run-jmp1"]]);
+  });
+});
+
+describe("legacy offer wire is ignored (r2 §6-W1, old-hub compat)", () => {
+  function mountHeaderBody(over: HubOver & ViewOver = {}) {
+    const agent = agentOf(over);
+    const { hub, state } = hubOf(agent, over);
+    const { view } = viewOf(agent, over);
+    const w = mount(DetailHeader, {
+      props: { agent, narrow: false },
+      global: { provide: { [HUB_CTX as symbol]: hub, [CONTROL_VIEW as symbol]: view } },
+      attachTo: document.body,
+    });
+    mounted.push(w);
+    return { w, body: new DOMWrapper(document.body), state };
+  }
+  async function settle(): Promise<void> {
+    await flushPromises(); // async chunk resolution
+    await nextTick();
+    await flushPromises();
+  }
+
+  it("an offer-carrying projection (makePendingTask) NEVER auto-opens the panel", async () => {
+    const { body } = mountHeaderBody({ schedules: makePayload() });
+    await settle();
+    expect(body.find(".sched-dialog").exists()).toBe(false);
+  });
+
+  it("the legacy pendingApproval task still opens the plain read-only detail from the panel", async () => {
+    const { body } = mountHeaderBody({ schedules: makePayload() });
+    await settle();
+    await body.find(".detail-sched-btn").trigger("click");
+    await settle();
+    const buttons = body.findAll(".sched-task-act .btn");
+    expect(buttons).toHaveLength(2);
+    await buttons[1]!.trigger("click");
+    await settle();
+    expect(body.find(".review-kv").exists()).toBe(true);
+    expect(body.find(".review-actions").exists()).toBe(false);
   });
 });
 
@@ -300,13 +398,14 @@ describe("AgentCard ⏰ badge", () => {
     mounted.push(w);
     return w;
   }
-  it("⏰! while a task is pendingApproval; ⏰<n> otherwise; nothing without the cap", () => {
+  it("⏰<n> count-only: a legacy pendingApproval+offer task counts like any other (no `!`)", () => {
+    // fixture session: one plain task + makePendingTask() (pendingApproval:true, offer)
     const pending = mountCard({ schedules: makePayload() });
     expect(pending.find(".chip-sched").exists()).toBe(true);
-    expect(pending.find(".chip-sched").attributes("data-pending")).toBe("true");
-    expect(pending.find(".chip-sched").text()).toContain("!");
+    expect(pending.find(".chip-sched").attributes("data-pending")).toBeUndefined();
+    expect(pending.find(".chip-sched .num").text()).toBe("2");
+    expect(pending.find(".chip-sched").text()).not.toContain("!");
     const plain = mountCard({ schedules: makePayload([makeSession({ tasks: [makeSession().tasks[0]!] })]) });
-    expect(plain.find(".chip-sched").attributes("data-pending")).toBeUndefined();
     expect(plain.find(".chip-sched .num").text()).toBe("1");
     expect(mountCard({ caps: [], schedules: makePayload() }).find(".chip-sched").exists()).toBe(false);
     expect(mountCard({}).find(".chip-sched").exists()).toBe(false); // no schedules slot at all

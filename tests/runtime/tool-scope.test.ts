@@ -73,6 +73,51 @@ describe("runtime/tool-scope: buildToolScopePolicy", () => {
     const policy = buildToolScopePolicy({ tools: ["Read", "Bash"], granted: ["StructuredOutput"] });
     expect(policy.allow).toEqual(new Set(["Read", "Bash", "StructuredOutput"]));
   });
+  it('fabric-thread §9.2: RESERVED_TOOL_NAMES stays frozen (no "thread" entry)', () => {
+    // The GLOBAL list is pinned by the fabric-xs-off golden; thread reservation is PER-RUN only.
+    expect(RESERVED_TOOL_NAMES).not.toContain("thread");
+  });
+  it("fabric-thread §9.2: extraReserved omitted or empty ⇒ exactly the pre-feature policy", () => {
+    const base = buildToolScopePolicy({ tools: ["read", "bash"], granted: ["message_agent"] });
+    const omitted = buildToolScopePolicy({ tools: ["read", "bash"], granted: ["message_agent"] });
+    const empty = buildToolScopePolicy({
+      tools: ["read", "bash"],
+      granted: ["message_agent"],
+      extraReserved: [],
+    });
+    expect(omitted).toEqual(base);
+    expect(empty).toEqual(base);
+    // set-equality AND iteration order: deny is the frozen list minus grants, "thread" nowhere.
+    expect([...empty.deny]).toEqual([...base.deny]);
+    expect(base.deny.has("thread")).toBe(false);
+    expect(empty.allow).toEqual(base.allow);
+  });
+  it('fabric-thread §9.2: extraReserved=["thread"] denies it for runs the tool was not injected into', () => {
+    const policy = buildToolScopePolicy({ tools: ["read", "bash"], extraReserved: ["thread"] });
+    expect(policy.deny.has("thread")).toBe(true);
+    // the global reserved names keep their deny semantics untouched
+    for (const n of RESERVED_TOOL_NAMES) expect(policy.deny.has(n)).toBe(true);
+    // the enforcer actually strips a late-registered same-named tool (TS1/TS4 path)
+    const handle = fakeHandle(["read", "bash", "thread"]);
+    const decision = createToolScopeEnforcer().onBind(handle, policy);
+    expect(decision.applied).toEqual(["bash", "read"]);
+  });
+  it("fabric-thread §9.2: granted thread wins over extraReserved (the injection run keeps it)", () => {
+    const policy = buildToolScopePolicy({
+      tools: ["read", "bash"],
+      granted: ["thread"],
+      extraReserved: ["thread"],
+    });
+    expect(policy.deny.has("thread")).toBe(false);
+    expect(policy.allow?.has("thread")).toBe(true);
+  });
+  it("fabric-thread §9.2: a readonly-domain run reserves without granting (thread stripped, never in allow)", () => {
+    const policy = buildToolScopePolicy({ tools: READONLY_DOMAIN_TOOLS, extraReserved: ["thread"] });
+    expect(policy.deny.has("thread")).toBe(true);
+    expect(policy.allow?.has("thread")).toBe(false);
+    const handle = fakeHandle([...READONLY_DOMAIN_TOOLS, "thread"]);
+    expect(createToolScopeEnforcer().onBind(handle, policy).applied).toEqual(["find", "grep", "ls", "read"]);
+  });
 });
 
 describe("runtime/tool-scope: createToolScopeEnforcer (X11 late-registration guard)", () => {

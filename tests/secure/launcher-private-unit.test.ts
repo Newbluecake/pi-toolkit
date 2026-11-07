@@ -25,6 +25,7 @@ import { pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { acquireGocryptfsTestLock } from "./gocryptfs-test-lock.js";
+import { awaitNoForeignGocryptfs } from "./private-real-harness.js";
 
 const require = createRequire(import.meta.url);
 
@@ -35,6 +36,10 @@ const PI_ARGS = join(REPO, "node_modules", "@earendil-works", "pi-coding-agent",
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- plain-JS module, no typings by design
 const H: any = await import(pathToFileURL(HELPER).href);
 const HELPER_SRC = readFileSync(HELPER, "utf8");
+// #56 ⑩-S: the --private command bodies live in private.mjs, the in-ns finalize steps in finalize.mjs
+// (helper.mjs loads both lazily); the source pins below follow the code there.
+const PRIVATE_SRC = readFileSync(join(dirname(HELPER), "private.mjs"), "utf8");
+const FINALIZE_SRC = readFileSync(join(dirname(HELPER), "finalize.mjs"), "utf8");
 
 const which = (b: string) => spawnSync("sh", ["-c", `command -v ${b}`]).status === 0;
 const HAVE_FLOCK = process.platform === "linux" && which("flock");
@@ -361,7 +366,7 @@ describe.skipIf(!HAVE_FLOCK)("releaseRecord — the only deleter (§3.2, I-P3)",
     expect(await H.releaseRecord(v, ID_A)).toEqual({ kind: "none" });
   });
   it.skipIf(!which("python3"))(
-    "review N1 #1 (real): a same-uid NON-DUMPABLE process newer than the supervisor (ns unreadable) ⇒ incomplete, record kept",
+    "r3.2 (real): a same-uid NON-DUMPABLE process OUTSIDE the vault lineage (sshd-session case) ⇒ skipped, released",
     async () => {
       const nd = holder("python3", ["-c", "import ctypes,time; ctypes.CDLL(None).prctl(4,0,0,0,0); time.sleep(30)"]);
       await sleep(400);
@@ -381,9 +386,34 @@ describe.skipIf(!HAVE_FLOCK)("releaseRecord — the only deleter (§3.2, I-P3)",
           inNsDone: true,
         }),
       );
+      // the holder's chain is holder → vitest worker (start = SUP.start but pid ≠ the recorded
+      // anchor) → vitest main (start < minStart) ⇒ OUT by lineage: the scan completes with the
+      // holder skipped and the record is released (the scan-poison fix, private-plan §3.3 r3.2)
+      const r = await H.releaseRecord(v, ID_A, { waitMs: 300 });
+      expect(r).toEqual({ kind: "released" });
+      expect(existsSync(recordFile())).toBe(false);
+    },
+  );
+  it.skipIf(!which("python3"))(
+    "r3.2 (real): a non-dumpable child of the recorded pi (inside the lineage) ⇒ incomplete in-lineage, record kept",
+    async () => {
+      const nd = holder("python3", ["-c", "import ctypes,time; ctypes.CDLL(None).prctl(4,0,0,0,0); time.sleep(30)"]);
+      await sleep(400);
+      H.writePrivateRecordExclusive(
+        v,
+        baseRecord({
+          phase: "finalizing",
+          ns: { mnt: "mnt:[1]", user: "user:[1]" },
+          supervisor: SUP(),
+          pi: { pid: process.pid, start: H.readProcStartSync(process.pid) as number }, // this very worker
+          inNsDone: true,
+        }),
+      );
+      // holder → this worker == the recorded pi anchor (pid+start) ⇒ IN: the strict fail-closed
+      // verdict stays for processes provably inside the instance lineage (P-SP1)
       const r = await H.releaseRecord(v, ID_A, { waitMs: 300 });
       expect(r.kind).toBe("incomplete");
-      expect(String(r.reason)).toMatch(new RegExp(`ns ${nd.pid} .*EACCES`));
+      expect(String(r.reason)).toMatch(new RegExp(`ns ${nd.pid} .*EACCES in-lineage`));
       expect(existsSync(recordFile())).toBe(true);
     },
   );
@@ -423,15 +453,17 @@ describe.skipIf(!HAVE_FLOCK)("releaseRecord — the only deleter (§3.2, I-P3)",
     expect(existsSync(recordFile())).toBe(false);
   });
   it("structural: only __private-release / __private-abort-start delete; the ns-root never releases (spy by source)", () => {
-    const callers = [...HELPER_SRC.matchAll(/deletePrivateRecordSync\(/g)].length;
+    const callers = [...PRIVATE_SRC.matchAll(/deletePrivateRecordSync\(/g)].length;
     expect(callers).toBe(3); // definition + the two sanctioned callers
-    const body = (start: string, end: string) => HELPER_SRC.slice(HELPER_SRC.indexOf(start), HELPER_SRC.indexOf(end));
+    expect(HELPER_SRC).not.toContain("deletePrivateRecordSync"); // nothing else (helper dispatch, record primitives) deletes
+    const body = (start: string, end: string) =>
+      PRIVATE_SRC.slice(PRIVATE_SRC.indexOf(start), PRIVATE_SRC.indexOf(end));
     const rel = body("async function cmdPrivateRelease", "function cmdPrivateAbortStart");
     const abort = body("function cmdPrivateAbortStart", "async function cmdPrivateTerminate");
     expect(rel).toContain("deletePrivateRecordSync(v)");
     expect(abort).toContain("deletePrivateRecordSync(v)");
-    const p1 =
-      body("async function cmdNsRoot", "// ═════") || body("async function cmdNsRoot", "export async function main");
+    // the ns-root: cmdNsRoot (last function of private.mjs) plus everything it runs from finalize.mjs
+    const p1 = PRIVATE_SRC.slice(PRIVATE_SRC.indexOf("async function cmdNsRoot")) + FINALIZE_SRC;
     for (const forbidden of [
       "deletePrivateRecordSync",
       "__private-release",
@@ -534,12 +566,15 @@ describe("scanNsMembers (never reports an incomplete scan as empty)", () => {
     expect((await inNs({ "/21/ns/mnt": "EACCES" })).kind).toBe("done");
     expect((await inNs({ "/21/ns/mnt": "EIO" })).kind).toBe("incomplete");
     // the deletion gate never uses that mode: structural check on the source
-    const relBody = HELPER_SRC.slice(
-      HELPER_SRC.indexOf("async function cmdPrivateRelease"),
-      HELPER_SRC.indexOf("function cmdPrivateAbortStart"),
+    const relBody = PRIVATE_SRC.slice(
+      PRIVATE_SRC.indexOf("async function cmdPrivateRelease"),
+      PRIVATE_SRC.indexOf("function cmdPrivateAbortStart"),
     );
     expect(relBody).not.toContain("deniedMeans");
-    expect([...HELPER_SRC.matchAll(/deniedMeans: "outside"/g)].length).toBe(1);
+    // the single in-ns use (finalizeInNs) — none in helper.mjs or private.mjs
+    expect(
+      [HELPER_SRC, PRIVATE_SRC, FINALIZE_SRC].map((t) => [...t.matchAll(/deniedMeans: "outside"/g)].length),
+    ).toEqual([0, 0, 1]);
     // status / stat / ns-user failures other than ENOENT ⇒ incomplete; ENOENT/ESRCH ⇒ skipped
     expect((await scan({ "/21/status": "EIO" })).kind).toBe("incomplete");
     expect((await scan({ "/21/status": "EACCES" })).kind).toBe("incomplete");
@@ -562,6 +597,313 @@ describe("scanNsMembers (never reports an incomplete scan as empty)", () => {
     expect((await H.scanNsMembers("mnt:[7]", { procRoot: pr, maxEntries: 2 })).kind).toBe("incomplete");
     expect((await H.scanNsMembers("mnt:[7]", { procRoot: join(pr, "nope") })).kind).toBe("incomplete");
     expect((await H.scanNsMembers("mnt:[7]", { procRoot: pr, deadline: Date.now() - 1 })).kind).toBe("incomplete");
+  });
+});
+
+describe("scanNsMembers lineage (scan-poison, private-plan §3.3 r3.2)", () => {
+  // X is always pid 80: same uid, ns link EACCES (injected), start ≥ minStart=100 → deferred to
+  // the ppid walk. Anchors default to a pi identity {pid:12, start:105} unless a case overrides.
+  const PI_ANCHOR = { pid: 12, start: 105 };
+  const scanL = (pr: string, faults: Record<string, string> = {}, over: Record<string, unknown> = {}) =>
+    H.scanNsMembers("mnt:[7]", {
+      procRoot: pr,
+      minStart: 100,
+      fsImpl: faultyFs(faults),
+      lineage: { anchors: [PI_ANCHOR] },
+      ...over,
+    });
+
+  it("1. sshd chain: session → root [priv] → boot-time listener ⇒ done, X in outside, members unchanged", async () => {
+    const pr = fakeProc([
+      { pid: 20, ns: "mnt:[7]", start: 100, comm: "member" },
+      { pid: 30, start: 10, comm: "sshd-listener" }, // started at boot: before the supervisor
+      { pid: 31, uid: 4242, ns: "mnt:[8]", start: 150, ppid: 30, comm: "sshd-priv" }, // root [priv]
+      { pid: 80, start: 150, ppid: 31, comm: "sshd-session" }, // same uid, link EACCES (fault)
+    ]);
+    const r = await scanL(pr, { "/80/ns/mnt": "EACCES", "/31/ns/mnt": "EACCES" });
+    expect(r).toEqual({
+      kind: "done",
+      members: [{ pid: 20, start: 100, ppid: 1, user: "user:[6]", comm: "member" }],
+      outside: [{ pid: 80, comm: "sshd-session" }],
+    });
+  });
+  it("2. X's ppid is a READABLE ns member (pid 20, mnt:[7]) ⇒ incomplete `in-lineage`", async () => {
+    const pr = fakeProc([
+      { pid: 20, ns: "mnt:[7]", start: 100, comm: "member" },
+      { pid: 80, start: 150, ppid: 20, comm: "x" },
+    ]);
+    const r = await scanL(pr, { "/80/ns/mnt": "EACCES" });
+    expect(r).toMatchObject({ kind: "incomplete" });
+    expect(r.reason).toMatch(/^ns 80 x EACCES in-lineage$/);
+  });
+  it("3. X's ppid matches the recorded pi anchor (pid+start) ⇒ incomplete in-lineage", async () => {
+    const pr = fakeProc([
+      { pid: 12, start: 105, ppid: 1, comm: "pi" }, // the anchor itself needs no ns link here
+      { pid: 80, start: 150, ppid: 12, comm: "x" },
+    ]);
+    const r = await scanL(pr, { "/80/ns/mnt": "EACCES" });
+    expect(r).toMatchObject({ kind: "incomplete" });
+    expect(r.reason).toMatch(/in-lineage$/);
+  });
+  it("4. same anchor pid but a different start (pid reused) is NOT an anchor ⇒ walk continues ⇒ out", async () => {
+    const pr = fakeProc([
+      { pid: 12, start: 200, ppid: 30, comm: "reused" },
+      { pid: 30, start: 10, comm: "old" },
+      { pid: 80, start: 250, ppid: 12, comm: "x" },
+    ]);
+    const r = await scanL(pr, { "/80/ns/mnt": "EACCES" });
+    expect(r).toEqual({
+      kind: "done",
+      members: [],
+      outside: [{ pid: 80, comm: "x" }],
+    });
+  });
+  it("5. X reparented to pid 1 (broken chain) ⇒ out — accepted residual R37", async () => {
+    const pr = fakeProc([{ pid: 80, start: 150, ppid: 1, comm: "orphan" }]);
+    const r = await scanL(pr, { "/80/ns/mnt": "EACCES" });
+    expect(r).toEqual({ kind: "done", members: [], outside: [{ pid: 80, comm: "orphan" }] });
+  });
+  it("6. ancestor stat EIO ⇒ incomplete; ancestor ENOENT twice (race) ⇒ incomplete; parent newer than child (reuse) ⇒ incomplete; X gone on rewalk ⇒ out and NOT in outside (review #3)", async () => {
+    const eio = fakeProc([
+      { pid: 81, start: 140, ppid: 1, comm: "anc" },
+      { pid: 80, start: 150, ppid: 81, comm: "x" },
+    ]);
+    const rEio = await scanL(eio, { "/80/ns/mnt": "EACCES", "/81/stat": "EIO" });
+    expect(rEio).toMatchObject({ kind: "incomplete" });
+    expect(rEio.reason).toMatch(/^lineage 81 EIO$/);
+    // pid 81 does not exist at all: ENOENT on the walk, rewalk, ENOENT again ⇒ fail closed
+    const race = fakeProc([{ pid: 80, start: 150, ppid: 81, comm: "x" }]);
+    const rRace = await scanL(race, { "/80/ns/mnt": "EACCES" });
+    expect(rRace).toMatchObject({ kind: "incomplete" });
+    expect(rRace.reason).toBe("lineage race");
+    // a parent can never start after its child ⇒ the pid was reused: one rewalk, then fail closed
+    const reuse = fakeProc([
+      { pid: 81, start: 400, ppid: 1, comm: "reused-parent" },
+      { pid: 80, start: 150, ppid: 81, comm: "x" },
+    ]);
+    const rReuse = await scanL(reuse, { "/80/ns/mnt": "EACCES" });
+    expect(rReuse).toMatchObject({ kind: "incomplete" });
+    expect(rReuse.reason).toBe("lineage 81 reuse");
+    // the race rewalk finds X itself gone: OUT with no diagnostic (a dead process holds no mount)
+    const gone = fakeProc([{ pid: 80, start: 150, ppid: 81, comm: "x" }]); // 81 missing → rewalk
+    const real = require("node:fs/promises") as typeof import("node:fs/promises");
+    let statReads = 0;
+    const vanishingX = {
+      readdir: (p: string) => real.readdir(p),
+      readlink: async (p: string) => {
+        if (p === join(gone, "80", "ns", "mnt")) throw Object.assign(new Error("EACCES"), { code: "EACCES" });
+        return real.readlink(p);
+      },
+      readFile: async (p: string, enc: BufferEncoding) => {
+        if (p === join(gone, "80", "stat") && ++statReads > 1)
+          throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+        return real.readFile(p, enc);
+      },
+    };
+    const rGone = await H.scanNsMembers("mnt:[7]", {
+      procRoot: gone,
+      minStart: 100,
+      fsImpl: vanishingX,
+      lineage: { anchors: [PI_ANCHOR] },
+    });
+    expect(rGone).toEqual({ kind: "done", members: [] }); // no `outside` field at all
+  });
+  it("7. a ppid cycle never resolves ⇒ incomplete after maxHops (lineage depth)", async () => {
+    const pr = fakeProc([
+      { pid: 90, start: 150, ppid: 91, comm: "a" },
+      { pid: 91, start: 150, ppid: 90, comm: "b" },
+      { pid: 80, start: 150, ppid: 90, comm: "x" },
+    ]);
+    const r = await scanL(pr, { "/80/ns/mnt": "EACCES" });
+    expect(r).toMatchObject({ kind: "incomplete" });
+    expect(r.reason).toBe("lineage depth");
+  });
+  it("8. X's own link EIO still fails the scan even with lineage; other-uid denial skipped; lineage without minStart ⇒ incomplete", async () => {
+    const pr = fakeProc([
+      { pid: 84, uid: 4242, ns: "mnt:[8]", start: 150, comm: "other" },
+      { pid: 80, start: 150, ppid: 1, comm: "x" },
+    ]);
+    // EIO is not a ptrace denial (EACCES/EPERM): fail closed before lineage ever applies
+    expect(await scanL(pr, { "/80/ns/mnt": "EIO" })).toMatchObject({ kind: "incomplete" });
+    // another uid's unreadable link is skipped (never a member without privileges over our userns)
+    expect(await scanL(pr, { "/84/ns/mnt": "EACCES" })).toEqual({ kind: "done", members: [] });
+    // no minStart (no supervisor recorded): the deferred branch never applies ⇒ incomplete
+    const r = await scanL(pr, { "/80/ns/mnt": "EACCES" }, { minStart: undefined });
+    expect(r).toMatchObject({ kind: "incomplete" });
+    expect(r.reason).toBe("ns 80 EACCES");
+  });
+  it("9. a deadline expiring mid-walk ⇒ incomplete timeout", async () => {
+    const pr = fakeProc([
+      { pid: 82, start: 148, ppid: 1, comm: "anc2" },
+      { pid: 81, start: 149, ppid: 82, comm: "anc1" },
+      { pid: 80, start: 150, ppid: 81, comm: "x" },
+    ]);
+    const real = require("node:fs/promises") as typeof import("node:fs/promises");
+    const slowAncestorStat = {
+      readdir: (p: string) => real.readdir(p),
+      readlink: async (p: string) => {
+        if (p === join(pr, "80", "ns", "mnt")) throw Object.assign(new Error("EACCES"), { code: "EACCES" });
+        return real.readlink(p);
+      },
+      readFile: async (p: string, enc: BufferEncoding) => {
+        if (p === join(pr, "81", "stat")) await sleep(300); // the walk stalls on the first ancestor
+        return real.readFile(p, enc);
+      },
+    };
+    const r = await H.scanNsMembers("mnt:[7]", {
+      procRoot: pr,
+      minStart: 100,
+      fsImpl: slowAncestorStat,
+      deadline: Date.now() + 100,
+      lineage: { anchors: [PI_ANCHOR] },
+    });
+    expect(r).toEqual({ kind: "incomplete", reason: "timeout" });
+  });
+  it("10. structure: exactly the three authoritative ns-outer callers pass lineage (review #6)", () => {
+    expect([...HELPER_SRC.matchAll(/lineage: \{ anchors: recordAnchors\(/g)].length).toBe(2); // judge + outer terminate
+    expect([...PRIVATE_SRC.matchAll(/lineage: \{ anchors: recordAnchors\(/g)].length).toBe(1); // __private-release
+    expect([...FINALIZE_SRC.matchAll(/lineage: \{ anchors: recordAnchors\(/g)].length).toBe(0); // in-ns: unchanged
+  });
+});
+
+describe("r3.2 scan-poison: privateInstanceState / terminateInstance with lineage", () => {
+  const POISON = { "/58/ns/mnt": "EACCES" }; // pid 58: same uid, unreadable link, start 140 ≥ minStart
+  const recOver = { ns: { mnt: "mnt:[7]", user: "user:[6]", innerUser: "user:[8]" } };
+  const identities = {
+    supervisor: { pid: 50, start: 100 },
+    gocryptfs: { pid: 51, start: 120 },
+    pi: { pid: 52, start: 130 },
+  };
+  const stateOf = (procs: Array<Record<string, unknown>>, over: Record<string, unknown> = {}) => {
+    const pr = fakeProc(procs as never);
+    writeFileSync(join(pr, "locks"), ""); // empty /proc/locks ⇒ the lease is free
+    const record = { kind: "ok", record: baseRecord({ phase: "session", ...recOver, ...identities, ...over }) };
+    return H.privateInstanceState(v, { procRoot: pr, record, fsImpl: faultyFs(POISON) });
+  };
+
+  it("a lineage-EXTERNAL unreadable process no longer poisons the judge: supervisor alive ⇒ session, lock --kill ⇒ kill", async () => {
+    const s = await stateOf([
+      { pid: 50, ns: "mnt:[7]", start: 100, comm: "node" },
+      { pid: 51, ns: "mnt:[7]", start: 120, comm: "gocryptfs" },
+      { pid: 52, ns: "mnt:[7]", start: 130, ppid: 50, user: "user:[8]", comm: "pi" },
+      { pid: 59, start: 10, comm: "old-ancestor" }, // logged in at boot: before the supervisor
+      { pid: 58, start: 140, ppid: 59, comm: "sshd-session" }, // 58 → 59 < minStart ⇒ OUT
+    ]);
+    expect(s.state).toBe("session"); // previously unknown/scan-incomplete (the poison)
+    expect(s.scan).toMatchObject({ kind: "done" });
+    expect(H.lockPrivateDecision(v, { ...s, inNs: false }, { kill: true }).action).toBe("kill");
+  });
+  it("…identities dead, lease free, no members ⇒ stale (the rsi-evo residual-record case)", async () => {
+    const s = await stateOf([
+      { pid: 59, start: 10, comm: "old-ancestor" },
+      { pid: 58, start: 140, ppid: 59, comm: "sshd-session" },
+    ]);
+    expect(s.state).toBe("stale"); // the record can be released while the ssh session lives on
+  });
+  it("the same process re-hung under the recorded pi ⇒ IN ⇒ unknown/scan-incomplete again", async () => {
+    const s = await stateOf([
+      { pid: 52, ns: "mnt:[7]", start: 130, ppid: 50, user: "user:[8]", comm: "pi" },
+      { pid: 58, start: 140, ppid: 52, comm: "pi-child" }, // 58 → pi anchor (pid+start) ⇒ IN
+    ]);
+    expect(s.state).toBe("unknown");
+    expect(s.reason).toBe("scan-incomplete");
+    expect(s.scan).toMatchObject({ kind: "incomplete" });
+    expect(s.scan.reason).toMatch(/ns 58 pi-child EACCES in-lineage$/);
+  });
+
+  it("terminateInstance: an outside-lineage unreadable process neither blocks nor is ever signalled; readable members still are", async () => {
+    const pr = fakeProc([
+      { pid: 50, ns: "mnt:[7]", start: 100, comm: "node" },
+      { pid: 55, ns: "mnt:[7]", start: 130, ppid: 50, comm: "bgjob" },
+      { pid: 59, start: 10, comm: "old-ancestor" },
+      { pid: 58, start: 140, ppid: 59, comm: "sshd-session" },
+    ]);
+    const sent: Array<[number, string]> = [];
+    const kill = (pid: number, sig: string) => {
+      sent.push([pid, sig]);
+      rmSync(join(pr, String(pid)), { recursive: true, force: true }); // dies at once
+    };
+    const rec = baseRecord({
+      phase: "session",
+      ...recOver,
+      supervisor: identities.supervisor,
+      gocryptfs: identities.gocryptfs,
+    });
+    const r = await H.terminateInstance(rec, {
+      deadline: Date.now() + 5_000,
+      procRoot: pr,
+      kill,
+      fsImpl: faultyFs(POISON),
+    });
+    expect(r.ok).toBe(true);
+    expect(sent.map(([p]) => p).sort()).toEqual([50, 55]);
+    expect(sent.some(([p]) => p === 58)).toBe(false); // OUT processes are never signalled
+    expect(r.unverified ?? []).toEqual([]);
+  });
+  it("terminateInstance: an IN-lineage unreadable process fails the scan ⇒ nothing signalled", async () => {
+    const pr = fakeProc([
+      { pid: 52, ns: "mnt:[7]", start: 130, ppid: 50, user: "user:[8]", comm: "pi" },
+      { pid: 58, start: 140, ppid: 52, comm: "pi-child" },
+    ]);
+    const kill = () => {
+      throw new Error("must not signal");
+    };
+    const rec = baseRecord({
+      phase: "session",
+      ...recOver,
+      supervisor: identities.supervisor,
+      gocryptfs: identities.gocryptfs,
+      pi: identities.pi,
+    });
+    const r = await H.terminateInstance(rec, {
+      deadline: Date.now() + 2_000,
+      procRoot: pr,
+      kill,
+      fsImpl: faultyFs(POISON),
+    });
+    expect(r).toMatchObject({ ok: false, killed: [] });
+    expect(r.incomplete).toMatch(/in-lineage$/);
+  });
+});
+
+// ─────────── r3.2 kernel premise pins (real; P-SP1 — private-plan §3.3) ───────────
+
+const HAVE_USERNS =
+  process.platform === "linux" &&
+  which("unshare") &&
+  spawnSync("unshare", ["--user", "--map-root-user", "true"]).status === 0;
+
+describe.skipIf(!HAVE_USERNS || !which("python3"))("scan-poison premise pins (P-SP1, private-plan §R3)", () => {
+  it("P-SP1: the owner of a child userns still reads /proc/<pid>/ns/mnt of a non-dumpable process in it", async () => {
+    const nd = holder("unshare", [
+      "--user",
+      "--map-root-user",
+      "python3",
+      "-c",
+      "import ctypes,time; ctypes.CDLL(None).prctl(4,0,0,0,0); time.sleep(30)",
+    ]);
+    await sleep(600);
+    let link: string | undefined;
+    try {
+      link = readlinkSync(`/proc/${nd.pid}/ns/mnt`);
+    } catch {
+      link = undefined;
+    }
+    // if this ever fails the lineage reasoning no longer holds: an instance member made
+    // non-dumpable would be unreadable to P0 and could be misjudged OUT (plan §8 R-a)
+    expect(link).toMatch(/^mnt:\[\d+\]$/);
+  });
+  it("/proc/1/stat is readable here (hidepid≥1 ⇒ cross-uid lineage walks fail, this machine does not benefit — §R3 R-f)", () => {
+    let stat: string | undefined;
+    try {
+      stat = readFileSync("/proc/1/stat", "utf8");
+    } catch {
+      stat = undefined;
+    }
+    expect(
+      stat,
+      "hidepid≥1 detected: the scan-poison fix cannot work on this machine (lineage walks read root ancestors' stat) — this is a machine property, not a code bug",
+    ).toBeDefined();
   });
 });
 
@@ -1447,24 +1789,6 @@ setTimeout(() => process.exit(Number(process.env.FAKE_PI_EXIT ?? 0)), Number(pro
     });
   }
   const globalMounted = (mnt: string) => readFileSync("/proc/self/mountinfo", "utf8").includes(` ${mnt} `);
-  /**
-   * Review N1 #3 refuses `run --private` while ANY fuse.gocryptfs mount exists globally. Other
-   * suites (or other sessions) may hold short-lived test mounts; wait for a clean table, else skip.
-   */
-  async function awaitNoForeignGocryptfs(ctx: { skip: () => void }, mine: string): Promise<void> {
-    const end = Date.now() + 60_000;
-    for (;;) {
-      const foreign = readFileSync("/proc/self/mountinfo", "utf8")
-        .split("\n")
-        .filter((l) => l.includes(" - fuse.gocryptfs ") && !l.split(" ")[4]!.startsWith(mine + "/"));
-      if (!foreign.length) return;
-      if (Date.now() >= end) {
-        ctx.skip();
-        return;
-      }
-      await sleep(500);
-    }
-  }
 
   it("normal exit: invisible outside, real uid / CapEff 0 / fd 9 in pi, exit code passes, record + lease released", async (ctx) => {
     const e = setup();

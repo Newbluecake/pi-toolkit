@@ -72,6 +72,7 @@ export const ENV_FALLBACK: Readonly<Record<QuotaProviderId, string>> = {
   "zai-coding-cn": "ZAI_API_KEY",
   zai: "ZAI_API_KEY",
   "kimi-coding": "KIMI_CODING_API_KEY",
+  "opencode-go": "OPENCODE_API_KEY",
   // D3 拍板：droid 两池只用 FACTORY_API_KEY（与 droid 子进程继承同一把 key），
   // 不读 ~/.factory/env.sh（那是新 shell 才 source 的）。
   "droid-standard": "FACTORY_API_KEY",

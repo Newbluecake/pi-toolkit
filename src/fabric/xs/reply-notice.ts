@@ -55,6 +55,8 @@ export type XsReplyNoticeWakeResult =
   | { dispatched: false; wakeDowngraded: string }
   | { dispatched: false; effect: "none"; reason: string };
 
+type XsNoticePhase = "queued" | "delivered" | "started" | "replied";
+
 export interface XsReplyNoticePorts {
   ledger: XsReplyLedger;
   /** The requester session this gate serves (its stack). */
@@ -76,6 +78,8 @@ export interface XsReplyNoticePorts {
   controller?: { dispatch(request: XsReplyNoticeWakeRequest): XsReplyNoticeWakeResult };
   /** Quiet write: `pi.sendMessage(write, { triggerTurn:false })`; a synchronous throw keeps owed. */
   host: { sendMessage(write: XsReplyQuietWrite): void };
+  /** #20: synchronous, read-only source mirror lookup; unknown leaves notice bytes unchanged. */
+  progressOf?(requestId: string): XsNoticePhase | undefined;
   clock?: Clock;
 }
 
@@ -165,7 +169,13 @@ export class XsReplyNoticeGate {
       wakeEligible.length > 0 &&
       (receive === "wake" || receive === "replies") &&
       controller !== undefined;
-    const content = buildTimeoutNoticeContent(owed);
+    const content = buildTimeoutNoticeContent(owed, (id) => {
+      try {
+        return this.ports.progressOf?.(id);
+      } catch {
+        return undefined;
+      }
+    });
     if (wake && guardOk !== undefined && controller !== undefined) {
       const request: XsReplyNoticeWakeRequest = {
         xid: `t_${requestIds[0]!}`,
@@ -314,18 +324,40 @@ function iso(ms: number): string {
  * promise: a reply inside the grace window still lands (quietly); after it the ticket is gone
  * and the peer's resend will be refused.
  */
-export function buildTimeoutNoticeContent(tickets: readonly XsReplyTicket[]): string {
+export function buildTimeoutNoticeContent(
+  tickets: readonly XsReplyTicket[],
+  phaseOf?: (requestId: string) => XsNoticePhase | undefined,
+): string {
+  let delivered = false;
+  let started = false;
   const lines = tickets
     .slice()
     .sort((a, b) => a.dueAt - b.dueAt)
-    .map((ticket) => `- ${ticket.requestId} → ${ticket.replierRef}（截止 ${iso(ticket.dueAt)}）`);
+    .map((ticket) => {
+      const phase = phaseOf?.(ticket.requestId);
+      delivered ||= phase === "delivered";
+      started ||= phase === "started";
+      const marker =
+        phase === "queued" || phase === "delivered"
+          ? ` · last seen ${phase}`
+          : phase === "started"
+            ? " · started seen"
+            : "";
+      return `- ${ticket.requestId} → ${ticket.replierRef}（截止 ${iso(ticket.dueAt)}）${marker}`;
+    });
   const head =
     tickets.length === 1
       ? `你发往 ${tickets[0]!.replierRef} 的跨会话请求 ${tickets[0]!.requestId} 已超时未收到回复（截止 ${iso(tickets[0]!.dueAt)}）。`
       : `你有 ${tickets.length} 个跨会话请求已超时未收到回复：`;
   return (
     `[fabric xs reply-timeout] ${head}\n${lines.join("\n")}\n` +
-    `宽限期（默认 10 分钟）内到达的回复仍会送达（不唤醒，无需轮询）；宽限期过后凭证失效，对方的补发将被拒收。`
+    `宽限期（默认 10 分钟）内到达的回复仍会送达（不唤醒，无需轮询）；宽限期过后凭证失效，对方的补发将被拒收。` +
+    (delivered
+      ? '\n标 last seen delivered 的请求：最后观测为已送达，尚无对方开始处理（started）的证明——观测可能滞后或漏记，不代表对方此刻一定没在处理。需要的话可在宽限期内用 wake_session（action "activate"，原发送结果的 track.messageId/activationKey）尝试激活（对方若已开始处理会返回 no-op），不要重发正文。'
+      : "") +
+    (started
+      ? "\n标 started seen 的请求：已观测到对方回合上下文包含该请求，但尚未收到回复；不要重发，宽限期内的回复仍会送达。"
+      : "")
   );
 }
 

@@ -1,6 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
-  defaultSettingsPath,
   persistSettingOverride,
   type AgentSettings,
   type CacheTtlMode,
@@ -540,7 +539,7 @@ export function wireCacheTtl(pi: ExtensionAPI, settings: AgentSettings, deps: Ca
   let mode = settings.cacheTtl.mode;
   let persisted = mode;
   let dirty = false;
-  const persist = deps.persist ?? ((value) => persistSettingOverride("cacheTtl.mode", value, defaultSettingsPath()));
+  const persist = deps.persist ?? ((value) => persistSettingOverride("cacheTtl.mode", value));
   let lastSent: LastSent | undefined;
 
   wireCacheEvents(pi, deps);

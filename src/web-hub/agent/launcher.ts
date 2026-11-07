@@ -16,7 +16,8 @@ import { hubSpawnBlockedReason } from "../../secure/domain.js";
 import { spawn as nodeSpawn } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import { createRequire } from "node:module";
-import { basename, dirname, join } from "node:path";
+import { dirname, join } from "node:path";
+import { findPiPackageJson } from "../../core/host-modules.js";
 import type { HubConfig } from "../hub/ports.js";
 import { TIMING } from "../protocol/messages.js";
 import { readStopMarkerSync, type StopMarkerRead } from "../protocol/stop-marker.js";
@@ -26,9 +27,6 @@ export interface LauncherPlan {
   jitiCli: string;
   argv1: string;
 }
-
-const PI_SCOPE = "@earendil-works";
-const PI_PKG = "pi-coding-agent";
 
 /**
  * Resolve pi's bundled `jiti/lib/jiti-cli.mjs`.
@@ -72,22 +70,6 @@ export function resolveJitiCli(opts: {
   }
   const cli = join(dirname(jitiPkg), "lib", "jiti-cli.mjs");
   return exists(cli) ? { ok: true, jitiCli: cli } : { ok: false, reason: `jiti-cli missing: ${cli}` };
-}
-
-function findPiPackageJson(start: string, exists: (p: string) => boolean): string | undefined {
-  let dir = dirname(start);
-  for (let i = 0; i < 64; i++) {
-    if (basename(dir) === PI_PKG && basename(dirname(dir)) === PI_SCOPE) {
-      const own = join(dir, "package.json");
-      if (exists(own)) return own;
-    }
-    const nested = join(dir, "node_modules", PI_SCOPE, PI_PKG, "package.json");
-    if (exists(nested)) return nested;
-    const parent = dirname(dir);
-    if (parent === dir) return undefined;
-    dir = parent;
-  }
-  return undefined;
 }
 
 /** private-plan §4.1-5 / security review N3 #1: `spawnHub`'s refusal verdict — the ONE place a

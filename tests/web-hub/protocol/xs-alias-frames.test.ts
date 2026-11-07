@@ -5,7 +5,12 @@ import {
   XS_AGENT_CAPS,
   XS_ALIAS_AGENT_CAP,
   XS_ALIAS_HUB_CAP,
+  XS_ALIAS_INTENTS,
   XS_ALIAS_TAKE_PREVIEW,
+  XS_ALIAS_V2_AGENT_CAP,
+  XS_ALIAS_V2_HUB_CAP,
+  XS_HUB_FRAME_SCHEMAS,
+  XsAliasEvtSchema,
   XS_HUB_CAP,
   XS_REQ_DEADLINE_MS,
   XsDeliverSchema,
@@ -147,5 +152,99 @@ describe("alias-plan AL0b: StatusInfo.xs.alias", () => {
     expect(Value.Check(XsStatusSchema, { ...st, alias: "" })).toBe(false);
     expect(Value.Check(XsStatusSchema, { ...st, alias: "a".repeat(49) })).toBe(false);
     expect(Value.Check(legacy.XsStatusSchema, { ...st, alias: "x" })).toBe(false);
+  });
+});
+
+describe("alias-force-default AF0: xs.alias.v2 contract", () => {
+  it("caps are distinct from v1 and the frozen lists are untouched", () => {
+    expect(XS_ALIAS_V2_HUB_CAP).toBe("xs.alias.v2");
+    expect(XS_ALIAS_V2_AGENT_CAP).toBe("xs.alias.v2");
+    expect(XS_ALIAS_V2_HUB_CAP).not.toBe(XS_ALIAS_HUB_CAP);
+    expect(XS_AGENT_CAPS).toEqual(["xs.v1"]);
+    expect(XS_ALIAS_INTENTS).toEqual(["auto", "force", "handoff"]);
+  });
+
+  it("xs_req accepts intent and prevSessionId (field combinations are the router's business, not the schema's)", () => {
+    for (const extra of [
+      { alias: "前端", intent: "auto" },
+      { alias: "前端", take: XS_ALIAS_TAKE_PREVIEW, intent: "force" },
+      { alias: "前端", intent: "handoff", prevSessionId: SID2 },
+      { alias: "前端", take: "k0123456789abcdef", intent: "force" },
+      { intent: "auto", clear: true }, // illegal combination ⇒ router answers E_XS_BAD_FRAME, so the schema must still decode it
+      { prevSessionId: SID2 },
+    ]) {
+      const f = { ...req, ...extra };
+      expect(decodeAgentFrame(f), JSON.stringify(extra)).toEqual(f);
+    }
+  });
+
+  it("xs_req rejects a malformed intent / prevSessionId (silent drop on the hub decoder)", () => {
+    expect(decodeAgentFrame({ ...req, intent: "steal" })).toBeUndefined();
+    expect(decodeAgentFrame({ ...req, intent: 1 })).toBeUndefined();
+    expect(decodeAgentFrame({ ...req, intent: "handoff", prevSessionId: "" })).toBeUndefined();
+    expect(decodeAgentFrame({ ...req, intent: "handoff", prevSessionId: "x".repeat(129) })).toBeUndefined();
+    expect(decodeAgentFrame({ ...req, prevSessionId: 7 })).toBeUndefined();
+  });
+
+  it("an OLD (v0.7.1) strict schema drops the whole frame — hence the intent field is only sent to a v2 hub", () => {
+    const withIntent = { ...req, alias: "前端", intent: "auto" };
+    const withPrev = { ...req, alias: "前端", intent: "handoff", prevSessionId: SID2 };
+    expect(Value.Check(XsReqSchema, withIntent)).toBe(true);
+    expect(Value.Check(legacy.XsReqSchema, withIntent)).toBe(false);
+    expect(Value.Check(legacy.XsReqSchema, withPrev)).toBe(false);
+    // …and the exact v1 shapes are byte-for-byte what they were (no key is added to a v1 frame by the schema)
+    const v1 = { ...req, alias: "前端", take: XS_ALIAS_TAKE_PREVIEW };
+    expect(decodeAgentFrame(v1)).toEqual(v1);
+    expect(Object.keys(decodeAgentFrame(v1) as object)).toEqual(Object.keys(v1));
+  });
+
+  it("xs_alias_evt: strict schema, registered as a hub frame, decodes only with sessionId + at", () => {
+    const evt = { t: "xs_alias_evt", sessionId: SID, at: 1_700_000_000_000 };
+    expect(XS_HUB_FRAME_SCHEMAS["xs_alias_evt"]).toBe(XsAliasEvtSchema);
+    expect(decodeHubFrame(evt)).toEqual(evt);
+    expect(Value.Check(XsAliasEvtSchema, evt)).toBe(true);
+    for (const bad of [
+      { ...evt, alias: "前端" }, // never carries alias text
+      { ...evt, extra: 1 },
+      { t: "xs_alias_evt", sessionId: SID },
+      { t: "xs_alias_evt", at: 1 },
+      { ...evt, sessionId: "" },
+      { ...evt, sessionId: "x".repeat(129) },
+      { ...evt, at: -1 },
+      { ...evt, at: 1.5 },
+      { ...evt, at: "1" },
+    ]) {
+      expect(decodeHubFrame(bad), JSON.stringify(bad)).toBeUndefined();
+    }
+  });
+
+  it("xs_alias_evt is hub→agent only: an agent decoder ignores it, and an old hub decoder never learnt it", () => {
+    const evt = { t: "xs_alias_evt", sessionId: SID, at: 1 };
+    expect(decodeAgentFrame(evt)).toBeUndefined();
+    expect(legacy.XS_HUB_FRAME_SCHEMAS["xs_alias_evt"]).toBeUndefined();
+  });
+
+  it("xs_res.alias carries the v2 body keys (open object) without disturbing v1 bodies", () => {
+    const base = { t: "xs_res", rid: "r1", ok: true };
+    for (const body of [
+      { alias: "前端", state: "held", origin: "auto" },
+      { state: "none", lost: { alias: "前端", reason: "taken", at: 5, forced: true } },
+      {
+        take: {
+          cwdLabel: "~/ai/foo",
+          offlineForS: 0,
+          token: "k0123456789abcdef",
+          expiresAt: 9,
+          online: true,
+          auto: true,
+        },
+      },
+      { alias: "前端", state: "held" },
+    ]) {
+      const f = { ...base, alias: body };
+      expect(decodeHubFrame(f)).toEqual(f);
+    }
+    const unnotifiable = { t: "xs_res", rid: "r1", ok: false, code: "E_XS_ALIAS_TAKE{unnotifiable}" };
+    expect(decodeHubFrame(unnotifiable)).toEqual(unnotifiable);
   });
 });

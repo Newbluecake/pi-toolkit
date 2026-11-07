@@ -2,8 +2,11 @@
  * plan §5.1: `KdfPort.run` (real scrypt via `node:crypto`), `validateKdfParams`
  * bounds, and default-write params.
  */
+import { scrypt as realScrypt } from "node:crypto";
 import { describe, expect, it } from "vitest";
+import type { KdfParams } from "../../../src/web-hub/hub/ports.js";
 import {
+  computeVerifyTarget,
   createKdf,
   createKdfSemaphore,
   DEFAULT_KDF_KEY_LEN,
@@ -12,8 +15,17 @@ import {
   DEFAULT_KDF_R,
   DEFAULT_KDF_SALT_BYTES,
   defaultKdfParams,
+  dummyParams,
+  effectiveWriteTarget,
+  KDF_LEGACY,
+  KDF_PHASE2,
+  kdfCost,
   maxmemFor,
+  needsRehash,
+  newKdfParams,
+  padParamsFor,
   validateKdfParams,
+  type ScryptFn,
 } from "../../../src/web-hub/hub/kdf.js";
 
 describe('defaultKdfParams (plan §5.1 "参数")', () => {
@@ -231,13 +243,12 @@ describe('validateKdfParams (plan §5.1 "读取校验")', () => {
     expect(validateKdfParams(rec())).toEqual({ ok: true });
   });
 
-  it("accepts the boundary values (2^14, 2^16, r=1, r=16, p=1, p=2, salt=16, salt=64)", () => {
+  it("accepts the boundary values (2^14, 2^17, r=1, r=16, p=1, p=2, salt=16, salt=64)", () => {
     expect(validateKdfParams(rec({ n: 2 ** 14, r: 1, p: 1 }))).toEqual({ ok: true });
     expect(validateKdfParams(rec({ n: 2 ** 14, r: 1, p: 2 }))).toEqual({ ok: true });
-    expect(validateKdfParams(rec({ n: 2 ** 16, r: 16, p: 1, salt: new Uint8Array(64) }))).toEqual({
-      ok: false,
-      reason: expect.any(String),
-    }); // 128*2^16*16 exceeds 32MiB
+    expect(validateKdfParams(rec({ n: 2 ** 17, r: 8, p: 1 }))).toEqual({ ok: true }); // #66 phase-2 target
+    expect(validateKdfParams(rec({ n: 2 ** 16, r: 16, p: 1, salt: new Uint8Array(64) }))).toEqual({ ok: true }); // 128 MiB exactly
+    expect(validateKdfParams(rec({ n: 2 ** 16, r: 8, p: 2 }))).toEqual({ ok: true });
     expect(validateKdfParams(rec({ salt: new Uint8Array(64) }))).toEqual({ ok: true });
   });
 
@@ -248,10 +259,10 @@ describe('validateKdfParams (plan §5.1 "读取校验")', () => {
     });
   });
 
-  it("rejects non-power-of-2 n, and n outside [2^14..2^16]", () => {
+  it("rejects non-power-of-2 n, and n outside [2^14..2^17]", () => {
     expect(validateKdfParams(rec({ n: 32000 }))).toEqual({ ok: false, reason: expect.any(String) });
     expect(validateKdfParams(rec({ n: 2 ** 13 }))).toEqual({ ok: false, reason: expect.any(String) });
-    expect(validateKdfParams(rec({ n: 2 ** 17 }))).toEqual({ ok: false, reason: expect.any(String) });
+    expect(validateKdfParams(rec({ n: 2 ** 18 }))).toEqual({ ok: false, reason: expect.any(String) });
   });
 
   it("rejects r/p out of range", () => {
@@ -261,8 +272,8 @@ describe('validateKdfParams (plan §5.1 "读取校验")', () => {
     expect(validateKdfParams(rec({ p: 3 }))).toEqual({ ok: false, reason: expect.any(String) });
   });
 
-  it("rejects 128*n*r exceeding 32 MiB even when n/r are individually in range", () => {
-    expect(validateKdfParams(rec({ n: 2 ** 16, r: 16 }))).toEqual({ ok: false, reason: expect.any(String) });
+  it("rejects 128*n*r exceeding 128 MiB even when n/r are individually in range", () => {
+    expect(validateKdfParams(rec({ n: 2 ** 17, r: 16 }))).toEqual({ ok: false, reason: expect.any(String) });
   });
 
   it("rejects salt length outside [16..64] bytes", () => {
@@ -278,5 +289,295 @@ describe('validateKdfParams (plan §5.1 "读取校验")', () => {
   it("rejects non-safe-integer n/r/p (corrupted row)", () => {
     expect(validateKdfParams(rec({ n: 32768.5 }))).toEqual({ ok: false, reason: expect.any(String) });
     expect(validateKdfParams(rec({ r: Number.NaN }))).toEqual({ ok: false, reason: expect.any(String) });
+  });
+});
+
+describe("#66 targets and cost helpers", () => {
+  it("KDF_LEGACY is the v0.10 shape and KDF_PHASE2 only raises N to 2^17", () => {
+    expect(KDF_LEGACY).toEqual({ n: 32768, r: 8, p: 1, keyLen: 32, saltBytes: 16 });
+    expect(KDF_PHASE2).toEqual({ n: 131072, r: 8, p: 1, keyLen: 32, saltBytes: 16 });
+    expect(effectiveWriteTarget(false)).toBe(KDF_LEGACY);
+    expect(effectiveWriteTarget(true)).toBe(KDF_PHASE2);
+    expect(kdfCost(KDF_PHASE2) / kdfCost(KDF_LEGACY)).toBe(4);
+  });
+
+  it("newKdfParams carries the target shape with a fresh salt; defaultKdfParams is the legacy alias", () => {
+    const a = newKdfParams(KDF_PHASE2);
+    const b = newKdfParams(KDF_PHASE2);
+    expect(a).toMatchObject({ n: 131072, r: 8, p: 1, keyLen: 32 });
+    expect(Buffer.from(a.salt).equals(Buffer.from(b.salt))).toBe(false);
+    expect(defaultKdfParams()).toMatchObject({ n: 32768, r: 8, p: 1, keyLen: 32 });
+  });
+
+  it("dummyParams has the target cost, the fixed all-zero salt, and is v0.10's DUMMY_PARAMS at the legacy target", () => {
+    const d = dummyParams(KDF_LEGACY);
+    expect(d).toEqual({ n: 32768, r: 8, p: 1, keyLen: 32, salt: new Uint8Array(16) });
+    expect(kdfCost(dummyParams(KDF_PHASE2))).toBe(kdfCost(KDF_PHASE2));
+  });
+
+  it("padParamsFor closes the cost gap for every valid stored shape (p ≤ 8, never above the cap) and is undefined at/above the target", () => {
+    for (const target of [KDF_LEGACY, KDF_PHASE2]) {
+      for (const n of [2 ** 14, 2 ** 15, 2 ** 16, 2 ** 17]) {
+        for (const r of [1, 4, 8, 16]) {
+          for (const p of [1, 2]) {
+            const rec = { n, r, p };
+            if (!validateKdfParams({ kdf: "scrypt", ...rec, salt: new Uint8Array(16), hash: new Uint8Array(32) }).ok)
+              continue;
+            const pad = padParamsFor(rec, target);
+            if (kdfCost(rec) >= kdfCost(target)) {
+              expect(pad).toBeUndefined();
+              continue;
+            }
+            expect(pad).toBeDefined();
+            expect(pad!.n).toBe(rec.n);
+            expect(pad!.r).toBe(target.r);
+            expect(pad!.p).toBeLessThanOrEqual(8);
+            expect(kdfCost(rec) + kdfCost(pad!)).toBeGreaterThanOrEqual(kdfCost(target));
+            // never grossly over-compensating: less than one extra `p` step
+            expect(kdfCost(rec) + kdfCost(pad!) - kdfCost(target)).toBeLessThan(rec.n * target.r);
+          }
+        }
+      }
+    }
+  });
+
+  it("computeVerifyTarget follows the strongest valid stored record, ignores corrupt ones, never goes below the write target", () => {
+    expect(computeVerifyTarget(KDF_LEGACY, undefined)).toBe(KDF_LEGACY);
+    expect(computeVerifyTarget(KDF_LEGACY, { n: 2 ** 14, r: 8, p: 1 })).toBe(KDF_LEGACY);
+    expect(computeVerifyTarget(KDF_LEGACY, { n: 2 ** 15, r: 8, p: 1 })).toBe(KDF_LEGACY);
+    expect(computeVerifyTarget(KDF_LEGACY, { n: 2 ** 17, r: 8, p: 1 })).toEqual({
+      n: 2 ** 17,
+      r: 8,
+      p: 1,
+      keyLen: 32,
+      saltBytes: 16,
+    });
+    expect(computeVerifyTarget(KDF_LEGACY, { n: 2 ** 16, r: 8, p: 2 })).toMatchObject({ n: 2 ** 16, p: 2 });
+    // corrupt / out-of-range rows must not drag the timing target (they only ever run the dummy)
+    expect(computeVerifyTarget(KDF_LEGACY, { n: 2 ** 20, r: 8, p: 1 })).toBe(KDF_LEGACY);
+    expect(computeVerifyTarget(KDF_LEGACY, { n: 12345, r: 8, p: 1 })).toBe(KDF_LEGACY);
+    expect(computeVerifyTarget(KDF_PHASE2, { n: 2 ** 15, r: 8, p: 1 })).toBe(KDF_PHASE2);
+  });
+
+  it("needsRehash is upgrade-only and never flags a corrupt record", () => {
+    const rec = (n: number, r = 8, p = 1) => ({
+      kdf: "scrypt" as const,
+      n,
+      r,
+      p,
+      salt: new Uint8Array(16),
+      hash: new Uint8Array(32),
+    });
+    expect(needsRehash(rec(2 ** 15), KDF_PHASE2)).toBe(true);
+    expect(needsRehash(rec(2 ** 17), KDF_PHASE2)).toBe(false);
+    expect(needsRehash(rec(2 ** 17), KDF_LEGACY)).toBe(false); // never downgrade
+    expect(needsRehash(rec(2 ** 15), KDF_LEGACY)).toBe(false);
+    expect(needsRehash(rec(12345), KDF_PHASE2)).toBe(false);
+  });
+});
+
+/** A scrypt double whose physical completion the test controls. Each result is `fill(N % 251)`. */
+function controlledScrypt() {
+  const started: Array<{ n: number; p: number; finish(err?: Error): void }> = [];
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const fn: ScryptFn = (_pw, _salt, keyLen, options, cb) => {
+    inFlight++;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+    let done = false;
+    started.push({
+      n: options.N,
+      p: options.p,
+      finish: (err) => {
+        if (done) return;
+        done = true;
+        inFlight--;
+        if (err) cb(err, Buffer.alloc(0));
+        else cb(null, Buffer.alloc(keyLen, options.N % 251));
+      },
+    });
+  };
+  return { fn, started, inFlight: () => inFlight, maxInFlight: () => maxInFlight };
+}
+const tick = () => new Promise<void>((r) => setImmediate(r));
+const P = (n: number): KdfParams => ({ n, r: 8, p: 1, keyLen: 32, salt: new Uint8Array(16) });
+
+describe("createKdf pool releases on PHYSICAL completion (#66 plan §4.1)", () => {
+  it("an aborted caller rejects at once but its slot stays taken until scrypt really calls back", async () => {
+    const sc = controlledScrypt();
+    const kdf = createKdf({ maxConcurrent: 2, scrypt: sc.fn });
+    const ac = [new AbortController(), new AbortController(), new AbortController()];
+    const runs = ac.map((c, i) => kdf.run(`pw${i}`, P(16384 + i * 0), { signal: c.signal }));
+    const settled = runs.map((r) =>
+      r.then(
+        () => "ok",
+        (e: Error) => `rej:${e.message}`,
+      ),
+    );
+    await tick();
+    expect(sc.started).toHaveLength(2); // third is queued behind the pool
+    ac[0]!.abort(new Error("gone"));
+    await tick();
+    await expect(settled[0]).resolves.toBe("rej:gone"); // caller released immediately…
+    expect(sc.started).toHaveLength(2); // …but the physical slot is not: 3rd must NOT have started
+    expect(sc.inFlight()).toBe(2);
+    sc.started[0]!.finish(); // the physical computation completes
+    await tick();
+    expect(sc.started).toHaveLength(3); // only now does the queued run start
+    sc.started[1]!.finish();
+    sc.started[2]!.finish();
+    await expect(settled[1]).resolves.toBe("ok");
+    await expect(settled[2]).resolves.toBe("ok");
+    expect(sc.maxInFlight()).toBe(2);
+    expect(sc.inFlight()).toBe(0);
+  });
+
+  it("an abort while still queued never starts scrypt and never takes a slot", async () => {
+    const sc = controlledScrypt();
+    const kdf = createKdf({ maxConcurrent: 1, scrypt: sc.fn });
+    const first = kdf.run("a", P(16384));
+    const ac = new AbortController();
+    const queued = kdf.run("b", P(16384), { signal: ac.signal });
+    await tick();
+    ac.abort(new Error("queued-abort"));
+    await expect(queued).rejects.toThrow("queued-abort");
+    sc.started[0]!.finish();
+    await first;
+    await tick();
+    expect(sc.started).toHaveLength(1);
+    const third = kdf.run("c", P(16384));
+    await tick();
+    expect(sc.started).toHaveLength(2);
+    sc.started[1]!.finish();
+    await third;
+  });
+
+  it("a scrypt error and a synchronous throw both release the slot", async () => {
+    const sc = controlledScrypt();
+    const kdf = createKdf({ maxConcurrent: 1, scrypt: sc.fn });
+    const bad = kdf.run("a", P(16384));
+    await tick();
+    sc.started[0]!.finish(new Error("boom"));
+    await expect(bad).rejects.toThrow("boom");
+    const throwing = createKdf({
+      maxConcurrent: 1,
+      scrypt: () => {
+        throw new Error("sync-throw");
+      },
+    });
+    await expect(throwing.run("x", P(16384))).rejects.toThrow("sync-throw");
+    await expect(throwing.run("y", P(16384))).rejects.toThrow("sync-throw"); // slot was freed
+  });
+
+  it("abort-flood with REAL scrypt: physical concurrency never exceeds the pool size", async () => {
+    let inFlight = 0;
+    let max = 0;
+    const counting: ScryptFn = (pw, salt, keyLen, options, cb) => {
+      inFlight++;
+      max = Math.max(max, inFlight);
+      (realScrypt as unknown as ScryptFn)(pw, salt, keyLen, options, (err, key) => {
+        inFlight--;
+        cb(err, key);
+      });
+    };
+    const kdf = createKdf({ maxConcurrent: 2, scrypt: counting });
+    const runs: Promise<unknown>[] = [];
+    for (let i = 0; i < 12; i++) {
+      const ac = new AbortController();
+      runs.push(kdf.run(`pw${i}`, P(16384), { signal: ac.signal }).catch(() => undefined));
+      setTimeout(() => ac.abort(new Error("flood")), 1).unref();
+    }
+    await Promise.all(runs);
+    // callers are gone, but the physical work (and its slots) is still draining: wait for it
+    const deadline = Date.now() + 15_000;
+    while (inFlight > 0 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10));
+    expect(inFlight).toBe(0);
+    expect(max).toBeLessThanOrEqual(2);
+    // and the pool is fully usable again
+    expect((await kdf.run("after", P(16384))).byteLength).toBe(32);
+  }, 30_000);
+});
+
+describe("createKdf().runPadded (#66 D6)", () => {
+  it("one pool slot covers real + compensation; resolves with the REAL result only after both finish", async () => {
+    const sc = controlledScrypt();
+    const kdf = createKdf({ maxConcurrent: 1, scrypt: sc.fn });
+    const padded = kdf.runPadded!("pw", P(16384), P(32768));
+    let resolved: Uint8Array | undefined;
+    void padded.then((v) => (resolved = v));
+    const next = kdf.run("other", P(65536)); // queued behind the single slot
+    await tick();
+    expect(sc.started.map((s) => s.n)).toEqual([16384]);
+    sc.started[0]!.finish();
+    await tick();
+    expect(sc.started.map((s) => s.n)).toEqual([16384, 32768]); // compensation starts in the SAME slot
+    expect(resolved).toBeUndefined(); // real result withheld until the compensation completes
+    sc.started[1]!.finish();
+    await tick();
+    expect(resolved).toEqual(new Uint8Array(32).fill(16384 % 251));
+    expect(sc.started.map((s) => s.n)).toEqual([16384, 32768, 65536]); // slot handed on exactly once
+    sc.started[2]!.finish();
+    await next;
+    expect(sc.maxInFlight()).toBe(1);
+  });
+
+  it("abort during the real pass: caller rejects at once, compensation is skipped, slot freed on the physical callback", async () => {
+    const sc = controlledScrypt();
+    const kdf = createKdf({ maxConcurrent: 1, scrypt: sc.fn });
+    const ac = new AbortController();
+    const padded = kdf.runPadded!("pw", P(16384), P(32768), { signal: ac.signal });
+    const settled = padded.then(
+      () => "ok",
+      (e: Error) => e.message,
+    );
+    const next = kdf.run("n", P(65536));
+    await tick();
+    ac.abort(new Error("cut"));
+    await expect(settled).resolves.toBe("cut");
+    expect(sc.started).toHaveLength(1);
+    sc.started[0]!.finish();
+    await tick();
+    expect(sc.started.map((s) => s.n)).toEqual([16384, 65536]); // no compensation pass for the aborted call
+    sc.started[1]!.finish();
+    await next;
+  });
+
+  it("abort during the compensation pass: rejects at once, slot released once, only on the physical callback", async () => {
+    const sc = controlledScrypt();
+    const kdf = createKdf({ maxConcurrent: 1, scrypt: sc.fn });
+    const ac = new AbortController();
+    const padded = kdf.runPadded!("pw", P(16384), P(32768), { signal: ac.signal });
+    const settled = padded.then(
+      () => "ok",
+      (e: Error) => e.message,
+    );
+    const next = kdf.run("n", P(65536));
+    await tick();
+    sc.started[0]!.finish();
+    await tick();
+    ac.abort(new Error("late"));
+    await expect(settled).resolves.toBe("late");
+    expect(sc.started.map((s) => s.n)).toEqual([16384, 32768]); // next still waiting: slot held
+    sc.started[1]!.finish();
+    await tick();
+    expect(sc.started.map((s) => s.n)).toEqual([16384, 32768, 65536]);
+    sc.started[2]!.finish();
+    await next;
+  });
+
+  it("an error in the real pass rejects, skips the compensation and frees the slot; real scrypt result matches run()", async () => {
+    const sc = controlledScrypt();
+    const kdf = createKdf({ maxConcurrent: 1, scrypt: sc.fn });
+    const padded = kdf.runPadded!("pw", P(16384), P(32768));
+    await tick();
+    sc.started[0]!.finish(new Error("real-fail"));
+    await expect(padded).rejects.toThrow("real-fail");
+    expect(sc.started).toHaveLength(1);
+    const real = createKdf();
+    const salt = new Uint8Array(16).fill(5);
+    const params = { n: 16384, r: 8, p: 1, keyLen: 32, salt };
+    const a = await real.run("pw", params);
+    const b = await real.runPadded!("pw", params, { ...params, n: 16384, p: 2, salt: new Uint8Array(16) });
+    expect(Buffer.from(b).equals(Buffer.from(a))).toBe(true);
   });
 });

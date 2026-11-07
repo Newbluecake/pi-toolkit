@@ -1,5 +1,5 @@
 import type { AgentSettings, WorkflowBudget as SettingsWorkflowBudget } from "../config/settings.js";
-import { DEFAULT_WORKFLOW_BUDGET } from "../config/settings.js";
+import { DEFAULT_WORKFLOW_BUDGET } from "./settings.js";
 import type { WorkflowRunBudget } from "./types.js";
 
 /**

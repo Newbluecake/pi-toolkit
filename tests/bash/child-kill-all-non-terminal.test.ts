@@ -62,6 +62,7 @@ class FakeProc {
       stderr: this.stderr,
       processExitPromise: this.processExitPromise,
       drainedPromise: this.drainedPromise,
+      logWrittenByChild: false,
     };
   }
 

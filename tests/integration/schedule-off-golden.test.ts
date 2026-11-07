@@ -107,7 +107,7 @@ async function captureSurface(settings: Record<string, unknown>): Promise<Record
   const sb = sandbox("pi-sched-off-");
   resetGlobals();
   try {
-    sb.writeSettings({ ...BASELINE, ...settings });
+    sb.writeSettings({ ...BASELINE, fast: { enabled: false }, ...settings });
     const h = fakePi();
     activate(h.pi);
     const c = fakeCtx(sb.home);
@@ -176,7 +176,7 @@ describe("schedule off golden (plan r3 §14)", () => {
     const sb = sandbox("pi-sched-off-guard-");
     resetGlobals();
     try {
-      sb.writeSettings({ ...BASELINE });
+      sb.writeSettings({ ...BASELINE, fast: { enabled: false } });
       const h = fakePi();
       activate(h.pi);
       const c = fakeCtx(sb.home);

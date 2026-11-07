@@ -37,7 +37,7 @@ function bodyIndent(options: unknown): number {
 export type FabricSenderResolver = (runId: string) => string | undefined;
 
 /**
- * 2026-10-24 user report: 「fabric finding」 said nothing about WHO sent the message. The header now shows only
+ * 2026-10-24 user report: the 「[fabric <kind> …]」 header said nothing about WHO sent the message. The header now shows only
  * the sender — `@<fromLabel>` (persisted at admit() time, survives reloads), then the resolver's mention label,
  * then the bare runId; host senders render as `@root` / `@system`.
  */

@@ -18,6 +18,19 @@ import {
   type DetailMetricsView,
 } from "../../../src/web-hub/ui/src/components/control/controlContext.js";
 
+async function beginHold(w: ReturnType<typeof mountRing>, selector = ".ctx-ring-stop-btn") {
+  vi.useFakeTimers();
+  await w
+    .get(selector)
+    .trigger("pointerdown", { pointerId: 1, pointerType: "mouse", isPrimary: true, button: 0, clientX: 0, clientY: 0 });
+}
+async function finishHold(w: ReturnType<typeof mountRing>) {
+  vi.advanceTimersByTime(700);
+  await nextTick();
+  window.dispatchEvent(new PointerEvent("pointerup", { pointerId: 1 }));
+  await nextTick();
+}
+
 const CIRC = 2 * Math.PI * 7.5; // matches ContextRing.vue (R=7.5)
 
 function metrics(over: {
@@ -147,7 +160,7 @@ describe("ContextRing.vue — details panel", () => {
 });
 
 describe("ContextRing.vue — merged stop mode (2026-10 user request: stop 图标放进上下文圆圈)", () => {
-  it("busy + ring ⇒ ONE merged button: stop aria-label + arc still shows usage; click ARMS instead of opening the panel (stop wins the whole zone)", async () => {
+  it("busy + ring ⇒ ONE merged button: stop aria-label + arc still shows usage; pointer hold starts instead of opening the panel (stop wins the whole zone)", async () => {
     const wrapper = mountRing(metrics({ percent: 62 }), { busy: true });
     const btn = wrapper.get(".ctx-ring-stop-btn");
     expect(btn.attributes("aria-label")).toBe("Stop the current turn"); // control.stopAria
@@ -156,40 +169,35 @@ describe("ContextRing.vue — merged stop mode (2026-10 user request: stop 图�
     expect(wrapper.get(".ctx-ring-bar").attributes("stroke-dasharray")).toBe(`${0.62 * CIRC} ${CIRC}`);
     expect(wrapper.get(".ctx-ring-stop-icon").exists()).toBe(true);
     expect(wrapper.get(".ctx-ring").attributes("data-stop")).toBe("true");
-    await btn.trigger("click"); // arms — must NOT open the details panel
-    expect(btn.attributes("data-armed")).toBe("true");
+    await beginHold(wrapper); // hold must NOT open the details panel
+    expect(btn.attributes("data-holding")).toBe("true");
     expect(wrapper.find(".ctx-ring-panel").exists()).toBe(false);
     expect(wrapper.find(".stop-live").exists()).toBe(true); // aria-live announcement preserved
   });
 
-  it("two-step: first click arms (no emit), second click emits stop", async () => {
+  it("hold: no early emit, threshold emits stop", async () => {
     const wrapper = mountRing(metrics({}), { busy: true });
-    await wrapper.get(".ctx-ring-stop-btn").trigger("click");
+    await beginHold(wrapper);
     expect(wrapper.emitted("stop")).toBeUndefined();
-    await wrapper.get(".ctx-ring-stop-btn").trigger("click");
+    await finishHold(wrapper);
     expect(wrapper.emitted("stop")).toHaveLength(1);
     expect(wrapper.get(".ctx-ring-stop-btn").attributes("data-armed")).toBeUndefined();
   });
 
-  it("auto-reverts after 4s; Esc disarms without emitting", async () => {
-    vi.useFakeTimers();
+  it("Esc cancels holding without emitting", async () => {
     const wrapper = mountRing(metrics({}), { busy: true });
-    await wrapper.get(".ctx-ring-stop-btn").trigger("click");
-    expect(wrapper.get(".ctx-ring-stop-btn").attributes("data-armed")).toBe("true");
-    vi.advanceTimersByTime(4100);
-    await wrapper.vm.$nextTick();
-    expect(wrapper.get(".ctx-ring-stop-btn").attributes("data-armed")).toBeUndefined();
-    await wrapper.get(".ctx-ring-stop-btn").trigger("click"); // arm again
+    await beginHold(wrapper);
     await wrapper.get(".ctx-ring-stop-btn").trigger("keydown", { key: "Escape" });
-    expect(wrapper.get(".ctx-ring-stop-btn").attributes("data-armed")).toBeUndefined();
+    vi.advanceTimersByTime(4100);
+    expect(wrapper.get(".ctx-ring-stop-btn").attributes("data-holding")).toBeUndefined();
     expect(wrapper.emitted("stop")).toBeUndefined();
   });
 
-  it("armed queue note floats above the ring when queueCount > 0 (K12 copy preserved)", async () => {
+  it("holding queue note floats above the ring when queueCount > 0 (K12 copy preserved)", async () => {
     const wrapper = mountRing(metrics({}), { busy: true, queueCount: 3 });
-    expect(wrapper.find(".ctx-ring-stop-note").exists()).toBe(false); // not armed yet
-    await wrapper.get(".ctx-ring-stop-btn").trigger("click");
-    expect(wrapper.get(".ctx-ring-stop-note").text()).toContain("3");
+    expect(wrapper.find(".stop-hold-note .stop-queue-note").exists()).toBe(false); // not armed yet
+    await beginHold(wrapper);
+    expect(wrapper.get(".stop-hold-note .stop-queue-note").text()).toContain("3");
   });
 
   it("busy flipping true force-closes an open details panel (the panel must not compete with stop)", async () => {
@@ -205,8 +213,8 @@ describe("ContextRing.vue — merged stop mode (2026-10 user request: stop 图�
   it("busy + NO provider ⇒ standalone StopButton fallback (stop stays reachable)", async () => {
     const noProvider = mountRing(undefined, { busy: true });
     expect(noProvider.find(".ctx-ring").exists()).toBe(false);
-    await noProvider.get(".stop-btn").trigger("click"); // arm
-    await noProvider.get(".stop-btn").trigger("click"); // confirm
+    await beginHold(noProvider, ".stop-btn");
+    await finishHold(noProvider);
     expect(noProvider.emitted("stop")).toHaveLength(1);
   });
 
@@ -219,8 +227,8 @@ describe("ContextRing.vue — merged stop mode (2026-10 user request: stop 图�
     // arc parked at 0 while usage is pending; the track ring + icon still frame the stop zone
     expect(noUsage.get(".ctx-ring-bar").attributes("stroke-dasharray")).toBe(`0 ${CIRC}`);
     expect(noUsage.get(".ctx-ring").attributes("data-stop")).toBe("true");
-    await btn.trigger("click"); // arm
-    await btn.trigger("click"); // confirm
+    await beginHold(noUsage);
+    await finishHold(noUsage);
     expect(noUsage.emitted("stop")).toHaveLength(1);
   });
 
@@ -333,35 +341,35 @@ describe("ContextRing.vue — hover peek (2026-10-16 「这个展示做成 hover
     expect(wrapper.find(".ctx-ring-panel").exists()).toBe(false);
   });
 
-  it("busy: hover peeks (read-only) and the panel does not intercept the stop button — arm+confirm still emits stop", async () => {
+  it("busy: hover peeks (read-only) and the panel does not intercept the stop button — hold still emits stop", async () => {
     const wrapper = mountHoverable(metrics({}), { busy: true });
     await wrapper.get(".ctx-ring").trigger("mouseenter");
     vi.advanceTimersByTime(150);
     await nextTick();
     expect(wrapper.find(".ctx-ring-panel").exists()).toBe(true); // peek allowed while busy
-    const stop = wrapper.get(".ctx-ring-stop-btn");
-    await stop.trigger("click"); // arm
-    await stop.trigger("click"); // confirm — the panel never intercepted the tap
+    await beginHold(wrapper);
+    await finishHold(wrapper); // the panel never intercepted the hold
     expect(wrapper.emitted("stop")).toHaveLength(1);
   });
 
-  it("busy: ARMED hides the peek (armed copy wins)", async () => {
+  it("busy: HOLDING hides the peek", async () => {
     const wrapper = mountHoverable(metrics({}), { busy: true });
     await wrapper.get(".ctx-ring").trigger("mouseenter");
     vi.advanceTimersByTime(150);
     await nextTick();
     expect(wrapper.find(".ctx-ring-panel").exists()).toBe(true);
-    await wrapper.get(".ctx-ring-stop-btn").trigger("click"); // arm
+    await beginHold(wrapper); // arm
     await nextTick();
     expect(wrapper.find(".ctx-ring-panel").exists()).toBe(false); // armed wins
     expect(wrapper.find(".stop-live").exists()).toBe(true); // the armed announcement is the overlay now
   });
 
-  it("busy: still no click-to-pin — arming (and its 4s auto-revert) never opens the panel", async () => {
+  it("busy: cancelled holding never click-pins the panel", async () => {
     const wrapper = mountHoverable(metrics({}), { busy: true });
-    await wrapper.get(".ctx-ring-stop-btn").trigger("click"); // arm
+    await beginHold(wrapper); // arm
     expect(wrapper.find(".ctx-ring-panel").exists()).toBe(false);
-    vi.advanceTimersByTime(4100); // armed auto-reverts
+    await wrapper.get(".ctx-ring-stop-btn").trigger("keydown", { key: "Escape" });
+    vi.advanceTimersByTime(4100); // cancelled hold never revives
     await nextTick();
     expect(wrapper.get(".ctx-ring-stop-btn").attributes("data-armed")).toBeUndefined();
     expect(wrapper.find(".ctx-ring-panel").exists()).toBe(false);
