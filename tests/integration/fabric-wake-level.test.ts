@@ -116,10 +116,10 @@ describe("root matrix — delivery call shape (plan §3.1)", () => {
     stack.fabric!.dispose();
   });
 
-  it("explicit wake:true: the IDENTICAL legacy call + a hop", async () => {
+  it("explicit wake:true: a replayed loud record with no current plan is delivered quietly, but the hop still counts", async () => {
     const entries = [runEntry, fabricEntry(record({ level: 1, wake: true }))];
     const { sent, stack } = await deliver(entries);
-    expect(sent[0]!.options).toEqual({ deliverAs: "steer", triggerTurn: true });
+    expect(sent[0]!.options).toEqual({ triggerTurn: false });
     expect(stack.wake?.level.root).toBe(2);
     stack.fabric!.dispose();
   });

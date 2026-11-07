@@ -74,18 +74,15 @@ afterAll(() => {
  *  an absolute presence/absence check. `agent_end` is deliberately excluded here: BOTH sub-
  *  features (context-switch AND keepalive) register it, so disabling only one leaves it present. */
 const CHILD_SWITCH_NEW_EVENTS = ["context"];
-const CHILD_KEEPALIVE_NEW_EVENTS = [
-  "before_provider_request",
-  "message_end",
-  "thinking_level_select",
-  "session_compact_failed",
-];
-/** Events this package shares with other pre-guard registrants (todo / the sysprompt hub) — T-Z1
- *  must be checked by comparing the HANDLER COUNT with the feature on vs. off, not by presence. */
-/** Events this package shares with other pre-guard registrants (todo / the sysprompt hub) — T-Z1
- *  must be checked by comparing the HANDLER COUNT with the feature on vs. off, not by presence.
- *  Value = how many of THIS package's two sub-features (context-switch, keepalive) register this
- *  exact event name (turn_end and session_compact are registered by BOTH). */
+/** `before_provider_request` is deliberately excluded: the fast-command child receiver
+ *  (`wireFastChild`, docs/dev/fast-command/README.md §固定装配与生命周期) also registers it
+ *  pre-guard, so it is never absent from a child session — count it via SHARED_EVENT_DELTAS. */
+const CHILD_KEEPALIVE_NEW_EVENTS = ["message_end", "thinking_level_select", "session_compact_failed"];
+/** Events this package shares with other pre-guard registrants (todo / the sysprompt hub, and the
+ *  fast-command child receiver for `before_provider_request`) — T-Z1 must be checked by comparing
+ *  the HANDLER COUNT with the feature on vs. off, not by presence. Value = how many of THIS
+ *  package's two sub-features (context-switch, keepalive) register this exact event name
+ *  (turn_end and session_compact are registered by BOTH). */
 const SHARED_EVENT_DELTAS: Record<string, number> = {
   turn_end: 2,
   tool_execution_start: 1,
@@ -93,6 +90,7 @@ const SHARED_EVENT_DELTAS: Record<string, number> = {
   session_compact: 2,
   model_select: 1,
   agent_settled: 1,
+  before_provider_request: 1,
 };
 
 function activateAsChild(): ReturnType<typeof fakePi> {
@@ -165,6 +163,9 @@ describe("child-context-switch wiring (T-Z1): both switches off ⇒ zero new reg
     writeSettings({ cacheTtl: { keepalive: false } });
     const { handlers } = activateAsChild();
     for (const event of CHILD_KEEPALIVE_NEW_EVENTS) expect(handlers.has(event)).toBe(false);
+    // before_provider_request is shared with the fast-command child receiver (wireFastChild):
+    // keepalive's handler is gone, fast's single handler remains.
+    expect(handlers.get("before_provider_request")).toHaveLength(1);
     // switch_context is unaffected by the keepalive switch.
     expect(handlers.has("context")).toBe(true);
   });

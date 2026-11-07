@@ -191,6 +191,9 @@ describe("web-hub disabled ⇒ zero side effects (plan §6, §9 #7)", () => {
       "session_before_compact",
       "resources_discover",
       "context",
+      // message-speed wiring (wireMessageSpeed) subscribes `provider_stream_event` to sample
+      // token-generation speed for the hub's live speed meter (part of package D's surface).
+      "provider_stream_event",
       ...FORWARDED_EVENTS,
     ]);
     expect(changed.length).toBeGreaterThan(0);
