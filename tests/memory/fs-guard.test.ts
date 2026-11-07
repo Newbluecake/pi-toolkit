@@ -6,7 +6,9 @@
 // access); `lock.ts` is explicitly NOT exempt (it must reach fs only through
 // safe-fs.ts's exported primitives).
 
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync, mkdtempSync, mkdirSync, chmodSync, lstatSync, symlinkSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { inspectDirSecurityNoFollow } from "../../src/memory/safe-fs.js";
 import { join, relative } from "node:path";
 import { describe, expect, it } from "vitest";
 
@@ -86,5 +88,36 @@ describe("fs import guard (§3.1)", () => {
     expect(fsImportLines('const x = await import("node:fs/promises");\n')).toHaveLength(1);
     expect(fsImportLines('import type { Stats } from "node:fs";\n')).toHaveLength(0);
     expect(fsImportLines('import { join } from "node:path";\n')).toHaveLength(0);
+  });
+});
+
+describe("read-only directory security metadata", () => {
+  it("returns actual uid/mode/dev/ino without enumeration or repair; rejects links/files/missing", () => {
+    const root = mkdtempSync(join(tmpdir(), "dir-security-"));
+    try {
+      const dir = join(root, "private");
+      mkdirSync(dir, { mode: 0o700 });
+      chmodSync(dir, 0o300); // metadata requires no directory read permission
+      const actual = lstatSync(dir);
+      expect(inspectDirSecurityNoFollow(dir)).toEqual({
+        uid: actual.uid,
+        mode: actual.mode,
+        dev: actual.dev,
+        ino: actual.ino,
+      });
+      expect(lstatSync(dir).mode & 0o777).toBe(0o300);
+      symlinkSync(dir, join(root, "link"));
+      expect(() => inspectDirSecurityNoFollow(join(root, "link"))).toThrow();
+      expect(() => inspectDirSecurityNoFollow(import.meta.filename)).toThrow();
+      expect(() => inspectDirSecurityNoFollow(join(root, "missing"))).toThrow();
+      expect(readdirSync(root).sort()).toEqual(["link", "private"]);
+      const source = readFileSync(join(MEMORY_SRC_DIR, ALLOWED_FILE), "utf8").split(
+        "export function inspectDirSecurityNoFollow",
+      )[1]!;
+      expect(source).not.toMatch(/\b(?:readdirSync|mkdirSync|chmodSync|realpathSync|statSync)\(/);
+    } finally {
+      chmodSync(join(root, "private"), 0o700);
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

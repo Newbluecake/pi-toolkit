@@ -1752,3 +1752,11 @@ export function inspectDirNoFollow(path: string): { dev: number; ino: number; mt
   if (st.isSymbolicLink() || !st.isDirectory()) throw new MemoryError(`not-dir: ${path} is not a real directory`);
   return { dev: st.dev, ino: st.ino, mtimeMs: st.mtimeMs, names: readdirSync(path) };
 }
+
+/** #39 read-only security metadata: no listing, following, creation or permission repair.
+ * Ancestors retain their existing trust policy; the final component must be a real dir. */
+export function inspectDirSecurityNoFollow(path: string): { uid: number; mode: number; dev: number; ino: number } {
+  const st = lstatSync(path);
+  if (st.isSymbolicLink() || !st.isDirectory()) throw new MemoryError(`not-dir: ${path} is not a real directory`);
+  return { uid: st.uid, mode: st.mode, dev: st.dev, ino: st.ino };
+}

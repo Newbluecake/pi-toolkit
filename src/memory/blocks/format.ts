@@ -9,6 +9,10 @@ export interface BlockMeta {
   kind: "block";
   authority: "user" | "agent";
   scope?: "global" | "topic";
+  /** #39 P3a hub compat append (Root-approved ONLY this field): marks a block owned by the
+   * hub-memory store (`<stateDir>/hub-memory`). Hub blocks are always `authority:"user"`;
+   * provenance (grant/src/from) lives in the hub store's own `items.json`, not here. */
+  storageScope?: "hub";
   audience?: "all" | "main" | "child";
   expires?: string;
   until?: string;
@@ -49,6 +53,7 @@ const ORDER = [
   "kind",
   "authority",
   "scope",
+  "storageScope",
   "audience",
   "expires",
   "until",
@@ -93,7 +98,10 @@ export function parseBlockFile(name: string, raw: string): ParsedBlock | { stray
   for (const key of values.keys())
     if (!(ORDER as readonly string[]).includes(key)) errors.push(`unknown field: ${key}`);
   const meta: BlockMeta = { kind: "block", authority: "agent", status: "active", created: "", updated: "", version: 1 };
-  const enumField = (key: "authority" | "scope" | "audience" | "status", allowed: readonly string[]): void => {
+  const enumField = (
+    key: "authority" | "scope" | "storageScope" | "audience" | "status",
+    allowed: readonly string[],
+  ): void => {
     const value = values.get(key);
     if (value === undefined) return;
     if (!allowed.includes(value)) {
@@ -104,11 +112,16 @@ export function parseBlockFile(name: string, raw: string): ParsedBlock | { stray
   };
   enumField("authority", ["user", "agent"]);
   enumField("scope", ["global", "topic"]);
+  enumField("storageScope", ["hub"]);
   enumField("audience", ["all", "main", "child"]);
   enumField("status", ["active", "superseded", "archived"]);
   if (meta.authority === "agent" && meta.scope !== undefined) {
     delete meta.scope;
     errors.push("agent scope ignored");
+  }
+  if (meta.authority === "agent" && meta.storageScope !== undefined) {
+    delete meta.storageScope;
+    errors.push("agent storageScope ignored");
   }
   for (const key of ["until", "section", "heading", "title", "when"] as const) {
     const value = values.get(key);
@@ -191,6 +204,7 @@ export function serializeBlock(meta: BlockMeta, body: string, opts?: { allowOver
   for (const key of ORDER) {
     let value: unknown = meta[key];
     if (value === undefined || (key === "scope" && meta.authority !== "user")) continue;
+    if (key === "storageScope" && meta.authority !== "user") continue;
     if (key === "origin" && meta.origin)
       value = `${meta.origin.file}#L${meta.origin.lines[0]}-L${meta.origin.lines[1]}`;
     if (key === "tags" && meta.tags)
