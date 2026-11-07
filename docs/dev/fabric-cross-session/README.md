@@ -632,3 +632,40 @@ wake.enabled ∧ this leaf` and is only ever read by the P2 host wiring.
   `tests/config/{fabric-wake-settings,settings-corpus,setting-specs-pin}.test.ts` (the 8-leaf
   pins legitimately became 9-leaf; the corpus is projected, NOT regenerated). P1 (delivery) and
   P2 (host/tool/web producer) wiring stay open per the plan's DAG.
+
+## Root wake budget (#61 最小流程 · 纯模块已实现尚未生产接线)
+
+`src/fabric/root-wake-budget.ts` 仅提供 activation-local 纯策略闭包
+`createRootWakeBudget({owner, sessionId, limit?:2, snapshot?})`；**无人生产接线，当前 Root
+行为不变，#61 尚未完成**。旧 DecisionWakeLedger / strong-input 原型冻结保留，SDK 路线
+PAUSED；本模块不使用旧 decision-request 状态机，不增设置、工具字段、hooks 或 SDK patch。
+
+- 宿主先保留原有 permission / rate / inbox / capacity 门禁，仅对 explicit child report
+  wake 请求调用 `admit({owner,messageKey,rootState})`。running/starting ⇒ `queue`，不扣额度，
+  无窗口/limit=0/额度耗尽也不阻止 busy 排队；idle ⇒ 同步 reserve 后 `used++` 返回
+  `requestWake`；额度耗尽只 `deliverOnly`，正文仍走既有投递规则。closed/unknown 不 wake。
+- 默认每 Root/user 窗口 2 次，构造输入 limit 可为 0；limit 必须有限非负安全整数。
+  当前窗口只保留已尝试 key（数目 ≤ limit，单 key ≤512 字符），不保正文或用户文本，
+  不设 TTL/LRU 赦免。相同 key 不重复 wake，idle burst 的第二个请求 `queue/reserved`。
+- **仅可信 TUI/Web 宿主用户聊天到达入口**调用
+  `observeAcceptedUserArrival(owner,eventObject)`，立即开新窗口并重置 used，不等模型消费，
+  不看 legacy root-level 数字。工具结果、子消息、completion、timer、user-role wrapper
+  均不得调用。该方法不检测 human，不解析 role/source/text，不创建 proof/RPC/ticket。
+  同一普通事件对象 WeakSet 去重，不强留历史、不设 lifetime 256 上限；宿主必须复用同一
+  到达事件对象，不能为重复回调重新包装对象。旧 owner/disposed 调用无效。
+- 宿主持有 `requestWake` 返回的 `{window,used}` reservation，在现有 `agent_start`、
+  known send failure 或 settled 时调用 `clearReservation(owner,reservation,event)`。
+  unknown 不清预约、不盲重 body；所有失败均不退额度、不删 key。旧 reservation 无法清除
+  新预约。用户到达只重置次数，不清仍在飞的启动预约。无 timeout/poll/IO/发送/SDK 控制。
+- `snapshot()` 只输出可序列化 `{sessionId,window,used,dedupCount}`。same-SID 合法恢复保留
+  已用次数；**因计数无法重建 exact-key 去重，恢复窗口保守 deliver-only，下一真实用户
+  到达才恢复 wake**（running/starting 仍 queue）。缺失/损坏/不同 SID 快照无 fresh budget，
+  new/fork 不继承。epoch/count 校验为有限非负安全整数，epoch 溢出 fail closed。
+  宿主未来接线必须从可信、非 branch-rollback 的最新快照恢复，且在 host send 前保存已扣
+  状态，不能通过 reload/tree 选旧快照洗预算；本纯模块不实现持久化或抗宿主回滚存储。
+
+接线顺序：为每 activation 建 exact owner/SID → 可信用户到达回调 reset → 原门禁通过后
+admit → host 持久化快照再发送/queue/deliver-only → 现有生命周期清预约 → dispose 旧 owner。
+owner、SDK refs、caps、正文不进入快照；跨 activation 的到达事件去重与最新快照选择由未来
+宿主接线负责，模块本身不能证明来源或跨进程 exactly-once。测试：
+`tests/fabric/root-wake-budget.test.ts`（纯测试，无真实 SDK/网络/等待）。
