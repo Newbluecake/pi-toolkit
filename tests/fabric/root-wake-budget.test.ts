@@ -20,7 +20,7 @@ function make(limit = 2, snapshot?: unknown, sessionId = "sid") {
   return { owner, budget, admit, arrival, wake };
 }
 
-describe("root wake budget (pure, not production wired)", () => {
+describe("root wake budget (pure policy)", () => {
   it("queues running/starting without a window or any charge, even with zero limit", () => {
     const f = make(0);
     for (const state of ["running", "starting"] as const) {
@@ -142,6 +142,20 @@ describe("root wake budget (pure, not production wired)", () => {
     const exhausted = make(2, { ...good, window: Number.MAX_SAFE_INTEGER });
     expect(exhausted.arrival()).toBe(false);
     expect(exhausted.admit("x").action).toBe("deliverOnly");
+  });
+
+  it("matched delivered confirmation clears only its own reservation without refund or duplicate-key retry", () => {
+    const f = make();
+    f.arrival();
+    const reservation = f.wake("delivered-key");
+    expect(f.budget.clearReservation({}, reservation, "delivered")).toBe(false);
+    expect(f.budget.clearReservation(f.owner, { ...reservation, used: reservation.used + 1 }, "delivered")).toBe(false);
+    expect(f.admit("other").reason).toBe("reserved");
+    expect(f.budget.clearReservation(f.owner, reservation, "delivered")).toBe(true);
+    expect(f.admit("delivered-key").reason).toBe("duplicate");
+    expect(f.budget.snapshot().used).toBe(1);
+    expect(f.wake("next-key").used).toBe(2);
+    expect(f.budget.clearReservation(f.owner, reservation, "delivered")).toBe(false);
   });
 
   it("supports over 320 real user windows and keeps current-window storage bounded", () => {

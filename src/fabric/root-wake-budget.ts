@@ -141,18 +141,18 @@ export function createRootWakeBudget(options: {
       return result("requestWake", "admitted", pending);
     },
     /**
-     * Host calls on agent_start, known send failure or settled. Unknown send outcomes
-     * retain the reservation until an observed lifecycle event. No outcome refunds
+     * Host calls on agent_start, known send failure, settled, or matched host delivery confirmation. Unknown send outcomes
+     * retain the reservation until a matching host confirmation. No outcome refunds
      * used or removes a key; the host must never blindly resend a message body.
      */
     clearReservation(
       candidate: object,
       reservation: RootWakeReservation,
-      event: "agent_start" | "send_failed" | "settled",
+      event: "agent_start" | "send_failed" | "settled" | "delivered",
     ): boolean {
       if (
         !allowed(candidate) ||
-        !["agent_start", "send_failed", "settled"].includes(event) ||
+        !["agent_start", "send_failed", "settled", "delivered"].includes(event) ||
         pending === undefined ||
         pending.window !== reservation.window ||
         pending.used !== reservation.used

@@ -52,6 +52,11 @@ export interface WakePolicy {
   hopAllowed(level: number): boolean;
   /** Effective `wake:true` sends allowed per sender run (`fabric.wake.perRunQuota`). */
   perRunQuota: number;
+  /** Optional host window gate. Absent preserves the legacy root level/rate policy byte-for-byte. */
+  rootAdmission?(input: { from: NodeRef; kind: MessageKind; level: number; messageKey: MessageKey }): {
+    action: "deliverOnly" | "requestWake";
+    reason?: RootWakeDowngrade;
+  };
   /**
    * W5: synchronous admission-time gate for a `wake:true` report/directive to a FINISHED non-root target (the revive
    * path). `refuse` ⇒ the message is not admitted at all (`not_wakeable`); `downgrade` ⇒ it is admitted deliver-only
@@ -60,6 +65,8 @@ export interface WakePolicy {
    */
   reviveGate?(input: { from: NodeRef; to: NodeRef; level: number; rootWakes: number }): ReviveGate;
 }
+/** Additive receipt-only reasons; never written into non-root parked records. */
+export type RootWakeDowngrade = WakeDowngrade | `root_${import("./root-wake-budget.js").RootWakeBudgetReason}`;
 export type ReviveGate = { ok: true } | { refuse: WakeExclusion } | { downgrade: WakeDowngrade };
 export interface AdmissionInput {
   to: NodeRef;
@@ -81,7 +88,7 @@ export type AdmissionResult =
       /** Effective wake of an explicit `wake` request (after a downgrade); absent when the sender omitted it. */
       wake?: boolean;
       /** Why an explicit `wake:true` to the root was delivered deliver-only instead (plan §3.1 / L5). */
-      wakeDowngraded?: WakeDowngrade;
+      wakeDowngraded?: RootWakeDowngrade;
       parkUnavailable?: "stack_memory";
       inboxDurability?: "session-memory";
     }
@@ -233,19 +240,30 @@ export class FabricRouter {
     if (!rejection && input.to === "root" && channel === "context" && this.rootInbox() >= this.config.rootInboxCap)
       rejection = { ok: false, status: "target_backpressure", key, seq, retryAfterMs: 0 };
     // plan §3.1 root matrix + §3.3 L2/L5: the host stamps the sender's level; an explicit wake:true to the ROOT is the
-    // expensive class — it must pass the level gate and the per-run quota, otherwise it is delivered deliver-only
-    // (downgraded, never rejected). Any other target keeps the sender's intent verbatim (a running target is steered
+    // expensive class — use the optional host root window gate, or the legacy level/per-run gate when absent.
+    // Downgrades still deliver the body. Any other target keeps the sender's intent verbatim (a running target is steered
     // either way; a finished one is W3–W5's business).
     const senderLevel = wakePolicy ? wakePolicy.levelOf(from) : undefined;
     let wake = wakePolicy ? input.wake : undefined;
-    let wakeDowngraded: WakeDowngrade | undefined;
+    let wakeDowngraded: RootWakeDowngrade | undefined;
     if (reviveDowngrade !== undefined) {
       wakeDowngraded = reviveDowngrade;
       wake = false;
     } else if (wakePolicy && wake === true && input.to === "root" && senderLevel !== undefined) {
-      if (!wakePolicy.hopAllowed(senderLevel)) wakeDowngraded = "level_limit";
-      else if ((this.wakeSent.get(from) ?? 0) >= wakePolicy.perRunQuota) wakeDowngraded = "rate_limited";
-      if (wakeDowngraded !== undefined) wake = false;
+      if (wakePolicy.rootAdmission) {
+        // Do not reserve a start for an envelope rejected by the ordinary body/inbox gates.
+        if (!rejection) {
+          const admission = wakePolicy.rootAdmission({ from, kind: input.kind, level: senderLevel, messageKey: key });
+          if (admission.action === "deliverOnly") {
+            wake = false;
+            wakeDowngraded = admission.reason;
+          }
+        }
+      } else {
+        if (!wakePolicy.hopAllowed(senderLevel)) wakeDowngraded = "level_limit";
+        else if ((this.wakeSent.get(from) ?? 0) >= wakePolicy.perRunQuota) wakeDowngraded = "rate_limited";
+        if (wakeDowngraded !== undefined) wake = false;
+      }
     }
     const parkRequested =
       this.config.inbox !== undefined &&
@@ -283,7 +301,7 @@ export class FabricRouter {
       ...(senderLevel !== undefined && from !== "system" ? { level: senderLevel } : {}),
       ...(wake !== undefined ? { wake } : {}),
       ...(!rejection && canPark
-        ? { parked: { at: this.now(), reason: wakeDowngraded ?? ("wake_false" as const) } }
+        ? { parked: { at: this.now(), reason: reviveDowngrade ?? ("wake_false" as const) } }
         : {}),
       ...(from !== "system"
         ? {

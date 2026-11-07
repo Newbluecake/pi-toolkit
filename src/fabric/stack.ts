@@ -11,6 +11,7 @@ import { createCausalLevel, readRootLevel, WAKE_LEVEL_CUSTOM_TYPE, type CausalLe
 import { createWakeService, inboxDurability } from "./wake.js";
 import { isLiveSessionFile } from "../core/live-session-files.js";
 import { isRunId } from "../core/ids.js";
+import { createRootWakeBudget, type RootBudgetState, type RootWakeReservation } from "./root-wake-budget.js";
 import { createFabricRouter } from "./router.js";
 import { createFabricThrottle } from "./throttle.js";
 import { createFabricTree } from "./tree.js";
@@ -20,6 +21,27 @@ import type { Runner } from "../service/ports.js";
 import { type QueryService } from "../service/query-service.js";
 import { type SpawnService } from "../service/spawn-service.js";
 import { type Tombstone } from "../service/tombstone.js";
+
+/** Internal policy, not a settings key. Each stack starts closed until a trusted user arrival. */
+const ROOT_WAKE_LIMIT = 2;
+
+export function readRootBudgetState(
+  ctx: Partial<Pick<ExtensionContext, "isIdle" | "hasPendingMessages">>,
+): RootBudgetState {
+  try {
+    const idle = ctx.isIdle?.();
+    const pending = ctx.hasPendingMessages?.();
+    if (typeof idle !== "boolean" || typeof pending !== "boolean") return "unknown";
+    return !idle ? "running" : pending ? "starting" : "idle";
+  } catch {
+    return "unknown";
+  }
+}
+
+export interface RootBudgetPort {
+  observeAcceptedUserArrival(event: object): boolean;
+  snapshot(): import("./root-wake-budget.js").RootWakeBudgetSnapshot;
+}
 
 export function buildFabric(
   pi: ExtensionAPI,
@@ -86,6 +108,26 @@ export function buildFabric(
         },
       })
     : undefined;
+  const rootOwner = {};
+  const rootBudget = wakeOn
+    ? createRootWakeBudget({ owner: rootOwner, sessionId: ctx.sessionManager.getSessionId(), limit: ROOT_WAKE_LIMIT })
+    : undefined;
+  const rootPlans = new Map<
+    string,
+    {
+      from: NodeRef;
+      action: "queue" | "requestWake";
+      reservation?: RootWakeReservation;
+      attempted?: boolean;
+      sent?: boolean;
+    }
+  >();
+  const rootBudgetPort: RootBudgetPort | undefined = rootBudget
+    ? {
+        observeAcceptedUserArrival: (event) => rootBudget.observeAcceptedUserArrival(rootOwner, event),
+        snapshot: () => rootBudget.snapshot(),
+      }
+    : undefined;
   const tree = createFabricTree();
   // run-persistence plan D6 (fabric row): fold the run log per runId first —
   // terminal entries win, otherwise the latest non-terminal (journal) entry —
@@ -144,6 +186,27 @@ export function buildFabric(
               levelOf: (node) => level.levelOf(node),
               hopAllowed: (l) => level.hopAllowed(l),
               perRunQuota: settings.fabric.wake.perRunQuota,
+              rootAdmission: (input: {
+                from: NodeRef;
+                kind: FabricRecord["kind"];
+                level: number;
+                messageKey: string;
+              }) => {
+                const decision = rootBudget!.admit({
+                  owner: rootOwner,
+                  messageKey: input.messageKey,
+                  rootState: readRootBudgetState(ctx),
+                });
+                if (decision.action !== "deliverOnly")
+                  rootPlans.set(input.messageKey, {
+                    from: input.from,
+                    action: decision.action,
+                    ...(decision.reservation ? { reservation: decision.reservation } : {}),
+                  });
+                return decision.action === "requestWake"
+                  ? { action: "requestWake" as const }
+                  : { action: "deliverOnly" as const, reason: `root_${decision.reason}` as const };
+              },
               // W5: finished-target wake:true is decided here, synchronously, before anything is queued.
               reviveGate: (input: { from: NodeRef; to: NodeRef; level: number; rootWakes: number }) =>
                 wake ? wake.admitCheck(input) : ({ ok: true } as const),
@@ -181,10 +244,30 @@ export function buildFabric(
         display: false,
         details: record,
       };
-      // plan §3.1 root matrix: an explicit wake:false (or a wake:true downgraded at admission, stored as false) is
-      // deliver-only — the very same `triggerTurn:false` sendMessage shape stack.ts already uses elsewhere; omitted and
-      // effective wake:true keep today's steer + triggerTurn:true call, argument for argument.
-      if (record.wake === false) pi.sendMessage(message, { triggerTurn: false });
+      // Explicit wake requests with a current stack plan use the budget path. Other false envelopes
+      // remain quiet, and omitted wake retains the legacy call verbatim.
+      const plan = rootPlans.get(record.key);
+      if (plan && plan.from === record.from) {
+        // A retry of bookkeeping must never resend a possibly effective body/start.
+        if (plan.attempted)
+          return plan.sent ? { ok: true } : { ok: false, retryable: false, reason: "policy", effect: "unknown" };
+        plan.attempted = true;
+        const state = readRootBudgetState(ctx);
+        // Busy steer needs triggerTurn:true in pi 1.5: false only appends after the turn,
+        // never injects a next turn. The SDK queues this into the already active run.
+        const triggerTurn = state === "running" || (plan.action === "requestWake" && state === "idle");
+        try {
+          if (triggerTurn) pi.sendMessage(message, { deliverAs: "steer", triggerTurn: true });
+          else pi.sendMessage(message, { triggerTurn: false });
+          plan.sent = true;
+        } catch {
+          // Void host API: no delivery confirmation, no refund/clear/retry.
+          return { ok: false, retryable: false, reason: "policy", effect: "unknown" };
+        }
+      } else if (rootBudget && record.wake === true) {
+        // Replayed loud envelopes have no authorization in this new stack.
+        pi.sendMessage(message, { triggerTurn: false });
+      } else if (record.wake === false) pi.sendMessage(message, { triggerTurn: false });
       else pi.sendMessage(message, { deliverAs: "steer", triggerTurn: true });
       return { ok: true };
     },
@@ -232,8 +315,45 @@ export function buildFabric(
     progressChannel: settings.fabric.progressChannel,
     canRenderEntries: capabilities.canRenderEntries,
     maxAttempts: settings.deliveryAttempts,
-    ...(level ? { level } : {}),
-    ...(wake ? { inbox: wake } : {}),
+    ...(level
+      ? {
+          level: {
+            onDelivered: (record, channel) => {
+              level.onDelivered(record, channel);
+              const plan = rootPlans.get(record.key);
+              if (record.to === "root" && plan?.from === record.from && plan.sent) {
+                if (plan.reservation) rootBudget!.clearReservation(rootOwner, plan.reservation, "delivered");
+                rootPlans.delete(record.key);
+              }
+            },
+          },
+        }
+      : {}),
+    ...(wake
+      ? {
+          inbox: {
+            sweep: (...args) => wake.sweep(...args),
+            nextSweepAt: (...args) => wake.nextSweepAt(...args),
+            successor: (...args) => wake.successor(...args),
+            steerHeld: (...args) => wake.steerHeld(...args),
+            auditUnverified: (...args) => wake.auditUnverified(...args),
+            subscribe: (...args) => wake.subscribe(...args),
+            dispose: () => {
+              rootBudget?.dispose(rootOwner);
+              rootPlans.clear();
+              wake.dispose();
+            },
+          },
+        }
+      : {}),
   });
-  return { engine, tree, router, mailbox, ...(level ? { level } : {}), ...(wake ? { wake } : {}) };
+  return {
+    engine,
+    tree,
+    router,
+    mailbox,
+    ...(rootBudgetPort ? { rootBudget: rootBudgetPort } : {}),
+    ...(level ? { level } : {}),
+    ...(wake ? { wake } : {}),
+  };
 }

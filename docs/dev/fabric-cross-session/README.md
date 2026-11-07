@@ -34,10 +34,13 @@ off — is on; read once at stack build, non-live). With wake on, `message_agent
 — never regenerate it — and C-P4): omitted = legacy byte-for-byte, `false` = deliver-only (to a finished run: **park**,
 pending until TTL or until a resume carries it; needs inbox durability `disk`/`session-memory`, `stack-memory` ⇒ legacy
 `target_gone` + `parkUnavailable`), `true` = wake (expensive; progress ⇒ `invalid_wake`). Wake to root is exactly the legacy
-steer+`triggerTurn` call (no new unmanaged root run path in phase 1). **Causal level** (`wake-level.ts`): `diag.wakeLevel`
+steer+`triggerTurn` call (no new unmanaged root run path in phase 1). **#61 production root admission now adds
+an independent user-arrival window for explicit child reports; see “Root wake budget” below.** **Causal level** (`wake-level.ts`): `diag.wakeLevel`
 (reducer input `wake_level`, monotonic, persisted with the terminal entry; root level in `subagent:wake-level`); only
 proven human input resets root (`wake-input.ts`'s `input` hook; runs never reset); an effective wake hop needs
-`level+1 ≤ maxLevel` else it silently downgrades to deliver-only (`level_limit`). **Successor coalescing**
+`level+1 ≤ maxLevel` else it silently downgrades to deliver-only (`level_limit`) on the legacy policy / non-root
+revive path. Production explicit root wakes use #61's window instead of the sender-level/per-run root gate;
+child levels and non-root revive gates are unchanged. **Successor coalescing**
 (`SpawnService.resumeOwners`/`successorOf`, mailbox `waitingFor`/`drainSession`): a message for a finished run whose
 session chain already has a successor waits for it (pending_start) or is redirect-steered into it (durable
 `steerAttempt`; a steer timeout/restart ⇒ audited consume, never a retry). **Revive** (`WakeService.revive`, the single
@@ -633,39 +636,101 @@ wake.enabled ∧ this leaf` and is only ever read by the P2 host wiring.
   pins legitimately became 9-leaf; the corpus is projected, NOT regenerated). P1 (delivery) and
   P2 (host/tool/web producer) wiring stay open per the plan's DAG.
 
-## Root wake budget (#61 最小流程 · 纯模块已实现尚未生产接线)
+## Root wake budget (#61 · production source wiring, not live activation)
 
-`src/fabric/root-wake-budget.ts` 仅提供 activation-local 纯策略闭包
-`createRootWakeBudget({owner, sessionId, limit?:2, snapshot?})`；**无人生产接线，当前 Root
-行为不变，#61 尚未完成**。旧 DecisionWakeLedger / strong-input 原型冻结保留，SDK 路线
-PAUSED；本模块不使用旧 decision-request 状态机，不增设置、工具字段、hooks 或 SDK patch。
+`src/fabric/root-wake-budget.ts` remains a pure activation-local policy closure. The production
+`buildFabric` now constructs one budget with an exact stack-private owner, the real session ID,
+and **internal constant `ROOT_WAKE_LIMIT = 2`**. No new settings key, tool parameter/description,
+SDK patch, proof/ticket, timer, poller or external platform. Effective gate remains
+`fabric.enabled ∧ fabric.wake.enabled`. This is source integration only: installing/reloading or
+enabling a running process is NOT part of this change; an already running process is unaffected.
+The old DecisionWakeLedger / strong-input prototype above remains unwired/frozen and its SDK
+route remains paused; its provenance-unavailable statements do not govern this smaller flow.
 
-- 宿主先保留原有 permission / rate / inbox / capacity 门禁，仅对 explicit child report
-  wake 请求调用 `admit({owner,messageKey,rootState})`。running/starting ⇒ `queue`，不扣额度，
-  无窗口/limit=0/额度耗尽也不阻止 busy 排队；idle ⇒ 同步 reserve 后 `used++` 返回
-  `requestWake`；额度耗尽只 `deliverOnly`，正文仍走既有投递规则。closed/unknown 不 wake。
-- 默认每 Root/user 窗口 2 次，构造输入 limit 可为 0；limit 必须有限非负安全整数。
-  当前窗口只保留已尝试 key（数目 ≤ limit，单 key ≤512 字符），不保正文或用户文本，
-  不设 TTL/LRU 赦免。相同 key 不重复 wake，idle burst 的第二个请求 `queue/reserved`。
-- **仅可信 TUI/Web 宿主用户聊天到达入口**调用
-  `observeAcceptedUserArrival(owner,eventObject)`，立即开新窗口并重置 used，不等模型消费，
-  不看 legacy root-level 数字。工具结果、子消息、completion、timer、user-role wrapper
-  均不得调用。该方法不检测 human，不解析 role/source/text，不创建 proof/RPC/ticket。
-  同一普通事件对象 WeakSet 去重，不强留历史、不设 lifetime 256 上限；宿主必须复用同一
-  到达事件对象，不能为重复回调重新包装对象。旧 owner/disposed 调用无效。
-- 宿主持有 `requestWake` 返回的 `{window,used}` reservation，在现有 `agent_start`、
-  known send failure 或 settled 时调用 `clearReservation(owner,reservation,event)`。
-  unknown 不清预约、不盲重 body；所有失败均不退额度、不删 key。旧 reservation 无法清除
-  新预约。用户到达只重置次数，不清仍在飞的启动预约。无 timeout/poll/IO/发送/SDK 控制。
-- `snapshot()` 只输出可序列化 `{sessionId,window,used,dedupCount}`。same-SID 合法恢复保留
-  已用次数；**因计数无法重建 exact-key 去重，恢复窗口保守 deliver-only，下一真实用户
-  到达才恢复 wake**（running/starting 仍 queue）。缺失/损坏/不同 SID 快照无 fresh budget，
-  new/fork 不继承。epoch/count 校验为有限非负安全整数，epoch 溢出 fail closed。
-  宿主未来接线必须从可信、非 branch-rollback 的最新快照恢复，且在 host send 前保存已扣
-  状态，不能通过 reload/tree 选旧快照洗预算；本纯模块不实现持久化或抗宿主回滚存储。
+### Admission and delivery
 
-接线顺序：为每 activation 建 exact owner/SID → 可信用户到达回调 reset → 原门禁通过后
-admit → host 持久化快照再发送/queue/deliver-only → 现有生命周期清预约 → dispose 旧 owner。
-owner、SDK refs、caps、正文不进入快照；跨 activation 的到达事件去重与最新快照选择由未来
-宿主接线负责，模块本身不能证明来源或跨进程 exactly-once。测试：
-`tests/fabric/root-wake-budget.test.ts`（纯测试，无真实 SDK/网络/等待）。
+- Only explicit `wake:true` reaches the optional router `WakePolicy.rootAdmission` seam, after
+  existing sender/tree permission, progress-invalid-wake, body quota and root inbox checks.
+  The seam receives host sender/kind/level and the generated immutable `messageKey`. A rejected
+  envelope never reserves. Production root admission replaces the old **root** sender-level /
+  per-run wake gate; high-level live children are not rejected by `level_limit`. Non-root
+  revive, causal propagation and spawn inheritance remain unchanged. Effective root starts
+  still contribute to the existing `wakeSent` diagnostic/non-root revive quota input.
+- Host state uses both `ctx.isIdle()` and `ctx.hasPendingMessages()`: non-idle ⇒ busy/running,
+  idle+pending ⇒ starting, idle+no pending ⇒ idle. Missing, throwing or non-boolean evidence ⇒
+  `unknown`, always deliver-only. These are SDK host-state observations, not model metadata.
+- Busy/running/starting ⇒ queue, **zero window charge**, even without a window or at the limit.
+  Idle within a current user window ⇒ synchronous reservation, `used++`, request one wake.
+  An idle burst's later message sees the outstanding reservation and queues without charge.
+  Limit/no window/unknown ⇒ deliver-only; body is still subject to ordinary delivery rules.
+- Queue/admission plans retain only key/from/action/reservation and attempt flags, not another
+  body. At dispatch the state is re-read. For a currently active run, pi 1.5 requires
+  `{deliverAs:"steer",triggerTurn:true}` to inject the body into that run's next turn: false
+  would only append after the current turn and would not steer. **This busy call does not
+  start a second run**, as the real-SDK starting/streaming tests assert. A queued plan that
+  finds idle/starting/unknown at dispatch never promotes itself to a fresh wake. Only an
+  admitted `requestWake` may start from observed idle. A replayed explicit loud record with no
+  current-stack plan is delivered quietly, not granted a new authorization.
+- Receipts use the existing optional `wake` / `wakeDowngraded` slots. New additive strings are
+  prefixed `root_` (`root_busy`, `root_reserved`, `root_limit`, `root_no_window`, `root_unknown`,
+  etc. from the pure policy). Busy receipts say `wake:false`: queued into an existing run, not
+  another activation. `wake:true` means requested, **not proof that a provider turn started or
+  Root processed it**. Accepted/delivered remain distinct. Old reason meanings are unchanged.
+- Omitted wake is deliberately **still legacy steer+triggerTurn:true**, without this new
+  admission; it is not a quota workaround to recommend. Explicit false stays quiet. Absent
+  `rootAdmission` preserves legacy router level/per-run policy. Wake off retains the previous
+  tool/schema and call shape; no frozen fixtures were changed or regenerated.
+
+### User-arrival window and teardown
+
+- `src/index.ts` passes the current stack's same `wake.rootBudget` facade into the already
+  registered wake-input hook; no new registrations or registration-order changes. On accepted
+  **TUI `interactive`** input, or extension input attributed as `web_prompt` through the
+  existing late-bound `attributeInput` port, the hook both observes the original arrival event
+  object and calls existing `resetRoot`. Opening a window does not depend on a numeric causal
+  change: used=0/root=0 and successive real arrivals still open new windows.
+- The budget WeakSet deduplicates the **same event object**, weakly held. A rewrapped event
+  is not the same arrival identity; there is no cross-process/external replay proof. Machine
+  RPC, un-attributed extension/topic-switch/goal continuations, child/tool/completion events
+  and user-role/text wrappers do not reset the budget. The shared legacy classifier is NOT
+  changed: RPC continues its old causal-level-only reset, but never opens this budget.
+  Web attribution is the existing port, not a new authentication layer.
+- The pure policy reserves only on `requestWake`. Production clears the exact reservation
+  through the **existing mailbox `level.onDelivered(record,channel)` callback**, matched on
+  root target, sender, key and successful host send attempt. Its new `delivered` event means
+  **host dispatch/delivery bookkeeping confirmation, not an observed SDK `agent_start`**.
+  No extra lifecycle hooks are registered. Failed send or missing delivery confirmation keeps
+  the reservation and consumed count; no refund, key deletion or automatic body resend.
+  Repeated bookkeeping for an already attempted key cannot send/start twice in that stack.
+- Mailbox's existing inbox-dispose exit also disposes this exact budget owner and clears the
+  local plans, before the existing WakeService disposal. No new teardown step or ordering.
+  Old facade calls cannot reopen a disposed window.
+- **No production window persistence.** Rebuild/reload/new stack starts with **no window**,
+  even for the same SID, and is conservatively deliver-only while idle until a new trusted
+  user arrival. Busy messages can still queue. Reload does not gift quota. The pure module's
+  optional snapshot API remains available for tests/future work, but is not a production
+  recovery path; restored exact-key authority is never reconstructed from counts.
+
+### Evidence and remaining limits
+
+`tests/fabric/root-wake-admission.test.ts` covers production construction, gates, missing/throwing
+host evidence, reservation failure, off/legacy behavior and disposal;
+`tests/fabric/wake-input.test.ts` covers original-object arrival dedup, zero-count resets and
+machine negatives; `tests/fabric/root-wake-budget.test.ts` includes matched `delivered` / stale
+reservation / same-key tests. `tests/integration/fabric-wake-arrival.test.ts` is real pi 1.5
+`createAgentSession` + the production message_agent tool/router/mailbox with an own/tmp
+DefaultResourceLoader, isolated HOME and scripted fake provider (zero network/paid API): idle
+2-start limit and third body, an actual SDK child invoking the registered production tool,
+streaming and before-agent-start coalescing, simultaneous idle
+requests, same-key delivery-bookkeeping retry, rebuild, TUI/Web/machine inputs and unknown state.
+Integration is already tier2 by the directory manifest; the new pure tests need no special tier
+registration. Existing C-P1…C-P5 and the off/schema goldens remain gates.
+
+This is not a decision-request ledger, cross-session wake redesign, TODO restore, memory scope
+change, or SDK consumer-proof implementation. The void `pi.sendMessage` API confirms host
+acceptance only; asynchronous SDK/provider failure cannot be promoted into a success claim.
+At-most-once attempt flags are stack-local, not a new crash-durable delivery ledger. Lost wake
+opportunities on unknown state, missing confirmations, reload or a busy→idle race are accepted
+fail-closed outcomes, not a promise of immediate Root processing. SDK `isIdle` also includes
+manual compaction; this getter pair does not independently distinguish compaction from run
+startup. No new compaction fence or lifecycle observation hook is introduced or certified here.

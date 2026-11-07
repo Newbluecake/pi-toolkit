@@ -8,7 +8,7 @@ import {
   checkBashToolReturnLag,
   scheduleBashJobRecovery,
 } from "./bash/host.js";
-import { buildFabric } from "./fabric/stack.js";
+import { buildFabric, type RootBudgetPort } from "./fabric/stack.js";
 import { ThreadEngine, type ThreadEventInput, type HandleEventResult } from "./fabric/thread/engine.js";
 import type { ThreadAcquireResult, ThreadRebindResult } from "./fabric/thread/engine.js";
 import type { ThreadCloseReason, ThreadStatusSlotWire } from "./web-hub/protocol/thread.js";
@@ -338,6 +338,7 @@ export interface Stack {
    */
   wake?: {
     level: CausalLevel;
+    rootBudget?: RootBudgetPort;
     /** G (plan §7): read-only `/agent status` view — counters from `WakeService.stats()` plus level/durability facts. */
     status(): WakeStatusView;
     /** G (plan §7): messages carried into resume run `runId` (committed or reserved); drives `get_run_result` text. */
@@ -2502,6 +2503,7 @@ export function buildSessionStack(
       ? {
           wake: {
             level: fabric.level,
+            ...(fabric.rootBudget ? { rootBudget: fabric.rootBudget } : {}),
             status: (): WakeStatusView => ({
               maxLevel: fabric.level!.maxLevel,
               rootLevel: fabric.level!.root,

@@ -905,6 +905,7 @@ export default function activate(rawPi: ExtensionAPI): void {
     "input",
     createWakeInputHook({
       level: () => holder.current?.wake?.level,
+      rootBudget: () => holder.current?.wake?.rootBudget,
       attributeInput: () => wakeAttributeRef.current,
     }),
   );
