@@ -215,9 +215,16 @@ const offScenarios = [
     name: "off:xs-reply-off",
     settings: { fabric: { enabled: true, crossSession: { enabled: true, reply: { enabled: false } } } },
   },
-  { name: "off:schedule-off", settings: { ...BASELINE }, replay: "schedule" as const },
+  // Fast defaults ON, which registers `/fast` + its provider hooks; the schedule-off and
+  // thread-rebind-off FROZEN goldens were captured with fast explicitly off (their own src-path
+  // tests write the same input), so these two legacy-contract inputs must isolate Fast the same
+  // way. Parity rows are unaffected — all three paths run the same scenario input.
+  { name: "off:schedule-off", settings: { ...BASELINE, fast: { enabled: false } }, replay: "schedule" as const },
   { name: "off:thread-off", settings: { fabric: { enabled: true } } },
-  { name: "off:thread-rebind-off", settings: { fabric: { enabled: true, threads: { enabled: true } } } },
+  {
+    name: "off:thread-rebind-off",
+    settings: { fabric: { enabled: true, threads: { enabled: true } }, fast: { enabled: false } },
+  },
   { name: "off:all-off", settings: ALL_OFF },
 ];
 
