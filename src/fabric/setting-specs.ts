@@ -100,6 +100,12 @@ export const FABRIC_SETTING_SPECS: Record<string, SettingSpec> = {
     "Max revives per hour for one target",
   ),
   "fabric.wake.parkCapPerTarget": count("fabric.wake.parkCapPerTarget", 0, "Max parked messages per finished target"),
+  // #61 decision-wake plan §2.1: explicit blocking decision requests (default on; a window opens
+  // only on host-proven human input). Non-live, read once at stack build like the wake block.
+  "fabric.wake.decisionRequests": bool(
+    "fabric.wake.decisionRequests",
+    "Let blocked direct children file explicit decision requests to root (needs fabric.wake.enabled)",
+  ),
   // alias-force-default plan §6 (AF0): the first crossSession key on this surface. Non-live (stack build, needs /reload);
   // agent-side only — it never rides HubConfig.
   "fabric.crossSession.alias.autoFromCwd": bool(

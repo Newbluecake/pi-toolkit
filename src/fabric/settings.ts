@@ -176,6 +176,12 @@ export interface FabricWakeSettings {
   /** Cross-session Controller watchdog, measured from DISPATCH (phase2 §4.1/§6.2); parse-time
    * clamped to 60..3600, `0` = Controller off ⇒ cross-session `wake:true` degrades to deliver-only. */
   rootRunMaxS: number;
+  /** #61 decision-wake (plan §2.1): explicit blocking decision requests from direct children —
+   * default TRUE (user ruling 2026-11-07); `false` = explicit opt-out back to the legacy path.
+   * Effective = fabric.enabled ∧ wake.enabled ∧ this leaf; non-live (read once at stack build).
+   * Default-on grants NO budget by itself: a window opens only on a host-proven human input
+   * (fabric/decision-input.ts); without proof every request is deliver-only. */
+  decisionRequests: boolean;
 }
 
 /** Parse-time bounds for `fabric.wake.resumeBudgetS` (plan §4.8). */
@@ -623,7 +629,9 @@ export function parseFabricWakeSettings(input: unknown): FabricWakeSettings {
   const defaults = DEFAULT_FABRIC_SETTINGS.wake;
   if (!input || typeof input !== "object" || Array.isArray(input)) return { ...defaults };
   const value = input as Record<string, unknown>;
-  const count = (key: Exclude<keyof FabricWakeSettings, "enabled" | "resumeBudgetS" | "rootRunMaxS">): number => {
+  const count = (
+    key: Exclude<keyof FabricWakeSettings, "enabled" | "resumeBudgetS" | "rootRunMaxS" | "decisionRequests">,
+  ): number => {
     const raw = value[key];
     return typeof raw === "number" && Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : defaults[key];
   };
@@ -648,6 +656,9 @@ export function parseFabricWakeSettings(input: unknown): FabricWakeSettings {
         : typeof rootRunRaw === "number" && Number.isFinite(rootRunRaw) && rootRunRaw > 0
           ? Math.min(FABRIC_WAKE_ROOT_RUN_MAX_S, Math.max(FABRIC_WAKE_ROOT_RUN_MIN_S, Math.floor(rootRunRaw)))
           : defaults.rootRunMaxS,
+    // #61: default TRUE; only an explicit boolean false opts out (invalid types fall back to
+    // the default — “缺省/非法类型回落 true”，plan §2.1).
+    decisionRequests: typeof value.decisionRequests === "boolean" ? value.decisionRequests : defaults.decisionRequests,
   };
 }
 
@@ -757,6 +768,9 @@ export const DEFAULT_FABRIC_SETTINGS: FabricSettings = {
     resumesPerTargetPerHour: 2,
     parkCapPerTarget: 8,
     rootRunMaxS: 900,
+    // #61 decision-wake plan §2.1: default ON (explicit false opts out; no budget without a
+    // host-proven human input — fabric/decision-input.ts).
+    decisionRequests: true,
   },
   // fabric phase-2 (phase2-plan §4.1/§5.2, rulings P1/P2/P8 + review #7): OFF by default —
   // `crossSession` exists in every parsed FabricSettings, but `xsOn` stays false until the

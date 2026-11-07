@@ -37,23 +37,33 @@ if (process.env.GOV_SPECS_GENERATE === "1") {
   });
 } else {
   const pin = JSON.parse(readFileSync(PIN_PATH, "utf8")) as Pin;
-  // task55 /fast and task39 scopes are declared additive features, not baseline refreshes.
-  // Project exactly these NEW keys; all old specs/order/content remain pinned.
-  const declaredAdditions = ["memory.scopes.session", "memory.scopes.hub", "fast.enabled"];
+  // task55 /fast, task39 scopes and task61 decision-wake scopes are declared additive
+  // features, not baseline refreshes. Project exactly these NEW keys; old specs/order/content
+  // remain pinned.
+  const declaredAdditions = [
+    "memory.scopes.session",
+    "memory.scopes.hub",
+    "fabric.wake.decisionRequests",
+    "fast.enabled",
+  ];
   const legacySpecs = Object.fromEntries(
     Object.entries(SETTING_SPECS).filter(([key]) => !declaredAdditions.includes(key)),
   );
   describe("SETTING_SPECS pin (order + content)", () => {
-    it("adds exactly declared Fast/scopes keys with non-live defaults and keeps old ordering", () => {
+    it("adds exactly declared Fast/scopes/decision keys with non-live defaults and keeps old ordering", () => {
       const oldKeys = pin.specs.map(([key]) => key);
       expect(Object.keys(SETTING_SPECS).filter((key) => !oldKeys.includes(key))).toEqual(declaredAdditions);
       const anchor = oldKeys.indexOf("memory.jev.predict.cacheTtlMin");
       expect(anchor).toBeGreaterThan(0);
+      const wake = oldKeys.indexOf("fabric.wake.parkCapPerTarget");
+      expect(wake).toBeGreaterThan(0);
       expect(Object.keys(SETTING_SPECS)).toEqual([
         ...oldKeys.slice(0, anchor + 1),
         "memory.scopes.session",
         "memory.scopes.hub",
-        ...oldKeys.slice(anchor + 1),
+        ...oldKeys.slice(anchor + 1, wake + 1),
+        "fabric.wake.decisionRequests",
+        ...oldKeys.slice(wake + 1),
         "fast.enabled",
       ]);
       for (const path of ["memory.scopes.session", "memory.scopes.hub"]) {
@@ -68,6 +78,13 @@ if (process.env.GOV_SPECS_GENERATE === "1") {
         description: "/fast 总开关（默认 true，初始 inherit 不改请求）；false 为零接线紧急关闭，修改后需 /reload",
       });
       expect(defaultOf(SETTING_SPECS["fast.enabled"]!)).toBe(true);
+      // #61 decision-wake: the 9th wake leaf, non-live, default true (explicit false opts out).
+      expect(SETTING_SPECS["fabric.wake.decisionRequests"]).toMatchObject({
+        kind: "boolean",
+        path: "fabric.wake.decisionRequests",
+      });
+      expect(SETTING_SPECS["fabric.wake.decisionRequests"]?.live).toBeUndefined();
+      expect(defaultOf(SETTING_SPECS["fabric.wake.decisionRequests"]!)).toBe(true);
     });
     it("lists the same keys in the same order", () => {
       expect(Object.keys(legacySpecs)).toEqual(pin.specs.map(([key]) => key));

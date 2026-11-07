@@ -19,10 +19,14 @@ describe("fabric.wake settings (plan v3 §4.8; rootRunMaxS added by phase2 §4.1
       parkCapPerTarget: 8,
       // phase2 §4.1: the cross-session Controller watchdog joins the wake block (default 900s)
       rootRunMaxS: 900,
+      // #61 decision-wake plan §2.1: default TRUE (explicit false opts out; no budget without a
+      // host-proven human input — fabric/decision-input.ts). 9th leaf.
+      decisionRequests: true,
     });
     // `crossSession.*` is a FABRIC-level leaf (parsed by parseFabricCrossSessionSettings), never a wake one
     expect(Object.keys(defaults).sort()).toEqual(
       [
+        "decisionRequests",
         "enabled",
         "maxLevel",
         "parkCapPerTarget",
@@ -62,6 +66,7 @@ describe("fabric.wake settings (plan v3 §4.8; rootRunMaxS added by phase2 §4.1
         resumesPerTargetPerHour: 1,
         parkCapPerTarget: 3,
         rootRunMaxS: 5,
+        decisionRequests: false,
         crossSession: { enabled: true },
       }),
     ).toEqual({
@@ -73,6 +78,7 @@ describe("fabric.wake settings (plan v3 §4.8; rootRunMaxS added by phase2 §4.1
       resumesPerTargetPerHour: 1,
       parkCapPerTarget: 3,
       rootRunMaxS: 60, // 5 clamps up to the 60s floor (phase2 §4.1)
+      decisionRequests: false, // #61: explicit false is the ONLY opt-out
     });
   });
 
@@ -85,6 +91,7 @@ describe("fabric.wake settings (plan v3 §4.8; rootRunMaxS added by phase2 §4.1
       resumesPerHour: Number.NaN,
       resumesPerTargetPerHour: Infinity,
       parkCapPerTarget: 2.9,
+      decisionRequests: "off", // #61: invalid type falls back to the DEFAULT (true)
     });
     expect(parsed).toEqual({ ...defaults, parkCapPerTarget: 2 });
   });
@@ -130,6 +137,7 @@ describe("fabric.wake settings (plan v3 §4.8; rootRunMaxS added by phase2 §4.1
       "resumesPerHour",
       "resumesPerTargetPerHour",
       "parkCapPerTarget",
+      "decisionRequests",
     ]) {
       const full = `fabric.wake.${key}`;
       expect(isKnownSettingKey(full), full).toBe(true);

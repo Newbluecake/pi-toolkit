@@ -278,13 +278,22 @@ function withoutFast(settings: typeof DEFAULT_SETTINGS) {
   // #39 declared additive keys only: every legacy case must parse both flags as false.
   // Preserve ALL old rows/fields/order; never regenerate or filter the frozen inputs.
   expect(settings.memory.scopes).toEqual({ session: false, hub: false });
+  // #61 declared additive leaf only: every legacy case must parse the 9th wake leaf as the
+  // default true (fabric/decision-input.ts owns the proof — the leaf alone mints nothing).
+  expect(settings.fabric.wake.decisionRequests).toBe(true);
   const { memory } = settings;
   const { scopes: _scopes, ...oldMemory } = memory;
+  const {
+    fabric: {
+      wake: { decisionRequests: _dr, ...oldWake },
+    },
+  } = settings;
   // Replace at the original memory position rather than appending it to the end.
   return Object.fromEntries(
     Object.entries(settings)
       .filter(([key]) => key !== "fast")
-      .map(([key, value]) => [key, key === "memory" ? oldMemory : value]),
+      .map(([key, value]) => [key, key === "memory" ? oldMemory : value])
+      .map(([key, value]) => [key, key === "fabric" ? { ...value, wake: oldWake } : value]),
   );
 }
 

@@ -585,3 +585,50 @@ wait then runs to its deadline; the deterministic tests gate the ask on requeste
 notes**: the T11 rig clock must be live (`Object.defineProperty(r.clock, "t", …)` — a frozen rig clock
 expires every frame after 5s), and the rig-vs-bridge member limits must match (the bridge republishes
 `xs_member`; a default 30s pair interval silently overrides the rig's).
+
+## Decision requests (#61 P0 · kernel landed, unwired)
+
+`docs/dev/fabric-decision-wake/plan.md` (r2, default-ON ruling). **P0 shipped the pure kernel
+only — no production wiring: no hooks, no tool fields, no stack/index changes. "Default on"
+grants nothing by itself.** `fabric.wake.decisionRequests` (default `true`, explicit `false`
+opt-out, 9th wake leaf, non-live) is parsed/spec'd/pinned; effective = `fabric.enabled ∧
+wake.enabled ∧ this leaf` and is only ever read by the P2 host wiring.
+
+- **Human proof port** (`src/fabric/decision-input.ts`): the ONLY authority that opens a
+  decision window is a host-observed `{sessionId, owner, inputId, provenance:"web_prompt"}`
+  (exact key set — text/role/source can never forge it); one epoch per distinct inputId, replay
+  never re-opens, bounded dedup fails closed, freeze on switch/new/fork/dispose. **Offline
+  capability evidence** (`tests/conformance/fabric-decision-input.test.ts`, real SDK + real
+  command handler): the TUI submit loop (`interactive-mode.js` → `session.prompt(text)`, no
+  options) and an arbitrary in-process `prompt()` produce **byte-identical** `input` events with
+  no unique id; generic RPC (`rpc-mode.js` prompt/steer/follow_up, all `source:"rpc"`, client
+  id) is equally indistinguishable ⇒ **both entries are provenance_unavailable — decision wake
+  is deliver-only there until the SDK exposes a trusted submission callback** (reported to
+  Root; NOT claimed supported). The web command prompt IS provable (server-side cmdId dedup +
+  digest + origin, Feishu skipped, one-shot `noteWebProof` before exactly one `sendUserMessage`)
+  — but today's proof registration is gated on xs human-enhancement; **P2 must add an
+  independent tree-only callback (decision wake must never require xs on)**.
+- **Ledger kernel** (`src/fabric/decision-wake.ts`): single-session bounded request ledger
+  (TTL 15 min, ≤32 pending, ≤256 entries/owner incl. tombstones, 2 activations per human
+  window / 1 per child), lazy activation (first legal request checkpoints proof+reservation
+  BEFORE any send; 0 writes/0 timers/0 budget while unused), publish-before-grant epoch
+  advances, at-most-once body with conservative consumption — **every dispatch attempt (body /
+  wake / reply) is persisted BEFORE the host call**, so a mid-send crash restores the body as
+  `unknown` and a reply as `reply_unknown` (slot kept, NO second steer, wake blocked; a repeated
+  id or repeated correlated resolve only reports the recorded snapshot); an attempt-persist
+  failure means 0 host call; prepare-fail is conservative fail-closed (attempt already counted,
+  no retry entry); post-dispatch none/unknown consume, never refunded, `effect_none` vs
+  `unknown` kept distinct, never "Root processed"), correlated `resolve` only (normal steer
+  resolves nothing; `reply_unknown` keeps the slot but blocks further decision wake),
+  child/owner/generation/running gates, full revoke set (child terminal, root abort, session
+  switch/new/fork, dispose), reload restores the activated high-watermark (never washed;
+  queued+attempted restores as `unknown`), one optional clamped nearest-deadline timer.
+- **Causal isolation (Root ruling a)**: the ledger has NO CausalLevel reference and never calls
+  `onDelivered`; sends go through a dedicated port; `FabricRecord.decision` (pure optional
+  metadata, `src/core/message.ts`) rides records whose persisted base `wake` is always
+  `false`. Root 0 stays 0, an L4 child stays L4, unrelated spawns inherit the old root level.
+- Gates: `tests/fabric/{decision-input,decision-wake}.test.ts` (tier1),
+  `tests/conformance/fabric-decision-input.test.ts` (tier2), updated pins in
+  `tests/config/{fabric-wake-settings,settings-corpus,setting-specs-pin}.test.ts` (the 8-leaf
+  pins legitimately became 9-leaf; the corpus is projected, NOT regenerated). P1 (delivery) and
+  P2 (host/tool/web producer) wiring stay open per the plan's DAG.

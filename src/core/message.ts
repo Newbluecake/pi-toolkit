@@ -5,6 +5,18 @@ export type NodeRef = RunId | "root" | "system";
 export type MessageKind = "progress" | "report" | "directive" | "result" | "dead_letter";
 export type MessageChannel = "context" | "display";
 
+/** #61 decision-wake plan §2.1/§4.1: pure-data metadata for a decision request record body.
+ *  Core keeps ONLY the data shape (I8: core never imports fabric, not even type-only). */
+export interface DecisionRequestMeta {
+  /** Caller-chosen stable id for the SAME logical question (1–64 `[A-Za-z0-9_-]`); the host's
+   *  real primary key adds sessionId/rootOwner/runId/generation — this id is not a credential. */
+  id: string;
+  /** sha256(hex) of the request text at FIRST admission; same id + different text ⇒ id_conflict. */
+  contentHash: string;
+  /** Persisted send-attempt ordinal (at-most-once audit; conservative consume, never refunded). */
+  attempt?: number;
+}
+
 export type MessageKey = string & { readonly __messageKey: unique symbol };
 
 /**
@@ -92,6 +104,14 @@ export interface FabricRecord extends MessageEnvelope {
   quarantined?: true;
   /** Set when the record was injected into resume run `revivedAs` (`terminalReason: "resume_injected"`). */
   revivedAs?: RunId;
+  /** #61 decision-wake (docs/dev/fabric-decision-wake/plan.md §4.1): host-stamped metadata for
+   *  an explicit blocking decision request body. PURE DATA on the record — the persisted base
+   *  wake of a decision record is ALWAYS `false` (the wake attempt rides a dedicated host
+   *  primitive in `src/fabric/decision-wake.ts`, never a record mutation to `wake:true`), and
+   *  this field is never authority: the decision budget/window lives in the host-owned ledger,
+   *  keyed by `(sessionId, rootOwner, runId, generation, id)`, so `id` here is a display/dedup
+   *  anchor, not a credential. Old readers ignore it and stay deliver-only. */
+  decision?: DecisionRequestMeta;
   deadLetter?: {
     reason: "ttl_expired" | "target_gone" | "attempts_exhausted" | "wake_refused";
     status: "issued" | "suppressed_quota" | "suppressed_sender_gone";
