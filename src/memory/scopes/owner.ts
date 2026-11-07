@@ -11,7 +11,7 @@ import { createScopedMemoryCommand, trustedNativeMemoryCommand, type NativeMemor
 import { createScopedMemoryTool } from "./tool.js";
 import { createScopedMemoryDoctor } from "./doctor.js";
 import { hubMemoryRoot } from "./hub-slot.js";
-import { sha256Hex } from "./limits.js";
+import { isMemorySid, sha256Hex } from "./limits.js";
 import type { MemoryChildManager } from "./child-bind.js";
 import type { EffectiveHubSlot, MemoryOwner, SessionWriteGate } from "./types.js";
 
@@ -31,10 +31,25 @@ export interface MemoryOwnerDeps {
   readonly remote: () => AskUserRemotePort | undefined;
   readonly gate: SessionWriteGate;
 }
+/** Missing capabilities are not an empty session. Do not construct authority or read storage.
+ * A present method that throws (including an accessor) is a host failure, not feature-off.
+ */
+export function hasMemoryManagerCapabilities(manager: unknown): manager is MemoryChildManager {
+  if (typeof manager !== "object" || manager === null) return false;
+  const candidate = manager as Partial<MemoryChildManager>;
+  return (
+    typeof candidate.getSessionId === "function" &&
+    typeof candidate.getSessionFile === "function" &&
+    typeof candidate.getBranch === "function"
+  );
+}
 export function createMemoryOwner(deps: MemoryOwnerDeps) {
   const manager = deps.manager;
+  if (!hasMemoryManagerCapabilities(manager)) return undefined;
   const sid = manager.getSessionId(),
     file = manager.getSessionFile();
+  if (!isMemorySid(sid) || (file !== undefined && typeof file !== "string"))
+    throw Error("invalid memory session identity");
   const owner: MemoryOwner = Object.freeze({
     incarnation: Object.freeze({}),
     sid,
@@ -193,4 +208,4 @@ export function createMemoryOwner(deps: MemoryOwnerDeps) {
     },
   };
 }
-export type MemoryOwnerRuntime = ReturnType<typeof createMemoryOwner>;
+export type MemoryOwnerRuntime = NonNullable<ReturnType<typeof createMemoryOwner>>;

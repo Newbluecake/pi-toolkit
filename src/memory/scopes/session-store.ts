@@ -24,7 +24,7 @@ import { SESSION_MEMORY_ENTRY_TYPE } from "./types.js";
 import { foldSessionMemory, foldCacheKey, EMPTY_FOLD } from "./session-fold.js";
 import { planSessionOp } from "./session-ops.js";
 import { renderSessionSection } from "./render.js";
-import { bodyTextDigest, scopedOpDigest, sha256Hex } from "./limits.js";
+import { bodyTextDigest, isMemorySid, scopedOpDigest, sha256Hex, validateSeedCapture } from "./limits.js";
 import {
   freezeSessionOperation,
   sameSessionOperation,
@@ -147,10 +147,29 @@ export function createSessionMemoryStore(deps: SessionMemoryStoreDeps): SessionM
   });
 
   const snapshot = (): MemorySeedCapture => {
-    const state = fold();
-    if (state.items.length === 0) return { v: 1, state: "empty" };
+    if (deps.enabled === false || deps.isLocked()) return { v: 1, state: "empty" };
+    if (disposed) throw new Error("memory session disposed");
+    const owner = { ...deps.currentOwner() };
+    const manager = readManager();
     const sid = deps.getSessionId();
-    if (sid === undefined) throw new Error("session id required for seed capture");
+    const file = deps.getSessionFile();
+    if (!isMemorySid(sid) || sid !== owner.sid || file !== owner.sessionFile)
+      throw new Error("memory session identity changed");
+    // Captures are authority-bearing: always read the real branch, not a leaf/length cache.
+    const branch = deps.getBranch();
+    if (!Array.isArray(branch)) throw new Error("invalid memory session branch");
+    const state = foldSessionMemory(branch, sid);
+    if (
+      disposed ||
+      deps.isLocked() ||
+      !sameOwner(owner, deps.currentOwner()) ||
+      readManager() !== manager ||
+      deps.getSessionId() !== sid ||
+      deps.getSessionFile() !== file
+    )
+      throw new Error("memory session changed during capture");
+    if (state.dropped.length !== 0) throw new Error("invalid memory session entries");
+    if (state.items.length === 0) return { v: 1, state: "empty" };
     const seed = deepFreeze({
       v: 1 as const,
       fromSid: sid,
@@ -161,7 +180,10 @@ export function createSessionMemoryStore(deps: SessionMemoryStoreDeps): SessionM
       })),
       nextN: state.nextN,
     });
-    return Object.freeze({ v: 1, state: "captured", seed });
+    const capture = { v: 1 as const, state: "captured" as const, seed };
+    const checked = validateSeedCapture(capture);
+    if (!checked.ok) throw new Error(`memory seed capture failed: ${checked.reason}`);
+    return Object.freeze(capture);
   };
 
   const enqueue = (

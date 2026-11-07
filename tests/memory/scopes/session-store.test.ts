@@ -529,6 +529,46 @@ describe("snapshot (seed capture seam for P2)", () => {
     }
   });
 
+  it.each(["sid", "file", "owner", "manager"] as const)(
+    "%s changes during branch read reject even an empty capture",
+    (change) => {
+      const h = harness();
+      let sid = h.owner.sid,
+        file = h.owner.sessionFile;
+      const store = createSessionMemoryStore({
+        ...h.deps,
+        getSessionId: () => sid,
+        getSessionFile: () => file,
+        getBranch: () => {
+          if (change === "sid") sid = "other-session";
+          if (change === "file") file = "/other-session.json";
+          if (change === "owner") h.setOwner({ ...h.owner, incarnation: {} });
+          if (change === "manager") h.setManager({});
+          return [];
+        },
+      });
+      expect(() => store.snapshot()).toThrow("memory session changed during capture");
+      expect(h.appendAttempts()).toBe(0);
+      store.dispose();
+    },
+  );
+
+  it("capture bypasses a warm fold cache and refuses malformed branches/entries or illegal seeds", async () => {
+    const h = harness();
+    await h.store.enqueue(agentPut("valid", h.owner));
+    expect(h.store.view().items).toHaveLength(1);
+    // Same leaf and length are insufficient evidence for an authority-bearing capture.
+    h.branch[0] = { type: "custom", customType: SESSION_MEMORY_ENTRY_TYPE, data: { v: 1, op: "bad" } };
+    expect(() => h.store.snapshot()).toThrow("invalid memory session entries");
+    const badBranch = createSessionMemoryStore({ ...h.deps, getBranch: () => undefined as unknown as unknown[] });
+    expect(() => badBranch.snapshot()).toThrow("invalid memory session branch");
+    h.branch.length = 0;
+    seedHighWatermark(h);
+    expect(() => h.store.snapshot()).toThrow("memory seed capture failed");
+    h.store.dispose();
+    badBranch.dispose();
+  });
+
   it("the fold cache is transparent: repeated view() calls agree with the branch", async () => {
     const h = harness();
     await h.store.enqueue(agentPut("a", h.owner));

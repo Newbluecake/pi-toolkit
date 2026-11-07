@@ -228,3 +228,25 @@ scopes-on child 的 Jev 实验经过真实 wireMemory→wireJev：A cooldown 写
 command-capture 环境拒写、最终 Web transport scoped deny、普通 prompt 保持原语义；native add/rm 无
 额外框，restore/adopt 各一个完整框。三条实际 Stack teardown entry 在不合作 popup 下同步首先关闭本
 owner。secure/locked 测试只用 fake mountinfo 的实际 activate/SDK construction，不声称真实挂载验收。
+
+### #39 默认开启后的宿主能力边界（2026-11-08）
+
+- `owner.ts` / `wire.ts` 在构造 owner、解析 Hub paths、创建 poison/授权状态之前检查实际 manager：
+  `sessionManager` 缺失，或 `getSessionId` / `getSessionFile` / `getBranch` 不是方法时，返回
+  `undefined`、不发布 group/runtime/store。Stack 因没有 session port 而不安装 parent/workflow
+  捕获端口；不是伪造 `state:empty`、不是要求上游 try/catch，也不会阻断其他 session hooks。
+  `getSessionFile()` **存在且返回 undefined** 是合法 memory-only 会话，不等同于方法缺失。
+  `getLeafId` 仍只是可选缓存提示，不是准入能力。
+- 仅“能力缺失”可以 effective-off：存在的方法/访问器抛错、非法 sid/file、已绑定 owner 的
+  sid/file/manager/epoch/tree 变化都不允许变成空继承。旧 owner 在能力丢失时被撤销，已持有旧
+  捕获端口的调用仍拒绝；新完整上下文可建立新 owner，不能复活旧授权。
+  例外（既有行为，本包未收紧）：`wire.ts` 的 `context()` 刷新路径整体 `catch`，能力探测之后的真实
+  getter 异常也会降级为 dispose + effective-off，而不是上抛；严谨性要求落在 `open()`/捕获/seed
+  路径上（那三处没有兜底 catch）。
+- `session-store.snapshot()` 在未锁定/未关闭时读取真实 branch（绕过 fold 缓存），前后复核
+  owner/实际 manager/sid/file；branch 必须为数组，坏 scoped entry（fold 的 dropped）和非法
+  seed（包括编号耗尽）拒绝捕获。合法空 branch 才返回 `state:empty`；locked/off 维持零 branch
+  读取的旧契约。普通只读 view 的宽容折叠、持久化 poison/恢复协议不变。
+- 此兼容修复不兜底其他子系统的直接 manager 调用，也不放宽“每次返回随机 sid”的宿主夹具。
+  独立的 launcher 版本夹具、Fast hook/identity 与 bundle 契约问题须单独归因；不得靠这里吞掉
+  真实异常或关闭产品默认值使其假绿。

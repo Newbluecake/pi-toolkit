@@ -30,7 +30,7 @@ function owner(
     commandContext: () => ({ mode: "unknown", hasUI: false, isWeb: false }),
     remote: () => undefined,
     gate: { check: () => ({ ok: true }) },
-  });
+  })!;
 }
 describe("actual manager owner production factory", () => {
   it("a manager without a leaf hint still reads and captures its real session memory", async () => {
@@ -55,29 +55,57 @@ describe("actual manager owner production factory", () => {
     }
   });
 
-  it.each(["getSessionId", "getBranch"] as const)("%s failures still refuse parent capture", (method) => {
-    const manager = SessionManager.inMemory("/owned");
-    Object.defineProperty(manager, "getLeafId", { value: undefined });
-    const r = owner(manager, "created");
-    const group: MemoryScopesGroup = {
-      runtime: () => r,
-      childBinding: {},
-      gate: { check: () => ({ ok: true }) },
-      dispose: () => r.dispose(),
-    };
-    try {
-      expect(captureMemorySeed(group, {})).toEqual({ v: 1, state: "empty" });
+  it.each(["getSessionId", "getSessionFile", "getBranch"] as const)(
+    "%s failures still refuse parent capture",
+    (method) => {
+      const manager = SessionManager.inMemory("/owned");
+      Object.defineProperty(manager, "getLeafId", { value: undefined });
+      const r = owner(manager, "created");
+      const group: MemoryScopesGroup = {
+        runtime: () => r,
+        childBinding: {},
+        gate: { check: () => ({ ok: true }) },
+        dispose: () => r.dispose(),
+      };
+      try {
+        expect(captureMemorySeed(group, {})).toEqual({ v: 1, state: "empty" });
+        Object.defineProperty(manager, method, {
+          value: () => {
+            throw Error(`actual ${method} failed`);
+          },
+        });
+        expect(() => captureMemorySeed(group, {})).toThrow(
+          method === "getBranch" ? "actual getBranch failed" : "memory parent unavailable",
+        );
+      } finally {
+        r.dispose();
+      }
+    },
+  );
+
+  it.each(["getSessionId", "getSessionFile", "getBranch"] as const)(
+    "missing %s is effective-off rather than an empty captured session",
+    (method) => {
+      const manager = SessionManager.inMemory("/owned");
+      Object.defineProperty(manager, method, { value: undefined });
+      expect(owner(manager, "created")).toBeUndefined();
+    },
+  );
+
+  it("a missing manager is effective-off; present failing identity methods are not", () => {
+    expect(owner(undefined as unknown as SessionManager, "created")).toBeUndefined();
+    for (const method of ["getSessionId", "getSessionFile"] as const) {
+      const manager = SessionManager.inMemory("/owned");
       Object.defineProperty(manager, method, {
         value: () => {
-          throw Error(`actual ${method} failed`);
+          throw Error(`real ${method} failure`);
         },
       });
-      expect(() => captureMemorySeed(group, {})).toThrow(
-        method === "getSessionId" ? "memory parent unavailable" : "actual getBranch failed",
-      );
-    } finally {
-      r.dispose();
+      expect(() => owner(manager, "created")).toThrow(`real ${method} failure`);
     }
+    const manager = SessionManager.inMemory("/owned");
+    Object.defineProperty(manager, "getSessionId", { value: () => undefined });
+    expect(() => owner(manager, "created")).toThrow("invalid memory session identity");
   });
 
   it("buffered append uses original object, same stable owner, once-only poison recovery only on actual reopen", async () => {

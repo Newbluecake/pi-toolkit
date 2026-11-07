@@ -5,8 +5,8 @@ import type { AskUserRemotePort } from "../../ask-user/remote.js";
 import { isWebInvocation } from "../../commands/capture.js";
 import { createHumanDispatchHookOwner, type HumanDispatchBridge } from "../../web-hub/agent/human-dispatch-proof.js";
 import { resolveHubSlot } from "./hub-slot.js";
-import { receiveMemoryChildBinding, type MemoryBindRequest, type MemoryChildManager } from "./child-bind.js";
-import { createMemoryOwner, type MemoryOwnerRuntime } from "./owner.js";
+import { receiveMemoryChildBinding, type MemoryBindRequest } from "./child-bind.js";
+import { createMemoryOwner, hasMemoryManagerCapabilities, type MemoryOwnerRuntime } from "./owner.js";
 import type { EffectiveHubSlot, SessionWriteGate } from "./types.js";
 
 export interface MemoryScopesGroup {
@@ -79,8 +79,14 @@ export function wireMemoryScopes(
       group?.dispose();
     },
   };
-  function open(manager: MemoryChildManager, reason: string, inherited?: EffectiveHubSlot) {
+  function open(manager: unknown, reason: string, inherited?: EffectiveHubSlot) {
     group?.dispose();
+    group = undefined;
+    runtime = undefined;
+    activeTree = undefined;
+    // Capability absence is effective-off, before paths/poison/authority are constructed.
+    // Do not catch real manager failures here or turn them into an empty inheritance seed.
+    if (!hasMemoryManagerCapabilities(manager)) return undefined;
     epoch++;
     tree = 0;
     const paths = !inherited && opts.settings.scopes.hub ? opts.hubPaths() : undefined;
@@ -124,6 +130,7 @@ export function wireMemoryScopes(
       });
     // Factory reads owner before publication only for recovery. isCurrent is exact group-local live identity.
     owned = build(reason);
+    if (!owned) return undefined;
     runtime = owned;
     const thisGroup: MemoryScopesGroup = {
       childBinding: Object.freeze(slot ? { frozenParentHubSlot: slot } : {}),
@@ -152,6 +159,13 @@ export function wireMemoryScopes(
   function context(next: ExtensionContext) {
     try {
       const manager = next.sessionManager;
+      if (!hasMemoryManagerCapabilities(manager)) {
+        group?.dispose();
+        group = undefined;
+        activeTree = undefined;
+        ctx = next;
+        return;
+      }
       if (
         !runtime ||
         manager !== runtime.manager ||
@@ -163,8 +177,8 @@ export function wireMemoryScopes(
           return;
         }
         ctx = next;
-        const opened = open(manager as MemoryChildManager, "context");
-        activeTree = opened.tree;
+        const opened = open(manager, "context");
+        activeTree = opened?.tree;
       }
       ctx = next;
     } catch {
@@ -176,9 +190,9 @@ export function wireMemoryScopes(
     receiverOff = receiveMemoryChildBinding(pi.events, (request) => {
       childRequest = request;
       const opened = open(request.manager, request.reason, request.frozenParentHubSlot);
-      activeTree = opened.tree;
+      activeTree = opened?.tree;
       return () => {
-        opened.group.dispose();
+        opened?.group.dispose();
         if (childRequest === request) {
           ctx = undefined;
           childRequest = undefined;
@@ -189,8 +203,8 @@ export function wireMemoryScopes(
     // These precede the bridge hooks (and every downstream handled/reentrant interceptor).
     pi.on("session_start", (event, next) => {
       ctx = next;
-      const opened = open(next.sessionManager as MemoryChildManager, event.reason);
-      activeTree = opened.tree;
+      const opened = open(next.sessionManager, event.reason);
+      activeTree = opened?.tree;
     });
     pi.on("input", (_event, next) => {
       context(next);

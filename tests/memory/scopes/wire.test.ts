@@ -73,6 +73,60 @@ describe("scopes activation group", () => {
       );
     }
   });
+  it.each(["manager", "getSessionId", "getSessionFile", "getBranch"] as const)(
+    "missing %s leaves no parent/workflow capture port or authority and preserves unrelated hooks",
+    async (missing) => {
+      const pi = fakePi();
+      const paths = vi.fn(() => ({ stateDir: "/must-not-read" }));
+      const wiring = wireMemoryScopes(pi.pi, {
+        settings: { ...DEFAULT_MEMORY_SETTINGS, scopes: { session: true, hub: true } },
+        child: false,
+        domain: "plain",
+        gate: { check: () => ({ ok: true }) },
+        locked: () => false,
+        remote: () => undefined,
+        hubPaths: paths,
+      })!;
+      const manager = SessionManager.inMemory("/owned");
+      const branch = vi.spyOn(manager, "getBranch");
+      if (missing !== "manager") Object.defineProperty(manager, missing, { value: undefined });
+      const ctx = context(missing === "manager" ? (undefined as unknown as SessionManager) : manager);
+      const downstream = vi.fn();
+      pi.pi.on("session_start", downstream);
+      try {
+        await emitAll(pi, "session_start", { type: "session_start", reason: "startup" }, ctx);
+        expect(downstream).toHaveBeenCalledTimes(1);
+        expect(wiring.current()).toBeUndefined();
+        expect(wiring.group()).toBeUndefined();
+        for (const event of ["input", "before_agent_start", "agent_start", "session_tree"]) {
+          await emitAll(pi, event, { type: event }, ctx);
+          expect(wiring.current()).toBeUndefined();
+          expect(wiring.group()).toBeUndefined();
+        }
+        expect(paths).not.toHaveBeenCalled();
+        expect(branch).not.toHaveBeenCalled();
+        expect((await wiring.command("session add no-authority", ctx)).result).toEqual({
+          ok: false,
+          code: "E_STALE_SESSION",
+        });
+      } finally {
+        wiring.dispose();
+      }
+    },
+  );
+
+  it("loss of manager revokes the exact old owner; a later complete context can open a new one", async () => {
+    const h = harness();
+    await emitAll(h.pi, "session_start", { type: "session_start", reason: "startup" }, h.ctx);
+    const old = h.wiring.current()!;
+    h.wiring.context(context(undefined as unknown as SessionManager));
+    expect(old.signal.aborted).toBe(true);
+    expect(h.wiring.group()).toBeUndefined();
+    h.wiring.context(h.ctx);
+    expect(h.wiring.current()!.owner.incarnation).not.toBe(old.owner.incarnation);
+    h.wiring.dispose();
+  });
+
   it("ordinary leaf keeps owner; tree rotates and exact old-group teardown cannot revoke replacement", async () => {
     const h = harness();
     await emitAll(h.pi, "session_start", { type: "session_start", reason: "startup" }, h.ctx);
