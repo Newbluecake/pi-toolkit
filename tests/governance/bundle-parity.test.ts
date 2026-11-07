@@ -204,12 +204,21 @@ const ALL_OFF = {
   cacheTtl: { enabled: false },
 };
 
+/**
+ * #39 (2026-11-08): memory scopes default ON, registering `scoped_memory` in the main session.
+ * The three fabric off-goldens (xs / thread / thread-rebind) pin the pre-#39 registration surface,
+ * so their bundle-parity inputs keep scopes explicitly off — the same posture their src-path tests
+ * take in 3fd61779. The frozen fixture JSON never changes. (schedule-off uses BASELINE's
+ * `memory.enabled:false`, which suppresses the scopes wire entirely, so it needs no extra pin.)
+ */
+const SCOPES_OFF = { memory: { scopes: { session: false, hub: false } } };
+
 const offScenarios = [
   ...Object.entries(SECURE_GOLDEN.scenarios).map(([name, settings]) => ({
     name: `secure-off:${name}`,
     settings,
   })),
-  { name: "off:xs-off", settings: null }, // DEFAULT settings — the fabric-xs-off golden's input
+  { name: "off:xs-off", settings: SCOPES_OFF }, // pre-#39 DEFAULT surface — the fabric-xs-off golden's input
   { name: "off:wake-off", settings: { fabric: { enabled: true, wake: { enabled: false } } } },
   {
     name: "off:xs-reply-off",
@@ -220,10 +229,10 @@ const offScenarios = [
   // tests write the same input), so these two legacy-contract inputs must isolate Fast the same
   // way. Parity rows are unaffected — all three paths run the same scenario input.
   { name: "off:schedule-off", settings: { ...BASELINE, fast: { enabled: false } }, replay: "schedule" as const },
-  { name: "off:thread-off", settings: { fabric: { enabled: true } } },
+  { name: "off:thread-off", settings: { fabric: { enabled: true }, ...SCOPES_OFF } },
   {
     name: "off:thread-rebind-off",
-    settings: { fabric: { enabled: true, threads: { enabled: true } }, fast: { enabled: false } },
+    settings: { fabric: { enabled: true, threads: { enabled: true } }, fast: { enabled: false }, ...SCOPES_OFF },
   },
   { name: "off:all-off", settings: ALL_OFF },
 ];
