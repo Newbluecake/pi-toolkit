@@ -25,6 +25,9 @@ import {
   RunWatchSchema,
 } from "./run-transcript.js";
 import type { LanStatus } from "./lan.js";
+// tokens-speed (task58): `WireEntry.piToolkitGeneration` type lives in protocol/message-generation.ts
+// (its own module); only the type is folded in here — runtime stays in keys.ts condition-spread.
+import type { GenerationMetadata } from "./message-generation.js";
 // feishu-bot plan §9 (F0): `fsb_req`/`fsb_res` schemas + types live in protocol/feishu.ts; only folded in here.
 import { type FsbReqFrame, FsbReqSchema, type FsbResFrame, FsbResSchema } from "./feishu.js";
 import {
@@ -202,6 +205,12 @@ export interface WireEntry {
    *  (kind ∈ first|cross-day|idle) so the web divider can label the injection. Absent on every
    *  other entry shape; old entries without details degrade to a content-only parse. */
   details?: { date?: string; kind?: string; at?: number };
+  /** tokens-speed (task58): `subagent:web-msg-speed` custom(data) entries carry the sanitized
+   *  `{v,tokens,genMs,deltaCount,mid}` generation metadata here (the entry otherwise stays a
+   *  display:false tombstone; the projection lives in protocol/keys.ts condition-spread).
+   *  Absent on every other entry shape. `WireEntrySchema` stays open — timing/cmd precedent —
+   *  so an old hub forwards the field verbatim; no PROTO bump. */
+  piToolkitGeneration?: GenerationMetadata;
   display?: boolean;
   truncated?: boolean;
   provider?: string; // model_change

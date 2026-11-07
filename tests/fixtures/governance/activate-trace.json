@@ -817,6 +817,8 @@
       "events.on(subagent:workflow:settled)",
       "on(session_start)",
       "on(session_shutdown)",
+      "on(provider_stream_event)",
+      "registerEntryRenderer(subagent:web-msg-speed)",
       "on(session_before_compact)",
       "on(session_compact)",
       "on(session_compact_failed)",
@@ -865,7 +867,7 @@
       "on(session_shutdown)",
       "registerCommand(topic-switch)"
     ],
-    "count": 254,
+    "count": 256,
     "phase2": [
       "ui.setStatus(claude-code-todo-status:clear)",
       "ui.setStatus(cache-ttl:clear)",
@@ -1209,6 +1211,8 @@
       "events.on(subagent:workflow:settled)",
       "on(session_start)",
       "on(session_shutdown)",
+      "on(provider_stream_event)",
+      "registerEntryRenderer(subagent:web-msg-speed)",
       "on(session_before_compact)",
       "on(session_compact)",
       "on(session_compact_failed)",
@@ -1251,7 +1255,7 @@
       "on(session_shutdown)",
       "registerCommand(topic-switch)"
     ],
-    "count": 250,
+    "count": 252,
     "phase2": [
       "ui.setStatus(claude-code-todo-status:clear)",
       "ui.setStatus(cache-ttl:clear)",

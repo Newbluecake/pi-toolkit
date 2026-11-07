@@ -27,6 +27,7 @@
 - Registry epoch 刷新与 epoch.up.v1（#23）
 - Outdated reload 状态机（#23）
 - Reload 结果回传 `status.reload`（#30）
+- 助手回复 tokens/s（task58）
 
 ## 概述与 P2 control-plane
 
@@ -793,4 +794,33 @@ logic/signature; only its caller header changed.
 
 Tests: `tests/web-hub/ui/{hold-stop,stop-button,context-ring,composer,use-control}.test.ts`.
 Design, compiled-App evidence and manual physical-device/AT limits:
-`docs/dev/hold-stop/{plan,runtime-notes}.md`. No wire/settings/backend/schema changes.
+`docs/dev/hold-stop/{plan,runtime-notes}.md`. No wire/settings/schema changes.
+
+## 助手回复 tokens/s（task58 P1，backend/protocol 已合，UI 未上线）
+
+实现状态（截至 P1 精确合主 7f064822）：agent 侧观测/证明与 protocol 契约已实装并合入主
+干（`src/web-hub/agent/{message-speed,message-speed-wire,message-speed-binding,event-tap}.ts`、
+`src/web-hub/protocol/message-generation.ts`、`keys.ts` 白名单投影）；UI 包（P2/P3）尚未合并，
+**不得视为已上线**。设计定稿见 `docs/dev/web-hub-tokens-speed/plan.md`（r3.1 Root gate）。
+
+- **计时/信任**：分母为原始摄取点首个→最后一个非空 `text|thinking|toolcall` delta 的
+  `performance.now()` 窗口（delta-only，无合并后观测）；分子固定 SDK `usage.output`。
+  正向证明（A）仅接受归一化前公开 provider stream event 严格
+  `response.completed` + 自有非空 `response.id`/`output_tokens`/
+  `output_tokens_details.reasoning_tokens`（number 且严格 0）并与最终
+  `AssistantMessage.responseId` 关联；**normalized 0 不是证据**，缺失/unknown/redacted/
+  summary 一律隐藏。证据 B（完整原生 thinking）**本期恒 false**——推理模型 summary-only
+  或不能证明完整观测的均 hide，不承诺推理模型出数。无 delta/一次性返回/短窗口
+  （<2 delta 或 <500ms）/streaming 中均无数字。abort/error 无正向证明自然隐藏；
+  已发 live 不因 turn_end 未到而撤销，仅不持久。
+- **持久 metadata 机制**：主 session metadata 持久化（显式 `turn_end.messageEntryId`
+  mid，exact 最终对象引用 + 当前 ctx/session/loop/message generation + owner token 同步
+  recheck，不匹配只跳过不写）；child/run 详情仅 live，旧历史不回填（recent 不兜底）。
+  wire 唯一容器为 `WireEntry.piToolkitGeneration`（类型见 `protocol/messages.ts`，纯 optional
+  追加，`WireEntrySchema` 开放、无 PROTO bump；投影在 `keys.ts` 条件展开，历史 map 上限
+  512 已加载 entries）。`subagent:web-msg-speed` custom(data) 是 display:false 墓碑，
+  旧 UI 不渲染。
+- **边界**：不做收费/GPU 真实吞吐/字符估算/端到端兑底承诺，也不声称一般流式均支持
+  tokens/s 显示（仅上述完整可观测窗口）；child 无公开 raw 端口，保守 hide 且永不 append。
+  tests: `tests/web-hub/agent/{message-speed,message-speed-p0,wiring-message-speed}.test.ts`、
+  `tests/web-hub/protocol/message-generation.test.ts`。
