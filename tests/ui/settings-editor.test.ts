@@ -129,7 +129,7 @@ describe("SettingsEditorModel navigation", () => {
     expect(byKey.get("workflow.budget.gateS")?.value).toBe(String(DEFAULT_WORKFLOW_BUDGET.gateMs / 1000));
     expect(byKey.get("workflow.journalDir")?.value).toBe("(unset)");
     // timeout-notify: the new grace/extension knobs are visible with second-valued defaults
-    expect(byKey.get("budget.totalGraceS")?.value).toBe("90");
+    expect(byKey.get("budget.totalGraceS")?.value).toBe("600");
     expect(byKey.get("budget.maxExtensions")?.value).toBe("3");
     expect(byKey.get("budget.maxTotalFactor")?.value).toBe("2");
     expect(byKey.get("extend.enabled")?.value).toBe("true");
@@ -415,8 +415,8 @@ describe("renderSettingsEditor", () => {
   it("shows each row's description and the seconds unit on duration values", () => {
     const model = new SettingsEditorModel(store());
     focus(model, "concurrencyLimit");
-    // 窗口以焦点行为中心；budget 块随新键增加而变长，窗口必须足够大才能同时看到 idleS。
-    const text = renderSettingsEditor(model.snapshot(), { width: 120, maxVisible: 28 }).join("\n");
+    // 窗口以焦点行为中心；budget 块随新键增加而变长（含 minTotalS），窗口必须足够大才能同时看到 idleS。
+    const text = renderSettingsEditor(model.snapshot(), { width: 120, maxVisible: 34 }).join("\n");
     expect(text).toContain("Max silence between session events");
     expect(text).toMatch(/budget\.idleS\s+240s/);
     // non-time values carry no unit
