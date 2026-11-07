@@ -21,7 +21,7 @@ import {
  * file key is silently ignored — field-by-field tolerant parsing.)
  */
 export interface MemorySettings {
-  /** #39 opt-in scopes. Non-live; off leaves runtime ports/hooks/sections absent. */
+  /** #39 scopes default on. Non-live; explicit off leaves runtime ports/hooks/sections absent. */
   scopes: { session: boolean; hub: boolean };
   /** 总开关。false = 不注册注入 hook、memory 工具、/mem 命令。Default true（融合后原插件被卸载，默认关=升级即功能消失，merge-plan D2 哲学）。 */
   enabled: boolean;
@@ -459,7 +459,7 @@ export function parseMemorySettings(input: unknown): MemorySettings {
 }
 
 export const DEFAULT_MEMORY_SETTINGS: MemorySettings = {
-  scopes: { session: false, hub: false },
+  scopes: { session: true, hub: true },
   enabled: true,
   injectInChildSessions: true,
   allowWriteInChildSessions: false,

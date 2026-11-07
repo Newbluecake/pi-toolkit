@@ -6,7 +6,7 @@
  * session-nav", "topic-switch input last" all depend on the order of `pi.on / registerTool / ...` inside
  * `activate()`. The other goldens only pin tool order, command order and per-event handler COUNTS.
  *
- * Phase 1: the ordered calls of a real `activate()` on a recording pi (5 profiles).
+ * Phase 1: the ordered calls of a real `activate()` on a recording pi (declared profiles).
  * Phase 2: the externally visible calls (`sendMessage`, `appendEntry`, `setStatus`, `setWidget`, `notify`,
  *          `addAutocompleteProvider`) of session_start(startup) → session_shutdown(new) → session_start(new).
  * `count` / `phase2Count` are asserted separately from the arrays.
@@ -50,13 +50,22 @@ afterEach(() => {
 
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 
-async function record(name: ProfileName, fastDisabled = false): Promise<Entry> {
+async function record(name: ProfileName, historicalOff = false): Promise<Entry> {
   const profile = PROFILES[name];
   const box = sandbox("pi-trace-");
   try {
     resetGlobals();
     resetSecureDomainForTests();
-    box.writeSettings(fastDisabled ? { ...(profile.settings as object), fast: { enabled: false } } : profile.settings);
+    const settings = profile.settings as { memory?: object };
+    box.writeSettings(
+      historicalOff
+        ? {
+            ...settings,
+            fast: { enabled: false },
+            memory: { ...settings.memory, scopes: { session: false, hub: false } },
+          }
+        : settings,
+    );
     if (profile.child) (globalThis as Record<symbol, unknown>)[HOST_KEY] = { activatedAt: 1 };
     const handlers = new Map<string, Array<(e: unknown, c: unknown) => unknown>>();
     const trace = traceActivation(activate, {
@@ -101,11 +110,13 @@ async function record(name: ProfileName, fastDisabled = false): Promise<Entry> {
 
 describe("activation call-trace golden", () => {
   const names = Object.keys(PROFILES) as ProfileName[];
-  it("explicit fast:false retains the pre-wiring SDK1.5 trace bytes", async () => {
+  it("explicit fast:false and scopes-off retain the historical SDK1.5 trace bytes", async () => {
     const actual: Record<string, Entry> = {};
-    for (const name of names) actual[name] = await record(name, true);
+    const historicalNames = names.filter((name) => name !== "scopes-on-child");
+    for (const name of historicalNames) actual[name] = await record(name, true);
     const golden = JSON.parse(readFileSync(FIXTURE, "utf8")) as Record<string, Entry>;
-    for (const name of names) expect(actual[name], name).toEqual(golden[name === "default" ? "fast-disabled" : name]);
+    for (const name of historicalNames)
+      expect(actual[name], name).toEqual(golden[name === "default" ? "fast-disabled" : name]);
     // Optional pre-implementation capture: never regenerate it after wiring. Includes all seven old profiles.
     const path = process.env.PI_TOOLKIT_FAST_OFF_BASELINE;
     if (path) {
@@ -135,6 +146,18 @@ describe("activation call-trace golden", () => {
       expect(g.calls.length).toBe(g.count);
       expect(g.phase2.length).toBe(g.phase2Count);
     }
+  });
+
+  it("default scopes-on child registers its receiver but no human proof hooks", async () => {
+    const child = await record("scopes-on-child");
+    expect(child.calls.slice(0, 3)).toEqual([
+      "events.on(subagent:memory-bind)",
+      "on(session_tree)",
+      "registerTool(scoped_memory)",
+    ]);
+    expect(child.calls.filter((c) => c === "registerTool(scoped_memory)")).toHaveLength(1);
+    expect(child.calls).not.toContain("on(input)");
+    expect(child.calls).not.toContain("on(agent_start)");
   });
 
   it("is deterministic across two recordings", async () => {

@@ -13,7 +13,7 @@ const defaults = DEFAULT_SETTINGS.memory;
 describe("memory settings", () => {
   it("pins the P5 defaults (tiered injection + v2 tool surface)", () => {
     expect(defaults).toEqual({
-      scopes: { session: false, hub: false },
+      scopes: { session: true, hub: true },
       enabled: true,
       injectInChildSessions: true,
       allowWriteInChildSessions: false,
@@ -877,21 +877,37 @@ describe("memory settings", () => {
   });
 });
 
-describe("#39 declared opt-in scopes settings (no runtime wiring)", () => {
-  it("defaults off, parses independently and tolerates malformed blocks/values", () => {
-    expect(loadSettings({}).memory.scopes).toEqual({ session: false, hub: false });
+describe("#39 default-on scopes settings", () => {
+  it("defaults on, respects explicit overrides and tolerates malformed blocks/values", () => {
+    expect(loadSettings({}).memory.scopes).toEqual({ session: true, hub: true });
     expect(loadSettings({ memory: { scopes: { session: true, hub: true } } }).memory.scopes).toEqual({
       session: true,
       hub: true,
     });
-    expect(loadSettings({ memory: { scopes: { session: true, hub: "true" } } }).memory.scopes).toEqual({
+    expect(loadSettings({ memory: { scopes: { session: false, hub: false } } }).memory.scopes).toEqual({
+      session: false,
+      hub: false,
+    });
+    expect(loadSettings({ memory: { scopes: { session: false } } }).memory.scopes).toEqual({
+      session: false,
+      hub: true,
+    });
+    expect(loadSettings({ memory: { scopes: { hub: false } } }).memory.scopes).toEqual({
+      session: true,
+      hub: false,
+    });
+    expect(loadSettings({ memory: { scopes: { session: false, hub: "true" } } }).memory.scopes).toEqual({
+      session: false,
+      hub: true,
+    });
+    expect(loadSettings({ memory: { scopes: { session: "false", hub: false } } }).memory.scopes).toEqual({
       session: true,
       hub: false,
     });
     for (const scopes of [null, [], 1, "true"])
-      expect(loadSettings({ memory: { scopes } }).memory.scopes).toEqual({ session: false, hub: false });
-    // memory.enabled remains the runtime prerequisite; P0 does not implement runtime ports.
-    const off = loadSettings({ memory: { enabled: false, scopes: { session: true, hub: true } } });
+      expect(loadSettings({ memory: { scopes } }).memory.scopes).toEqual({ session: true, hub: true });
+    // memory.enabled remains the runtime prerequisite, without changing parsed scopes.
+    const off = loadSettings({ memory: { enabled: false } });
     expect(off.memory.enabled).toBe(false);
     expect(off.memory.scopes).toEqual({ session: true, hub: true });
   });

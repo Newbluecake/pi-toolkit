@@ -74,7 +74,7 @@ if (process.env.GOV_SPECS_GENERATE === "1") {
         expect(SETTING_SPECS[path]?.kind).toBe("boolean");
         expect(SETTING_SPECS[path]?.path).toBe(path);
         expect(SETTING_SPECS[path]?.live).toBeUndefined();
-        expect(defaultOf(SETTING_SPECS[path]!)).toBe(false);
+        expect(defaultOf(SETTING_SPECS[path]!)).toBe(true);
       }
       expect(SETTING_SPECS["fast.enabled"]).toEqual({
         kind: "boolean",

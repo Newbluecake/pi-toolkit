@@ -277,9 +277,9 @@ function stripRetired(template: unknown, retiredPaths: readonly string[]): unkno
  * generator continues to use the unprojected result; no corpus/template/hash is refreshed. */
 function withoutFast(settings: typeof DEFAULT_SETTINGS, input?: unknown) {
   expect(settings.fast).toEqual({ enabled: true });
-  // #39 declared additive keys only: every legacy case must parse both flags as false.
+  // #39 declared additive keys only: every legacy case now parses both flags as true.
   // Preserve ALL old rows/fields/order; never regenerate or filter the frozen inputs.
-  expect(settings.memory.scopes).toEqual({ session: false, hub: false });
+  expect(settings.memory.scopes).toEqual({ session: true, hub: true });
   // #61 declared additive leaf only: every legacy case must parse the 9th wake leaf as the
   // default true (fabric/decision-input.ts owns the proof — the leaf alone mints nothing).
   expect(settings.fabric.wake.decisionRequests).toBe(true);

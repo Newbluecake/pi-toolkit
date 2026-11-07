@@ -12,7 +12,15 @@
 import { BASELINE } from "../integration/helpers/schedule-activate.js";
 
 export type ProfileName =
-  "fast-disabled" | "default" | "minimal" | "max" | "child" | "compat-failure" | "thread-main" | "thread-child";
+  | "fast-disabled"
+  | "default"
+  | "minimal"
+  | "max"
+  | "child"
+  | "compat-failure"
+  | "thread-main"
+  | "thread-child"
+  | "scopes-on-child";
 
 /**
  * Pinned `quota.providers` for the phase-2 profiles (see the header note). The trace HOME carries no `auth.json`,
@@ -24,15 +32,29 @@ export type ProfileName =
  */
 const QUOTA_PIN = { providers: "zai-coding-cn,zai,kimi-coding,droid" } as const;
 
+// #39 product defaults are on. Historical profiles retain their explicit scopes-off bytes.
+const SCOPES_OFF = { scopes: { session: false, hub: false } } as const;
+
 export const PROFILES: Record<
   ProfileName,
   { settings: unknown; child?: true; omit?: readonly string[]; phase2: boolean }
 > = {
   default: { settings: { quota: { ...QUOTA_PIN } }, phase2: true },
-  // Fast default-enabled is intentional only in the default profile. Historical profiles
-  // explicitly disable this new feature to retain their original registration/phase2 bytes.
-  "fast-disabled": { settings: { quota: { ...QUOTA_PIN }, fast: { enabled: false } }, phase2: true },
-  minimal: { settings: { ...BASELINE, fast: { enabled: false }, quota: { ...QUOTA_PIN } }, phase2: true },
+  // Fast/scopes default-enabled is intentional only in the default profiles. Historical
+  // profiles explicitly disable these features to retain their registration/phase2 bytes.
+  "fast-disabled": {
+    settings: { quota: { ...QUOTA_PIN }, fast: { enabled: false }, memory: { ...SCOPES_OFF } },
+    phase2: true,
+  },
+  minimal: {
+    settings: {
+      ...BASELINE,
+      memory: { ...BASELINE.memory, ...SCOPES_OFF },
+      fast: { enabled: false },
+      quota: { ...QUOTA_PIN },
+    },
+    phase2: true,
+  },
   max: {
     settings: {
       fast: { enabled: false },
@@ -58,7 +80,7 @@ export const PROFILES: Record<
       topicSwitch: { enabled: true },
       askUser: { enabled: true },
       todo: { enabled: true, nudge: { enabled: true } },
-      memory: { enabled: true },
+      memory: { enabled: true, ...SCOPES_OFF },
       webSearch: { enabled: true },
       title: { enabled: true },
       hud: { enabled: true },
@@ -69,8 +91,18 @@ export const PROFILES: Record<
     },
     phase2: true,
   },
-  child: { settings: { ...BASELINE, fast: { enabled: false } }, child: true, phase2: false },
-  "compat-failure": { settings: { ...BASELINE, fast: { enabled: false } }, omit: ["appendEntry"], phase2: false },
+  child: {
+    settings: { ...BASELINE, memory: { ...BASELINE.memory, ...SCOPES_OFF }, fast: { enabled: false } },
+    child: true,
+    phase2: false,
+  },
+  "compat-failure": {
+    settings: { ...BASELINE, memory: { ...BASELINE.memory, ...SCOPES_OFF }, fast: { enabled: false } },
+    omit: ["appendEntry"],
+    phase2: false,
+  },
+  // Independent child default surface: receiver and sections, never main-only human proof hooks.
+  "scopes-on-child": { settings: { quota: { ...QUOTA_PIN } }, child: true, phase2: false },
   // fabric-thread arch §9.3 (P0): the two thread profiles. `thread-main` turns on every switch
   // `max` can run offline PLUS fabric.threads (still inert in P0 — the main-session `thread` tool
   // and the hello cap arrive in P3, so today's trace must be IDENTICAL to `max`'s; when P3 wires
@@ -105,7 +137,7 @@ export const PROFILES: Record<
       topicSwitch: { enabled: true },
       askUser: { enabled: true },
       todo: { enabled: true, nudge: { enabled: true } },
-      memory: { enabled: true },
+      memory: { enabled: true, ...SCOPES_OFF },
       webSearch: { enabled: true },
       title: { enabled: true },
       hud: { enabled: true },
@@ -141,7 +173,7 @@ export const PROFILES: Record<
       topicSwitch: { enabled: true },
       askUser: { enabled: true },
       todo: { enabled: true, nudge: { enabled: true } },
-      memory: { enabled: true },
+      memory: { enabled: true, ...SCOPES_OFF },
       webSearch: { enabled: true },
       title: { enabled: true },
       hud: { enabled: true },
