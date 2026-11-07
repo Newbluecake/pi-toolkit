@@ -88,6 +88,8 @@ export interface DeadlineBudget {
   compactionMs: Millis;
   /** 总预算。恒 > 0：非法值（≤ 0 / 非有限数）由 mergeBudget 逐层丢弃并回退下一层（D-11）。 */
   totalMs: Millis;
+  /** Host-only Agent-tool admission floor; 0 disables it. Not a guaranteed lifetime. */
+  minTotalMs: Millis;
   abortGraceMs: Millis;
   steerMs: Millis;
   reapMs: Millis;
@@ -263,6 +265,8 @@ export interface SpawnRequest {
    * 模型面只有 Agent 工具传 timeout_s 时写 "extendable"，其余调用方不写（缺省按形状推导为 "fixed"）。
    */
   timeoutPolicy?: TimeoutPolicy;
+  /** Host convention set by every Agent tool path; admission-only, never threaded or persisted. */
+  agentToolDispatch?: true;
   budgetOverride?: Partial<DeadlineBudget>;
   /**
    * fabric-cross-session plan §4.1: provenance of a wake revive. Only programs write it (WakeService, W5); it is

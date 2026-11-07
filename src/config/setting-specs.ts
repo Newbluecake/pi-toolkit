@@ -36,12 +36,14 @@ const BUDGET_DESCRIPTIONS: Record<keyof DeadlineBudget, string> = {
   toolMs: "Single tool call timeout",
   compactionMs: "Context compaction timeout",
   totalMs: "Overall run cap (must be > 0; 0 falls back to the default)",
+  minTotalMs: "Host Agent-tool total budget floor (default 1800 seconds); short explicit values are raised; 0 = off",
   abortGraceMs: "Grace after abort before force-kill",
   steerMs: "Steer message delivery timeout",
   reapMs: "Reaper sweep timeout",
   retrySlackMs: "Extra idle slack per startup retry",
   startupRetries: "Startup retry attempts",
-  totalGraceMs: "Grace after the total budget before force-kill (default-budget runs only); 0 = off",
+  totalGraceMs:
+    "Grace after the total budget for extendable runs, including explicit Agent timeouts (default 600 seconds); fixed runs have no grace; 0 = off",
   maxExtensions: "Max deadline extensions per run; 0 = no extension and no grace",
   maxTotalFactor:
     "Hard ceiling as a multiple of the run's total budget, explicit timeout_s included (fixed-deadline system runs — workflow children, /goal verifier, RPC — are always 1)",

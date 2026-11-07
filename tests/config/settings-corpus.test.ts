@@ -31,6 +31,8 @@ import {
   loadWebHubProxyWarnings,
 } from "../../src/config/settings.js";
 
+import { getPath, normalizeTimeUnits } from "../../src/config/time-units.js";
+
 const CORPUS_PATH = join(import.meta.dirname, "__corpus__", "settings-corpus.json");
 
 interface Corpus {
@@ -230,7 +232,7 @@ function evaluate(input: unknown, legacyFastProjection = false): string {
   let files: unknown = null;
   try {
     const loaded = loadSettings(input);
-    settings = legacyFastProjection ? withoutFast(loaded) : loaded;
+    settings = legacyFastProjection ? withoutFast(loaded, input) : loaded;
     if (input !== undefined) {
       const path = join(scratch, `case-${fileSeq++}.json`);
       writeFileSync(path, JSON.stringify(input));
@@ -273,7 +275,7 @@ function stripRetired(template: unknown, retiredPaths: readonly string[]): unkno
 /** task55: intentional additive /fast configuration. Preserve every old field's order/value
  * and all warns/files hashes, while checking the new block for every legacy input. The
  * generator continues to use the unprojected result; no corpus/template/hash is refreshed. */
-function withoutFast(settings: typeof DEFAULT_SETTINGS) {
+function withoutFast(settings: typeof DEFAULT_SETTINGS, input?: unknown) {
   expect(settings.fast).toEqual({ enabled: true });
   // #39 declared additive keys only: every legacy case must parse both flags as false.
   // Preserve ALL old rows/fields/order; never regenerate or filter the frozen inputs.
@@ -281,6 +283,15 @@ function withoutFast(settings: typeof DEFAULT_SETTINGS) {
   // #61 declared additive leaf only: every legacy case must parse the 9th wake leaf as the
   // default true (fabric/decision-input.ts owns the proof — the leaf alone mints nothing).
   expect(settings.fabric.wake.decisionRequests).toBe(true);
+  // #62 intentional default change: only historical evaluations project the old budget.
+  // Dedicated agent-min-total tests exercise the real 1800/600 defaults and live conversion.
+  const { minTotalMs: _minTotal, ...oldBudget } = settings.budget;
+  const normalizedInput =
+    input !== null && typeof input === "object"
+      ? normalizeTimeUnits(input as Record<string, unknown>, ["budget.totalGraceMs"])
+      : {};
+  // Preserve explicit historical overrides (including 0); only the fallback default was 90s.
+  if (getPath(normalizedInput, "budget.totalGraceMs") === undefined) oldBudget.totalGraceMs = 90_000;
   const { memory } = settings;
   const { scopes: _scopes, ...oldMemory } = memory;
   const {
@@ -292,6 +303,7 @@ function withoutFast(settings: typeof DEFAULT_SETTINGS) {
   return Object.fromEntries(
     Object.entries(settings)
       .filter(([key]) => key !== "fast")
+      .map(([key, value]) => [key, key === "budget" ? oldBudget : value])
       .map(([key, value]) => [key, key === "memory" ? oldMemory : value])
       .map(([key, value]) => [key, key === "fabric" ? { ...value, wake: oldWake } : value]),
   );

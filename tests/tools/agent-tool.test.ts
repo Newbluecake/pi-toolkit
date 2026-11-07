@@ -70,16 +70,18 @@ describe("tools/agent-tool: top-level Agent is background-only", () => {
     expect(createAgentTool({ spawn: fakePort() }).parameters).toBe(AgentToolParams);
     expect(nestedTool(fakePort()).parameters).toBe(NestedAgentToolParams);
     // Everything else is shared verbatim between the two surfaces, except the
-    // P2 additions: the top-level `schema` copy (preset hint appended) and the
+    // P2 additions plus #62: the top-level timeout description, `schema` copy, and the
     // top-level-only `meta` (analytics dispatch metadata).
     const { run_in_background: _dropped, ...nestedRest } = NestedAgentToolParams.properties;
     const { meta: _meta, ...topRest } = AgentToolParams.properties;
     expect(Object.keys(topRest)).toEqual(Object.keys(nestedRest));
     expect(Object.keys(AgentToolParams.properties)).toEqual([...Object.keys(nestedRest), "meta"]);
-    // `experts` (and every leading field) is still the very same schema object;
-    // only `schema` is a separate top-level copy (description gains the hint).
+    // Unchanged fields retain shared schema identity; timeout and schema have top-level prose overrides.
     expect(topRest.experts).toBe(nestedRest.experts);
     expect(topRest.schema).not.toBe(nestedRest.schema);
+    expect(topRest.timeout_s).not.toBe(nestedRest.timeout_s);
+    expect(topRest.timeout_s.minimum).toBe(1);
+    expect(topRest.timeout_s.maximum).toBe(604_800);
   });
 
   it("a plain call returns a run_id immediately through spawn(), never spawnAndWait()", async () => {
@@ -92,6 +94,7 @@ describe("tools/agent-tool: top-level Agent is background-only", () => {
       {} as never,
     );
     expect(port.calls).toEqual(["spawn"]);
+    expect(port.seen?.agentToolDispatch).toBe(true);
     expect(port.seen?.detachSignalOnStart).toBe(true);
     expect(port.seen?.expectAck).toBeUndefined();
     expect(result.details).toEqual({ runId: "child-1", label: "d", background: true });
@@ -447,6 +450,7 @@ describe("tools/agent-tool: timeout_s budget override", () => {
     );
     // U3：显式 timeout_s 是模型面显式 ⇒ 策略写 "extendable"（§2.2 ①），
     // 与默认预算同权（宽限 + 延长），预算仍是 totalMs 覆盖。
+    expect(port.seen?.agentToolDispatch).toBe(true);
     expect(port.seen?.budgetOverride).toEqual({ totalMs: 120_000 });
     expect(port.seen?.timeoutPolicy).toBe("extendable");
 
@@ -459,6 +463,7 @@ describe("tools/agent-tool: timeout_s budget override", () => {
       undefined,
       {} as never,
     );
+    expect(port2.seen?.agentToolDispatch).toBe(true);
     expect(port2.seen?.budgetOverride).toBeUndefined();
     expect(port2.seen?.timeoutPolicy).toBeUndefined();
   });
@@ -480,6 +485,7 @@ describe("tools/agent-tool: timeout_s budget override", () => {
       {} as never,
     );
     expect(port.seen?.timeoutPolicy).toBe("extendable");
+    expect(port.seen?.agentToolDispatch).toBe(true);
     expect(port.seen?.budgetOverride).toEqual({ totalMs: 30_000 });
   });
 

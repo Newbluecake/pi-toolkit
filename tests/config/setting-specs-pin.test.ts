@@ -41,6 +41,7 @@ if (process.env.GOV_SPECS_GENERATE === "1") {
   // features, not baseline refreshes. Project exactly these NEW keys; old specs/order/content
   // remain pinned.
   const declaredAdditions = [
+    "budget.minTotalS",
     "memory.scopes.session",
     "memory.scopes.hub",
     "fabric.wake.decisionRequests",
@@ -52,13 +53,16 @@ if (process.env.GOV_SPECS_GENERATE === "1") {
   describe("SETTING_SPECS pin (order + content)", () => {
     it("adds exactly declared Fast/scopes/decision keys with non-live defaults and keeps old ordering", () => {
       const oldKeys = pin.specs.map(([key]) => key);
+      const minAnchor = oldKeys.indexOf("budget.totalS");
       expect(Object.keys(SETTING_SPECS).filter((key) => !oldKeys.includes(key))).toEqual(declaredAdditions);
       const anchor = oldKeys.indexOf("memory.jev.predict.cacheTtlMin");
       expect(anchor).toBeGreaterThan(0);
       const wake = oldKeys.indexOf("fabric.wake.parkCapPerTarget");
       expect(wake).toBeGreaterThan(0);
       expect(Object.keys(SETTING_SPECS)).toEqual([
-        ...oldKeys.slice(0, anchor + 1),
+        ...oldKeys.slice(0, minAnchor + 1),
+        "budget.minTotalS",
+        ...oldKeys.slice(minAnchor + 1, anchor + 1),
         "memory.scopes.session",
         "memory.scopes.hub",
         ...oldKeys.slice(anchor + 1, wake + 1),

@@ -4,6 +4,45 @@
 > 来源：AGENTS.md@fcbf71dc 的对应条目，原文搬运，未改写（仅路径按目录移动更新）。新的实现细节直接写在这里，不要再写回 AGENTS.md。
 > 相关：`../agent-background-only/`、`../timeout-notify/`、`../agent-explicit-timeout-extend/`、`../reaper-orphans/`、`../subagent-run-persistence/`
 
+## Agent-tool minimum total and shared grace defaults (#62)
+
+- Product defaults: `DeadlineBudget.minTotalMs = 1_800_000` (`budget.minTotalS = 1800`) and
+  `totalGraceMs = 600_000` (`budget.totalGraceS = 600`). `totalMs` stays 1800s; an existing personal
+  `budget.totalS: 7200` is preserved, not rewritten or replaced by the floor. The floor accepts lower values
+  and `0` (off), is live for **new admissions only**, and is derived through the normal seconds/ms boundary.
+- Every **Agent tool** path (top-level, nested blocking/background, omitted timeout and resume) marks
+  `SpawnRequest.agentToolDispatch: true` in `prepareSpawn`. This is an internal **host convention**, not a
+  security capability. Admission merges default → host → type → request budgets, then applies
+  `max(merged.totalMs, clampSpanMs(mergeBudget(host).minTotalMs))` only for marked requests, then the existing
+  policy. Type/request floor overrides cannot lower the host floor. Invalid negative/nonfinite floors are
+  discarded by `mergeBudget`; `0` disables the floor and huge finite spans are clamped. Generic `mergeBudget`
+  does **not** floor total: unmarked programmatic producers (`/task`, RPC, fabric wake, workflow children,
+  goal verifier, schedule) remain unchanged even with extendable policy or pool/load rejection flags.
+- Explicit `timeout_s: 1` and `1799` are intentionally raised by the default floor, not just omitted values.
+  A fixed-policy resume also gets the floor but **keeps fixed policy** (no grace/extension). Phase watchdogs,
+  earlier absolute deadlines, abort and parent lifecycle remain authoritative: the floor is **not a promise
+  to survive 30 minutes**. No clocks are refilled. The marker is `NOT_THREADED`, absent from runtime,
+  diagnostics, journals and wire. No new tool argument or persisted DTO is introduced.
+- Ceilings use the effective total **T after flooring**, default `max(2×T, T + 3h)`; configured factors/counts/
+  step, `extend.enabled=false`, fixed policy and earlier absolute deadlines retain their original semantics.
+  The shared grace default intentionally reaches workflow orchestration and schedule settlement fallback:
+  `schedule/agent/bg.ts`'s unspecified `waitGraceMs` is now `600s + 10s abort + 5s reap = 615s`.
+  This is a defensive result-wait allowance, **not grace or a longer deadline for the fixed schedule run**.
+- Frozen nested surface residual: the legacy `default 90` clause remains in **two places**, the shared
+  `leadingFields.timeout_s` description in `src/tools/agent-tool.ts` and its byte-for-byte nested snapshot in
+  `tests/fixtures/tools/agent-nested-surface-golden.json`. It is deliberately **not synchronized** because
+  that A-tier surface is frozen. Top-level Agent independently overrides only the timeout description
+  (schema stays integer/minimum1/maximum604800); nested **runtime uses 600s**, proven by real nested tool →
+  service → runtime grace entry in `tests/service/agent-min-total.test.ts`. Nested grace remains silent.
+- Config contract evidence: the old settings corpus projects away `minTotalMs` and uses the old 90s
+  **fallback** only for historical evaluations; frozen inputs/seeds/order/hashes stay unchanged and explicit
+  overrides stay intact. It does not claim to test 600s. Dedicated config tests cover real defaults,
+  lower/off/invalid floors, migration and live writes. The spec pin declares `budget.minTotalS` as additive;
+  only the intentionally changed grace-description hash and aggregate are refreshed (B contract change).
+  `tests/config/workflow-settings.test.ts` exercises the real schedule wait fallback without changing its implementation.
+- Source/default changes need `/reload` in existing sessions to load this code; no reload or user settings
+  write is performed by this change. Once loaded, live floor edits apply only to newly admitted runs.
+
 ## src/core/
 
 `src/core/` — pure domain: state machine, deadline budgets, ids, types, and the worktree-origin

@@ -1,5 +1,5 @@
 import type { FastParentPort } from "../fast/ports.js";
-import { applyBudgetPolicy } from "../core/deadline.js";
+import { applyBudgetPolicy, clampSpanMs } from "../core/deadline.js";
 import { mergeBudget } from "../config/settings.js";
 import { newRunId, isRunId } from "../core/ids.js";
 import { isLiveSessionFile } from "../core/live-session-files.js";
@@ -1026,7 +1026,13 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
         req.timeoutPolicy ??
         resumeTimeoutPolicy ??
         (req.budgetOverride?.totalMs !== undefined ? "fixed" : "extendable");
-      const budget = applyBudgetPolicy(mergeBudget(deps.budget, config.budgetOverride, req.budgetOverride), {
+      const mergedBudget = mergeBudget(deps.budget, config.budgetOverride, req.budgetOverride);
+      // Only the host setting supplies the Agent floor: type/request overrides cannot lower it.
+      // The marker is a host convention, not a security capability; other producers stay unchanged.
+      const floor = req.agentToolDispatch === true ? clampSpanMs(mergeBudget(deps.budget).minTotalMs) : undefined;
+      const admittedBudget =
+        floor === undefined ? mergedBudget : { ...mergedBudget, totalMs: Math.max(mergedBudget.totalMs, floor) };
+      const budget = applyBudgetPolicy(admittedBudget, {
         // "fixed" ⇒ maxTotalFactor 钳 1（H = deadlineAt，无宽限无延长）；"extendable"
         // 保留合并后的 factor（默认 2），Agent 工具的显式 timeout_s 与默认预算同权
         fixedDeadline: resolvedPolicy === "fixed",

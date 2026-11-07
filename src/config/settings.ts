@@ -313,10 +313,19 @@ export function mergeBudget(...overrides: Array<Partial<DeadlineBudget> | undefi
   // 这一个键（其余键保留），回退下一层；DEFAULT_BUDGET.totalMs = 1_800_000 是
   // 最后一层 ⇒ 返回值 totalMs 恒 > 0（tests/config/agent-config.test.ts 锁死）。
   const sane = overrides.map((o) => {
-    if (o === undefined || !("totalMs" in o)) return o;
-    if (typeof o.totalMs === "number" && Number.isFinite(o.totalMs) && o.totalMs > 0) return o;
-    const { totalMs: _drop, ...rest } = o;
-    return rest;
+    if (o === undefined) return o;
+    const clean = { ...o };
+    if (
+      "totalMs" in clean &&
+      !(typeof clean.totalMs === "number" && Number.isFinite(clean.totalMs) && clean.totalMs > 0)
+    )
+      delete clean.totalMs;
+    if (
+      "minTotalMs" in clean &&
+      !(typeof clean.minTotalMs === "number" && Number.isFinite(clean.minTotalMs) && clean.minTotalMs >= 0)
+    )
+      delete clean.minTotalMs;
+    return clean;
   });
   return { ...DEFAULT_BUDGET, ...sane.reduce((out, value) => ({ ...out, ...value }), {}) };
 }

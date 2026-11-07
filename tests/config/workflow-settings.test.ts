@@ -215,3 +215,66 @@ describe("loadSettingsFromFile: workflow.isolationReplay WARN (D9 \u56de\u843d\u
     }
   });
 });
+
+it("#62 shared defaults: workflow grace600 and schedule settlement fallback615s, not a fixed-run lifetime grant", async () => {
+  const { installBackgroundExecutor } = await import("../../src/schedule/agent/bg.js");
+  const { createScheduleAgent } = await import("../../src/schedule/agent/wire.js");
+  const { FakeClock } = await import("../../src/core/clock.js");
+  const { manualClaim } = await import("../../src/schedule/core/claim.js");
+  const { addTask, approve, env, makeTask, readOk, self, SID } = await import("../schedule/core/fixtures.js");
+  expect(buildWorkflowRunBudget(DEFAULT_SETTINGS).totalGraceMs).toBe(600_000);
+  const e = env(Date.now());
+  const file = join(e.dir, "session.jsonl");
+  writeFileSync(file, '{"type":"session"}\n');
+  const clock = new FakeClock(e.clock.t);
+  const a = createScheduleAgent({
+    ctx: { sessionManager: { getSessionId: () => SID } } as never,
+    mode: { kind: "interactive", arm: true },
+    sessionId: SID,
+    self: self(),
+    dir: e.storeDir,
+    plain: true,
+    inVault: () => false,
+    clock,
+    warn: () => undefined,
+    router: undefined,
+  });
+  let bg: ReturnType<typeof installBackgroundExecutor> | undefined;
+  try {
+    const task = approve(makeTask({ ownerCwd: e.dir }));
+    task.bg!.timeoutS = 60;
+    const store = a.ensureStore();
+    await addTask(store, task, e.clock.t);
+    const claim = await manualClaim(store, { taskId: task.id, reqId: "agent62_default_grace", holder: a.holder! });
+    if (claim.kind !== "started" || !claim.run) throw Error("fixture claim failed");
+    const waits: number[] = [];
+    const requests: import("../../src/core/types.js").SpawnRequest[] = [];
+    bg = installBackgroundExecutor(a, {
+      spawn: {
+        spawn: async (req) => {
+          requests.push(req);
+          return { runId: "r62" };
+        },
+        waitOutcome: async (_runId, waitMs) => {
+          waits.push(waitMs);
+          return { kind: "pending" as const };
+        },
+      },
+      notes: { currentSessionId: () => SID, sessionFile: () => file, isIdle: () => true, sendMessage: () => undefined },
+      clock,
+      monotonic: () => 0,
+    });
+    bg.dispatch(claim.run, task);
+    await bg.drain();
+    // 60s run + 600s shared grace + 10s abort + 5s reap. Last partial wait is 15s.
+    expect(waits).toEqual([...Array<number>(11).fill(60_000), 15_000]);
+    expect(waits.reduce((sum, value) => sum + value, 0)).toBe(675_000);
+    expect(requests[0]).toMatchObject({ timeoutPolicy: "fixed", budgetOverride: { totalMs: 60_000 } });
+    expect(requests[0]).not.toHaveProperty("agentToolDispatch");
+    expect(readOk(store).runs[0]).toMatchObject({ state: "unknown", reason: "no-outcome" });
+  } finally {
+    bg?.dispose();
+    a.dispose();
+    e.cleanup();
+  }
+});
