@@ -130,7 +130,6 @@ export function wireMemoryScopes(
       });
     // Factory reads owner before publication only for recovery. isCurrent is exact group-local live identity.
     owned = build(reason);
-    if (!owned) return undefined;
     runtime = owned;
     const thisGroup: MemoryScopesGroup = {
       childBinding: Object.freeze(slot ? { frozenParentHubSlot: slot } : {}),

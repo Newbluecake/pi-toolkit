@@ -250,3 +250,12 @@ owner。secure/locked 测试只用 fake mountinfo 的实际 activate/SDK constru
 - 此兼容修复不兜底其他子系统的直接 manager 调用，也不放宽“每次返回随机 sid”的宿主夹具。
   独立的 launcher 版本夹具、Fast hook/identity 与 bundle 契约问题须单独归因；不得靠这里吞掉
   真实异常或关闭产品默认值使其假绿。
+- **未绑定子会话的 project 注入（2026-11-08 release-blocker 回归修复）**：安装 scopes shell
+  不等于已经建立实际 owner/group。独立 `PiSessionDriver` 未收到 `memoryBinding` 时，不发送
+  `subagent:memory-bind`；此时三层投影 effective-off，`pi_project_memory` 仍走原只读 renderer，
+  不依赖 session/Hub owner，也不从普通 ctx 伪造 child binding。已建立但被撤销的 group 不走
+  此回退，仍由原 owner 校验 fail closed。project 的 `injectInChildSessions`/`childProfile`
+  开关、scopes-on child 的内容硬只读及 scoped 授权门均不变。真实 driver + SDK 回归用例
+  `tests/integration/child-session-marker.test.ts` 同时断言快照只有 `pi_project_memory`、包含
+  临时 core 正文，且实际模型请求收到该正文。源码验证用 `PI_TOOLKIT_ENTRY=src`；若仓库已有
+  `dist/bundle`，须先 rebuild 再跑默认入口，避免旧 bundle 掩盖源码修复。

@@ -200,7 +200,10 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
   let projectSection: ReturnType<typeof memorySection> | undefined;
   const projection = opts.scopes
     ? createScopedProjection({
-        enabled: () => true,
+        // A scopes shell is also installed in unbound children/reduced hosts. Without
+        // an actual group, keep the independent project-memory renderer available.
+        // A disposed group still exists: its stale owner must fail closed, not fall back.
+        enabled: () => opts.scopes!.group() !== undefined,
         owner: () => opts.scopes?.current()?.owner,
         mode: opts.systemPromptMode ?? (() => "stable"),
         state: opts.sections,
