@@ -19,10 +19,33 @@
   (identical DOM to today's non-ref segments). Candidates are submitted once per render tick
   through `probe.ensure(...)` — one message's segments merge into ONE batched request in the
   composable. Without `probe` the legacy always-clickable behavior is byte-identical.
--->
+
+  2026-11-07 #49 fix (probe-link flip under LRU churn, round4 evidence /tmp/pi-previews/
+  subagent-jitter/round4-report.md): the probe result store is a cross-scope LRU capped at
+  256 entries; a high-churn sibling transcript (e.g. an open subagent run settling batches of
+  fresh absolute paths) evicts an already-rendered message's CONFIRMED entries, and the shared
+  link visibly flipped ref→plain→ref (~333 ms) with the store reporting `undefined` for it.
+  Eviction is a MEMORY event, not evidence the file vanished, and an already-mounted
+  `PathText` never re-`ensure()`s on its own — so this component now keeps a LOCAL retention
+  set of its own candidates it has observed `stateOf(path) === "confirmed"` for (the only
+  authority — never synthesized without a probe). While the current probe reports `pending`
+  or `undefined` (evicted) for such a path, the link STAYS; an explicit `missing`/`failed`
+  still revokes the local positive and degrades to plain text per the existing policy. The
+  set is cleared synchronously on any authority change — scope/capability change
+  (`scopeKeyOf` folds agent|session|cwd|abs|dir|tilde|file|html), probe instance replacement,
+  plain suppression (noRefs/suspended/no-ctx/no-scope) — pruned to the current candidate set
+  (never accumulates history), and cleared on unmount; no cross-context carryover and no
+  stale-request backfill (an old-scope settle writes the old partition only). Authority
+  changes are compared SEMANTICALLY (probe identity + scopeKey string + plain flag): the
+  App-level scope ref is rebuilt with identical fields on ordinary upstream status refreshes,
+  and such same-value rebuilds must NOT clear anything (round4 rework: a wrapper-object
+  comparison cleared the whole page's retention on every refresh). No retry timer,
+  no IO, no store/cap change: the store's own semantics (including eviction) are untouched,
+  and the click path is unchanged (an evicted `kindOf` hint degrades to the existing safe hub
+  re-check fallback).-->
 <script setup lang="ts">
-import { computed, inject, onBeforeUnmount, ref, watch } from "vue";
-import { findPathRefs, pathRefOfCode } from "@logic/preview.js";
+import { computed, inject, onBeforeUnmount, reactive, ref, watch, watchEffect } from "vue";
+import { findPathRefs, pathRefOfCode, scopeKeyOf } from "@logic/preview.js";
 import { findProxyUrlRefs, normalizeProxyHref } from "@logic/proxy.js";
 import { useI18n } from "../../composables/useI18n.js";
 import { useProxyOpen } from "../../composables/useProxyOpen.js";
@@ -95,6 +118,7 @@ function openProxy(href: string, ev?: MouseEvent): void {
 onBeforeUnmount(() => {
   clearNote();
   proxy.clear();
+  confirmedLocal.clear(); // #49: the local retention is component-scoped — no residue
 });
 
 function onProxyKeydown(ev: KeyboardEvent, href: string): void {
@@ -146,16 +170,57 @@ const plain = computed(
 /** 2026-10-07 修订: the probe controller — absent ⇒ legacy always-clickable rendering. */
 const probe = computed(() => ctx?.handle.probe ?? null);
 
+/* #49 (2026-11-07): local retention of THIS component's probe-confirmed candidates — the
+ * component-level complement to the store's "confirmed is sticky" rule. Entries come only
+ * from an observed `stateOf(path) === "confirmed"` of the CURRENT probe under the CURRENT
+ * authority; they leave on an explicit `missing`/`failed`, on any authority change, when the
+ * path leaves the current candidate set, and on unmount. Bounded by the current candidates
+ * (pruned in the reconcile watcher below) — never accumulating history. */
+const confirmedLocal = reactive(new Set<string>());
+
+/* The authority a local positive is conditioned on, compared SEMANTICALLY per source: the
+ * probe INSTANCE (a replaced pipeline is a replaced authority), the store's scope partition
+ * (`scopeKeyOf` already folds in agent|session|cwd plus the abs/dir/tilde/file/html capability
+ * flags — a capability flip IS a scope change) as a STRING, and the plain suppression flag
+ * (noRefs/suspended/no-ctx/no-scope). NEVER a per-evaluation wrapper object: the App-level
+ * scope ref is rebuilt with IDENTICAL fields on ordinary upstream status refreshes, and an
+ * Object.is-different wrapper per rebuild cleared the whole-page retention on every refresh
+ * (round4 rework evidence: churn 14 flips / quiescent 10-13, all main links flashing). */
+// Sync on purpose (#49 mandate「同步清掉」): a local positive never survives into any render
+// that already sees the new authority — no cross-scope/cross-probe window at all.
+watch(
+  [
+    () => probe.value,
+    () => {
+      const sc = scope.value;
+      return sc === null ? null : scopeKeyOf(sc);
+    },
+    () => plain.value,
+  ],
+  () => {
+    if (confirmedLocal.size > 0) confirmedLocal.clear();
+  },
+  { flush: "sync" },
+);
+
 type Segments = ReturnType<typeof findPathRefs>;
 const segments = computed<Segments | null>(() =>
   props.code === true || plain.value ? null : findPathRefs(props.text, scope.value),
 );
 const codeRef = computed(() => (props.code === true && !plain.value ? pathRefOfCode(props.text, scope.value) : null));
 
-/** A candidate is clickable iff confirmed by the backend (or no probe pipeline exists). */
+/** A candidate is clickable iff confirmed by the backend (or no probe pipeline exists).
+ * #49 retention: while the current probe's answer is `pending` or `undefined` (LRU-evicted
+ * from the shared store — a memory event, not file evidence), a path THIS component has seen
+ * confirmed stays clickable. An explicit `missing`/`failed` always wins: plain rendering,
+ * and the reconcile watcher drops the corresponding local positive. */
 function clickable(path: string): boolean {
   const p = probe.value;
-  return p === null ? true : p.stateOf(path) === "confirmed";
+  if (p === null) return true;
+  const st = p.stateOf(path);
+  if (st === "confirmed") return true;
+  if (st === "pending" || st === undefined) return confirmedLocal.has(path);
+  return false;
 }
 
 /** Candidates of this instance, in render order — submitted to the probe pipeline so the
@@ -202,6 +267,31 @@ watch(
   },
   { immediate: true },
 );
+
+/* #49: reconcile the local positives against the CURRENT probe's answers — the only writer.
+ * Pre-flush so a settle's version bump reconciles BEFORE the re-render that reads the set.
+ * `undefined` (never staged — or LRU-evicted) and `pending` KEEP an existing positive (the
+ * retention); `missing`/`failed` revoke theirs. The final prune bounds the set to the
+ * current candidates: a path that left the text (or a plain/no-probe state — candidates is
+ * `[]` there, hitting the early return's clear) drops its positive immediately. */
+watchEffect(() => {
+  const p = probe.value;
+  const paths = candidates.value;
+  if (p === null || paths.length === 0) {
+    if (confirmedLocal.size > 0) confirmedLocal.clear();
+    return;
+  }
+  for (const path of paths) {
+    const st = p.stateOf(path); // reactive on the store's version + the current scope
+    if (st === "confirmed") {
+      if (!confirmedLocal.has(path)) confirmedLocal.add(path);
+    } else if (st === "missing" || st === "failed") confirmedLocal.delete(path);
+  }
+  if (confirmedLocal.size > 0) {
+    const live = new Set(paths);
+    for (const path of [...confirmedLocal]) if (!live.has(path)) confirmedLocal.delete(path);
+  }
+});
 
 function openPath(path: string): void {
   ctx?.handle.open({ path });
