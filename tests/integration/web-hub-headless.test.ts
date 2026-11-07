@@ -7,7 +7,8 @@
  *  A. REAL HUB CHILD PROCESSES (H1–H3): `spawnHub` + pi's bundled jiti — the exact production
  *     fork path from `agent/launcher.ts`, with `PI_WEBHUB_CONFIG` carrying a spawn-enabled
  *     `HubConfig` whose `launcher` points at a fixture tree (`node_modules/@earendil-works/
- *     pi-coding-agent/package.json` v1.0.2 + a `pi.mjs` copy of `fixtures/fake-rpc-pi.mjs`) so
+ *     pi-coding-agent/package.json` at `SUPPORTED_PI_RANGE.min` + a `pi.mjs` copy of
+ *     `fixtures/fake-rpc-pi.mjs`) so
  *     SP7's launcher version chain runs for real. Orphan/ladder semantics need the hub PROCESS
  *     to die — nothing in-process can reproduce that. Skipped when pi's bundled jiti is not
  *     resolvable (CI without the dev dependency) or off Linux (spawn is Linux-only, fail-closed).
@@ -49,7 +50,7 @@ import { startHub, type RunningHub } from "../../src/web-hub/hub/hub.js";
 import type { HubConfig, HubLanConfig } from "../../src/web-hub/hub/ports.js";
 import { hasNodeSqlite } from "../../src/web-hub/hub/db.js";
 import { resolveHubPaths, webHubSpawnFiles } from "../../src/web-hub/protocol/paths.js";
-import { STDERR_FILE_MAX } from "../../src/web-hub/protocol/spawn.js";
+import { STDERR_FILE_MAX, SUPPORTED_PI_RANGE } from "../../src/web-hub/protocol/spawn.js";
 import type {
   HubSpawnConfig,
   SpawnsPayload,
@@ -136,13 +137,21 @@ function findReaperPid(hubPid: number): number | undefined {
   return undefined;
 }
 
-/** Fixture launcher tree satisfying SP7's version chain: a pi-named package v1.0.2 + a .mjs entry. */
+/**
+ * The pi version the fake launcher's package claims. It must sit inside `SUPPORTED_PI_RANGE`:
+ * the shared fixture impersonates a SUPPORTED host, so SP7's init check passes and every spawn
+ * reaches the behaviour under test. Rejection of unsupported versions is covered on purpose by
+ * `tests/web-hub/hub/spawn/launcher-check.test.ts`, not here.
+ */
+const FAKE_PI_HOST_VERSION = SUPPORTED_PI_RANGE.min;
+
+/** Fixture launcher tree satisfying SP7's version chain: a pi-named package at a supported version + a .mjs entry. */
 function fakeLauncher(root: string): readonly [string, string] {
   const pkgDir = join(root, "node_modules", "@earendil-works", "pi-coding-agent");
   mkdirSync(pkgDir, { recursive: true });
   writeFileSync(
     join(pkgDir, "package.json"),
-    JSON.stringify({ name: "@earendil-works/pi-coding-agent", version: "1.0.2" }),
+    JSON.stringify({ name: "@earendil-works/pi-coding-agent", version: FAKE_PI_HOST_VERSION }),
   );
   const entry = join(pkgDir, "pi.mjs");
   copyFileSync(FAKE_PI, entry);

@@ -29,6 +29,7 @@ import { startHub, type RunningHub } from "../../src/web-hub/hub/hub.js";
 import type { HubConfig, HubLanConfig } from "../../src/web-hub/hub/ports.js";
 import { hasNodeSqlite } from "../../src/web-hub/hub/db.js";
 import { webHubSpawnFiles } from "../../src/web-hub/protocol/paths.js";
+import { SUPPORTED_PI_RANGE } from "../../src/web-hub/protocol/spawn.js";
 import type { HubSpawnConfig } from "../../src/web-hub/protocol/spawn.js";
 import type { LanInfoPayload, LanResFrame } from "../../src/web-hub/protocol/messages.js";
 import { config as hubConfig, connectClient, hello, type TestClient } from "../web-hub/hub/helpers.js";
@@ -41,12 +42,19 @@ const IS_LINUX = process.platform === "linux";
 const NO_NODE_SQLITE = !(await hasNodeSqlite());
 const FAKE_PI = resolve("tests/integration/fixtures/fake-rpc-pi.mjs");
 
+/**
+ * The pi version the fake launcher's package claims — a SUPPORTED host version: the fixture
+ * impersonates a supported host so spawns are admitted; the refusal of unsupported versions is
+ * pinned on purpose by `tests/web-hub/hub/spawn/launcher-check.test.ts`.
+ */
+const FAKE_PI_HOST_VERSION = SUPPORTED_PI_RANGE.min;
+
 function fakeLauncher(root: string): readonly [string, string] {
   const pkgDir = join(root, "node_modules", "@earendil-works", "pi-coding-agent");
   mkdirSync(pkgDir, { recursive: true });
   writeFileSync(
     join(pkgDir, "package.json"),
-    JSON.stringify({ name: "@earendil-works/pi-coding-agent", version: "1.0.2" }),
+    JSON.stringify({ name: "@earendil-works/pi-coding-agent", version: FAKE_PI_HOST_VERSION }),
   );
   const entry = join(pkgDir, "pi.mjs");
   copyFileSync(FAKE_PI, entry);
