@@ -466,3 +466,24 @@ LIVE 环境开关只施于该命令进程。runtime 仍使用只读 credential s
 | 精确三文件 `timeout 10 git diff --check -- ...`                                                                                        | PASS                     |
 
 最终命令日志仍为 `/tmp/36-evaluator-{tests,typecheck,format,diffcheck}.log`；最终三文件 SHA256 及证据更新至 `/tmp/36-evaluator-handoff.json`。只交 root resume 原 Sonnet 做两项窄复验；G1 仍 **10/20 BLOCKED**，G2 没有新 live/质量结论。冻结后停止，不扩审计范围。
+
+## 2026-11-08 · G1 扩大来源盘点（结论：仍 BLOCKED，口径已定）
+
+root 授权按「每项目独立池、不混比、不补造时间、不凑数」扩大 G1 正例来源。对 `~/.pi/agent/memory/` 下 **23 个项目池**做只读盘点：621 个文件 / 524 份 Markdown / 247 个迁移块正文，逐池完整读 live + `.backup` + `archive`。
+
+**结果：仅 2 条完整取代候选**（`--data` 之外的候选文件 `candidates/g1-expand-20261108.jsonl`，含 full text、entry-sha1、mtime 纳秒原值、projectPool）：
+
+| 池                            | NEW → OLD                                                                                         | 判定                                     |
+| ----------------------------- | ------------------------------------------------------------------------------------------------- | ---------------------------------------- |
+| `-home-bluecake-ai-warren`    | 当前阶段块：M0 未开工/无远端/GitHub 待办 → M0 进行中/两私有仓已建、10 标签、5 里程碑、Issue #1–#8 | 完整覆盖；`createdAt` + mtime 双时间证据 |
+| `-home-bluecake-ai-apistrike` | L3 被白名单静默丢弃（无条件接线）→ L3 白名单已回归、`layerEnabled(L3)` 为唯一闸门                 | 完整覆盖；旧块仅此一条独立有效子条款     |
+
+排除理由可核且逐池记录（`candidates/README-20261108.md` + `source-inventory`）：迁移副本与原文相同（不计新增）、部分覆盖、互补非取代、跨项目迁入指针不得混池、时间证据缺失（同文件共用 mtime / 反向 mtime）、agent 索引不得取代 user 详细条目。既有 20 条排除锁定不升格；`.jev/index.json` 的 `dismissed` 全为空。
+
+**因此正例上限为 12/20**：G1 在现有真实数据上不可能达标；这不是标注力度问题，而是「真实记忆里完整取代本就稀少」。root 裁定（2026-11-08）：**接受 G1 长期 BLOCKED**，不再专项追指标，改为随真实取代自然积累后补标；**G2 不受 G1 影响，按已授权单独推进**。门槛、cap、脚本一律不动——不为过门而放宽。
+
+### 现状与前提
+
+- 已并入正式集的只有原 10 条；上述 2 条候选**尚未并入**，也未建新 freeze。
+- G2 的 freeze 必须在**记忆元数据修复**之后（否则 legacy 超限字段会让生产读取路径与评测语料不一致）。该修复已于 `2769ad14` 落地：读路径对历史超限字段按 UTF-8 边界在内存降级、源文件字节不变、写入仍严格、迁移 planner 一次性截断并记入报告。
+- 与 `pg-candidate-v3` 的关系：该 run 的 `freeze.json` 是历史证据，**不得覆写**；G2 使用独立的新版本目录。
