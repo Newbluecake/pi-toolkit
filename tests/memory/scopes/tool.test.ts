@@ -1,5 +1,5 @@
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -73,6 +73,7 @@ function fixture(child = false) {
     caps: registry,
   };
   return {
+    dir,
     deps,
     session,
     hub,
@@ -402,3 +403,84 @@ it("oversized and malformed provenance rejected before human dialogs; getters ne
   expect(f.dialogs()).toBe(0);
   expect(f.branch).toEqual([]);
 });
+
+it.each(["user", "agent"] as const)("hub authority %s uses real TUI approval and cap", async (authority) => {
+  const f = fixture();
+  f.tracker.noteInteractive(f.owner());
+  expect(
+    await f.tool.run("c", { op: "create", storageScope: "hub", topic: "general", text: "exact body", authority }),
+  ).toMatchObject({ ok: true });
+  expect(f.dialogs()).toBe(1);
+  expect(f.hub.view().items[0]).toMatchObject({
+    text: "exact body",
+    authority: "user",
+    grant: { via: "dialog", channel: "tui" },
+  });
+});
+
+it("hub delete with explicit authority uses web confirmation and web cap", async () => {
+  const f = fixture();
+  expect(
+    await f.hub.management.command({
+      storageScope: "hub",
+      op: "create",
+      authority: "user",
+      topic: "general",
+      text: "web exact body",
+    }),
+  ).toMatchObject({ ok: true });
+  const item = f.hub.management.inspect("general.001");
+  if (!item.ok) throw Error(item.code);
+  f.tracker.noteInteractive(f.owner());
+  const { createDialogBridge } = await import("../../../src/web-hub/agent/dialogs.js");
+  const dialogs = createDialogBridge({ enabled: true, epoch: "hub-fix", isAttached: () => true });
+  const approval = createOpApprovalPort({ tracker: f.tracker, registry: f.registry, remote: dialogs });
+  const tool = createScopedMemoryTool({ ...f.deps, sharedApproval: approval });
+  const pending = tool.run("delete-web", {
+    op: "delete",
+    storageScope: "hub",
+    id: item.item.id,
+    rev: item.rev,
+    authority: "user",
+  });
+  const dialog = dialogs.frame().open[0]!;
+  expect(dialog.questions[0]!.question).toContain("web exact body");
+  expect(
+    dialogs.answer(
+      dialog.dialogId,
+      [{ selected: [dialog.questions[0]!.options[1]!.label], other: null }],
+      { listener: "loopback", ip: "127.0.0.1", reqId: "web-fix" },
+      "answer",
+      "hub-fix",
+    ),
+  ).toMatchObject({ ok: true });
+  expect(await pending).toMatchObject({ ok: true });
+  expect(f.hub.view().items).toEqual([]);
+  const audit = readFileSync(join(f.dir, "hub-memory", "audit.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  expect(audit.at(-1)).toMatchObject({ op: "delete", channel: "web", via: "dialog" });
+  dialogs.dispose();
+});
+
+it.each(["user", "agent"] as const)(
+  "hub authority %s cannot bypass missing proof or rejected confirmation",
+  async (authority) => {
+    const f = fixture();
+    const op = { op: "create", storageScope: "hub", topic: "general", text: "must not persist", authority };
+    expect(await f.tool.run("no-proof", op)).toEqual({ ok: false, code: "E_HUB_NEEDS_HUMAN_TURN" });
+    expect(f.dialogs()).toBe(0);
+    f.tracker.noteInteractive(f.owner());
+    const approval = createOpApprovalPort({
+      tracker: f.tracker,
+      registry: f.registry,
+      select: async (_title, choices) => choices[0],
+    });
+    expect(await createScopedMemoryTool({ ...f.deps, sharedApproval: approval }).run("decline", op)).toEqual({
+      ok: false,
+      code: "E_HUB_DECLINED",
+    });
+    expect(f.hub.view().items).toEqual([]);
+  },
+);

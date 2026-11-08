@@ -112,7 +112,12 @@ export function createScopedMemoryTool(deps: ScopedToolDeps) {
             "Optional provenance link session:nN or project:<reference>; does not grant authority or move the source.",
         }),
       ),
-      authority: Type.Optional(Type.Union([Type.Literal("agent"), Type.Literal("user")])),
+      authority: Type.Optional(
+        Type.Union([Type.Literal("agent"), Type.Literal("user")], {
+          description:
+            "Only used for session scope; ignored for hub scope, where writes and deletes always require exact-content confirmation.",
+        }),
+      ),
     },
     { additionalProperties: false },
   );
@@ -134,7 +139,6 @@ export function createScopedMemoryTool(deps: ScopedToolDeps) {
       if (p[k] !== undefined && typeof p[k] !== "string") return scopedFailure("E_META_INVALID");
     if (p.authority !== undefined && p.authority !== "agent" && p.authority !== "user")
       return scopedFailure("E_AUTHORITY");
-    if (scope === "hub" && p.authority !== undefined) return scopedFailure("E_AUTHORITY");
     if (typeof p.text === "string" && utf8Bytes(p.text) > 1024) return scopedFailure("E_TOO_LARGE");
     if (p.from !== undefined && !isFromRef(p.from)) return scopedFailure("E_FROM_INVALID");
     if (p.topic !== undefined && !isHubTopic(p.topic)) return scopedFailure("E_META_INVALID");

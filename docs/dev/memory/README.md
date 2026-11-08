@@ -259,3 +259,7 @@ owner。secure/locked 测试只用 fake mountinfo 的实际 activate/SDK constru
   `tests/integration/child-session-marker.test.ts` 同时断言快照只有 `pi_project_memory`、包含
   临时 core 正文，且实际模型请求收到该正文。源码验证用 `PI_TOOLKIT_ENTRY=src`；若仓库已有
   `dist/bundle`，须先 rebuild 再跑默认入口，避免旧 bundle 掩盖源码修复。
+
+### Hub authority 参数确认陷阱修复（v0.11.0 hotfix）
+
+`scoped_memory` 的 `authority` 仅决定 session 写入的权限，hub 作用域忽略该参数（无论 `agent`、`user` 或省略），hub 写入和删除仍必须经过原文确认与一次性 opCap；TUI 和 Web 的确认入口均可到达。此前 hub 对任何显式 authority 在弹框前返回 `E_AUTHORITY`，而 view 又返回 user authority，诱导模型传参后导致无法确认。
