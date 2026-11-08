@@ -3,6 +3,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { createSegmentedClock, type TimerHandle } from "../core/clock.js";
 import { clampSpanMs } from "../core/deadline.js";
 import { createDialogRace, type AskUserRemotePort, type AskUserRemoteSession } from "../ask-user/remote.js";
+import type { MemoryOwner } from "./scopes/types.js";
 
 export const COMMAND_CONFIRM_TIMEOUT_MS = 120_000;
 export const COMMAND_WALL_TIMEOUT_MS = 29 * 60_000;
@@ -81,9 +82,20 @@ export interface CommandLease {
   readonly signal: AbortSignal;
   check(): boolean;
 }
+export interface MemoryWebCallBinding {
+  readonly cmdId: string;
+  readonly commandOwner: string;
+  readonly operationGeneration: number;
+  readonly owner: MemoryOwner;
+  readonly manager: object;
+  readonly deadline: number;
+  readonly signal: AbortSignal;
+  readonly current: () => boolean;
+}
 export interface CommandConfirmKernel {
   /** Host-only: invoke exclusively from the authenticated immediate dispatch seam. */
-  start(rawArgs: string): MemoryWebCall | undefined;
+  start(rawArgs: string, binding?: MemoryWebCallBinding): MemoryWebCall | undefined;
+  binding(call: MemoryWebCall): Readonly<MemoryWebCallBinding> | undefined;
   confirm(
     call: MemoryWebCall,
     plan: CommandPlan,
@@ -104,6 +116,8 @@ interface CallRecord {
   steps: Set<number>;
   controller: AbortController;
   timer: TimerHandle | undefined;
+  binding?: Readonly<MemoryWebCallBinding>;
+  onBindingAbort?: () => void;
 }
 interface ReceiptRecord {
   call: MemoryWebCall;
@@ -141,13 +155,27 @@ export function createCommandConfirmKernel(options: CommandConfirmOptions): Comm
     if (!record) return;
     calls.delete(call);
     if (record.timer !== undefined) wallClock.clearTimer(record.timer);
+    if (record.binding && record.onBindingAbort)
+      record.binding.signal.removeEventListener("abort", record.onBindingAbort);
     record.controller.abort();
     for (const [cap, r] of receipts) if (r.call === call) receipts.delete(cap);
   };
   const valid = (call: MemoryWebCall): CallRecord | undefined => {
     const record = calls.get(call);
     if (!record) return undefined;
-    if (!ownerCurrent() || record.controller.signal.aborted || clock.now() >= record.deadline) {
+    let bindingCurrent = true;
+    try {
+      if (record.binding) bindingCurrent = !record.binding.signal.aborted && record.binding.current() === true;
+    } catch {
+      bindingCurrent = false;
+    }
+    if (
+      !ownerCurrent() ||
+      !bindingCurrent ||
+      calls.get(call) !== record ||
+      record.controller.signal.aborted ||
+      clock.now() >= record.deadline
+    ) {
       close(call);
       return undefined;
     }
@@ -164,29 +192,65 @@ export function createCommandConfirmKernel(options: CommandConfirmOptions): Comm
     return r;
   };
   return {
-    start(rawArgs) {
+    start(rawArgs, binding) {
       for (const c of calls.keys()) valid(c);
       if (!ownerCurrent() || calls.size !== 0) return undefined;
+      const now = clock.now();
+      if (binding) {
+        try {
+          if (
+            !binding.cmdId ||
+            !binding.commandOwner ||
+            !Number.isSafeInteger(binding.operationGeneration) ||
+            binding.operationGeneration < 0 ||
+            !Number.isFinite(binding.deadline) ||
+            binding.deadline <= now ||
+            typeof binding.manager !== "object" ||
+            binding.manager === null ||
+            binding.signal.aborted ||
+            binding.current() !== true
+          )
+            return undefined;
+        } catch {
+          return undefined;
+        }
+      }
       const call = Object.freeze({}) as MemoryWebCall;
+      let frozenBinding: Readonly<MemoryWebCallBinding> | undefined;
+      try {
+        frozenBinding = binding ? Object.freeze({ ...binding, owner: Object.freeze({ ...binding.owner }) }) : undefined;
+      } catch {
+        return undefined;
+      }
       const record: CallRecord = {
         rawArgs,
-        deadline: clock.now() + COMMAND_WALL_TIMEOUT_MS,
+        deadline: Math.min(now + COMMAND_WALL_TIMEOUT_MS, frozenBinding?.deadline ?? Infinity),
         dialogs: 0,
         pending: false,
         steps: new Set(),
         controller: new AbortController(),
         timer: undefined,
+        ...(frozenBinding ? { binding: frozenBinding } : {}),
       };
       calls.set(call, record);
       try {
-        record.timer = wallClock.setTimer(clampSpanMs(COMMAND_WALL_TIMEOUT_MS) ?? COMMAND_WALL_TIMEOUT_MS, () =>
-          close(call),
-        );
+        if (frozenBinding) {
+          record.onBindingAbort = () => close(call);
+          frozenBinding.signal.addEventListener("abort", record.onBindingAbort, { once: true });
+          if (frozenBinding.signal.aborted) {
+            close(call);
+            return undefined;
+          }
+        }
+        record.timer = wallClock.setTimer(clampSpanMs(record.deadline - now) ?? 0, () => close(call));
       } catch {
         close(call);
         return undefined;
       }
       return call;
+    },
+    binding(call) {
+      return valid(call)?.binding;
     },
     async confirm(call, plan) {
       const record = valid(call);

@@ -71,6 +71,53 @@ function fixture() {
 }
 
 describe("memory command confirmation kernel", () => {
+  it("binds immutable dispatch facts and invalidates synchronously on deadline, current or abort", () => {
+    const f = fixture();
+    f.kernel.close(f.call);
+    const signal = new AbortController();
+    const manager = {};
+    const owner = { incarnation: {}, sid: "session-1", sessionEpoch: 1, branchGen: 2 };
+    let current = true;
+    const binding = {
+      cmdId: "cmd-1",
+      commandOwner: "activation",
+      operationGeneration: 3,
+      owner,
+      manager,
+      deadline: 100,
+      signal: signal.signal,
+      current: () => current,
+    };
+    const call = f.kernel.start("session add hello", binding)!;
+    const captured = f.kernel.binding(call)!;
+    expect(captured.manager).toBe(manager);
+    expect(captured.owner.incarnation).toBe(owner.incarnation);
+    owner.branchGen = 9;
+    expect(captured.owner.branchGen).toBe(2);
+    current = false;
+    expect(f.kernel.binding(call)).toBeUndefined();
+    expect(f.kernel.lease(call)).toBeUndefined();
+    current = true;
+    const second = f.kernel.start("session add hello", binding)!;
+    signal.abort();
+    expect(f.kernel.binding(second)).toBeUndefined();
+    const third = f.kernel.start("session add hello", { ...binding, signal: new AbortController().signal })!;
+    f.clock.time = 100; // no timer callback: every lookup checks the absolute deadline
+    expect(f.kernel.binding(third)).toBeUndefined();
+    expect(f.kernel.start("session add hello", binding)).toBeUndefined();
+  });
+  it("does not consume a minted receipt until it is reserved", async () => {
+    const f = fixture();
+    const pending = f.kernel.confirm(f.call, f.plan);
+    f.deliver(f.affirm());
+    const result = await pending;
+    if (!result.approved) throw Error();
+    expect(f.kernel.binding(f.call)).toBeUndefined(); // legacy call has no production binding
+    expect(f.kernel.check(f.call, result.receipt, f.plan)).toBe(true);
+    expect(f.kernel.consume(f.call, result.receipt, f.plan)).toBe(false);
+    expect(f.kernel.reserve(f.call, result.receipt, f.plan)).toBe(true);
+    expect(f.kernel.consume(f.call, result.receipt, f.plan)).toBe(true);
+  });
   it("mints only after a valid remote answer, reserves and consumes once", async () => {
     const f = fixture();
     const pending = f.kernel.confirm(f.call, f.plan);
