@@ -101,6 +101,18 @@ describe("createCommandHandler — control disabled", () => {
 });
 
 describe("createCommandHandler — prompt (§4.2/§4.3/D4/D5/D13/D21)", () => {
+  it.each(["/mem", "/mem init", "  /mem session add x", "/mem\nhub rm x"])(
+    "refuses memory prompts before routing or SDK dispatch: %s",
+    (text) => {
+      const h = makeHarness();
+      const send = vi.spyOn(h.deps.pi, "sendUserMessage");
+      h.handler.handle(frame("memory-prompt", { op: "prompt", text, deliver: "followUp" }));
+      expect(h.sent).toMatchObject([{ ok: false, code: "E_COMMAND_DENIED", retryable: false, effect: "none" }]);
+      expect(send).not.toHaveBeenCalled();
+      expect(h.originEntry.appendOrigin).not.toHaveBeenCalled();
+      h.handler.dispose();
+    },
+  );
   it.each([
     "/webhub 2fa enroll",
     "/webhub 2fa recovery",
@@ -801,4 +813,135 @@ it("#40 thread metadata skips W3 even when the wire name is invalid", () => {
   expect(read).not.toHaveBeenCalled();
   expect(send).toHaveBeenCalledTimes(1);
   h.handler.dispose();
+});
+
+describe("direct Web memory reads", () => {
+  it.each([
+    ["idle-busy", "E_COMMAND_DENIED"],
+    ["pending", "E_COMMAND_DENIED"],
+    ["compacting", "E_BUSY_COMPACTING"],
+    ["switch", "E_STALE_CTX"],
+    ["topic-switch", "E_STALE_CTX"],
+  ] as const)("refuses %s before the real bridge invokes its read port", async (state, code) => {
+    const { createBuiltinBridge } = await import("../../../src/web-hub/agent/builtin-bridge.js");
+    const h = makeHarness();
+    const send = vi.spyOn(h.deps.pi, "sendUserMessage");
+    const read = vi.fn(() => ({ ok: true as const, output: "unexpected" }));
+    const ctx = {
+      ...h.deps.getCtx()!,
+      cwd: "/tmp",
+      isIdle: () => state !== "idle-busy",
+      hasPendingMessages: () => state === "pending",
+    };
+    h.deps.getCtx = () => ctx;
+    h.compaction.manualCompacting = state === "compacting";
+    h.deps.switchInFlight = () => state === "switch";
+    h.deps.topicSwitchActive = () => state === "topic-switch";
+    h.deps.builtinBridge = createBuiltinBridge({
+      getCtx: () => ctx,
+      getSessionId: () => h.ctxState.sessionId,
+      memoryRead: read,
+    });
+    const handler = createCommandHandler(h.deps);
+    handler.handle(frame(`busy-${state}`, { op: "command", name: "mem", args: "list" }));
+    expect(h.sent).toMatchObject([{ ok: false, code, effect: "none" }]);
+    expect(read).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
+    handler.dispose();
+    h.handler.dispose();
+  });
+  it("returns real readonly results without UI, SDK dispatch or mutations", async () => {
+    const { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { tmpdir } = await import("node:os");
+    const { executeMemoryRead } = await import("../../../src/memory/command-readonly.js");
+    const { memoryDirFor } = await import("../../../src/memory/paths.js");
+    const { createBuiltinBridge } = await import("../../../src/web-hub/agent/builtin-bridge.js");
+    const root = mkdtempSync(join(tmpdir(), "web-mem-seam-"));
+    try {
+      const cwd = join(root, "project");
+      const paths = { memoryRoot: join(root, "memory"), ccProjectsRoot: join(root, "cc") };
+      const dir = memoryDirFor(cwd, paths);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "note.md"), "# Topic\n\nExample\n");
+      const h = makeHarness();
+      const send = vi.spyOn(h.deps.pi, "sendUserMessage");
+      const confirm = vi.fn();
+      const ctx = { ...h.deps.getCtx()!, cwd, ui: { confirm } };
+      h.deps.builtinBridge = createBuiltinBridge({
+        getCtx: () => ctx,
+        getSessionId: () => h.ctxState.sessionId,
+        memoryRead: (args, hostCwd) => executeMemoryRead(args, hostCwd, paths),
+      });
+      const handler = createCommandHandler(h.deps);
+      for (const [id, args] of ["list", "path", "restore", "migrate --dry-run"].entries())
+        handler.handle(frame(`read-${id}`, { op: "command", name: "mem", args }));
+      expect(h.sent).toHaveLength(4);
+      expect(h.sent[0]).toMatchObject({
+        ok: true,
+        data: { output: { entries: [{ text: expect.stringContaining("note.md") }] } },
+      });
+      expect(h.sent[1]).toMatchObject({ ok: true, data: { output: { entries: [{ text: `memory dir: ${dir}` }] } } });
+      expect(h.sent[2]).toMatchObject({
+        ok: true,
+        data: { output: { entries: [{ text: "no backups or trash entries" }] } },
+      });
+      expect(h.sent[3]).toMatchObject({
+        ok: true,
+        data: { output: { entries: [{ text: expect.stringContaining("note.md") }] } },
+      });
+      for (const [id, args] of ["doctor", "init", "restore --trash abc"].entries())
+        handler.handle(frame(`reject-${id}`, { op: "command", name: "mem", args }));
+      expect(h.sent.slice(4)).toHaveLength(3);
+      for (const result of h.sent.slice(4))
+        expect(result).toMatchObject({
+          ok: false,
+          code: "E_UNSUPPORTED",
+          message: expect.stringContaining("E_MEM_WEB_UNSUPPORTED"),
+          effect: "none",
+        });
+      expect(confirm).not.toHaveBeenCalled();
+      expect(send).not.toHaveBeenCalled();
+      expect(readdirSync(dir)).toEqual(["note.md"]);
+      expect(readFileSync(join(dir, "note.md"), "utf8")).toBe("# Topic\n\nExample\n");
+      handler.dispose();
+      h.handler.dispose();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed for missing and throwing ports, with no SDK fallback", async () => {
+    const { createBuiltinBridge } = await import("../../../src/web-hub/agent/builtin-bridge.js");
+    for (const mode of ["missing", "throw"] as const) {
+      const h = makeHarness();
+      const send = vi.spyOn(h.deps.pi, "sendUserMessage");
+      const ctx = { ...h.deps.getCtx()!, cwd: "/tmp" };
+      h.deps.builtinBridge = createBuiltinBridge({
+        getCtx: () => ctx,
+        getSessionId: () => h.ctxState.sessionId,
+        ...(mode === "throw"
+          ? {
+              memoryRead: () => {
+                throw new Error("unavailable");
+              },
+            }
+          : {}),
+      });
+      const handler = createCommandHandler(h.deps);
+      for (const [id, args] of ["list", "init"].entries())
+        handler.handle(frame(`${mode}-${id}`, { op: "command", name: "mem", args }));
+      expect(h.sent).toHaveLength(2);
+      for (const result of h.sent)
+        expect(result).toMatchObject({
+          ok: false,
+          code: "E_UNSUPPORTED",
+          message: expect.stringContaining("E_MEM_CONFIRM_UNAVAILABLE"),
+          effect: "none",
+        });
+      expect(send).not.toHaveBeenCalled();
+      handler.dispose();
+      h.handler.dispose();
+    }
+  });
 });

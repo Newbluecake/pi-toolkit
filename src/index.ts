@@ -1073,6 +1073,7 @@ export default function activate(rawPi: ExtensionAPI): void {
     // (non-live, like `lanSettingsWarnings` below) and only when the proxy is enabled at all.
     const proxyWarnings = settings.webHub.proxy?.enabled === true ? loadWebHubProxyWarnings() : [];
     webHubRef.current = wireWebHub(pi, {
+      ...(secureDomain.kind === "plain" && memoryWiring ? { memoryRead: memoryWiring.webRead } : {}),
       settings: settings.webHub,
       ...xs.webHubDeps(),
       feishuBot: settings.feishuBot,
@@ -1189,6 +1190,7 @@ export default function activate(rawPi: ExtensionAPI): void {
       // topic-switch plan.md §P3b.1 D2 flip point: removing this one line is the whole kill-switch
       // for web prompts ever being judged — web-hub then always takes its native dispatch path.
       promptGate: () => promptGateRef.current,
+      topicSwitchActive: () => xsFencePorts.topicSwitch?.() === true,
     });
     askUserRemoteRef.current = () => webHubRef.current?.askUserRemote();
     if (webHubRef.current.capture !== undefined) commandCaptureRef.current = webHubRef.current.capture;

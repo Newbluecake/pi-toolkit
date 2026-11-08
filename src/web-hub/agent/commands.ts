@@ -123,6 +123,8 @@ export interface CommandHandlerDeps {
    *  (the web half of the `session_before_switch` window). Absent ⇒ the check never runs
    *  (byte-identical to the pre-feature path). */
   switchInFlight?: () => boolean;
+  /** Live topic-switch fence, including held and cross-activation switch windows. */
+  topicSwitchActive?: () => boolean;
   /** fabric-thread arch r3 §6.1 (P3): the stack's thread routing surface, late-bound — `undefined`
    *  ⇔ threads off / no live stack, and then this handler's prompt path is byte-identical to the
    *  pre-feature form (the §6.1 step never runs: it is gated on `cmd.thread`, which only a
@@ -340,6 +342,11 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
     }
     if (cmd.text.trim() === "" || byteLen(cmd.text) > PROMPT_MAX_BYTES) {
       return settleAndReply(frame, errResult("E_BAD_REQUEST", true, "none"));
+    }
+    // Slash-shaped memory prompts must not bypass the direct command channel, including
+    // queued/held delivery. The guard is independent of SDK command discovery and policy.
+    if (/^\s*\/mem(?:\s|$)/.test(cmd.text)) {
+      return settleAndReply(frame, errResult("E_COMMAND_DENIED", false, "none", "Send /mem as a command"));
     }
     // LAN security: never let a browser smuggle local auth administration through prompt.
     // pi 1.2 sendUserMessage defaults expandPromptTemplates:false; keep this explicit boundary
@@ -675,6 +682,8 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
     deliver: "steer" | "followUp";
     origin: CmdOrigin;
   }): DispatchOutcome {
+    // Items held by an older activation may predate the prompt admission guard.
+    if (/^\s*\/mem(?:\s|$)/.test(item.text)) return "refused";
     try {
       const ctx = deps.getCtx();
       if (ctx === undefined) return "refused";
@@ -1091,6 +1100,22 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
     if (frame.cmd.op !== "command") return;
     const cmd = frame.cmd;
     if (!beginOrReply(frame)) return;
+    // Direct memory reads must see the same live session admission as resume/prompt,
+    // before the synchronous bridge can touch the filesystem.
+    if (cmd.name === "mem") {
+      try {
+        if (deps.compactionState.manualCompacting)
+          return settleAndReply(frame, errResult("E_BUSY_COMPACTING", true, "none"));
+        if (deps.switchInFlight?.() === true || deps.topicSwitchActive?.() === true)
+          return settleAndReply(frame, errResult("E_STALE_CTX", true, "none"));
+        const ctx = deps.getCtx();
+        if (!ctx) return settleAndReply(frame, errResult("E_STALE_CTX", true, "none"));
+        if (!ctx.isIdle() || ctx.hasPendingMessages())
+          return settleAndReply(frame, errResult("E_COMMAND_DENIED", true, "none", "mem:busy"));
+      } catch {
+        return settleAndReply(frame, errResult("E_STALE_CTX", true, "none"));
+      }
+    }
     // web-resume plan §2.4: `__list` is the one quiet read — no terminal origin notify, and the
     // ledger entry never retains the list payload.
     let quiet = false;

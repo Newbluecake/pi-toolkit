@@ -749,3 +749,53 @@ describe("wireWebHub — runtx session replacement (F2 P1 regression: reset, not
     });
   });
 });
+
+describe("wireWebHub — readonly memory port", () => {
+  it("delivers actual reads over the hub socket and refuses unsupported commands", async () => {
+    const { mkdirSync, writeFileSync, readdirSync, readFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { executeMemoryRead } = await import("../../../src/memory/command-readonly.js");
+    const { memoryDirFor } = await import("../../../src/memory/paths.js");
+    const paths = { memoryRoot: join(tmp.dir, "memory"), ccProjectsRoot: join(tmp.dir, "cc") };
+    const dir = memoryDirFor("/tmp/wa", paths);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "note.md"), "# Real\n\nText\n");
+    const { sentUserMessages } = await connectFullCaps({
+      memoryRead: (args, cwd) => executeMemoryRead(args, cwd, paths),
+    });
+    const commands = ["list", "path", "restore", "migrate --dry-run", "doctor", "init"];
+    for (const [i, args] of commands.entries()) {
+      const id = `mem0000000000000${i}`;
+      hub!.send(hub!.conns[0]!, cmdFrame(id, { op: "command", name: "mem", args }));
+      await waitUntil(() => hub!.all().some((f) => f.t === "cmd_result" && f.id === id));
+    }
+    const results = hub!.all().filter((f) => f.t === "cmd_result");
+    expect(results).toHaveLength(6);
+    for (const [i, text] of ["note.md", `memory dir: ${dir}`, "no backups or trash entries", "note.md"].entries())
+      expect(results[i]).toMatchObject({
+        ok: true,
+        data: { output: { entries: [{ text: expect.stringContaining(text) }] } },
+      });
+    for (const result of results.slice(4))
+      expect(result).toMatchObject({
+        ok: false,
+        code: "E_UNSUPPORTED",
+        message: expect.stringContaining("E_MEM_WEB_UNSUPPORTED"),
+      });
+    expect(hub!.all().filter((f) => f.t === "dialog_open")).toHaveLength(0);
+    expect(sentUserMessages).toHaveLength(0);
+    expect(readdirSync(dir)).toEqual(["note.md"]);
+    expect(readFileSync(join(dir, "note.md"), "utf8")).toBe("# Real\n\nText\n");
+  });
+  it("does not fall back when the port is absent", async () => {
+    const { sentUserMessages } = await connectFullCaps();
+    hub!.send(hub!.conns[0]!, cmdFrame("mem0000000000010", { op: "command", name: "mem", args: "list" }));
+    await waitUntil(() => hub!.all().some((f) => f.t === "cmd_result" && f.id === "mem0000000000010"));
+    expect(hub!.all().find((f) => f.t === "cmd_result" && f.id === "mem0000000000010")).toMatchObject({
+      ok: false,
+      code: "E_UNSUPPORTED",
+      message: expect.stringContaining("E_MEM_CONFIRM_UNAVAILABLE"),
+    });
+    expect(sentUserMessages).toHaveLength(0);
+  });
+});

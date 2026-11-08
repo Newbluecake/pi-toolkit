@@ -1090,17 +1090,32 @@ describe("#39 actual Web command choke point", () => {
       );
       expect(bridge.execute(frame("mem", args, {}, true))).toMatchObject({
         ok: false,
-        code: "E_COMMAND_DENIED",
+        code: "E_UNSUPPORTED",
         effect: "none",
       });
       expect(p.sent).toEqual([]);
       expect(capture.armed).toBeUndefined();
     },
   );
-  it("scoped reads reach existing real extension dispatch path", () => {
+  it("refuses before command discovery, even if registry lookup would throw", () => {
+    const send = vi.fn();
+    const getCommands = vi.fn(() => {
+      throw new Error("registry unavailable");
+    });
+    const bridge = createBuiltinBridge(baseDeps({ pi: { getCommands, sendUserMessage: send } as never }));
+    expect(bridge.execute(frame("mem", "init", {}, true))).toMatchObject({
+      ok: false,
+      code: "E_UNSUPPORTED",
+      retryable: false,
+      effect: "none",
+    });
+    expect(getCommands).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
+  });
+  it("scoped reads fail closed until direct dispatch is wired", () => {
     const p = fakePi({ commands: [{ name: "mem", source: "extension" }] });
     const bridge = createBuiltinBridge(baseDeps({ pi: p.pi, memoryScopes: true }));
-    expect(bridge.execute(frame("mem", "session list"))).toMatchObject({ ok: true });
-    expect(p.sent).toHaveLength(1);
+    expect(bridge.execute(frame("mem", "session list"))).toMatchObject({ ok: false, code: "E_UNSUPPORTED" });
+    expect(p.sent).toHaveLength(0);
   });
 });

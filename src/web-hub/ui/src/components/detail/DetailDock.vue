@@ -112,9 +112,9 @@ const cmdResult = ref<CmdResultState | null>(null);
 const cmdWaitingTerminal = ref(false);
 
 // web-hub-cmd-history (plan v2 §4.6/§4.7, D4): historyMode = hub caps ∧ agent status.features
-// both carry `cmd.history.v1`. While ON, `cmdResult` stays null FOREVER (no CommandResult —
-// command output lives in the transcript as `subagent:cmd` cards) and the dock only shows the
-// slim notes below; while OFF every code path below is byte-identical to the pre-feature dock.
+// both carry `cmd.history.v1`. Normally output lives in transcript cards; the synchronous
+// captured /mem read has no record, so it alone uses the direct result surface.
+// While OFF every code path below remains the pre-feature dock.
 const historyMode = computed(() => {
   const caps = hub !== null ? (hub.state.value.hub as { caps?: unknown } | null | undefined)?.caps : undefined;
   return cmdHistoryModeOn(caps, view?.agent.value.status);
@@ -170,7 +170,17 @@ async function runCommandHistory(
     }
     return;
   }
-  const data = (outcome.data ?? {}) as { history?: unknown };
+  const data = (outcome.data ?? {}) as {
+    history?: unknown;
+    completion?: string;
+    captured?: boolean;
+    output?: CommandOutputWire;
+  };
+  if (name === "mem" && data.completion === "sync" && data.captured === true && data.output) {
+    store.drop(id);
+    cmdResult.value = { name, state: "done", captured: true, output: data.output };
+    return;
+  }
   if (data.history === "recorded") return; // the record card arrives via the transcript
   store.finishWithoutCard(id, name); // n1: `none` OR a missing field ⇒ no card will come
 }
@@ -338,6 +348,7 @@ async function runCommand(
   const key = agentKey();
   if (!c || key === null) return;
   pendingConfirm.value = null;
+  cmdResult.value = null;
   if (historyMode.value) return runCommandHistory(c, key, name, args, confirm, fallback, commandId); // §4.7 — no CommandResult
   cmdResult.value = { name, state: "running" };
   cmdWaitingTerminal.value = false;
@@ -888,9 +899,8 @@ onUnmounted(() => {
       :waiting-terminal="cmdWaitingTerminal"
       @dismiss="cmdResult = null"
     />
-    <!-- cmd-history §4.7 (D4): in historyMode the transcript cards replace CommandResult; the
-         dock keeps ONLY the slim notes + the terminal-interaction banner. `historyMode` false
-         ⇒ this whole block renders nothing and the legacy surface above is untouched. -->
+    <!-- History normally uses transcript cards; synchronous memory reads use the result above.
+         This block holds slim notes and the terminal-interaction banner only. -->
     <template v-if="historyMode">
       <p
         v-for="note in cmdNotes"

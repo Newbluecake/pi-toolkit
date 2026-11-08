@@ -48,6 +48,7 @@ export interface BuiltinBridge {
 }
 
 export interface BuiltinBridgeDeps {
+  memoryRead?: import("../../memory/index.js").MemoryReadPort;
   memoryScopes?: boolean;
   pi?: ExtensionAPI & CommandsPort;
   getCtx?(): ExtensionContext | undefined;
@@ -632,6 +633,45 @@ export function createBuiltinBridge(deps: BuiltinBridgeDeps = {}): BuiltinBridge
       if (!/^[A-Za-z0-9:_.-]{1,64}$/.test(cmd.name))
         return errResult("E_BAD_REQUEST", false, "none", "bad command name");
       if (byteLen(cmd.args) > ARGS_MAX_BYTES) return errResult("E_BAD_REQUEST", true, "none", "args too long");
+      // The direct, read-only capability is closure-injected by the host, never
+      // obtained from frame fields or capture tickets. No SDK/native fallback.
+      if (cmd.name === "mem") {
+        if (!deps.memoryRead || isFeishuCmdOrigin(frame.origin))
+          return errResult(
+            "E_UNSUPPORTED",
+            false,
+            "none",
+            "E_MEM_CONFIRM_UNAVAILABLE: memory command channel unavailable",
+          );
+        try {
+          const ctx = deps.getCtx?.();
+          if (!ctx || !ctx.cwd) return errResult("E_STALE_CTX", false, "none");
+          const sessionId = deps.getSessionId?.();
+          if (!sessionId || (cmd.expect?.sessionId !== undefined && cmd.expect.sessionId !== sessionId))
+            return errResult("E_SESSION_CHANGED", false, "none");
+          if (frame.deadlineMs <= 0) return errResult("E_DEADLINE", false, "none");
+          const override = deps.overrides?.()?.mem;
+          if (override === "deny") return errResult("E_COMMAND_DENIED", false, "none");
+          const result = deps.memoryRead(cmd.args, ctx.cwd);
+          if (!result.ok) return errResult("E_UNSUPPORTED", false, "none", `${result.code}: ${result.message}`);
+          if (override === "confirm" && cmd.confirm !== true)
+            return errResult("E_CONFIRM_REQUIRED", false, "none", confirmMessage(cmd.name, cmd.args, "extension"));
+          return okResult({
+            op: "command",
+            kind: "extension",
+            completion: "sync",
+            captured: true,
+            output: textOutput(result.output),
+          });
+        } catch {
+          return errResult(
+            "E_UNSUPPORTED",
+            false,
+            "none",
+            "E_MEM_CONFIRM_UNAVAILABLE: memory command channel unavailable",
+          );
+        }
+      }
       const ctx = deps.getCtx?.();
       if (ctx === undefined) return errResult("E_STALE_CTX", true, "none");
       if (cmd.expect?.sessionId !== undefined) {

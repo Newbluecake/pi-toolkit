@@ -323,6 +323,7 @@ export interface ThreadAgentPort extends ThreadPromptPort {
   threadClosed(h: string, reason: ThreadCloseReason): void;
 }
 export interface WebHubDeps {
+  memoryRead?: import("../../memory/index.js").MemoryReadPort;
   /** P4 owns/wires ONE bridge independent of webHub.enabled; this client only dispatches. */
   memoryProof?: () => HumanDispatchBridge | undefined;
   /** Top-level, non-live settings; only buildHubConfig consumes it. */
@@ -403,6 +404,8 @@ export interface WebHubDeps {
    *  assigns the ref. Unset (topic-switch off, or not wired yet) ⇒ `commands.ts` never calls
    *  `tryClaim` at all — byte-identical to the pre-feature native/hold dispatch path. */
   promptGate?: () => PromptGatePort | undefined;
+  /** Existing topic-switch fence, sampled at direct memory read admission. */
+  topicSwitchActive?: () => boolean;
   /** fabric-thread arch r3 §11.1 P3: the stack's thread surface, late-bound (`holder.current?.threads`).
    *  Unset (threads off) ⇒ no §6.1 prompt step, no `status.threads`, no thr_closed handling —
    *  byte-identical prompt handling (G2a). Structural: `ThreadStackSurface` (stack.ts) satisfies
@@ -982,6 +985,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     sendLate: (frame, result) => bridgeLate.current?.(frame, result),
   });
   const builtinBridge = createBuiltinBridge({
+    ...(deps.memoryRead ? { memoryRead: deps.memoryRead } : {}),
     ...(deps.memoryProof ? { memoryScopes: true } : {}),
     pi,
     getCtx: () => ctx,
@@ -1351,6 +1355,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     // through unchanged — `undefined` (the common case until topic-switch is wired) keeps
     // `handlePrompt` byte-identical to its pre-feature form.
     ...(deps.promptGate !== undefined ? { promptGate: deps.promptGate } : {}),
+    ...(deps.topicSwitchActive !== undefined ? { topicSwitchActive: deps.topicSwitchActive } : {}),
     // web-hub-steer-recall §4.7 step 3 (A6): the hold driver, looked up lazily so the driver can
     // be constructed after the handler it dispatches through (no temporal-dead-zone cycle).
     // `owner` (Y4/Y7.3) scopes every ledger lookup this handler makes to THIS module instance.

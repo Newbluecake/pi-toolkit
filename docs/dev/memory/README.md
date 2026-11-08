@@ -263,3 +263,7 @@ owner。secure/locked 测试只用 fake mountinfo 的实际 activate/SDK constru
 ### Hub authority 参数确认陷阱修复（v0.11.0 hotfix）
 
 `scoped_memory` 的 `authority` 仅决定 session 写入的权限，hub 作用域忽略该参数（无论 `agent`、`user` 或省略），hub 写入和删除仍必须经过原文确认与一次性 opCap；TUI 和 Web 的确认入口均可到达。此前 hub 对任何显式 authority 在弹框前返回 `E_AUTHORITY`，而 view 又返回 user authority，诱导模型传参后导致无法确认。
+
+### Web 命令只读函数（A2d，已接生产）
+
+`command-readonly.ts` 提供不依赖 command ctx 的 `executeMemoryRead`：支持空参数、`list`、`path`、`restore`/`restore --legacy`/`restore --trash` 列表及单目录 `migrate --dry-run`/`--report`；其余输入返回 `E_MEM_WEB_UNSUPPORTED`。缺目录的迁移预览拒绝，报告读取失败抛错。仅 plain domain 且 memory 已启用时，宿主把该只读函数引用注入 Web bridge；经过 command handler 的 ledger 与宿主 idle/pending、手动 compact 和 session switch 准入后同步直调，cwd 来自当前宿主 ctx，不进入 SDK slash/capture/native handler。缺端口、抛错、飞书来源及不支持的命令均拒绝，写命令始终拒绝；显式 Web 命令策略 deny/confirm 仍生效。默认 history 模式下同步只读输出直接展示，不依赖 transcript record。输出暂不包含 native 列表的 doctor/Jev 尾注。该函数本身不认证调用者，函数引用只提供只读通道，并非方案中的逐次 MemoryWebCall/owner/lease 证明，不得用于开放写入。测试覆盖真实临时目录及 hub socket 返回；完整写确认、终态和生命周期尚未实现。

@@ -39,6 +39,7 @@ import type { MemoryWriteGate, TidyPort } from "./contracts.js";
 import { createSweepRunner } from "./govern/sweep.js";
 import type { SweepReason } from "./govern/sweep-plan.js";
 import { createMemCommand } from "./command.js";
+import { executeMemoryRead, type MemoryReadResult } from "./command-readonly.js";
 import { memorySection, renderExternalMemoryBlock } from "./inject.js";
 import { RenderCache, type InjectBudget } from "./render.js";
 import { createMemoryTool } from "./tool.js";
@@ -87,7 +88,11 @@ export interface WireMemoryOpts {
   todo?: () => JevTodoPort | undefined;
 }
 
+export type MemoryReadPort = (args: string, cwd: string) => MemoryReadResult;
+
 export interface WireMemoryResult {
+  /** Read-only Web executor; no native handler or write grant is exposed. */
+  readonly webRead: MemoryReadPort;
   /** §7's spawn port for `/mem tidy`/`/mem restore`. Called at most once by
    *  `src/index.ts`, post-guard, main session only; `undefined` restores the
    *  "tidy unavailable in this session" fallback (child sessions never get
@@ -440,6 +445,7 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
     }),
   );
   return {
+    webRead: executeMemoryRead,
     attachTidy(port) {
       tidyPort = port;
     },
