@@ -9,6 +9,7 @@ import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { createMemCommand } from "../../src/memory/command.js";
 import { forgetWorktreeOrigin, recordWorktreeOrigin } from "../../src/core/worktree-origin.js";
 import { memoryDirFor, toSlug, type MemoryPaths } from "../../src/memory/paths.js";
+import { parseMemorySettings } from "../../src/memory/settings.js";
 import { DRIFT_HEADER } from "../../src/memory/store.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -184,6 +185,34 @@ describe("/mem getArgumentCompletions", () => {
     const cmd = createMemCommand({ paths: fx.paths });
     const items = cmd.getArgumentCompletions("")!;
     expect(items.map((i) => i.value).sort()).toEqual(["doctor", "import", "init", "list", "path", "restore", "tidy"]);
+  });
+
+  test("layout-specific menu exposes block restore and labels maintenance", async () => {
+    const fx = fixture();
+    const blocks = createMemCommand({ paths: fx.paths, settings: parseMemorySettings({ layout: "blocks" }) });
+    const tiered = createMemCommand({ paths: fx.paths, settings: parseMemorySettings({ layout: "tiered" }) });
+    expect(blocks.description).not.toContain("tidy");
+    expect(blocks.description).toContain("restore --block");
+    expect(blocks.description).toContain("维护: /mem migrate");
+    expect(blocks.getArgumentCompletions("").map((v) => v.value)).not.toContain("tidy");
+    expect(blocks.getArgumentCompletions("").find((v) => v.value === "restore")?.description).toBe(
+      "恢复归档块 [--block]",
+    );
+    expect(tiered.getArgumentCompletions("").find((v) => v.value === "restore")?.description).toBe(
+      "恢复 tidy 备份 [--trash]",
+    );
+    expect(blocks.getArgumentCompletions("tidy ")).toEqual([]);
+    expect(blocks.getArgumentCompletions("restore ").map((v) => v.value)).toContain("restore --block");
+    expect(tiered.description).toContain("tidy");
+    expect(tiered.description).not.toContain("restore --block");
+    expect(tiered.getArgumentCompletions("restore ").map((v) => v.value)).not.toContain("restore --block");
+    expect(tiered.getArgumentCompletions("tidy --break")[0]?.description).toContain("维护");
+    const dir = join(memoryDirFor(fx.cwd, fx.paths), "blocks");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, ".layout.json"), "{}");
+    const { ctx, notifications } = fakeCtx(fx.cwd);
+    await blocks.handler("tidy", ctx);
+    expect(notifications[0]?.message).toContain("disabled for block-layout");
   });
 
   test("prefix filters subcommands", () => {

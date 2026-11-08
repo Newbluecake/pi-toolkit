@@ -70,7 +70,7 @@ const DESCRIPTION =
 /** With a jev port the description gains the new subcommands (J4's jev/tags,
  *  J8's review/expired); without one it must stay byte-identical (I9 / off
  *  golden). */
-const DESCRIPTION_JEV = `${DESCRIPTION} · /mem jev · /mem tags · /mem review · /mem expired`;
+const DESCRIPTION_JEV = `${DESCRIPTION} · /mem jev · /mem tags · /mem review · /mem expired · 维护: /mem tidy --break-lock · /mem jev reset-index`;
 
 function fmtImport(r: ImportResult): string {
   const s = r.skipped ? `, ${r.skipped} skipped (exists)` : "";
@@ -123,7 +123,7 @@ const MEM_SECOND_LEVEL: Record<string, ReadonlyArray<{ value: string; descriptio
     { value: "tidy --batch --dry-run", description: "预览批量计划，不写入" },
     { value: "tidy --batch --status", description: "查看批量运行状态" },
     { value: "tidy --batch --archive-only", description: "只执行批量归档" },
-    { value: "tidy --break-lock", description: "撤销并打破残留锁（仅 TUI）" },
+    { value: "tidy --break-lock", description: "维护：撤销并打破残留锁（仅 TUI）" },
     { value: "tidy --dry-run", description: "只预览，不写入" },
     { value: "tidy --frontmatter", description: "只整理 frontmatter" },
   ],
@@ -137,7 +137,7 @@ const MEM_SECOND_LEVEL: Record<string, ReadonlyArray<{ value: string; descriptio
 /** jev/tags second-level completion (J4) — appended only with a port;
  *  review/expired added by J8, same gating. */
 const MEM_JEV_SUBCOMMANDS: ReadonlyArray<{ value: string; description: string }> = [
-  { value: "jev", description: "Jev 分类引擎状态 [probe|retag|reset-index]" },
+  { value: "jev", description: "Jev 分类引擎状态 [probe|retag]；维护：reset-index" },
   { value: "tags", description: "场景标签管理 [list|add|rm|disable|enable]" },
   { value: "review", description: "整理建议逐条确认 [--list|--run]" },
   { value: "expired", description: "到期条目处理" },
@@ -147,7 +147,7 @@ const MEM_JEV_SECOND_LEVEL: Record<string, ReadonlyArray<{ value: string; descri
     { value: "jev probe", description: "强制刷新可用集" },
     { value: "jev retag", description: "补打 pending 条目" },
     { value: "jev retag --all", description: "全部重打" },
-    { value: "jev reset-index", description: "清除侧车索引（保留 taxonomy）" },
+    { value: "jev reset-index", description: "维护：清除侧车索引（保留 taxonomy）" },
   ],
   tags: [
     { value: "tags list", description: "列出标签" },
@@ -179,25 +179,39 @@ export function createMemCommand(deps: CreateMemCommandDeps): {
     const dir = dirFor(c);
     return dir === undefined || entryIndex === undefined ? [] : entryIndex.get(dir);
   };
-  // I9: without a port the tables and description stay exactly as before.
+  // Preserve the jev-off files-layout golden; blocks expose their own layout-specific menu.
   const blocks = deps.settings?.layout === "blocks";
   const subcommands = [
-    ...(jev === undefined ? MEM_SUBCOMMANDS : [...MEM_SUBCOMMANDS, ...MEM_JEV_SUBCOMMANDS]),
+    ...(jev === undefined ? MEM_SUBCOMMANDS : [...MEM_SUBCOMMANDS, ...MEM_JEV_SUBCOMMANDS])
+      .filter((item) => !blocks || item.value !== "tidy")
+      .map((item) => (blocks && item.value === "restore" ? { ...item, description: "恢复归档块 [--block]" } : item)),
     ...(blocks
-      ? [{ value: "migrate", description: "块布局迁移 [--dry-run|--all|--report|--status|--import-legacy|--rollback]" }]
+      ? [
+          {
+            value: "migrate",
+            description: "维护：块布局迁移 [--dry-run|--all|--report|--status|--import-legacy|--rollback]",
+          },
+        ]
       : []),
   ];
   const secondLevel: Record<string, ReadonlyArray<{ value: string; description: string }>> = jev === undefined
     ? { ...MEM_SECOND_LEVEL }
     : { ...MEM_SECOND_LEVEL, ...MEM_JEV_SECOND_LEVEL };
+  if (blocks) {
+    delete secondLevel.tidy;
+    secondLevel.restore = [{ value: "restore --block", description: "恢复归档块" }, ...MEM_SECOND_LEVEL.restore!];
+  }
+  const scopedHelp = deps.scopedRouter ? " · /mem session|hub status (list equivalent; status recommended)" : "";
+  const description = blocks
+    ? "Project memory blocks. /mem · /mem list · /mem init · /mem import · /mem path · /mem doctor · /mem restore --block" +
+      (jev === undefined ? "" : " · /mem jev · /mem tags · /mem review · /mem expired") +
+      scopedHelp +
+      " · 维护: /mem migrate [--dry-run|--all|--report|--status|--import-legacy|--rollback]"
+    : jev === undefined
+      ? DESCRIPTION + scopedHelp
+      : DESCRIPTION_JEV.replace(" · 维护:", `${scopedHelp} · 维护:`);
   return {
-    description:
-      (blocks
-        ? "Project memory blocks. /mem migrate [--dry-run|--all|--report|--status|--import-legacy|--rollback] · /mem doctor · /mem restore"
-        : jev === undefined
-          ? DESCRIPTION
-          : DESCRIPTION_JEV) +
-      (deps.scopedRouter ? " · /mem session|hub status (list equivalent; status recommended)" : ""),
+    description,
     getArgumentCompletions: (argumentPrefix: string) => {
       try {
         const a = (argumentPrefix ?? "").trimStart();
@@ -212,7 +226,7 @@ export function createMemCommand(deps: CreateMemCommandDeps): {
           const visible =
             head === "tidy" && a === "tidy "
               ? second.filter((item) => item.value === "tidy --dry-run" || item.value === "tidy --frontmatter")
-              : head === "restore" && a === "restore "
+              : head === "restore" && a === "restore " && !blocks
                 ? second.filter((item) => item.value === "restore --trash")
                 : second;
           const typed = a.trim();
