@@ -57,6 +57,7 @@ import {
   productionClockPort,
   validateAnswers,
   validateLabels,
+  validateRunBudgets,
   verifyTurnSources,
 } from "../../../scripts/dev/memory36-gate.mjs";
 
@@ -88,6 +89,17 @@ const questions = { e1: { type: "bool", instructions: "production question", cri
 const model = { provider: "test", id: "classifier" };
 const context = { state: { user_message: "a real request", today: "2026-11-06" }, questions };
 const result = { stopReason: "stop", answers: { e1: { type: "bool", probability: 0.7 } } };
+
+describe("PG budget admission", () => {
+  it("accepts the authorized ceilings and rejects over-budget and invalid values without transport", () => {
+    expect(validateRunBudgets(800, 900000, 1.5)).toBeUndefined();
+    expect(validateRunBudgets(400, 900000, 0.5)).toBeUndefined();
+    expect(() => validateRunBudgets(801, 900000, 1.5)).toThrow("invalid run budgets");
+    expect(() => validateRunBudgets(800, 900000, 1.501)).toThrow("classifier cap exceeds approved budget");
+    expect(() => validateRunBudgets(800, 900001, 1.5)).toThrow("invalid run budgets");
+    expect(() => validateRunBudgets(0, 900000, 1.5)).toThrow("invalid run budgets");
+  });
+});
 
 describe("PG parsing/provenance", () => {
   it("parses JSONL with blanks and rejects malformed records, duplicate ids and missing references", () => {

@@ -1638,6 +1638,19 @@ export function createFatalRejectionLatch({ audit, abort, setExitCode }) {
     forcedExit: (code) => (tripped ? 2 : code),
   };
 }
+export function validateRunBudgets(maxCalls, timeoutMs, maxClassifierUsd) {
+  check(
+    Number.isInteger(maxCalls) &&
+      maxCalls > 0 &&
+      maxCalls <= 800 &&
+      Number.isInteger(timeoutMs) &&
+      timeoutMs > 0 &&
+      timeoutMs <= 900000,
+    "invalid run budgets",
+  );
+  check(maxClassifierUsd > 0 && maxClassifierUsd <= 1.5, "classifier cap exceeds approved budget");
+}
+
 /** The SAME listener lifetime used by main and offline regressions. */
 export async function withFatalLatchScope({ audit, controller, setExitCode }, fn) {
   const latch = createFatalRejectionLatch({ audit, abort: () => controller.abort(), setExitCode });
@@ -1732,15 +1745,7 @@ export async function main(args = process.argv.slice(2)) {
   const live = process.env.PI_TOOLKIT_MEMORY36_GATE_LIVE === "1";
   const maxCalls = Number(options["max-calls"] ?? 400),
     timeoutMs = Number(options["timeout-ms"] ?? 900000);
-  check(
-    Number.isInteger(maxCalls) &&
-      maxCalls > 0 &&
-      maxCalls <= 400 &&
-      Number.isInteger(timeoutMs) &&
-      timeoutMs > 0 &&
-      timeoutMs <= 900000,
-    "invalid run budgets",
-  );
+  validateRunBudgets(maxCalls, timeoutMs, Number(options["max-classifier-usd"] ?? 0.5));
   const agentDir = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi/agent");
   const settingPath = options.settings ?? join(agentDir, "pi-toolkit.json");
   const userSettings = existsSync(settingPath) ? JSON.parse(readFileSync(settingPath, "utf8")).memory : undefined;
@@ -1760,10 +1765,6 @@ export async function main(args = process.argv.slice(2)) {
     proxyHash: digest(config.proxy),
     day: new Date(now).toISOString().slice(0, 10),
   };
-  check(
-    Number(options["max-classifier-usd"] ?? 0.5) > 0 && Number(options["max-classifier-usd"] ?? 0.5) <= 0.5,
-    "classifier cap exceeds approved budget",
-  );
   check(
     Number(options["max-chat-usd"] ?? 0.28) > 0 &&
       Number(options["max-chat-usd"] ?? 0.28) <= 0.28 &&
