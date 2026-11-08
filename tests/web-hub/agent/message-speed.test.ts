@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { expectHidden } from "./message-speed-test-helpers.js";
 import { createMessageSpeed, type MessageSpeedOwner } from "../../../src/web-hub/agent/message-speed.js";
 import { messageSpeedBinding } from "../../../src/web-hub/agent/message-speed-binding.js";
 import { createEventTap } from "../../../src/web-hub/agent/event-tap.js";
@@ -403,4 +404,194 @@ it("raw completed must own response.id, reasoning number zero and output count w
     expect(f.speed.end(f.message)).toBeUndefined();
     expect(calls).toBe(0);
   }
+});
+
+describe("P1 completions proof", () => {
+  it.each([
+    "positive",
+    "choice usage",
+    "reasoning",
+    "thinking",
+    "changed id",
+    "missing usage",
+    "null usage",
+    "mismatch",
+    "empty",
+    "tool round",
+    "conflicting usage",
+    "tail delta",
+    "early changed id",
+    "early usage",
+    "same chunk conflict",
+    "null intermediate",
+    "multi choice",
+    "unknown finish",
+  ])("%s", (mode) => {
+    const f = fixture();
+    const b = { ...binding, api: "openai-completions" };
+    const message = {
+      ...f.message,
+      ...b,
+      stopReason: mode === "tool round" ? "toolUse" : "stop",
+      content: mode === "empty" ? [] : mode === "thinking" ? [{ type: "thinking", text: "x" }] : f.message.content,
+      usage: { output: mode === "mismatch" ? 9 : 10 },
+    };
+    const raw = (data: unknown) => f.speed.raw({ provider: b.provider, model: b.model, api: b.api, data });
+    const chunk = (id: string, choices: unknown[], usage?: unknown) => ({
+      id,
+      choices,
+      ...(usage === undefined ? {} : { usage }),
+    });
+    f.start();
+    raw(chunk("resp", [{ index: 0, delta: { role: "assistant" }, finish_reason: null }]));
+    if (mode === "early changed id") raw(chunk("other", []));
+    if (mode === "early usage") raw(chunk("resp", [], { completion_tokens: 10 }));
+    if (mode === "multi choice") raw(chunk("resp", [{ index: 0 }, { index: 1 }]));
+    if (mode === "null intermediate") raw(chunk("resp", [], null));
+    if (mode === "same chunk conflict")
+      raw(
+        chunk("resp", [{ index: 0, delta: {}, finish_reason: "stop", usage: { completion_tokens: 9 } }], {
+          completion_tokens: 10,
+        }),
+      );
+    f.speed.delta(mode === "thinking" ? "thinking_delta" : "text_delta", "x", b);
+    f.setTime(500);
+    f.speed.delta("text_delta", "y", b);
+    if (mode === "changed id") raw(chunk("other", [{ index: 0, delta: { content: "x" } }]));
+    raw(
+      chunk("resp", [
+        {
+          index: 0,
+          delta: {},
+          finish_reason: mode === "tool round" ? "tool_calls" : mode === "unknown finish" ? "content_filter" : "stop",
+          ...(mode === "choice usage" ? { usage: { completion_tokens: 10 } } : {}),
+        },
+      ]),
+    );
+    if (mode !== "missing usage" && mode !== "choice usage")
+      raw(
+        chunk(
+          "resp",
+          [],
+          mode === "null usage" ? null : { completion_tokens: 10, completion_tokens_details: { reasoning_tokens: 5 } },
+        ),
+      );
+    if (mode === "conflicting usage") raw(chunk("resp", [], { completion_tokens: 9 }));
+    if (mode === "tail delta") raw(chunk("resp", [{ index: 0, delta: { content: "late" } }]));
+    const positive = ["positive", "choice usage", "reasoning", "thinking", "null intermediate"].includes(mode);
+    const events: Array<{ type: string; message?: unknown }> = [];
+    const end = vi.spyOn(f.speed, "end");
+    const tap = createEventTap((e) => events.push(e), { speed: f.speed, setTimer: () => ({ cancel() {} }) });
+    tap.handle({ type: "message_end", message });
+    f.event("turn_end", { message, turnIndex: 0, messageEntryId: "mid" });
+    expect(end).toHaveBeenCalledTimes(1);
+    if (positive) {
+      expect(end).toHaveReturnedWith(core);
+      expect(f.append).toHaveBeenCalledTimes(1);
+    } else expectHidden(events, end.mock.results.at(-1)?.value, f.append.mock.calls.length);
+    tap.dispose();
+  });
+});
+
+describe("P1 rework: hostile boundaries and terminal ordering", () => {
+  it.each([
+    "choices accessor",
+    "second start",
+    "error delta",
+    "abort delta",
+    "responses late done",
+    "responses anonymous tail",
+  ])("%s hides end, live and append", (mode) => {
+    const f = fixture();
+    const events: Array<Record<string, unknown>> = [];
+    const end = vi.spyOn(f.speed, "end");
+    const tap = createEventTap((e) => events.push(e as unknown as Record<string, unknown>), {
+      speed: f.speed,
+      now: () => 0,
+      setTimer: () => ({ cancel() {} }),
+    });
+    const chat = mode === "choices accessor" || mode === "second start";
+    const b = chat ? { ...binding, api: "openai-completions" } : binding;
+    const message = { ...f.message, ...b, stopReason: "stop" };
+    const raw = (data: unknown) => f.speed.raw({ provider: b.provider, api: b.api, model: b.model, data });
+    tap.handle({ type: "agent_start" });
+    tap.handle({ type: "turn_start", turnIndex: 0 });
+    tap.handle({ type: "message_start", message });
+    let getterCalls = 0;
+    if (chat) {
+      const choices = [{ index: 0, delta: {}, finish_reason: "stop" }];
+      if (mode === "choices accessor")
+        Object.defineProperty(choices, "0", {
+          get() {
+            getterCalls++;
+            return { index: 0, delta: {}, finish_reason: "stop" };
+          },
+        });
+      raw({ id: "resp", choices, usage: { completion_tokens: 10 } });
+    }
+    if (mode === "second start") tap.handle({ type: "message_start", message });
+    const update = (kind: string) =>
+      tap.handle({ type: "message_update", assistantMessageEvent: { type: kind, contentIndex: 0, delta: "x" } }, b);
+    update("text_delta");
+    f.setTime(500);
+    update("text_delta");
+    if (mode === "error delta") update("error");
+    if (mode === "abort delta") update("aborted");
+    if (!chat) {
+      f.speed.raw(completed());
+      if (mode === "responses late done") raw({ type: "response.output_text.done", response_id: "resp", text: "late" });
+      if (mode === "responses anonymous tail") raw({ type: "response.output_text.delta", delta: "late" });
+    }
+    tap.handle({ type: "message_end", message });
+    tap.handle({ type: "turn_end", message, turnIndex: 0, messageEntryId: "mid" });
+    expect(end).toHaveBeenCalledTimes(1);
+    expectHidden(events, end.mock.results.at(-1)?.value, f.append.mock.calls.length);
+    expect(getterCalls).toBe(0);
+    tap.dispose();
+  });
+  it("counts normalized deltas queued before raw completion but consumed afterward", () => {
+    const f = fixture();
+    f.start();
+    f.delta();
+    // The provider produced this delta before completion; its normalized delivery is queued.
+    f.speed.raw({ ...binding, data: { type: "response.output_text.delta", response_id: "resp", delta: "b" } });
+    f.speed.raw(completed());
+    f.setTime(500);
+    f.delta();
+    expect(f.speed.end(f.message)).toEqual(core);
+    f.finish();
+    expect(f.append).toHaveBeenCalledTimes(1);
+  });
+  it("joins raw-first chat terminal only to its exact binding; independent warmer invalidates", () => {
+    for (const warmer of [false, true]) {
+      const f = fixture();
+      const b = { ...binding, api: "openai-completions" };
+      const message = { ...f.message, ...b, stopReason: "stop" };
+      f.event("agent_start");
+      f.event("turn_start", { turnIndex: 0 });
+      const raw = (id: string) =>
+        f.speed.raw({
+          ...b,
+          data: { id, choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: { completion_tokens: 10 } },
+        });
+      raw("resp");
+      if (warmer) raw("warmer");
+      f.event("message_start", { message });
+      f.speed.delta("text_delta", "a", b);
+      f.setTime(500);
+      f.speed.delta("text_delta", "b", b);
+      const events: Array<{ type: string; message?: unknown }> = [];
+      const end = vi.spyOn(f.speed, "end");
+      const tap = createEventTap((e) => events.push(e), { speed: f.speed, setTimer: () => ({ cancel() {} }) });
+      tap.handle({ type: "message_end", message });
+      f.event("turn_end", { message, turnIndex: 0, messageEntryId: "mid" });
+      expect(end).toHaveBeenCalledTimes(1);
+      if (warmer) expectHidden(events, end.mock.results.at(-1)?.value, f.append.mock.calls.length);
+      else {
+        expect(end).toHaveReturnedWith(core);
+        expect(f.append).toHaveBeenCalledTimes(1);
+      }
+      tap.dispose();
+    }
+  });
 });
