@@ -41,6 +41,8 @@ import {
 import { cmdHistoryModeOn } from "@logic/cmdRecord.js";
 import {
   acceptXsStatus,
+  createXsRequestDismissals,
+  XS_REQUEST_DISMISSALS,
   narrowMentionSession,
   narrowXsRequests,
   seedXsMention,
@@ -385,6 +387,14 @@ const xsHubCaps = computed<unknown>(() =>
  *  session-matched `status.xsRequests` snapshot. Wrong-session snapshots are dropped
  *  wholesale ("错 session 丢弃"); a cap-less hub narrows to undefined ⇒ empty rows. */
 const xsAgent = computed(() => view?.agent.value);
+const xsDismissals = inject(XS_REQUEST_DISMISSALS, null) ?? createXsRequestDismissals();
+watch(
+  () => [agentKey(), sessionId()] as const,
+  ([key, sid]) => {
+    if (key !== null && sid !== "") xsDismissals.reconcile(new Map([[key, sid]]), new Set());
+  },
+  { immediate: true, flush: "sync" },
+);
 const xsSnapshot = computed(() => {
   const snap = narrowXsRequests(xsAgent.value?.status, xsHubCaps.value);
   if (snap === undefined) return undefined;
@@ -411,7 +421,7 @@ const xsRows = computed<readonly XsRowView[]>(() => {
   const key = agentKey();
   const sid = sessionId();
   if (key === null || sid === "") return [];
-  return xsRequestRows(xsMentionSeeds(key, sid), xsRemoteRows(key, sid));
+  return xsDismissals.rows(key, sid, xsRequestRows(xsMentionSeeds(key, sid), xsRemoteRows(key, sid)));
 });
 /** The per-row gate inputs, folded once per render — the component itself trusts these. */
 const xsNow = computed(() => props.now ?? Date.now());
@@ -482,6 +492,14 @@ async function runXsAction(
     done.delete(messageId);
     xsInFlight.value = done;
   }
+}
+
+function onXsDismiss(messageId: string): void {
+  const key = agentKey();
+  const sid = sessionId();
+  if (key !== null && sid !== "") xsDismissals.dismiss(key, sid, messageId);
+  // Do not cancel or clear xsInFlight: the action still settles through its original
+  // promise/finally. Its late result may update evidence, but cannot clear the tombstone.
 }
 
 function onXsActivate(messageId: string, activationKey: string): void {
@@ -1035,6 +1053,7 @@ onUnmounted(() => {
       :now="xsNow"
       @activate="onXsActivate"
       @query="onXsQuery"
+      @dismiss="onXsDismiss"
     />
     <QueueList
       :items="visibleQueue"

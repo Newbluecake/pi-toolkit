@@ -258,6 +258,8 @@ export interface XsRequestListEmits {
   /** User click ONLY — no lifecycle path ever emits these (plan §3 P4: 不自动执行). */
   activate: [messageId: string, activationKey: string];
   query: [messageId: string, activationKey: string | null];
+  /** Local presentation only — never sends a control request or removes hub evidence. */
+  dismiss: [messageId: string];
 }
 export interface ControlNoticeProps {
   readonly plaintext?: boolean;

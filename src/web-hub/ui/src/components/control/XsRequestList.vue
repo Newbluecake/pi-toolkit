@@ -86,6 +86,16 @@ function activateRetryAt(messageId: string): number | undefined {
         >
           <AppIcon name="search" class="icon-sm" />{{ t("xs.query") }}
         </button>
+        <button
+          class="btn btn-ghost btn-xs"
+          type="button"
+          data-xs-dismiss
+          :aria-label="t('xs.dismissAria', { id: row.messageId })"
+          :title="t('xs.dismissTitle')"
+          @click="emit('dismiss', row.messageId)"
+        >
+          <span aria-hidden="true">×</span>
+        </button>
       </span>
       <span class="queue-note">{{ t(row.noteKey) }}</span>
       <span v-if="row.seeded" class="queue-note">{{ t("xs.noteSeeded") }}</span>

@@ -60,6 +60,7 @@ import { useAvatar } from "./composables/useAvatar.js";
 import { useHashRoute } from "./composables/useHashRoute.js";
 import { useHub } from "./composables/useHub.js";
 import { loadKeepAlive } from "@logic/sessionKeepAlive.js";
+import { createXsRequestDismissals, XS_REQUEST_DISMISSALS } from "@logic/xsRequestState.js";
 import { useI18n } from "./composables/useI18n.js";
 import { useMedia } from "./composables/useMedia.js";
 import { useMotionPref } from "./composables/useMotionPref.js";
@@ -188,6 +189,22 @@ if (authMode !== "unknown") {
   // #32 C5 (control-plan v2.1 §7.1/§7.4): the control plane reaches components via inject —
   // the frozen `contracts.ts` props of TopBar/AgentDetail/AgentCard have no hub/control field.
   provide(HUB_CTX, hub);
+  // App-owned, memory-only: detail remounts and SSE reconnects retain local dismissals.
+  // Only a proven session replacement/removal clears them (not a temporary missing frame).
+  const xsDismissals = createXsRequestDismissals();
+  provide(XS_REQUEST_DISMISSALS, xsDismissals);
+  watch(
+    hub.state,
+    (state) => {
+      const sessions = new Map<string, string>();
+      for (const [key, agent] of state.agents) {
+        const sid = agent.session?.["sessionId"];
+        if (typeof sid === "string" && sid !== "") sessions.set(key, sid);
+      }
+      xsDismissals.reconcile(sessions, state.removed ?? new Set());
+    },
+    { flush: "sync" },
+  );
   provide(CONTROL_ENV, {
     authMode,
     plaintext: authMode === "password" && window.location.protocol === "http:",
