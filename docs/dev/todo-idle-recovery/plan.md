@@ -1,4 +1,4 @@
-# Task59 Stage B：有界 TODO 空闲恢复（已批准；B1 纯内核已交付，B2/B3 待依赖与能力门）
+# Task59 Stage B：有界 TODO 空闲恢复（B1/B2 源码已实现；B3 未接生产）
 
 ## 2026-11-08 用户新裁定（覆盖旧 strong-window 前置）
 
@@ -7,7 +7,7 @@
 - B1 已实现纯 API：`HumanEpochPort` / `parseRecoveryHumanProof` / `applyHumanProof` 接受明确 host provenance `user-arrival`；legacy `strong-consumption` 兼容但不是前置。`admission` / `interactive` 原始标签、`role:user`、机器通知和 Task 操作仍不能开窗。
 - 实际 producer 是未来 Host TUI/Web 新聊天入站 callback；由 host 分配/去重单调 epoch 与 inputId、绑定当前 sid/owner，重复到达复用 proof。模型不得通过工具参数传 epoch/owner/inputId 自称 human。本包不构造实际来源，不新增认证框架；parse 只验证形状，不认证任意对象。
 - 每窗口最多 2 次、同组合全 sid 一次、seen256 满闭不淘汰、Stop 仅新合格输入解除；旧 owner/stale epoch/异 sid/重复 proof 不清 Stop。全树 high-water 与进程内 open 不变，replay/tree/reload 不造窗，new/fork 不继承权限；reserve 先 append attempt 再 send，unknown 不退款/不重试。
-- 当前仅纯内核/store 与测试已实现，**没有生产接线**。B2 专用 runner、owned deadline、队列/触发/teardown 能力仍需真实 SDK 本地 conformance 验证，不预判缺字段即不可能，不引入新 SDK 改造。B3 共享入口须等 #39 当前包独验并 commit 后才触碰。
+- B1 纯内核/store 和 B2 host/runner 已在源码实现，**没有生产接线**：Host 未注册，runner 缺真实 `AgentSession.subscribe` 时 effective-off，extension `agent_settled` hook 不得排恢复。15 分钟期限/10 秒宽限、先记账后发送和所有 busy/goal 门的实现不代表真实拓扑已验证。真实时钟期限、跨 reload 账本（replay 只恢复账本、不恢复 live window）、与 #61 fabric 唤醒、`/goal`、schedule 的真实拓扑互斥均未验证；异步 hook / deferred 输入 / reload 组合的 conformance 已知不支持。下文为历史设计计划，阶段状态以本段为准。
 - #61 的简化 counter 独立；todo 不 import fabric 内核，不新增 ticket 或消费回执依赖。默认 on 是已批准的未来设置，不表示当前运行已激活。
 
 ## 一页摘要 / Root 决策
@@ -19,9 +19,9 @@
 - Root 技术裁定：B2 唯一拥有本特性专用 `idle-recovery-runner.ts`；借鉴现 RootWake 的监督模式，不改 xs/fabric、不伪造 XS，不等待外部 owner 提供悬空端口。独立预算和非 XS customType 是拆分理由，不是旧类缺陷。
 - 默认（用户已确认 2026-11-07）：`todo.idleRecovery.enabled=true`；安全门不完整时有效状态仍关闭。收益是兑现默认续做；成本是每窗口至多两个额外检查回合。
 - 窗口来源（2026-11-08 新裁定）：可信 Host TUI/Web 新用户聊天到达即开窗，见上节；只读 `HumanEpochPort` 是唯一注入点，模型侧无法提供 epoch 或人类声明。
-- 可信 arrival producer 尚未接线：B1 以内核 + fail-closed 端口交付，生产不激活；B2（专用 runner）与 B3（host 接线）仍待能力验证与依赖，不等强消费 producer。
+- 可信 arrival producer 尚未接线：B1 内核和 B2 专用 host/runner 已实现，生产不激活；B3 接线及真实拓扑能力验证仍待完成，不等强消费 producer。
 - #61 的默认 on / 未知 RPC 不归零及强消费选择不自动成为 #59 的强制 SDK 方案。普通机器 RPC 在两方案中都不得续额。
-- 方案异源 review 与用户确认已完成（默认 on + 强消费窗口）；B1 纯内核（`src/todo/idle-recovery.ts`、`src/todo/idle-recovery-store.ts` + 两个定向测试）已交付，不接线、不改真实配置。B2/B3 待依赖与能力门；不得启动原排队 #22/#50，不绕 #36 质量门。
+- 方案异源 review 与用户确认已完成（默认 on + 强消费窗口）；B1 纯内核（`src/todo/idle-recovery.ts`、`src/todo/idle-recovery-store.ts` + 两个定向测试）已交付，不接线、不改真实配置。B2 源码现已实现；B3 接线及真实拓扑验证仍待能力门。
 
 ## 1. 已读证据与真实 SDK 边界（r2：落实 Root 五项技术裁定）
 
@@ -40,7 +40,7 @@
 | E11  | SDK `core/session-manager.js:790-827,913-925`; `core/session-manager.d.ts:178,318,341`                  | appendCustomEntry 同步写；getEntries 全树与 getBranch 不同；无会话文件/未形成 conversation 时不能假定已持久化；不是 fsync 保证         |
 | E12  | `src/fabric/decision-input.ts:1-125`; `docs/dev/fabric-cross-session/README.md:589-612`                 | #61 现口径/注释不能直接外推 #59；本方案不修改其 owner 源码，也不重复「TUI 天然不安全」结论                                             |
 
-补充五项源码核验（实际 API；下文标「新增」的均尚未实现）：
+补充五项源码核验（当时的 API 基线；下文「新增」是历史计划，当前状态见文首）：
 
 1. `src/fabric/root-wake.ts:499-521` 已有 ledger.put → claim → arm **先于 send**；只有 chargeInboundWake 在 send 后。撤回任何「旧类没有先记账」暗示。
 2. SDK `core/extensions/types.d.ts:230-238` 的 **ExtensionContext.mode 是公开字段**；`core/extensions/runner.js:355-357,613-628` 返回宿主 runner.mode。hasUI 在 TUI/RPC 都可 true，不能单凭 hasUI 判真人。
@@ -162,4 +162,4 @@ index/stack只装配，不堆恢复逻辑。A golden绝不重生；若激活trac
 | 可见/off      | TUI 与 Web 真实 custom 投影各一条；非 human；off 字节一致；A 计数、归档、triggerTurn:false 原断言不变                                                                                   |
 
 实现阶段才运行针对测试 → typecheck/build → tier1，涉及 conformance/integration 补相应 tier2；不安装新依赖、不创建真实 scheduled task、不做用户数据/挂载/在线 API 探针。
-本轮文档静态检查及现有 todo 纯测试65条通过，不冒充尚未实现的runner验证。B1 交付的是纯候选/指纹/预算-Stop 内核与 store 效果接口（不 send/abort/timer），定向测试为本包自验；B2/B3 的开发仍需上述 SDK 能力边界用真实 conformance 通过，且可信 arrival producer / B2 / B3 接线与验证完成前生产不激活。
+历史 B1 阶段文档静态检查及 todo 纯测试 65 条通过；该阶段的 store 不 send/abort/timer。此后 B2 runner 已在源码实现，但真实拓扑验证及 B3 接线未完成前生产不激活；当前状态以文首为准。
