@@ -138,6 +138,8 @@ export async function supersede(
           if (next.rev !== v.newRev) throw new MemoryError("new rev changed");
           if (next.meta.status !== "active" || next.meta.supersededBy) throw new MemoryError("new block not active");
           if (old.rev !== v.oldRev) throw new MemoryError("old rev changed");
+          const oldHash = (v as RelationVerdict & { readonly oldHash?: string }).oldHash;
+          if (oldHash !== undefined && entryHash(old.body) !== oldHash) throw new MemoryError("old hash changed");
           if (old.meta.status !== "active" || old.meta.supersededBy) throw new MemoryError("old block not active");
           if (next.meta.authority === "agent" && old.meta.authority === "user")
             throw new MemoryError("supersedes ignored: target is a user rule");
@@ -188,7 +190,13 @@ export async function supersede(
   }
   // Failed automatic decisions remain actionable instead of disappearing in
   // a tool echo. A denied gate/abort/off path never writes a suggestion.
-  if (!opts.explicit && opts.enabled !== false && results.some((r) => r.outcome === "skipped")) {
+  if (
+    !opts.explicit &&
+    opts.enabled !== false &&
+    results.some(
+      (r) => r.outcome === "skipped" && !r.reason?.includes("rev changed") && !r.reason?.includes("hash changed"),
+    )
+  ) {
     try {
       governanceGate(memDir, opts.gate, opts.signal);
       await withMemoryDirLock(
@@ -199,7 +207,17 @@ export async function supersede(
           const review = index.review ?? { lastRunAt: "", corpusFp: "", suggestions: [], dismissed: [] };
           const suggestions = [...review.suggestions];
           for (const v of verdicts) {
-            if (!results.some((r) => r.oldId === v.oldId && r.outcome === "skipped") || v.newId === v.oldId) continue;
+            if (
+              !results.some(
+                (r) =>
+                  r.oldId === v.oldId &&
+                  r.outcome === "skipped" &&
+                  !r.reason?.includes("rev changed") &&
+                  !r.reason?.includes("hash changed"),
+              ) ||
+              v.newId === v.oldId
+            )
+              continue;
             let a: ParsedBlock, b: ParsedBlock;
             try {
               a = readGovernBlock(memDir, v.newId);
@@ -207,6 +225,9 @@ export async function supersede(
             } catch {
               continue;
             }
+            const oldHash = (v as RelationVerdict & { readonly oldHash?: string }).oldHash;
+            if (a.rev !== v.newRev || b.rev !== v.oldRev || (oldHash !== undefined && entryHash(b.body) !== oldHash))
+              continue;
             const key = pair(a, b);
             if (review.dismissed.some((d) => d.hashKey === key.hashKey || d.anchorKey === key.anchorKey)) continue;
             const id = `relation-${v.newId}-${v.oldId}`;

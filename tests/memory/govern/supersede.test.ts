@@ -256,3 +256,24 @@ it("direct explicit conflict preserves authority checks, including agent→user 
     (await supersede(d, [{ ...verdict(a, old), kind: "conflict", auto: false, p: 0 }], { explicit: true }))[0]?.outcome,
   ).toBe("superseded");
 });
+it("concurrent judgments against one old revision never overwrite one another", async () => {
+  const d = setup(),
+    a = block(d),
+    b = block(d),
+    old = block(d);
+  const [first, second] = await Promise.all([supersede(d, [verdict(a, old)]), supersede(d, [verdict(b, old)])]);
+  expect([first[0]?.outcome, second[0]?.outcome].sort()).toEqual(["skipped", "superseded"]);
+  const winner = first[0]?.outcome === "superseded" ? a.id : b.id;
+  expect(readGovernBlock(d, old.id).meta.supersededBy).toBe(winner);
+  expect(readGovernBlock(d, old.id).meta.version).toBe(old.meta.version + 1);
+});
+it("frozen body hash rejects a mismatched judgment even when revision matches", async () => {
+  const d = setup(),
+    a = block(d),
+    old = block(d);
+  const before = readFileSync(join(d, "blocks", `${old.id}.md`));
+  const result = await supersede(d, [{ ...verdict(a, old), oldHash: "wrong" }]);
+  expect(result[0]).toMatchObject({ outcome: "skipped", reason: "old hash changed" });
+  expect(readFileSync(join(d, "blocks", `${old.id}.md`))).toEqual(before);
+  expect(() => readFileSync(join(d, "blocks", ".jev", "index.json"))).toThrow();
+});

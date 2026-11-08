@@ -908,3 +908,71 @@ it.each([false, true])(
     expect(fake.asks[0]!.questions).not.toHaveProperty("g1");
   },
 );
+
+it.each([false, true])("abandons stale judgment without sidecar writes (sidecar exists: %s)", async (exists) => {
+  const tmp = mkdtempSync(join(tmpdir(), "wp-race-"));
+  tmpRoots.push(tmp);
+  const dir = writeBlocksDir(tmp, [
+    { id: "gen.001", body: "- pipeline replacement" },
+    { id: "gen.002", body: "- pipeline original" },
+  ]);
+  const { readGovernBlock, supersede } = await import("../../../src/memory/govern/supersede.js");
+  const { replaceBlockLocked } = await import("../../../src/memory/blocks/store.js");
+  const next = readGovernBlock(tmp, "gen.001");
+  const old = readGovernBlock(tmp, "gen.002");
+  const indexPath = join(dir, ".jev", "index.json");
+  if (exists) {
+    mkdirSync(join(dir, ".jev"));
+    writeFileSync(indexPath, JSON.stringify({ v: 1, entries: {}, lastTaggedAt: "2025-01-01T00:00:00.000Z" }));
+  }
+  const indexBefore = exists ? readFileSync(indexPath) : undefined;
+  const fake = fakeClient({
+    answerFor: () =>
+      answersFor({ c1: { type: "choice", choice: "supersedes", probabilities: { supersedes: 1 }, confidence: 1 } }),
+  });
+  let release!: () => void;
+  const pending = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const client: JevClient = {
+    ...fake.client,
+    async ask(req) {
+      const answer = await fake.client.ask(req);
+      await pending;
+      return answer;
+    },
+  };
+  const port = createJevWritePort({
+    client,
+    entryIndex: new EntryIndex(),
+    dirFor: () => tmp,
+    taxonomyFor: () => mergeTaxonomy().taxonomy,
+    now: () => FIX_NOW,
+  });
+  const resultPromise = port.afterWrite({
+    cwd: tmp,
+    file: `${next.id}.md`,
+    before: undefined,
+    after: next.raw,
+    registry: REGISTRY,
+    block: { id: next.id, rev: next.rev, authority: "agent", scopeExplicit: false },
+  });
+  expect(fake.asks).toHaveLength(1);
+  replaceBlockLocked(
+    dir,
+    old.id,
+    old.rev,
+    { meta: old.meta, body: "- pipeline concurrent valuable update" },
+    new Date(),
+  );
+  const before = readFileSync(join(dir, `${old.id}.md`));
+  release();
+  const result = await resultPromise;
+  expect(result.echo).toContain(`skipped: ${old.id}: old snapshot changed`);
+  expect(result.relations).toEqual([]);
+  const results = await supersede(tmp, result.relations ?? []);
+  expect(results.every((r) => r.outcome === "skipped")).toBe(true);
+  expect(readFileSync(join(dir, `${old.id}.md`))).toEqual(before);
+  if (indexBefore) expect(readFileSync(indexPath)).toEqual(indexBefore);
+  else expect(existsSync(join(dir, ".jev"))).toBe(false);
+});
