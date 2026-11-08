@@ -103,6 +103,7 @@ P0 共享面先行（契约/设置/harness 钉/白名单）
 - **新增 P0**：把 `jev/contracts.ts`、`src/memory/contracts.ts`、`settings.ts`/`setting-specs.ts`/corpus、off-harness 钉住、pi-free 白名单这些共享面集中先改，之后的并行组合就不再争抢这些文件（对应 pitfalls-git #1 的三选一，这里选「先集中改共享面再派」，由一个子 agent 执行 P0）。
 - **P5 拆成 P5a/P5b**：`jev/wire.ts` 不能被并行包同时改。P5a 不碰 wire.ts，可以和 P6b 并行；P5b 在 P6b 之后串行接线。
 - **默认布局翻转**放在 P5b 的最后一步：在此之前，`layout:"blocks"` 只用于测试，**不得写进真实 settings**（中间提交不 push，无发布风险）。
+  - **2026-11-08 root 裁定（改变下面 PG 前置）**：G1 已判定长期 BLOCKED（真实数据里「完整取代」上限 12/20，见 `pg-report.md` 2026-11-08 节），**不再等 G1 PASS**。F1 照常执行——默认 `layout` 翻到 `blocks` 且 `memory.governance.enabled` 保持默认开启（**用户裁定：翻，默认开启**）。替代证据链：G2 正式评估须 PASS；自动取代维持既有阈值（`supersedes ≥0.85` / `conflict ≥0.90`，不新增档位）、单批 ≤2、可撤销并保留原文；翻转后按启动/写入抽样复核误取代。**这是已知未验证项（自动取代误判率无数据背书）被用户显式接受的残留**，不得在文档里改写成「已通过 G1」。
 - **r2 新增**：
   - **PG** 离线门禁包，排在 P5b 之前；
   - **P2 合入后立即设置 `memory.migrate.auto=false` 并取证**。原因是 pi 直接从本仓库工作树加载扩展，任何提交都会对新起的会话立即生效，见 §8 第 3 步。
