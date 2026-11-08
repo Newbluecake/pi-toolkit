@@ -63,6 +63,7 @@ import {
   renderBlocks,
   residentRenderKey,
   parseResidentSection,
+  type BudgetRenderStats,
   type RenderBlocksInput,
   type RenderBlocksResult,
 } from "./blocks/render.js";
@@ -94,6 +95,7 @@ export interface MemorySectionDeps {
     block: string | undefined,
     info: JevRenderInfo | undefined,
     resident?: ReadonlyMap<string, string>,
+    budgetStats?: BudgetRenderStats,
   ) => void;
   /** jev on (jev-plan J6, jev-arch §8): strip `<!-- mem … -->` inline
    *  authority comments from the injected block. Settings-derived, constant
@@ -315,6 +317,7 @@ function renderLive(deps: MemorySectionDeps, cwd: string, ctx: ExtensionContext,
   let info: JevRenderInfo | undefined;
   let resident: ReadonlyMap<string, string> | undefined;
   let usedFrozen = false;
+  let budgetStats: BudgetRenderStats | undefined;
   if (deps.frozenBlocks.has(cwd)) {
     usedFrozen = true;
     // Frozen source (§5.5): may be a captured `undefined` (R3), which flows
@@ -360,6 +363,7 @@ function renderLive(deps: MemorySectionDeps, cwd: string, ctx: ExtensionContext,
         ...(jevIndex === undefined ? {} : { jevIndex }),
       };
       result = renderBlocks(corpus, input);
+      budgetStats = result.budgetStats;
       caches.blocksRender.set(cwd, { key, result });
     }
     block = result.text;
@@ -411,7 +415,7 @@ function renderLive(deps: MemorySectionDeps, cwd: string, ctx: ExtensionContext,
   if (deps.stripInlineMeta === true && block !== undefined && INLINE_META_PROBE_RE.test(block)) {
     block = stripInlineMeta(block);
   }
-  if (!usedFrozen) deps.onRender?.(cwd, block, info, resident);
+  if (!usedFrozen) deps.onRender?.(cwd, block, info, resident, budgetStats);
   return block ?? "";
 }
 
@@ -433,6 +437,7 @@ interface CapturedProjectRender {
   readonly source: ProjectSource;
   readonly info: JevRenderInfo | undefined;
   readonly blocks: boolean;
+  readonly budgetStats?: BudgetRenderStats;
 }
 
 function renderScopedSource(
@@ -446,6 +451,7 @@ function renderScopedSource(
   const project = new ProjectCapture(deps.isChildSession);
   let text: string;
   let info: JevRenderInfo | undefined;
+  let budgetStats: BudgetRenderStats | undefined;
   const blocks = effectiveLayout(deps.settings.layout, dirFormat(memoryDirFor(cwd, deps.paths))) === "blocks";
   if (blocks) {
     const today = localTodayOf(Date.now());
@@ -468,6 +474,7 @@ function renderScopedSource(
       ...(jevIndex === undefined ? {} : { jevIndex }),
     });
     text = result.text;
+    budgetStats = result.budgetStats;
     info = { omittedSections: [], coreInlined: false, residentBlocks: result.resident.map((b) => b.id) };
   } else if (deps.settings.layout === "tiered") {
     const sessionKey = resolveSessionKey(ctx);
@@ -494,7 +501,14 @@ function renderScopedSource(
         project,
       ) ?? "";
   }
-  return { key, owner, source: project.finish(text), info, blocks };
+  return {
+    key,
+    owner,
+    source: project.finish(text),
+    info,
+    blocks,
+    ...(budgetStats === undefined ? {} : { budgetStats }),
+  };
 }
 
 /**
@@ -586,6 +600,7 @@ export function memorySection(deps: MemorySectionDeps): MemorySectionRegistratio
         const memoized = renderedInputs.get(input);
         if (memoized !== undefined) return memoized;
         let captured = frozenSources.get(cwd);
+        let newObservation = false;
         if (deps.frozenBlocks.has(cwd) && captured === undefined) return SKIP;
         if (captured !== undefined && !sameProjectionOwner(captured.owner, owner)) return SKIP;
         if (captured === undefined) {
@@ -610,10 +625,12 @@ export function memorySection(deps: MemorySectionDeps): MemorySectionRegistratio
             access,
           ]);
           const hit = sourceCache.get(cwd);
-          captured =
-            hit !== undefined && hit.key === key && sameProjectionOwner(hit.owner, owner)
-              ? hit
-              : renderScopedSource(deps, cwd, input.ctx, caches, key, owner);
+          if (hit !== undefined && hit.key === key && sameProjectionOwner(hit.owner, owner)) {
+            captured = hit;
+          } else {
+            captured = renderScopedSource(deps, cwd, input.ctx, caches, key, owner);
+            newObservation = true;
+          }
           if (!projection.ownerValid(input)) return SKIP;
           if (sourceCache.size >= STICKY_CACHE_CAPACITY && !sourceCache.has(cwd)) sourceCache.clear();
           sourceCache.set(cwd, captured);
@@ -631,6 +648,7 @@ export function memorySection(deps: MemorySectionDeps): MemorySectionRegistratio
           block || undefined,
           captured.info,
           captured.blocks ? parseResidentSection(block) : undefined,
+          newObservation ? captured.budgetStats : undefined,
         );
         renderedInputs.set(input, block);
         return block;

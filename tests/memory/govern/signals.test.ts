@@ -1,9 +1,62 @@
 import { describe, expect, test } from "vitest";
-import { canMark, createGovernanceSignals } from "../../../src/memory/govern/signals.js";
+import {
+  budgetObservationKey,
+  canMark,
+  createGovernanceSignals,
+  type BudgetObservation,
+} from "../../../src/memory/govern/signals.js";
 
 const allowed = { success: true, readOnly: false } as const;
 
+function observation(over: boolean, overflow: boolean, budget = 2048): BudgetObservation {
+  return {
+    identity: { realpath: "/tmp/memory", dev: 1, ino: 2, migration: { gen: 3, runId: "run" } },
+    stats: {
+      corpusFingerprint: "corpus",
+      localToday: "2026-11-08",
+      policyVersion: "blocks-render-v1",
+      resident: { inputFingerprint: "resident-input", usedBytes: over ? 4096 : 1024, budgetBytes: budget, over },
+      index: { inputFingerprint: "index-input", limitBytes: 2048, omittedCount: overflow ? 1 : 0, over: overflow },
+    },
+  };
+}
+
 describe("session governance signals (unwired)", () => {
+  test("deduplicates budget observations by signal kind and clears on a normal value", () => {
+    const signals = createGovernanceSignals();
+    const first = observation(true, true);
+    signals.observeBudget(first);
+    signals.observeBudget(first);
+    const candidates = signals.consumeBudgets(first.identity, { external: false });
+    expect(candidates.map((candidate) => candidate.kind)).toEqual(["resident-over-budget", "index-overflow"]);
+    expect(signals.consumeBudgets(first.identity, { external: false })).toEqual([]);
+    expect(budgetObservationKey(first, "resident-over-budget")).not.toBe(
+      budgetObservationKey(observation(true, true, 4096), "resident-over-budget"),
+    );
+    signals.observeBudget(observation(false, false));
+    expect(signals.consumeBudgets(first.identity, { external: false })).toEqual([]);
+  });
+
+  test("sweep-origin observations stay dormant until an external opportunity", () => {
+    const signals = createGovernanceSignals();
+    const current = observation(true, true);
+    signals.observeBudget(current, "sweep");
+    expect(signals.consumeBudgets(current.identity, { external: false })).toEqual([]);
+    expect(signals.consumeBudgets(current.identity, { external: true }).map((candidate) => candidate.kind)).toEqual([
+      "resident-over-budget",
+      "index-overflow",
+    ]);
+  });
+
+  test("unknown observations do not clear the last known over-budget state", () => {
+    const signals = createGovernanceSignals();
+    const current = observation(true, false);
+    signals.observeBudget(current);
+    signals.observeBudget(undefined);
+    expect(signals.consumeBudgets(current.identity, { external: false }).map((candidate) => candidate.kind)).toEqual([
+      "resident-over-budget",
+    ]);
+  });
   test("coalesces all three kinds and duplicate marks into one consumption", () => {
     const signals = createGovernanceSignals();
     signals.markSignal("task-done", allowed);
