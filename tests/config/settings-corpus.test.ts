@@ -292,6 +292,10 @@ function withoutFast(settings: typeof DEFAULT_SETTINGS, input?: unknown) {
       : {};
   // Preserve explicit historical overrides (including 0); only the fallback default was 90s.
   if (getPath(normalizedInput, "budget.totalGraceMs") === undefined) oldBudget.totalGraceMs = 90_000;
+  // Count-only archive adds exactly one parsed leaf; dedicated settings tests pin
+  // legacy alias and explicit-boolean precedence for the new behavior.
+  expect(typeof settings.webHub.archiveEnabled).toBe("boolean");
+  const { archiveEnabled: _archiveEnabled, ...oldWebHub } = settings.webHub;
   const { memory } = settings;
   const { scopes: _scopes, ...oldMemory } = memory;
   const {
@@ -304,6 +308,7 @@ function withoutFast(settings: typeof DEFAULT_SETTINGS, input?: unknown) {
     Object.entries(settings)
       .filter(([key]) => key !== "fast")
       .map(([key, value]) => [key, key === "budget" ? oldBudget : value])
+      .map(([key, value]) => [key, key === "webHub" ? oldWebHub : value])
       .map(([key, value]) => [key, key === "memory" ? oldMemory : value])
       .map(([key, value]) => [key, key === "fabric" ? { ...value, wake: oldWake } : value]),
   );

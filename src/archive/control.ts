@@ -12,7 +12,7 @@
  *    drawer's partition (both hide archived rows, display only — never
  *    get_run_result, /agent status, notifications or the runs themselves).
  *
- * Auto-archive (`webHub.archiveAfterMin`, default 30, 0 = off): a 60s unref'd
+ * Auto-archive (`webHub.archiveEnabled`, default on): a 60s unref'd
  * sweep over the terminal runs / terminal bash jobs supplied by the injected
  * candidate getters. Sweep-archived entries carry `auto: true`; anything the
  * user unarchived is `held` and never auto-archived again (state.ts).
@@ -50,7 +50,7 @@ export interface ArchiveCandidates {
 export interface ArchiveControlDeps {
   appendEntry(customType: string, data: unknown): unknown;
   now(): number;
-  /** Sweep period; also the resolution of "ended N minutes ago". */
+  /** Sweep period. */
   sweepMs?: number;
 }
 
@@ -71,7 +71,7 @@ export class ArchiveControl {
   private readonly deps: ArchiveControlDeps;
   private readonly candidates: ArchiveCandidates;
   private timer: ReturnType<typeof setInterval> | undefined;
-  private autoAfterMs = 0;
+  private autoEnabled = false;
   private keepRuns = 6;
   private keepBash = 5;
   private disposed = false;
@@ -93,13 +93,15 @@ export class ArchiveControl {
     this.rev++;
   }
 
-  /** Start the auto-archive sweep. `afterMs <= 0` disables it (timer never armed). */
-  start(afterMs: number, keepRuns = 6, keepBash = 5): void {
+  /** Start the auto-archive sweep; disabled never arms a timer. */
+  start(enabled: boolean, keepRuns = 6, keepBash = 5): void {
     if (this.disposed) return;
-    this.autoAfterMs = Math.max(0, afterMs);
+    if (this.timer !== undefined) clearInterval(this.timer);
+    this.timer = undefined;
+    this.autoEnabled = enabled;
     this.keepRuns = keepRuns;
     this.keepBash = keepBash;
-    if (this.autoAfterMs <= 0) return;
+    if (!this.autoEnabled) return;
     const period = this.deps.sweepMs ?? DEFAULT_SWEEP_MS;
     this.timer = setInterval(() => this.sweep(), period);
     this.timer.unref?.();
@@ -298,7 +300,7 @@ export class ArchiveControl {
    *  everyone else folds into the horizon — all in a single batch commit (one
    *  entry, one rev bump). A stable fleet then converges to zero writes. */
   private sweep(): void {
-    if (this.disposed || this.autoAfterMs <= 0) return;
+    if (this.disposed || !this.autoEnabled) return;
     const now = this.deps.now();
     const candidates: ArchiveCandidate[] = [
       ...this.candidates.runs().map((snap) => ({
@@ -315,7 +317,6 @@ export class ArchiveControl {
       })),
     ];
     const selected = selectAutoArchives(this.state, candidates, now, {
-      afterMs: this.autoAfterMs,
       keepRuns: this.keepRuns,
       keepBash: this.keepBash,
     });

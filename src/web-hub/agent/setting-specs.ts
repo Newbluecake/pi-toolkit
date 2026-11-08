@@ -89,21 +89,26 @@ export const WEBHUB_SETTING_SPECS: Record<string, SettingSpec> = {
   ),
   // web-hub archive plan (docs/dev/web-hub/archive-report.md): agent-side auto-archive knob —
   // non-live but does NOT need a hub restart (never read by buildHubConfig; /reload suffices).
+  "webHub.archiveEnabled": bool(
+    "webHub.archiveEnabled",
+    "web-hub: auto-archive terminal fleet items exceeding the keep counts (default on; /reload)",
+  ),
   "webHub.archiveAfterMin": {
     kind: "number",
     path: "webHub.archiveAfterMin",
     min: 0,
-    description: "web-hub: auto-archive finished agent cards / bash rows in the fleet drawer after N minutes (0 = off)",
+    description:
+      "web-hub: deprecated legacy alias; 0 disables auto-archive, positive enables it; age no longer applies (archiveEnabled takes precedence; /reload)",
   },
   "webHub.archiveKeepRuns": count(
     "webHub.archiveKeepRuns",
     0,
-    "web-hub: keep N unarchived finished agent runs; held items count but are never auto-archived (default 6; 0 = time-only; /reload)",
+    "web-hub: keep N unarchived finished agent runs; held items count but are never auto-archived (default 6; 0 = archive all eligible; /reload)",
   ),
   "webHub.archiveKeepBash": count(
     "webHub.archiveKeepBash",
     0,
-    "web-hub: keep N unarchived finished bash jobs; held items count but are never auto-archived (default 5; 0 = time-only; /reload)",
+    "web-hub: keep N unarchived finished bash jobs; held items count but are never auto-archived (default 5; 0 = archive all eligible; /reload)",
   ),
   // web-hub LAN (lan-plan.md §9.1, S1-W3 LI): five more keys under webHub.lan.*, all non-live like
   // the rest of webHub.* (captured at activate; change → /reload). extraHosts/trustProxyFrom/

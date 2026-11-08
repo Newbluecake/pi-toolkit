@@ -309,22 +309,23 @@ pulse in `agents.css` is a DIFFERENT object and stays untouched.
 
 **Fleet drawer archive (archive-report.md)**: `src/archive/` (per-session `ArchiveControl` built by
 `buildSessionStack`, `webHub.enabled`-gated, state in the `subagent:archive` session entry, full-snapshot-per-change,
-60s unref'd auto-sweep under `webHub.archiveAfterMin` — default 30, 0 = off, agent-side only ⇒ `/reload` suffices)
+60s unref'd auto-sweep under `webHub.archiveEnabled` — default on, agent-side only ⇒ `/reload` suffices)
 hides TERMINAL run rows / bash rows from the fleet drawer and the TUI fleet widget (display only — never
 get_run_result/`/agent status`/notifications). Web ops ride the `archive` cmd op (`{kind,target,set}`, hub
 `parseCmdBody` whitelist ⇒ needs one `/webhub restart`); the set rides the open `StatusInfo.archived` slot
 (no proto bump/caps, absent when empty); user-unarchived ids are `held` and never re-auto-archived. Report:
 `docs/dev/web-hub/archive-report.md`.
 
-**#59 count + age gates**: `webHub.archiveKeepRuns` defaults to 6 and
-`webHub.archiveKeepBash` to 5 (non-negative integers; `0` = no count gate, legacy
-age-only behavior). Each sweep counts unarchived TERMINAL items per kind, including
+**Count-only auto-archive**: `webHub.archiveKeepRuns` defaults to 6 and
+`webHub.archiveKeepBash` to 5 (non-negative integers; `0` = archive all eligible items). Each sweep counts unarchived TERMINAL items per kind, including
 held items; running and already archived items do not count. Only when a kind exceeds
 its keep count does it archive eligible items oldest-settled-first, stopping at the
-keep count or when no age-eligible non-held items remain. Held items never auto-archive.
-`archiveAfterMin=0` still disables the timer; manual archive remains available.
+keep count or when no non-held items remain, regardless of their age. Held items never auto-archive.
+`archiveEnabled=false` disables the timer; manual archive remains available. Legacy
+`archiveAfterMin=0` disables the timer and a positive value enables it only when the new
+boolean is absent; its duration no longer applies. The explicit boolean takes precedence.
 `src/archive/sweep.ts` performs pure selection; control adapts snapshots and batch-commits
-once. All three settings are agent-only, non-live: `/reload` suffices, no hub restart.
+once. These settings are agent-only, non-live: `/reload` suffices, no hub restart.
 Evidence: `docs/dev/web-hub/archive-threshold-report.md`.
 
 **Cap-full progression (#91)**: a FULL 256-entry cap no longer stalls auto-archive (the pre-#91

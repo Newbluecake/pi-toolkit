@@ -1,3 +1,4 @@
+import { parseWebHubSettings } from "../../src/web-hub/agent/settings.js";
 /**
  * ArchiveControl (src/archive/control.ts): persistence discipline (one full-snapshot entry per
  * change), restore, the manual archive/unarchive terminality gate, the auto sweep (batch
@@ -275,7 +276,7 @@ describe("ArchiveControl: auto sweep above the 256-entry archive cap (flip-flop 
     vi.useFakeTimers();
     try {
       const h = makeControl({ runs: manyRuns(300), sweepMs: 1000 });
-      h.control.start(60_000, 6, 5);
+      h.control.start(true, 6, 5);
       vi.advanceTimersByTime(1000);
       const first = archivedRuns(h);
       expect(first).toHaveLength(256);
@@ -297,7 +298,7 @@ describe("ArchiveControl: auto sweep above the 256-entry archive cap (flip-flop 
     vi.useFakeTimers();
     try {
       const h = makeControl({ runs: manyRuns(700), sweepMs: 1000 });
-      h.control.start(60_000, 6, 5);
+      h.control.start(true, 6, 5);
       vi.advanceTimersByTime(1000);
       expect(h.control.setArchived("run", "r-699", "archive")).toEqual({ ok: true, changed: true });
       for (let i = 0; i < 5; i++) vi.advanceTimersByTime(1000);
@@ -319,7 +320,7 @@ describe("ArchiveControl: auto sweep above the 256-entry archive cap (flip-flop 
     try {
       const runs = manyRuns(300);
       const h = makeControl({ runs, sweepMs: 1000 });
-      h.control.start(60_000, 6, 5);
+      h.control.start(true, 6, 5);
       vi.advanceTimersByTime(1000);
       const before = archivedRuns(h);
       expect(before).toHaveLength(256);
@@ -353,7 +354,7 @@ describe("ArchiveControl: auto sweep above the 256-entry archive cap (flip-flop 
     try {
       const runs = manyRuns(300);
       const h = makeControl({ runs, sweepMs: 1000 });
-      h.control.start(60_000, 6, 5);
+      h.control.start(true, 6, 5);
       vi.advanceTimersByTime(1000);
       const before = archivedRuns(h); // r-38..r-293
       expect(horizonRun(h)).toBe(37);
@@ -382,7 +383,7 @@ describe("ArchiveControl: auto sweep above the 256-entry archive cap (flip-flop 
 });
 
 describe("ArchiveControl: auto sweep", () => {
-  it("archives terminal runs and bash jobs past the threshold in ONE batch commit", () => {
+  it("archives freshly finished items with keep 0 in one sweep and batch", () => {
     vi.useFakeTimers();
     try {
       const h = makeControl({
@@ -390,19 +391,15 @@ describe("ArchiveControl: auto sweep", () => {
         jobs: [job({ jobId: "b-old", status: "completed", endedAt: 0 })],
         sweepMs: 1000,
       });
-      h.control.start(30 * 60_000, 0, 0); // threshold 1_800_000; now = 1_000_000
+      h.control.start(true, 0, 0);
       vi.advanceTimersByTime(1000);
-      // r-old settled at 0 (age 1_000_000 < 1_800_000) — NOT due yet; nothing committed.
-      expect(h.appended).toHaveLength(0);
-      h.setNow(2_000_000);
-      vi.advanceTimersByTime(1000);
-      expect(h.appended).toHaveLength(1); // one batch entry
+      expect(h.appended).toHaveLength(1);
       expect(h.control.wire()?.entries).toEqual([
-        { kind: "run", id: "r-old", at: 2_000_000, auto: true },
-        { kind: "bash", id: "b-old", at: 2_000_000, auto: true },
+        { kind: "run", id: "r-old", at: 1_000_000, auto: true },
+        { kind: "run", id: "r-fresh", at: 1_000_000, auto: true },
+        { kind: "bash", id: "b-old", at: 1_000_000, auto: true },
       ]);
-      // r-fresh (settled 999_999, age 1_000_001 < 1_800_000) still live.
-      expect(h.control.view().runs.has("r-fresh")).toBe(false);
+      h.control.dispose();
     } finally {
       vi.useRealTimers();
     }
@@ -416,7 +413,7 @@ describe("ArchiveControl: auto sweep", () => {
         jobs: Array.from({ length: 6 }, (_, i) => job({ jobId: `b-${i}`, status: "completed", endedAt: i })),
         sweepMs: 1000,
       });
-      h.control.start(60_000);
+      h.control.start(true);
       vi.advanceTimersByTime(1000);
       expect(h.appended).toHaveLength(1);
       expect(h.control.wire()?.entries).toEqual([
@@ -431,11 +428,22 @@ describe("ArchiveControl: auto sweep", () => {
     }
   });
 
-  it("0 disables the sweep (timer never armed)", () => {
-    const h = makeControl({ runs: [runSnap({ updatedAt: 0 })], sweepMs: 1000 });
-    h.control.start(0);
-    // No timer was armed — nothing to advance; direct proof: no persist ever.
-    expect((h.control as unknown as { timer: unknown }).timer).toBeUndefined();
+  it("disabled settings, including the legacy zero alias, never arm or run a sweep", () => {
+    vi.useFakeTimers();
+    try {
+      for (const input of [{ archiveEnabled: false }, { archiveAfterMin: 0 }]) {
+        const h = makeControl({ runs: [runSnap({ updatedAt: 0 })], sweepMs: 1000 });
+        const enabled = parseWebHubSettings(input).archiveEnabled ?? true;
+        h.control.start(enabled, 0, 0);
+        expect((h.control as unknown as { timer: unknown }).timer).toBeUndefined();
+        vi.advanceTimersByTime(5000);
+        expect(h.appended).toEqual([]);
+        expect(h.control.view().runs.size).toBe(0);
+        h.control.dispose();
+      }
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("never re-archives an unarchived item (hold exemption)", () => {
@@ -444,7 +452,7 @@ describe("ArchiveControl: auto sweep", () => {
       const h = makeControl({ runs: [runSnap({ runId: "r-1", updatedAt: 0 })], sweepMs: 1000 });
       h.control.setArchived("run", "r-1", "archive");
       h.control.setArchived("run", "r-1", "unarchive");
-      h.control.start(60_000, 0, 0);
+      h.control.start(true, 0, 0);
       h.setNow(10_000_000);
       vi.advanceTimersByTime(10_000);
       expect(h.control.wire()).toBeUndefined(); // still unarchived
@@ -457,7 +465,7 @@ describe("ArchiveControl: auto sweep", () => {
     vi.useFakeTimers();
     try {
       const h = makeControl({ runs: [runSnap({ updatedAt: 0 })], sweepMs: 1000 });
-      h.control.start(60_000);
+      h.control.start(true);
       h.control.dispose();
       h.setNow(10_000_000);
       vi.advanceTimersByTime(10_000);
@@ -507,7 +515,7 @@ describe("ArchiveControl: cap-full progression (#91)", () => {
       ]);
       // 20 new terminal runs (past the age gate, over keep-6 ⇒ 14 due).
       for (let i = 0; i < 20; i++) runs.push(runSnap({ runId: `n-${i}`, updatedAt: 1000 + i }));
-      h.control.start(60_000, 6, 5);
+      h.control.start(true, 6, 5);
       vi.advanceTimersByTime(1000);
       // One sweep, one write: the 14 OLDEST arrivals are archived (pre-#91: room=0 ⇒
       // nothing selected, zero writes — the stall).
@@ -551,7 +559,7 @@ describe("ArchiveControl: cap-full progression (#91)", () => {
       for (let i = 0; i < 6; i++) live(`k-${i}`, 700 + i); // the keep-6 window
       const h = makeControl({ runs, sweepMs: 1000 });
       h.control.restore([branchEntry({ entries, held: [] })]);
-      h.control.start(60_000, 6, 5);
+      h.control.start(true, 6, 5);
       const archived = () => h.control.view().runs;
       // 12 arrivals, one per sweep: each makes exactly ONE selection → ONE eviction.
       for (let sweep = 0; sweep < 12; sweep++) {
@@ -589,7 +597,7 @@ describe("ArchiveControl: cap-full progression (#91)", () => {
       h.control.restore([
         branchEntry({ entries: [], held: [{ kind: "run", id: "r-hold", at: 1 }], horizon: { run: 200 } }),
       ]);
-      h.control.start(60_000, 6, 5);
+      h.control.start(true, 6, 5);
       vi.advanceTimersByTime(1000);
       // hold + 6 fresh = 7 counted > keep 6 ⇒ 1 selected — the oldest NON-held item,
       // never the (older) hold.
@@ -642,7 +650,7 @@ describe("ArchiveControl: cap-full progression (#91)", () => {
       expect(horizonRun(h)).toBe(746);
       expect("horizon" in (h.appended[0]!.data as object)).toBe(true);
       // The keep slots are not squatted: 60 further sweeps write NOTHING.
-      h.control.start(60_000, 6, 5);
+      h.control.start(true, 6, 5);
       for (let i = 0; i < 60; i++) vi.advanceTimersByTime(1000);
       expect(h.appended).toHaveLength(1);
       h.control.dispose();
@@ -680,7 +688,7 @@ describe("ArchiveControl: cap-full progression (#91)", () => {
         }),
       ]);
       runs.push(runSnap({ runId: "n-0", updatedAt: 4_000 })); // one arrival (counted 7 > keep 6)
-      h.control.start(60_000, 6, 5);
+      h.control.start(true, 6, 5);
       vi.advanceTimersByTime(1000);
       const view = h.control.view();
       expect(view.runs.size + view.bash.size).toBe(256);
@@ -718,7 +726,7 @@ describe("ArchiveControl: cap-full progression (#91)", () => {
         at: 1_000_000,
       });
       // And the sweep leaves the explicit entry alone (archived ⇒ never re-selected).
-      h.control.start(60_000, 0, 0); // keep 0: maximum pressure
+      h.control.start(true, 0, 0); // keep 0: maximum pressure
       h.setNow(10_000_000);
       vi.advanceTimersByTime(1000);
       expect(h.control.view().runs.has("r-imp")).toBe(true);

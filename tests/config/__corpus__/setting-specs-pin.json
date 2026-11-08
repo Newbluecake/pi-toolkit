@@ -64,9 +64,10 @@
     ["webHub.commandComplete", "581e130ba3b390d89541e6b8f48171b935e1b542e7d312d3b730806804181065"],
     ["webHub.quota", "757e470fb17307610db682df1449d67d6d6f221360649dce20c0b4acb49f4795"],
     ["webHub.cmdHistory", "07a829355047d619df6b31927e31f9a0066e3d72d4777a75092869357198cbb6"],
-    ["webHub.archiveAfterMin", "704dff88d60e48083f46ad45d1a56b267f978f576884cc6725c21e5cf91d1186"],
-    ["webHub.archiveKeepRuns", "0cbf2b60d1ce01a4ffbf9ab083649e11af51bfe8cce7797feb1c0b6792fdffff"],
-    ["webHub.archiveKeepBash", "08afd04047c039744187df81c6ffeb6efae1e5fb1df04df76c2028c78b8fc89b"],
+    ["webHub.archiveEnabled", "cbbc22855b7f86fe1ea52fd116fa868d6772b5a57bd53f248b45ebc60bfc71f2"],
+    ["webHub.archiveAfterMin", "1e9c164d8cd07d4e0099a376ae6fc772d6d54377a2d37ee0b9fc770942824256"],
+    ["webHub.archiveKeepRuns", "a9d4e727e347b9a55c518412e683ee81749e5df52941388b323170f9a23b25d4"],
+    ["webHub.archiveKeepBash", "8145a1d5cdffb4e810c4ab1860fae33971246390d97fd16fc0bbef2633fc9c53"],
     ["webHub.lan.enabled", "abb06ddf6a8b4a23903aefd35a94110088d84b9db3d04b58b0601f9aaea8eeb0"],
     ["webHub.lan.port", "5e3a7dbd3c6a2d0d7107ebcbb04564ec750b64fc924bcd01912be59e67516487"],
     ["webHub.lan.allowClients", "f9417ae4fe2306598e93e3c713c5f6580fc4d4798620d1d1858f3d6e5eb51dfb"],
@@ -344,5 +345,5 @@
     ["reflex.autoResolve", "fa7252fca5b9d9612274c53c53b4ac0d2b8440a9574f7ddc36a4edb81bd9a726"],
     ["reflex.drafts.enabled", "424d403597834a370e6e25a0f89c9b2409242400cba7fde08de293bb5f820729"]
   ],
-  "all": "d30ce318a714f79204feaef2bf6b71e1774c547b84f83f177243bb52d1c602e8"
+  "all": "dc7993c4c723ba93c7a5b607cbea4d70735c3a97ba01d9a44aaa95c2ba912b92"
 }

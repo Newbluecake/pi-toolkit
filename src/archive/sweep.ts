@@ -2,7 +2,6 @@
 import {
   ARCHIVE_ENTRIES_CAP,
   archivedSetOf,
-  autoArchiveDue,
   horizonOf,
   raiseHorizon,
   type ArchiveEntry,
@@ -19,8 +18,7 @@ export interface ArchiveCandidate {
 }
 
 export interface ArchiveSweepPolicy {
-  afterMs: number;
-  /** 0 removes the count gate (legacy time-only behavior). */
+  /** 0 archives all eligible terminal items. */
   keepRuns: number;
   keepBash: number;
 }
@@ -44,10 +42,9 @@ export function liveKey(kind: ArchiveKind, id: string): string {
 export function selectAutoArchives(
   state: ArchiveState,
   candidates: readonly ArchiveCandidate[],
-  now: number,
+  _now: number,
   policy: ArchiveSweepPolicy,
 ): ArchiveCandidate[] {
-  if (policy.afterMs <= 0) return [];
   const selected: ArchiveCandidate[] = [];
   for (const kind of ["run", "bash"] as const) {
     const archived = archivedSetOf(state, kind);
@@ -65,7 +62,7 @@ export function selectAutoArchives(
     const excess = keep === 0 ? remaining.length : Math.max(0, remaining.length - keep);
     selected.push(
       ...remaining
-        .filter((item) => autoArchiveDue(state, item, item.settledAt, now, policy.afterMs))
+        .filter((item) => !held.has(item.id))
         .sort((a, b) => a.settledAt - b.settledAt)
         .slice(0, excess),
     );

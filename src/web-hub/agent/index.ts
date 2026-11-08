@@ -246,12 +246,12 @@ export interface WebHubSettings {
    * load sampler: `buildHubConfig` (P2a, this file) writes `config.load` only when this AND
    * `settings.load.enabled` are both true (§7.2's "任一为 false ⇒整键省略"). Default `true`. */
   load?: boolean;
-  /** web-hub archive plan (docs/dev/web-hub/archive-report.md): auto-archive terminal fleet
-   *  rows / bash rows after N minutes (default 30). `0` disables the sweep (manual archive
-   *  from the drawer still works). AGENT-side only — never read by buildHubConfig, so a change
-   *  needs just `/reload` (picked up at the next stack build), NOT a hub restart. */
+  /** Agent-side count-only auto-archive, default true; change requires /reload. */
+  archiveEnabled?: boolean;
+  /** Deprecated alias: 0 disables, positive enables; duration is ignored.
+   * The explicit archiveEnabled boolean takes precedence. */
   archiveAfterMin?: number;
-  /** #59: unarchived terminal keep counts (held included); 0 = time-only. Agent-side, /reload. */
+  /** Unarchived terminal keep counts (held included); 0 archives all eligible. */
   archiveKeepRuns?: number;
   archiveKeepBash?: number;
   /** web-hub-steer-recall plan §2/§4.7 (A6) / arch §11 Q1: hold busy web steer/followUp in the

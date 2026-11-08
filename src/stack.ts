@@ -1940,7 +1940,7 @@ export function buildSessionStack(
 
   // web-hub archive plan (docs/dev/web-hub/archive-report.md): per-session archive control —
   // seeded from the branch's last `subagent:archive` entry (the G5a read-back discipline),
-  // swept every 60s while `webHub.archiveAfterMin` > 0. Gated on webHub.enabled (the whole
+  // swept every 60s while `webHub.archiveEnabled` is true. Gated on webHub.enabled (the whole
   // feature is web-originated; with web-hub off nothing is ever archived and the TUI widget's
   // filter getter stays absent — byte-identical rendering).
   const archive = settings.webHub.enabled
@@ -1955,7 +1955,7 @@ export function buildSessionStack(
       : [];
     archive.restore(archiveBranch);
     archive.start(
-      Math.max(0, settings.webHub.archiveAfterMin ?? 30) * 60_000,
+      settings.webHub.archiveEnabled ?? true,
       settings.webHub.archiveKeepRuns ?? 6,
       settings.webHub.archiveKeepBash ?? 5,
     );

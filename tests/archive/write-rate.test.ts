@@ -180,7 +180,7 @@ describe("archive write-rate invariants (#89 A2, LCG seed 0x5eed89)", () => {
       const runs = Array.from({ length: RUNS }, (_, i) => runSnap(`r-${i}`, i));
       const jobs = Array.from({ length: BASH }, (_, i) => job(`b-${i}`, 500 + i));
       const h = makeControl(runs, jobs);
-      h.control.start(AFTER_MS, 6, 5);
+      h.control.start(true, 6, 5);
       drive(h.control, SWEEPS, h.tick);
       h.control.dispose();
       // Bounded writes: the first sweep fills the 256 cap (one batch commit); a stable
@@ -203,7 +203,7 @@ describe("archive write-rate invariants (#89 A2, LCG seed 0x5eed89)", () => {
       const runs = Array.from({ length: RUNS }, (_, i) => runSnap(`r-${i}`, i));
       const h = makeControl(runs, []);
       let arrivals = 0;
-      h.control.start(AFTER_MS, 6, 5);
+      h.control.start(true, 6, 5);
       drive(h.control, SWEEPS, h.tick, (i) => {
         if (i % 10 !== 0) return;
         arrivals += 1;
@@ -239,7 +239,7 @@ describe("archive write-rate invariants (#89 A2, LCG seed 0x5eed89)", () => {
       const rng = lcg(0x5eed89);
       const runs = Array.from({ length: RUNS }, (_, i) => runSnap(`r-${i}`, i));
       const h = makeControl(runs, []);
-      h.control.start(AFTER_MS, 6, 5);
+      h.control.start(true, 6, 5);
       let arrivals = 0;
       drive(h.control, 300, h.tick, (i) => {
         if (i % 10 !== 0) return;
@@ -267,7 +267,7 @@ describe("archive write-rate invariants (#89 A2, LCG seed 0x5eed89)", () => {
       // fork / tree-switch never replay history as new snapshots.
       const h2 = makeControl(runs, []);
       h2.control.restore(branch);
-      h2.control.start(AFTER_MS, 6, 5);
+      h2.control.start(true, 6, 5);
       drive(h2.control, 60, h2.tick);
       h2.control.dispose();
       expect(h2.appended).toHaveLength(0);
@@ -350,7 +350,7 @@ describe("archive write-rate invariants (#89 A2, LCG seed 0x5eed89)", () => {
     try {
       const runs = Array.from({ length: RUNS }, (_, i) => runSnap(`r-${i}`, i));
       const h = makeControl(runs, []);
-      h.control.start(AFTER_MS, 6, 5);
+      h.control.start(true, 6, 5);
       const { arrivals, detector, horizons, evictions, idSets } = driveArrivalFlow(runs, SWEEPS * 3, h);
       h.control.dispose();
       expect(arrivals).toBe(1_440); // the scenario is not vacuous
@@ -386,7 +386,7 @@ describe("archive write-rate invariants (#89 A2, LCG seed 0x5eed89)", () => {
     try {
       const runs = Array.from({ length: RUNS }, (_, i) => runSnap(`r-${i}`, i));
       const h = makeControl(runs, []);
-      h.control.start(AFTER_MS, 6, 5);
+      h.control.start(true, 6, 5);
       driveArrivalFlow(runs, 900, h); // 300 arrivals → a real mixed state WITH a horizon
       h.control.dispose();
       expect(h.appended.length).toBeGreaterThanOrEqual(2);
@@ -398,7 +398,7 @@ describe("archive write-rate invariants (#89 A2, LCG seed 0x5eed89)", () => {
       expect(readback.horizon?.run).toBeGreaterThan(400); // a REAL horizon, not -∞
       const h2 = makeControl(runs, []);
       h2.control.restore(branch);
-      h2.control.start(AFTER_MS, 6, 5);
+      h2.control.start(true, 6, 5);
       for (let i = 0; i < 60; i++) {
         h2.tick();
         vi.advanceTimersByTime(SWEEP_MS);
@@ -431,7 +431,7 @@ describe("archive write-rate invariants (#89 A2, LCG seed 0x5eed89)", () => {
           },
         },
       ]);
-      h.control.start(AFTER_MS, 6, 5);
+      h.control.start(true, 6, 5);
       vi.advanceTimersByTime(SWEEP_MS);
       // First sweep: the 479 selected all-older-than-the-window items lose the trim
       // contest — entries UNCHANGED, horizon folded in, exactly ONE write.
@@ -710,8 +710,6 @@ describe("archive write-rate counterfactual CF3: the cd57bdf9 room clamp stalls 
     // The teeth: the CURRENT selectAutoArchives on that same stalled state selects
     // the over-keep excess (progression) where the room clamp returned [].
     expect(cfRoomSelect(state, runs, now, AFTER_MS, 6, 5)).toHaveLength(0); // the old way: nothing
-    expect(
-      selectAutoArchives(state, runs, now, { afterMs: AFTER_MS, keepRuns: 6, keepBash: 5 }).length,
-    ).toBeGreaterThan(0); // the new way: progression
+    expect(selectAutoArchives(state, runs, now, { keepRuns: 6, keepBash: 5 }).length).toBeGreaterThan(0); // the new way: progression
   });
 });

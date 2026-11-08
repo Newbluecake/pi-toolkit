@@ -196,15 +196,23 @@ export function parseWebHubSettings(input: unknown): WebHubSettings {
     quota: typeof record.quota === "boolean" ? record.quota : (defaults.quota ?? true),
     // sysload plan §6.1: boolean only, anything else falls back to the default `true`.
     load: typeof record.load === "boolean" ? record.load : (defaults.load ?? true),
-    // web-hub archive plan: finite number ≥ 0 (minutes); anything else falls back to the
-    // default 30. 0 = sweep off.
+    // Explicit boolean wins over the deprecated numeric alias. Invalid values use the default.
+    archiveEnabled:
+      typeof record.archiveEnabled === "boolean"
+        ? record.archiveEnabled
+        : typeof record.archiveAfterMin === "number" &&
+            Number.isFinite(record.archiveAfterMin) &&
+            record.archiveAfterMin >= 0
+          ? record.archiveAfterMin > 0
+          : (defaults.archiveEnabled ?? true),
+    // Retain the legacy value for settings compatibility; it no longer supplies an age threshold.
     archiveAfterMin:
       typeof record.archiveAfterMin === "number" &&
       Number.isFinite(record.archiveAfterMin) &&
       record.archiveAfterMin >= 0
         ? record.archiveAfterMin
         : (defaults.archiveAfterMin ?? 30),
-    // #59: non-negative integer count gates; 0 preserves time-only archiving.
+    // Non-negative integer keep counts; 0 archives all eligible terminal items.
     archiveKeepRuns:
       typeof record.archiveKeepRuns === "number" &&
       Number.isInteger(record.archiveKeepRuns) &&
@@ -673,10 +681,9 @@ export const DEFAULT_WEBHUB_SETTINGS: WebHubSettings = {
   // on/off for its OWN load sampler (`buildHubConfig` writes `config.load` only when BOTH
   // this and `load.enabled` are true, §7.2). Default true.
   load: true,
-  // web-hub archive plan (docs/dev/web-hub/archive-report.md): auto-archive TERMINAL fleet
-  // rows / bash rows after N minutes (default 30). 0 disables the sweep; manual archive from
-  // the web drawer always works. AGENT-side only (never read by buildHubConfig) — a change
-  // needs `/reload` (picked up at the next stack build), NOT `/webhub restart`.
+  // Count-only auto-archive; the legacy numeric alias no longer controls age.
+  // Agent-side only: changes require /reload, not /webhub restart.
+  archiveEnabled: true,
   archiveAfterMin: 30,
   archiveKeepRuns: 6,
   archiveKeepBash: 5,
