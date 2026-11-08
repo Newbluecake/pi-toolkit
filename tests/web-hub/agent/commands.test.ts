@@ -950,7 +950,7 @@ describe("direct Web memory reads", () => {
 
 describe("memory completion lifecycle", () => {
   const mem = (id: string) => frame(id, { op: "command", name: "mem", args: "list" });
-  it("settles real command results once and caches non-retryable failures", () => {
+  it("settles mocked synchronous bridge results once and caches non-retryable failures", () => {
     const h = makeHarness();
     vi.mocked(h.builtinBridge.execute).mockReturnValue({
       ok: false,
@@ -964,7 +964,7 @@ describe("memory completion lifecycle", () => {
     expect(h.deps.ledger.query("mem-sync")).toMatchObject({ state: "failed", result: { retryable: false } });
     expect(h.sent).toHaveLength(1);
   });
-  it("expires at 29 minutes on query even when the timer was not scheduled", async () => {
+  it("expires at 29 minutes on query before the scheduled timer fires", async () => {
     let now = 1000;
     const h = makeHarness({ now: () => now });
     let resolve!: (value: never) => void;
@@ -1004,14 +1004,29 @@ describe("memory completion lifecycle", () => {
     expect(h.sent.filter((f) => f.t === "cmd_late")).toHaveLength(1);
   });
   it.each(["boundary", "dispose", "tree"])("clears in-flight waiters at %s", (kind) => {
+    // Observe the private map without changing production surfaces or intercepting deletion.
+    const originalSet = Map.prototype.set;
+    let waiters: Map<unknown, unknown> | undefined;
+    const spy = vi.spyOn(Map.prototype, "set").mockImplementation(function (
+      this: Map<unknown, unknown>,
+      key: unknown,
+      value: unknown,
+    ) {
+      if (key === "mem-clean" && value && typeof value === "object" && "timer" in value && "frame" in value)
+        waiters = this;
+      return originalSet.call(this, key, value);
+    });
     const h = makeHarness();
     vi.mocked(h.builtinBridge.execute).mockReturnValue(new Promise(() => {}));
     h.handler.handle(mem("mem-clean"));
     expect(h.timers.pendingCount()).toBe(1);
+    expect(waiters?.size).toBe(1);
     if (kind === "boundary") h.handler.onSessionBoundary();
     else if (kind === "dispose") h.handler.dispose();
     else h.handler.clearMemoryWaiters();
     expect(h.timers.pendingCount()).toBe(0);
+    expect(waiters?.size).toBe(0);
+    spy.mockRestore();
     expect(h.deps.ledger.query("mem-clean")).toMatchObject({
       state: "failed",
       result: { code: "E_STALE_CTX", retryable: false },

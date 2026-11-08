@@ -36,6 +36,8 @@ export const TIER2_DIRS: readonly string[] = ["tests/integration/", "tests/confo
 /** Tier 2 files outside TIER2_DIRS (plan D2): real private lock / plain child processes /
  * build-artifact-dependent suites. Not real-mount — those are SECURE_MOUNT_FILES. */
 export const TIER2_FILES: readonly string[] = [
+  // Root WebHub activation attempts a real Unix socket connection via its wiring.
+  "tests/web-hub/agent/memory-lifecycle-wiring.test.ts",
   // private lock file only — no mount (keeps its fast unit behaviour out of tier1)
   "tests/secure/gocryptfs-test-lock.test.ts",
   // plain child processes, no gocryptfs mount
