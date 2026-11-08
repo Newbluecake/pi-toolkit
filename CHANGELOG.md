@@ -7,6 +7,162 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-08
+
+### ⚠️ Breaking Changes
+
+- **compat**: require pi 1.5 hosts (#45) (`18e3b949`)
+
+### Added
+
+- **memory**: enable session and Hub scopes by default (#39) (`2a52d938`)
+- **fabric**: admit root wakes by user window instead of causal depth (#61) (`12a9d104`)
+- **todo**: add gated idle-recovery host and runner (#59) (`006e67d1`)
+- **todo**: open idle recovery windows on accepted user arrival (#59) (`2527cded`)
+- **memory**: wire session and Hub scopes into root and child sessions (#39) (`e02044db`)
+- **fabric**: add simple user-arrival wake budget policy (#61) (`359b152d`)
+- **memory**: project actual visible entries into three-layer duplicate planning (#39) (`161c7fa7`)
+- **memory**: add scoped tool and trusted memory command factories (#39) (`ce9b0a08`)
+- **memory**: add three-layer duplicate planning and scoped section invalidation (#39) (`59b177e9`)
+- **agent**: default to a 30-minute budget floor and 10-minute grace (#62) (`00bebcb8`)
+- **memory**: add locked Hub management and provenance-preserving restore (#39) (`94a7ce00`)
+- **todo**: add bounded idle recovery kernel and replay ledger (#59) (`1cff52ba`)
+- **memory**: prove native and Web human turns for exact approval (#39) (`e1c4bc46`)
+- **memory**: add private Hub store with exact provenance checks (#39) (`4fee0496`)
+- **web-ui**: move expanded activity controls into compact headers (#60) (`773a65f7`)
+- **memory**: capture isolated child seeds before admission queues (#39) (`7f2f2ec3`)
+- **fabric**: add bounded decision request ledger and ingress gates (#61) (`5312f6ec`)
+- **memory**: add isolated session store and exact operation approval (#39) (`3fa51cd0`)
+- **memory**: freeze scoped memory contracts and SDK capability gates (#39) (`9853b533`)
+- **web-hub**: show verified generation speed beside reply cost (#58) (`bc671de1`)
+- **web-hub**: capture verified generation timing metadata (#58) (`7f064822`)
+- **fast**: wire session commands and inherited request tiers (#55) (`44736559`)
+- **fast**: inherit session tiers across child creation and resume (#55) (`8b50bfa8`)
+- **fast**: implement branch state and Responses tier rewriting (#55) (`8dba5349`)
+- **workflow**: capture Fast tiers before replay and admission queues (#55) (`aaad5a3c`)
+- **fast**: add session tier contracts and enablement settings (#55) (`80af9ca3`)
+- **web-ui**: stop the current turn with a hold gesture (#47) (`fd34a85b`)
+- **web-ui**: distinguish agent and terminal activity halos in session list (#46) (`4decc503`)
+- **web-hub**: send unknown slash inputs as ordinary text (#40) (`54f5413c`)
+- **web-ui**: split activity icons and add hover peek panels (#41 #42) (`efdcb828`)
+- **memory**: add bounded governance sweeps and recoverable supersession (#36 P5a) (`efa12f26`)
+- **memory**: filter recall by audience and decay stale agent facts (#36 P6b) (`9f9ca704`)
+- **memory**: add v3 block tools and production Jev wiring (#36 P4) (`138d65b1`)
+- **web-ui**: render write calls as numbered code cards (#37) (`2cab92d1`)
+- **memory**: render blocks with a resident ledger and shared eligibility (#36 P3) (`6dcf292f`)
+- **memory**: add atomic block migration and secure write gate (#36 P2) (`f213b69f`)
+- **memory**: give the last predict tier the full budget, gate E-layer read-only failures, add a cooldown starvation exit (#36 P6a) (`b4233be4`)
+- **memory**: add block storage core (#36 P1) (`cb39b1db`)
+- **memory**: parse the #36 settings keys and refresh corpus/pin (P0) (`3f426e6f`)
+- **memory**: add #36 governance contract surface and sidecar sanitizer compat (P0) (`5aa92620`)
+- **fabric**: rename the fabric.findingQuota setting to fabric.reportQuota (`c7a134df`)
+- **fabric**: rename the message kind "finding" to "report" (`32406279`)
+- **reflex**: add the reflex-backtest script with batches and a ledger (`884184a2`)
+- **reflex**: generate reflex drafts from clustered training turns (`34e19878`)
+- **reflex**: add the backtest core for replaying recorded sessions (`cc8b39b6`)
+- **reflex**: load reflex drafts at runtime in shadow mode (`852332ec`)
+- **reflex**: judge promotion on merged live and backtest evidence (`23391eda`)
+- **reflex**: freeze the backtest contract and add the draft schema parser (`cd1d6c4a`)
+- **web-hub**: report reload progress and outcomes from the agent (`204da159`)
+- **web-hub**: settle outdated reloads from reported reload results (`10e58a53`)
+- **fabric**: wire ask redirect into sessions (`f91ec0c1`)
+- **fabric**: route delegated-turn ask_user questions to the requester (`a820b356`)
+- **ask-user**: accept a redirect port for delegated-turn questions (`13cc2946`)
+- **memory**: apply user-rule edits without confirmation, notify instead (`bfa16784`)
+- **fabric**: show last observed progress in reply timeout notices (`735642ff`)
+- **fabric**: warn when an expected reply was delivered without waking (`47406619`)
+
+### Fixed
+
+- **hud**: stop plugin info from verifying commit signatures (`47050966`)
+- **memory**: keep the project memory section for unbound child sessions (`5f773293`)
+- **memory**: degrade scoped memory to effective-off without host capabilities (`f484419a`)
+- **fast**: keep session open when the host cannot identify it (`f7a9ae5f`)
+- **ui**: align the settings editor with the 600s grace default (#62) (`e893c463`)
+- **memory**: treat leaf id as an optional cache hint (#39) (`9b32a56b`)
+- **todo**: never abort another feature run from recovery markers (#59) (`e861168e`)
+- **memory**: keep native commands direct without invented input provenance (#39) (`8de49e91`)
+- **memory**: bind persistence recovery to actual reopened managers (#39) (`8a474aba`)
+- **memory**: bind full Hub management confirmation to prepared tokens (#39) (`30977ce3`)
+- **memory**: bind session writes exactly and preserve persistence poison (#39) (`5c19478d`)
+- **todo**: show actionable reminders in TUI and web transcripts (#59) (`fbad9b28`)
+- **preview**: retain confirmed links across cache eviction (#49) (`f35d53c7`)
+- **fast**: capture command feedback through the invoking UI (#56) (`f954f712`)
+- **fast**: accept native reasoning replay content (#55) (`65239800`)
+- **memory**: track final evaluation outcomes per sampled turn (#36) (`3fc76437`)
+- **memory**: require full replacement for automatic supersession (#36) (`a8fc1dac`)
+- **cache-ttl**: accept pi 1.5 stock managed-effort measurement payloads (#45) (`16289441`)
+- **web-ui**: pulse the full terminal-count badge background (#51) (`11dfa800`)
+- **compat**: accept explicit undefined price tiers from pi 1.5 (#45) (`4b065925`)
+- **web-ui**: group mobile activity icons on a shared backdrop (#48) (`d96aa198`)
+- **web-ui**: remove redundant control-mode chip and notice (#44) (`768cacd3`)
+- **web-ui**: hide redundant running labels in session rows (#43) (`c7bf1afe`)
+- **startup**: silence stale bundle warnings (#38) (`a1eea6d1`)
+- **fabric**: explain message_agent kinds and guide rejected sends (`b63a27d8`)
+- **core**: dispose the load sampler when a session stack is rebuilt (`69651237`)
+- **secure**: mount vaults by physical path so symlinked dirs are not foreign (`b217a4bf`)
+- **sysload**: label the load recovery notice as recovery, not a level (`200aea5e`)
+- **quota**: drop exhaustion estimates from model-facing quota notices (`6c41c123`)
+- **web-hub**: keep three rotated hub logs instead of one (`bc9e12b1`)
+- **web-hub**: stop outdated reloads from waiting forever (`59425ad2`)
+- **web-hub**: publish agent_up after epoch changes without hold (`b84cdb72`)
+
+### Documentation
+
+- **fabric**: record ingress design as superseded and note the shipped wake path (#61) (`3bb6479a`)
+- **memory**: record scopes default-on, rollback and secure boundary (#39) (`a1127aa4`)
+- **fabric**: design default-on bounded decision wake requests (#61) (`8e3c37ea`)
+- **web-ui**: plan compact activity panel header controls (#60) (`e4109dc4`)
+- **memory**: design isolated session and hub memory scopes (#39) (`32122f27`)
+- **web-hub**: define verified generation speed metrics (#58) (`e288153b`)
+- **fast**: plan session-scoped tiers and child inheritance (#54) (`c5485454`)
+- **web-hub**: complete slash verification concurrency notes (#40) (`b6d84d1f`)
+- **memory**: block layout + governance architecture and implementation plan (#36) (`d2fc6b93`)
+- **reflex**: document how the backtest treats evidence, caches and batches (`50a74ecf`)
+- **fabric**: plan renaming the finding message kind to report (`bf717389`)
+- **secure**: document the physical mount contract and recovering wedged vaults (`e386f44f`)
+- **reflex**: record the B0 commit for the parity fixture gate (`dc036048`)
+- **web-hub**: plan reporting real reload results to the web UI (`86e4d5d8`)
+- **secure**: plan physical-path mounting to stop false foreign detection (`151c6dae`)
+- **test**: plan faster test runs with tiered vitest projects (`c2fefa18`)
+- **fabric**: guide workers to ask the requester with a new expectReply (`d05552ac`)
+- **fabric**: plan redirecting ask_user to the requester in delegated turns (`e31968b1`)
+- **memory**: plan direct user-rule edits without confirmation (`b17eb070`)
+- **reflex**: plan reflex backtesting, drafts, and promotion evidence (`72ee1fe9`)
+- plan web update recovery and reflex backtesting (`a743b0ff`)
+- **fabric**: plan warnings for unwoken cross-session reply requests (`0e6e563b`)
+
+### Tests
+
+- align stale wiring assertions with the current contracts (`22167c8c`)
+- **subagent**: give the explicit-timeout fake hosts a stable session id (`482c66db`)
+- **governance**: pin scopes off in the pre-#39 bundle parity scenarios (`1e614e14`)
+- **web-hub**: pin fake host versions inside the supported pi range (`33784464`)
+- **memory**: pin historical off-golden harnesses to explicit scopes-off (#39) (`3fd61779`)
+- **governance**: isolate Fast in frozen bundle off scenarios (`2c841670`)
+- **web-hub**: verify SDK-to-transcript generation speed flow (#58) (`37b7a7eb`)
+- **web-hub**: declare generation metadata and registration contracts (#58) (`cb2e76db`)
+- **compat**: validate budget conformance extension loading (#45) (`33b96ffc`)
+- **fast**: isolate legacy reload and child budget fixtures (#55) (`afe88d99`)
+- **fast**: isolate legacy thread rebind capture (#55) (`19009c81`)
+- **compat**: align launcher fixtures with pi 1.5 baseline (#45) (`89fdd5ea`)
+- **fast**: characterize session persistence rollback failures (#55) (`2f65ea9b`)
+- **web-ui**: align detail dock stop integration with hold gesture (#47) (`6e9bb384`)
+- **memory**: add bounded production-path governance gates (#36 PG) (`bfd7ef09`)
+- **memory**: pin jev-off harness (4 default-dependent configs) to layout:"tiered" (#36) (`ac7d434f`)
+- **fabric**: read the receiver's own status in the unread inbox test (`122de638`)
+- **web-hub**: cover reload results end to end through the hub (`576e4af7`)
+- **secure**: fail real-mount suites fast when the machine is not clean (`322975fc`)
+- **secure**: stop real-mount suites from waiting out every case (`4d992b96`)
+- split the suite into tier1, tier2, and secure vitest projects (`5c11d443`)
+- **web-hub**: cover outdated reload end to end across hub and UI (`8c21120b`)
+
+### Chores
+
+- run the release and CI test gates as tier1 then tier2 (`5dc5e4cb`)
+
+Stats: 56 feat, 32 fix, 22 docs, 22 test, 1 chore, 1 breaking
+
 ## [0.10.6] - 2026-11-05
 
 ### Added
@@ -1691,7 +1847,8 @@ First public release: anti-hang subagent extension for pi — drop-in replacemen
 
 Stats: 30 feat, 12 fix, 1 refactor, 1 docs, 3 chore/test · 970+ tests (state-machine transition matrix, seeded property invariants, widget rendering)
 
-[Unreleased]: https://github.com/Newbluecake/pi-toolkit/compare/v0.10.6...HEAD
+[Unreleased]: https://github.com/Newbluecake/pi-toolkit/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/Newbluecake/pi-toolkit/compare/v0.10.6...v0.11.0
 [0.10.6]: https://github.com/Newbluecake/pi-toolkit/compare/v0.10.5...v0.10.6
 [0.10.5]: https://github.com/Newbluecake/pi-toolkit/compare/v0.10.4...v0.10.5
 [0.10.4]: https://github.com/Newbluecake/pi-toolkit/compare/v0.10.3...v0.10.4
