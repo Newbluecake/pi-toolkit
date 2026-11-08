@@ -348,9 +348,6 @@ export interface FleetSummaryBarProps {
 export interface FleetSummaryBarEmits {
   toggle: [];
   "toggle-panel": [panel: "agent" | "bash", origin: "pointer" | "keyboard", trigger: HTMLElement];
-  "peek-panel": [panel: "agent" | "bash", event: PointerEvent];
-  "peek-end": [];
-  "peek-keep": [];
 }
 
 /** 2026-10-15 bash→fleet 迁移(components/fleet/FleetBashJobs.vue):fleet 抽屉树视图末尾
@@ -407,9 +404,7 @@ export interface FleetTreeEmits {
 export interface FleetDrawerProps {
   /** Absent only for legacy combined callers; production always supplies an explicit panel. */
   readonly panel?: "agent" | "bash";
-  readonly peeking?: boolean;
-  readonly canPeek?: boolean;
-  readonly openOrigin?: "hover" | "pointer" | "keyboard" | "restore" | "interaction";
+  readonly openOrigin?: "pointer" | "keyboard" | "restore";
   readonly trigger?: HTMLElement | null;
   readonly agent: AgentState;
   readonly now: number;
@@ -418,11 +413,6 @@ export interface FleetDrawerProps {
 }
 export interface FleetDrawerEmits {
   close: [];
-  "peek-keep": [];
-  "peek-end": [];
-  promote: [holdLayout?: boolean];
-  "interaction-end": [];
-  "toggle-pin": [];
 }
 
 export interface RunHeaderProps {

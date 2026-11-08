@@ -635,21 +635,22 @@ describe("FleetDrawer — 测量与接线(验收 #6)", () => {
     expect(w.findAll(".bj-item")).toHaveLength(27);
   });
 
-  it("Task60: floating 变化（held 释放/入头部）清行高缓存并重测 —— 即使 mode 仍 overlay", async () => {
+  it("closing and reopening invalidates measurement even when mode remains overlay", async () => {
     stubLayout();
     const w = mountDrawer(drawerAgent(flatFleet(30), doneBash(30)), "agent");
     await settle();
     expect(w.findAll(".tree > li")).toHaveLength(19); // H=400: live 1 + terminal 18
-    expect(w.find(".activity-bridge").exists()).toBe(false); // 未传 floating ⇒ peeking 回退 false ⇒ 无桥
+    await w.setProps({ open: false });
+    await settle();
     Object.defineProperty(HTMLElement.prototype, "clientHeight", {
       configurable: true,
       get() {
         return 600;
       },
     });
-    await w.setProps({ floating: true }); // right72 浮动几何 ⇒ 可用宽/高变化 ⇒ 失效重测
+    await w.setProps({ open: true });
     await settle();
-    expect(drawerEl()!.getAttribute("data-floating")).toBe("true"); // 多根组件：VTU attributes 不可用，直接读 aside
+    expect(drawerEl()!.hasAttribute("data-open")).toBe(true);
     expect(w.findAll(".tree > li")).toHaveLength(29); // H=600 重测: live 1 + terminal 28
   });
 

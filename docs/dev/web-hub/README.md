@@ -243,23 +243,21 @@ halos are not clipped. This is an absolute overlay, never a reserved column. At 
 remains transparent, borderless and shadowless, regardless of coarse/fine pointer capability.
 
 `AgentDetail` owns `useActivityRail` and mounts the rail beside `FleetDrawer` at the existing
-relative `.detail-split` anchor. Fine/hover pointers above 767px peek after 120ms; leaving both
-button/bridge/panel closes after 280ms. Peek never resizes the main column, persists state or
-steals composer focus. Click pins using the EXISTING viewport modes: ≥1280 docked (grid shrinks
-main), 768–1279 overlay, ≤767 fullscreen with no hover. `useFleetDrawerOpen` still exclusively
-owns `webhub.fleetDrawer.open`, default-open and breakpoint resets; no new key/wire/setting.
-`data-docked-open` alone drives grid allocation; `data-peek-open` is transient visibility intent.
-Pinned hover never switches type; clicking the other button does. Production always passes an
-explicit `panel`, while undefined panel is legacy combined-render/fill-budget compatibility.
+relative `.detail-split` anchor. The rail is click-driven: opening the drawer keeps it expanded,
+including when the pointer leaves. There is no pin control, hover preview or timed auto-close.
+Close only with `×`, `Esc`, another click on the active rail icon, or an outside click in overlay
+mode. Clicking the other rail icon switches the panel without closing the drawer.
 
-Peek interactions promote before action. Real pointer testing caught dock movement losing the
-mouseup/click target: `layoutHeld` temporarily retains overlay geometry after logical pin, then
-click-capture queues release AFTER the target action. Pointercancel/blur/close/type/viewport/
-unmount clean the temporary state and gesture listeners; pointerup uses only a next-task no-click
-fallback, never a pre-action microtask. Run subscribe/unsubscribe still belongs solely to useHub.
-Only keyboard Enter/Space opens focus close; close/Escape return to the triggering type (never
-first aria-controls), timeout/outside do not grab focus. Fullscreen restores background inert
-values on close/resize/unmount and traps Tab; input/composition Escape guards remain.
+Viewport layout rules are unchanged: ≥1280 docked (grid shrinks main), 768–1279 overlay,
+≤767 fullscreen. `useFleetDrawerOpen` exclusively owns `webhub.fleetDrawer.open`: docked-mode
+open/close state is persisted there, with the existing default-open and breakpoint-reset behavior;
+no new key/wire/setting. `data-docked-open` alone drives grid allocation. Production always
+passes an explicit `panel`, while undefined panel is legacy combined-render/fill-budget compatibility.
+
+Run subscribe/unsubscribe still belongs solely to useHub. Only keyboard Enter/Space opens focus
+close; close/Escape return to the triggering type (never first aria-controls), while outside close
+does not grab focus. Fullscreen restores background inert values on close/resize/unmount and traps
+Tab; input/composition Escape guards remain.
 
 Budget measurement resets on panel/effective-mode/open and ResizeObserver updates; explicit
 panels give the other class zero budget counts, undefined preserves the previous joint algorithm.
@@ -268,7 +266,11 @@ Privacy lock still unmounts the whole detail subtree including both rail buttons
 checks-body-applicability,detail-body}.test.ts`; real compiled-UI evidence and design decisions:
 `docs/dev/activity-rail/plan.md`. No Vue Transition/rAF, inline style or new dependency.
 
-### Task60 compact panel — zero reserved column, entry moves into the header
+### Historical Task60 compact panel — zero reserved column, entry moves into the header
+
+**Historical implementation, superseded by the click-driven drawer described above.** The following
+records the former hover preview / pin / held geometry and its validation, not current behavior.
+The pin control, hover preview, held state and timed auto-close have since been removed.
 
 User-confirmed rework (`docs/dev/activity-rail/compact-panel-plan.md`, frozen): the expanded
 panel no longer keeps ANY right-edge reserved column (the old docked 84px padding overrides are
@@ -883,3 +885,7 @@ Design, compiled-App evidence and manual physical-device/AT limits:
   浏览器需显式设该环境变量。P2 的独立 App fakeHub 浏览器验收不替代本条删除链。
   当前 child producer 无同等公开 raw port，保守隐藏且无持久化；UI 可消费合法 child live
   core 不意味着当前 child 请求会产生数值。旧历史永不回填，并非所有 Requests 都显示。
+
+### Activity drawer interaction
+
+The Agents/commands rail is click-driven: opening stays open on pointer leave, without a pin control or hover preview. Close via the active rail button, ×, Escape, or an outside pointer in overlay mode. Docked open state remains in `webhub.fleetDrawer.open`; viewport breakpoints and their existing mode-transition reset behavior are unchanged.

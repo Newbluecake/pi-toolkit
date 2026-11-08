@@ -26,7 +26,7 @@
   display: none;
 }
 
-/* Viewport mode is not intent: only pinned docked opens a layout column. */
+/* Viewport mode is not intent: only an open docked drawer opens a layout column. */
 .detail[data-drawer="docked"] {
   --drawer-w: clamp(480px, 38vw, 760px);
 }
@@ -52,25 +52,11 @@
   border-radius: var(--r-md);
   box-shadow: var(--shadow-3);
 }
-/* 手动 overlay（入口已进公共头部，data-floating 缺席）：不占外侧按钮栏，right12，
+/* overlay（入口已进公共头部）：不占外侧按钮栏，right12，
  * 宽度上限不借机扩容。 */
-.fleet-drawer[data-mode="overlay"]:not([data-floating]) {
+.fleet-drawer[data-mode="overlay"] {
   right: 12px;
   width: min(440px, calc(100% - 24px));
-}
-/* hover/held（data-floating）：入口仍在右缘浮动 DOM —— fine rail 外缘 20 + 命中 44 +
- * 净距 8 ⇒ right72；窄 split 左缘至少 12px。hover 与 held 共用同一几何，不停仅靠
- * data-peek-open 驱动（held 时 peeking 已为 false）。 */
-.fleet-drawer[data-mode="overlay"][data-floating] {
-  right: 72px;
-  width: min(440px, calc(100% - 84px));
-}
-.activity-bridge {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  right: -8px;
-  width: 8px;
 }
 .fleet-drawer[data-mode="fullscreen"] {
   position: fixed;

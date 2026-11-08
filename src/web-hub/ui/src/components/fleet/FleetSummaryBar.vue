@@ -61,9 +61,6 @@ function toggle(kind: "agent" | "bash", event: MouseEvent): void {
       :aria-expanded="open && (panel ?? (summary.total > 0 ? 'agent' : 'bash')) === button.kind"
       :aria-label="button.label"
       @click="toggle(button.kind, $event)"
-      @pointerenter="emit('peek-panel', button.kind, $event)"
-      @pointerleave="emit('peek-end')"
-      @pointermove="emit('peek-keep')"
     >
       <AppIcon :name="button.icon" class="icon fab-icon" />
       <span v-if="button.running > 0" class="pill fab-count" data-st="running">

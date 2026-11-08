@@ -6,8 +6,6 @@
 const fleet = {
   commandsTitle: "Commands",
   activityTitle: "Activity",
-  pin: "Pin panel",
-  unpin: "Unpin panel",
 
   panelTitle: "Agents",
   running: "{n} running",

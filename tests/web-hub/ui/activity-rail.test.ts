@@ -27,8 +27,7 @@ function setup() {
   cleanups.push(() => scope.stop());
   const deps = {
     mode: ref<FleetDrawerMode>("docked"),
-    pinnedOpen: ref(false),
-    hoverFine: ref(true),
+    drawerOpen: ref(false),
     hasAgent: ref(true),
     hasBash: ref(true),
     deselectRun: vi.fn(),
@@ -40,65 +39,10 @@ function setup() {
   return { rail, deps, pointer, button };
 }
 describe("activity rail intent state machine", () => {
-  it("pointerdown pins logically but defers dock until click; cancel/blur/up/close/switch clean guards", async () => {
-    const { rail, pointer } = setup();
-    const remove = vi.spyOn(document, "removeEventListener");
-    for (const finish of ["click", "pointercancel", "blur", "pointerup", "close", "switch"] as const) {
-      rail.close();
-      rail.enter("agent", pointer);
-      vi.advanceTimersByTime(120);
-      rail.promote(true);
-      expect(rail.peeking.value).toBe(false);
-      expect(rail.effectiveMode.value).toBe("overlay");
-      if (finish === "click") rail.releaseInteraction();
-      if (finish === "pointercancel") document.dispatchEvent(new Event("pointercancel"));
-      if (finish === "blur") window.dispatchEvent(new Event("blur"));
-      if (finish === "pointerup") {
-        document.dispatchEvent(new Event("pointerup"));
-        await nextTick();
-        expect(rail.effectiveMode.value).toBe("overlay"); // never pointerup microtask
-        vi.advanceTimersByTime(0);
-      }
-      if (finish === "close") rail.close();
-      if (finish === "switch") rail.toggle("bash", "pointer");
-      expect(rail.effectiveMode.value).toBe("docked");
-    }
-    expect(remove.mock.calls.some((c) => c[0] === "pointerup")).toBe(true);
-    remove.mockRestore();
-  });
-
-  it("120ms enter, 280ms leave, re-entry cancels exit; never touches pinned state", async () => {
-    const { rail, deps, pointer } = setup();
-    rail.enter("agent", pointer);
-    vi.advanceTimersByTime(119);
-    expect(rail.open.value).toBe(false);
-    vi.advanceTimersByTime(1);
-    expect(rail.peeking.value).toBe(true);
-    expect(rail.effectiveMode.value).toBe("overlay");
-    rail.leave();
-    vi.advanceTimersByTime(279);
+  it("click opens, switches panels, and clicking the active panel closes", () => {
+    const { rail, deps, button } = setup();
+    rail.toggle("agent", "pointer", button);
     expect(rail.open.value).toBe(true);
-    rail.keep();
-    vi.advanceTimersByTime(1);
-    expect(rail.open.value).toBe(true);
-    rail.enter("bash", pointer);
-    expect(rail.panel.value).toBe("bash");
-    rail.leave();
-    vi.advanceTimersByTime(280);
-    expect(rail.open.value).toBe(false);
-    expect(deps.pinnedOpen.value).toBe(false);
-    expect(deps.deselectRun).not.toHaveBeenCalled();
-  });
-  it("promotes interaction before leaving, ignores other hover, click switches and closes", () => {
-    const { rail, deps, pointer, button } = setup();
-    rail.enter("agent", pointer);
-    vi.advanceTimersByTime(120);
-    rail.leave();
-    rail.promote();
-    vi.advanceTimersByTime(1000);
-    expect(rail.open.value).toBe(true);
-    expect(rail.effectiveMode.value).toBe("docked");
-    rail.enter("bash", pointer);
     expect(rail.panel.value).toBe("agent");
     rail.toggle("bash", "keyboard", button);
     expect(rail.panel.value).toBe("bash");
@@ -107,56 +51,16 @@ describe("activity rail intent state machine", () => {
     rail.toggle("bash", "pointer", button);
     expect(rail.open.value).toBe(false);
   });
-  it("phone, coarse and touch events cannot peek; boundary change clears pending hover", async () => {
-    const { rail, deps, pointer } = setup();
-    rail.enter("agent", { ...pointer, pointerType: "touch" });
-    vi.advanceTimersByTime(120);
-    expect(rail.open.value).toBe(false);
-    deps.hoverFine.value = false;
-    await nextTick();
-    rail.enter("agent", pointer);
-    vi.advanceTimersByTime(120);
-    expect(rail.open.value).toBe(false);
-    deps.hoverFine.value = true;
-    deps.mode.value = "fullscreen";
-    await nextTick();
-    rail.enter("agent", pointer);
-    vi.advanceTimersByTime(120);
-    expect(rail.open.value).toBe(false);
-    deps.mode.value = "overlay";
-    await nextTick();
-    rail.enter("agent", pointer);
-    deps.mode.value = "fullscreen";
-    await nextTick();
-    vi.advanceTimersByTime(120);
-    expect(rail.open.value).toBe(false);
-  });
-  it("data disappearance falls back to available type and disposal cancels timers", async () => {
-    const { rail, deps, pointer } = setup();
-    rail.enter("agent", pointer);
-    vi.advanceTimersByTime(120);
+  it("data disappearance falls back to available type", async () => {
+    const { rail, deps } = setup();
+    rail.toggle("agent", "pointer");
     deps.hasAgent.value = false;
     await nextTick();
-    expect(rail.open.value).toBe(false);
     expect(rail.panel.value).toBe("bash");
-    rail.toggle("bash", "pointer");
     expect(rail.open.value).toBe(true);
     deps.hasBash.value = false;
     await nextTick();
     expect(rail.open.value).toBe(false);
-  });
-  it("Task60: exposes read-only held — true only across the promote→release window", () => {
-    const { rail, pointer } = setup();
-    expect(rail.held.value).toBe(false);
-    rail.enter("agent", pointer);
-    vi.advanceTimersByTime(120);
-    rail.promote(true);
-    expect(rail.held.value).toBe(true);
-    expect(rail.peeking.value).toBe(false); // held 时 peeking 已为 false：floating 不能只看 peeking
-    expect(rail.effectiveMode.value).toBe("overlay");
-    rail.releaseInteraction();
-    expect(rail.held.value).toBe(false);
-    expect(rail.effectiveMode.value).toBe("docked"); // settled open，可入公共头部
   });
 });
 const row = {
@@ -236,7 +140,6 @@ describe("real components (not mock HTML)", () => {
     expect(w.findAll(".detail-split [data-rail-host='floating'] .activity-rail")).toHaveLength(1);
     const drawer = w.getComponent(FleetDrawer);
     expect(drawer.props("panel")).toBe("agent");
-    expect(drawer.props("floating")).toBe(false);
     const outside = document.createElement("input");
     document.body.append(outside);
     outside.focus();
@@ -250,31 +153,25 @@ describe("real components (not mock HTML)", () => {
     await nextTick();
     expect(document.activeElement).toBe(w.get('[data-panel="bash"].fleet-summary-bar').element);
   });
-  it("peek preserves focus; capture interaction pins before run selection, close unsubscribes", async () => {
+  it("hover does not open; click opens and pointer leave does not close or deselect", async () => {
     vi.useFakeTimers();
     const { w, selectRun } = detail();
-    const input = document.createElement("input");
-    document.body.append(input);
-    input.focus();
-    await w.get('[data-panel="agent"].fleet-summary-bar').trigger("pointerenter", { pointerType: "mouse" });
-    vi.advanceTimersByTime(120);
+    const button = w.get('[data-panel="agent"].fleet-summary-bar');
+    await button.trigger("pointerenter", { pointerType: "mouse" });
+    vi.advanceTimersByTime(500);
     await nextTick();
-    expect(w.attributes("data-peek-open")).toBeDefined();
-    expect(w.attributes("data-docked-open")).toBeUndefined();
-    expect(document.activeElement).toBe(input);
-    const run = w.get(".run-open");
-    await run.trigger("pointerdown");
-    await run.trigger("click");
-    await nextTick();
-    expect(w.attributes("data-peek-open")).toBeUndefined();
+    expect(w.attributes("data-drawer-open")).toBeUndefined();
+    await button.trigger("click", { detail: 1 });
+    await w.get(".run-open").trigger("click");
     expect(selectRun).toHaveBeenCalledWith("A", "r1");
     await w.get("#fleet-drawer").trigger("pointerleave");
-    vi.advanceTimersByTime(280);
+    vi.advanceTimersByTime(1000);
     await nextTick();
     expect(w.attributes("data-drawer-open")).toBeDefined();
     await w.setProps({ agent: { ...agent(), runSel: "r1" } as AgentState });
     await w.get(".drawer-close").trigger("click");
     expect(selectRun).toHaveBeenCalledWith("A", null);
+    expect(w.attributes("data-drawer-open")).toBeUndefined();
   });
   it("keyboard open focuses close; fullscreen makes background inert and restores it", async () => {
     const { w } = detail("fullscreen");
@@ -314,42 +211,18 @@ describe("Task60 compact panel: 零预留列 + 单实例双宿主（compact-pane
     expect(drawerRoot()!.querySelector(".activity-bridge")).toBeNull();
   });
 
-  it("hover peek 与 held 都留在浮动宿主、right 几何与桥仅在 floating 时存在；click 后才迁移", async () => {
-    vi.useFakeTimers();
-    const { w } = detail();
-    const btn = w.get('[data-panel="agent"].fleet-summary-bar').element;
-    await w.get('[data-panel="agent"].fleet-summary-bar').trigger("pointerenter", { pointerType: "mouse" });
-    vi.advanceTimersByTime(120);
-    await nextTick();
-    expect(btn.closest('[data-rail-host="floating"]')).not.toBeNull(); // hover 不迁移（防振荡）
-    expect(drawerRoot()!.hasAttribute("data-floating")).toBe(true);
-    expect(drawerRoot()!.querySelector(".activity-bridge")).not.toBeNull(); // hover/held 桥连续
-    // guard-fix: 指针落在交互元素（如树里 run-open 按钮）上才提升 held；非交互背景不升级
-    await w.get(".run-open").trigger("pointerdown");
-    await nextTick();
-    expect(btn.closest('[data-rail-host="floating"]')).not.toBeNull();
-    expect(drawerRoot()!.hasAttribute("data-floating")).toBe(true); // held 时 peeking 已 false，几何仍靠 floating
-    // click 落地（capture → interaction-end → 释放 held）后才迁入头部
-    await w.get("#fleet-drawer").trigger("click");
-    await nextTick();
-    await nextTick();
-    expect(btn.closest('[data-rail-host="header"]')).not.toBeNull();
-    expect(drawerRoot()!.hasAttribute("data-floating")).toBe(false);
-    expect(drawerRoot()!.querySelector(".activity-bridge")).toBeNull();
-  });
-
   it("关闭回到浮动宿主；子详情公共头部不重复 close，back 退选但入口宿主不销毁", async () => {
     const { w, selectRun } = detail();
     const btn = w.get('[data-panel="agent"].fleet-summary-bar').element;
     await w.get('[data-panel="agent"].fleet-summary-bar').trigger("click", { detail: 1 });
     await nextTick();
     expect(btn.closest('[data-rail-host="header"]')).not.toBeNull();
-    // 选入子详情：公共头部保留入口+pin，无重复 close；RunHeader 保留 back/name/status/close
+    // 选入子详情：公共头部保留入口，无重复 close；RunHeader 保留 back/name/status/close
     await w.setProps({ agent: { ...agent(), runSel: "r1" } as AgentState });
     await nextTick();
     const head = drawerRoot()!.querySelector(".drawer-head")!;
     expect(head.querySelector('[data-rail-host="header"]')).not.toBeNull();
-    expect(head.querySelector(".activity-pin")).not.toBeNull();
+    expect(head.querySelector(".activity-pin")).toBeNull();
     expect(head.querySelector(".drawer-close")).toBeNull(); // 公共头部不重复 close
     const runHead = drawerRoot()!.querySelector(".run-head")!;
     expect(runHead.querySelector(".drawer-back")).not.toBeNull();
@@ -395,19 +268,11 @@ describe("Task60 compact panel: 零预留列 + 单实例双宿主（compact-pane
 describe("Task60 CSS 门禁：零预留列 + 头部宿主静态横排（compact-panel-plan §2.2）", () => {
   const read = (rel: string) =>
     readFileSync(resolve(fileURLToPath(import.meta.url), "../../../../src/web-hub/ui/src/styles/", rel), "utf8");
-  it("drawer.css: 84px 整列预留彻底删除，overlay 几何按 data-floating 分流，桥 8px", () => {
+  it("drawer.css: overlay keeps its compact geometry without a reserved column", () => {
     const css = read("drawer.css");
-    expect(css).not.toContain("84px;"); // 三处 padding-right 预留已删（width min(...,calc(100% - 84px)) 不带分号匹配不到）
     expect(css).not.toMatch(/padding-right:\s*84/);
-    const manual = css.match(/\.fleet-drawer\[data-mode="overlay"\]:not\(\[data-floating\]\)\s*\{([^}]+)\}/)?.[1] ?? "";
-    expect(manual).toMatch(/right:\s*12px/);
-    expect(manual).toMatch(/width:\s*min\(440px,\s*calc\(100%\s*-\s*24px\)\)/);
-    const floating = css.match(/\.fleet-drawer\[data-mode="overlay"\]\[data-floating\]\s*\{([^}]+)\}/)?.[1] ?? "";
-    expect(floating).toMatch(/right:\s*72px/);
-    expect(floating).toMatch(/width:\s*min\(440px,\s*calc\(100%\s*-\s*84px\)\)/);
-    const bridge = css.match(/\.activity-bridge\s*\{([^}]+)\}/)?.[1] ?? "";
-    expect(bridge).toMatch(/right:\s*-8px/);
-    expect(bridge).toMatch(/width:\s*8px/);
+    expect(css).toMatch(/right:\s*12px/);
+    expect(css).toMatch(/width:\s*min\(440px,\s*calc\(100%\s*-\s*24px\)\)/);
   });
   it("fleet.css: 浮动宿主零布局占位；头部宿主静态横排并清容器装饰，不动按钮/badge/pulse", () => {
     const css = read("fleet.css");

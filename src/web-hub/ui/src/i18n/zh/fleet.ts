@@ -10,8 +10,6 @@ type Messages<T> = { [K in keyof T]: string };
 const fleet = {
   commandsTitle: "后台命令",
   activityTitle: "活动入口",
-  pin: "固定面板",
-  unpin: "取消固定",
 
   panelTitle: "Agents",
   running: "{n} 个运行中",

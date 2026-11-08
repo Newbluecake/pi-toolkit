@@ -252,7 +252,7 @@ describe("U2/U3: Esc 规则链(§6.4 #2/#3,overlay 模式)", () => {
     expect(document.querySelector(".detail")!.hasAttribute("data-drawer-open")).toBe(true);
   });
 
-  it("docked pinned Escape closes without invoking parent navigation", async () => {
+  it("docked open Escape closes without invoking parent navigation", async () => {
     stubModes(MODE_DOCKED);
     mountDetail(baseAgent());
     expect(document.querySelector(".detail")!.hasAttribute("data-drawer-open")).toBe(true);
@@ -359,26 +359,6 @@ describe("U6: 卸载清理(§6.4 #7)", () => {
 });
 
 describe("Task60: floating 数据口与焦点归还可见性（compact-panel-plan §2.2/§3）", () => {
-  it("resolvedFloating = floating || peeking（Vue boolean prop 缺席归一为 false，?? 链回退不可达；真实调用上等价）：data-floating/桥与它同源，不由 mode 猜", async () => {
-    stubModes(MODE_OVERLAY);
-    const wrapper = mount(FleetDrawer, {
-      props: { agent: baseAgent(), now: 0, mode: "overlay", open: true, panel: "agent", peeking: true },
-      attachTo: document.body,
-      global: { provide: { [HUB_CTX as symbol]: fakeHub() } },
-    });
-    mounted.push(wrapper);
-    expect(drawerEl()!.hasAttribute("data-floating")).toBe(true); // 旧独立调用：peeking 回退
-    expect(drawerEl()!.querySelector(".activity-bridge")).not.toBeNull();
-    await wrapper.setProps({ peeking: false });
-    await nextTick();
-    expect(drawerEl()!.hasAttribute("data-floating")).toBe(false);
-    expect(drawerEl()!.querySelector(".activity-bridge")).toBeNull();
-    await wrapper.setProps({ floating: true }); // 生产口径：held 时 peeking 已 false 仍 floating
-    await nextTick();
-    expect(drawerEl()!.hasAttribute("data-floating")).toBe(true);
-    expect(drawerEl()!.querySelector(".activity-bridge")).not.toBeNull();
-  });
-
   it("restoreTrigger 只还给实际可见且非 inert 的入口；不可见时走同类型 fallback", async () => {
     stubModes(MODE_OVERLAY);
     const host = document.createElement("div");
@@ -414,60 +394,6 @@ describe("Task60: floating 数据口与焦点归还可见性（compact-panel-pla
     drawerEl()!.querySelector<HTMLElement>(".drawer-close")!.click();
     await nextTick();
     expect(document.activeElement).toBe(btn); // 恢复可见后还给同一入口
-  });
-
-  // Task60 guard-fix 回归：promoteInteraction 守卫被反写过（交互元素 return、非交互 emit），
-  // 54 矩阵因点击 run-open 走 FLEET_SELECT.select 的防御性 promote 掩盖了此路径。
-  function mountForPromote(peeking: boolean) {
-    const wrapper = mount(FleetDrawer, {
-      props: { agent: baseAgent(), now: 0, mode: "overlay", open: true, panel: "agent", peeking },
-      attachTo: document.body,
-      global: { provide: { [HUB_CTX as symbol]: fakeHub() } },
-    });
-    mounted.push(wrapper);
-    return wrapper;
-  }
-  it("guard-fix: peeking 下非交互区域（drawer-title/head）pointerdown 不 promote——hover peek 不被误 pin/迁 header", async () => {
-    stubModes(MODE_OVERLAY);
-    const wrapper = mountForPromote(true);
-    const title = drawerEl()!.querySelector(".drawer-title")!;
-    title.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
-    drawerEl()!
-      .querySelector(".drawer-head")!
-      .dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
-    await nextTick();
-    expect(wrapper.emitted("promote")).toBeUndefined();
-  });
-  it("guard-fix: 交互元素 pointerdown ⇒ promote(true)；focusin ⇒ promote(false)（升级但非指针钉住）", async () => {
-    stubModes(MODE_OVERLAY);
-    const wrapper = mountForPromote(true);
-    // 守卫对任意交互元素通用；挂一个普通 button 进 drawer（drawer-close/activity-pin 本身被排除）
-    const interactive = document.createElement("button");
-    interactive.textContent = "probe";
-    drawerEl()!.append(interactive);
-    interactive.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
-    await nextTick();
-    const promoted = wrapper.emitted("promote")!;
-    expect(promoted.at(-1)).toEqual([true]);
-    interactive.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
-    await nextTick();
-    expect(wrapper.emitted("promote")!.at(-1)).toEqual([false]);
-  });
-  it("guard-fix: 交互元素 focusin 升级后，鼠标离开只收 peek，焦点/钉住语义不丢（不落回 BODY）", async () => {
-    stubModes(MODE_OVERLAY);
-    const wrapper = mountForPromote(true);
-    const interactive = document.createElement("button");
-    interactive.textContent = "probe";
-    drawerEl()!.append(interactive);
-    interactive.focus();
-    interactive.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
-    await nextTick();
-    expect(wrapper.emitted("promote")!.at(-1)).toEqual([false]); // 升级（非 pointer pin）
-    // 鼠标离开由 hover 状态机收 peek；本组件不应因 focusin 升级而发出 close/interaction-end 副作用
-    expect(wrapper.emitted("close")).toBeUndefined();
-    await wrapper.setProps({ peeking: false }); // hover 状态机收起 peek
-    await nextTick();
-    expect(document.activeElement === document.body).toBe(false); // 焦点未被强制丢弃
   });
 });
 
