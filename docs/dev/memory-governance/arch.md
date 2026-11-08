@@ -1242,7 +1242,7 @@ export function planSweep(
 
 必须复用、禁止双实现：`govern/supersede.ts` 的权限/阈值、`govern/review-lite.ts` 的交互/dismiss、`govern/sweep-plan.ts` 的到期规则、`jev/tagging.ts` + `jev/client.ts` 分类器（勿新造客户端），以及目录锁/CAS/单边恢复。事件入口与建议存储各只能有一个 owner。
 
-前置缺陷：#66（sweep/review 共享运行状态导致建议被覆盖）和 #67（判定 rev 与提交 rev 不一致）必须先修；#68（Jev 120s 只 race 不 abort、队列无上限）作为作业级 abort 的基础。正式设计时必须通过 `ask_user` 确认尚未获批的权限：用户令、删除、跨主题合并、低置信冲突、expires、跨 project/Hub。
+前置缺陷：#66（sweep/review 共享运行状态导致建议被覆盖）和 #67（判定 rev 与提交 rev 不一致）必须先修；#68（Jev 120s 只 race 不 abort、队列无上限）作为作业级 abort 的基础。六类权限已由 root 于 2026-11-08 拍板（用户令允许窄条件自动取代、agent 块与已过期块可自动删除、同/跨主题合并可自动、低置信仅建议、agent 块 expires 可自动、跨 project/Hub 仅建议），详见 [plan 权限表](plan.md#权限表2026-11-08-root-已拍板)；所有自动动作仍须走既有阈值 + CAS + 审计快照 + 原文恢复。
 
 **验收钉子**：N 次变更合并一次；安静窗口内新写重置等待；自写不再入队；超时/abort/旧 rev 零提交；队列/调用/费用/并发达 cap 停止；撤销可恢复原文字节。
 
