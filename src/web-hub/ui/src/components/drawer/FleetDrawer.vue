@@ -114,6 +114,13 @@ import RunTranscript from "./RunTranscript.vue";
 
 const props = defineProps<FleetDrawerProps>();
 const emit = defineEmits<FleetDrawerEmits>();
+// Capture before stopped run-open clicks, and include native keyboard activation of
+// buttons and summaries. Passive clicks and data-driven fold changes are not intent.
+function onDrawerClick(event: MouseEvent): void {
+  if (event.target instanceof Element && event.target.closest("button, summary, a, input, select, textarea")) {
+    emit("intent");
+  }
+}
 const { t } = useI18n();
 
 const rootEl = ref<HTMLElement | null>(null);
@@ -569,6 +576,7 @@ watch(
     :role="mode === 'docked' ? undefined : 'dialog'"
     :aria-modal="mode === 'fullscreen' ? true : undefined"
     :aria-label="t(panel === 'bash' ? 'fleet.commandsTitle' : 'fleet.panelTitle')"
+    @click.capture="onDrawerClick"
   >
     <!-- The activity host remains mounted across tree/run transitions. -->
     <div class="drawer-head">

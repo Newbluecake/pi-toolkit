@@ -678,6 +678,7 @@ function onCloseDrawer(): void {
         :open-origin="openOrigin"
         :trigger="trigger"
         @close="onCloseDrawer"
+        @intent="rail.cancelRestore"
       >
         <!-- 公共头部宿主在 tree/run 分支切换间保持不变。 -->
         <template #activity>

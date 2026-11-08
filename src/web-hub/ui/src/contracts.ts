@@ -413,6 +413,7 @@ export interface FleetDrawerProps {
 }
 export interface FleetDrawerEmits {
   close: [];
+  intent: [];
 }
 
 export interface RunHeaderProps {

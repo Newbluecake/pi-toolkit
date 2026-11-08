@@ -106,7 +106,7 @@ function agent(): AgentState {
     status: { busy: false, pending: false, bashJobs: jobs },
   } as unknown as AgentState;
 }
-function detail(mode: "docked" | "overlay" | "fullscreen" = "overlay") {
+function detail(mode: "docked" | "overlay" | "fullscreen" = "overlay", initialAgent = agent()) {
   vi.stubGlobal("matchMedia", (q: string) => ({
     matches:
       q === "(hover: hover) and (pointer: fine)" ||
@@ -117,7 +117,7 @@ function detail(mode: "docked" | "overlay" | "fullscreen" = "overlay") {
   }));
   const selectRun = vi.fn();
   const w = mount(AgentDetail, {
-    props: { agent: agent(), now: 1000, narrow: false },
+    props: { agent: initialAgent, now: 1000, narrow: false },
     attachTo: document.body,
     global: { provide: { [HUB_CTX as symbol]: { state: ref({ control: true }), selectRun, control: undefined } } },
   });
@@ -125,6 +125,87 @@ function detail(mode: "docked" | "overlay" | "fullscreen" = "overlay") {
   return { w, selectRun };
 }
 describe("real components (not mock HTML)", () => {
+  it("persists a switched panel and restores it after remount without changing drawer-open memory", async () => {
+    localStorage.setItem("webhub.fleetDrawer.open", "1");
+    const first = detail("docked").w;
+    expect(first.getComponent(FleetDrawer).props("panel")).toBe("agent");
+    await first.get('[data-panel="bash"].fleet-summary-bar').trigger("click", { detail: 1 });
+    expect(localStorage.getItem("webhub.fleetDrawer.panel")).toBe("bash");
+    expect(localStorage.getItem("webhub.fleetDrawer.open")).toBe("1");
+    first.unmount();
+    const second = detail("docked").w;
+    expect(second.getComponent(FleetDrawer).props("panel")).toBe("bash");
+    expect(second.attributes("data-drawer-open")).toBeDefined();
+    await second.get('[data-panel="agent"].fleet-summary-bar').trigger("click", { detail: 1 });
+    expect(localStorage.getItem("webhub.fleetDrawer.panel")).toBe("agent");
+    second.unmount();
+    const third = detail("docked").w;
+    expect(third.getComponent(FleetDrawer).props("panel")).toBe("agent");
+  });
+  it("rejects unknown stored panels and preserves the initial agent default", () => {
+    localStorage.setItem("webhub.fleetDrawer.panel", "__proto__");
+    expect(detail("docked").w.getComponent(FleetDrawer).props("panel")).toBe("agent");
+  });
+  it("falls back when the saved panel has no content, then restores if its data arrives late", async () => {
+    localStorage.setItem("webhub.fleetDrawer.panel", "agent");
+    const { w } = detail("docked");
+    await w.setProps({ agent: { ...agent(), fleet: [] } as AgentState });
+    w.unmount();
+    const emptyAgent = { ...agent(), fleet: [] } as AgentState;
+    const restored = mount(AgentDetail, {
+      props: { agent: emptyAgent, now: 1000, narrow: false },
+      attachTo: document.body,
+    });
+    cleanups.push(() => restored.unmount());
+    expect(restored.getComponent(FleetDrawer).props("panel")).toBe("bash");
+    await restored.setProps({ agent: agent() });
+    expect(restored.getComponent(FleetDrawer).props("panel")).toBe("agent");
+  });
+  it("falls back to agent when a saved bash panel has no jobs", () => {
+    localStorage.setItem("webhub.fleetDrawer.panel", "bash");
+    const noJobs = { ...agent(), status: { busy: false, pending: false } } as AgentState;
+    const w = mount(AgentDetail, { props: { agent: noJobs, now: 1000, narrow: false } });
+    cleanups.push(() => w.unmount());
+    expect(w.getComponent(FleetDrawer).props("panel")).toBe("agent");
+  });
+  it("keeps an explicitly opened run on agent when saved bash jobs arrive late", async () => {
+    localStorage.setItem("webhub.fleetDrawer.panel", "bash");
+    const noJobs = { ...agent(), status: { busy: false, pending: false } } as AgentState;
+    const { w, selectRun } = detail("docked", noJobs);
+    expect(w.getComponent(FleetDrawer).props("panel")).toBe("agent");
+    await w.get(".run-open").trigger("click");
+    expect(selectRun).toHaveBeenCalledWith("A", "r1");
+    await w.setProps({ agent: { ...noJobs, runSel: "r1" } as AgentState });
+    await w.setProps({ agent: { ...agent(), runSel: "r1" } as AgentState });
+    expect(w.getComponent(FleetDrawer).props("panel")).toBe("agent");
+    expect(selectRun).not.toHaveBeenCalledWith("A", null);
+    expect(w.find(".run-head").exists()).toBe(true);
+  });
+  it("restores late bash without interaction, but not after an explicit panel toggle", async () => {
+    localStorage.setItem("webhub.fleetDrawer.panel", "bash");
+    const noJobs = { ...agent(), status: { busy: false, pending: false } } as AgentState;
+    const first = detail("docked", noJobs).w;
+    expect(first.getComponent(FleetDrawer).props("panel")).toBe("agent");
+    await first.setProps({ agent: agent() });
+    expect(first.getComponent(FleetDrawer).props("panel")).toBe("bash");
+    first.unmount();
+    const second = detail("docked", noJobs).w;
+    await second.get('[data-panel="agent"].fleet-summary-bar').trigger("click");
+    await second.setProps({ agent: agent() });
+    expect(second.getComponent(FleetDrawer).props("panel")).toBe("agent");
+  });
+  it("cancels late restore when the user expands an agent tree node", async () => {
+    localStorage.setItem("webhub.fleetDrawer.panel", "bash");
+    const noJobs = {
+      ...agent(),
+      fleet: [row, { ...row, runId: "r2", parentRunId: "r1" }],
+      status: { busy: false, pending: false },
+    } as AgentState;
+    const { w } = detail("docked", noJobs);
+    await w.get(".tree summary").trigger("click");
+    await w.setProps({ agent: { ...noJobs, status: agent().status } as AgentState });
+    expect(w.getComponent(FleetDrawer).props("panel")).toBe("agent");
+  });
   it("separate badges, 99+ full accessible count, empty classes hidden", () => {
     const w = mount(FleetSummaryBar, {
       props: { rows: Array.from({ length: 101 }, () => row) as never[], bashJobs: jobs as never, open: false },

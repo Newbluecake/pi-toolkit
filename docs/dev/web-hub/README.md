@@ -218,6 +218,11 @@ Design: `docs/dev/worktree-web/plan.md`.
 
 ## Bash-jobs panel
 
+The activity drawer remembers the selected agent/bash panel separately from its docked open state.
+If the saved panel has no content at mount, it falls back temporarily and restores when content
+arrives only until the user acts: a panel toggle, drawer close, or activation of a drawer control
+(including run selection and tree folds) cancels that pending restore. Passive data updates do not.
+
 **Bash-jobs panel (bash-jobs-panel plan v3/v4)**: `agent/bash-jobs-sampler.ts` samples the main session's
 background bash jobs (`BashJobManager`, source-generation pinned, single-flight with per-job deadlines, all
 timers unref'd) and `agent/bash-jobs.ts` projects to the optional `StatusInfo.bashJobs` slot (D1 row
