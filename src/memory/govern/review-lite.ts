@@ -1,12 +1,17 @@
 /** Governance-only review, including Jev-off. Block edits never use legacy
  * line editing: every action rechecks the live revision inside the lock. */
 import { join } from "node:path";
+import { createHash } from "node:crypto";
+import { redactForJev } from "../jev/redact.js";
 import { looksSecret } from "../secret-patterns.js";
 import type { MemoryWriteGate } from "../contracts.js";
 import type { MemCommandUiLike, ReviewSuggestion, ReviewSuggestionKind } from "../jev/contracts.js";
 import { isDismissedRelation, readIndex, suggestionKey } from "../jev/index-store.js";
 import { entryHash } from "../jev/entries.js";
 import { readCorpus, trashBlockLocked } from "../blocks/store.js";
+import { parseBlockFile, type ParsedBlock } from "../blocks/format.js";
+import { parseBlockName } from "../blocks/naming.js";
+import { inspectDirNoFollow, listRegular, readRegular } from "../safe-fs.js";
 import { residentBlocksOf, residentMeteredBytes } from "../blocks/render.js";
 import { withMemoryDirLock } from "../lock.js";
 import {
@@ -172,67 +177,277 @@ export async function handleReviewLite(
     }
   }
 }
-/** Migration's first semantic pass is suggestions-only and user↔user only.
- * The judge is supplied by the host (P5b); this port never calls a model or
- * auto-executes a relation. Rev mismatches discard late answers. */
+/** Bounded migration review. Only the selected 32 blocks remain in memory;
+ * the digest covers every eligible block in ID order. */
+/** Fingerprint only authoritative local fields; projections such as inherited are irrelevant. */
+export function firstReviewFingerprintRow(block: Pick<ParsedBlock, "id" | "rev" | "meta">): string {
+  return (
+    JSON.stringify([block.id, block.rev, block.meta.authority, block.meta.status, block.meta.private === true]) + "\n"
+  );
+}
+export interface FirstReviewPair {
+  a: string;
+  b: string;
+  aExcerpt: string;
+  bExcerpt: string;
+}
+export interface FirstReviewPlan {
+  pairs: readonly FirstReviewPair[];
+  dismissed: readonly { a: string; b: string }[];
+  corpusFp: string;
+  eligibleUsers: number;
+  selectedUsers: number;
+  plannedPairs: number;
+}
+export interface FirstReviewResult {
+  plan?: FirstReviewPlan;
+  answeredPairs: number;
+  casFailures: { a: string; b: string }[];
+  suggestionsWritten: boolean;
+  added: number;
+  complete: boolean;
+  reason?: string;
+}
+export interface FirstReviewOptions {
+  gate?: MemoryWriteGate;
+  signal?: AbortSignal;
+  /** Throws when the owner, deadline or migration identity is no longer valid. */
+  check?: () => void;
+  remainingMs?: () => number;
+  /** Numeric facade retains the pre-C3 suggestion threshold. */
+  legacyAllAnswers?: boolean;
+  /** Observe local, validated progress; never grants commit rights. */
+  onProgress?: (result: FirstReviewResult) => void;
+}
 export async function firstUserReviewPass(
   memDir: string,
-  judge: (pairs: readonly { a: string; b: string }[]) => Promise<readonly { a: string; b: string; p: number }[]>,
-  opts: { gate?: MemoryWriteGate; signal?: AbortSignal } = {},
-): Promise<number> {
-  governanceGate(memDir, opts.gate, opts.signal);
-  const users = readCorpus(join(memDir, "blocks")).blocks.filter(
-    (b) => b.meta.authority === "user" && b.meta.status === "active" && b.meta.private !== true && !looksSecret(b.body),
-  );
-  const pairs = users.flatMap((a, i) => users.slice(i + 1).map((b) => ({ a: a.id, b: b.id })));
-  if (!pairs.length) return 0;
-  const answers = await judge(pairs);
-  governanceGate(memDir, opts.gate, opts.signal);
-  return withMemoryDirLock(
-    memDir,
-    () => {
-      governanceGate(memDir, opts.gate, opts.signal);
-      const index = readIndex(memDir).index,
-        review = index.review ?? { lastRunAt: "", corpusFp: "", suggestions: [], dismissed: [] };
-      const suggestions: ReviewSuggestion[] = [];
-      for (const answer of answers) {
-        const a = users.find((b) => b.id === answer.a),
-          b = users.find((b) => b.id === answer.b);
-        if (!a || !b || a.id === b.id || !Number.isFinite(answer.p) || answer.p < 0 || answer.p > 1) continue;
-        try {
-          if (readGovernBlock(memDir, a.id).rev !== a.rev || readGovernBlock(memDir, b.id).rev !== b.rev) continue;
-        } catch {
+  judge: (
+    plan: FirstReviewPlan,
+    reportAnswer: (answer: { a: string; b: string; p: number }) => void,
+  ) => Promise<readonly { a: string; b: string; p: number }[]>,
+  opts: FirstReviewOptions = {},
+): Promise<FirstReviewResult> {
+  const result: FirstReviewResult = {
+    answeredPairs: 0,
+    casFailures: [],
+    suggestionsWritten: false,
+    added: 0,
+    complete: false,
+  };
+  const check = () => {
+    governanceGate(memDir, opts.gate, opts.signal);
+    opts.check?.();
+  };
+  try {
+    check();
+    const scan = () => {
+      const dir = join(memDir, "blocks"),
+        identity = inspectDirNoFollow(dir);
+      const listing = listRegular(dir, { names: "legacy" });
+      if (
+        listing.files.length + listing.skipped.length !==
+        identity.names.filter((name) => name.endsWith(".md")).length
+      )
+        throw new Error("review: directory enumeration changed");
+      if (listing.skipped.some((entry) => parseBlockName(entry.name))) throw new Error("review: unreadable block");
+      const users: ReturnType<typeof readCorpus>["blocks"][number][] = [];
+      let eligibleUsers = 0;
+      const hash = createHash("sha256").update("bounded-neighbours-v1\n");
+      // Block names are ASCII; their code-point order is ID order.
+      for (const file of listing.files.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
+        check();
+        if (!parseBlockName(file.name)) continue;
+        const block = parseBlockFile(file.name, readRegular(dir, file.name).text, { softLimits: true });
+        if (
+          "stray" in block ||
+          block.meta.authority !== "user" ||
+          block.meta.status !== "active" ||
+          block.meta.private === true ||
+          block.meta.residue === true ||
+          block.meta.storageScope === "hub" ||
+          looksSecret(block.body)
+        )
           continue;
-        }
-        const id = `migration-${[a.id, b.id].sort().join("-")}`;
-        if (review.suggestions.some((s) => s.id === id) || suggestions.some((s) => s.id === id)) continue;
+        eligibleUsers++;
+        hash.update(firstReviewFingerprintRow(block));
+        if (users.length < 32) users.push(block);
+      }
+      const after = inspectDirNoFollow(dir);
+      if (
+        identity.dev !== after.dev ||
+        identity.ino !== after.ino ||
+        JSON.stringify(identity.names.filter((name) => name.endsWith(".md")).sort()) !==
+          JSON.stringify(after.names.filter((name) => name.endsWith(".md")).sort())
+      )
+        throw new Error("review: directory changed");
+      return { users, eligibleUsers, corpusFp: hash.digest("hex") };
+    };
+    const { users, eligibleUsers, corpusFp } = scan();
+    const initialIndex = readIndex(memDir);
+    if (initialIndex.rebuilt) throw new Error("review: invalid index");
+    const dismissed = initialIndex.index.review?.dismissed ?? [];
+    const pairs: FirstReviewPair[] = [],
+      skipped: { a: string; b: string }[] = [];
+    for (const distance of [1, 2])
+      for (let i = 0; i + distance < users.length; i++) {
+        if (pairs.length + skipped.length >= 64) throw new Error("review: pair limit exceeded");
+        const a = users[i]!,
+          b = users[i + distance]!;
+        const pair = { a: a.id, b: b.id };
         if (
           isDismissedRelation(
-            review.dismissed,
+            dismissed,
             { hash: entryHash(a.body), anchor: blockAnchor(a) },
             { hash: entryHash(b.body), anchor: blockAnchor(b) },
             "conflict",
           )
         )
-          continue;
-        suggestions.push({
-          id,
-          kind: "conflict",
-          a: { hash: entryHash(a.body), anchor: blockAnchor(a) },
-          b: { hash: entryHash(b.body), anchor: blockAnchor(b) },
-          p: answer.p,
-          at: new Date().toISOString(),
-        });
+          skipped.push(pair);
+        else pairs.push({ ...pair, aExcerpt: redactForJev(a.body, "entry"), bExcerpt: redactForJev(b.body, "entry") });
       }
-      if (suggestions.length)
-        writeGovernIndexLocked(
-          memDir,
-          { ...index, review: { ...review, suggestions: [...review.suggestions, ...suggestions] } },
-          opts.gate,
-          opts.signal,
-        );
-      return suggestions.length;
-    },
-    { timeoutMs: 500 },
+    const plan: FirstReviewPlan = {
+      pairs,
+      dismissed: skipped,
+      corpusFp,
+      eligibleUsers,
+      selectedUsers: users.length,
+      plannedPairs: pairs.length + skipped.length,
+    };
+    result.plan = plan;
+    opts.onProgress?.(result);
+    const expected = new Map(pairs.map((p) => [JSON.stringify([p.a, p.b]), p]));
+    const reported = new Map<string, number>();
+    const reportAnswer = (answer: { a: string; b: string; p: number }) => {
+      const key = JSON.stringify([answer.a, answer.b]);
+      if (!expected.has(key) || reported.has(key) || !Number.isFinite(answer.p) || answer.p < 0 || answer.p > 1)
+        throw new Error("invalid, duplicate or unknown pair answer");
+      reported.set(key, answer.p);
+      result.answeredPairs = reported.size;
+      opts.onProgress?.(result);
+    };
+    check();
+    const answers = await judge(plan, reportAnswer);
+    check();
+    const seen = new Map<string, number>();
+    for (const answer of answers) {
+      const key = JSON.stringify([answer.a, answer.b]);
+      if (
+        !expected.has(key) ||
+        seen.has(key) ||
+        !Number.isFinite(answer.p) ||
+        answer.p < 0 ||
+        answer.p > 1 ||
+        (reported.has(key) && reported.get(key) !== answer.p)
+      )
+        throw new Error("invalid, duplicate or unknown pair answer");
+      seen.set(key, answer.p);
+      result.answeredPairs = new Set([...reported.keys(), ...seen.keys()]).size;
+      opts.onProgress?.(result);
+    }
+    if (seen.size !== pairs.length || [...reported.keys()].some((key) => !seen.has(key)))
+      throw new Error("missing pair answer");
+    check();
+    await withMemoryDirLock(
+      memDir,
+      () => {
+        check();
+        const liveIndex = readIndex(memDir);
+        if (liveIndex.rebuilt) throw new Error("review: invalid index");
+        const index = liveIndex.index;
+        const review = index.review ?? { lastRunAt: "", corpusFp: "", suggestions: [], dismissed: [] };
+        const suggestions: ReviewSuggestion[] = [];
+        for (const pair of [...pairs, ...skipped]) {
+          const a = users.find((b) => b.id === pair.a)!,
+            b = users.find((v) => v.id === pair.b)!;
+          try {
+            const liveA = readGovernBlock(memDir, a.id),
+              liveB = readGovernBlock(memDir, b.id);
+            if (
+              [liveA, liveB].some(
+                (v, i) =>
+                  v.rev !== [a, b][i]!.rev ||
+                  v.meta.authority !== "user" ||
+                  v.meta.status !== "active" ||
+                  v.meta.private === true ||
+                  v.meta.residue === true ||
+                  v.meta.storageScope === "hub" ||
+                  looksSecret(v.body),
+              )
+            )
+              throw new Error("changed");
+          } catch {
+            result.casFailures.push({ a: pair.a, b: pair.b });
+            continue;
+          }
+          const isDismissed = isDismissedRelation(
+            review.dismissed,
+            { hash: entryHash(a.body), anchor: blockAnchor(a) },
+            { hash: entryHash(b.body), anchor: blockAnchor(b) },
+            "conflict",
+          );
+          if (isDismissed) continue;
+          const p = seen.get(JSON.stringify([a.id, b.id]));
+          if (p === undefined) {
+            result.casFailures.push({ a: a.id, b: b.id });
+            continue;
+          }
+          const id = `migration-${a.id}-${b.id}`;
+          if ((!opts.legacyAllAnswers && p < 0.75) || review.suggestions.some((s) => s.id === id)) continue;
+          suggestions.push({
+            id,
+            kind: "conflict",
+            a: { hash: entryHash(a.body), anchor: blockAnchor(a) },
+            b: { hash: entryHash(b.body), anchor: blockAnchor(b) },
+            p,
+            at: new Date().toISOString(),
+          });
+        }
+        if (result.casFailures.length) return;
+        if (scan().corpusFp !== plan.corpusFp) throw new Error("corpus changed");
+        check();
+        if (suggestions.length)
+          writeGovernIndexLocked(
+            memDir,
+            { ...index, review: { ...review, suggestions: [...review.suggestions, ...suggestions] } },
+            {
+              check: () => {
+                try {
+                  check();
+                  return { ok: true as const };
+                } catch {
+                  return { ok: false as const, reason: "identity-changed" as const };
+                }
+              },
+              capture() {},
+            },
+            opts.signal,
+          );
+        result.added = suggestions.length;
+        result.suggestionsWritten = true;
+      },
+      { timeoutMs: Math.max(0, Math.min(500, opts.remainingMs?.() ?? 500)) },
+    );
+    check();
+    result.complete = result.suggestionsWritten && result.casFailures.length === 0;
+    if (!result.complete) result.reason = "cas-failed";
+  } catch (e) {
+    result.reason = (e as Error).message;
+  }
+  return result;
+}
+
+/** Legacy numeric facade with strict completeness: a missing planned answer
+ * throws instead of returning a partial count; it is not full compatibility. */
+export async function firstUserReviewCount(
+  memDir: string,
+  judge: (pairs: readonly { a: string; b: string }[]) => Promise<readonly { a: string; b: string; p: number }[]>,
+  opts: { gate?: MemoryWriteGate; signal?: AbortSignal } = {},
+): Promise<number> {
+  const result = await firstUserReviewPass(
+    memDir,
+    (plan) => (plan.pairs.length ? judge(plan.pairs.map(({ a, b }) => ({ a, b }))) : Promise.resolve([])),
+    { ...opts, legacyAllAnswers: true },
   );
+  if (!result.complete && result.reason !== "cas-failed") throw new Error(result.reason ?? "review incomplete");
+  return result.added;
 }

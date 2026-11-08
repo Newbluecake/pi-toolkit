@@ -45,13 +45,23 @@ it("migrate → user-only review → startup budget suggestion, no truncation �
     "expired state",
     new Date(),
   );
-  let pairs: readonly { a: string; b: string }[] = [];
-  const count = await firstUserReviewPass(root, async (p) => {
-    pairs = p;
-    return p.slice(0, 1).map((x) => ({ ...x, p: 1 }));
-  });
-  expect(count).toBe(1);
-  expect(pairs.every((p) => !p.a.startsWith("agent.") && !p.b.startsWith("agent."))).toBe(true);
+  const eligibleIds = readCorpus(blocks)
+    .blocks.filter((b) => b.meta.authority === "user")
+    .map((b) => b.id);
+  const review = await firstUserReviewPass(root, async (plan) =>
+    plan.pairs.map(({ a, b }, i) => ({ a, b, p: i === 0 ? 1 : 0 })),
+  );
+  expect(review.complete).toBe(true);
+  expect(review.added).toBe(1);
+  expect(review.suggestionsWritten).toBe(true);
+  expect(review.casFailures).toEqual([]);
+  expect(review.plan?.eligibleUsers).toBe(eligibleIds.length);
+  expect(review.plan?.selectedUsers).toBe(eligibleIds.length);
+  expect(review.plan?.pairs.length).toBeGreaterThan(0);
+  expect(review.answeredPairs).toBe(review.plan?.plannedPairs);
+  expect(review.plan?.pairs.every((p) => eligibleIds.includes(p.a) && eligibleIds.includes(p.b))).toBe(true);
+  expect(review.plan?.pairs.every((p) => !p.a.startsWith("agent.") && !p.b.startsWith("agent."))).toBe(true);
+  expect(readIndex(root).index.review?.suggestions.filter((s) => s.kind === "conflict")).toHaveLength(1);
   const notices: string[] = [];
   const runner = createSweepRunner({ enabled: true, residentBudget: 512, notify: (m) => notices.push(m) });
   const result = await runner.runSweep(root, "startup");

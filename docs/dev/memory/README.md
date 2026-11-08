@@ -156,6 +156,14 @@ unavailable；缺失合法、旧代际不抑制新迁移，坏 JSON/版本/字�
 `tests/integration/memory-blocks-governance.test.ts`（sweep 移交无两条）。不接 C3、不消费 I1 事件，默认值及
 所有 golden 保持原样。
 
+### #36 C3 首次 user↔user 有界 review（未装配）
+
+`govern/review-lite.ts::firstUserReviewPass` 是结构化核心：逐块扫描 project blocks，仅保留按 ID 排序前 32 个 active、非 private/secret/residue 的 user；完整合格集合按 ID 顺序以 `(id, rev, authority, status, private)` 和 `bounded-neighbours-v1` 做 SHA-256。按距离 1、2 取对（最多 61），在 judge 前剔除已 dismiss；judge 只收到本地 ID 与 `redactForJev(entry)` 摘录。锁内复核双方 live rev/authority/status/privacy/dismiss，重扫完整指纹后才合并建议；缺失、重复、未知/非法答案、CAS 丢弃、锁/写失败都不返回完整。新 core 沿用常规 Jev relation 的 0.75 建议阈值；低置信答案仍计入完整。数字接口改名 `firstUserReviewCount`，保留新增建议计数与旧阈值，但**不是完整兼容旧语义**：严格要求所有计划 pair 的答案齐全，缺答案即不完整并抛错，不返回部分新增计数。调用方需显式迁移名称。
+
+`jev/first-user-review.ts::createFirstUserReviewHost` 独立持有在飞状态，先验证迁移 markers、owner、gate、Jev、主会话及 registry；向现有 client 仅发批内 alias、两边≤400 code point 的脱敏摘录及固定 bool conflict 问句。每批≤16、最多 4 批、同时受现有 token/client 配额约束；跨批失败或取消保留已验证答案数，并报告已尝试批次数、已申请预算、已耗墙钟及 client 已报告费用（失败调用的未知费用不猜测）。6000ms 总期限贯穿扫描、请求和提交，超时或取消撤销提交权，已有建议不回滚。所有结果及建议提交成功后才请求 markers owner 写完成；marker 写失败允许未来自然机会重试。同步文件系统调用无法在单次 syscall 内被 JS 抢占，不声称跨建议和 marker 的事务性。
+
+本包不注册 hook、不主动续跑：I1 装配方必须只在已有 startup 或真实 corpus 变化/治理事件等自然机会调用 `run()`，禁止 render 或空转 turn_end 重试；提供当前 registry/client、主会话标记、gate、owner/session epoch 的 `isCurrent`、生命周期 signal，并在显式取消/shutdown/reload 调用 `cancel()` / `dispose()`。当前不是生产接线完成的声明。
+
 ### #36 自动取代收窄（2026-11-07 用户新裁定）
 
 仅完整取代才自动：新块整体覆盖或明确废弃旧块全部有效信息；部分冲突旧块保持 active 并给建议。`supersede` 非 explicit 只接受 supersedes，write-port 只将 supersedes 高 p 且未超 cap 标 auto；conflict 即使 p=1 也不自动。`CONFLICT_AUTO_P` 仅历史 cutoff，SUPERSEDE_AUTO_P 与每写最多 2 条不变；显式路径、agent→user 永禁及 authority/CAS/cycle/residue/dismissed 均不扩域。

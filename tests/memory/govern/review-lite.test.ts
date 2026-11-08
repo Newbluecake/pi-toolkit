@@ -3,7 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
 import { createBlockLocked, replaceBlockLocked } from "../../../src/memory/blocks/store.js";
-import { handleReviewLite, firstUserReviewPass } from "../../../src/memory/govern/review-lite.js";
+import {
+  handleReviewLite,
+  firstUserReviewCount as firstUserReviewPass,
+} from "../../../src/memory/govern/review-lite.js";
 import { readGovernBlock } from "../../../src/memory/govern/supersede.js";
 import { readIndex } from "../../../src/memory/jev/index-store.js";
 const roots: string[] = [];
@@ -403,4 +406,42 @@ it("cross-kind conflict dismiss permits semantic supersedes candidate, stale mer
     { interactive: false, enabled: true, residentBudget: 512, now },
   );
   expect(messages.join("\n")).toContain("[supersedes]");
+});
+
+it("bounds migration candidate selection before constructing neighbour pairs", async () => {
+  const dir = fixture();
+  const ids: string[] = [];
+  for (let i = 0; i < 33; i++) {
+    ids.push(createBlockLocked(join(dir, "blocks"), "rule", { authority: "user" }, `body ${i}`, now).id);
+  }
+  ids.sort();
+  const selected = ids.slice(0, 32);
+  const expected = [1, 2].flatMap((distance) =>
+    selected.slice(0, selected.length - distance).map((a, i) => ({ a, b: selected[i + distance] })),
+  );
+  let calls = 0;
+  await firstUserReviewPass(dir, async (pairs) => {
+    calls++;
+    expect(pairs).toEqual(expected);
+    expect(pairs).toHaveLength(61);
+    expect(pairs.some((p) => p.a === ids[32] || p.b === ids[32])).toBe(false);
+    return pairs.map((pair) => ({ ...pair, p: 0 }));
+  });
+  expect(calls).toBe(1);
+});
+
+it("forms one pair for two users and does not call judge for one", async () => {
+  const dir = fixture();
+  const first = createBlockLocked(join(dir, "blocks"), "rule", { authority: "user" }, "one", now);
+  let calls = 0;
+  const judge = async (pairs: readonly { a: string; b: string }[]) => {
+    calls++;
+    expect(pairs).toEqual([{ a: first.id, b: second.id }]);
+    return pairs.map((pair) => ({ ...pair, p: 0.5 }));
+  };
+  expect(await firstUserReviewPass(dir, judge)).toBe(0);
+  expect(calls).toBe(0);
+  const second = createBlockLocked(join(dir, "blocks"), "rule", { authority: "user" }, "two", now);
+  expect(await firstUserReviewPass(dir, judge)).toBe(1);
+  expect(calls).toBe(1);
 });
