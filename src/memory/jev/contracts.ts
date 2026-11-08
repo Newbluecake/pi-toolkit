@@ -847,3 +847,25 @@ export const P_INJECTED_AT_MAX = A_INJECTED_AT_MAX;
 export const MAX_ENABLED_TAGS = 64;
 /** Inline authority comment byte budget (§4.2: ≤200B). */
 export const INLINE_META_MAX_BYTES = 200;
+
+// ───────────────────────────── #36 S0 governance names (not wired) ─────────────────────────────
+// docs/dev/memory-governance/p5b-contracts.md is the lifecycle/ownership contract.
+// Additive names only: no existing interface, default, hook or wire payload changes.
+
+/** Successful operation edges, coalesced at the next existing turn_end.
+ * Intent, read-only results and aborts never create a governance event. */
+export const JEV_GOVERNANCE_EVENTS = ["task-done", "push", "release"] as const;
+export type JevGovernanceEvent = (typeof JEV_GOVERNANCE_EVENTS)[number];
+
+/** Renderer observations; dedup belongs to govern/signals.ts, not the
+ * ordinary sweep corpus fingerprint. Resident budgets never truncate rules. */
+export const JEV_GOVERNANCE_BUDGET_SIGNALS = ["resident-over-budget", "index-overflow"] as const;
+export type JevGovernanceBudgetSignal = (typeof JEV_GOVERNANCE_BUDGET_SIGNALS)[number];
+
+/** Reserved keys in blocks/.jev/governance-markers.json (format v:1).
+ * Only govern/markers.ts may persist them; neither belongs in JevIndexV1.
+ * Completed review means one bounded pass, NOT exhaustive corpus coverage. */
+export const JEV_GOVERNANCE_FIRST_USER_REVIEW_MARKER = "first-user-review/v1";
+export const JEV_GOVERNANCE_RELOAD_REMINDER_MARKER = "migration-reload-reminder/v1";
+export type JevGovernanceMarkerKey =
+  typeof JEV_GOVERNANCE_FIRST_USER_REVIEW_MARKER | typeof JEV_GOVERNANCE_RELOAD_REMINDER_MARKER;
