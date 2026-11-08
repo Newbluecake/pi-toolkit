@@ -36,10 +36,9 @@ import type {
 } from "./jev/contracts.js";
 import { EntryIndex, expiredEntries, untilEntries } from "./jev/entries.js";
 import { deleteEntry as fsDeleteEntry, setInlineMeta as fsSetInlineMeta } from "./jev/entry-edit.js";
-import { handleMemExpired } from "./jev/expired-command.js";
+import { blockReviewDisplay, blockExpiredDisplay, fileExpiredDisplay } from "./govern/display.js";
 import { readIndex } from "./jev/index-store.js";
 import { restoreBlock } from "./govern/sweep.js";
-import { handleReviewLite } from "./govern/review-lite.js";
 import { handleMemReview } from "./jev/review-command.js";
 import { readMarker } from "./blocks/marker.js";
 import { dirFormat } from "./blocks/naming.js";
@@ -458,14 +457,13 @@ export function createMemCommand(deps: CreateMemCommandDeps): {
             const message = await restoreBlock(dir, rest[1], { gate: deps.writeGate ?? plainMemoryWriteGate });
             deps.onAfterWrite?.(cwd);
             if (ctx.hasUI) ctx.ui.notify(message, "info");
-          } else {
-            await handleReviewLite(dir, rest.join(" "), toMemCommandUi(ctx), {
-              interactive: !isChildSession && isInteractive(ctx),
-              enabled: deps.settings?.governance.enabled ?? false,
-              residentBudget: deps.settings?.residentBytes ?? 2048,
-              gate: deps.writeGate ?? plainMemoryWriteGate,
-              onAfterWrite: () => deps.onAfterWrite?.(cwd),
-            });
+          } else if (ctx.hasUI) {
+            ctx.ui.notify(
+              sub === "review"
+                ? `${blockReviewDisplay(dir)}${rest.includes("--run") ? "\n只展示现有建议，不会启动整理。" : ""}`
+                : blockExpiredDisplay(dir),
+              "info",
+            );
           }
           return;
         }
@@ -495,7 +493,7 @@ export function createMemCommand(deps: CreateMemCommandDeps): {
         }
         if (sub === "review" && jev !== undefined) {
           const dir = dirFor(cwd);
-          await handleMemReview(rest.join(" "), toMemCommandUi(ctx), jev, {
+          await handleMemReview("--list", toMemCommandUi(ctx), jev, {
             cwd,
             dir,
             entries: entriesFor(cwd),
@@ -509,17 +507,19 @@ export function createMemCommand(deps: CreateMemCommandDeps): {
           });
           return;
         }
-        if (sub === "expired" && jev !== undefined) {
+        if (sub === "expired") {
           const dir = dirFor(cwd);
-          await handleMemExpired(rest.join(" "), toMemCommandUi(ctx), {
-            dir,
-            entries: entriesFor(cwd),
-            isChildSession,
-            interactive: isInteractive(ctx),
-            deleteEntry: (entry) => (dir === undefined ? Promise.resolve("stale" as const) : fsDeleteEntry(dir, entry)),
-            setInlineMeta: (entry, patch) =>
-              dir === undefined ? Promise.resolve("stale" as const) : fsSetInlineMeta(dir, entry, patch),
-          });
+          if (ctx.hasUI)
+            ctx.ui.notify(
+              dir === undefined
+                ? "expired: no memory directory"
+                : fileExpiredDisplay(jev === undefined ? new EntryIndex().get(dir) : entriesFor(cwd)),
+              "info",
+            );
+          return;
+        }
+        if (sub === "review") {
+          if (ctx.hasUI) ctx.ui.notify("review: unavailable\n此布局未启用建议索引，无法显示建议。", "info");
           return;
         }
         // default: list
