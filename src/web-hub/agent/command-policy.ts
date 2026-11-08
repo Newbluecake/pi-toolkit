@@ -322,6 +322,8 @@ function tokenize(args: string): string[] {
 
 export interface ResolvePolicyOptions {
   memoryScopes?: boolean;
+  /** Internal projection of the write port's presence; never a wire capability. */
+  memorySessionAdd?: boolean;
   name: string;
   args: string;
   kind: CommandKind;
@@ -333,7 +335,18 @@ export interface ResolvePolicyOptions {
 export function resolveCommandPolicy(opts: ResolvePolicyOptions): PolicyDecision {
   if (opts.memoryScopes && opts.name === "mem") {
     const scoped = scopedMemoryCommandPolicy(opts.args);
-    if (scoped) return scoped;
+    if (scoped) {
+      // This narrowly opens admission to the separate business-confirmation path, never
+      // authorization itself. All other scoped writes remain hard-denied even on allow.
+      if (
+        opts.memorySessionAdd &&
+        /^session add ([\s\S]+)$/.test(opts.args.trim()) &&
+        opts.args.trim().slice("session add ".length).trim() !== ""
+      ) {
+        return { policy: opts.overrides?.mem ?? "allow" };
+      }
+      return scoped;
+    }
   }
   const override = opts.overrides?.[opts.name];
   if (override !== undefined) return { policy: override };

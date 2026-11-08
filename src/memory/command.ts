@@ -729,3 +729,59 @@ async function handleMemTags(
     notify(`tags error: ${(err as Error).message}`, "warning");
   }
 }
+
+/** Web-only gate. It does not change, call, or impersonate the native command handler. */
+export async function executeConfirmedMemoryWrite(
+  call: import("./command-confirm.js").MemoryWebCall,
+  request: import("./command-policy.js").MemoryWriteRequest,
+  plan: import("./scopes/session-store.js").FrozenPlan,
+  receipt: import("./command-confirm.js").MemoryCommandApproval,
+  deps: {
+    readonly kernel: import("./command-confirm.js").CommandConfirmKernel;
+    readonly currentOwnerMatches: (binding: import("./command-confirm.js").MemoryWebCallBinding) => boolean;
+    readonly store: Pick<
+      import("./scopes/session-store.js").SessionMemoryStore,
+      "ownsWebPlan" | "enqueueConfirmedCommand"
+    >;
+  },
+): Promise<import("./scopes/session-store.js").SessionWebOutcome> {
+  const failure = (
+    code: import("./command-confirm.js").CommandErrorCode,
+  ): import("./scopes/session-store.js").SessionWebFailure => ({
+    ok: false,
+    effect: "none",
+    code,
+    message: `${code}: 本步未执行。`,
+    retryable: false,
+  });
+  const reject = (code: import("./command-confirm.js").CommandErrorCode) => {
+    // Revoke only this call. The store retains its prepared observation until its owner
+    // releases it after completion; closing the kernel does not release the store plan.
+    deps.kernel.close(call);
+    return failure(code);
+  };
+  try {
+    const binding = deps.kernel.binding(call);
+    if (!binding || !deps.currentOwnerMatches(binding)) return reject("E_MEM_NEEDS_HUMAN_COMMAND");
+    if (request.kind !== "session.add" || plan.kind !== "session.add" || request.rawArgs !== plan.commandPlan.rawArgs)
+      return reject("E_MEM_PLAN_CHANGED");
+    if (!deps.store.ownsWebPlan(call, plan)) return reject("E_MEM_PLAN_CHANGED");
+    if (!deps.kernel.check(call, receipt, plan.commandPlan)) return reject("E_MEM_CONFIRM_STALE");
+  } catch {
+    return reject("E_MEM_CONFIRM_STALE");
+  }
+  try {
+    return await deps.store.enqueueConfirmedCommand(call, plan, receipt);
+  } catch {
+    // The store is responsible for classifying attempted writes; an unexpected rejection
+    // from an injected consumer cannot establish that no effect occurred.
+    return {
+      ok: false,
+      effect: "unknown",
+      code: "E_PERSIST_UNKNOWN",
+      message: "E_PERSIST_UNKNOWN: 写入结果未知，请勿盲目重试。",
+      retryable: false,
+      recovery: "explicit-reopen-and-verify",
+    };
+  }
+}

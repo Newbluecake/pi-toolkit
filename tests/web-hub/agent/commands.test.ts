@@ -75,6 +75,7 @@ function makeHarness(
     },
     originEntry,
     builtinBridge,
+    memoryOwner: "test-memory-owner",
     controlEnabled: () => over.control ?? true,
     now: over.now ?? (() => 1000),
     send: (f) => sent.push(f),
@@ -1031,5 +1032,240 @@ describe("memory completion lifecycle", () => {
       state: "failed",
       result: { code: "E_STALE_CTX", retryable: false },
     });
+  });
+});
+
+import type { MemoryBridgeAdmission, MemoryBridgeTaskControl } from "../../../src/web-hub/agent/builtin-bridge.js";
+import type { LedgerResult } from "../../../src/web-hub/agent/ledger.js";
+
+describe("#65 memory write admission/cancel/release", () => {
+  const memWrite = (id: string) => frame(id, { op: "command", name: "mem", args: "session add note" });
+
+  it("attaches exactly once and cancels before terminal on boundary", () => {
+    const h = makeHarness();
+    const events: string[] = [];
+    const control: MemoryBridgeTaskControl = {
+      cancel: () => {
+        events.push("cancel");
+        return { ok: false, code: "E_STALE_CTX", retryable: false, effect: "none" } as LedgerResult;
+      },
+      release: () => events.push("release"),
+    };
+    let admission: MemoryBridgeAdmission | undefined;
+    vi.mocked(h.builtinBridge.execute).mockImplementation((_f: CmdFrame, ad?: MemoryBridgeAdmission) => {
+      admission = ad;
+      ad!.attach(control);
+      return new Promise(() => {});
+    });
+    h.handler.handle(memWrite("w1"));
+    expect(admission).toBeDefined();
+    expect(h.timers.pendingCount()).toBe(1);
+    h.handler.onSessionBoundary();
+    expect(events).toEqual(["cancel", "release"]);
+    expect(h.deps.ledger.query("w1")).toMatchObject({
+      state: "failed",
+      result: { code: "E_STALE_CTX", retryable: false },
+    });
+  });
+
+  it("release runs only after the result is settled (observe-before-release)", async () => {
+    const h = makeHarness();
+    const events: string[] = [];
+    let resolve!: (body: LedgerResult) => void;
+    const control: MemoryBridgeTaskControl = {
+      cancel: () => ({ ok: false, code: "E_STALE_CTX", retryable: false, effect: "none" }) as LedgerResult,
+      release: () => events.push("release"),
+    };
+    vi.mocked(h.builtinBridge.execute).mockImplementation((_f: CmdFrame, ad?: MemoryBridgeAdmission) => {
+      ad!.attach(control);
+      return new Promise<LedgerResult>((r) => (resolve = r));
+    });
+    h.handler.handle(memWrite("w2"));
+    resolve({ ok: true, data: { op: "command", kind: "extension", completion: "sync", captured: true } });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(h.deps.ledger.query("w2")).toMatchObject({ state: "ok", result: { ok: true } });
+    expect(events).toEqual(["release"]);
+  });
+
+  it("a completed observation survives cancel (not downgraded to none)", () => {
+    const h = makeHarness();
+    const control: MemoryBridgeTaskControl = {
+      cancel: () =>
+        ({ ok: true, data: { op: "command", kind: "extension", completion: "sync", captured: true } }) as LedgerResult,
+      release: () => {},
+    };
+    vi.mocked(h.builtinBridge.execute).mockImplementation((_f: CmdFrame, ad?: MemoryBridgeAdmission) => {
+      ad!.attach(control);
+      return new Promise(() => {});
+    });
+    h.handler.handle(memWrite("w3"));
+    h.handler.onSessionBoundary();
+    expect(h.deps.ledger.query("w3")).toMatchObject({ state: "ok", result: { ok: true } });
+  });
+
+  it("rejects a stale admission whose waiter is already gone (attach returns false)", () => {
+    const h = makeHarness();
+    const release = vi.fn();
+    vi.mocked(h.builtinBridge.execute).mockImplementation((_f: CmdFrame, ad?: MemoryBridgeAdmission) => {
+      const attached = ad!.attach({
+        cancel: () => ({ ok: false, code: "E_STALE_CTX", retryable: false, effect: "none" }) as LedgerResult,
+        release,
+      });
+      expect(attached).toBe(true);
+      return new Promise(() => {});
+    });
+    h.handler.handle(memWrite("w4"));
+    h.handler.clearMemoryWaiters();
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("#65 B2 real handler → bridge → kernel/store admission", () => {
+  it.each(["busy", "pending", "compacting", "switching", "controlOff", "throw"] as const)(
+    "invalidates current and prevents real store consume when %s changes while confirming",
+    async (change) => {
+      const { createBuiltinBridge } = await import("../../../src/web-hub/agent/builtin-bridge.js");
+      const { createCommandConfirmKernel } = await import("../../../src/memory/command-confirm.js");
+      const { createSessionMemoryStore } = await import("../../../src/memory/scopes/session-store.js");
+      const { createSessionPoisonRegistry } = await import("../../../src/memory/scopes/session-poison.js");
+      const h = makeHarness({ now: () => Date.now() });
+      const ctx = h.deps.getCtx()!;
+      const manager = ctx.sessionManager;
+      const owner = { incarnation: {}, sid: h.ctxState.sessionId, sessionEpoch: 1, branchGen: 1 };
+      let switchActive = false;
+      let enabled = true;
+      let throwCtx = false;
+      h.deps.switchInFlight = () => switchActive;
+      h.deps.controlEnabled = () => enabled;
+      h.deps.getCtx = () => {
+        if (throwCtx) throw Error("stale");
+        return ctx;
+      };
+      let callback: ((x: import("../../../src/ask-user/remote.js").RemoteOutcome) => boolean) | undefined;
+      let affirm = "";
+      const kernel = createCommandConfirmKernel({
+        channel: {
+          kind: "web",
+          remote: {
+            open(req) {
+              affirm = req.questions[0]!.options[1]!.label;
+              return {
+                setOnRemote(fn) {
+                  callback = fn;
+                },
+                close() {},
+              };
+            },
+          },
+        },
+        isOwnerCurrent: () => true,
+      });
+      const consume = vi.spyOn(kernel, "consume");
+      const append = vi.fn();
+      const store = createSessionMemoryStore({
+        currentOwner: () => owner,
+        isLocked: () => false,
+        getBranch: () => [],
+        getSessionId: () => owner.sid,
+        getSessionFile: () => undefined,
+        getManager: () => manager,
+        appendCustomEntry: append,
+        now: () => "2026-11-07T00:00:00.000Z",
+        webConfirm: () => kernel,
+        poisonRegistry: createSessionPoisonRegistry(),
+        stableSessionIdentity: () => "b2-test",
+      });
+      let liveCurrent: (() => boolean) | undefined;
+      let capturedOwner = "";
+      const bridge = createBuiltinBridge({
+        getCtx: () => h.deps.getCtx(),
+        getSessionId: () => h.ctxState.sessionId,
+        memoryWrite: () => ({
+          start(req) {
+            liveCurrent = req.current;
+            capturedOwner = req.commandOwner;
+            const call = kernel.start(req.write.rawArgs, { ...req, owner, manager })!;
+            const done = Promise.resolve().then(async () => {
+              const prepared = await store.prepareWebAdd(call, req.write);
+              if (!prepared.ok) return prepared;
+              const approval = await kernel.confirm(call, prepared.plan.commandPlan);
+              if (!approval.approved)
+                return {
+                  ok: false as const,
+                  effect: "none" as const,
+                  code: approval.code,
+                  message: approval.message,
+                  retryable: false as const,
+                };
+              kernel.reserve(call, approval.receipt, prepared.plan.commandPlan);
+              return store.enqueueConfirmedCommand(call, prepared.plan, approval.receipt);
+            });
+            return {
+              accepted: true as const,
+              task: { done, cancel: (reason) => store.cancelWeb(call, reason), release: () => store.releaseWeb(call) },
+            };
+          },
+        }),
+      });
+      h.deps.builtinBridge = bridge;
+      const handler = createCommandHandler(h.deps);
+      handler.handle(frame(`b2-${change}`, { op: "command", name: "mem", args: "session add note" }));
+      for (let i = 0; i < 20 && !callback; i++) await Promise.resolve();
+      expect(callback).toBeDefined();
+      expect(capturedOwner).toBe("test-memory-owner");
+      expect(h.deps.owner).toBeUndefined();
+      expect(liveCurrent!()).toBe(true);
+      if (change === "busy") h.ctxState.idle = false;
+      if (change === "pending") h.ctxState.pending = true;
+      if (change === "compacting") h.compaction.manualCompacting = true;
+      if (change === "switching") switchActive = true;
+      if (change === "controlOff") enabled = false;
+      if (change === "throw") throwCtx = true;
+      expect(liveCurrent!()).toBe(false);
+      expect(callback!({ kind: "answer", answers: { MEMCMD: affirm }, origin: "test", originKind: "loopback" })).toBe(
+        false,
+      );
+      h.ctxState.idle = true;
+      h.ctxState.pending = false;
+      h.compaction.manualCompacting = false;
+      switchActive = false;
+      enabled = true;
+      throwCtx = false;
+      h.deps.getCtx = () => ctx;
+      expect(callback!({ kind: "answer", answers: { MEMCMD: affirm }, origin: "test", originKind: "loopback" })).toBe(
+        false,
+      );
+      expect(consume).not.toHaveBeenCalled();
+      expect(append).not.toHaveBeenCalled();
+      handler.dispose();
+      h.handler.dispose();
+      store.dispose();
+      kernel.dispose();
+    },
+  );
+});
+
+describe("#65 M2 independent memory owner", () => {
+  it("fails closed with no memoryOwner, without falling back to hold owner", async () => {
+    const { createBuiltinBridge } = await import("../../../src/web-hub/agent/builtin-bridge.js");
+    const h = makeHarness();
+    delete h.deps.memoryOwner;
+    h.deps.owner = "hold-owner";
+    const start = vi.fn();
+    h.deps.builtinBridge = createBuiltinBridge({
+      getCtx: () => h.deps.getCtx(),
+      getSessionId: () => h.ctxState.sessionId,
+      memoryWrite: () => ({ start }),
+    });
+    const handler = createCommandHandler(h.deps);
+    handler.handle(frame("no-memory-owner", { op: "command", name: "mem", args: "session add note" }));
+    expect(start).not.toHaveBeenCalled();
+    expect(h.deps.ledger.query("no-memory-owner")).toMatchObject({
+      state: "failed",
+      result: { code: "E_UNSUPPORTED", effect: "none" },
+    });
+    handler.dispose();
+    h.handler.dispose();
   });
 });

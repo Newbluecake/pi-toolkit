@@ -87,3 +87,22 @@ export function classifyMemoryCommand(rawArgs: string): MemoryCommandClass {
 export function needsConfirm(rawArgs: string): boolean {
   return classifyMemoryCommand(rawArgs) !== "read";
 }
+
+/** Strict Web-only syntax. The original text and spacing after the fixed prefix are retained. */
+export interface MemoryWriteRequest {
+  readonly kind: "session.add";
+  readonly rawArgs: string;
+  readonly text: string;
+}
+export function parseMemoryWriteRequest(
+  rawArgs: string,
+):
+  | { ok: true; request: MemoryWriteRequest }
+  | { ok: false; code: "E_MEM_WEB_UNSUPPORTED" | "E_MEM_ARGS"; message: string } {
+  const trimmed = rawArgs.trim();
+  const match = /^session add ([\s\S]+)$/.exec(trimmed);
+  if (match?.[1] && match[1].trim()) return { ok: true, request: { kind: "session.add", rawArgs, text: match[1] } };
+  if (trimmed === "session add" || trimmed.startsWith("session add "))
+    return { ok: false, code: "E_MEM_ARGS", message: "session add 需要非空正文。" };
+  return { ok: false, code: "E_MEM_WEB_UNSUPPORTED", message: "此 Web 记忆写入不受支持。" };
+}

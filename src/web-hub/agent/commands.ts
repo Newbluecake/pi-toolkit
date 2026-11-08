@@ -60,6 +60,9 @@ import type {
   CmdResultFrame,
 } from "../protocol/messages.js";
 import { isFeishuCmdOrigin } from "../protocol/messages.js";
+import { parseMemoryWriteRequest } from "../../memory/command-policy.js";
+import type { MemoryBridgeAdmission, MemoryBridgeTaskControl } from "./builtin-bridge.js";
+import type { MemoryCancelReason } from "../../memory/scopes/web-write-port.js";
 
 export interface Timer {
   cancel(): void;
@@ -95,6 +98,8 @@ export interface CommandHandlerDeps {
    * never be mistaken for a current one even when `sessionId` happens to match. Optional so a
    * caller that hasn't wired hold-recall yet (no `hold` dep either) still compiles unchanged. */
   owner?: string;
+  /** Independent activation identity for memory writes; never changes hold/ledger ownership. */
+  memoryOwner?: string;
   /** topic-switch plan P4 (D2, #5): optional, late-bound web-prompt claim port — looked up lazily
    * (not captured once) for the same reason `hold` is: the real port may not exist yet when this
    * handler is constructed, and the module instance that eventually registers one is free to swap
@@ -292,34 +297,132 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
 
   // Local ownership of in-flight memory completions; the ledger itself contains only data.
   const memoryWaiters = new Map<string, { frame: CmdFrame; due: number; timer: Timer }>();
+  // Per-write task handles registered by the bridge via `admission.attach` (package 2).
+  // The task's `release()` runs only in `finishMemory`, AFTER the ledger has copied the final
+  // result out — observe-before-release. `memoryAdmissions` holds the per-write abort signal.
+  const memoryTaskControls = new Map<string, MemoryBridgeTaskControl>();
+  const memoryAdmissions = new Map<string, AbortController>();
+  let memoryGeneration = 0;
   const memoryDeadlineMs = 29 * 60_000;
   const memoryClock = createSegmentedClock({
     now: deps.now,
     set: (ms, fn) => deps.setTimer(ms, fn),
     clear: (timer) => (timer as Timer).cancel(),
   });
+  /** Cancel an attached memory write and map its observed outcome; fall back when unattached. */
+  function cancelMemoryTask(id: string, reason: MemoryCancelReason, fallback: LedgerResult): LedgerResult {
+    const control = memoryTaskControls.get(id);
+    if (!control) return fallback;
+    try {
+      return control.cancel(reason);
+    } catch {
+      return fallback;
+    }
+  }
+  /** §4.2: mint the per-write admission the bridge consumes. Waiter must already be registered. */
+  function createMemoryAdmission(frame: CmdFrame, memoryDue: number): MemoryBridgeAdmission {
+    const generation = ++memoryGeneration;
+    const commandOwner = deps.memoryOwner ?? "";
+    const sessionId = deps.getSessionId();
+    const manager = deps.getCtx()?.sessionManager;
+    const controller = new AbortController();
+    memoryAdmissions.set(frame.id, controller);
+    return {
+      commandOwner,
+      operationGeneration: generation,
+      deadline: memoryDue,
+      signal: controller.signal,
+      current() {
+        try {
+          const ctx = deps.getCtx();
+          return (
+            commandOwner.length > 0 &&
+            manager !== undefined &&
+            ctx !== undefined &&
+            ctx.sessionManager === manager &&
+            deps.getSessionId() === sessionId &&
+            memoryAdmissions.get(frame.id) === controller &&
+            memoryWaiters.has(frame.id) &&
+            !controller.signal.aborted &&
+            deps.now() < memoryDue &&
+            deps.controlEnabled() &&
+            !deps.compactionState.manualCompacting &&
+            deps.switchInFlight?.() !== true &&
+            deps.topicSwitchActive?.() !== true &&
+            ctx.isIdle() &&
+            !ctx.hasPendingMessages()
+          );
+        } catch {
+          return false;
+        }
+      },
+      attach(control) {
+        if (
+          memoryAdmissions.get(frame.id) !== controller ||
+          controller.signal.aborted ||
+          !memoryWaiters.has(frame.id) ||
+          memoryTaskControls.has(frame.id)
+        )
+          return false;
+        memoryTaskControls.set(frame.id, control);
+        return true;
+      },
+    };
+  }
   function finishMemory(frame: CmdFrame, result: LedgerResult, late: boolean): void {
     const pending = memoryWaiters.get(frame.id);
     if (pending) {
       pending.timer.cancel();
       memoryWaiters.delete(frame.id);
     }
-    const now = deps.now();
-    if (!deps.ledger.settleMemoryCompletion(frame.id, result, now, late)) return;
-    const stored = deps.ledger.query(frame.id)?.result;
-    if (!stored) return;
-    deps.onChanged();
-    deps.send(late ? toLateFrame(frame, stored, now) : toResultFrame(frame, stored));
+    try {
+      const now = deps.now();
+      if (!deps.ledger.settleMemoryCompletion(frame.id, result, now, late)) return;
+      const stored = deps.ledger.query(frame.id)?.result;
+      if (!stored) return;
+      deps.onChanged();
+      deps.send(late ? toLateFrame(frame, stored, now) : toResultFrame(frame, stored));
+    } finally {
+      // Release only after the final result has been copied out of the task; idempotent.
+      const controller = memoryAdmissions.get(frame.id);
+      if (controller) {
+        memoryAdmissions.delete(frame.id);
+        try {
+          controller.abort();
+        } catch {
+          /* ignore */
+        }
+      }
+      const control = memoryTaskControls.get(frame.id);
+      if (control) {
+        memoryTaskControls.delete(frame.id);
+        try {
+          control.release();
+        } catch {
+          /* fail closed: a throw from release must never lose the settled result */
+        }
+      }
+    }
   }
   function expireMemory(id: string): boolean {
     const pending = memoryWaiters.get(id);
     if (!pending || deps.now() < pending.due) return false;
-    finishMemory(pending.frame, errResult("E_DEADLINE", false, "unknown", "memory completion deadline"), true);
+    const body = cancelMemoryTask(
+      id,
+      "timeout",
+      errResult("E_DEADLINE", false, "unknown", "memory completion deadline"),
+    );
+    finishMemory(pending.frame, body, true);
     return true;
   }
   function clearMemoryWaiters(): void {
     for (const pending of [...memoryWaiters.values()]) {
-      finishMemory(pending.frame, errResult("E_STALE_CTX", false, "unknown", "memory completion cancelled"), true);
+      const body = cancelMemoryTask(
+        pending.frame.id,
+        "reload",
+        errResult("E_STALE_CTX", false, "unknown", "memory completion cancelled"),
+      );
+      finishMemory(pending.frame, body, true);
     }
   }
 
@@ -864,6 +967,16 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
     let wasBusy: boolean;
     try {
       wasBusy = !ctx.isIdle();
+      // §6.2/§7.3: a session-level stop also cancels the active memory write (idle included) —
+      // cancel-before-terminal: the observed outcome is settled before the model is aborted.
+      for (const [id, pending] of [...memoryWaiters.entries()]) {
+        const body = cancelMemoryTask(
+          id,
+          "abort",
+          errResult("E_STALE_CTX", false, "unknown", "memory completion cancelled"),
+        );
+        finishMemory(pending.frame, body, true);
+      }
       deps.hold?.()?.onWebAbort();
       ctx.abort();
     } catch {
@@ -1157,6 +1270,24 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
       return settleAndReply(frame, errResult("E_RATE", false, "none", "memory completion capacity"));
     }
     const memoryDue = deps.now() + memoryDeadlineMs;
+    // §4.2/§5.1: an authenticated Web `mem session add` write gets a per-write admission and a
+    // pre-registered waiter/timer BEFORE the bridge runs, so the bridge's `admission.attach` can
+    // bind the task's cancel/release synchronously.
+    const writeRequest = cmd.name === "mem" ? parseMemoryWriteRequest(cmd.args) : undefined;
+    const isMemWrite = writeRequest?.ok === true;
+    if (isMemWrite && !deps.memoryOwner) {
+      finishMemory(frame, errResult("E_UNSUPPORTED", false, "none", "memory owner unavailable"), false);
+      return;
+    }
+    let admission: MemoryBridgeAdmission | undefined;
+    if (isMemWrite) {
+      admission = createMemoryAdmission(frame, memoryDue);
+      const handle = memoryClock.setTimer(clampSpanMs(Math.max(0, memoryDue - deps.now()))!, () => {
+        expireMemory(frame.id);
+      });
+      const timer = { cancel: () => memoryClock.clearTimer(handle) };
+      memoryWaiters.set(frame.id, { frame, due: memoryDue, timer });
+    }
     // web-resume plan §2.4: `__list` is the one quiet read — no terminal origin notify, and the
     // ledger entry never retains the list payload.
     let quiet = false;
@@ -1167,18 +1298,44 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
     }
     let result: CmdResultBody | Promise<CmdResultBody>;
     try {
-      result = deps.builtinBridge.execute(frame);
+      result = deps.builtinBridge.execute(frame, admission);
     } catch {
-      if (cmd.name === "mem") finishMemory(frame, errResult("E_UNSUPPORTED", false, "none"), false);
-      else settleAndReply(frame, errResult("E_UNSUPPORTED", false, "none"));
+      if (isMemWrite) {
+        // A throw is a seam failure, not a business cancel; release any attached task (via
+        // finishMemory's finally) after copying a definitive failure result.
+        finishMemory(frame, errResult("E_UNSUPPORTED", false, "none"), false);
+      } else if (cmd.name === "mem") {
+        finishMemory(frame, errResult("E_UNSUPPORTED", false, "none"), false);
+      } else {
+        settleAndReply(frame, errResult("E_UNSUPPORTED", false, "none"));
+      }
+      return;
+    }
+    if (isMemWrite) {
+      if (typeof (result as { then?: unknown }).then === "function") {
+        replyOnly(frame, okResult({ op: "command", kind: "extension", completion: "async" }));
+        void Promise.resolve(result).then(
+          (body) => {
+            if (!expireMemory(frame.id)) finishMemory(frame, body, true);
+          },
+          () => {
+            if (!expireMemory(frame.id)) finishMemory(frame, errResult("E_UNSUPPORTED", false, "unknown"), true);
+          },
+        );
+      } else {
+        const body =
+          deps.now() >= memoryDue
+            ? errResult("E_DEADLINE", false, "none", "memory completion deadline")
+            : (result as CmdResultBody);
+        finishMemory(frame, body, false);
+      }
       return;
     }
     if (cmd.name === "mem" && typeof (result as { then?: unknown }).then === "function") {
       const handle = memoryClock.setTimer(clampSpanMs(Math.max(0, memoryDue - deps.now()))!, () => {
         expireMemory(frame.id);
       });
-      const timer = { cancel: () => memoryClock.clearTimer(handle) };
-      memoryWaiters.set(frame.id, { frame, due: memoryDue, timer });
+      memoryWaiters.set(frame.id, { frame, due: memoryDue, timer: { cancel: () => memoryClock.clearTimer(handle) } });
       replyOnly(frame, okResult({ op: "command", kind: "extension", completion: "async" }));
       void Promise.resolve(result).then(
         (body) => {

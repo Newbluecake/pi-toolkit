@@ -376,3 +376,28 @@ describe("#39 scopes-on exact command policy", () => {
     });
   });
 });
+
+describe("#65 session add policy projection", () => {
+  it("defaults closed and permits only valid session add with the internal port projection", () => {
+    const base = { name: "mem", kind: "extension" as const, memoryScopes: true };
+    expect(resolveCommandPolicy({ ...base, args: "session add text" })).toEqual({ policy: "deny" });
+    expect(resolveCommandPolicy({ ...base, args: "session add text", memorySessionAdd: true })).toEqual({
+      policy: "allow",
+    });
+    for (const args of ["session add", "session add   ", "session\tadd text", "hub add text", "session rm n1"]) {
+      expect(resolveCommandPolicy({ ...base, args, memorySessionAdd: true, overrides: { mem: "allow" } })).toEqual({
+        policy: "deny",
+      });
+    }
+    for (const policy of ["deny", "confirm", "allow"] as const) {
+      expect(
+        resolveCommandPolicy({
+          ...base,
+          args: "session add --text\nbody",
+          memorySessionAdd: true,
+          overrides: { mem: policy },
+        }),
+      ).toEqual({ policy });
+    }
+  });
+});

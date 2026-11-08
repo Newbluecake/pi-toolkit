@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { classifyMemoryCommand, needsConfirm } from "../../src/memory/command-policy.js";
+import { classifyMemoryCommand, needsConfirm, parseMemoryWriteRequest } from "../../src/memory/command-policy.js";
 
 describe("memory command classification", () => {
   it.each([
@@ -98,5 +98,40 @@ describe("closed read syntax", () => {
   ])("does not grant read exemption to %s", (input) => {
     expect(needsConfirm(input)).toBe(true);
     expect(classifyMemoryCommand(input)).toBe("unknown");
+  });
+});
+
+describe("strict Web write parser (package 2)", () => {
+  it("accepts exactly `session add <non-empty text>` and preserves the original text", () => {
+    const r = parseMemoryWriteRequest("session add hello world");
+    expect(r.ok).toBe(true);
+    if (r.ok)
+      expect(r.request).toEqual({ kind: "session.add", rawArgs: "session add hello world", text: "hello world" });
+    const multi = parseMemoryWriteRequest("  session add  leading\n  body --flag ");
+    expect(multi.ok).toBe(true);
+    if (multi.ok) expect(multi.request.text).toBe(" leading\n  body --flag");
+  });
+  it("rejects empty and whitespace-only bodies as usage errors", () => {
+    for (const args of ["session add", "session add   ", "session add \t ", "session add\n"]) {
+      expect(parseMemoryWriteRequest(args)).toMatchObject({ ok: false, code: "E_MEM_ARGS" });
+    }
+  });
+  it("rejects every other write/read as unsupported for the write seam", () => {
+    for (const args of [
+      "list",
+      "path",
+      "doctor",
+      "session list",
+      "session rm n1",
+      "hub add hello",
+      "hub rm rule.1",
+      "migrate --all",
+      "init",
+      "import --force",
+      "tidy",
+      "restore --block x",
+    ]) {
+      expect(parseMemoryWriteRequest(args)).toMatchObject({ ok: false, code: "E_MEM_WEB_UNSUPPORTED" });
+    }
   });
 });

@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync, unlinkSync, symlinkSync, renameSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createCommandConfirmKernel } from "../../../src/memory/command-confirm.js";
+import { executeConfirmedMemoryWrite } from "../../../src/memory/command.js";
 import type { AskUserRemotePort, RemoteOutcome } from "../../../src/ask-user/remote.js";
 import { createSessionMemoryStore } from "../../../src/memory/scopes/session-store.js";
 import { SESSION_MEMORY_ENTRY_TYPE, type MemoryOwner } from "../../../src/memory/scopes/types.js";
@@ -126,10 +127,68 @@ function harness(
     if (reserve) expect(kernel.reserve(call, answer.receipt, prepared.plan.commandPlan)).toBe(true);
     return { plan: prepared.plan, receipt: answer.receipt };
   }
-  return { owner, manager, branch, item, file, store, kernel, call, append, consume, prepare, wrapped, getBranch };
+  return {
+    owner,
+    manager,
+    branch,
+    item,
+    file,
+    store,
+    kernel,
+    call,
+    append,
+    consume,
+    prepare,
+    wrapped,
+    getBranch,
+    answer: () =>
+      answerRemote?.({ kind: "answer", answers: { MEMCMD: affirm }, origin: "test", originKind: "loopback" }),
+  };
 }
 
 describe("confirmed session Web consumer, real fold and planner", () => {
+  it("revokes the real receipt on the command gate's changed plan without releasing the store observation", async () => {
+    const h = harness("fork", false, true);
+    const { plan, receipt } = await h.prepare();
+    expect(h.kernel.check(h.call, receipt, plan.commandPlan)).toBe(true);
+    const result = await executeConfirmedMemoryWrite(
+      h.call,
+      { kind: "session.add", rawArgs: "session add altered", text: "altered" },
+      plan,
+      receipt,
+      { kernel: h.kernel, currentOwnerMatches: () => true, store: h.store },
+    );
+    expect(result).toMatchObject({ ok: false, code: "E_MEM_PLAN_CHANGED", effect: "none" });
+    expect(h.kernel.check(h.call, receipt, plan.commandPlan)).toBe(false);
+    expect(h.kernel.reserve(h.call, receipt, plan.commandPlan)).toBe(false);
+    expect(h.kernel.consume(h.call, receipt, plan.commandPlan)).toBe(false);
+    expect(h.answer()).toBe(false);
+    expect(h.append).not.toHaveBeenCalled();
+    expect(h.store.ownsWebPlan(h.call, plan)).toBe(true);
+    expect(h.store.cancelWeb(h.call, "abort")).toMatchObject({ ok: false, effect: "none" });
+    h.store.releaseWeb(h.call);
+    expect(h.store.ownsWebPlan(h.call, plan)).toBe(false);
+  });
+  it("revokes the real receipt when the frozen plan belongs to a different store", async () => {
+    const first = harness("fork", false);
+    const second = harness("fork", false);
+    const { plan, receipt } = await first.prepare();
+    const result = await executeConfirmedMemoryWrite(
+      first.call,
+      { kind: "session.add", rawArgs: "session add new body", text: "new body" },
+      plan,
+      receipt,
+      { kernel: first.kernel, currentOwnerMatches: () => true, store: second.store },
+    );
+    expect(result).toMatchObject({ ok: false, code: "E_MEM_PLAN_CHANGED", effect: "none" });
+    expect(first.kernel.check(first.call, receipt, plan.commandPlan)).toBe(false);
+    expect(first.kernel.reserve(first.call, receipt, plan.commandPlan)).toBe(false);
+    expect(first.kernel.consume(first.call, receipt, plan.commandPlan)).toBe(false);
+    expect(first.store.ownsWebPlan(first.call, plan)).toBe(true);
+    expect(first.append).not.toHaveBeenCalled();
+    expect(second.append).not.toHaveBeenCalled();
+    first.store.releaseWeb(first.call);
+  });
   it.each([
     ["fork", false, "fork inheritance + put"],
     ["spawn", false, "spawn inheritance + put"],
