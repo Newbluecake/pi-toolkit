@@ -51,9 +51,9 @@ import {
   type TodoState,
 } from "../../todo/state.js";
 
-/** Web projection caps (plan §0 预算行): 32 rows, 240-byte descriptions, 32 KiB hard budget. */
+/** Web projection caps (plan §0 预算行): 32 rows, 512-byte descriptions, 32 KiB hard budget. */
 export const TODO_WIRE_MAX_TASKS = 32;
-export const TODO_DESC_MAX_BYTES = 240;
+export const TODO_DESC_MAX_BYTES = 512;
 export const TODO_WIRE_BUDGET_BYTES = 32 << 10;
 /** todo-archive D4: the web panel folds completed tasks to the 3 most recent. */
 export const TODO_RECENT_COMPLETED = 3;
