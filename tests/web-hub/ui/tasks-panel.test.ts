@@ -203,6 +203,19 @@ describe("TasksPanel.vue — todo section (todo-web plan §4, T4 regression)", (
     expect(w.find(".todo-list").exists()).toBe(false);
   });
 
+  it("shows the Chinese truncation tooltip only on truncated descriptions", async () => {
+    setLangOverride("zh");
+    try {
+      const { w } = mountPanel({ todo: todoFixture() });
+      await expand(w);
+      const descriptions = w.findAll(".todo-desc");
+      expect(descriptions[0]!.attributes("title")).toBeUndefined();
+      expect(descriptions[1]!.attributes("title")).toBe("已截断，完整内容请在 TUI 查看");
+    } finally {
+      resetLangForTests();
+    }
+  });
+
   it("renders subject, description (+truncation ellipsis), blocker label and the omitted tail", async () => {
     const { w } = mountPanel({ todo: todoFixture() });
     await expand(w);
@@ -211,6 +224,8 @@ describe("TasksPanel.vue — todo section (todo-web plan §4, T4 regression)", (
     expect(items[1]?.find(".todo-desc").text()).toBe("32 KiB 预算");
     expect(items[2]?.find(".todo-blocked").text()).toBe("blocked by #2");
     expect(items[3]?.find(".todo-desc").text()).toBe("abcdef…");
+    expect(items[3]?.find(".todo-desc").attributes("title")).toBe("Truncated; see the TUI for the full content");
+    expect(items[1]?.find(".todo-desc").attributes("title")).toBeUndefined();
     expect(items[2]?.find(".todo-desc").exists()).toBe(false);
     expect(w.find(".todo-more").text()).toBe("(+4 more)");
     expect(items[1]?.find(".sr-only").text()).toBe("In progress");
@@ -257,7 +272,21 @@ describe("TasksPanel.vue — sched section (r2 W2)", () => {
     expect(w.findAll(".tasks-sec")).toHaveLength(2);
     expect(w.find(".tasks-sec-title").text()).toContain("8"); // todo section count = total
     expect(w.findAll(".sched-row")).toHaveLength(2);
-    expect(w.find(".tasks-foot-link").exists()).toBe(true);
+    expect(w.find(".tasks-foot").exists()).toBe(false);
+    expect(w.text()).not.toContain("Details »");
+  });
+
+  it("does not render the details footer in Chinese", async () => {
+    setLangOverride("zh");
+    try {
+      const { w } = mountPanel({ todo: todoFixture(), schedSummary: SCHED_SUMMARY, schedProj: makeSession() });
+      await expand(w);
+      expect(w.findAll(".tasks-sec")).toHaveLength(2);
+      expect(w.find(".tasks-foot").exists()).toBe(false);
+      expect(w.text()).not.toContain("详情 »");
+    } finally {
+      resetLangForTests();
+    }
   });
 
   it("sched-only session renders with just the ⏰ segment and one section", async () => {
@@ -373,15 +402,13 @@ describe("TasksPanel.vue — sched section (r2 W2)", () => {
     expect(w.find(".tasks-sched-note[role='alert']").text()).toContain("nope");
   });
 
-  it("emits open-schedule from the 详情 foot and from a row name click", async () => {
+  it("emits open-schedule from a row name click without a details footer", async () => {
     const { w } = mountPanel({ schedSummary: SCHED_SUMMARY, schedProj: makeSession() });
     await expand(w);
-    await w.find(".tasks-foot-link").trigger("click");
-    expect(w.emitted("openSchedule")).toHaveLength(1);
     // default mode: the name is a clickable BUTTON (the composer's plainNames is opt-in)
     expect(w.find(".sched-row-name").element.tagName).toBe("BUTTON");
     await w.find("button.sched-row-name").trigger("click");
-    expect(w.emitted("openSchedule")).toHaveLength(2);
+    expect(w.emitted("openSchedule")).toHaveLength(1);
   });
 
   it("emits open-run with the run's id when the link is clicked", async () => {
@@ -496,7 +523,7 @@ describe("DetailHeader tasks-panel mount (todo-web T4 + r2 W2)", () => {
     await import("../../../src/web-hub/ui/src/components/schedule/SchedulePanel.vue");
     const { body } = mountHeader({ schedules: makePayload() });
     await expand(body);
-    await body.find(".tasks-foot-link").trigger("click");
+    await body.find("button.sched-row-name").trigger("click");
     for (let i = 0; i < 10 && !body.find(".sched-dialog").exists(); i++) {
       await flushPromises();
       await nextTick();

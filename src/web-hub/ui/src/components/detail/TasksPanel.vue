@@ -176,7 +176,10 @@ async function onSchedAction(action: "pause" | "resume" | "rm", id: string): Pro
             <span class="sr-only">{{ statusLabel(task.status) }}</span>
             <span class="todo-body">
               <span class="todo-subject">{{ task.subject }}</span>
-              <span v-if="task.description" class="todo-desc"
+              <span
+                v-if="task.description"
+                class="todo-desc"
+                :title="task.descTruncated ? t('detail.todoDescTruncated') : undefined"
                 >{{ task.description }}{{ task.descTruncated ? "…" : "" }}</span
               >
               <span v-if="task.blockedBy.length > 0" class="todo-blocked">{{ blockedLabel(task) }}</span>
@@ -207,11 +210,6 @@ async function onSchedAction(action: "pause" | "resume" | "rm", id: string): Pro
           @open-run="(runId) => emit('openRun', runId)"
           @open-detail="emit('openSchedule')"
         />
-        <p class="tasks-foot">
-          <button class="tasks-foot-link" type="button" @click="emit('openSchedule')">
-            {{ t("detail.tasksFoot") }}
-          </button>
-        </p>
       </div>
 
       <CommandConfirm

@@ -896,3 +896,14 @@ Design, compiled-App evidence and manual physical-device/AT limits:
 ### Activity drawer interaction
 
 The Agents/commands rail is click-driven: opening stays open on pointer leave, without a pin control or hover preview. Close via the active rail button, ×, Escape, or an outside pointer in overlay mode. Docked open state remains in `webhub.fleetDrawer.open`; viewport breakpoints and their existing mode-transition reset behavior are unchanged.
+
+## Composer inline schedule summary
+
+The composer task popover retains its existing chip and open-only Todo section. Its read-only
+schedule section starts as one keyboard-operable summary; opening it reveals the existing compact
+`ScheduleRows`. The summary counts every task, shows the earliest enabled task's `relIn` token
+when available, and separately counts paused tasks. The `pi-webhub:composer-schedule-expanded`
+symbol stores a per-session fold map on the browser's hub instance: it survives composer remounts
+and session switches, but not a page refresh. No storage, setting, or wire field is added. Empty
+schedule projections do not render the section; a degraded projection still retains its existing
+chip gate. The separate detail-header schedule dialog is unchanged.

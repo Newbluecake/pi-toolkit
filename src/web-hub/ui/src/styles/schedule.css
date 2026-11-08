@@ -352,27 +352,6 @@
   overflow-wrap: anywhere;
 }
 
-.tasks-foot {
-  margin-top: 2px;
-  padding: 3px 0 0;
-  text-align: right;
-}
-
-.tasks-foot-link {
-  padding: 0;
-  border: 0;
-  background: none;
-  color: var(--c-text-3);
-  font-family: var(--font-sans);
-  font-size: var(--fs-xs);
-  cursor: pointer;
-}
-
-.tasks-foot-link:hover {
-  color: var(--c-text-2);
-  text-decoration: underline;
-}
-
 /* Scheduled-task rows (ScheduleRows — TasksPanel's sched section + the panel's run jump). */
 
 .sched-rows {

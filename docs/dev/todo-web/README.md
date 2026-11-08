@@ -18,9 +18,15 @@ pre-guard; widget is TUI-only. Completed tasks
 collapse out of the default views and auto-archive (on compaction and after `todo.archive.afterTurns`
 turns; `TaskList includeCompleted:true` lists everything) per `docs/dev/todo-archive/plan.md`. A read-only
 summary also reaches the web hub: `TodoWireResult.getTodoSnapshot()` → `projectTodo`
-(`src/web-hub/agent/todo.ts`, 32-task cap / 240B description / 32KiB three-pass budget) rides
+(`src/web-hub/agent/todo.ts`, 32-task cap / 512B description / 32KiB three-pass budget) rides
 the optional `StatusInfo.todo` slot (append-only, no proto bump) to a collapsible `TodoPanel`
 on the web detail header. Design: `docs/dev/todo-web/plan.md`.
+
+The 512-byte per-description limit is a UTF-8 code-point-safe source-text cap, not a
+32-row retention guarantee: the final 32 KiB JSON budget still drops whole descriptions
+from the tail when fields are large or JSON escaping expands control characters. For example,
+32 short-subject rows with 512 ASCII bytes each fit (19,059 serialized bytes), whereas 32
+rows of 512 U+0001 characters expand sixfold and only nine descriptions survive.
 
 **TodoPanel → TasksPanel（schedule-auto-approve r2 W2, 2026-11-05）**: the web detail header's
 todo surface is now the aggregated `TasksPanel.vue`（`components/detail/`）— same data path
