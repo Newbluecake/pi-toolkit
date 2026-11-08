@@ -492,6 +492,7 @@ export type LanAdminResult<T> =
   | { ok: false; reason: "rejected"; code: string; message: string };
 
 export interface WebHubControl {
+  onMemoryTreeBoundary?(): void;
   readonly capture?: CommandCapturePort;
   /** #30 reload-result plan §1 D6: the deferred-reload command port's phase sink — the tracker
    *  behind `StatusInfo.reload`. Wired late-bound from src/index.ts
@@ -2458,6 +2459,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     },
     askUserRemote: () => (remoteAskUserEnabled() ? dialogBridge : undefined),
     memoryHubPaths: () => paths,
+    onMemoryTreeBoundary: () => commandHandler.clearMemoryWaiters(),
     attributeInput: (text) =>
       safe(
         () =>

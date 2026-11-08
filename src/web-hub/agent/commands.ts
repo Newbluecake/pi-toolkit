@@ -1,5 +1,6 @@
 import type { HumanDispatchBridge } from "./human-dispatch-proof.js";
 import { clampSpanMs } from "../../core/deadline.js";
+import { createSegmentedClock } from "../../core/clock.js";
 import { isXsWebCommand, parseXsWebAction } from "../protocol/xs-web-command.js";
 import { randomUUID } from "node:crypto";
 import { noteHumanWebDispatch, revokeHumanWebDispatch } from "../../fabric/xs/human-grant.js";
@@ -209,6 +210,7 @@ export interface CommandHandler {
    * the handler (rather than free-standing) because it shares `pendingObservation`'s 30 s CAS
    * timer machinery with the native prompt path. */
   dispatchHeld(item: HoldItem): DispatchOutcome;
+  clearMemoryWaiters(): void;
   dispose(): void;
 }
 
@@ -288,9 +290,43 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
     deps.send(toLateFrame(frame, result, at));
   }
 
+  // Local ownership of in-flight memory completions; the ledger itself contains only data.
+  const memoryWaiters = new Map<string, { frame: CmdFrame; due: number; timer: Timer }>();
+  const memoryDeadlineMs = 29 * 60_000;
+  const memoryClock = createSegmentedClock({
+    now: deps.now,
+    set: (ms, fn) => deps.setTimer(ms, fn),
+    clear: (timer) => (timer as Timer).cancel(),
+  });
+  function finishMemory(frame: CmdFrame, result: LedgerResult, late: boolean): void {
+    const pending = memoryWaiters.get(frame.id);
+    if (pending) {
+      pending.timer.cancel();
+      memoryWaiters.delete(frame.id);
+    }
+    const now = deps.now();
+    if (!deps.ledger.settleMemoryCompletion(frame.id, result, now, late)) return;
+    const stored = deps.ledger.query(frame.id)?.result;
+    if (!stored) return;
+    deps.onChanged();
+    deps.send(late ? toLateFrame(frame, stored, now) : toResultFrame(frame, stored));
+  }
+  function expireMemory(id: string): boolean {
+    const pending = memoryWaiters.get(id);
+    if (!pending || deps.now() < pending.due) return false;
+    finishMemory(pending.frame, errResult("E_DEADLINE", false, "unknown", "memory completion deadline"), true);
+    return true;
+  }
+  function clearMemoryWaiters(): void {
+    for (const pending of [...memoryWaiters.values()]) {
+      finishMemory(pending.frame, errResult("E_STALE_CTX", false, "unknown", "memory completion cancelled"), true);
+    }
+  }
+
   /** §4.5 rule 1 / §4.2 "公共前置": ledger get-or-create, replying (and returning `proceed:false`)
    * for the dup/running/digest-mismatch outcomes so every op handler shares one code path. */
   function beginOrReply(frame: CmdFrame, extra?: { text?: string; runId?: string }): boolean {
+    expireMemory(frame.id);
     const outcome = deps.ledger.begin(frame.id, frame.cmd.op, frame.cmd, deps.now(), {
       ...extra,
       sessionId: deps.getSessionId(),
@@ -320,6 +356,7 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
   }
 
   function handleQueryOnly(frame: CmdFrame): void {
+    expireMemory(frame.id);
     const snap = deps.ledger.query(frame.id);
     if (snap === undefined) {
       deps.send(toResultFrame(frame, errResult("E_UNKNOWN_ID", false, "none")));
@@ -1116,6 +1153,10 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
         return settleAndReply(frame, errResult("E_STALE_CTX", true, "none"));
       }
     }
+    if (cmd.name === "mem" && !deps.ledger.reserveMemoryCompletion(frame.id, deps.now())) {
+      return settleAndReply(frame, errResult("E_RATE", false, "none", "memory completion capacity"));
+    }
+    const memoryDue = deps.now() + memoryDeadlineMs;
     // web-resume plan §2.4: `__list` is the one quiet read — no terminal origin notify, and the
     // ledger entry never retains the list payload.
     let quiet = false;
@@ -1128,7 +1169,33 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
     try {
       result = deps.builtinBridge.execute(frame);
     } catch {
-      settleAndReply(frame, errResult("E_UNSUPPORTED", false, "none"));
+      if (cmd.name === "mem") finishMemory(frame, errResult("E_UNSUPPORTED", false, "none"), false);
+      else settleAndReply(frame, errResult("E_UNSUPPORTED", false, "none"));
+      return;
+    }
+    if (cmd.name === "mem" && typeof (result as { then?: unknown }).then === "function") {
+      const handle = memoryClock.setTimer(clampSpanMs(Math.max(0, memoryDue - deps.now()))!, () => {
+        expireMemory(frame.id);
+      });
+      const timer = { cancel: () => memoryClock.clearTimer(handle) };
+      memoryWaiters.set(frame.id, { frame, due: memoryDue, timer });
+      replyOnly(frame, okResult({ op: "command", kind: "extension", completion: "async" }));
+      void Promise.resolve(result).then(
+        (body) => {
+          if (!expireMemory(frame.id)) finishMemory(frame, body, true);
+        },
+        () => {
+          if (!expireMemory(frame.id)) finishMemory(frame, errResult("E_UNSUPPORTED", false, "unknown"), true);
+        },
+      );
+      return;
+    }
+    if (cmd.name === "mem") {
+      const body =
+        deps.now() >= memoryDue
+          ? errResult("E_DEADLINE", false, "none", "memory completion deadline")
+          : (result as CmdResultBody);
+      finishMemory(frame, body, false);
       return;
     }
     if (typeof (result as { then?: unknown }).then === "function" && (result as { then?: unknown }).then !== null) {
@@ -1411,9 +1478,14 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
       for (const runId of [...pendingSteerByRun.keys()]) releaseStaleRunLock(runId, query);
     },
     handleBridgeLate(frame, result) {
+      if (frame.cmd.op === "command" && frame.cmd.name === "mem") {
+        if (!expireMemory(frame.id)) finishMemory(frame, result, true);
+        return;
+      }
       settleLate(frame, result);
     },
     onSessionBoundary() {
+      clearMemoryWaiters();
       revokeHumanWebDispatch(humanOwner);
       const cleared = deps.queueMirror.clearAll();
       let changed = false;
@@ -1476,7 +1548,9 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
       settleAndReply(frame, errResult("E_STALE_CTX", true, "none"));
       return true;
     },
+    clearMemoryWaiters,
     dispose() {
+      clearMemoryWaiters();
       unsubscribeSessionRouted?.();
       revokeHumanWebDispatch(humanOwner);
       for (const p of pendingObservation.values()) {

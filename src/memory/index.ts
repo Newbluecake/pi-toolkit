@@ -445,7 +445,7 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
     }),
   );
   return {
-    webRead: executeMemoryRead,
+    webRead: (args, cwd) => executeMemoryRead(args, cwd, undefined, opts.settings),
     attachTidy(port) {
       tidyPort = port;
     },

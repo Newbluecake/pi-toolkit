@@ -369,6 +369,7 @@ export default function activate(rawPi: ExtensionAPI): void {
   // existing session_start / session_tree handlers (no new handler); see tools/result-tool-activation.ts.
   const activateResultTool = createResultToolActivation(pi);
   pi.on("session_tree", (_event, ctx) => {
+    webHubRef.current?.onMemoryTreeBoundary?.();
     restoreArchive(ctx);
     activateResultTool(ctx);
   });

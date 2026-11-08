@@ -877,6 +877,8 @@ describe("direct Web memory reads", () => {
       for (const [id, args] of ["list", "path", "restore", "migrate --dry-run"].entries())
         handler.handle(frame(`read-${id}`, { op: "command", name: "mem", args }));
       expect(h.sent).toHaveLength(4);
+      expect(h.deps.ledger.get("read-0")?.memoryCompletion).toBe(true);
+      expect(h.deps.ledger.query("read-0")).toMatchObject({ state: "ok", result: { ok: true } });
       expect(h.sent[0]).toMatchObject({
         ok: true,
         data: { output: { entries: [{ text: expect.stringContaining("note.md") }] } },
@@ -943,5 +945,76 @@ describe("direct Web memory reads", () => {
       handler.dispose();
       h.handler.dispose();
     }
+  });
+});
+
+describe("memory completion lifecycle", () => {
+  const mem = (id: string) => frame(id, { op: "command", name: "mem", args: "list" });
+  it("settles real command results once and caches non-retryable failures", () => {
+    const h = makeHarness();
+    vi.mocked(h.builtinBridge.execute).mockReturnValue({
+      ok: false,
+      code: "E_UNSUPPORTED",
+      retryable: true,
+      effect: "none",
+    });
+    h.handler.handle(mem("mem-sync"));
+    expect(h.deps.ledger.query("mem-sync")).toMatchObject({ state: "failed", result: { retryable: false } });
+    h.handler.handleBridgeLate(mem("mem-sync"), { ok: true, data: { op: "abort" } });
+    expect(h.deps.ledger.query("mem-sync")).toMatchObject({ state: "failed", result: { retryable: false } });
+    expect(h.sent).toHaveLength(1);
+  });
+  it("expires at 29 minutes on query even when the timer was not scheduled", async () => {
+    let now = 1000;
+    const h = makeHarness({ now: () => now });
+    let resolve!: (value: never) => void;
+    vi.mocked(h.builtinBridge.execute).mockReturnValue(
+      new Promise((r) => {
+        resolve = r;
+      }),
+    );
+    h.handler.handle(mem("mem-timeout"));
+    expect(h.deps.ledger.query("mem-timeout")?.state).toBe("running");
+    now += 29 * 60_000;
+    h.handler.handle(frame("mem-timeout", { op: "command", name: "mem", args: "list" }, { queryOnly: true }));
+    expect(h.deps.ledger.query("mem-timeout")).toMatchObject({
+      state: "failed",
+      late: true,
+      result: { code: "E_DEADLINE", retryable: false },
+    });
+    expect(h.timers.pendingCount()).toBe(0);
+    expect(h.sent.filter((f) => f.t === "cmd_late")).toHaveLength(1);
+    resolve({ ok: true, data: { op: "abort" } } as never);
+    await Promise.resolve();
+    expect(h.sent.filter((f) => f.t === "cmd_late")).toHaveLength(1);
+  });
+  it("settles the timeout when the deadline timer fires", () => {
+    let now = 1000;
+    const h = makeHarness({ now: () => now });
+    vi.mocked(h.builtinBridge.execute).mockReturnValue(new Promise(() => {}));
+    h.handler.handle(mem("mem-timer"));
+    now += 29 * 60_000;
+    h.timers.fireByMs(29 * 60_000);
+    expect(h.deps.ledger.query("mem-timer")).toMatchObject({
+      state: "failed",
+      late: true,
+      result: { code: "E_DEADLINE", retryable: false },
+    });
+    expect(h.timers.pendingCount()).toBe(0);
+    expect(h.sent.filter((f) => f.t === "cmd_late")).toHaveLength(1);
+  });
+  it.each(["boundary", "dispose", "tree"])("clears in-flight waiters at %s", (kind) => {
+    const h = makeHarness();
+    vi.mocked(h.builtinBridge.execute).mockReturnValue(new Promise(() => {}));
+    h.handler.handle(mem("mem-clean"));
+    expect(h.timers.pendingCount()).toBe(1);
+    if (kind === "boundary") h.handler.onSessionBoundary();
+    else if (kind === "dispose") h.handler.dispose();
+    else h.handler.clearMemoryWaiters();
+    expect(h.timers.pendingCount()).toBe(0);
+    expect(h.deps.ledger.query("mem-clean")).toMatchObject({
+      state: "failed",
+      result: { code: "E_STALE_CTX", retryable: false },
+    });
   });
 });

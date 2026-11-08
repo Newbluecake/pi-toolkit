@@ -50,6 +50,7 @@ import {
 import { withMemoryDirLock } from "../lock.js";
 import { isWebInvocation } from "../../commands/capture.js";
 import { showBoundedViewer } from "./ui/bounded-viewer.js";
+import { statusText, lockReadText } from "./status.js";
 
 const DIALOG_MAX_MS = 600_000;
 const UI_TOTAL_MS = 3_600_000;
@@ -221,50 +222,6 @@ function invalidManifestIds(dir: string): { id: string; reason: string }[] {
   return invalid;
 }
 
-function statusText(dir: string): string {
-  const lease = leaseRead(dir);
-  const leaseLine = lease
-    ? `lease: pid ${lease.payload.pid} on ${lease.payload.host} since ${new Date(lease.payload.at).toISOString()}${lease.payload.draining.length ? ` draining ${lease.payload.draining.join(",")}` : ""}`
-    : "lease: free";
-  // Read-only: a stale or foreign directory lock blocks every memory write, so --status shows its
-  // holder too (only `/mem tidy --break-lock` may clear it, M-T4).
-  const lockHolder = lockReadText(dir);
-  const rows: string[] = [lockHolder === "none" ? "lock: free" : `lock: ${lockHolder}`, leaseLine];
-  const invalid: { id: string; reason: string }[] = [];
-  for (const id of listDirNames(`${dir}/.backup`)) {
-    let dirs;
-    try {
-      dirs = openRunDirs(dir, id, { createArchive: false, createBackup: false });
-    } catch {
-      continue;
-    }
-    const raw = (() => {
-      try {
-        return JSON.parse(readRegular(dirs.backup.path, "manifest.json").text) as unknown;
-      } catch {
-        return undefined;
-      }
-    })();
-    const manifest = readManifestV2(dirs, id);
-    if (!manifest) {
-      try {
-        parseManifestStrict(raw, id);
-      } catch (err) {
-        invalid.push({ id, reason: err instanceof Error ? err.message : String(err) });
-      }
-      continue;
-    }
-    const run = manifest.events
-      .slice()
-      .reverse()
-      .find((e) => e.ev === "run");
-    if (run?.ev === "run") rows.push(`run ${id}: ${run.state}`);
-  }
-  if (invalid.length)
-    rows.push(`invalid manifest: ${invalid.map((entry) => `${entry.id} (${entry.reason})`).join(", ")}`);
-  return rows.join("\n");
-}
-
 function formatRevokedMessage(id: string, oldEpoch: number, newEpoch: number): string {
   return `tidy run ${id} stopped: ownership was revoked by /mem tidy --break-lock (epoch ${oldEpoch} → ${newEpoch}) at ${new Date().toISOString()}. Nothing more was written by this run; its journal will be recovered by the next /mem tidy --batch.`;
 }
@@ -296,22 +253,6 @@ async function breakLockCommand(ctx: ExtensionCommandContext, dir: string, timin
     `${broken ? "lock broken" : "lock not found"}; owner epoch ${old} → ${next}${leaseBroken ? "; lease broken" : ""}; run will be recovered on the next /mem tidy --batch`,
     "info",
   );
-}
-function lockReadText(dir: string): string {
-  let raw: string;
-  try {
-    raw = readRegular(dir, ".lock").text;
-  } catch {
-    return "none";
-  }
-  try {
-    const p = JSON.parse(raw) as { pid?: number; host?: string; at?: number };
-    return p.pid && p.host
-      ? `pid ${p.pid} on ${p.host} since ${p.at ? new Date(p.at).toISOString() : "unknown"}`
-      : "unknown owner";
-  } catch {
-    return "unknown owner";
-  }
 }
 
 async function selectArchives(

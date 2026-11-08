@@ -104,7 +104,7 @@ export interface CommandLedger {
     extra?: { text?: string; runId?: string; sessionId?: string; owner?: string },
   ): BeginOutcome;
   reserveMemoryCompletion(id: string, now: number): boolean;
-  settleMemoryCompletion(id: string, result: LedgerResult, now: number): boolean;
+  settleMemoryCompletion(id: string, result: LedgerResult, now: number, late?: boolean): boolean;
   get(id: string): LedgerEntry | undefined;
   /** Settle a running entry to a terminal state. A retryable, effect:"none" failure is deleted
    * instead of cached (D7 rule 2) so a retry re-executes from scratch. `opts.late` marks this as
@@ -285,13 +285,13 @@ export function createCommandLedger(): CommandLedger {
       entry.memoryCompletion = true;
       return true;
     },
-    settleMemoryCompletion(id, result, now) {
+    settleMemoryCompletion(id, result, now, late = true) {
       const entry = bag.entries.get(id);
       if (!entry || entry.memoryCompletion !== true || entry.state !== "running") return false;
       entry.state = result.ok ? "ok" : "failed";
       entry.result = result.ok ? result : { ...result, retryable: false };
       entry.updatedAt = now;
-      entry.late = true;
+      if (late) entry.late = true;
       return true;
     },
     get(id) {
