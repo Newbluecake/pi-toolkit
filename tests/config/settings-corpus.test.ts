@@ -296,6 +296,14 @@ function withoutFast(settings: typeof DEFAULT_SETTINGS, input?: unknown) {
   // legacy alias and explicit-boolean precedence for the new behavior.
   expect(typeof settings.webHub.archiveEnabled).toBe("boolean");
   const { archiveEnabled: _archiveEnabled, ...oldWebHub } = settings.webHub;
+  // Preserve valid explicit cooldown overrides; only old fallback values project to 8.
+  const cooldown = getPath(normalizedInput, "todo.nudge.cooldownTurns");
+  const validCooldown =
+    typeof cooldown === "number" && Number.isFinite(cooldown) && Number.isInteger(cooldown) && cooldown > 0;
+  const oldTodo = {
+    ...settings.todo,
+    nudge: { ...settings.todo.nudge, cooldownTurns: validCooldown ? settings.todo.nudge.cooldownTurns : 8 },
+  };
   const { memory } = settings;
   const { scopes: _scopes, ...oldMemory } = memory;
   const {
@@ -309,6 +317,7 @@ function withoutFast(settings: typeof DEFAULT_SETTINGS, input?: unknown) {
       .filter(([key]) => key !== "fast")
       .map(([key, value]) => [key, key === "budget" ? oldBudget : value])
       .map(([key, value]) => [key, key === "webHub" ? oldWebHub : value])
+      .map(([key, value]) => [key, key === "todo" ? oldTodo : value])
       .map(([key, value]) => [key, key === "memory" ? oldMemory : value])
       .map(([key, value]) => [key, key === "fabric" ? { ...value, wake: oldWake } : value]),
   );

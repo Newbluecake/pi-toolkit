@@ -3,8 +3,8 @@ import { DEFAULT_SETTINGS, loadSettings } from "../../src/config/settings.js";
 import { SETTING_SPECS } from "../../src/config/setting-specs.js";
 
 describe("config: todo.nudge (main-session todo staleness nudge, L1 feature)", () => {
-  it("defaults: enabled=true, graceTurns=2, fallbackTurns=20, cooldownTurns=8", () => {
-    expect(DEFAULT_SETTINGS.todo.nudge).toEqual({ enabled: true, graceTurns: 2, fallbackTurns: 20, cooldownTurns: 8 });
+  it("defaults: enabled=true, graceTurns=2, fallbackTurns=20, cooldownTurns=3", () => {
+    expect(DEFAULT_SETTINGS.todo.nudge).toEqual({ enabled: true, graceTurns: 2, fallbackTurns: 20, cooldownTurns: 3 });
     expect(loadSettings({}).todo.nudge).toEqual(DEFAULT_SETTINGS.todo.nudge);
   });
 
@@ -27,7 +27,7 @@ describe("config: todo.nudge (main-session todo staleness nudge, L1 feature)", (
       const settings = loadSettings({ todo: { nudge: { graceTurns: bad, fallbackTurns: bad, cooldownTurns: bad } } });
       expect(settings.todo.nudge.graceTurns).toBe(2);
       expect(settings.todo.nudge.fallbackTurns).toBe(20);
-      expect(settings.todo.nudge.cooldownTurns).toBe(8);
+      expect(settings.todo.nudge.cooldownTurns).toBe(3);
     }
   });
 

@@ -29,7 +29,7 @@ export interface NudgeConfig {
 export const DEFAULT_NUDGE_CONFIG: NudgeConfig = {
   graceTurns: 2,
   fallbackTurns: 20,
-  cooldownTurns: 8,
+  cooldownTurns: 3,
 };
 
 /** Cooldown backoff cap, expressed as a multiple of the configured base (spec: 8→16→32 for base 8). */

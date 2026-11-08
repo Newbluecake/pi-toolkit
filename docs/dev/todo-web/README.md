@@ -62,3 +62,7 @@ legacy `strong-consumption` 仅兼容；raw `admission`/`interactive`、`role:us
 B2 专用 runner/owned deadline 等仍须真实 SDK 本地 conformance 证明；B3 共享入口待 #39
 当前包独验并 commit 后再接，todo 不依赖 fabric/#61 内核。详见 `../todo-idle-recovery/plan.md`
 顶部新裁定；旧历史 strong-window/Q2 口径由其覆盖。
+
+**Nudge backoff default**: `todo.nudge.cooldownTurns` defaults to 3 silent turns; consecutive
+no-touch nudges use 3 / 6 / 12 / 12 silent turns (cap = 4 × base). The next turn after
+the silent interval is eligible to fire, so persistent candidates fire 4 / 7 / 13 turns apart.

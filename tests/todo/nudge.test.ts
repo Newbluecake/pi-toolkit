@@ -175,6 +175,19 @@ describe("todo/nudge: cooldown and backoff", () => {
     expect(fourth.state.cooldownLength).toBe(cap);
   });
 
+  it("uses the default 3/6/12/12 silent-turn backoff and fires on the next eligible turn", () => {
+    const config = DEFAULT_NUDGE_CONFIG;
+    let state = fireOnce(config).state;
+    for (const length of [3, 6, 12, 12]) {
+      expect(state.cooldownTurnsLeft).toBe(length);
+      const silent = tickN(state, config, true, length);
+      expect(silent.every((result) => !result.fire)).toBe(true);
+      const next = tickTurn(silent.at(-1)!.state, config, true);
+      expect(next.fire).toBe(true);
+      state = next.state;
+    }
+  });
+
   it("a todo touch fully resets counters and the cooldown/backoff state", () => {
     const fired = fireOnce();
     expect(fired.state.noTouchStreak).toBe(1);
@@ -285,8 +298,8 @@ describe("todo/nudge: buildHandoffAdvisory (switch_context)", () => {
 });
 
 describe("todo/nudge: DEFAULT_NUDGE_CONFIG sanity", () => {
-  it("matches the documented defaults (graceTurns=2, fallbackTurns=20, cooldownTurns=8)", () => {
-    expect(DEFAULT_NUDGE_CONFIG).toEqual({ graceTurns: 2, fallbackTurns: 20, cooldownTurns: 8 });
+  it("matches the documented defaults (graceTurns=2, fallbackTurns=20, cooldownTurns=3)", () => {
+    expect(DEFAULT_NUDGE_CONFIG).toEqual({ graceTurns: 2, fallbackTurns: 20, cooldownTurns: 3 });
   });
 });
 
