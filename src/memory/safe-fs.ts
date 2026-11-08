@@ -230,6 +230,37 @@ export function listRegular(
   return { files, skipped };
 }
 
+// ─────────────────── exact session-file observation primitives ───────────────────
+// Internal use only: callers needing exact control of read semantics must validate
+// file type and identity themselves. These thin wrappers preserve raw fs errors.
+export function openSessionObservationFile(path: string): number {
+  return openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+}
+
+export function lstatSessionObservation(path: string) {
+  return lstatSync(path, { bigint: true });
+}
+
+export function lstatSessionObservationExists(path: string): void {
+  lstatSync(path);
+}
+
+export function fstatSessionObservation(fd: number) {
+  return fstatSync(fd, { bigint: true });
+}
+
+export function readSessionObservationChunk(fd: number, buffer: Buffer): number {
+  return readSync(fd, buffer, 0, buffer.length, null);
+}
+
+export function closeSessionObservation(fd: number): void {
+  closeSync(fd);
+}
+
+export function realpathSessionObservation(path: string): string {
+  return realpathSync(path);
+}
+
 // ───────────────────────────── regular-file open/read ─────────────────────────────
 
 export interface RegularStat {

@@ -3,9 +3,10 @@
 // no-clobber create/rename, canonicalization + the slug-directory trust
 // exception, and the lock-file primitives lock.ts composes.
 
-import { execSync } from "node:child_process";
+import { execFileSync, execSync } from "node:child_process";
 import {
   closeSync,
+  lstatSync,
   linkSync,
   mkdirSync,
   mkdtempSync,
@@ -21,6 +22,13 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { MemoryError } from "../../src/memory/paths.js";
 import {
+  closeSessionObservation,
+  fstatSessionObservation,
+  lstatSessionObservation,
+  lstatSessionObservationExists,
+  openSessionObservationFile,
+  readSessionObservationChunk,
+  realpathSessionObservation,
   appendLegacy,
   canonicalDir,
   canonicalDirState,
@@ -581,5 +589,66 @@ describe("removeFlatDir", () => {
     expect(readdirSync(backup)).not.toContain(id);
     const leftovers = readdirSync(backup).filter((n) => n.startsWith(".rm-"));
     expect(leftovers).toHaveLength(1);
+  });
+});
+
+describe("internal exact session observation primitives", () => {
+  it("preserves ELOOP for a symlink and ENOENT for a missing path", () => {
+    const dir = tmp();
+    const link = join(dir, "link");
+    writeFileSync(join(dir, "target"), "abc");
+    symlinkSync(join(dir, "target"), link);
+    expect(() => openSessionObservationFile(link)).toThrow(expect.objectContaining({ code: "ELOOP" }));
+    expect(() => lstatSessionObservationExists(join(dir, "missing"))).toThrow(
+      expect.objectContaining({ code: "ENOENT" }),
+    );
+    expect(realpathSessionObservation(link)).toBe(realpathSessionObservation(join(dir, "target")));
+  });
+
+  it("returns bigint stat fields, reads exact chunk boundaries, and propagates repeated-close EBADF", () => {
+    const dir = tmp();
+    const path = join(dir, "file");
+    writeFileSync(path, "abcdefg");
+    const expected = lstatSync(path, { bigint: true });
+    expect(lstatSessionObservation(path)).toEqual(expected);
+    const fd = openSessionObservationFile(path);
+    try {
+      const stat = fstatSessionObservation(fd);
+      expect(typeof stat.ino).toBe("bigint");
+      expect(typeof stat.mtimeNs).toBe("bigint");
+      expect([stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs, stat.mode]).toEqual([
+        expected.dev,
+        expected.ino,
+        expected.size,
+        expected.mtimeNs,
+        expected.ctimeNs,
+        expected.mode,
+      ]);
+      const buffer = Buffer.alloc(3);
+      const chunks: string[] = [];
+      let count: number;
+      while ((count = readSessionObservationChunk(fd, buffer)) > 0) chunks.push(buffer.subarray(0, count).toString());
+      expect(chunks).toEqual(["abc", "def", "g"]);
+      expect(readSessionObservationChunk(fd, buffer)).toBe(0);
+    } finally {
+      closeSessionObservation(fd);
+    }
+    // Raw close is intentionally not idempotent: a second close must retain EBADF.
+    expect(() => closeSessionObservation(fd)).toThrow(expect.objectContaining({ code: "EBADF" }));
+  });
+
+  it("opens a FIFO without a writer without blocking, leaving type rejection to the caller", () => {
+    const dir = tmp();
+    const path = join(dir, "pipe");
+    execFileSync("mkfifo", [path], { timeout: 2000 });
+    const moduleUrl = new URL("../../src/memory/safe-fs.ts", import.meta.url).href;
+    const program = `import { openSessionObservationFile, fstatSessionObservation, closeSessionObservation } from ${JSON.stringify(moduleUrl)};
+      const fd = openSessionObservationFile(process.argv[1]);
+      try { console.log(fstatSessionObservation(fd).isFIFO()); } finally { closeSessionObservation(fd); }`;
+    const output = execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", program, path], {
+      encoding: "utf8",
+      timeout: 5000,
+    });
+    expect(output.trim()).toBe("true");
   });
 });

@@ -1,6 +1,14 @@
 import type { BigIntStats } from "node:fs";
 /** Read-only guard for the entire JSONL; never creates or repairs a session file. */
-import { constants, closeSync, fstatSync, lstatSync, openSync, readSync, realpathSync } from "node:fs";
+import {
+  openSessionObservationFile,
+  lstatSessionObservation,
+  lstatSessionObservationExists,
+  fstatSessionObservation,
+  readSessionObservationChunk,
+  closeSessionObservation,
+  realpathSessionObservation,
+} from "../safe-fs.js";
 import { createHash } from "node:crypto";
 import { dirname, basename, join } from "node:path";
 
@@ -27,18 +35,18 @@ export function observeSessionWebFile(path: string, check: () => void): string {
   check();
   let before: BigIntStats;
   try {
-    before = lstatSync(path, { bigint: true });
+    before = lstatSessionObservation(path);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new SessionWebFileError("E_WRITE_GATE");
     check();
-    const parent = realpathSync(dirname(path));
+    const parent = realpathSessionObservation(dirname(path));
     check();
-    const ps = lstatSync(parent, { bigint: true });
+    const ps = lstatSessionObservation(parent);
     check();
     if (!ps.isDirectory()) throw new SessionWebFileError("E_WRITE_GATE");
     // Verify absence after resolving the parent; a concurrently created file cannot pass.
     try {
-      lstatSync(path);
+      lstatSessionObservationExists(path);
       throw new SessionWebFileError("E_WRITE_GATE", true);
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
@@ -48,10 +56,10 @@ export function observeSessionWebFile(path: string, check: () => void): string {
   }
   check();
   if (!before.isFile() || before.isSymbolicLink()) throw new SessionWebFileError("E_WRITE_GATE", true);
-  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  const fd = openSessionObservationFile(path);
   try {
     check();
-    const opened = fstatSync(fd, { bigint: true });
+    const opened = fstatSessionObservation(fd);
     check();
     if (!opened.isFile() || stamp(before) !== stamp(opened)) throw new SessionWebFileError("E_WRITE_GATE", true);
     if (opened.size > BigInt(maxBytes)) throw new SessionWebFileError("E_MEM_FILE_TOO_LARGE");
@@ -60,7 +68,7 @@ export function observeSessionWebFile(path: string, check: () => void): string {
     let total = 0;
     for (;;) {
       check();
-      const n = readSync(fd, buf, 0, buf.length, null);
+      const n = readSessionObservationChunk(fd, buf);
       check();
       if (!n) break;
       total += n;
@@ -68,16 +76,16 @@ export function observeSessionWebFile(path: string, check: () => void): string {
       hash.update(buf.subarray(0, n));
     }
     check();
-    const after = fstatSync(fd, { bigint: true });
+    const after = fstatSessionObservation(fd);
     check();
-    const tail = lstatSync(path, { bigint: true });
+    const tail = lstatSessionObservation(path);
     check();
-    const canonical = realpathSync(path);
+    const canonical = realpathSessionObservation(path);
     check();
     if (BigInt(total) !== opened.size || stamp(opened) !== stamp(after) || stamp(opened) !== stamp(tail))
       throw new SessionWebFileError("E_WRITE_GATE", true);
     return JSON.stringify(["file", canonical, stamp(opened), hash.digest("hex")]);
   } finally {
-    closeSync(fd);
+    closeSessionObservation(fd);
   }
 }
