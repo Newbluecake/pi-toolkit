@@ -26,6 +26,7 @@
  * never delivers; `hello` means every old-client subscription is already gone server-side.
  */
 import { shallowRef, type ShallowRef } from "vue";
+import { memoryOwnerMatches } from "@logic/control.js";
 import { initialState, needsRunSubscribe, needsSubscribe, reduce } from "@logic/state.js";
 import { planKeepAlive } from "@logic/sessionKeepAlive.js";
 import type { RenderGateDocument, RenderGateWindow } from "./renderGate.js";
@@ -229,6 +230,8 @@ export function useHub<TTimer = ReturnType<typeof setTimeout>>(opts: UseHubOptio
   const state = shallowRef<HubState>(raw as unknown as HubState) as ShallowRef<HubState>;
 
   const lastSubAt = new Map<string, number>();
+  const memoryAutoQueried = new Set<string>(); // reserved alongside the 32 retained mem requests
+  const memoryRecovery = new Set<string>(); // reconnect queries even if an offline terminal signal was lost
   const autoQueried = new Set<string>(); // §3.5: one automatic queryOnly per pending item id
   let subTimer: TTimer | null = null;
   let prevSelected: string | null = null;
@@ -310,6 +313,24 @@ export function useHub<TTimer = ReturnType<typeof setTimeout>>(opts: UseHubOptio
         : { event: msg.event, data: msg.data ?? {}, id: msg.id },
     );
     if (next === raw) return; // no-op event: no effects, no render request (mirrors legacy app.js)
+    // transport-core's hello handler emits conn=open BEFORE dispatching that same hello.
+    // open already proves handshake success; reset only here so hello cannot grant a second
+    // automatic query after the first recovery flight fails. QueryOnly does not need clientId.
+    if (msg.event === "conn" && raw.conn !== "open" && next.conn === "open") {
+      memoryAutoQueried.clear();
+      for (const [agentKey, a] of raw.agents) {
+        for (const it of a.pendingCtl)
+          if (it.memoryUiKey && !it.memorySettled && !it.memoryInvalidated)
+            memoryRecovery.add(`memory|${agentKey}|${it.id}`);
+      }
+    }
+    if (msg.event === "agent_up") {
+      for (const key of memoryAutoQueried) {
+        const agentKey = (msg.data as { agentKey?: string } | undefined)?.agentKey;
+        if (agentKey && raw.agents.get(agentKey)?.down && key.startsWith(`memory|${agentKey}|`))
+          memoryAutoQueried.delete(key);
+      }
+    }
     const prevSpawns = raw.spawns;
     raw = next;
     // SP11: every `spawns` slot change (snapshot on reconnect, live broadcast) feeds the
@@ -634,12 +655,42 @@ export function useHub<TTimer = ReturnType<typeof setTimeout>>(opts: UseHubOptio
    * `autoQueried` blocks the unknown-driven path from ever firing twice for the same id.
    */
   function runControlEffects(): void {
+    const retainedMemory = new Set<string>();
+    for (const [agentKey, a] of raw.agents) {
+      for (const it of a.pendingCtl) if (it.memoryUiKey) retainedMemory.add(`memory|${agentKey}|${it.id}`);
+    }
+    for (const key of memoryAutoQueried) if (!retainedMemory.has(key)) memoryAutoQueried.delete(key);
+    for (const key of memoryRecovery) if (!retainedMemory.has(key)) memoryRecovery.delete(key);
     for (const [agentKey, a] of raw.agents) {
       if (a.down) continue;
       const pending = (a as { pendingCtl?: unknown }).pendingCtl;
       if (!Array.isArray(pending)) continue;
       for (const it of pending as Array<Record<string, unknown>>) {
         if (!it || typeof it.id !== "string") continue;
+        if (it.memoryUiKey) {
+          if (
+            raw.conn !== "open" ||
+            !memoryOwnerMatches(it.memoryUiKey, agentKey, a) ||
+            it.memoryInvalidated ||
+            it.memoryQueryInFlight
+          )
+            continue;
+          const qk = `memory|${agentKey}|${it.id}`;
+          if (it.lateQuery === true) {
+            memoryRecovery.delete(qk);
+            memoryAutoQueried.add(qk);
+            void control.query(agentKey, it.id);
+          } else if (
+            !it.memorySettled &&
+            (it.state === "unknown" || memoryRecovery.has(qk)) &&
+            !memoryAutoQueried.has(qk)
+          ) {
+            memoryRecovery.delete(qk);
+            memoryAutoQueried.add(qk);
+            void control.query(agentKey, it.id);
+          }
+          continue;
+        }
         if (it.lateQuery === true && it.state === "querying") {
           void control.query(agentKey, it.id); // query_start clears lateQuery ⇒ fires once
           continue;
@@ -752,6 +803,23 @@ export function useHub<TTimer = ReturnType<typeof setTimeout>>(opts: UseHubOptio
     getSessionId: (agentKey) => {
       const session = raw.agents.get(agentKey)?.session as { sessionId?: unknown } | undefined;
       return typeof session?.sessionId === "string" ? session.sessionId : undefined;
+    },
+    memoryKeyCurrent: (key) =>
+      raw.agents
+        .get(key.owner.agentKey)
+        ?.pendingCtl.some(
+          (it) =>
+            it.id === key.cmdId &&
+            !it.memoryInvalidated &&
+            memoryOwnerMatches(it.memoryUiKey, key.owner.agentKey, raw.agents.get(key.owner.agentKey)),
+        ) === true,
+    getMemoryOwner: (agentKey) => {
+      const a = raw.agents.get(agentKey);
+      const sessionId = a?.session?.sessionId;
+      const epoch = a?.card?.epoch;
+      return typeof sessionId === "string" && sessionId !== "" && typeof epoch === "string" && epoch !== ""
+        ? { agentKey, sessionId, epoch }
+        : undefined;
     },
     now,
   });

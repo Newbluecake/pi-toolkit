@@ -129,30 +129,7 @@ async function sendSlash(w: ReturnType<typeof mount>, text: string): Promise<voi
 }
 
 describe("DetailDock historyMode (cmd-history §4.7)", () => {
-  it.each(
-    [false, true].flatMap((history) =>
-      ["list", "path", "restore", "migrate --dry-run"].map((args) => ({ history, args })),
-    ),
-  )("shows direct /mem $args output with history=$history and no confirmation", async ({ history, args }) => {
-    const output = `actual read result: ${args}`;
-    const { control, calls } = fakeControl(() => ({
-      ok: true,
-      data: {
-        op: "command",
-        kind: "extension",
-        completion: "sync",
-        captured: true,
-        output: { entries: [{ kind: "text", text: output }] },
-      },
-    }));
-    const commands = [{ name: "mem", kind: "extension", policy: "allow", output: "captured" }];
-    const w = mountDockHistory(control, history ? { ...BOTH, commands } : { commands });
-    await sendSlash(w, `/mem ${args}`);
-    expect(w.find(".command-result").text()).toContain(output);
-    expect(w.find(".command-confirm").exists()).toBe(false);
-    expect(calls.filter((call) => call.method === "runCommand")).toHaveLength(1);
-    expect(useCmdHistory("agent-a").placeholders).toHaveLength(0);
-  });
+  // Mem read/write coverage moved to memory-command.test.ts (production reducers + DOM).
   it("history:'recorded' ⇒ NO CommandResult, placeholder in the store, caller-minted id sent", async () => {
     const { control, calls } = fakeControl(() => ({
       ok: true,

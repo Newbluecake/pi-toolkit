@@ -16,8 +16,8 @@ import { seedXsActivationOutcome } from "../logic/xsRequestState.js";
  * `crypto.randomUUID` — LAN plaintext HTTP has no randomUUID).
  */
 import type { InjectionKey } from "vue";
-import { newCmdId } from "@logic/control.js";
-import type { ControlHandle, CmdOutcome } from "../types.js";
+import { newCmdId, sameMemoryUiKey, outcomeFromError } from "@logic/control.js";
+import type { ControlHandle, CmdOutcome, MemoryUiKey } from "../types.js";
 import type { CmdRequest, DialogRequest, HubTransport } from "../transport/types.js";
 import { createUploads } from "./useUploads.js";
 
@@ -25,9 +25,9 @@ export const CONTROL_CTX: InjectionKey<{ agentKey: string; control: ControlHandl
   Symbol("web-hub-control");
 
 /**
- * How long the original wire payloads are retained for query/retry. §3.4's assertion: the
- * agent ledger (30 min TTL) outlives the browser's interest in a pending item (10 min), so a
- * small FIFO bound here can never strand a legitimate query.
+ * Ordinary query/retry payloads keep their existing 128-slot FIFO. Mem has 32 RESERVED
+ * slots: running requests are not aged out during the 29-minute wall clock; terminal
+ * observations are retained for 30 minutes or until dismiss. No browser persistence/replay.
  */
 const REQUESTS_CAP = 128;
 
@@ -42,9 +42,13 @@ export interface ControlOptions {
   /** Current session id of an agent (D21: prompt/abort/command carry `expect.sessionId`). */
   getSessionId?(agentKey: string): string | undefined;
   now?(): number;
+  getMemoryOwner?(agentKey: string): MemoryUiKey["owner"] | undefined;
+  memoryKeyCurrent?(key: MemoryUiKey): boolean;
 }
 
-type StoredRequest = { channel: "cmd"; req: CmdRequest } | { channel: "dialog"; req: DialogRequest };
+type StoredRequest =
+  | { channel: "cmd"; req: CmdRequest; memoryUiKey?: MemoryUiKey; finishedAt?: number }
+  | { channel: "dialog"; req: DialogRequest };
 type DispatchMsg = { event: string; data?: unknown; id?: number };
 
 export function createControl(
@@ -56,6 +60,36 @@ export function createControl(
   const drafts = new Map<string, string>();
   /** Insertion-ordered FIFO of the original wire payloads, keyed `${agentKey}|${id}`. */
   const requests = new Map<string, StoredRequest>();
+  const queries = new Map<string, Promise<CmdOutcome>>();
+  const memoryKey = (r: StoredRequest): MemoryUiKey | undefined => (r.channel === "cmd" ? r.memoryUiKey : undefined);
+  const current = (r: StoredRequest): boolean => {
+    const key = memoryKey(r);
+    return (
+      key === undefined ||
+      (sameMemoryUiKey(key, { ...key, owner: opts.getMemoryOwner?.(key.owner.agentKey) }) &&
+        opts.memoryKeyCurrent?.(key) !== false)
+    );
+  };
+  function trimMemory(): void {
+    for (const [key, r] of requests) {
+      if (r.channel === "cmd" && r.memoryUiKey && r.finishedAt !== undefined && now() - r.finishedAt >= 30 * 60_000) {
+        requests.delete(key);
+        dispatch({ event: "ctl_discard", data: { agentKey: r.req.agentKey, id: r.req.id } });
+      }
+    }
+  }
+  function markFinished(stored: StoredRequest, outcome: CmdOutcome, query = false): void {
+    if (stored.channel !== "cmd" || !stored.memoryUiKey) return;
+    const data = outcome.ok
+      ? (outcome.data as { completion?: string; result?: { ok?: boolean } } | undefined)
+      : undefined;
+    if (
+      query
+        ? typeof data?.result?.ok === "boolean"
+        : data?.completion === "sync" || (!outcome.ok && outcome.effect === "none")
+    )
+      stored.finishedAt = now();
+  }
 
   const keyOf = (agentKey: string, id: string): string => `${agentKey}|${id}`;
 
@@ -97,13 +131,11 @@ export function createControl(
   }
 
   function remember(key: string, stored: StoredRequest): void {
-    requests.delete(key); // refresh insertion order
+    requests.delete(key);
     requests.set(key, stored);
-    while (requests.size > REQUESTS_CAP) {
-      const oldest = requests.keys().next().value;
-      if (oldest === undefined) break;
-      requests.delete(oldest);
-    }
+    // Memory's 32 reserved slots cannot be evicted by ordinary 128-request churn.
+    const ordinary = [...requests].filter(([, r]) => memoryKey(r) === undefined);
+    for (const [oldest] of ordinary.slice(0, Math.max(0, ordinary.length - REQUESTS_CAP))) requests.delete(oldest);
   }
 
   /** D21: `expect.sessionId` rides every prompt/abort/command (§7.7); never on sub-agent ops. */
@@ -112,13 +144,33 @@ export function createControl(
     return sessionId ? { expect: { sessionId } } : {};
   }
 
-  function sendCmd(agentKey: string, item: Record<string, unknown>, req: CmdRequest): Promise<CmdOutcome> {
-    remember(keyOf(agentKey, req.id), { channel: "cmd", req });
+  function sendCmd(
+    agentKey: string,
+    item: Record<string, unknown>,
+    req: CmdRequest,
+    key?: MemoryUiKey,
+  ): Promise<CmdOutcome> {
+    const stored: StoredRequest = { channel: "cmd", req, ...(key ? { memoryUiKey: key } : {}) };
+    remember(keyOf(agentKey, req.id), stored);
     dispatch({ event: "ctl_send", data: { agentKey, item } });
-    return transport.command(req).then((outcome) => {
-      dispatch({ event: "ctl_result", data: { agentKey, id: req.id, transition: { type: "result", outcome } } });
-      return outcome;
-    });
+    return transport
+      .command(req)
+      .catch(outcomeFromError)
+      .then((outcome) => {
+        if (!key || (requests.get(keyOf(agentKey, req.id)) === stored && current(stored))) {
+          markFinished(stored, outcome);
+          dispatch({
+            event: "ctl_result",
+            data: {
+              agentKey,
+              id: req.id,
+              ...(key ? { expectedKey: key } : {}),
+              transition: { type: "result", outcome },
+            },
+          });
+        }
+        return outcome;
+      });
   }
 
   function sendDialog(agentKey: string, item: Record<string, unknown>, req: DialogRequest): Promise<CmdOutcome> {
@@ -133,7 +185,7 @@ export function createControl(
   const localMiss = (): CmdOutcome => ({
     ok: false,
     error: "E_UNKNOWN_ID",
-    message: "request not retained locally (page was reloaded) — resend as a new action",
+    message: "request not retained locally (page was reloaded) — result unavailable; verify before any new action",
     retryable: false,
     effect: "none",
   });
@@ -283,9 +335,48 @@ export function createControl(
       // one here — behavior for id-less callers is unchanged. The optimistic item now also
       // carries `args` so QueueList's notExecuted retry can re-send the FULL command line.
       const id = cmdOpts?.id ?? newCmdId();
+      const suppliedKey = name === "mem" ? cmdOpts?.memoryUiKey : undefined;
+      const memoryUiKey = suppliedKey
+        ? Object.freeze({ ...suppliedKey, owner: Object.freeze({ ...suppliedKey.owner }) })
+        : undefined;
+      if (name === "mem") {
+        trimMemory();
+        if (
+          !memoryUiKey ||
+          memoryUiKey.cmdId !== id ||
+          memoryUiKey.owner.agentKey !== agentKey ||
+          !sameMemoryUiKey(memoryUiKey, { ...memoryUiKey, owner: opts.getMemoryOwner?.(agentKey) })
+        )
+          return Promise.resolve({
+            ok: false,
+            error: "E_STALE_CTX",
+            message: "Missing or stale memory operation identity",
+            retryable: false,
+            effect: "none",
+          });
+        if (
+          requests.has(keyOf(agentKey, id)) ||
+          [...requests.values()].filter((r) => memoryKey(r) !== undefined).length >= 32
+        )
+          return Promise.resolve({
+            ok: false,
+            error: "E_RATE",
+            message: "Memory request tracking full; query existing operations first",
+            retryable: false,
+            effect: "none",
+          });
+      }
       return sendCmd(
         agentKey,
-        { id, kind: "command", name, args, state: "sending", at: now() },
+        {
+          id,
+          kind: "command",
+          name,
+          args,
+          state: "sending",
+          at: now(),
+          ...(memoryUiKey ? { memoryUiKey, memoryResult: { phase: "running" } } : {}),
+        },
         {
           agentKey,
           id,
@@ -295,12 +386,13 @@ export function createControl(
           ...(cmdOpts?.confirm === true ? { confirm: true as const } : {}),
           ...expectFor(agentKey),
         },
+        memoryUiKey,
       ).then((outcome) => {
         // 2026-10-05 field report: E_CONFIRM_REQUIRED means the command never executed and the
         // caller (DetailDock) drives the CommandConfirm dialog, then re-issues with a NEW id +
         // confirm:true. Without this discard the ctl_result leaves a zombie "failed" queue card
         // whose 重试 re-sends the SAME id WITHOUT confirm:true — it can only fail again.
-        if (!outcome.ok && outcome.error === "E_CONFIRM_REQUIRED") {
+        if (!memoryUiKey && !outcome.ok && outcome.error === "E_CONFIRM_REQUIRED") {
           requests.delete(keyOf(agentKey, id));
           dispatch({ event: "ctl_discard", data: { agentKey, id } });
         }
@@ -313,21 +405,67 @@ export function createControl(
     queryCommand: (agentKey, name, args) =>
       transport.command({ agentKey, id: newCmdId(), op: "command", name, args, ...expectFor(agentKey) }),
     /** §3.4/§3.5: queryOnly — ask the agent ledger for the outcome of `id`, never re-execute. */
-    query: async (agentKey, id) => {
-      const stored = requests.get(keyOf(agentKey, id));
-      if (!stored) return localMiss();
-      dispatch({ event: "ctl_result", data: { agentKey, id, transition: { type: "query_start" } } });
-      const outcome =
-        stored.channel === "cmd"
-          ? await transport.command({ ...stored.req, queryOnly: true })
-          : await transport.dialog({ ...stored.req, queryOnly: true });
-      dispatch({ event: "ctl_result", data: { agentKey, id, transition: { type: "query_result", outcome } } });
-      return outcome;
+    isMemoryCurrent: (key) => {
+      const stored = requests.get(keyOf(key.owner.agentKey, key.cmdId));
+      return !!stored && sameMemoryUiKey(memoryKey(stored), key) && current(stored);
+    },
+    requestMemoryQuery: (key) => {
+      const stored = requests.get(keyOf(key.owner.agentKey, key.cmdId));
+      if (!stored || !current(stored) || !sameMemoryUiKey(memoryKey(stored), key)) return;
+      dispatch({
+        event: "ctl_result",
+        data: { agentKey: key.owner.agentKey, id: key.cmdId, expectedKey: key, transition: { type: "query_request" } },
+      });
+    },
+    query: (agentKey, id) => {
+      trimMemory();
+      const rk = keyOf(agentKey, id);
+      const stored = requests.get(rk);
+      if (!stored) return Promise.resolve(localMiss());
+      if (!current(stored)) return Promise.resolve({ ...localMiss(), effect: "unknown" });
+      const flight = queries.get(rk);
+      if (flight) return flight;
+      const key = memoryKey(stored);
+      // Register BEFORE query_start dispatch: useHub effects are synchronous/re-entrant.
+      const attempt = Promise.resolve().then(async () => {
+        if (requests.get(rk) !== stored || !current(stored)) {
+          queries.delete(rk);
+          return { ...localMiss(), effect: "unknown" as const };
+        }
+        const outcome = await (
+          stored.channel === "cmd"
+            ? transport.command({ ...stored.req, queryOnly: true })
+            : transport.dialog({ ...stored.req, queryOnly: true })
+        ).catch(outcomeFromError);
+        queries.delete(rk); // a terminal signal received during this flight may need one follow-up
+        if (requests.get(rk) === stored && current(stored)) {
+          markFinished(stored, outcome, true);
+          dispatch({
+            event: "ctl_result",
+            data: { agentKey, id, ...(key ? { expectedKey: key } : {}), transition: { type: "query_result", outcome } },
+          });
+        }
+        return outcome;
+      });
+      queries.set(rk, attempt);
+      dispatch({
+        event: "ctl_result",
+        data: { agentKey, id, ...(key ? { expectedKey: key } : {}), transition: { type: "query_start" } },
+      });
+      return attempt;
     },
     /** §7.3: re-execute a FAILED (effect:none) request with the same id — hub/agent dedupe it. */
     retry: async (agentKey, id) => {
       const stored = requests.get(keyOf(agentKey, id));
       if (!stored) return localMiss();
+      if (memoryKey(stored))
+        return {
+          ok: false,
+          error: "E_QUERY_ONLY",
+          message: "Query the original memory command; do not replay it",
+          retryable: false,
+          effect: "unknown",
+        };
       dispatch({ event: "ctl_retry", data: { agentKey, id } });
       const outcome =
         stored.channel === "cmd" ? await transport.command(stored.req) : await transport.dialog(stored.req);

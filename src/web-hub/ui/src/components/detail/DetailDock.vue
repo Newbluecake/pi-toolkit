@@ -33,6 +33,8 @@ import {
   slashTextRoute,
   unknownSlashTextAvailable,
   newCmdId,
+  sameMemoryUiKey,
+  memoryOwnerMatches,
   parseSlash,
   validRecallText,
 } from "@logic/control.js";
@@ -62,6 +64,7 @@ import {
   findFileMentionTokens,
   isImagePath,
 } from "@logic/file-mention.js";
+import type { AgentState, MemoryUiKey, MemoryUiResult } from "../../types.js";
 import type { CommandOutputWire } from "@protocol/messages.js";
 import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";
@@ -106,6 +109,179 @@ interface CmdResultState {
   readonly error?: string;
   readonly message?: string;
 }
+
+// Mem has ONE result source: the retained pendingCtl item, filled by the production reducer.
+// Task identity deliberately survives dismiss; display identity does not. Neither is authority.
+const memoryTask = ref<{ key: MemoryUiKey; write: boolean } | null>(null);
+const memoryDisplayKey = ref<MemoryUiKey | null>(null);
+const memoryAbortPending = ref<MemoryUiKey | null>(null);
+const memoryAbortNote = ref("");
+let memoryGeneration = 0;
+let memoryDisposed = false;
+const memoryAgent = computed<AgentState | undefined>(() =>
+  hub?.state.value.agents instanceof Map ? hub.state.value.agents.get(agentKey() ?? "") : view?.agent.value,
+);
+const memoryItem = computed(() => {
+  const key = memoryTask.value?.key;
+  if (!key || !memoryCurrent(key)) return undefined;
+  const item = findPending(key.cmdId);
+  return sameMemoryUiKey(item?.["memoryUiKey"], key) ? item : undefined;
+});
+const memoryResult = computed<MemoryUiResult>(
+  () => (memoryItem.value?.["memoryResult"] as MemoryUiResult | undefined) ?? { phase: "running" },
+);
+const memoryShown = computed(
+  () =>
+    memoryDisplayKey.value !== null &&
+    sameMemoryUiKey(memoryDisplayKey.value, memoryTask.value?.key) &&
+    memoryCurrent(memoryDisplayKey.value),
+);
+const memoryUnsettled = computed(
+  () =>
+    memoryTask.value?.write === true &&
+    memoryCurrent(memoryTask.value.key) &&
+    memoryItem.value?.["memorySettled"] !== true,
+);
+const memoryIdle = computed(() => {
+  const status = memoryAgent.value?.status;
+  // The idle-only action does not borrow Composer's busy Stop button. Pending/compact/switch
+  // gates are conservative; the host revalidates actual state when abort arrives.
+  return (
+    !busy.value &&
+    status?.["busy"] === false &&
+    status?.["pending"] === false &&
+    status?.["compacting"] !== true &&
+    status?.["switchInFlight"] !== true &&
+    status?.["switching"] !== true &&
+    !memoryAgent.value?.prompts.some((p) => /compact|switch/.test(p.kind)) &&
+    !(memoryAgent.value?.pendingCtl ?? []).some((raw) => {
+      const it = raw as Record<string, unknown>;
+      const boundary =
+        it["kind"] === "switch_session" ||
+        (it["kind"] === "command" && ["compact", "new", "resume", "clear"].includes(String(it["name"])));
+      return boundary && !["done", "failed", "notExecuted", "dropped"].includes(String(it["state"]));
+    })
+  );
+});
+const memoryCanStop = computed(() => {
+  const key = memoryTask.value?.key;
+  return (
+    !!key &&
+    memoryUnsettled.value &&
+    memoryIdle.value &&
+    ctlEnabled.value &&
+    view?.commandsEnabled.value === true &&
+    memoryAgent.value?.down !== true &&
+    memoryAgent.value?.card["state"] !== "stale" &&
+    memoryAgent.value?.card["control"] === true &&
+    (hub?.state.value.selected === undefined || hub.state.value.selected === key.owner.agentKey) &&
+    hub?.state.value.conn === "open" &&
+    memoryCurrent(key) &&
+    !sameMemoryUiKey(memoryAbortPending.value, key)
+  );
+});
+function memoryCurrent(key: MemoryUiKey): boolean {
+  return (
+    !memoryDisposed &&
+    sameMemoryUiKey(memoryTask.value?.key, key) &&
+    memoryOwnerMatches(key, agentKey(), memoryAgent.value) &&
+    handle()?.isMemoryCurrent?.(key) !== false
+  );
+}
+function dismissMemory(): void {
+  memoryDisplayKey.value = null; // no abort, no discard, no resurrection by a late query
+  const task = memoryTask.value;
+  if (task && memoryItem.value?.["memorySettled"] === true) {
+    handle()?.discard(task.key.owner.agentKey, task.key.cmdId);
+    memoryTask.value = null;
+  }
+}
+async function runMemory(name: string, args: string, confirm: boolean, id = newCmdId()): Promise<void> {
+  const c = handle();
+  const agent = view?.agent.value;
+  const owner = { agentKey: agentKey() ?? "", sessionId: sessionId(), epoch: agent?.card?.["epoch"] };
+  if (!c || typeof owner.epoch !== "string" || !owner.epoch || !owner.agentKey || !owner.sessionId) {
+    cmdResult.value = { name, state: "failed", error: "E_STALE_CTX", message: t("control.memIdentityMissing") };
+    return;
+  }
+  const key: MemoryUiKey = Object.freeze({
+    cmdId: id,
+    owner: Object.freeze({ ...owner, epoch: owner.epoch }),
+    operationGeneration: ++memoryGeneration,
+  });
+  memoryTask.value = { key, write: /^session\s+add(?:\s|$)/.test(args.trim()) };
+  memoryDisplayKey.value = key;
+  memoryAbortPending.value = null;
+  memoryAbortNote.value = "";
+  trackingCmd = null;
+  cmdWaitingTerminal.value = false;
+  const outcome = await c.runCommand(key.owner.agentKey, name, args, {
+    id,
+    memoryUiKey: key,
+    ...(confirm ? { confirm: true as const } : {}),
+  });
+  if (
+    memoryDisposed ||
+    !sameMemoryUiKey(memoryTask.value?.key, key) ||
+    !memoryOwnerMatches(key, agentKey(), memoryAgent.value) ||
+    !sameMemoryUiKey(memoryDisplayKey.value, key)
+  )
+    return;
+  if (!findPending(id) && !outcome.ok && outcome.effect === "none") {
+    // Local admission refused BEFORE transport: there is no host operation/result to retain.
+    memoryTask.value = null;
+    memoryDisplayKey.value = null;
+    cmdResult.value = {
+      name,
+      state: "failed",
+      error: outcome.error ?? "E_FAILED",
+      message: t(outcome.error === "E_RATE" ? "control.memTrackingFull" : "control.memIdentityMissing"),
+    };
+    return;
+  }
+  if (!memoryCurrent(key)) return;
+  if (!outcome.ok && outcome.error === "E_CONFIRM_REQUIRED") {
+    c.discard(key.owner.agentKey, id);
+    memoryTask.value = null;
+    memoryDisplayKey.value = null;
+    pendingConfirm.value = { name, args, ...(outcome.message !== undefined ? { message: outcome.message } : {}) };
+  }
+}
+async function stopMemory(): Promise<void> {
+  const key = memoryTask.value?.key;
+  const c = handle();
+  if (!key || !c || !memoryCanStop.value || !memoryCurrent(key)) return;
+  memoryAbortPending.value = key;
+  memoryAbortNote.value = t("control.memStopping");
+  // NO await between identity/permission recheck and existing session-level abort.
+  try {
+    const outcome = await c.abort(key.owner.agentKey);
+    if (!memoryCurrent(key)) return;
+    memoryAbortNote.value = t(outcome.ok ? "control.memStopRequested" : "control.memStopUnknown");
+    c.requestMemoryQuery?.(key); // useHub's sole driver queries ORIGINAL cmdId, not abort's id
+  } catch {
+    if (memoryCurrent(key)) memoryAbortNote.value = t("control.memStopUnknown");
+  } finally {
+    if (memoryCurrent(key)) memoryAbortPending.value = null;
+  }
+}
+watch(
+  () => [agentKey(), sessionId(), view?.agent.value.card?.["epoch"]],
+  () => {
+    const key = memoryTask.value?.key;
+    if (key && !memoryCurrent(key)) {
+      memoryTask.value = null;
+      memoryDisplayKey.value = null;
+      memoryAbortPending.value = null;
+    }
+  },
+  { flush: "sync" },
+);
+onUnmounted(() => {
+  memoryDisposed = true;
+  memoryTask.value = null;
+  memoryDisplayKey.value = null;
+});
 
 const pendingConfirm = ref<{ name: string; args: string; message?: string } | null>(null);
 const cmdResult = ref<CmdResultState | null>(null);
@@ -176,11 +352,6 @@ async function runCommandHistory(
     captured?: boolean;
     output?: CommandOutputWire;
   };
-  if (name === "mem" && data.completion === "sync" && data.captured === true && data.output) {
-    store.drop(id);
-    cmdResult.value = { name, state: "done", captured: true, output: data.output };
-    return;
-  }
   if (data.history === "recorded") return; // the record card arrives via the transcript
   store.finishWithoutCard(id, name); // n1: `none` OR a missing field ⇒ no card will come
 }
@@ -349,6 +520,9 @@ async function runCommand(
   if (!c || key === null) return;
   pendingConfirm.value = null;
   cmdResult.value = null;
+  if (name === "mem") return runMemory(name, args, confirm, commandId);
+  memoryTask.value = null;
+  memoryDisplayKey.value = null;
   if (historyMode.value) return runCommandHistory(c, key, name, args, confirm, fallback, commandId); // §4.7 — no CommandResult
   cmdResult.value = { name, state: "running" };
   cmdWaitingTerminal.value = false;
@@ -707,6 +881,10 @@ function onQueueRetry(id: string): void {
   const key = agentKey();
   if (!c || key === null) return;
   const item = findPending(id);
+  if (item?.["memoryUiKey"]) {
+    c.requestMemoryQuery?.(item["memoryUiKey"] as MemoryUiKey);
+    return;
+  }
   // §7.7: notExecuted (E_UNKNOWN_ID) re-sends with a NEW id — the old id provably never ran.
   if (item && item["state"] === "notExecuted") {
     if (item["kind"] === "prompt" && typeof item["text"] === "string") {
@@ -759,7 +937,7 @@ const clipboard = useClipboard(window as unknown as ClipboardWindow);
 
 const visibleQueue = computed<readonly unknown[]>(() => {
   void dismissedVersion.value;
-  const items = queueItems.value;
+  const items = queueItems.value.filter((raw) => !(raw as Record<string, unknown> | null)?.["memoryUiKey"]);
   if (dismissedHeld.size === 0) return items;
   return items.filter((raw) => {
     const it = raw as Record<string, unknown>;
@@ -888,6 +1066,83 @@ onUnmounted(() => {
         {{ t("control.mentionSteered", { label: mentionResult.label }) }}
       </template>
     </p>
+    <section
+      v-if="memoryTask && (memoryShown || memoryUnsettled)"
+      class="memory-command"
+      :data-cmd-id="memoryTask.key.cmdId"
+      :data-memory-phase="memoryResult.phase"
+      :data-memory-effect="memoryResult.effect"
+      aria-label="Memory command"
+    >
+      <template v-if="memoryShown">
+        <div v-if="memoryResult.phase === 'running'" class="command-result" data-state="running">
+          <div class="command-result-head">
+            <AppIcon name="terminal" class="icon-sm" />
+            <b translate="no">/mem</b>
+            <span class="chip state-chip" translate="no" role="status">
+              <AppIcon name="loader" class="icon-sm spin" />running
+            </span>
+          </div>
+        </div>
+        <span v-else class="chip" translate="no" role="status">{{ memoryResult.phase }}</span>
+        <CommandResult
+          v-if="memoryResult.phase !== 'running'"
+          name="mem"
+          :state="memoryResult.phase === 'completed' ? 'done' : 'failed'"
+          :captured="true"
+          :output="memoryResult.output ?? null"
+          :error="memoryResult.error"
+          :message="memoryResult.message"
+          @dismiss="dismissMemory"
+        />
+        <p class="fleet-actions-note" role="status">
+          {{
+            t(
+              memoryResult.phase === "running"
+                ? "control.memRunning"
+                : memoryResult.phase === "completed"
+                  ? memoryTask.write
+                    ? "control.memCompleted"
+                    : "control.memReadCompleted"
+                  : memoryResult.phase === "rejected"
+                    ? "control.memRejected"
+                    : "control.memUnknown",
+            )
+          }}
+        </p>
+        <button class="btn btn-ghost btn-xs memory-dismiss" type="button" @click="dismissMemory">
+          {{ t("control.memDismiss") }}
+        </button>
+        <p class="fleet-actions-note">{{ t("control.memDismissHint") }}</p>
+      </template>
+      <div v-if="memoryUnsettled" class="memory-command-actions">
+        <button
+          v-if="memoryIdle"
+          class="btn btn-ghost btn-xs memory-stop"
+          type="button"
+          :disabled="!memoryCanStop"
+          @click="void stopMemory()"
+        >
+          {{ t("control.memStop") }}
+        </button>
+        <p class="fleet-actions-note">{{ t("control.memStopScope") }}</p>
+        <p v-if="memoryAbortNote" class="fleet-actions-note" role="status">{{ memoryAbortNote }}</p>
+      </div>
+      <button
+        v-if="memoryResult.phase === 'unknown' && memoryCurrent(memoryTask.key)"
+        class="btn btn-ghost btn-xs memory-query"
+        type="button"
+        :disabled="
+          memoryItem?.['memoryQueryInFlight'] === true ||
+          !ctlEnabled ||
+          view?.agent.value.down === true ||
+          hub?.state.value.conn !== 'open'
+        "
+        @click="handle()?.requestMemoryQuery?.(memoryTask.key)"
+      >
+        {{ t("control.memQuery") }}
+      </button>
+    </section>
     <CommandResult
       v-if="cmdResult"
       :name="cmdResult.name"

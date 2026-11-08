@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
 import { createControl, CONTROL_CTX } from "../../../src/web-hub/ui/src/composables/useControl.js";
-import type { Attachment } from "../../../src/web-hub/ui/src/types.js";
+import type { Attachment, MemoryUiKey } from "../../../src/web-hub/ui/src/types.js";
 import type {
   CmdOutcome,
   CmdRequest,
@@ -27,6 +27,8 @@ function harness(
     dialogResult?: CmdOutcome;
     getSessionId?: (agentKey: string) => string | undefined;
     now?: () => number;
+    getMemoryOwner?: (agentKey: string) => MemoryUiKey["owner"] | undefined;
+    command?: (req: CmdRequest) => Promise<CmdOutcome>;
   } = {},
 ) {
   const calls: Call[] = [];
@@ -40,7 +42,7 @@ function harness(
     page: async () => ({ ok: true, data: {} }),
     command: async (req) => {
       calls.push({ method: "command", req });
-      return opts.commandResult ?? { ok: true, data: {} };
+      return opts.command ? opts.command(req) : (opts.commandResult ?? { ok: true, data: {} });
     },
     dialog: async (req) => {
       calls.push({ method: "dialog", req });
@@ -50,6 +52,7 @@ function harness(
   const control = createControl(transport, (msg) => dispatched.push({ event: msg.event, data: msg.data }), {
     ...(opts.getSessionId ? { getSessionId: opts.getSessionId } : {}),
     ...(opts.now ? { now: opts.now } : {}),
+    ...(opts.getMemoryOwner ? { getMemoryOwner: opts.getMemoryOwner } : {}),
   });
   return { calls, dispatched, control };
 }
@@ -428,5 +431,122 @@ describe("createControl: caller-generated cmdId + command args (web-model-switch
     // the optimistic item now always carries args (QueueList's notExecuted retry re-sends them)
     const item = h.dispatched.find((d) => d.event === "ctl_send" && d.data.item.name === "compact")!.data.item;
     expect(item.args).toBe("keep it short");
+  });
+});
+
+const memoryOwner = { agentKey: "A", sessionId: "s1", epoch: "epoch1" };
+const memoryKey = (n = 0): MemoryUiKey => ({
+  cmdId: `memory-command-id-${n}`,
+  owner: memoryOwner,
+  operationGeneration: n,
+});
+const memoryAccepted: CmdOutcome = { ok: true, data: { completion: "async", captured: true } };
+describe("#65 memory request identity, reservations and single-flight", () => {
+  it("requires complete local identity; never spreads it onto the wire", async () => {
+    const h = harness({ getSessionId: () => "s1", getMemoryOwner: () => memoryOwner, commandResult: memoryAccepted });
+    expect(await h.control.runCommand("A", "mem", "session add no key")).toMatchObject({ ok: false, effect: "none" });
+    expect(h.calls).toHaveLength(0);
+    const key = memoryKey();
+    await h.control.runCommand("A", "mem", "session add exact text", { id: key.cmdId, memoryUiKey: key });
+    expect(h.calls[0]!.req).toMatchObject({ id: key.cmdId, op: "command", expect: { sessionId: "s1" } });
+    expect(h.calls[0]!.req).not.toHaveProperty("memoryUiKey");
+    expect(h.calls[0]!.req).not.toHaveProperty("operationGeneration");
+    expect(h.dispatched.at(-1)?.data.expectedKey).toEqual(key);
+  });
+
+  it("same-key queries share the same Promise/transport flight; replies carry expectedKey", async () => {
+    let resolve!: (outcome: CmdOutcome) => void;
+    const h = harness({
+      getMemoryOwner: () => memoryOwner,
+      command: async (req) =>
+        req.queryOnly
+          ? new Promise<CmdOutcome>((r) => {
+              resolve = r;
+            })
+          : memoryAccepted,
+    });
+    const key = memoryKey();
+    await h.control.runCommand("A", "mem", "session add body", { id: key.cmdId, memoryUiKey: key });
+    const q1 = h.control.query("A", key.cmdId),
+      q2 = h.control.query("A", key.cmdId);
+    expect(q1).toBe(q2);
+    await flush();
+    expect(h.calls.filter((c) => (c.req as CmdRequest).queryOnly)).toHaveLength(1);
+    resolve({ ok: true, data: { op: "query", state: "running" } });
+    await q1;
+    expect(h.dispatched.at(-1)!.data.expectedKey).toEqual(key);
+  });
+
+  it("memory reserves 32 slots, survives 128 ordinary churn and a 29-minute running wall clock; full refuses before wire", async () => {
+    let now = 0;
+    const h = harness({ now: () => now, getMemoryOwner: () => memoryOwner, commandResult: memoryAccepted });
+    for (let n = 0; n < 32; n++) {
+      const key = memoryKey(n);
+      await h.control.runCommand("A", "mem", "session add body", { id: key.cmdId, memoryUiKey: key });
+    }
+    const key33 = memoryKey(33),
+      before = h.calls.length;
+    expect(
+      await h.control.runCommand("A", "mem", "session add overflow", { id: key33.cmdId, memoryUiKey: key33 }),
+    ).toMatchObject({ ok: false, error: "E_RATE", effect: "none" });
+    expect(h.calls).toHaveLength(before);
+    for (let n = 0; n < 150; n++) await h.control.sendPrompt("A", "ordinary churn", "steer");
+    now = 29 * 60_000;
+    await h.control.query("A", memoryKey().cmdId);
+    expect(h.calls.at(-1)!.req).toMatchObject({ id: memoryKey().cmdId, queryOnly: true });
+    h.control.discard("A", memoryKey().cmdId);
+    expect(
+      await h.control.runCommand("A", "mem", "session add admitted", { id: key33.cmdId, memoryUiKey: key33 }),
+    ).toEqual(memoryAccepted);
+  });
+
+  it("only terminal requests expire after 30 minutes, not at the old ten-minute assumption", async () => {
+    let now = 100;
+    const h = harness({
+      now: () => now,
+      getMemoryOwner: () => memoryOwner,
+      commandResult: { ok: false, error: "E_COMMAND_DENIED", effect: "none", retryable: false },
+    });
+    const key = memoryKey();
+    await h.control.runCommand("A", "mem", "session add denied", { id: key.cmdId, memoryUiKey: key });
+    now += 29 * 60_000;
+    await h.control.query("A", key.cmdId);
+    expect(h.calls.at(-1)!.req).toMatchObject({ queryOnly: true });
+    now += 60_000;
+    const before = h.calls.length;
+    expect(await h.control.query("A", key.cmdId)).toMatchObject({ ok: false, error: "E_UNKNOWN_ID" });
+    expect(h.calls).toHaveLength(before);
+  });
+
+  it("epoch replacement or discard drops an in-flight response; never retries a memory write", async () => {
+    let owner = memoryOwner;
+    let resolve!: (outcome: CmdOutcome) => void;
+    const h = harness({
+      getMemoryOwner: () => owner,
+      command: async (req) =>
+        req.queryOnly
+          ? new Promise<CmdOutcome>((r) => {
+              resolve = r;
+            })
+          : memoryAccepted,
+    });
+    const key = memoryKey();
+    await h.control.runCommand("A", "mem", "session add body", { id: key.cmdId, memoryUiKey: key });
+    const q = h.control.query("A", key.cmdId);
+    await flush();
+    const before = h.dispatched.length;
+    owner = { ...owner, epoch: "epoch2" };
+    resolve({ ok: true, data: { state: "ok" } });
+    await q;
+    expect(h.dispatched).toHaveLength(before);
+    const calls = h.calls.length;
+    expect(await h.control.retry("A", key.cmdId)).toMatchObject({
+      ok: false,
+      error: "E_QUERY_ONLY",
+      effect: "unknown",
+    });
+    expect(h.calls).toHaveLength(calls);
+    expect(await h.control.query("A", key.cmdId)).toMatchObject({ ok: false, effect: "unknown" });
+    expect(h.calls).toHaveLength(calls);
   });
 });

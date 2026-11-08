@@ -248,6 +248,25 @@ const control = {
   thinkingErrSession: "The session changed — pick again",
   thinkingErrGeneric: "Couldn't set thinking level ({code})",
   thinkingDismiss: "Dismiss",
+  memTrackingFull:
+    "Tracking is full (32 memory commands). Nothing was sent. Query existing operations or hide a finished result first.",
+  memIdentityMissing:
+    "Operation identity unavailable. Reloaded pages cannot recover a lost command id; do not resend blindly.",
+  memRunning: "In progress: waiting for admission, confirmation or execution. This can take up to 29 minutes.",
+  memReadCompleted: "The read completed. See its output above.",
+  memCompleted: "The command completed. A completed write cannot be undone; see its id and persistence details above.",
+  memRejected: "Refused: this step was not executed. See the host result for the reason.",
+  memUnknown: "Outcome unknown: it may already have written. Query the original command; do not retry blindly.",
+  memDismiss: "Hide result only",
+  memDismissHint: "Hiding the result does not stop the operation.",
+  memStop: "Stop this session (attempt to cancel memory write)",
+  memStopScope:
+    "This is a session-level stop and may also abort the current model task. Completed writes cannot be undone.",
+  memStopping: "Requesting a stop; the original memory command determines the final outcome.",
+  memStopRequested: "The stop request was handled. Querying the original memory command for its final outcome.",
+  memStopUnknown:
+    "Stop request outcome unknown. Query the original command; no stop or write is retried automatically.",
+  memQuery: "Query original command",
 } satisfies Record<string, string>;
 
 export default control;
