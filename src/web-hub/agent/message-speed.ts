@@ -1,4 +1,4 @@
-/** One current observation/proof OR pending write. B (native thinking) is deliberately absent. */
+/** One current observation/proof or pending write; generation rate includes reasoning output. */
 import {
   generationOwnData as own,
   isGenerationId,
@@ -46,6 +46,12 @@ interface Observation {
   count: number;
   first?: number;
   last?: number;
+  tokens?: number;
+}
+interface ResponseCapture {
+  binding: MessageSpeedBinding;
+  created: boolean;
+  invalid: boolean;
   completed: boolean;
   tokens?: number;
 }
@@ -56,6 +62,17 @@ interface ChatCapture {
   invalid: boolean;
   finish?: string;
   tokens?: number;
+}
+interface AnthropicLane {
+  provider: unknown;
+  model: unknown;
+  id: string;
+  external: boolean;
+  terminal: boolean;
+  closed: boolean;
+  invalid: boolean;
+  tokens?: number;
+  stop?: string;
 }
 interface Pending {
   identity: Identity;
@@ -85,16 +102,27 @@ export function createMessageSpeed<C>(deps: {
   let observation: Observation | undefined;
   let pending: Pending | undefined;
   let chat: ChatCapture | undefined;
+  let responses: ResponseCapture | undefined;
   let messageStarted = false;
+  let lane: AnthropicLane | undefined;
+  let anthropicTainted = false;
+  let capture = false;
+  let captureOwner: MessageSpeedOwner | undefined;
+  const abandonLane = (): void => {
+    if (lane) lane.external = true;
+  };
   const clear = (): void => {
     observation = undefined;
     pending = undefined;
   };
   const reset = (): void => {
     clear();
+    abandonLane();
+    capture = false;
     armed = false;
     turnIndex = undefined;
     chat = undefined;
+    responses = undefined;
     messageStarted = false;
   };
   const owner = (): MessageSpeedOwner | undefined => {
@@ -159,8 +187,10 @@ export function createMessageSpeed<C>(deps: {
           reset();
           break;
         case "turn_start":
+          abandonLane();
           clear();
           chat = undefined;
+          responses = undefined;
           messageStarted = false;
           turnIndex =
             armed &&
@@ -169,6 +199,10 @@ export function createMessageSpeed<C>(deps: {
             event.turnIndex >= 0
               ? event.turnIndex
               : undefined;
+          capture = turnIndex !== undefined;
+          const current = owner();
+          captureOwner = current === undefined ? undefined : { ...current };
+          if (capture && lane && !lane.closed) anthropicTainted = true;
           break;
         case "message_start": {
           if (own(event.message, "role") !== "assistant") break;
@@ -182,15 +216,17 @@ export function createMessageSpeed<C>(deps: {
               identity: { ...o, loopGeneration, turnIndex, messageGeneration },
               invalid: repeated,
               count: 0,
-              completed: false,
             };
           break;
         }
         case "turn_end":
           persist(event);
           observation = undefined;
+          abandonLane();
+          capture = false;
           turnIndex = undefined;
           chat = undefined;
+          responses = undefined;
           break;
       }
     },
@@ -202,15 +238,16 @@ export function createMessageSpeed<C>(deps: {
         return;
       }
       if (kind === "error" || kind === "aborted" || kind === "abort") o.invalid = true;
-      if (
-        (kind === "thinking_delta" || kind === "thinking_start" || kind === "thinking_end") &&
-        binding?.api !== "openai-completions" &&
-        o.binding?.api !== "openai-completions"
-      )
-        o.invalid = true;
       if (kind !== "text_delta" && kind !== "thinking_delta" && kind !== "toolcall_delta") return;
       if (binding === undefined || (o.binding !== undefined && !sameBinding(o.binding, binding))) o.invalid = true;
-      else o.binding = { ...binding };
+      else {
+        o.binding = { ...binding };
+        if (binding.api === "openai-responses" || binding.api === "openai-codex-responses") {
+          if (responses === undefined)
+            responses = { binding: { ...binding }, created: false, invalid: false, completed: false };
+          else if (!sameBinding(responses.binding, binding)) responses.invalid = true;
+        }
+      }
       if (delta.length === 0) return;
       const t = now();
       if (!Number.isFinite(t) || t < 0 || (o.last !== undefined && t < o.last)) o.invalid = true;
@@ -220,6 +257,103 @@ export function createMessageSpeed<C>(deps: {
     },
     raw(event) {
       const api = own(event, "api");
+      if (api === "anthropic-messages") {
+        const provider = own(event, "provider"),
+          model = own(event, "model");
+        const data = own(event, "data"),
+          type = own(data, "type");
+        const poison = (): void => {
+          anthropicTainted = true;
+          if (lane) lane.invalid = true;
+        };
+        const invalidate = (): void => {
+          if (lane && !lane.external) lane.invalid = true;
+          else poison();
+        };
+        if (type === "message_start") {
+          const id = own(own(data, "message"), "id");
+          if (
+            !isGenerationId(id) ||
+            typeof provider !== "string" ||
+            typeof model !== "string" ||
+            (lane && (!lane.closed || (capture && !lane.external)))
+          ) {
+            poison();
+            return;
+          }
+          lane = { provider, model, id, external: !capture, terminal: false, closed: false, invalid: anthropicTainted };
+          return;
+        }
+        if (type === "message_delta" || type === "message_stop") {
+          if (
+            !lane ||
+            lane.closed ||
+            lane.provider !== provider ||
+            lane.model !== model ||
+            (lane.external && capture)
+          ) {
+            poison();
+            return;
+          }
+          if (type === "message_stop") {
+            if (!lane.terminal) {
+              invalidate();
+              return;
+            }
+            lane.closed = true;
+            return;
+          }
+          const stop = own(own(data, "delta"), "stop_reason");
+          const tokens = own(own(data, "usage"), "output_tokens");
+          const mapped =
+            stop === "end_turn" || stop === "stop_sequence"
+              ? "stop"
+              : stop === "max_tokens"
+                ? "length"
+                : stop === "tool_use"
+                  ? "toolUse"
+                  : undefined;
+          if (
+            lane.terminal ||
+            mapped === undefined ||
+            typeof tokens !== "number" ||
+            !Number.isSafeInteger(tokens) ||
+            tokens < 1 ||
+            tokens > 10_000_000
+          ) {
+            invalidate();
+            return;
+          }
+          lane.terminal = true;
+          if (!lane.external) {
+            lane.stop = mapped;
+            lane.tokens = tokens;
+          }
+          return;
+        }
+        if (type === "ping" || type === "content_block_stop") return;
+        if (type === "content_block_delta") {
+          const deltaType = own(own(data, "delta"), "type");
+          if (deltaType === "signature_delta") return;
+          if (deltaType !== "text_delta" && deltaType !== "thinking_delta" && deltaType !== "input_json_delta") {
+            invalidate();
+            return;
+          }
+        } else if (type !== "content_block_start") {
+          invalidate();
+          return;
+        }
+        if (
+          !lane ||
+          lane.closed ||
+          lane.terminal ||
+          lane.provider !== provider ||
+          lane.model !== model ||
+          (lane.external && capture)
+        )
+          invalidate();
+        return;
+      }
       if (api === "openai-completions" && armed && turnIndex !== undefined) {
         const provider = own(event, "provider"),
           model = own(event, "model");
@@ -284,62 +418,71 @@ export function createMessageSpeed<C>(deps: {
         }
         return;
       }
-      const o = observation;
-      if (o === undefined) return;
-      if (!matches(o.identity)) {
-        clear();
-        return;
-      }
-      if (o.binding === undefined) return;
-      const b = o.binding;
-      if (
-        own(event, "provider") !== b.provider ||
-        own(event, "api") !== b.api ||
-        own(event, "model") !== b.model ||
-        (b.api !== "openai-responses" && b.api !== "openai-codex-responses")
-      )
-        return;
-      const data = own(event, "data");
-      const response = own(data, "response");
-      const type = own(data, "type");
+      if (!capture || (api !== "openai-responses" && api !== "openai-codex-responses")) return;
+      const provider = own(event, "provider"),
+        model = own(event, "model");
+      const data = own(event, "data"),
+        response = own(data, "response"),
+        type = own(data, "type");
       const id =
-        type === "response.completed" ? own(response, "id") : (own(response, "id") ?? own(data, "response_id"));
-      if (o.completed && (id === b.responseId || !isGenerationId(id))) {
-        o.invalid = true;
+        type === "response.completed" || type === "response.created"
+          ? own(response, "id")
+          : (own(response, "id") ?? own(data, "response_id"));
+      if (responses === undefined) {
+        if (type !== "response.created" || !isGenerationId(id) || !isGenerationId(provider) || !isGenerationId(model))
+          return;
+        responses = {
+          binding: { responseId: id, provider, api, model },
+          created: true,
+          invalid: false,
+          completed: false,
+        };
         return;
       }
-      if (id !== b.responseId) return; // never cache/overwrite another request (including native warmer)
-      if (typeof type === "string" && /reasoning|summary|redact/.test(type)) o.invalid = true;
+      const r = responses,
+        b = r.binding;
+      if (provider !== b.provider || api !== b.api || model !== b.model) return;
+      if (type === "response.created") {
+        if (r.created || r.completed || id !== b.responseId) r.invalid = true;
+        else r.created = true;
+        return;
+      }
+      if (r.completed && (id === b.responseId || !isGenerationId(id))) {
+        r.invalid = true;
+        return;
+      }
+      if (id !== b.responseId) return;
+      if (
+        type === "response.incomplete" ||
+        type === "response.failed" ||
+        type === "error" ||
+        type === "response.error"
+      ) {
+        r.invalid = true;
+        return;
+      }
       if (type !== "response.completed") return;
-      if (o.completed) o.invalid = true;
-      o.completed = true;
+      r.completed = true;
       const usage = own(response, "usage");
       const tokens = own(usage, "output_tokens");
-      const details = own(usage, "output_tokens_details");
       if (
         own(response, "status") !== "completed" ||
-        own(details, "reasoning_tokens") !== 0 ||
         typeof tokens !== "number" ||
         !Number.isSafeInteger(tokens) ||
         tokens < 1 ||
         tokens > 10_000_000
       )
-        o.invalid = true;
-      else o.tokens = tokens;
+        r.invalid = true;
+      else r.tokens = tokens;
       const output = own(response, "output");
-      if (
-        !Array.isArray(output) ||
-        !arrayEveryOwn(output, (item) => {
-          const type = own(item, "type");
-          return typeof type === "string" && type !== "reasoning" && type !== "redacted_thinking";
-        })
-      )
-        o.invalid = true;
+      if (!Array.isArray(output) || !arrayEveryOwn(output, (item) => typeof own(item, "type") === "string"))
+        r.invalid = true;
     },
     end(message) {
       if (own(message, "role") !== "assistant") return undefined;
       const o = observation;
       clear();
+      capture = false;
       if (o === undefined || !matches(o.identity) || o.invalid || o.binding === undefined) return undefined;
       const b = o.binding;
       if (b.api === "openai-completions") {
@@ -353,10 +496,45 @@ export function createMessageSpeed<C>(deps: {
           chat.tokens === undefined
         )
           return undefined;
-        if (chat.finish === "toolUse") return undefined;
         o.tokens = chat.tokens;
-      } else if (!o.completed) return undefined;
-      if (own(message, "stopReason") === "error" || own(message, "stopReason") === "aborted") return undefined;
+      } else if (b.api === "anthropic-messages") {
+        if (
+          !captureOwner ||
+          captureOwner.sessionId !== o.identity.sessionId ||
+          captureOwner.sessionGeneration !== o.identity.sessionGeneration ||
+          captureOwner.activationGeneration !== o.identity.activationGeneration ||
+          captureOwner.ownerToken !== o.identity.ownerToken ||
+          !lane ||
+          lane.external ||
+          lane.invalid ||
+          anthropicTainted ||
+          !lane.terminal ||
+          lane.id !== b.responseId ||
+          lane.provider !== b.provider ||
+          lane.model !== b.model ||
+          lane.stop !== own(message, "stopReason") ||
+          lane.tokens === undefined
+        )
+          return undefined;
+        o.tokens = lane.tokens;
+      } else {
+        if (
+          !captureOwner ||
+          captureOwner.sessionId !== o.identity.sessionId ||
+          captureOwner.sessionGeneration !== o.identity.sessionGeneration ||
+          captureOwner.activationGeneration !== o.identity.activationGeneration ||
+          captureOwner.ownerToken !== o.identity.ownerToken ||
+          !responses ||
+          responses.invalid ||
+          !responses.completed ||
+          !sameBinding(responses.binding, b) ||
+          responses.tokens === undefined
+        )
+          return undefined;
+        o.tokens = responses.tokens;
+      }
+      const stopReason = own(message, "stopReason");
+      if (stopReason !== "stop" && stopReason !== "length" && stopReason !== "toolUse") return undefined;
       if (
         own(message, "responseId") !== b.responseId ||
         own(message, "provider") !== b.provider ||
@@ -374,8 +552,8 @@ export function createMessageSpeed<C>(deps: {
           (item) =>
             own(item, "type") === "text" ||
             own(item, "type") === "toolCall" ||
-            (b.api === "openai-completions" &&
-              (own(item, "type") === "thinking" || own(item, "type") === "redacted_thinking")),
+            own(item, "type") === "thinking" ||
+            own(item, "type") === "redacted_thinking",
         )
       )
         return undefined;

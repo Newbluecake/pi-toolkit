@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { expectHidden } from "./message-speed-test-helpers.js";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { stream } from "@earendil-works/pi-ai/api/openai-responses";
+import { stream as anthropicStream } from "@earendil-works/pi-ai/api/anthropic-messages";
 import { stream as chatStream } from "@earendil-works/pi-ai/api/openai-completions";
 import type { Model } from "@earendil-works/pi-ai";
 import { runAgentLoop } from "@earendil-works/pi-agent-core";
@@ -153,7 +154,7 @@ async function sdkCase(mode: string) {
   expect(final).toBe(turn);
   expect((final as { usage: { reasoning: number } }).usage.reasoning).toBe(mode === "nonzero" ? 2 : 0);
   const message = h.emitted.findLast((e) => e.type === "message_end" && e.message?.role === "assistant")!.message!;
-  if (mode === "positive" || mode === "warmer") {
+  if (["positive", "warmer", "missing", "nonzero", "summary", "redacted"].includes(mode)) {
     expect(message.piToolkitGeneration).toEqual({ v: 1, tokens: 10, genMs: 500, deltaCount: 2 });
     expect(h.writes).toEqual([
       {
@@ -203,6 +204,7 @@ it.each([
   "nonzero",
   "summary",
   "late-done",
+  "incomplete-then-completed",
   "queued",
   "error-delta",
   "second-start",
@@ -210,7 +212,7 @@ it.each([
   "R1-batch",
   "R1-delayed",
 ])("P0 FULL public SDK session boundary %s: real turnIndex, final reference, real mid", async (mode) => {
-  const positive = mode === "positive" || mode === "queued";
+  const positive = ["positive", "queued", "missing", "nonzero", "summary"].includes(mode);
   const r1 = mode.startsWith("R1-");
   const { mkdtempSync, rmSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
@@ -374,6 +376,16 @@ it.each([
       },
     },
   ];
+  if (mode === "incomplete-then-completed")
+    events.splice(4, 0, {
+      type: "response.incomplete",
+      response: {
+        id: responseId,
+        status: "incomplete",
+        incomplete_details: { reason: "max_output_tokens" },
+        usage: { output_tokens: 10 },
+      },
+    } as never);
   if (r1)
     events.push({
       type: "response.output_text.delta",
@@ -456,6 +468,13 @@ it.each([
     expect(endResult).toEqual(positive ? { v: 1, tokens: 10, genMs: 500, deltaCount: 2 } : undefined);
     // The positive control has the same completed usage but no post-completion delta.
     if (mode === "positive" || r1) expect((final as { usage: { output: number } }).usage.output).toBe(10);
+    if (mode === "incomplete-then-completed") {
+      expect(final).toMatchObject({
+        stopReason: "stop",
+        usage: { output: 10 },
+        content: [{ type: "text", text: "hello world" }],
+      });
+    }
     if (mode === "queued") expect(trace.indexOf("raw-completed")).toBeLessThan(trace.indexOf("second-delta-forward"));
     if (r1) {
       const completedAt = trace.indexOf("release-response.completed");
@@ -525,10 +544,21 @@ describe("P1 real completions SDK → tap → metadata", () => {
       chunk([choice({ role: "assistant" })], null),
       ...(mode === "empty"
         ? []
-        : [
-            chunk([choice(mode === "thinking" ? { reasoning_content: "think" } : { content: "hello " })]),
-            chunk([choice({ content: "world" })], undefined, mode === "changed id" ? "other" : id),
-          ]),
+        : mode === "tool round"
+          ? [
+              chunk([
+                choice({
+                  tool_calls: [
+                    { index: 0, id: "call_1", type: "function", function: { name: "lookup", arguments: '{"q":' } },
+                  ],
+                }),
+              ]),
+              chunk([choice({ tool_calls: [{ index: 0, function: { arguments: '"value"}' } }] })]),
+            ]
+          : [
+              chunk([choice(mode === "thinking" ? { reasoning_content: "think" } : { content: "hello " })]),
+              chunk([choice({ content: "world" })], undefined, mode === "changed id" ? "other" : id),
+            ]),
       chunk([choice({}, mode === "tool round" ? "tool_calls" : "stop")]),
       ...(mode === "missing usage"
         ? []
@@ -547,18 +577,27 @@ describe("P1 real completions SDK → tap → metadata", () => {
           ]),
     ];
     let final: any;
+    const abort = new AbortController();
+    const toolDeltas: string[] = [];
+    let toolTurnComplete = false;
     await runAgentLoop(
       [{ role: "user", content: "fake", timestamp: 0 }],
       { systemPrompt: "", messages: [], tools: [] },
       { model: chatModel, convertToLlm: (messages) => messages as never },
       (event) => {
         const e = event as unknown as Record<string, unknown> & { type: string };
+        if (toolTurnComplete) return;
         if (e.type === "turn_start") e.turnIndex = 0;
         if (
           e.type === "message_update" &&
-          ["text_delta", "thinking_delta"].includes((e.assistantMessageEvent as { type: string }).type)
-        )
+          ["text_delta", "thinking_delta", "toolcall_delta"].includes(
+            (e.assistantMessageEvent as { type: string }).type,
+          )
+        ) {
           h.advance();
+          if ((e.assistantMessageEvent as { type: string }).type === "toolcall_delta")
+            toolDeltas.push((e.assistantMessageEvent as { delta: string }).delta);
+        }
         if (e.type === "message_end" && (e.message as { role: string }).role === "assistant") {
           final = e.message;
           if (mode === "mismatch") final.usage.output = 9;
@@ -568,8 +607,12 @@ describe("P1 real completions SDK → tap → metadata", () => {
           e.messageEntryId = "public-mid";
         }
         h.forward(e);
+        if (mode === "tool round" && e.type === "turn_end") {
+          toolTurnComplete = true;
+          abort.abort();
+        }
       },
-      undefined,
+      abort.signal,
       (m, c, o) =>
         chatStream(m as Model<"openai-completions">, c, {
           ...o,
@@ -582,7 +625,13 @@ describe("P1 real completions SDK → tap → metadata", () => {
           onProviderStreamEvent: (data) => h.raw(data),
         }),
     );
-    const positive = ["positive", "reasoning", "thinking"].includes(mode);
+    const positive = ["positive", "reasoning", "thinking", "tool round"].includes(mode);
+    if (mode === "tool round") {
+      expect(toolDeltas).toEqual(['{"q":', '"value"}']);
+      expect(final.content).toContainEqual(
+        expect.objectContaining({ type: "toolCall", name: "lookup", arguments: { q: "value" } }),
+      );
+    }
     const msg = h.emitted.findLast((e) => e.type === "message_end" && e.message?.role === "assistant")?.message;
     if (positive) {
       expect(msg?.piToolkitGeneration).toEqual({ v: 1, tokens: 10, genMs: 500, deltaCount: 2 });
@@ -869,6 +918,320 @@ describe("P1 rework full public Chat session scheduling", () => {
           session?.dispose();
           rmSync(root, { recursive: true, force: true });
         }
+      }
+    },
+    30000,
+  );
+});
+
+describe("P2 real anthropic SDK stream through production tap", () => {
+  it.each(["frames", "batch", "delayed"])("%s", async (schedule) => {
+    const h = harness("anthropic-messages");
+    const anthropicModel: Model<"anthropic-messages"> = { ...model, api: "anthropic-messages" };
+    const events = [
+      {
+        type: "message_start",
+        message: { id: "anthropic_main", model: anthropicModel.id, usage: { input_tokens: 2, output_tokens: 0 } },
+      },
+      { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+      { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "hello " } },
+      { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "world" } },
+      { type: "content_block_stop", index: 0 },
+      { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 10 } },
+      { type: "message_stop" },
+    ];
+    const frames = events.map((e) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`);
+    let final: unknown;
+    await runAgentLoop(
+      [{ role: "user", content: "fake", timestamp: 0 }],
+      { systemPrompt: "", messages: [], tools: [] },
+      { model: anthropicModel, convertToLlm: (messages) => messages as never },
+      (event) => {
+        const e = event as unknown as Record<string, unknown> & { type: string };
+        if (e.type === "turn_start") e.turnIndex = 0;
+        if (e.type === "message_update" && (e.assistantMessageEvent as { type: string }).type === "text_delta")
+          h.advance();
+        if (e.type === "message_end" && (e.message as { role: string }).role === "assistant") final = e.message;
+        if (e.type === "turn_end") {
+          e.turnIndex = 0;
+          e.messageEntryId = "public-mid";
+        }
+        h.forward(e);
+      },
+      undefined,
+      (m, c, o) =>
+        anthropicStream(m as Model<"anthropic-messages">, c, {
+          ...o,
+          apiKey: "fake-not-secret",
+          maxRetries: 0,
+          fetch: async () => {
+            if (schedule !== "frames")
+              return new Response(frames.join(""), { headers: { "content-type": "text/event-stream" } });
+            let i = 0;
+            return new Response(
+              new ReadableStream({
+                pull(controller) {
+                  if (i < frames.length) controller.enqueue(new TextEncoder().encode(frames[i++]));
+                  else controller.close();
+                },
+              }),
+              { headers: { "content-type": "text/event-stream" } },
+            );
+          },
+          onProviderStreamEvent: async (data) => {
+            if (schedule === "delayed") await new Promise<void>((resolve) => queueMicrotask(resolve));
+            h.raw(data);
+          },
+        }),
+    );
+    expect(final).toMatchObject({ responseId: "anthropic_main", stopReason: "stop", usage: { output: 10 } });
+    expect(h.end).toHaveReturnedWith({ v: 1, tokens: 10, genMs: 500, deltaCount: 2 });
+    expect(h.writes).toHaveLength(1);
+    h.tap.dispose();
+  });
+});
+
+describe("P2 Anthropic real public session", () => {
+  it.each(["frames", "batch", "delayed", "overlap-aba", "delayed-stop", "no-stop"])(
+    "%s",
+    async (mode) => {
+      const { mkdtempSync, rmSync } = await import("node:fs");
+      const { tmpdir } = await import("node:os");
+      const { join } = await import("node:path");
+      const { createAgentSession, DefaultResourceLoader, SettingsManager, SessionManager } =
+        await import("@earendil-works/pi-coding-agent");
+      const root = mkdtempSync(join(tmpdir(), "speed-anthropic-"));
+      const settings = SettingsManager.inMemory({
+        cacheWarming: "off",
+        compaction: { enabled: false },
+        retry: { enabled: false },
+      });
+      const manager = SessionManager.inMemory(root);
+      const anthropicModel: Model<"anthropic-messages"> = { ...model, api: "anthropic-messages" };
+      const api = anthropicModel.api;
+      const makeEvents = (id: string, stop = true) => [
+        { type: "message_start", message: { id, model: model.id, usage: { input_tokens: 2, output_tokens: 0 } } },
+        { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+        { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "hello " } },
+        { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "world" } },
+        { type: "content_block_stop", index: 0 },
+        { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 10 } },
+        ...(stop ? [{ type: "message_stop" }] : []),
+      ];
+      const serialize = (events: ReturnType<typeof makeEvents>) =>
+        events.map((e) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`);
+      let current: import("@earendil-works/pi-coding-agent").ExtensionContext | undefined;
+      const ownerToken = {},
+        activationGeneration = {};
+      let time = 0,
+        writes = 0,
+        endResult: unknown,
+        final: unknown,
+        mid: unknown,
+        warmerRaw = 0;
+      const emitted: WireEvent[] = [];
+      const trace: string[] = [];
+      const entries: unknown[] = [];
+      let speed!: ReturnType<typeof createMessageSpeed>;
+      let release!: () => void;
+      const terminal = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const warmer = async () => {
+        const warmerStream = anthropicStream(
+          anthropicModel,
+          { messages: [] },
+          {
+            apiKey: "fake-not-secret",
+            maxRetries: 0,
+            fetch: async () =>
+              new Response(serialize(makeEvents("warmer_independent")).join(""), {
+                headers: { "content-type": "text/event-stream" },
+              }),
+            onProviderStreamEvent: async (data, streamModel) => {
+              warmerRaw++;
+              const raw = data as { type?: string; message?: { id?: string } };
+              trace.push(`B:${raw.type}:${raw.message?.id ?? ""}`);
+              if (!session?.agent.onProviderStreamEvent) throw new Error("public raw dispatcher unavailable");
+              await session.agent.onProviderStreamEvent(data, streamModel);
+            },
+          },
+        );
+        for await (const _event of warmerStream) {
+          /* consume the separate SDK stream */
+        }
+      };
+      let inserted = false;
+      const loader = new DefaultResourceLoader({
+        cwd: root,
+        agentDir: join(root, "agent"),
+        settingsManager: settings,
+        noExtensions: true,
+        noSkills: true,
+        noPromptTemplates: true,
+        noThemes: true,
+        extensionFactories: [
+          (pi) => {
+            speed = createMessageSpeed({
+              monotonicNow: () => time,
+              currentOwner: () =>
+                current
+                  ? { sessionId: manager.getSessionId(), sessionGeneration: 1, ownerToken, activationGeneration }
+                  : undefined,
+              getCurrentContext: () => current,
+              sessionId: (c) => c.sessionManager.getSessionId(),
+              secureRecheckForWrite: () => undefined,
+              appendEntry: (type, data) => {
+                writes++;
+                entries.push({ type, data });
+                pi.appendEntry(type, data);
+              },
+            });
+            const originalEnd = speed.end;
+            speed.end = (message) => (endResult = originalEnd(message)) as ReturnType<typeof originalEnd>;
+            const tap = createEventTap((event) => emitted.push(event), {
+              speed,
+              now: () => 0,
+              setTimer: () => ({ cancel() {} }),
+            });
+            const wire = wireMessageSpeed(pi, speed, () => true);
+            pi.on("provider_stream_event", async (event) => {
+              const raw = event.data as { type?: string; message?: { id?: string } };
+              const isWarmer = trace.at(-1)?.startsWith("B:") === true;
+              if (isWarmer) {
+                trace.push(`public-B:${raw.type}:${raw.message?.id ?? ""}`);
+                return;
+              }
+              trace.push(`A:${raw.type}:${raw.message?.id ?? ""}`);
+              if (raw.type === "message_delta") release();
+              if (
+                !inserted &&
+                ((mode === "overlap-aba" && raw.type === "content_block_delta") ||
+                  (mode === "delayed-stop" && raw.type === "message_delta"))
+              ) {
+                inserted = true;
+                await warmer();
+              }
+            });
+            pi.on("session_start", (_event, ctx) => {
+              current = ctx;
+            });
+            for (const type of [
+              "agent_start",
+              "turn_start",
+              "message_start",
+              "message_update",
+              "message_end",
+              "turn_end",
+              "agent_end",
+            ] as const)
+              pi.on(type, async (event, ctx) => {
+                current = ctx;
+                if (mode === "delayed" && event.type === "message_start" && event.message.role === "assistant") {
+                  trace.push("public-start-enter");
+                  await terminal;
+                  trace.push("public-start-forward");
+                }
+                if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") time += 500;
+                if (event.type === "message_end" && event.message.role === "assistant") final = event.message;
+                if (event.type === "turn_end") mid = event.messageEntryId;
+                wire.forward(tap, event as unknown as Record<string, unknown> & { type: string });
+              });
+          },
+        ],
+      });
+      const runtime = {
+        streamSimple: (
+          m: Model<"anthropic-messages">,
+          c: Parameters<typeof anthropicStream>[1],
+          o: Parameters<typeof anthropicStream>[2],
+        ) =>
+          anthropicStream(m, c, {
+            ...o,
+            apiKey: "fake-not-secret",
+            maxRetries: 0,
+            fetch: async () => {
+              const frames = serialize(makeEvents("anthropic_main", mode !== "no-stop"));
+              if (mode !== "frames")
+                return new Response(frames.join(""), { headers: { "content-type": "text/event-stream" } });
+              let index = 0;
+              return new Response(
+                new ReadableStream({
+                  pull(controller) {
+                    if (index < frames.length) controller.enqueue(new TextEncoder().encode(frames[index++]));
+                    else controller.close();
+                  },
+                }),
+                { headers: { "content-type": "text/event-stream" } },
+              );
+            },
+          }),
+        getAuth: async () => undefined,
+        hasConfiguredAuth: () => true,
+        checkAuth: async () => ({ ok: true }),
+        isUsingOAuth: () => false,
+        isUsingSubscription: () => false,
+        getError: () => undefined,
+        refresh: async () => undefined,
+        getAvailableSnapshot: () => [anthropicModel],
+        getModel: () => anthropicModel,
+      };
+      let session: import("@earendil-works/pi-coding-agent").AgentSession | undefined;
+      try {
+        await loader.reload();
+        ({ session } = await createAgentSession({
+          cwd: root,
+          agentDir: join(root, "agent"),
+          modelRuntime: runtime as never,
+          model: anthropicModel,
+          sessionManager: manager,
+          settingsManager: settings,
+          resourceLoader: loader,
+          tools: [],
+        }));
+        await session.bindExtensions({ mode: "rpc" });
+        if (mode !== "overlap-aba" && mode !== "delayed-stop") await warmer();
+        await session.prompt("isolated anthropic");
+        expect(warmerRaw).toBe(7);
+        expect(trace.filter((entry) => entry.startsWith("public-B:"))).toHaveLength(warmerRaw);
+        expect(trace).toContain("B:message_start:warmer_independent");
+        expect(trace).toContain("A:message_start:anthropic_main");
+        if (mode === "delayed") {
+          expect(trace.indexOf("public-start-enter")).toBeLessThan(trace.indexOf("A:message_delta:"));
+          expect(trace.indexOf("A:message_delta:")).toBeLessThan(trace.indexOf("public-start-forward"));
+        }
+        if (mode === "overlap-aba") {
+          expect(trace.indexOf("A:content_block_delta:")).toBeLessThan(
+            trace.indexOf("B:message_start:warmer_independent"),
+          );
+          expect(trace.indexOf("B:message_stop:")).toBeLessThan(trace.lastIndexOf("A:content_block_delta:"));
+        }
+        if (mode === "delayed-stop") {
+          expect(trace.indexOf("A:message_delta:")).toBeLessThan(trace.indexOf("B:message_start:warmer_independent"));
+          expect(trace.indexOf("B:message_stop:")).toBeLessThan(trace.indexOf("A:message_stop:"));
+        }
+        expect(final).toMatchObject({ responseId: "anthropic_main", usage: { output: 10 } });
+        expect(typeof mid).toBe("string");
+        if (mode === "overlap-aba" || mode === "delayed-stop" || mode === "no-stop") {
+          if (mode === "no-stop") expect(final).toMatchObject({ stopReason: "error" });
+          expectHidden(emitted, endResult, writes);
+        } else {
+          expect(endResult).toEqual({ v: 1, tokens: 10, genMs: 500, deltaCount: 2 });
+          expect(
+            emitted.findLast((e) => e.type === "message_end" && e.message?.role === "assistant")?.message
+              ?.piToolkitGeneration,
+          ).toEqual(endResult);
+          expect(entries).toEqual([
+            {
+              type: "subagent:web-msg-speed",
+              data: { piToolkitGeneration: { v: 1, tokens: 10, genMs: 500, deltaCount: 2, mid } },
+            },
+          ]);
+          expect(writes).toBe(1);
+        }
+      } finally {
+        session?.dispose();
+        rmSync(root, { recursive: true, force: true });
       }
     },
     30000,

@@ -842,16 +842,18 @@ Design, compiled-App evidence and manual physical-device/AT limits:
 `20.0 tokens/s`，streaming 始终隐藏。设计定稿见
 `docs/dev/web-hub-tokens-speed/plan.md`（r3.1 Root gate）。
 
-- **计时/信任**：分母为原始摄取点首个→最后一个非空 `text|thinking|toolcall` delta 的
-  `performance.now()` 窗口（delta-only，无合并后观测）；分子固定 SDK `usage.output`。
-  正向证明（A）仅接受归一化前公开 provider stream event 严格
-  `response.completed` + 自有非空 `response.id`/`output_tokens`/
-  `output_tokens_details.reasoning_tokens`（number 且严格 0）并与最终
-  `AssistantMessage.responseId` 关联；**normalized 0 不是证据**，缺失/unknown/redacted/
-  summary 一律隐藏。证据 B（完整原生 thinking）**本期恒 false**——推理模型 summary-only
-  或不能证明完整观测的均 hide，不承诺推理模型出数。无 delta/一次性返回/短窗口
-  （<2 delta 或 <500ms）/streaming 中均无数字。abort/error 无正向证明自然隐藏；
-  已发 live 不因 turn_end 未到而撤销，仅不持久。
+> P2 补充：Responses 在有效 turn 内可由 raw `response.created` 建立单一候选，先到的
+> `completed` 仅保存标量；之后每次 delta 的 binding、最终消息及 turn owner 必须精确匹配，
+> 无 binding、候选冲突、重复终结或终结后同 ID/匿名 raw 均隐藏。此规则不放宽归属和终结门。
+
+- **计时/信任**：分母为本地摄取点首个→最后一个非空 `text|thinking|toolcall` delta 的
+  `performance.now()` 观测窗口；分子为 provider 上报、经原始事件证明且与最终 SDK
+  `usage.output` 一致的总输出 token（含 reasoning，缺 reasoning 子字段不阻止显示）。
+  同源计数不意味着本地 delta 完整覆盖服务端的隐式推理或所有生成耗时，不能视作 GPU 吞吐。
+  Responses/Chat 依各自终结与身份关联门校验；Anthropic 因缺少逐事件响应 ID，采用保守
+  单 lane 启发式，归属不确定即隐藏。无 delta/一次性返回/短窗口（<2 delta 或 <500ms）/
+  streaming 中均无数字；失败、矛盾终结或非成功 stopReason 隐藏。已发 live 不因 turn_end
+  未到而撤销，仅不持久。
 - **持久 metadata 机制**：主 session metadata 持久化（显式 `turn_end.messageEntryId`
   mid，exact 最终对象引用 + 当前 ctx/session/loop/message generation + owner token 同步
   recheck，不匹配只跳过不写）；child/run 详情仅 live，旧历史不回填（recent 不兜底）。
@@ -860,7 +862,7 @@ Design, compiled-App evidence and manual physical-device/AT limits:
   512 已加载 entries）。`subagent:web-msg-speed` custom(data) 是 display:false 墓碑，
   旧 UI 不渲染。
 - **边界**：不做收费/GPU 真实吞吐/字符估算/端到端兑底承诺，也不声称一般流式均支持
-  tokens/s 显示（仅上述完整可观测窗口）；child 无公开 raw 端口，保守 hide 且永不 append。
+  tokens/s 显示（仅满足上述归属与本地观测窗口条件）；child 无公开 raw 端口，保守 hide 且永不 append。
   tests: `tests/web-hub/agent/{message-speed,message-speed-p0,wiring-message-speed}.test.ts`、
   `tests/web-hub/protocol/message-generation.test.ts`。
 
@@ -869,8 +871,7 @@ Design, compiled-App evidence and manual physical-device/AT limits:
   内存 fake Responses SSE，经公开 provider raw / message / turn 事件进入生产
   `wireMessageSpeed` / `eventTap`，所得 frames 进入生产 reducer / `buildTxEntries`；
   不手填最终 core。两条相同文本回复之间插入真实 SessionManager toolResult entry，
-  断言公开 mid 精确匹配、10 tokens / 500ms / 2 delta → `20.0 tokens/s`、费用独立；第三条
-  缺 raw reasoning 字段但 SDK normalized reasoning=0 必须隐藏。实际 `manager.getBranch()`
+  断言公开 mid 精确匹配、10 tokens / 500ms / 2 delta → `20.0 tokens/s`、费用独立；第三条缺 raw reasoning 子字段仍显示；第四条缺合法 raw 总量则隐藏。实际 `manager.getBranch()`
   经 `projectSessionEntry` 新建 snapshot 恢复，并验证删除/replace metadata 无残留；
   metadata 不在 SDK assistant 对象、`buildSessionContext` 或后续模型 context 中。
 - **真实浏览器验收**：同文件的 opt-in Chromium companion 使用已缓存的 Playwright
