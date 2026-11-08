@@ -306,6 +306,11 @@ function withoutFast(settings: typeof DEFAULT_SETTINGS, input?: unknown) {
   };
   const { memory } = settings;
   const { scopes: _scopes, ...oldMemory } = memory;
+  // #68 adds a bounded background queue; legacy corpus inputs have no such leaf.
+  // Verify it explicitly, then project it out without changing frozen hashes/inputs.
+  expect(memory.jev.backgroundQueueLimit).toBe(32);
+  const { backgroundQueueLimit: _queueLimit, ...oldJev } = memory.jev;
+  const legacyMemory = { ...oldMemory, jev: oldJev };
   const {
     fabric: {
       wake: { decisionRequests: _dr, ...oldWake },
@@ -318,7 +323,7 @@ function withoutFast(settings: typeof DEFAULT_SETTINGS, input?: unknown) {
       .map(([key, value]) => [key, key === "budget" ? oldBudget : value])
       .map(([key, value]) => [key, key === "webHub" ? oldWebHub : value])
       .map(([key, value]) => [key, key === "todo" ? oldTodo : value])
-      .map(([key, value]) => [key, key === "memory" ? oldMemory : value])
+      .map(([key, value]) => [key, key === "memory" ? legacyMemory : value])
       .map(([key, value]) => [key, key === "fabric" ? { ...value, wake: oldWake } : value]),
   );
 }

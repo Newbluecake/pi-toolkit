@@ -54,6 +54,7 @@ describe("memory settings", () => {
         review: { intervalDays: 7 },
         maxCostUsd: 0.5,
         maxCalls: 800,
+        backgroundQueueLimit: 32,
         fastPathAllowTags: [],
         fastPathDenyTags: [],
         fastPathCooldownH: 24,
@@ -526,6 +527,7 @@ describe("memory settings", () => {
         review: { intervalDays: 14 },
         maxCostUsd: 1.25,
         maxCalls: 100,
+        backgroundQueueLimit: 48,
         fastPathAllowTags: "testing, ci,testing",
         fastPathDenyTags: ["git-push", "nope id", "release"],
         fastPathCooldownH: 0,
@@ -541,11 +543,22 @@ describe("memory settings", () => {
       review: { intervalDays: 14 },
       maxCostUsd: 1.25,
       maxCalls: 100,
+      backgroundQueueLimit: 48,
       fastPathAllowTags: ["testing", "ci"],
       fastPathDenyTags: ["git-push", "release"],
       fastPathCooldownH: 0,
       predict: defaults.jev.predict,
     });
+  });
+
+  it("jev background queue limit: validates bounds and defaults", () => {
+    for (const value of [0, 1025, NaN, "32", null]) {
+      expect(parseMemorySettings({ jev: { backgroundQueueLimit: value } }).jev.backgroundQueueLimit).toBe(32);
+    }
+    for (const value of [1, 1024]) {
+      expect(parseMemorySettings({ jev: { backgroundQueueLimit: value } }).jev.backgroundQueueLimit).toBe(value);
+    }
+    expect(parseMemorySettings({ jev: { backgroundQueueLimit: 3.9 } }).jev.backgroundQueueLimit).toBe(3);
   });
 
   it("jev fastPath keys: tag-id lists drop invalid ids; cooldown enforces 0-720", () => {

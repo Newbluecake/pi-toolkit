@@ -42,6 +42,7 @@ if (process.env.GOV_SPECS_GENERATE === "1") {
   // remain pinned.
   const declaredAdditions = [
     "budget.minTotalS",
+    "memory.jev.backgroundQueueLimit",
     "memory.scopes.session",
     "memory.scopes.hub",
     "fabric.wake.decisionRequests",
@@ -55,6 +56,8 @@ if (process.env.GOV_SPECS_GENERATE === "1") {
       const oldKeys = pin.specs.map(([key]) => key);
       const minAnchor = oldKeys.indexOf("budget.totalS");
       expect(Object.keys(SETTING_SPECS).filter((key) => !oldKeys.includes(key))).toEqual(declaredAdditions);
+      const queueAnchor = oldKeys.indexOf("memory.jev.maxCalls");
+      expect(queueAnchor).toBeGreaterThan(0);
       const anchor = oldKeys.indexOf("memory.jev.predict.cacheTtlMin");
       expect(anchor).toBeGreaterThan(0);
       const wake = oldKeys.indexOf("fabric.wake.parkCapPerTarget");
@@ -62,7 +65,9 @@ if (process.env.GOV_SPECS_GENERATE === "1") {
       expect(Object.keys(SETTING_SPECS)).toEqual([
         ...oldKeys.slice(0, minAnchor + 1),
         "budget.minTotalS",
-        ...oldKeys.slice(minAnchor + 1, anchor + 1),
+        ...oldKeys.slice(minAnchor + 1, queueAnchor + 1),
+        "memory.jev.backgroundQueueLimit",
+        ...oldKeys.slice(queueAnchor + 1, anchor + 1),
         "memory.scopes.session",
         "memory.scopes.hub",
         ...oldKeys.slice(anchor + 1, wake + 1),
@@ -70,6 +75,15 @@ if (process.env.GOV_SPECS_GENERATE === "1") {
         ...oldKeys.slice(wake + 1),
         "fast.enabled",
       ]);
+      expect(SETTING_SPECS["memory.jev.backgroundQueueLimit"]).toEqual({
+        kind: "number",
+        path: "memory.jev.backgroundQueueLimit",
+        min: 1,
+        integer: true,
+        description: "Maximum running and queued Jev background jobs; reject new jobs when full",
+        max: 1024,
+      });
+      expect(defaultOf(SETTING_SPECS["memory.jev.backgroundQueueLimit"]!)).toBe(32);
       for (const path of ["memory.scopes.session", "memory.scopes.hub"]) {
         expect(SETTING_SPECS[path]?.kind).toBe("boolean");
         expect(SETTING_SPECS[path]?.path).toBe(path);
