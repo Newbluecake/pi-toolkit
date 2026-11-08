@@ -32,7 +32,8 @@ import type { SystemPromptMode } from "../sysprompt/hub.js";
  * the fingerprint-keyed RenderCache survives across sessions. No timers.
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { MemoryWebWritePort } from "./scopes/web-write-port.js";
+import type { ExtensionContext, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { MemorySettings } from "../config/settings.js";
 import type { PromptSectionHub } from "../sysprompt/hub.js";
 import type { MemoryWriteGate, TidyPort } from "./contracts.js";
@@ -107,6 +108,7 @@ export type MemoryReadPort = (args: string, cwd: string) => MemoryReadResult;
 export interface WireMemoryResult {
   /** Read-only Web executor; no native handler or write grant is exposed. */
   readonly webRead: MemoryReadPort;
+  readonly webWrite?: MemoryWebWritePort;
   /** §7's spawn port for `/mem tidy`/`/mem restore`. Called at most once by
    *  `src/index.ts`, post-guard, main session only; `undefined` restores the
    *  "tidy unavailable in this session" fallback (child sessions never get
@@ -758,7 +760,37 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
       ...(jev === undefined ? {} : { jev: jev.commandPort }),
     }),
   );
+  const webWrite: MemoryWebWritePort | undefined =
+    !opts.isChildSession &&
+    (opts.secureDomainKind ?? "plain") === "plain" &&
+    opts.settings.enabled &&
+    opts.settings.scopes.session &&
+    opts.scopes
+      ? {
+          start(request, actualCtx) {
+            try {
+              const runtime = opts.scopes!.current();
+              const ctx = actualCtx as ExtensionContext;
+              if (runtime && ctx?.sessionManager === runtime.manager && runtime.current())
+                return runtime.startWebWrite(request, ctx);
+            } catch {
+              /* Missing/stale actual context is never replaced with a fabricated one. */
+            }
+            return {
+              accepted: false,
+              outcome: {
+                ok: false,
+                effect: "none",
+                code: "E_MEM_CONFIRM_STALE",
+                message: "E_MEM_CONFIRM_STALE: 本步未执行。",
+                retryable: false,
+              },
+            };
+          },
+        }
+      : undefined;
   return {
+    ...(webWrite ? { webWrite } : {}),
     webRead: (args, cwd) => executeMemoryRead(args, cwd, undefined, opts.settings),
     attachTidy(port) {
       tidyPort = port;

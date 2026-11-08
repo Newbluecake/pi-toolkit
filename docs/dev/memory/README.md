@@ -27,9 +27,8 @@ Batch reads require live settings to enable batch; block-layout tidy remains ref
 Other tidy previews and scoped/Jev views remain unsupported on this path. Direct reads
 reserve and settle the bounded completion ledger. The command dispatcher also has a
 29-minute timeout and boundary cleanup for asynchronous bridge promises, but the real
-`memoryRead` port is synchronous and read-only: no production async execution, abort/revoke
-port or end-to-end async lifecycle exists yet. The promise path is not evidence that
-asynchronous memory writes are safe to enable.
+`memoryRead` port remains synchronous and read-only. The separate #65 session-add write
+port described below does not change this signature or route through the native handler.
 
 ## Web confirmed-step building block (B1 partial, not wired)
 
@@ -46,6 +45,46 @@ or undo effects already started; `runLocked` remains an unbranded, trusted callb
 production domain adapter and is not connected to Web dispatch: no write command is
 thereby enabled. Real domain-specific plans, store guards and end-to-end Web tests are
 still required before enabling any command.
+
+## #65 B1 包4：session add 装配与真实 SDK / 浏览器门
+
+`wireMemory.webWrite` 是独立可选 facade：main/plain/memory enabled/session scope 才构造；
+每次 `start` 重新读取 `scopes.current()`，核对实际 SDK context 的 manager 引用，不缓存 owner、
+不制造 context、不调用 native handler。根只在原 plain+memory gate 追加这个可选端口；缺端口
+仍为 `E_UNSUPPORTED`。不加 hook、setting、原语 callback 或第二 owner/store。
+
+`scopes/owner.ts` 在第一次真实 start 时惰性创建同 owner kernel，store 通过 getter 取它。
+任务先同步返回并让 commands attach，再从 microtask prepare；确认不占 FIFO。call 绑定 manager、
+incarnation、sid/file、sessionEpoch/branchGen 和 command admission。完成/取消先复制 store 的最终
+观察，commands 唯一 settle ledger 后 finally release；normal done 只 close kernel，不提前删除计划。
+owner dispose 先 cancel task/kernel 再 dispose store，复用既有 scopes 生命周期，不另加 abort hook。
+
+验收修订 B1/B2：S1 在 running/rejected/completed/unknown 每个阶段重新读取 DOM 的
+`data-cmd-id`，与真实 ledger entry.id 严格比较，逐态记录 `commandIdentity`（phase/domPhase/
+domCmdId/ledgerCmdId/ledgerState）；汇总输出 `/tmp/65-pkg4-s1-command-ids.json`，不以领域 n1
+或运行开始时的样本代替终态身份。缺失的可选 rev 仍不补 wire 值，DetailDock 另显示
+「Revision 不可得：宿主未提供版本标识，未生成推测值。」，history on/off DOM 测试钉住该提示。
+
+成功字段不拼进 message：bridge 在既有开放 command data 中携带 `memoryWrite:{id,rev?,persistence}`，
+DetailDock 直接消费结构化字段；output 保留原领域提示。`appended` 只说明 file-backed 目标，
+不是已 flush/fsync：真实 SDK custom-only 会话即使已有 sessionFile，首次 conversation 前也可能无文件。
+三类实际 SDK（memory-only / buffered / 已 conversation flush）均验证恰一次 entry、领域计划/观察
+同 hash、不 poison；随后 conversation flush 不重复 entry。SDK settled barrier 超过 5s capture TTL
+仍走即时 seam，drain 后 native mem 与 sendUserMessage mem 均为零。
+
+S1 probe：`npx tsx scripts/web-hub/memory-command-confirm-probe.ts`。使用离线缓存 Chromium、隔离
+实际 SDK session、真实 HTTP/SSE、生产 DetailDock/useHub/useControl/reducer、remote AskUserForm +
+dialog bridge、commands/controller/store/ledger；不脚本化成功/失败响应，不以按钮 spy 替代。
+28 组（history on/off）覆盖等待确认撤销、批准后 commit barrier、点击先而 handleAbort 晚、
+同步 attempted 可重入 unknown、store 已观察但 done 尚未消费时 completed、29 分钟判定，以及
+permission/session/epoch/同名替换/断网/隐藏/真实模型后启/页面刷新；快照和完整 ledger/append/顺序证据写 `/tmp/65-pkg4-s1-*`。
+probe 的 barrier/计数仅在测试 host，生产同步 apply 不加 await；浏览器 unavailable 退出 2，不算通过。
+该 probe 是隔离 seam 全链证据，不是生产 Hub daemon 的认证/部署或真模型调用验收。
+
+保留限界：FIFO 不约束外部 writer；最后文件 guard 后仍有跨进程竞态；100ms 是协作软预算，
+同步 syscall 不能抢占；已提交 entry/两阶段标签不可回滚。会话级停止可能影响模型，点击时刻
+不是 cancel 线性化时刻，unknown 不等于未写且不得盲重试。reentrant cancel 已发布 unknown 后，
+后来的明确观察只用于清理，不升级 ledger。设计详见 `web-write-seam-design.md`。
 
 ## 局部类型兼容注记（pi 1.5，2026-11-06）
 
@@ -253,7 +292,7 @@ leaf append 不变 branchGen，真正 tree 边界才换 owner。child 只接 pub
 - Native main/TUI/UI/not-Web `/mem session add`、Hub add/rm 走 host-private direct command，无额外弹框，
   不是物理人类来源证明。adopt/restore 保留完整 token-bound 原文/metadata/digest 的**一次**确认。
   模型 `scoped_memory` 的 Hub/user 写入仍走同一个 exact sharedApproval；RPC 不当作 local TUI。
-  Web 只允许新 scoped read routes，write routes 在 transport policy 前于 override 强制 deny，completion
+  Web scoped read routes 沿用原通路；除下述 #65 可选端口明确支持的 session add 外，write routes 在 transport policy 前于 override 强制 deny，completion
   复用相同策略；原 memory/mem description/schema 不变。未增加模型 `/mem` 入口或新 SDK 依赖。
 - 单个 `createScopedProjection` 与真实 `memorySection.projectSources` 接入；project→session→Hub 连续注册，
   同一 input 同步捕获真实 view。`available` 不额外读取 view；inert 由该次 captured view 判定。
@@ -341,9 +380,9 @@ owner。secure/locked 测试只用 fake mountinfo 的实际 activate/SDK constru
 
 ### Web 命令只读函数（A2d，已接生产）
 
-`command-readonly.ts` 提供不依赖 command ctx 的 `executeMemoryRead`：支持空参数、`list`、`path`、`restore`/`restore --legacy`/`restore --trash` 列表及单目录 `migrate --dry-run`/`--report`；其余输入返回 `E_MEM_WEB_UNSUPPORTED`。缺目录的迁移预览拒绝，报告读取失败抛错。仅 plain domain 且 memory 已启用时，宿主把该只读函数引用注入 Web bridge；经过 command handler 的 ledger 与宿主 idle/pending、手动 compact 和 session switch 准入后同步直调，cwd 来自当前宿主 ctx，不进入 SDK slash/capture/native handler。缺端口、抛错、飞书来源及不支持的命令均拒绝，写命令始终拒绝；显式 Web 命令策略 deny/confirm 仍生效。默认 history 模式下同步只读输出直接展示，不依赖 transcript record。输出暂不包含 native 列表的 doctor/Jev 尾注。该函数本身不认证调用者，函数引用只提供只读通道，并非方案中的逐次 MemoryWebCall/owner/lease 证明，不得用于开放写入。测试覆盖真实临时目录及 hub socket 返回；完整写确认、终态和生命周期尚未实现。
+`command-readonly.ts` 提供不依赖 command ctx 的 `executeMemoryRead`：支持空参数、`list`、`path`、`restore`/`restore --legacy`/`restore --trash` 列表及单目录 `migrate --dry-run`/`--report`；其余输入返回 `E_MEM_WEB_UNSUPPORTED`。缺目录的迁移预览拒绝，报告读取失败抛错。仅 plain domain 且 memory 已启用时，宿主把该只读函数引用注入 Web bridge；经过 command handler 的 ledger 与宿主 idle/pending、手动 compact 和 session switch 准入后同步直调，cwd 来自当前宿主 ctx，不进入 SDK slash/capture/native handler。缺端口、抛错、飞书来源及不支持的命令均拒绝，写命令始终拒绝；显式 Web 命令策略 deny/confirm 仍生效。默认 history 模式下同步只读输出直接展示，不依赖 transcript record。输出暂不包含 native 列表的 doctor/Jev 尾注。该函数本身不认证调用者，函数引用只提供只读通道，并非方案中的逐次 MemoryWebCall/owner/lease 证明，不得用于开放写入。测试覆盖真实临时目录及 hub socket 返回；完整 session-add 写确认、终态和生命周期现由上文 #65 独立可选端口承担，不改变这个只读函数。
 
-### Web session add consumer（B1 第 1 包，未接生产）
+### Web session add consumer（B1 第 1 包；包4 现已装配）
 
 `scopes/session-store.ts` 在现有有界 FIFO 中提供 `prepareWebAdd` / `ownsWebPlan` /
 `enqueueConfirmedCommand` / `cancelWeb` / `releaseWeb`；确认等待在 FIFO 外。仅同 store 注册的
@@ -355,7 +394,8 @@ observer 但不等待、不改 unknown 结果；这不能撤回已开始的 effe
 fold 外层派生 inherited；不改变 native 继承规则。`session-web-file.ts` 只读观察整个 JSONL，
 8MiB 字节硬界；每段 100ms 是单调时钟协作预算，无法抢占同步 syscall。文件身份/字节 guard
 不是跨进程原子 CAS；SDK 可缓冲，appended 不代表已 flush/fsync。取消时保留已同步观察，
-最终观察由控制器复制后 release；本包没有控制器、远程入口或生产写接线，现有 Web 写仍拒绝。
+最终观察由控制器复制后 release。第 1 包交付时没有控制器/远程入口；包4 现已通过上文的
+同 owner lazy controller 与生产 facade 接入，仍只支持 session add，其余写保持拒绝。
 
 ## Migration metadata byte limits
 

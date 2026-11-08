@@ -1171,7 +1171,14 @@ describe("#65 memory write seam (package 2)", () => {
     const bridge = createBuiltinBridge(baseDeps({ memoryWrite: () => port }));
     expect(bridge.execute(frame("mem", "session add hello"), writeAdmission())).toMatchObject({
       ok: true,
-      data: { op: "command", kind: "extension", completion: "sync", captured: true },
+      data: {
+        op: "command",
+        kind: "extension",
+        completion: "sync",
+        captured: true,
+        memoryWrite: { id: "n1", rev: "r1", persistence: "memory-only" },
+        output: { entries: [{ kind: "text", text: completedOutcome.message }] },
+      },
     });
     const failing: MemoryWebWritePort = {
       start: () => ({
@@ -1186,6 +1193,33 @@ describe("#65 memory write seam (package 2)", () => {
       effect: "none",
       message: expect.stringContaining("E_MEM_BUSY"),
     });
+  });
+
+  it("preserves exact structured facts and omits an unavailable revision instead of inventing it", () => {
+    const { rev: _rev, ...withoutRevision } = completedOutcome;
+    const bridge = createBuiltinBridge(
+      baseDeps({
+        memoryWrite: () => ({
+          start: () => ({
+            accepted: false,
+            outcome: { ...withoutRevision, id: "n42", persistence: "appended", message: "plain localized prose" },
+          }),
+        }),
+      }),
+    );
+    const result = bridge.execute(frame("mem", "session add hello"), writeAdmission());
+    expect(result).toEqual({
+      ok: true,
+      data: {
+        op: "command",
+        kind: "extension",
+        completion: "sync",
+        captured: true,
+        output: { entries: [{ kind: "text", text: "plain localized prose" }] },
+        memoryWrite: { id: "n42", persistence: "appended" },
+      },
+    });
+    expect((result as any).data.memoryWrite).not.toHaveProperty("rev");
   });
 
   it("attaches the accepted task and resolves its done promise through the mapping", async () => {
@@ -1208,7 +1242,18 @@ describe("#65 memory write seam (package 2)", () => {
     expect(typeof (result as Promise<unknown>).then).toBe("function");
     expect(attached).toBeDefined();
     resolve(completedOutcome);
-    await expect(result).resolves.toMatchObject({ ok: true, data: { completion: "sync" } });
+    await expect(result).resolves.toMatchObject({
+      ok: true,
+      data: {
+        completion: "sync",
+        memoryWrite: { id: "n1", rev: "r1", persistence: "memory-only" },
+        output: { entries: [{ kind: "text", text: completedOutcome.message }] },
+      },
+    });
+    expect(attached!.cancel("abort")).toMatchObject({
+      ok: true,
+      data: { memoryWrite: { id: "n1", rev: "r1", persistence: "memory-only" } },
+    });
   });
 
   it("cancels and releases the task when attach fails (stale waiter)", () => {

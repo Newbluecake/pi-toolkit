@@ -324,6 +324,7 @@ export interface ThreadAgentPort extends ThreadPromptPort {
 }
 export interface WebHubDeps {
   memoryRead?: import("../../memory/index.js").MemoryReadPort;
+  memoryWrite?: import("../../memory/scopes/web-write-port.js").MemoryWebWritePort;
   /** P4 owns/wires ONE bridge independent of webHub.enabled; this client only dispatches. */
   memoryProof?: () => HumanDispatchBridge | undefined;
   /** Top-level, non-live settings; only buildHubConfig consumes it. */
@@ -922,6 +923,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   const commandComplete: CommandCompleteService | undefined = cmdCompleteOn
     ? createCommandComplete({
         ...(deps.memoryProof ? { memoryScopes: true } : {}),
+        ...(deps.memoryWrite ? { memorySessionAdd: true } : {}),
         commands: pi,
         own: () => deps.argCompleters ?? EMPTY_COMPLETERS,
         tui: () => tuiProviderRef.current,
@@ -987,6 +989,9 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   });
   const builtinBridge = createBuiltinBridge({
     ...(deps.memoryRead ? { memoryRead: deps.memoryRead } : {}),
+    ...(deps.memoryWrite
+      ? { memoryWrite: () => (attached && remoteAskUserEnabled() ? deps.memoryWrite : undefined) }
+      : {}),
     ...(deps.memoryProof ? { memoryScopes: true } : {}),
     pi,
     getCtx: () => ctx,
@@ -1361,6 +1366,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     // be constructed after the handler it dispatches through (no temporal-dead-zone cycle).
     // `owner` (Y4/Y7.3) scopes every ledger lookup this handler makes to THIS module instance.
     ...(holdOn ? { hold: () => holdDriver, owner: MODULE_INSTANCE } : {}),
+    ...(deps.memoryWrite ? { memoryOwner: MODULE_INSTANCE } : {}),
     // web-resume plan §2.5 step c: web prompts are refused (E_STALE_CTX, effect none) while a
     // resume switch is between its execution-point checks and its post-switch verification.
     switchInFlight: () => resumeExec.switchInFlight(),

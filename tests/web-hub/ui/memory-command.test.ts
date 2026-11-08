@@ -82,6 +82,108 @@ afterEach(() => {
 });
 
 describe("#65 mem: production useHub/useControl/reducers + visible DetailDock (NOT the S1 host proof)", () => {
+  it("renders structured completion facts directly, independent of prose", async () => {
+    const h = await setup(async (req) =>
+      req.queryOnly
+        ? {
+            ok: true,
+            data: {
+              op: "query",
+              state: "ok",
+              result: {
+                ok: true,
+                data: {
+                  op: "command",
+                  completion: "sync",
+                  captured: true,
+                  output: { entries: [{ kind: "text", text: "Localized message with no identifiers" }] },
+                  memoryWrite: { id: "n42", rev: "abcd1234", persistence: "memory-only" },
+                },
+              },
+            },
+          }
+        : accepted,
+    );
+    const id = await h.send();
+    h.signal(id, "late");
+    await flush();
+    expect(h.wrapper.find("[data-memory-id]").text()).toBe("n42");
+    expect(h.wrapper.find("[data-memory-rev]").text()).toContain("abcd1234");
+    expect(h.wrapper.find("[data-memory-rev-unavailable]").exists()).toBe(false);
+    expect(h.wrapper.find("[data-memory-persistence]").text()).toContain("memory-only");
+    expect(h.wrapper.find(".memory-command").attributes("data-memory-phase")).toBe("completed");
+    expect(h.wrapper.find(".command-result").text()).toContain("Localized message with no identifiers");
+  });
+  it.each([false, true])(
+    "explicitly renders unavailable revision without inventing one, history=%s",
+    async (history) => {
+      const h = await setup(
+        async (req) =>
+          req.queryOnly
+            ? {
+                ok: true,
+                data: {
+                  op: "query",
+                  state: "ok",
+                  result: {
+                    ok: true,
+                    data: {
+                      op: "command",
+                      completion: "sync",
+                      captured: true,
+                      output: { entries: [{ kind: "text", text: "Only the host-provided facts are available" }] },
+                      memoryWrite: { id: "n42", persistence: "memory-only" },
+                    },
+                  },
+                },
+              }
+            : accepted,
+        history,
+      );
+      const id = await h.send();
+      h.signal(id, "late");
+      await flush();
+      const card = h.wrapper.find(`.memory-command[data-cmd-id="${id}"]`);
+      expect(card.attributes("data-memory-phase")).toBe("completed");
+      expect(card.find("[data-memory-id]").text()).toBe("n42");
+      expect(card.find("[data-memory-rev-unavailable]").text()).toBe(
+        "Revision 不可得：宿主未提供版本标识，未生成推测值。",
+      );
+      expect(card.find("[data-memory-rev]").exists()).toBe(false);
+      const item = h.hub.state.value.agents.get(h.card.agentKey)?.pendingCtl.find((item: any) => item.id === id) as any;
+      expect(item.memoryResult.memoryWrite).toEqual({ id: "n42", persistence: "memory-only" });
+      expect(item.memoryResult.memoryWrite).not.toHaveProperty("rev");
+    },
+  );
+  it("malformed structured completion cannot be displayed as success", async () => {
+    const h = await setup(async (req) =>
+      req.queryOnly
+        ? {
+            ok: true,
+            data: {
+              op: "query",
+              state: "ok",
+              result: {
+                ok: true,
+                data: {
+                  op: "command",
+                  completion: "sync",
+                  captured: true,
+                  output: { entries: [{ kind: "text", text: "Not success evidence" }] },
+                  memoryWrite: { id: "forged-id", persistence: "fsync-guaranteed" },
+                },
+              },
+            },
+          }
+        : accepted,
+    );
+    const id = await h.send();
+    h.signal(id, "late");
+    await flush();
+    expect(h.wrapper.find(".memory-command").attributes("data-memory-phase")).toBe("unknown");
+    expect(h.wrapper.find("[data-memory-id]").exists()).toBe(false);
+    expect(h.wrapper.text()).not.toContain("写入已完成");
+  });
   it.each(
     [false, true].flatMap((history) =>
       ["ctl", "late"].flatMap((first) =>

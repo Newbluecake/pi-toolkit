@@ -1,4 +1,7 @@
 /** One actual-manager owner. All authority/closures are activation-local; poison alone is shared. */
+import { createCommandConfirmKernel, type CommandConfirmKernel } from "../command-confirm.js";
+import { executeConfirmedMemoryWrite } from "../command.js";
+import type { MemoryWebDispatchRequest, MemoryWriteTask, WriteOutcome } from "./web-write-port.js";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AskUserRemotePort } from "../../ask-user/remote.js";
 import { createHumanDispatchProof, createHumanOpApproval } from "../../web-hub/agent/human-dispatch-proof.js";
@@ -93,10 +96,13 @@ export function createMemoryOwner(deps: MemoryOwnerDeps) {
       return deps.remote();
     },
   });
+  let webKernel: CommandConfirmKernel | undefined;
+  let webTasks: Set<MemoryWriteTask> | undefined;
   const poison = deps.enabled.session ? sharedSessionPoisonRegistry() : undefined;
   const recovery = poison?.recoveryAuthority();
   const session = deps.enabled.session
     ? createSessionMemoryStore({
+        webConfirm: () => webKernel,
         currentOwner: requireOwner,
         isLocked: () => capability() !== "ok",
         getBranch: () => manager.getBranch(),
@@ -170,10 +176,127 @@ export function createMemoryOwner(deps: MemoryOwnerDeps) {
     },
   });
   const doctor = createScopedMemoryDoctor(common);
+  // Lazy: native/model use and Web-off sessions never construct a Web kernel.
+  function startWebWrite(request: MemoryWebDispatchRequest, actualCtx: ExtensionContext) {
+    const failure = (code: "E_MEM_CONFIRM_STALE" | "E_MEM_BUSY" | "E_MEM_CONFIRM_UNAVAILABLE"): WriteOutcome => ({
+      ok: false,
+      effect: "none",
+      code,
+      retryable: false,
+      message: `${code}: 本步未执行。`,
+    });
+    const live = () => {
+      try {
+        return (
+          !deps.child &&
+          !!session &&
+          current() &&
+          capability() === "ok" &&
+          actualCtx.sessionManager === manager &&
+          deps.context()?.sessionManager === manager &&
+          !abort.signal.aborted &&
+          !request.signal.aborted &&
+          request.current()
+        );
+      } catch {
+        return false;
+      }
+    };
+    if (!live() || !session) return { accepted: false as const, outcome: failure("E_MEM_CONFIRM_STALE") };
+    if (webTasks?.size) return { accepted: false as const, outcome: failure("E_MEM_BUSY") };
+    const remote = deps.remote();
+    if (!remote) return { accepted: false as const, outcome: failure("E_MEM_CONFIRM_UNAVAILABLE") };
+    webKernel ??= createCommandConfirmKernel({
+      channel: { kind: "web", remote: { open: (req) => deps.remote()?.open(req) } },
+      isOwnerCurrent: () => !deps.child && current() && capability() === "ok",
+    });
+    const kernel = webKernel;
+    const call = kernel.start(request.write.rawArgs, {
+      cmdId: request.cmdId,
+      commandOwner: request.commandOwner,
+      operationGeneration: request.operationGeneration,
+      deadline: request.deadline,
+      signal: request.signal,
+      current: live,
+      owner,
+      manager,
+    });
+    if (!call) return { accepted: false as const, outcome: failure("E_MEM_CONFIRM_STALE") };
+    let cached: WriteOutcome | undefined;
+    let released = false;
+    let resolve!: (outcome: WriteOutcome) => void;
+    const done = new Promise<WriteOutcome>((r) => {
+      resolve = r;
+    });
+    const remember = (outcome: WriteOutcome) => {
+      cached ??= { ...outcome };
+      resolve(cached);
+      return { ...cached };
+    };
+    const task: MemoryWriteTask = {
+      done,
+      cancel(reason) {
+        kernel.close(call);
+        return cached ? { ...cached } : remember(session.cancelWeb(call, reason));
+      },
+      release() {
+        if (released) return;
+        task.cancel("dispose"); // Copy the final observation BEFORE dropping the registered plan.
+        released = true;
+        session.releaseWeb(call);
+        webTasks?.delete(task);
+      },
+    };
+    (webTasks ??= new Set()).add(task);
+    // The bridge must attach cancel/release before any prepare or dialog work.
+    void Promise.resolve().then(async () => {
+      try {
+        if (cached || released) return;
+        const prepared = await session.prepareWebAdd(call, request.write);
+        if (cached || released) return;
+        if (!prepared.ok) {
+          remember(prepared);
+          return;
+        }
+        const answer = await kernel.confirm(call, prepared.plan.commandPlan);
+        if (cached || released) return;
+        if (!answer.approved) {
+          remember({ ok: false, effect: "none", code: answer.code, message: answer.message, retryable: false });
+          return;
+        }
+        if (!kernel.reserve(call, answer.receipt, prepared.plan.commandPlan)) {
+          remember(failure("E_MEM_CONFIRM_STALE"));
+          return;
+        }
+        remember(
+          await executeConfirmedMemoryWrite(call, request.write, prepared.plan, answer.receipt, {
+            kernel,
+            store: session,
+            currentOwnerMatches: (binding) =>
+              binding.owner.incarnation === owner.incarnation &&
+              binding.owner.sid === owner.sid &&
+              binding.owner.sessionFile === owner.sessionFile &&
+              binding.owner.sessionEpoch === owner.sessionEpoch &&
+              binding.owner.branchGen === owner.branchGen &&
+              binding.manager === manager &&
+              live(),
+          }),
+        );
+      } catch {
+        // Store observation wins even if a host callback failed after the synchronous append.
+        remember(session.cancelWeb(call, "dispose"));
+      } finally {
+        kernel.close(call); // NOT releaseWeb: commands owns observe → ledger → release.
+      }
+    });
+    return { accepted: true as const, task };
+  }
+
   return {
     owner,
     manager,
     session,
+    startWebWrite,
     hub,
     proof,
     approval,
@@ -191,6 +314,10 @@ export function createMemoryOwner(deps: MemoryOwnerDeps) {
       disposed = true;
       // Each exact-owner cleanup is independent (including a throwing UI close callback).
       for (const cleanup of [
+        () => {
+          for (const task of webTasks ?? []) task.cancel("dispose");
+        },
+        () => webKernel?.dispose(),
         () => abort.abort(),
         () => proof.dispose(),
         () => caps.revoke(),

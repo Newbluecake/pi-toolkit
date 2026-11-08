@@ -487,6 +487,37 @@ no-renderer, streaming/settled-deferral timing, `expandPromptTemplates:false`,
 no-file-before-first-message, newSession cancelled/stale-ctx) before any pi peer bump;
 real-device checklist `docs/dev/web-hub-cmd-history/acceptance.md`.
 
+## #65 Web session-add 独立结果通路（B1 包4）
+
+生产注入受 S1 硬门约束，只有 main/plain/session-memory-on 才提供可选 memoryWrite；没有端口
+仍 fail closed。`wireWebHub` 仅在现有四处窄接线：completion 的内部 memorySessionAdd 能力投影、
+bridge 的 write getter（闭包晚取 attached/remote readiness，避开 wireDialogs TDZ）、独立
+memoryOwner=MODULE_INSTANCE、可选类型。hold owner、原 session/tree/reload 边界调用及注册顺序不变。
+
+验收修订 B1/B2：S1 在 running/rejected/completed/unknown 每个阶段重新读取 DOM 的
+`data-cmd-id`，与真实 ledger entry.id 严格比较，逐态记录 `commandIdentity`（phase/domPhase/
+domCmdId/ledgerCmdId/ledgerState）；汇总输出 `/tmp/65-pkg4-s1-command-ids.json`，不以领域 n1
+或运行开始时的样本代替终态身份。缺失的可选 rev 仍不补 wire 值，DetailDock 另显示
+「Revision 不可得：宿主未提供版本标识，未生成推测值。」，history on/off DOM 测试钉住该提示。
+
+commands/ledger 是唯一终态源：异步回执 reply-only，原 cmdId 查询，cancel 观察在 release 之前；
+abort 自己的 ok 不是记忆已撤回证明。成功使用既有开放 command data 的
+`memoryWrite:{id,rev?,persistence}`（没有新 op/cap/PROTO/schema），message/output 只放人读提示；
+UI reducer 有界投影这些事实，DetailDock 直接渲染，不用正则从文案提取 id。坏字段转 unknown；
+旧客户端仍读原 output。记忆独立卡与 history 开关无关，不接 beginExternal/sink/settle，不改 Composer。
+
+验收入口：`tests/integration/memory-web-command-confirm.test.ts`、
+`tests/conformance/memory-web-command-dispatch.test.ts`（真实 SDK、5s settled TTL）和
+`npx tsx scripts/web-hub/memory-command-confirm-probe.ts`。probe 的 28 组真实浏览器/SDK场景验证
+按钮→HTTP→handleAbort→task.cancel→真实 ledger→SSE/query→DOM、running/refused/completed/unknown，
+以及 history on/off 的身份/权限/断网/隐藏/真实模型后启/页面刷新和迟到 ACK；完成 DOM id 与 ledger 结构化 id 精确比较。
+完整输出、截图和 DOM 在 `/tmp/65-pkg4-s1-*`；它使用隔离测试 HTTP host，不冒充实际 Hub daemon
+认证、生产部署或收费模型验收。浏览器不可用退出 2，不能据此打开生产写端口。
+
+file-backed 的 `appended` 不保证 SDK 此刻 flush/fsync。会话级停止不能回滚已完成写入；断网/进程
+退出/ledger 过期可能无法查询，unknown 永不显示成功。外部 writer 与最后 guard/SDK append 之间
+竞态、同步 I/O 软预算和已提交标签不可回滚为已接受限界，见 memory 的设计附件与 README。
+
 ## History tail reads (`hub/history.ts`)
 
 **Hub main-thread rule (perf incidents 2026-10-28, `docs/dev/web-hub/refresh-slow/`):** nothing

@@ -385,7 +385,30 @@ function memoryResult(body) {
   const data = body?.data;
   let result;
   if (body?.ok === true && data?.completion === "sync" && data?.captured === true && data?.output) {
-    result = { phase: "completed", effect: "completed", output: data.output };
+    const facts = data.memoryWrite;
+    if (
+      facts !== undefined &&
+      (!facts ||
+        typeof facts.id !== "string" ||
+        !/^n[1-9][0-9]{0,5}$/.test(facts.id) ||
+        (facts.rev !== undefined && (typeof facts.rev !== "string" || facts.rev.length > 128)) ||
+        !["appended", "memory-only"].includes(facts.persistence))
+    )
+      return { phase: "unknown", effect: "unknown", error: "E_BAD_RESPONSE" };
+    result = {
+      phase: "completed",
+      effect: "completed",
+      output: data.output,
+      ...(facts === undefined
+        ? {}
+        : {
+            memoryWrite: {
+              id: facts.id,
+              ...(facts.rev === undefined ? {} : { rev: facts.rev }),
+              persistence: facts.persistence,
+            },
+          }),
+    };
   } else if (body?.ok === false) {
     result = {
       phase: body.effect === "none" ? "rejected" : "unknown",

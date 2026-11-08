@@ -204,16 +204,21 @@ function wireMemFailureCode(code: string): CmdErrorCode {
 /** §4.6 wire mapping: a domain write outcome becomes a ledger result (effect none/unknown). */
 function mapWriteOutcome(outcome: WriteOutcome): LedgerResult {
   if (outcome.ok) {
-    return {
-      ok: true,
-      data: {
-        op: "command",
-        kind: "extension",
-        completion: "sync",
-        captured: true,
-        output: textOutput(outcome.message),
+    // command data is an open wire slot. Keep facts separate from localized/clipped prose;
+    // old clients retain their text output and new clients render these fields directly.
+    const data = {
+      op: "command" as const,
+      kind: "extension" as const,
+      completion: "sync" as const,
+      captured: true,
+      output: textOutput(outcome.message),
+      memoryWrite: {
+        id: outcome.id,
+        ...(outcome.rev === undefined ? {} : { rev: outcome.rev }),
+        persistence: outcome.persistence,
       },
     };
+    return { ok: true, data };
   }
   return {
     ok: false,

@@ -1114,6 +1114,23 @@ onUnmounted(() => {
           :message="memoryResult.message"
           @dismiss="dismissMemory"
         />
+        <p
+          v-if="memoryResult.phase === 'completed' && memoryResult.memoryWrite"
+          class="fleet-actions-note"
+          translate="no"
+        >
+          <span data-memory-id>{{ memoryResult.memoryWrite.id }}</span>
+          <span v-if="memoryResult.memoryWrite.rev" data-memory-rev> · {{ memoryResult.memoryWrite.rev }}</span>
+          <span data-memory-persistence> · {{ memoryResult.memoryWrite.persistence }}</span>
+        </p>
+        <p
+          v-if="memoryResult.phase === 'completed' && memoryResult.memoryWrite && !memoryResult.memoryWrite.rev"
+          class="fleet-actions-note"
+          data-memory-rev-unavailable
+          role="status"
+        >
+          Revision 不可得：宿主未提供版本标识，未生成推测值。
+        </p>
         <p class="fleet-actions-note" role="status">
           {{
             t(

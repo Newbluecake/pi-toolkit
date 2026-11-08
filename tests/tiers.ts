@@ -31,6 +31,9 @@ export const BASE_TEST_INCLUDE: readonly string[] = ["tests/**/*.test.ts", "test
  * Directories whose every test file is Tier 2 (real child processes / real sockets /
  * self-gating conformance suites). Trailing slash on purpose: projectOf matches prefixes.
  */
+// #65: memory-web-command-confirm.test.ts + memory-web-command-dispatch.test.ts
+// are deliberately covered by these prefixes (real SDK / >5s settled barrier).
+// The opt-in real-browser probe lives in scripts/, never the daily test project.
 export const TIER2_DIRS: readonly string[] = ["tests/integration/", "tests/conformance/"];
 
 /** Tier 2 files outside TIER2_DIRS (plan D2): real private lock / plain child processes /
