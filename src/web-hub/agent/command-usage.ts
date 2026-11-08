@@ -4,7 +4,8 @@
  *
  * Pure module — no pi imports, no I/O. Priority chain (plan §3.2, D5 拍板):
  *   `TOOLKIT_USAGE` (handwritten table, values lifted verbatim from each command's own
- *   USAGE constant / description) > `BUILTIN_USAGE` (pi `BUILTIN_SLASH_COMMANDS`
+ *   USAGE constant / description; `/mem` appends its scoped fragment from the registered
+ *   description only) > `BUILTIN_USAGE` (pi `BUILTIN_SLASH_COMMANDS`
  *   argumentHints, copied — an optional conformance test may deep-import pi's table and
  *   WARN on drift) > `usageFromDescription` (heuristic `[..]/<..>` extraction from a
  *   third-party description). Nothing is ever invented: no source ⇒ no usage (the UI
@@ -23,12 +24,13 @@ import { sanitizeText } from "../../commands/capture.js";
  * Hand-written usage lines for pi-toolkit's own commands. Values are taken from the
  * commands' existing USAGE constants / descriptions (§3.2 — 不「发明」用法); `cache-ttl`
  * carries the condensed form of its `USAGE` constant per r1 #3. Commands with no
- * arguments (`clear`, `tasklist`, `watch`, `pi-hud-refresh`, …) deliberately have no
+ * arguments (`clear`, `watch`, `pi-hud-refresh`, …) deliberately have no
  * entry — an absent entry simply means "no hint".
  */
 export const TOOLKIT_USAGE: Readonly<Record<string, string>> = {
   // src/commands/status.ts description (`/agent status <runId>` / costs / settings / reload).
-  agent: "status [runId] | costs | fleet | settings (list | set <k> <v> | reset <k>) | reload (now | cancel)",
+  agent:
+    "status [runId] (recommended; <runId> equivalent) | costs | settings (list | set <k> <v> | reset <k>) | reload (now | cancel); advanced: budget",
   // src/memory/command.ts DESCRIPTION.
   mem: "list | init | import [--force] [slug|all] | path | doctor | tidy [--batch] | restore [--legacy]",
   // src/cache-ttl/cache-ttl.ts `USAGE` constant minus the "usage: /cache-ttl " prefix
@@ -42,7 +44,9 @@ export const TOOLKIT_USAGE: Readonly<Record<string, string>> = {
   // src/commands/webhub.ts description (subcommands beyond `status` are web-deny — the
   // usage line documents the terminal surface; the per-item policy filter still drops
   // deny candidates from dynamic completion, §4.3 #7).
-  webhub: "status | open | restart | stop | start | passwd | unlock | 2fa | user | feishu | proxy",
+  webhub: "status | open | restart | stop | start | passwd | unlock | 2fa | user | feishu | token rotate",
+  // src/todo/index.ts description.
+  tasklist: "clear",
   // src/topic-switch/command.ts description (`__go <nonce>` is the internal trampoline,
   // never advertised).
   "topic-switch": "status | last [--send]",
@@ -120,7 +124,11 @@ export function resolveCommandUsage(
   description: string | undefined,
 ): string | undefined {
   const toolkit = TOOLKIT_USAGE[name];
-  if (toolkit !== undefined) return clampUsageLine(toolkit);
+  if (toolkit !== undefined) {
+    // The registered description is built from the actual scoped router, not settings.
+    const scoped = name === "mem" ? description?.match(/\/mem (session\|hub status \([^)]*\))/)?.[1] : undefined;
+    return clampUsageLine(scoped === undefined ? toolkit : `${toolkit} | ${scoped}`);
+  }
   const builtin = BUILTIN_USAGE[name];
   if (builtin !== undefined) return clampUsageLine(builtin);
   const heuristic = usageFromDescription(name, description);

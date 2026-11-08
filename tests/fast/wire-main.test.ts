@@ -6,7 +6,14 @@ import { FAST_BIND_EVENT, type FastBindReply, type FastBindRequest } from "../..
 function api() {
   type Handler = (event: never, ctx: ExtensionContext) => unknown;
   const handlers = new Map<string, Handler[]>();
-  const commands = new Map<string, { handler: (args: string, ctx: ExtensionCommandContext) => Promise<void> }>();
+  const commands = new Map<
+    string,
+    {
+      description: string;
+      getArgumentCompletions: (prefix: string) => { value: string }[];
+      handler: (args: string, ctx: ExtensionCommandContext) => Promise<void>;
+    }
+  >();
   const bus = new Map<string, ((data: unknown) => void)[]>();
   const pi = {
     on: vi.fn((event: string, handler: Handler) => {
@@ -148,7 +155,18 @@ describe("Fast fixed main/child wiring", () => {
     ports.dispose();
   });
 
+  it("recommends inherit and not the reset alias in help and completion", () => {
+    const f = api();
+    wireFastMain(f.pi, true);
+    const cmd = f.commands.get("fast")!;
+    expect(cmd.description).toContain("inherit");
+    expect(cmd.description).not.toContain("reset");
+    expect(cmd.getArgumentCompletions("").map((item) => item.value)).toContain("inherit");
+    expect(cmd.getArgumentCompletions("reset")).toEqual([]);
+  });
+
   it.each([
+    { args: "reset", mode: "on", expected: /^Fast requested=inherit/, level: "info", writes: 1 },
     { args: "status", mode: "off", expected: /^Fast requested=off/, level: "info", writes: 0 },
     { args: "on", mode: "inherit", expected: /^Fast requested=on/, level: "info", writes: 1 },
     { args: "off", mode: "on", expected: /^Fast requested=off/, level: "info", writes: 1 },

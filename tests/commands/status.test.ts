@@ -60,6 +60,17 @@ function deps(runs: RunSnapshot[]) {
   };
 }
 
+describe("agent command recommendations", () => {
+  it("offers settings instead of budget and explains the aliases", () => {
+    const cmd = createStatusCommand(deps([]) as never);
+    const values = cmd.getArgumentCompletions!("", 0)!.map((item) => item.value);
+    expect(values).toContain("settings");
+    expect(values).not.toContain("budget");
+    expect(cmd.description).toContain("status recommended");
+    expect(cmd.description).toContain("Advanced: `/agent budget`");
+  });
+});
+
 describe("external provider availability status", () => {
   it("shows the live droid reason; absent/disabled port preserves legacy output", () => {
     const d = deps([]) as never;
@@ -233,6 +244,17 @@ describe("M-C4 renderRunDetail (tool timeline)", () => {
         toolCounts: { bash: 2, edit: 1 },
       },
     });
+
+  it("agent <run> and agent status <run> render the same run detail", async () => {
+    const notified: string[] = [];
+    const cmd = createStatusCommand(deps([detailed()]) as never);
+    const ctx = { ui: { notify: (text: string) => notified.push(text) } };
+    await cmd.handler("223b8f1e", ctx as never);
+    await cmd.handler("status 223b8f1e", ctx as never);
+    expect(notified[0]).toContain("223b8f1e");
+    expect(notified[0]).toContain("bash");
+    expect(notified[1]).toBe(notified[0]);
+  });
 
   it("renders header, timeline with offsets/marks/durations, tool counts and usage", async () => {
     const { renderRunDetail } = await import("../../src/commands/status.js");

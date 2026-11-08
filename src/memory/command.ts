@@ -191,11 +191,13 @@ export function createMemCommand(deps: CreateMemCommandDeps): {
     ? { ...MEM_SECOND_LEVEL }
     : { ...MEM_SECOND_LEVEL, ...MEM_JEV_SECOND_LEVEL };
   return {
-    description: blocks
-      ? "Project memory blocks. /mem migrate [--dry-run|--all|--report|--status|--import-legacy|--rollback] · /mem doctor · /mem restore"
-      : jev === undefined
-        ? DESCRIPTION
-        : DESCRIPTION_JEV,
+    description:
+      (blocks
+        ? "Project memory blocks. /mem migrate [--dry-run|--all|--report|--status|--import-legacy|--rollback] · /mem doctor · /mem restore"
+        : jev === undefined
+          ? DESCRIPTION
+          : DESCRIPTION_JEV) +
+      (deps.scopedRouter ? " · /mem session|hub status (list equivalent; status recommended)" : ""),
     getArgumentCompletions: (argumentPrefix: string) => {
       try {
         const a = (argumentPrefix ?? "").trimStart();

@@ -111,6 +111,16 @@ it("optional exact subrouter does not consume original /mem, preserves full add 
   });
   expect(await f.command.route("session add")).toMatchObject({ result: { code: "E_META_INVALID" } });
 });
+it("session and hub list remain equivalent to the recommended status", async () => {
+  const f = fixture();
+  await f.command.route("session add session-body");
+  await f.command.route("hub add hub-body");
+  for (const scope of ["session", "hub"]) {
+    const status = await f.command.route(`${scope} status`);
+    expect(status).toMatchObject({ handled: true, result: { ok: true } });
+    expect(await f.command.route(`${scope} list`)).toEqual(status);
+  }
+});
 it("RPC with UI, unknown, Web, missing UI and child refuse writes", async () => {
   const f = fixture();
   for (const ctx of [

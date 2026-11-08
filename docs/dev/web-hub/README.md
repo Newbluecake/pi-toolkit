@@ -429,7 +429,9 @@ agent's slot-flush strips `args` for cap-less hubs). Sources: S-own (toolkit com
 `wrapCommandApi` records each raw `getArgumentCompletions`; new toolkit completers must be
 reviewed pure functions) and S-tui (`mode:"tui"` + `all` only — a transparent
 `addAutocompleteProvider` passthrough capturing pi's base provider for third-party/builtin
-commands; RPC/print never gets it). Deny commands never complete and deny ITEMS are dropped
+commands; RPC/print never gets it). The `/mem` usage's scoped fragment is taken only from the
+registered command description, which reflects whether a scoped router was actually wired;
+missing descriptions fail closed to the unscoped static usage. Deny commands never complete and deny ITEMS are dropped
 per-item (the execution path's own tables); budgets: agent 1.5s hard timeout + in-flight ≤2
 (a SYNCHRONOUS third-party hang blocks the process — accepted residual, r1 #4), hub 4s route
 deadline / in-flight ≤8 global ≤3 per principal / independent limiter, browser disconnect ⇒

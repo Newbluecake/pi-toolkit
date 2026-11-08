@@ -168,6 +168,13 @@ describe("/mem jev routing", () => {
   });
 });
 
+test("scoped help recommends status while preserving the no-router description", () => {
+  const plain = createMemCommand({});
+  const scoped = createMemCommand({ scopedRouter: async () => ({ handled: false }) });
+  expect(plain.description).not.toContain("session|hub status");
+  expect(scoped.description).toContain("session|hub status (list equivalent; status recommended)");
+});
+
 describe("/mem tags routing", () => {
   test("bare /mem tags and `tags list` both list; quoted --desc/--label survive parsing", async () => {
     const { cwd, paths } = fixture();
@@ -188,6 +195,18 @@ describe("/mem tags routing", () => {
       description: "Two words here",
       risk: "high",
       commands: ["foo bar", "baz"],
+    });
+  });
+
+  test("tags add accepts the legacy --description flag", async () => {
+    const { cwd, paths } = fixture();
+    const port = stubPort();
+    const cmd = createMemCommand({ paths, jev: port });
+    await cmd.handler('tags add old-tag --label Old --description "legacy description"', fakeCtx(cwd).ctx);
+    expect(JSON.parse(port.calls[0]!.slice(`tags-add:${cwd}:`.length))).toMatchObject({
+      id: "old-tag",
+      label: "Old",
+      description: "legacy description",
     });
   });
 
