@@ -115,6 +115,8 @@ async function readSweepCorpus(
     fingerprint: createHash("sha1").update(JSON.stringify(stamps)).digest("hex"),
   };
 }
+export type SweepRender = { residentBytes: number; residentBudget: number; indexOverflow: boolean };
+
 export interface SweepOptions {
   enabled: boolean;
   gate?: MemoryWriteGate;
@@ -125,7 +127,7 @@ export interface SweepOptions {
   diag?: (message: string) => void;
   yield?: () => Promise<void>;
   residentBudget?: number;
-  render?: { residentBytes: number; residentBudget: number; indexOverflow: boolean };
+  render?: SweepRender;
 }
 export interface SweepResult {
   operations: number;
@@ -134,11 +136,26 @@ export interface SweepResult {
   suggestions: number;
 }
 export function createSweepRunner(opts: SweepOptions) {
-  let inFlight: Promise<SweepResult> | undefined;
-  let pending: { dir: string; reason: SweepReason; signal?: AbortSignal } | undefined;
+  type Pending = {
+    dir: string;
+    reason: SweepReason;
+    signal?: AbortSignal;
+    admittedBudget?: SweepRender;
+    promise: Promise<SweepResult>;
+    resolve: (result: SweepResult) => void;
+  };
+  let inFlight = false;
+  let trailing = false;
+  let pending: Pending | undefined;
+  const notExecuted = (): SweepResult => ({ operations: 0, archived: [], stopped: "not-executed", suggestions: 0 });
   const previous = new Map<string, string>();
   const clock = opts.now ?? Date.now;
-  async function pass(memDir: string, reason: SweepReason, signal?: AbortSignal): Promise<SweepResult> {
+  async function pass(
+    memDir: string,
+    reason: SweepReason,
+    signal?: AbortSignal,
+    admittedBudget?: SweepRender,
+  ): Promise<SweepResult> {
     const result: SweepResult = { operations: 0, archived: [], stopped: "done", suggestions: 0 };
     if (!opts.enabled) {
       result.stopped = "disabled";
@@ -165,12 +182,20 @@ export function createSweepRunner(opts: SweepOptions) {
       const corpus = await readSweepCorpus(memDir, beforeRead, opts.yield ?? (() => scheduler.yield()));
       const today = governanceToday(new Date(clock()));
       const key = JSON.stringify([corpus.fingerprint, today, corpus.legacy]);
-      if (reason !== "startup" && reason !== "reload" && previous.get(memDir) === key) {
+      // Budget deduplication belongs to signals.ts. Only an explicitly admitted
+      // observation bypasses corpus debounce; a bare budget reason does not.
+      if (
+        reason !== "startup" &&
+        reason !== "reload" &&
+        !(reason === "budget" && admittedBudget) &&
+        previous.get(memDir) === key
+      ) {
         result.stopped = "unchanged";
         return result;
       }
       const index = readIndex(memDir).index;
       const render =
+        (reason === "budget" ? admittedBudget : undefined) ??
         opts.render ??
         (opts.residentBudget === undefined
           ? undefined
@@ -371,23 +396,84 @@ export function createSweepRunner(opts: SweepOptions) {
     await opts.yield?.();
     return result;
   }
-  function runSweep(memDir: string, reason: SweepReason, signal?: AbortSignal, origin?: string): Promise<SweepResult> {
+  function runSweep(
+    memDir: string,
+    reason: SweepReason,
+    signal?: AbortSignal,
+    origin?: string,
+    admittedBudget?: SweepRender,
+  ): Promise<SweepResult> {
     if (origin === "sweep") return Promise.resolve({ operations: 0, archived: [], stopped: "self", suggestions: 0 });
     if (inFlight) {
-      pending = { dir: memDir, reason, ...(signal ? { signal } : {}) };
-      return inFlight;
+      // The trailing pass cannot accept a third pass: never return another
+      // batch's successful result as evidence for this request.
+      if (trailing) return Promise.resolve(notExecuted());
+      if (pending && pending.dir === memDir) {
+        if (reason === "budget" && admittedBudget && pending.reason === "budget" && pending.admittedBudget) {
+          pending.resolve(notExecuted());
+          pending = undefined;
+        } else {
+          // A budget pass covers coalesced events; never downgrade it.
+          if (reason === "budget" && admittedBudget) {
+            pending.reason = reason;
+            pending.admittedBudget = admittedBudget;
+            if (signal) pending.signal = signal;
+          } else if (pending.reason !== "budget") {
+            const priority: Record<SweepReason, number> = {
+              startup: 0,
+              reload: 0,
+              write: 0,
+              "task-done": 1,
+              push: 2,
+              release: 3,
+              budget: 4,
+            };
+            if (priority[reason] > priority[pending.reason]) pending.reason = reason;
+          }
+          return pending.promise;
+        }
+      }
+      if (pending) pending.resolve(notExecuted());
+      let resolve!: (result: SweepResult) => void;
+      const promise = new Promise<SweepResult>((done) => {
+        resolve = done;
+      });
+      pending = {
+        dir: memDir,
+        reason,
+        ...(signal ? { signal } : {}),
+        ...(admittedBudget ? { admittedBudget } : {}),
+        promise,
+        resolve,
+      };
+      return promise;
     }
-    inFlight = (async () => {
-      let result = await pass(memDir, reason, signal);
-      const next = pending;
-      pending = undefined;
-      if (next) result = await pass(next.dir, next.reason, next.signal);
-      return result;
-    })().finally(() => {
-      inFlight = undefined;
-      pending = undefined;
-    });
-    return inFlight;
+    inFlight = true;
+    const first = pass(memDir, reason, signal, admittedBudget);
+    void (async () => {
+      try {
+        await first;
+        const next = pending;
+        pending = undefined;
+        if (next) {
+          trailing = true;
+          try {
+            next.resolve(await pass(next.dir, next.reason, next.signal, next.admittedBudget));
+          } catch {
+            next.resolve(notExecuted());
+          }
+        }
+      } catch {
+        pending?.resolve(notExecuted());
+        pending = undefined;
+      } finally {
+        pending?.resolve(notExecuted());
+        pending = undefined;
+        trailing = false;
+        inFlight = false;
+      }
+    })();
+    return first;
   }
   return { runSweep };
 }

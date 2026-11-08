@@ -196,6 +196,7 @@ import { audienceMatches, effectiveAudience } from "../govern/audience.js";
 import { TOPIC_USER_POOL_CAP, decayFactor, decaySubjectOf, isDecayTarget, namesSubject } from "../govern/decay.js";
 import type { MemoryWriteGate } from "../contracts.js";
 import { parseBlockFile, type ParsedBlock } from "../blocks/format.js";
+import type { GovernanceCandidate, GovernanceSignal } from "../govern/signals.js";
 
 // ───────────────────────────── constants (jev-arch §5.5) ─────────────────────────────
 
@@ -309,6 +310,14 @@ export interface WireJevDeps {
    *  command-port、write-port 的全部侧车写入（打标/冷却戳/建议/taxonomy）都
    *  经 writeIndexPatch/writeTaxonomyFile 的逐原语 gateCheck 复检；缺省无
    *  gate 时行为与此前逐字节相同（I9，off-golden 不变）。 */
+  readonly governance?: {
+    capture(cwd: string, id: string, candidate: GovernanceCandidate): void;
+    take(cwd: string, id: string, inputFingerprint: string): GovernanceCandidate | undefined;
+    clear(): void;
+    mark(cwd: string, signal: GovernanceSignal): void;
+    abort(): void;
+    turnEnd(cwd: string, registry: ClassifierRegistryLike, client: JevClient): void;
+  };
   readonly writeGate?: MemoryWriteGate;
 }
 
@@ -435,7 +444,7 @@ function textOfContent(content: unknown): string {
 
 /** `ctx.modelRegistry` with all three classifier methods, else undefined
  *  (⇒ `off(pi-api)`, jev-plan §10 #2). Never throws. */
-function registryOf(ctx: unknown): ClassifierRegistryLike | undefined {
+export function registryOf(ctx: unknown): ClassifierRegistryLike | undefined {
   try {
     const r = (ctx as { modelRegistry?: unknown } | undefined)?.modelRegistry as Record<string, unknown> | undefined;
     if (r === undefined || r === null || typeof r !== "object") return undefined;
@@ -2840,6 +2849,115 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     }
   });
 
+  const governanceCandidate = (event: ToolCallEvent, ctx: ExtensionContext): void => {
+    const port = deps.governance;
+    if (!port || isChild) return;
+    const cwd = cwdOf(ctx);
+    let kind: GovernanceSignal | undefined;
+    let taskId: number | undefined;
+    const input = event.input as Record<string, unknown>;
+    if (
+      event.toolName === "TaskUpdate" &&
+      input["status"] === "completed" &&
+      typeof input["taskId"] === "string" &&
+      Object.keys(input).every((key) => key === "taskId" || key === "status")
+    ) {
+      const id = /^#?\d+$/.test(input["taskId"]) ? Number(input["taskId"].replace(/^#/, "")) : NaN;
+      const prior = deps.todo?.list().find((task) => task.id === id);
+      if (prior && prior.status !== "completed") {
+        kind = "task-done";
+        taskId = id;
+      }
+    } else if (event.toolName === "bash" && typeof input["command"] === "string") {
+      const command = input["command"].trim();
+      // Restrict to literal single commands: shell control, expansion, quotes,
+      // redirects and comments cannot be proven by a flat parser.
+      if (command.length <= 8192 && /^[A-Za-z0-9_./:=@+%,\-\s]+$/.test(command) && !/[\r\n]/.test(command)) {
+        const parsed = parseShell(command);
+        const c = parsed.ok && !parsed.hasRedirect && parsed.commands.length === 1 ? parsed.commands[0] : undefined;
+        if (
+          c &&
+          !c.argv.some(
+            (arg) =>
+              arg === "--dry-run" ||
+              arg.startsWith("--dry-run=") ||
+              arg === "--changelog" ||
+              arg.startsWith("--changelog=") ||
+              arg === "--help" ||
+              arg === "--version" ||
+              arg.startsWith("--help=") ||
+              arg === "-h" ||
+              /^-[^-]*n/.test(arg),
+          )
+        ) {
+          const program = basename(c.argv[0] ?? "");
+          if (
+            program === "git" &&
+            c.argv[1] === "push" &&
+            /^(?:[A-Za-z0-9_./-]+\/)?git\s+(?:(?:-C\s+[A-Za-z0-9_./-]+|--no-pager)\s+)*push(?:\s|$)/.test(command)
+          )
+            kind = "push";
+          else if (
+            program === "gh" &&
+            c.argv[1] === "release" &&
+            c.argv[2] === "create" &&
+            /^(?:[A-Za-z0-9_./-]+\/)?gh\s+release\s+create(?:\s|$)/.test(command)
+          )
+            kind = "release";
+          else if (
+            (program === "release.sh" && /^(?:[A-Za-z0-9_./-]+\/)?release\.sh(?:\s|$)/.test(command)) ||
+            (["bash", "sh"].includes(program) &&
+              basename(c.argv[1] ?? "") === "release.sh" &&
+              /^(?:[A-Za-z0-9_./-]+\/)?(?:bash|sh)\s+(?:[A-Za-z0-9_./-]+\/)?release\.sh(?:\s|$)/.test(command))
+          )
+            kind = "release";
+        }
+      }
+    }
+    if (!kind) return;
+    port.capture(cwd, event.toolCallId, {
+      kind,
+      inputFingerprint: createHash("sha256").update(JSON.stringify(input)).digest("hex"),
+      ...(taskId === undefined ? {} : { taskId }),
+    });
+  };
+  const governanceResult = (event: ToolResultEvent, ctx: ExtensionContext): void => {
+    const cwd = cwdOf(ctx);
+    const fingerprint = createHash("sha256").update(JSON.stringify(event.input)).digest("hex");
+    const candidate = deps.governance?.take(cwd, event.toolCallId, fingerprint);
+    if (
+      !candidate ||
+      event.isError ||
+      (candidate.kind === "task-done" ? event.toolName !== "TaskUpdate" : event.toolName !== "bash")
+    )
+      return;
+    const details = event.details as Record<string, unknown> | undefined;
+    if (candidate.kind === "task-done") {
+      const task = details?.["task"] as { id?: unknown; status?: unknown } | undefined;
+      if (
+        details?.["action"] !== "update" ||
+        details["changed"] !== true ||
+        task?.id !== candidate.taskId ||
+        task?.status !== "completed"
+      )
+        return;
+    } else {
+      const structured = event.structuredContent as Record<string, unknown> | undefined;
+      if (
+        !structured ||
+        structured["exit_code"] !== 0 ||
+        details?.["jobId"] !== undefined ||
+        details?.["backgrounded"] === true ||
+        details?.["timedOut"] === true ||
+        details?.["aborted"] === true ||
+        structured["timedOut"] === true ||
+        structured["aborted"] === true
+      )
+        return;
+    }
+    deps.governance?.mark(cwd, candidate.kind);
+  };
+
   // tool_call: the A layer only (the interception gate was removed with the
   // gate feature, 2026-11). Fully synchronous — returns `undefined` with ZERO
   // awaits. Everything is wrapped: an exception never blocks the call (C-J2 —
@@ -2848,6 +2966,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     if (!runs) return undefined;
     try {
       if (observe(ctx) === undefined) return undefined;
+      governanceCandidate(event, ctx);
       fastPath(event, cwdOf(ctx));
       if (config.predict.enabled) {
         try {
@@ -2878,6 +2997,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     if (!runs) return undefined;
     try {
       if (observe(ctx) === undefined) return undefined;
+      governanceResult(event, ctx);
       if (config.predict.enabled) {
         if (event.toolName === "edit" || event.toolName === "write" || event.toolName === "bash") invalidateDirty();
         if (event.isError === true) {
@@ -2954,6 +3074,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
       try {
         const reg = observe(ctx);
         generation += 1;
+        deps.governance?.clear();
         errorSignatures = new Set();
         errorAsks = 0;
         parsedCache.clear();
@@ -2991,10 +3112,21 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     }
   });
 
-  pi.on("turn_end", (_event: unknown, ctx: ExtensionContext) => {
+  pi.on("turn_end", (event, ctx: ExtensionContext) => {
     if (!runs) return undefined;
     try {
-      if (observe(ctx) === undefined) return undefined;
+      const message = event.message as { stopReason?: unknown } | undefined;
+      const aborted = message?.stopReason === "aborted";
+      if (aborted) {
+        deps.governance?.clear();
+        deps.governance?.abort();
+      }
+      const currentRegistry = observe(ctx);
+      if (currentRegistry === undefined) return undefined;
+      if (!aborted) {
+        deps.governance?.clear();
+        deps.governance?.turnEnd(cwdOf(ctx), currentRegistry, client);
+      }
       turnSeq += 1;
       const branch = branchOf(ctx);
       if (branch === undefined) return undefined;
@@ -3010,6 +3142,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
 
   pi.on("session_shutdown", (event: SessionShutdownEvent) => {
     try {
+      deps.governance?.clear();
       recallAbort?.abort();
       bgAbort.abort();
       client.abortBackground();

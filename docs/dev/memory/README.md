@@ -375,3 +375,9 @@ is raw `closeSync`, not idempotent; a second close propagates `EBADF`.
 ### `/mem review` 与 `/mem expired` 只读展示
 
 这两个命令只列出结果，不运行 sweep、分类器或交互式写入；`--run` 也只显示现有建议。blocks 的 review 合并现有侧车建议和 `planSweep` 的瞬时治理建议，并沿用 review-lite 的锚点有效性检查；非治理类型同样可见。expired 独立列出 active 块的过期 `expires` 和所有 `until` 条件，按权威标识；同一块可占两行。已取代或归档的块不参与。files 布局使用现有条目和建议索引；未启用建议索引时明确提示不可用。日期判定仍沿用既有规则，until 不是日期到期断言。
+
+### #36 I1 事件与预算装配（2026-11-08）
+
+生产路径复用 Jev 现有 `tool_call` / `tool_result` / `turn_end` 和 memory 既有 startup、write、shutdown；不新增 hook 或主动唤醒。`govern/signals.ts` 是每个目录/session epoch 的唯一候选、事件 pending 与预算 key owner：关联表最多 128 项，只留输入指纹而不留命令原文；task 完成要求先前状态快照、仅改 status 的请求和匹配的结构化成功结果；bash 只接受保守的单条字面 push/release 命令及可信结构化零退出码，后台 job、复杂 shell 和未知终态跳过。turn_end 合并 detach，优先级 budget > release > push > task-done。Jev off 不注册 turn_end，预算只在既有 startup/write 机会消费。
+
+预算观察按独立 key 去重；同 key 成功后不因后续外部机会重跑，失败及 sweep-origin 的新观察可在下一外部机会重试，不在渲染或空 turn 中自旋。单次在飞 sweep 最多执行一个合并尾随 pass；每个被接纳批次获取其实际 pass 的结果，尾随执行中到达的新请求返回 `not-executed`，预算与事件转为 dormant，不能借旧 pass 的成功结算，也不会自动递归 drain。`sweep.ts` 仅为 signals owner 已准入的预算观察绕过普通 corpus 去抖，预算 key 不写入 `sweepCorpusFp`。自动路径按 canonical memory/blocks 目录与迁移身份、主会话 epoch、memory/governance 开关、abort 和 `MemoryWriteGate` 准入；额外 epoch gate 在写入前复核目录身份。身份变化、shutdown/reload 或 abort 撤销旧候选和在飞提交权；abort 撤权先于 registry 检查，registry 暂不可用也不能阻止撤权。自动路径不创建缺失的 memory/blocks。迁移首次 user review 仅在自然 startup 或真实治理事件的 turn_end 启动；空 turn 不重试，完成标记仍由 `markers.ts` 持久化。secure 域遵循 Jev 强制关闭并走预算 Jev-off 分支；locked 与 child 不执行新增自动治理。同步 filesystem 调用不能在单个 syscall 中抢占；后台 bash 终态关联尚未接生产，无可信关联的后台 job 终态不会被推断成功，复杂 shell 保守不支持。

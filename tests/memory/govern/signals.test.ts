@@ -21,7 +21,58 @@ function observation(over: boolean, overflow: boolean, budget = 2048): BudgetObs
   };
 }
 
-describe("session governance signals (unwired)", () => {
+describe("session governance signals", () => {
+  test("candidate owner caps associations, consumes once and clears on abort/dispose", () => {
+    const signals = createGovernanceSignals();
+    for (let i = 0; i < 129; i++) signals.captureCandidate(String(i), { kind: "push", inputFingerprint: `hash-${i}` });
+    expect(signals.takeCandidate("0", "hash-0")).toBeUndefined();
+    expect(signals.takeCandidate("1", "wrong")).toBeUndefined();
+    expect(signals.takeCandidate("1", "hash-1")).toBeUndefined();
+    expect(signals.takeCandidate("2", "hash-2")?.kind).toBe("push");
+    signals.abort();
+    expect(signals.takeCandidate("3", "hash-3")).toBeUndefined();
+    signals.captureCandidate("new", { kind: "release", inputFingerprint: "digest" });
+    signals.dispose();
+    expect(signals.takeCandidate("new", "digest")).toBeUndefined();
+    signals.captureCandidate("late", { kind: "push", inputFingerprint: "digest" });
+    expect(signals.takeCandidate("late", "digest")).toBeUndefined();
+  });
+
+  test("success suppresses the same key, failure retries only externally, and stale completion is ignored", () => {
+    const signals = createGovernanceSignals();
+    const first = observation(true, false);
+    signals.observeBudget(first);
+    const batch = signals.consumeBudgets(first.identity, { external: false });
+    signals.settleBudgets(batch, true);
+    signals.observeBudget(first);
+    expect(signals.consumeBudgets(first.identity, { external: true })).toEqual([]);
+    const changed = observation(true, false, 1000);
+    signals.observeBudget(changed);
+    const failed = signals.consumeBudgets(first.identity, { external: false });
+    signals.settleBudgets(failed, false);
+    expect(signals.consumeBudgets(first.identity, { external: false })).toEqual([]);
+    const retry = signals.consumeBudgets(first.identity, { external: true });
+    expect(retry).toHaveLength(1);
+    const newer = observation(true, false, 900);
+    signals.observeBudget(newer);
+    signals.settleBudgets(retry, true);
+    expect(signals.consumeBudgets(first.identity, { external: false })[0]?.key).toBe(
+      budgetObservationKey(newer, "resident-over-budget"),
+    );
+  });
+  test("a late pre-abort result cannot settle a new attempt for the same key", () => {
+    const signals = createGovernanceSignals();
+    const current = observation(true, false);
+    signals.observeBudget(current);
+    const oldBatch = signals.consumeBudgets(current.identity, { external: false });
+    signals.abort();
+    signals.observeBudget(current);
+    const newBatch = signals.consumeBudgets(current.identity, { external: false });
+    signals.settleBudgets(oldBatch, true);
+    signals.settleBudgets(newBatch, false);
+    expect(signals.consumeBudgets(current.identity, { external: true })).toHaveLength(1);
+  });
+
   test("deduplicates budget observations by signal kind and clears on a normal value", () => {
     const signals = createGovernanceSignals();
     const first = observation(true, true);

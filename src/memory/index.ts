@@ -36,7 +36,12 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { MemorySettings } from "../config/settings.js";
 import type { PromptSectionHub } from "../sysprompt/hub.js";
 import type { MemoryWriteGate, TidyPort } from "./contracts.js";
-import { createSweepRunner } from "./govern/sweep.js";
+import { createSweepRunner, type SweepRender } from "./govern/sweep.js";
+import { createGovernanceSignals, type BudgetDirectoryIdentity, type GovernanceSignal } from "./govern/signals.js";
+import { createFirstUserReviewHost } from "./jev/first-user-review.js";
+import type { BudgetRenderStats } from "./blocks/render.js";
+import { readMarker } from "./blocks/marker.js";
+import { join } from "node:path";
 import { createGovernanceMarkers } from "./govern/markers.js";
 import type { SweepReason } from "./govern/sweep-plan.js";
 import { createMemCommand } from "./command.js";
@@ -50,15 +55,23 @@ import { renderTiered } from "./tiered.js";
 import { runDoctor } from "./doctor.js";
 import { createStartupReminder, collectDoctorFindings, type RenderTieredPort } from "./doctor-command.js";
 import { summaryLine } from "./doctor.js";
-import { canonicalDir } from "./safe-fs.js";
+import { canonicalDir, inspectDirSecurityNoFollow, statRegularIfExists } from "./safe-fs.js";
 import { resolveWorktreeOrigin } from "../core/worktree-origin.js";
 import { dirFormat, effectiveLayout, toolSurfaceFor } from "./blocks/naming.js";
 import { runMigration, resumeRollback, plainMemoryWriteGate } from "./blocks/migrate.js";
 import { memoryDirFor } from "./paths.js";
 import { resolveJevWiring, type JevDomainKind } from "./jev/config.js";
-import { wireJev } from "./jev/wire.js";
+import { wireJev, registryOf } from "./jev/wire.js";
 import { createJevWritePort } from "./jev/write-port.js";
-import type { JevBashJobsLitePort, JevDoctorPort, JevFleetPort, JevRenderInfo, JevTodoPort } from "./jev/contracts.js";
+import type {
+  ClassifierRegistryLike,
+  JevClient,
+  JevBashJobsLitePort,
+  JevDoctorPort,
+  JevFleetPort,
+  JevRenderInfo,
+  JevTodoPort,
+} from "./jev/contracts.js";
 
 export interface WireMemoryOpts {
   settings: MemorySettings;
@@ -146,7 +159,143 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
   // the write takes effect next session.
   const sweepRunners = new Map<string, ReturnType<typeof createSweepRunner>>();
   let governanceNotify: ((message: string) => void) | undefined;
-  const triggerSweep = (cwd: string, reason: SweepReason, origin?: string): void => {
+  type GovernanceEpoch = {
+    cwd: string;
+    identity: BudgetDirectoryIdentity;
+    key: string;
+    controller: AbortController;
+    signals: ReturnType<typeof createGovernanceSignals>;
+    review?: ReturnType<typeof createFirstUserReviewHost>;
+    reviewActive?: boolean;
+    latestBudget?: BudgetRenderStats;
+    externalPending?: boolean;
+  };
+  let governanceEpoch: GovernanceEpoch | undefined;
+  let governanceSessionActive = false;
+  const sweepInvalidation = new Set<string>();
+  const revokeGovernance = (): void => {
+    governanceEpoch?.controller.abort();
+    governanceEpoch?.signals.dispose();
+    governanceEpoch?.review?.dispose();
+    governanceEpoch = undefined;
+    sweepInvalidation.clear();
+    sweepRunners.clear();
+  };
+  const identityFor = (cwd: string): BudgetDirectoryIdentity | undefined => {
+    if (
+      !opts.settings.enabled ||
+      !opts.settings.governance.enabled ||
+      opts.isChildSession ||
+      opts.secureDomainKind === "locked"
+    )
+      return undefined;
+    const dir = memoryDirFor(resolveWorktreeOrigin(cwd) ?? cwd);
+    if (!gate.check(dir).ok) return undefined;
+    const canonical = canonicalDir(dir);
+    if (!canonical || dirFormat(canonical.real) !== "blocks") return undefined;
+    try {
+      const parent = inspectDirSecurityNoFollow(canonical.real);
+      inspectDirSecurityNoFollow(join(canonical.real, "blocks"));
+      const marker = readMarker(join(canonical.real, "blocks"));
+      return {
+        realpath: canonical.real,
+        dev: parent.dev,
+        ino: parent.ino,
+        ...(marker?.source === "migrate" && marker.gen !== undefined && marker.runId
+          ? { migration: { gen: marker.gen, runId: marker.runId } }
+          : {}),
+      };
+    } catch {
+      return undefined;
+    }
+  };
+  const epochFor = (cwd: string): GovernanceEpoch | undefined => {
+    const identity = identityFor(cwd);
+    if (!governanceSessionActive || !identity || migrationAbort.signal.aborted || opts.sessionSignal?.()?.aborted) {
+      revokeGovernance();
+      return undefined;
+    }
+    let blocks: ReturnType<typeof inspectDirSecurityNoFollow>;
+    try {
+      blocks = inspectDirSecurityNoFollow(join(identity.realpath, "blocks"));
+    } catch {
+      revokeGovernance();
+      return undefined;
+    }
+    const key = JSON.stringify([identity, blocks.dev, blocks.ino]);
+    if (governanceEpoch && (governanceEpoch.key !== key || governanceEpoch.cwd !== cwd)) revokeGovernance();
+    if (!governanceEpoch)
+      governanceEpoch = { cwd, identity, key, controller: new AbortController(), signals: createGovernanceSignals() };
+    return governanceEpoch;
+  };
+  const epochCurrent = (epoch: GovernanceEpoch): boolean => {
+    if (
+      governanceEpoch !== epoch ||
+      epoch.controller.signal.aborted ||
+      migrationAbort.signal.aborted ||
+      opts.sessionSignal?.()?.aborted
+    )
+      return false;
+    try {
+      const dir = memoryDirFor(resolveWorktreeOrigin(epoch.cwd) ?? epoch.cwd);
+      if (!gate.check(dir).ok) return false;
+      const canonical = canonicalDir(dir);
+      if (!canonical || canonical.real !== epoch.identity.realpath) return false;
+      const parent = inspectDirSecurityNoFollow(canonical.real);
+      const blocksDir = join(canonical.real, "blocks");
+      const b = inspectDirSecurityNoFollow(blocksDir);
+      if (parent.dev !== epoch.identity.dev || parent.ino !== epoch.identity.ino || b.dev !== parent.dev) return false;
+      if (statRegularIfExists(canonical.real, ".blocks-hold") || !statRegularIfExists(blocksDir, ".layout.json"))
+        return false;
+      const marker = readMarker(blocksDir);
+      const migration =
+        marker?.source === "migrate" && marker.gen !== undefined && marker.runId
+          ? { gen: marker.gen, runId: marker.runId }
+          : undefined;
+      const identity = {
+        realpath: canonical.real,
+        dev: parent.dev,
+        ino: parent.ino,
+        ...(migration ? { migration } : {}),
+      };
+      return JSON.stringify([identity, b.dev, b.ino]) === epoch.key;
+    } catch {
+      return false;
+    }
+  };
+  const epochGate = (epoch: GovernanceEpoch): MemoryWriteGate => ({
+    capture: (dir) => gate.capture(dir),
+    check: (dir) => (epochCurrent(epoch) ? gate.check(dir) : { ok: false, reason: "identity-changed" }),
+  });
+  const runFirstReview = (epoch: GovernanceEpoch, registry: ClassifierRegistryLike, client: JevClient): void => {
+    if (!epochCurrent(epoch) || !jevOn || epoch.reviewActive) return;
+    epoch.review?.dispose();
+    const host = createFirstUserReviewHost({
+      memDir: epoch.identity.realpath,
+      enabled: true,
+      jevEnabled: true,
+      isChild: false,
+      client,
+      registry,
+      gate: epochGate(epoch),
+      signal: epoch.controller.signal,
+      isCurrent: () => epochCurrent(epoch),
+    });
+    epoch.review = host;
+    epoch.reviewActive = true;
+    void host
+      .run()
+      .catch(() => {})
+      .finally(() => {
+        epoch.reviewActive = false;
+      });
+  };
+  const triggerSweep = (
+    cwd: string,
+    reason: SweepReason,
+    origin?: string,
+    admittedBudget?: SweepRender,
+  ): Promise<import("./govern/sweep.js").SweepResult> | undefined => {
     if (
       !opts.settings.governance.enabled ||
       opts.isChildSession ||
@@ -156,21 +305,101 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
       return;
     const dir = memoryDirFor(cwd);
     if (!gate.check(dir).ok || dirFormat(dir) !== "blocks") return;
+    const epoch = governanceEpoch;
     let runner = sweepRunners.get(dir);
     if (!runner) {
       runner = createSweepRunner({
         enabled: true,
-        gate,
+        gate: epoch ? epochGate(epoch) : gate,
         residentBudget: opts.settings.residentBytes,
-        ...(governanceNotify ? { notify: governanceNotify } : {}),
-        onAfterWrite: () => onAfterWrite(cwd, "sweep"),
+        ...(governanceNotify
+          ? {
+              notify: (message: string) => {
+                if (!epoch || epochCurrent(epoch)) governanceNotify?.(message);
+              },
+            }
+          : {}),
+        onAfterWrite: () => {
+          if (!epoch || epochCurrent(epoch)) onAfterWrite(cwd, "sweep");
+        },
       });
       sweepRunners.set(dir, runner);
     }
-    void runner.runSweep(dir, reason, migrationAbort.signal, origin);
+    // The memory-owned controller is replaced/aborted in the earlier existing
+    // session hook. The outer session controller is swapped by a later hook;
+    // capturing it here would abort a new startup sweep when that hook runs.
+    const signals = [migrationAbort.signal, ...(epoch ? [epoch.controller.signal] : [])];
+    return runner.runSweep(dir, reason, AbortSignal.any(signals), origin, admittedBudget);
+  };
+  const consumeOpportunity = (
+    cwd: string,
+    external: boolean,
+    registry?: ClassifierRegistryLike,
+    client?: JevClient,
+  ): boolean => {
+    const epoch = epochFor(cwd);
+    if (!epoch || !epochCurrent(epoch)) return false;
+    const externalOpportunity = external || epoch.externalPending === true;
+    epoch.externalPending = false;
+    const events =
+      epoch.signals.consumeSignals({ signal: epoch.controller.signal, external: externalOpportunity }) ?? [];
+    const budgets = epoch.signals.consumeBudgets(epoch.identity, {
+      external: externalOpportunity || events.length > 0,
+      signal: epoch.controller.signal,
+    });
+    const stats = budgets.length ? epoch.latestBudget : undefined;
+    const reason: SweepReason | undefined = stats
+      ? "budget"
+      : events.includes("release")
+        ? "release"
+        : events.includes("push")
+          ? "push"
+          : events.includes("task-done")
+            ? "task-done"
+            : undefined;
+    if (reason) {
+      const pass = triggerSweep(
+        cwd,
+        reason,
+        undefined,
+        stats
+          ? {
+              residentBytes: stats.resident.usedBytes,
+              residentBudget: stats.resident.budgetBytes,
+              indexOverflow: stats.index.over,
+            }
+          : undefined,
+      );
+      if (!pass) {
+        epoch.signals.settleBudgets(budgets, false);
+        epoch.signals.deferSignals(events);
+      } else
+        void pass.then(
+          (result) => {
+            if (!epochCurrent(epoch)) return;
+            epoch.signals.settleBudgets(budgets, result.stopped === "done");
+            if (result.stopped !== "done" && result.stopped !== "unchanged") epoch.signals.deferSignals(events);
+          },
+          () => {
+            if (!epochCurrent(epoch)) return;
+            epoch.signals.settleBudgets(budgets, false);
+            epoch.signals.deferSignals(events);
+          },
+        );
+    }
+    if (events.length && registry && client) runFirstReview(epoch, registry, client);
+    return reason !== undefined;
   };
   const onAfterWrite = (cwd: string, origin?: string): void => {
-    if (origin !== "sweep") triggerSweep(cwd, "write", origin);
+    if (origin === "sweep") sweepInvalidation.add(cwd);
+    else {
+      sweepInvalidation.delete(cwd);
+      if (jevOn) {
+        const epoch = epochFor(cwd);
+        if (epoch && epochCurrent(epoch)) epoch.externalPending = true;
+        triggerSweep(cwd, "write", origin);
+      } else if (!consumeOpportunity(cwd, true)) triggerSweep(cwd, "write", origin);
+    }
     if (origin === "migrate" || effectiveLayout(opts.settings.layout, dirFormat(memoryDirFor(cwd))) === "blocks") {
       lastBlocks.delete(cwd);
       cache.delete(cwd);
@@ -248,6 +477,7 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
     : undefined;
   if (opts.scopes)
     pi.on("session_tree", () => {
+      revokeGovernance();
       projectSection?.projectSources.clear();
       frozenBlocks.clear();
       lastBlocks.clear();
@@ -258,6 +488,8 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
   pi.on("session_start", async (_event, ctx) => {
     frozenBlocks.clear();
     lastBlocks.clear();
+    revokeGovernance();
+    governanceSessionActive = true;
     migrationAbort.abort();
     migrationAbort = new AbortController();
     sweepRunners.clear();
@@ -301,9 +533,17 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
         });
       };
       await remind();
+      // Review uses the actual on-disk layout, even when the configured
+      // renderer is still tiered; it never performs migration itself.
+      if (current() && dirFormat(dir) === "blocks") {
+        const registry = registryOf(ctx);
+        const epoch = epochFor(cwd);
+        if (epoch && registry && jev) runFirstReview(epoch, registry, jev.client);
+      }
       // Keep migration/sweep's original configured-layout admission unchanged.
       if (!current() || opts.settings.layout !== "blocks") return;
       triggerSweep(cwd, "startup");
+      if (!jevOn) consumeOpportunity(cwd, true);
       if (!opts.settings.migrate.auto || dirFormat(dir) !== "files") return;
       const result = await runMigration(dir, {
         gate,
@@ -320,6 +560,9 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
             "info",
           );
         await remind();
+        const registry = registryOf(ctx);
+        const epoch = epochFor(cwd);
+        if (epoch && registry && jev) runFirstReview(epoch, registry, jev.client);
       }
     } catch {
       /* bounded migration failure leaves the current files layout usable */
@@ -343,6 +586,8 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
     });
     pi.on("session_start", reminder.check);
     pi.on("session_shutdown", (event) => {
+      governanceSessionActive = false;
+      revokeGovernance();
       migrationAbort.abort();
       if (event.reason === "reload") reminder.reset();
     });
@@ -353,8 +598,19 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
     isChildSession: opts.isChildSession,
     cache,
     frozenBlocks,
-    onRender: (cwd, block, info, resident) => {
+    onRender: (cwd, block, info, resident, budgetStats) => {
       lastBlocks.set(cwd, block);
+      if (budgetStats) {
+        const epoch = epochFor(cwd);
+        if (epoch && epochCurrent(epoch)) {
+          const fromSweep = sweepInvalidation.delete(cwd);
+          epoch.latestBudget = budgetStats;
+          epoch.signals.observeBudget(
+            { identity: epoch.identity, stats: budgetStats },
+            fromSweep ? "sweep" : "external",
+          );
+        }
+      }
       // #36 P4 (arch §3.3.5): the fourth argument carries this render's
       // resident id → renderKey map — fold its id set into the recorded
       // JevRenderInfo (wire.ts's renderInfoFor overlays the LEDGER ids on
@@ -399,6 +655,28 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
         // #36 P4 修复轮：生产 writeGate 覆盖 jev 侧车写入（打标/冷却戳/
         // 建议/taxonomy —— writeIndexPatch 逐原语复检）。
         writeGate: secureGate,
+        governance: {
+          capture: (cwd, id, candidate) => {
+            const epoch = epochFor(cwd);
+            if (epoch && epochCurrent(epoch)) epoch.signals.captureCandidate(id, candidate);
+          },
+          take: (cwd, id, fingerprint) => {
+            const epoch = governanceEpoch;
+            return epoch && epoch.cwd === cwd && epochCurrent(epoch)
+              ? epoch.signals.takeCandidate(id, fingerprint)
+              : undefined;
+          },
+          clear: () => governanceEpoch?.signals.clearCandidates(),
+          mark: (cwd, signal: GovernanceSignal) => {
+            const epoch = governanceEpoch;
+            if (epoch && epoch.cwd === cwd && epochCurrent(epoch))
+              epoch.signals.markSignal(signal, { success: true, readOnly: false });
+          },
+          abort: revokeGovernance,
+          turnEnd: (cwd, registry, client) => {
+            consumeOpportunity(cwd, false, registry, client);
+          },
+        },
         getSectionSnapshot: () => {
           const s = opts.sections._state("pi_project_memory");
           return s === undefined ? undefined : { snapshot: s.snapshot, stale: s.stale };

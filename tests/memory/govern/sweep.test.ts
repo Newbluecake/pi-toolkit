@@ -8,6 +8,8 @@ import { readGovernBlock } from "../../../src/memory/govern/supersede.js";
 import { serializeBlock } from "../../../src/memory/blocks/format.js";
 import * as locks from "../../../src/memory/lock.js";
 import { MemoryError } from "../../../src/memory/paths.js";
+import { createGovernanceSignals, type BudgetObservation } from "../../../src/memory/govern/signals.js";
+import * as planModule from "../../../src/memory/govern/sweep-plan.js";
 const roots: string[] = [];
 const now = new Date("2026-11-06T00:00:00Z");
 function setup() {
@@ -169,6 +171,242 @@ it("reentrant signals merge once and yield is invoked without timers", async () 
   await Promise.all([a, b]);
   expect(yields).toBe(4);
 });
+it("admitted budget observations bypass only the corpus debounce and use current render statistics", async () => {
+  const d = setup();
+  createBlockLocked(join(d, "blocks"), "rules", { authority: "user", scope: "global" }, "rule", now);
+  const r = runner({ render: { residentBytes: 0, residentBudget: 100, indexOverflow: false } });
+  expect((await r.runSweep(d, "write")).suggestions).toBe(0);
+  expect((await r.runSweep(d, "budget")).stopped).toBe("unchanged");
+  const result = await r.runSweep(d, "budget", undefined, undefined, {
+    residentBytes: 0,
+    residentBudget: 100,
+    indexOverflow: true,
+  });
+  expect(result.stopped).toBe("done");
+  expect(result.suggestions).toBe(1);
+  expect((await r.runSweep(d, "write")).stopped).toBe("unchanged");
+});
+
+it("keeps an admitted budget observation when a later event coalesces into the trailing pass", async () => {
+  const d = setup();
+  createBlockLocked(join(d, "blocks"), "rules", { authority: "user", scope: "global" }, "rule", now);
+  let release = () => {};
+  const held = new Promise<void>((resolve) => (release = resolve));
+  let yields = 0;
+  const r = runner({
+    yield: async () => {
+      if (++yields === 1) await held;
+    },
+  });
+  const first = r.runSweep(d, "write");
+  const budget = r.runSweep(d, "budget", undefined, undefined, {
+    residentBytes: 0,
+    residentBudget: 100,
+    indexOverflow: true,
+  });
+  r.runSweep(d, "push");
+  release();
+  expect((await first).suggestions).toBe(0);
+  expect((await budget).suggestions).toBe(1);
+});
+
+it("R1: budget arriving during the trailing pass is not settled by the old pass and can retry", async () => {
+  const d = setup();
+  createBlockLocked(join(d, "blocks"), "rules", { authority: "user", scope: "global" }, "rule", now);
+  let releaseFirst = () => {},
+    releaseTail = () => {},
+    tailStarted = () => {};
+  const firstHold = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  const tailHold = new Promise<void>((resolve) => {
+    releaseTail = resolve;
+  });
+  const tailReady = new Promise<void>((resolve) => {
+    tailStarted = resolve;
+  });
+  let yields = 0;
+  const r = runner({
+    yield: async () => {
+      yields++;
+      if (yields === 1) await firstHold;
+      if (yields === 2) {
+        tailStarted();
+        await tailHold;
+      }
+    },
+  });
+  const signals = createGovernanceSignals();
+  const plans = vi.spyOn(planModule, "planSweep");
+  const observation = (budget: number): BudgetObservation => ({
+    identity: { realpath: d, dev: 1, ino: 2 },
+    stats: {
+      corpusFingerprint: "corpus",
+      localToday: "2026-11-06",
+      policyVersion: "v1",
+      resident: { inputFingerprint: "resident", usedBytes: 200, budgetBytes: budget, over: true },
+      index: { inputFingerprint: "index", limitBytes: 2048, omittedCount: 0, over: false },
+    },
+  });
+  const first = r.runSweep(d, "write");
+  const a = observation(100);
+  signals.observeBudget(a);
+  const batchA = signals.consumeBudgets(a.identity, { external: false });
+  const tail = r.runSweep(d, "budget", undefined, undefined, {
+    residentBytes: 200,
+    residentBudget: 100,
+    indexOverflow: false,
+  });
+  releaseFirst();
+  await tailReady;
+  const b = observation(50);
+  signals.observeBudget(b);
+  const batchB = signals.consumeBudgets(b.identity, { external: false });
+  const skipped = await r.runSweep(d, "budget", undefined, undefined, {
+    residentBytes: 200,
+    residentBudget: 50,
+    indexOverflow: false,
+  });
+  expect(skipped.stopped).toBe("not-executed");
+  signals.settleBudgets(batchB, skipped.stopped === "done");
+  expect(signals.consumeBudgets(b.identity, { external: false })).toEqual([]);
+  releaseTail();
+  expect((await first).stopped).toBe("done");
+  const resultA = await tail;
+  expect(resultA.stopped).toBe("done");
+  expect(plans.mock.calls.map((call) => [call[4], call[5]?.residentBudget])).toEqual([
+    ["write", undefined],
+    ["budget", 100],
+  ]);
+  signals.settleBudgets(batchA, true);
+  const retry = signals.consumeBudgets(b.identity, { external: true });
+  expect(retry).toHaveLength(1);
+  expect(retry[0]?.observation.stats.resident.budgetBytes).toBe(50);
+  expect(
+    (
+      await r.runSweep(d, "budget", undefined, undefined, {
+        residentBytes: 200,
+        residentBudget: 50,
+        indexOverflow: false,
+      })
+    ).stopped,
+  ).toBe("done");
+  signals.settleBudgets(retry, true);
+  expect(plans.mock.calls.map((call) => [call[4], call[5]?.residentBudget])).toEqual([
+    ["write", undefined],
+    ["budget", 100],
+    ["budget", 50],
+  ]);
+  plans.mockRestore();
+  expect(signals.consumeBudgets(b.identity, { external: true })).toEqual([]);
+});
+
+it("R1: a new event during the trailing pass is dormant, not attributed to that pass", async () => {
+  const d = setup();
+  let releaseFirst = () => {},
+    releaseTail = () => {},
+    tailStarted = () => {};
+  const firstHold = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  const tailHold = new Promise<void>((resolve) => {
+    releaseTail = resolve;
+  });
+  const tailReady = new Promise<void>((resolve) => {
+    tailStarted = resolve;
+  });
+  let yields = 0;
+  const r = runner({
+    yield: async () => {
+      if (++yields === 1) await firstHold;
+      else if (yields === 2) {
+        tailStarted();
+        await tailHold;
+      }
+    },
+  });
+  const signals = createGovernanceSignals();
+  const first = r.runSweep(d, "write");
+  const tail = r.runSweep(d, "budget", undefined, undefined, {
+    residentBytes: 200,
+    residentBudget: 100,
+    indexOverflow: false,
+  });
+  releaseFirst();
+  await tailReady;
+  signals.markSignal("release", { success: true, readOnly: false });
+  const events = signals.consumeSignals({})!;
+  const skipped = await r.runSweep(d, "release");
+  expect(skipped.stopped).toBe("not-executed");
+  signals.deferSignals(events);
+  expect(signals.consumeSignals({})).toBeUndefined();
+  releaseTail();
+  await Promise.all([first, tail]);
+  expect(signals.consumeSignals({ external: true })).toEqual(["release"]);
+});
+
+it("R1: superseded queued budgets cannot receive another queued budget's result", async () => {
+  const d = setup();
+  let release = () => {};
+  const hold = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let yields = 0;
+  const r = runner({
+    yield: async () => {
+      if (++yields === 1) await hold;
+    },
+  });
+  const first = r.runSweep(d, "write");
+  const old = r.runSweep(d, "budget", undefined, undefined, {
+    residentBytes: 200,
+    residentBudget: 100,
+    indexOverflow: false,
+  });
+  const current = r.runSweep(d, "budget", undefined, undefined, {
+    residentBytes: 200,
+    residentBudget: 50,
+    indexOverflow: false,
+  });
+  expect((await old).stopped).toBe("not-executed");
+  release();
+  expect((await first).stopped).toBe("done");
+  expect((await current).stopped).toBe("done");
+});
+
+it.each(["first-fails", "tail-fails"])("R1: independent pass outcomes %s", async (mode) => {
+  const d = setup();
+  let release = () => {};
+  const hold = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let yields = 0,
+    locksCalled = 0;
+  const original = locks.withMemoryDirLock;
+  const spy = vi.spyOn(locks, "withMemoryDirLock").mockImplementation((...args) => {
+    locksCalled++;
+    if ((mode === "first-fails" && locksCalled === 1) || (mode === "tail-fails" && locksCalled === 2))
+      return Promise.reject(new MemoryError("memory dir busy"));
+    return original(...args);
+  });
+  const r = runner({
+    yield: async () => {
+      if (++yields === 1) await hold;
+    },
+  });
+  const first = r.runSweep(d, "write");
+  const tail = r.runSweep(d, "budget", undefined, undefined, {
+    residentBytes: 200,
+    residentBudget: 50,
+    indexOverflow: true,
+  });
+  release();
+  const [a, b] = await Promise.all([first, tail]);
+  expect(a.stopped).toBe(mode === "first-fails" ? "memory dir busy" : "done");
+  expect(b.stopped).toBe(mode === "tail-fails" ? "memory dir busy" : "done");
+  spy.mockRestore();
+});
+
 it("busy lock is abandoned instead of retrying a sweep", async () => {
   const d = setup();
   expired(d);
