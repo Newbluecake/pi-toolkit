@@ -6,6 +6,7 @@ import { afterEach, expect, it } from "vitest";
 import { runMigration } from "../../src/memory/blocks/migrate.js";
 import { createBlockLocked, readCorpus } from "../../src/memory/blocks/store.js";
 import { createSweepRunner, readArchiveIndex, restoreBlock } from "../../src/memory/govern/sweep.js";
+import { createGovernanceMarkers } from "../../src/memory/govern/markers.js";
 import { renderBlocks } from "../../src/memory/blocks/render.js";
 import { firstUserReviewPass } from "../../src/memory/govern/review-lite.js";
 import { readIndex } from "../../src/memory/jev/index-store.js";
@@ -56,7 +57,12 @@ it("migrate → user-only review → startup budget suggestion, no truncation �
   const result = await runner.runSweep(root, "startup");
   expect(result.archived).toContain(a.id);
   expect(notices.some((m) => m.includes("resident budget exceeded"))).toBe(true);
-  expect(notices.some((m) => m.includes("reload"))).toBe(true);
+  expect(notices.some((m) => m.includes("reload"))).toBe(false);
+  const markers = createGovernanceMarkers(root);
+  expect((await markers.deliverReloadReminder((m) => notices.push(m))).status).toBe("delivered");
+  await runner.runSweep(root, "reload");
+  expect((await markers.deliverReloadReminder((m) => notices.push(m))).status).toBe("already-delivered");
+  expect(notices.filter((m) => m.includes("/reload"))).toHaveLength(1);
   expect(readIndex(root).index.review?.suggestions.some((s) => s.kind === "resident-budget")).toBe(true);
   const rendered = renderBlocks(readCorpus(blocks), {
     slug: "test",

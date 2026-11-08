@@ -37,6 +37,7 @@ import type { MemorySettings } from "../config/settings.js";
 import type { PromptSectionHub } from "../sysprompt/hub.js";
 import type { MemoryWriteGate, TidyPort } from "./contracts.js";
 import { createSweepRunner } from "./govern/sweep.js";
+import { createGovernanceMarkers } from "./govern/markers.js";
 import type { SweepReason } from "./govern/sweep-plan.js";
 import { createMemCommand } from "./command.js";
 import { executeMemoryRead, type MemoryReadResult } from "./command-readonly.js";
@@ -161,7 +162,7 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
         enabled: true,
         gate,
         residentBudget: opts.settings.residentBytes,
-        notify: (message) => governanceNotify?.(message),
+        ...(governanceNotify ? { notify: governanceNotify } : {}),
         onAfterWrite: () => onAfterWrite(cwd, "sweep"),
       });
       sweepRunners.set(dir, runner);
@@ -260,30 +261,65 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
     migrationAbort.abort();
     migrationAbort = new AbortController();
     sweepRunners.clear();
-    governanceNotify = ctx.hasUI ? (message) => ctx.ui.notify(message, "warning") : undefined;
-    // Non-blocks/child/locked paths remain byte-identical and do not probe disk.
-    if (opts.isChildSession || opts.settings.layout !== "blocks" || opts.secureDomainKind === "locked") return;
+    const controller = migrationAbort;
+    const hostSignal = opts.sessionSignal?.();
+    const signal = hostSignal ? AbortSignal.any([controller.signal, hostSignal]) : controller.signal;
+    const current = (): boolean =>
+      migrationAbort === controller &&
+      !signal.aborted &&
+      memoryDirFor(resolveWorktreeOrigin(ctx.cwd) ?? ctx.cwd) === dir;
+    // No optional no-op wrapper: an absent UI port is not successful delivery.
+    governanceNotify =
+      ctx.hasUI && typeof ctx.ui?.notify === "function" ? (message) => ctx.ui.notify(message, "warning") : undefined;
+    const notify = governanceNotify;
+    // Child/off/locked paths do not probe disk. Reminder admission uses the
+    // ACTUAL layout; changing the configured renderer cannot reset migration.
+    if (!opts.settings.enabled || opts.isChildSession || opts.secureDomainKind === "locked") return;
     const cwd = resolveWorktreeOrigin(ctx.cwd) ?? ctx.cwd;
     const dir = memoryDirFor(cwd);
     if (!gate.check(dir).ok || !canonicalDir(dir)) return;
+    if (opts.settings.layout !== "blocks" && dirFormat(dir) !== "blocks") return;
     try {
-      await resumeRollback(dir, { gate, signal: migrationAbort.signal });
+      if (opts.settings.layout === "blocks") await resumeRollback(dir, { gate, signal });
+      if (!current()) return;
+      // Independent migration-only path, NOT behind triggerSweep's governance
+      // switch and NOT the doctor's pre-notify notifiedSessions bookkeeping.
+      const markers = createGovernanceMarkers(dir, {
+        gate,
+        signal,
+        isCurrent: current,
+        diag: (message) => {
+          if (current() && notify) notify(message);
+        },
+      });
+      const remind = async (): Promise<void> => {
+        if (!opts.settings.enabled || !opts.settings.doctor.notifyOnStart || !notify || !current()) return;
+        await markers.deliverReloadReminder((message) => {
+          if (!current() || !ctx.hasUI || typeof ctx.ui?.notify !== "function" || !opts.settings.doctor.notifyOnStart)
+            throw new Error("E_NOTIFY_UNAVAILABLE");
+          return notify(message);
+        });
+      };
+      await remind();
+      // Keep migration/sweep's original configured-layout admission unchanged.
+      if (!current() || opts.settings.layout !== "blocks") return;
       triggerSweep(cwd, "startup");
       if (!opts.settings.migrate.auto || dirFormat(dir) !== "files") return;
       const result = await runMigration(dir, {
         gate,
-        signal: migrationAbort.signal,
+        signal,
         diag: (message) => {
           if (ctx.hasUI) ctx.ui.notify(message, "warning");
         },
       });
-      if (result.outcome === "committed") {
+      if (result.outcome === "committed" && current()) {
         onAfterWrite(cwd, "migrate");
         if (ctx.hasUI)
           ctx.ui.notify(
             `memory: migrated ${result.plan!.report.files.length} files → ${result.plan!.blocks.length} blocks — /mem migrate --report · undo: /mem migrate --rollback`,
             "info",
           );
+        await remind();
       }
     } catch {
       /* bounded migration failure leaves the current files layout usable */

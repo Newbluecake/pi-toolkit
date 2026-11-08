@@ -125,10 +125,36 @@ Jev 是一个分类器驱动的核心 memory 子系统，职责三项：召回�
 
 ### P7 交接：需核对的行为缺口（未在本轮改行为）
 
-- 迁移后 reload 提醒目前可能在每次 startup 重复显示，尚不是持久化的一次性提醒。
+- 迁移后 reload 提醒已由 C5 接入独立代际标记（下节），不再由 sweep 重复显示。
 - blocks 的 `/mem review`、`/mem expired` 当前路由到 review-lite 治理子集，尚未完整呈现非治理 Jev 建议及原 expired 四组视图。这是命令能力/需求覆盖缺口，不是文档措辞问题；P7 应逐项核对需求与实现并安排补齐或显式裁定，不能仅靠更改文档宣称完成。
 
 本包证据：`tests/memory/govern/{sweep-plan,sweep,supersede,review-lite}.test.ts`、`tests/integration/memory-blocks-{governance,supersede-race}.test.ts`；相邻门禁包含工具 v3/Jev、命令/tidy、pi-free、activate-trace 与既有 memory golden。
+
+### #36 C5 治理标记与迁移 reload 提醒（2026-11-08）
+
+`govern/markers.ts` 是 `blocks/.jev/governance-markers.json` 的唯一读写 owner，v1 只保留当前已提交
+`source:migrate` 的 `(gen, runId)`。读取分为 current / missing / different-generation / invalid /
+unavailable；缺失合法、旧代际不抑制新迁移，坏 JSON/版本/字段/超 64KiB/symlink/非正规文件整份拒收，
+不视为完成、不覆写，并按 owner 最多一次诊断。`.layout.json` 只读，Jev index/review/report 不扩字段。
+
+- `read()` 返回目录身份、迁移 identity 与原文件 revision；`writeFirstUserReview(snapshot, marker)`
+  在原目录锁内重新读取、CAS 并合并另一 marker。它只是存储端口，**不是 C3 首检 host 或完成证明**；
+  调用方必须先证明整个有界 pass 的结果/建议提交成功。未知策略和越界计数拒写。
+- `deliverReloadReminder(syncNotify)` 在同一短锁内复核身份/代际/已送达状态，先同步通知再原子写 delivered。
+  `.jev` 仅在已有合法 blocks 下按 gate 创建；0600 临时文件 + rename，失败清理本次 temp，不动坏用户文件。
+  并发 startup 锁内复查；普通写端口陈旧 revision 拒绝覆盖。无 module-scope 状态/新计时器/模型或消息回合。
+- `wireMemory` 复用 startup 的发现已迁移目录及迁移完成机会，独立于 Jev/governance enabled；按实际
+  blocks 目录而非配置的 renderer 布局准入，不改变 migration/sweep 原有配置门。只在真实 UI notify
+  端口存在且 `doctor.notifyOnStart` 允许时准入。无 UI/端口、notify 抛错/返回 Promise、锁忙、
+  gate/abort/epoch 失效、落盘失败均不消费；notify 后再次取消检查。正文、预算及同代际 resume/reload
+  不重发，新迁移可重发。sweep 不再发此提醒，doctor 的原 notifiedSessions 语义不改。
+- 通知成功而持久失败时下次自然机会允许再提醒；已经 rename 成功的标记不因之后 abort 撤销。
+  这是可重试语义，不承诺跨 UI/文件系统 exactly-once 或多文件事务；同步 I/O 不能被 JS 抢占，
+  no-follow/身份复核也不宣称抵御同 uid 恶意进程在任意 syscall 间替换路径。
+
+证据：`tests/memory/govern/{markers,markers-wire}.test.ts`（真实临时文件系统 + 实际 wireMemory 接线）及
+`tests/integration/memory-blocks-governance.test.ts`（sweep 移交无两条）。不接 C3、不消费 I1 事件，默认值及
+所有 golden 保持原样。
 
 ### #36 自动取代收窄（2026-11-07 用户新裁定）
 

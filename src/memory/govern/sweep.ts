@@ -351,8 +351,8 @@ export function createSweepRunner(opts: SweepOptions) {
             `memory: resident budget exceeded (${render.residentBytes}/${render.residentBudget}B); no rules truncated — /mem review`,
           );
         if (count) opts.notify?.(`memory: ${count} suggestions — /mem review`);
-        if (corpus.marker?.source !== "fresh")
-          opts.notify?.("memory: migrated block memory — reload to refresh memory");
+        // Migration reload delivery belongs exclusively to govern/markers.ts;
+        // the host calls it independently of this governance-enabled runner.
       }
     } catch (e) {
       result.stopped = (e as Error).message;
