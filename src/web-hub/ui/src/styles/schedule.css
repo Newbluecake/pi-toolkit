@@ -144,6 +144,15 @@
   font-size: var(--fs-sm);
   font-weight: var(--fw-semibold);
   color: var(--c-text);
+  cursor: pointer;
+}
+.sched-task-name:hover {
+  color: var(--c-primary);
+  text-decoration: underline;
+}
+.sched-task-name:focus-visible {
+  outline: 2px solid var(--c-primary);
+  outline-offset: 2px;
 }
 .sched-task[data-enabled="false"] .sched-task-name {
   color: var(--c-text-3);
@@ -553,11 +562,4 @@ button.sched-row-name:hover {
 
 .chip-sched .num {
   font-variant-numeric: tabular-nums;
-}
-
-/* coarse pointers: the task-row 「详情」 buttons keep a ≥36px hit box (channels.css grammar) */
-@media (pointer: coarse) {
-  .sched-task-act .btn {
-    min-height: 36px;
-  }
 }

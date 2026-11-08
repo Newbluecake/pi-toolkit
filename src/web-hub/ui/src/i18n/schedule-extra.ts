@@ -53,7 +53,6 @@ const en = {
   whenInvalid: "(invalid schedule)",
   formBackground: "background",
   formMessage: "message",
-  details: "Details",
 
   runAuto: "auto",
   runManual: "manual",
@@ -155,7 +154,6 @@ const zh: Record<keyof typeof en, string> = {
   whenInvalid: "（时间定义无效）",
   formBackground: "后台运行",
   formMessage: "定时消息",
-  details: "详情",
 
   runAuto: "自动",
   runManual: "手动",

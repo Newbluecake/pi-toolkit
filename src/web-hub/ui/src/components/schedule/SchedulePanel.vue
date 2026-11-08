@@ -251,7 +251,17 @@ function closeDetail(): void {
               <span class="sched-task-dot" aria-hidden="true"></span>
               <div class="sched-task-body">
                 <div class="sched-task-head">
-                  <span class="sched-task-name" translate="no">{{ task.name }}</span>
+                  <span
+                    class="sched-task-name"
+                    role="button"
+                    tabindex="0"
+                    translate="no"
+                    :aria-label="t('detail.schedOpenDetailAria', { name: task.name })"
+                    @click="openDetail(task.id)"
+                    @keydown.enter.prevent="openDetail(task.id)"
+                    @keydown.space.prevent="openDetail(task.id)"
+                    >{{ task.name }}</span
+                  >
                   <span v-if="task.totals.missed > 0" class="chip sched-chip-missed">{{
                     t("schedule.missedNote", { n: task.totals.missed })
                   }}</span>
@@ -298,14 +308,6 @@ function closeDetail(): void {
                     <AppIcon name="trash" class="icon-sm" />
                   </button>
                 </template>
-                <button
-                  class="btn btn-ghost btn-xs"
-                  type="button"
-                  :aria-label="t('detail.schedOpenDetailAria', { name: task.name })"
-                  @click="openDetail(task.id)"
-                >
-                  {{ t("schedule.details") }} »
-                </button>
               </span>
             </li>
           </ul>

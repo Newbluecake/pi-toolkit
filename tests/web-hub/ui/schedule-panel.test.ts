@@ -151,10 +151,9 @@ describe("SchedulePanel", () => {
     expect(tasks[0]!.text()).toContain("0 8 * * *");
     expect(tasks[0]!.text()).toContain("Asia/Shanghai");
     expect(tasks[1]!.text()).toContain("周五归档提醒");
-    // r2: EVERY row is the read-only ghost 「详情」 — no primary 审阅 button anywhere,
-    // and the legacy pendingApproval task shows the plain 已启用/enabled chip (no 待确认).
+    // No separate detail action or approval action remains on the task cards.
     expect(w.findAll(".sched-task-act .btn-primary")).toHaveLength(0);
-    expect(w.findAll(".sched-task-act .btn-ghost")).toHaveLength(2);
+    expect(w.findAll(".sched-task-act .btn-ghost")).toHaveLength(0);
     // the legacy taskPending/taskExecutable copy (removed with the keys, r2) never renders
     expect(w.text()).not.toContain("review pending");
     expect(w.text()).not.toContain("待确认");
@@ -209,9 +208,21 @@ describe("SchedulePanel", () => {
     expect(w.find(".sched-task .sched-chip-missed").exists()).toBe(true);
   });
 
+  it.each(["enter", "space"])("opens the named detail from the focusable title with %s", async (key) => {
+    setLangOverride("zh");
+    const { w } = mountPanel({ schedules: makePayload() });
+    const title = w.findAll(".sched-task-name")[1]!;
+    expect(title.attributes("role")).toBe("button");
+    expect(title.attributes("tabindex")).toBe("0");
+    expect(title.attributes("aria-label")).toContain("周五归档提醒");
+    await title.trigger(`keydown.${key}`);
+    expect(w.find(".review-kv").exists()).toBe(true);
+    expect(w.text()).toContain("周五归档提醒");
+  });
+
   it("detail view: full prompt as INERT text (a <script> payload stays literal), bg kv rows", async () => {
     const { w } = mountPanel({ schedules: makePayload() });
-    await w.findAll(".sched-task-act .btn")[0]!.trigger("click"); // 详情
+    await w.findAll(".sched-task-name")[0]!.trigger("click"); // 详情
     const prompt = w.find(".review-prompt");
     expect(prompt.exists()).toBe(true);
     expect(prompt.element.tagName).toBe("PRE");
@@ -226,7 +237,7 @@ describe("SchedulePanel", () => {
     const { w } = mountPanel({ schedules: makePayload() });
     // the legacy-pending task (pendingApproval:true + offer on the wire) opens the SAME
     // read-only view — no action row, no hash note, no tracked command of any kind
-    await w.findAll(".sched-task-act .btn")[1]!.trigger("click");
+    await w.findAll(".sched-task-name")[1]!.trigger("click");
     expect(w.find(".review-actions").exists()).toBe(false);
     expect(w.find(".review-hash").exists()).toBe(false);
     expect(w.text()).not.toContain("defHash");
@@ -238,7 +249,7 @@ describe("SchedulePanel", () => {
 
   it("a task vanishing mid-detail falls back to the list silently (no note)", async () => {
     const { w, state } = mountPanel({ schedules: makePayload() });
-    await w.findAll(".sched-task-act .btn")[0]!.trigger("click");
+    await w.findAll(".sched-task-name")[0]!.trigger("click");
     expect(w.find(".review-kv").exists()).toBe(true);
     state.value.schedules = makePayload([makeSession({ tasks: [], runs: [] })]);
     await nextTick();
@@ -275,7 +286,7 @@ describe("SchedulePanel task actions + run jump (r2 §6-W2)", () => {
     await nextTick();
     expect(rows[0]!.find(".sched-task-meta").text()).toContain("next ");
     expect(rows[1]!.find(".sched-task-meta").text()).toContain("trigger paused");
-    await rows[1]!.find(".btn-ghost").trigger("click");
+    await rows[1]!.find(".sched-task-name").trigger("click");
     expect(w.find(".sched-task-act").exists()).toBe(false);
   });
 
@@ -319,10 +330,12 @@ describe("SchedulePanel task actions + run jump (r2 §6-W2)", () => {
     expect(note.text()).toContain("boom");
   });
 
-  it("offline (E3): no action buttons — the read-only 详情 stays", () => {
+  it("offline (E3): no action buttons — the title still opens read-only detail", async () => {
     const { w } = mountPanel({ schedules: makePayload(), down: true });
     expect(w.findAll(".sched-task-act .icon-btn")).toHaveLength(0);
-    expect(w.findAll(".sched-task-act .btn-ghost")).toHaveLength(2);
+    expect(w.findAll(".sched-task-act .btn-ghost")).toHaveLength(0);
+    await w.find(".sched-task-name").trigger("click");
+    expect(w.find(".review-kv").exists()).toBe(true);
   });
 
   it("run rows with a runId jump to the fleet (hub.selectRun); legacy runs without one render no button", async () => {
@@ -372,9 +385,9 @@ describe("legacy offer wire is ignored (r2 §6-W1, old-hub compat)", () => {
     await settle();
     await body.find(".detail-sched-btn").trigger("click");
     await settle();
-    const buttons = body.findAll(".sched-task-act .btn");
-    expect(buttons).toHaveLength(2);
-    await buttons[1]!.trigger("click");
+    const titles = body.findAll(".sched-task-name");
+    expect(titles).toHaveLength(2);
+    await titles[1]!.trigger("click");
     await settle();
     expect(body.find(".review-kv").exists()).toBe(true);
     expect(body.find(".review-actions").exists()).toBe(false);
