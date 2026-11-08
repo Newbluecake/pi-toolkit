@@ -164,7 +164,9 @@ function whenLabel(when: { kind: "cron" | "once" | "invalid"; expr: string; tz: 
 
 function nextLabel(nextAt: number | undefined, degraded: boolean): string {
   if (degraded || nextAt === undefined) return t("schedule.taskNextNever");
-  return t("schedule.taskNext", { t: `${fmtTs(nextAt)} (${relIn(nextAt, ticker.now.value)})` });
+  const relative = relIn(nextAt, ticker.now.value);
+  if (relative === "due") return t("schedule.taskDue");
+  return t("schedule.taskNextRelative", { t: relative });
 }
 
 // --- detail view (in-dialog swap; ONE PickerSheet — stacked sheets would double the scroll lock) ---
@@ -246,70 +248,65 @@ function closeDetail(): void {
           <p class="sched-sec-title">{{ t("schedule.sectionTasks", { n: model.tasks.length }) }}</p>
           <ul v-if="model.tasks.length > 0" class="sched-list">
             <li v-for="task in model.tasks" :key="task.id" class="sched-task" :data-enabled="task.enabled">
-              <div class="sched-task-head">
-                <span class="sched-task-name" translate="no">{{ task.name }}</span>
-                <span v-if="task.enabled" class="chip">{{ t("schedule.taskEnabled") }}</span>
-                <span v-else class="chip">{{ t("schedule.taskPaused") }}</span>
-                <span v-if="task.totals.missed > 0" class="chip sched-chip-missed">{{
-                  t("schedule.missedNote", { n: task.totals.missed })
-                }}</span>
-                <span class="sched-task-act">
-                  <template v-if="model.canWrite">
-                    <button
-                      v-if="task.enabled"
-                      class="icon-btn"
-                      type="button"
-                      :title="t('schedule.taskPause')"
-                      :aria-label="t('schedule.taskPauseAria', { name: task.name })"
-                      :disabled="busyTaskId !== null"
-                      @click="void onTaskAction('pause', task.id)"
-                    >
-                      <AppIcon name="pause" class="icon-sm" />
-                    </button>
-                    <button
-                      v-else
-                      class="icon-btn"
-                      type="button"
-                      :title="t('schedule.taskResume')"
-                      :aria-label="t('schedule.taskResumeAria', { name: task.name })"
-                      :disabled="busyTaskId !== null"
-                      @click="void onTaskAction('resume', task.id)"
-                    >
-                      <AppIcon name="play" class="icon-sm" />
-                    </button>
-                    <button
-                      class="icon-btn danger"
-                      type="button"
-                      :title="t('schedule.taskRemove')"
-                      :aria-label="t('schedule.taskRemoveAria', { name: task.name })"
-                      :disabled="busyTaskId !== null"
-                      @click="void onTaskAction('rm', task.id)"
-                    >
-                      <AppIcon name="trash" class="icon-sm" />
-                    </button>
-                  </template>
-                  <button class="btn btn-ghost btn-xs" type="button" @click="openDetail(task.id)">
-                    {{ t("schedule.details") }}
-                  </button>
-                </span>
+              <span class="sched-task-dot" aria-hidden="true"></span>
+              <div class="sched-task-body">
+                <div class="sched-task-head">
+                  <span class="sched-task-name" translate="no">{{ task.name }}</span>
+                  <span v-if="task.totals.missed > 0" class="chip sched-chip-missed">{{
+                    t("schedule.missedNote", { n: task.totals.missed })
+                  }}</span>
+                </div>
+                <div class="sched-task-meta">
+                  <strong>{{
+                    task.enabled ? nextLabel(task.nextAt, task.degraded) : t("schedule.taskTriggerPaused")
+                  }}</strong>
+                  <span class="sched-task-when" :title="whenLabel(task.when)">{{ whenLabel(task.when) }}</span>
+                </div>
               </div>
-              <p class="sched-task-meta">
-                {{ whenLabel(task.when) }} ·
-                {{ t(task.form === "message" ? "schedule.formMessage" : "schedule.formBackground")
-                }}<template v-if="task.feishu"> · {{ t("schedule.taskFeishuOn") }}</template>
-                <template v-if="task.createdBy === 'agent'"> · {{ t("schedule.taskCreatedByAgent") }}</template>
-                <template v-if="task.enabled"> · {{ nextLabel(task.nextAt, task.degraded) }}</template>
-              </p>
-              <p class="sched-task-stats">
-                {{
-                  t("schedule.taskStats", {
-                    fired: task.totals.fired,
-                    missed: task.totals.missed,
-                    skipped: task.totals.skipped,
-                    manual: task.totals.manual,
-                  })
-                }}
-              </p>
+              <span class="sched-task-act">
+                <template v-if="model.canWrite">
+                  <button
+                    v-if="task.enabled"
+                    class="icon-btn"
+                    type="button"
+                    :title="t('schedule.taskPause')"
+                    :aria-label="t('schedule.taskPauseAria', { name: task.name })"
+                    :disabled="busyTaskId !== null"
+                    @click="void onTaskAction('pause', task.id)"
+                  >
+                    <AppIcon name="pause" class="icon-sm" />
+                  </button>
+                  <button
+                    v-else
+                    class="icon-btn"
+                    type="button"
+                    :title="t('schedule.taskResume')"
+                    :aria-label="t('schedule.taskResumeAria', { name: task.name })"
+                    :disabled="busyTaskId !== null"
+                    @click="void onTaskAction('resume', task.id)"
+                  >
+                    <AppIcon name="play" class="icon-sm" />
+                  </button>
+                  <button
+                    class="icon-btn danger"
+                    type="button"
+                    :title="t('schedule.taskRemove')"
+                    :aria-label="t('schedule.taskRemoveAria', { name: task.name })"
+                    :disabled="busyTaskId !== null"
+                    @click="void onTaskAction('rm', task.id)"
+                  >
+                    <AppIcon name="trash" class="icon-sm" />
+                  </button>
+                </template>
+                <button
+                  class="btn btn-ghost btn-xs"
+                  type="button"
+                  :aria-label="t('detail.schedOpenDetailAria', { name: task.name })"
+                  @click="openDetail(task.id)"
+                >
+                  {{ t("schedule.details") }} »
+                </button>
+              </span>
             </li>
           </ul>
           <p v-else class="sched-empty">{{ t("schedule.empty") }}</p>

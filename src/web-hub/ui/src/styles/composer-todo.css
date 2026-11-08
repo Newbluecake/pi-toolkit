@@ -157,12 +157,6 @@
 /* Strictly read-only: no action buttons ever (ScheduleRows gets no canWrite) and the names
  * render as plain spans there (`plain-names`) — nothing focusable but the run links. */
 
-.composer-sched-readonly {
-  margin: 4px 0 0;
-  color: var(--c-text-3);
-  font-size: var(--fs-2xs);
-}
-
 .composer-todo-head {
   display: flex;
   align-items: baseline;

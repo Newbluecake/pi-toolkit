@@ -25,6 +25,7 @@ import { SCHEDULE_EXTRA } from "../../../src/web-hub/ui/src/i18n/schedule-extra.
 import type { AgentState, CmdOutcome, ControlHandle, HubHandle } from "../../../src/web-hub/ui/src/types.js";
 import type { SchedulesPayloadWire } from "../../../src/web-hub/protocol/schedule.js";
 import { makePayload, makePendingTask, makeRun, makeSession, makeTask, SCHED_SID } from "./fixtures/schedule.js";
+import { resetLangForTests, setLangOverride } from "../../../src/web-hub/ui/src/composables/useI18n.js";
 import { setDetailedListForTests } from "./helpers/list-density.js";
 
 const SCHED_CAP = "sched.v1";
@@ -40,6 +41,7 @@ beforeEach(() => {
   }));
 });
 afterEach(() => {
+  resetLangForTests();
   vi.unstubAllGlobals();
   for (const w of mounted.splice(0)) w.unmount();
   document.body.innerHTML = "";
@@ -248,6 +250,35 @@ describe("SchedulePanel", () => {
 });
 
 describe("SchedulePanel task actions + run jump (r2 §6-W2)", () => {
+  it("shows timeline state in both languages and keeps all actions operable", async () => {
+    setLangOverride("zh");
+    const tasks = [
+      makeTask({ nextAt: Date.now() + 29 * 60_000 }),
+      makeTask({ task: { id: "s_paused01", name: "暂停任务", enabled: false }, nextAt: undefined }),
+    ];
+    const { w, runs } = mountPanel({ schedules: makePayload([makeSession({ tasks, runs: [] })]) });
+    const rows = w.findAll(".sched-task");
+    expect(rows).toHaveLength(2);
+    expect(rows[0]!.find(".sched-task-meta strong").text()).toMatch(/下次 .* 后/);
+    expect(rows[0]!.find(".sched-task-when").text()).toContain("0 8");
+    expect(rows[1]!.find(".sched-task-when").text()).toContain("0 8");
+    expect(rows[1]!.find(".sched-task-meta").text()).toContain("暂停触发");
+    expect(rows.every((row) => row.find(".sched-task-dot").attributes("aria-hidden") === "true")).toBe(true);
+    expect(rows[0]!.findAll(".chip")).toHaveLength(0);
+    expect(rows[1]!.findAll("button").every((button) => !!button.attributes("aria-label"))).toBe(true);
+    await rows[1]!.find(".icon-btn").trigger("click");
+    await flushPromises();
+    await rows[0]!.find(".icon-btn.danger").trigger("click");
+    await flushPromises();
+    expect(runs.map((run) => run[2])).toEqual(["resume s_paused01", "rm s_abcd2345"]);
+    setLangOverride("en");
+    await nextTick();
+    expect(rows[0]!.find(".sched-task-meta").text()).toContain("next ");
+    expect(rows[1]!.find(".sched-task-meta").text()).toContain("trigger paused");
+    await rows[1]!.find(".btn-ghost").trigger("click");
+    expect(w.find(".sched-task-act").exists()).toBe(false);
+  });
+
   it("online + canWrite: task rows carry pause/resume/delete icon buttons", () => {
     const { w } = mountPanel({ schedules: makePayload() });
     // fixture: both tasks enabled ⇒ pause + delete per row

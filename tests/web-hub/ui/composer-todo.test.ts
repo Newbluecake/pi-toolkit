@@ -356,7 +356,7 @@ describe("Composer tasks chip ⏰ segment (r2 W3)", () => {
     const name = panel.find(".sched-row-name");
     expect(name.element.tagName).toBe("SPAN");
     expect(panel.findAll(".composer-tasks-sec button.sched-row-name")).toHaveLength(0);
-    expect(panel.find(".composer-sched-readonly").exists()).toBe(true);
+    expect(panel.find(".composer-sched-readonly").exists()).toBe(false);
     await panel.find(".sched-run-link").trigger("click");
     expect(selectRuns).toEqual([["agent-a", "run-w3a"]]);
   });

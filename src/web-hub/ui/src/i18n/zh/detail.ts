@@ -119,7 +119,6 @@ const detail = {
   // todoStatus*/todoBlockedBy；定时分区标题复用 tasksSchedSec。
   composerTasksAria: "查看任务",
   composerTasksTitle: "任务",
-  composerSchedReadonly: "定时任务在此只读——暂停或删除请到详情面板操作。",
   composerTodoDone: "已完成 {n} 项",
   composerTodoMore: "（+{n} 更多）",
   // schedule-auto-approve r2 W2：聚合 TasksPanel（详情头部——待办分区 + 定时任务分区，

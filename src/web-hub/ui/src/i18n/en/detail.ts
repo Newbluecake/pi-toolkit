@@ -126,7 +126,6 @@ const detail = {
   // keys above; the sched section header reuses tasksSchedSec.
   composerTasksAria: "Show tasks",
   composerTasksTitle: "Tasks",
-  composerSchedReadonly: "Scheduled tasks are read-only here — pause or delete them from the detail panel.",
   composerTodoDone: "{n} done",
   composerTodoMore: "(+{n} more)",
   // schedule-auto-approve r2 W2: the aggregated TasksPanel (detail header — todo section +

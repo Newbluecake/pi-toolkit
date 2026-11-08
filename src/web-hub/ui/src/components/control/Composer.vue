@@ -1559,7 +1559,6 @@ watch(
       <div v-if="schedWire !== undefined" class="composer-tasks-sec">
         <p class="composer-tasks-sec-title">{{ t("detail.tasksSchedSec", { n: schedWire.count }) }}</p>
         <ScheduleRows :rows="schedRows" :now="schedNow" compact plain-names @open-run="onSchedOpenRun" />
-        <p class="composer-sched-readonly">{{ t("detail.composerSchedReadonly") }}</p>
       </div>
     </div>
     <AttachmentTray
