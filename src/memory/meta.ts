@@ -6,6 +6,8 @@
 //
 // Zero pi/typebox imports; independently unit-testable.
 
+import { decodeSoftScalar } from "./soft-meta.js";
+import { META_LIMITS, truncateMeta } from "./blocks/format.js";
 import { parseFrontmatter, stripLeadingDriftHeader } from "./frontmatter.js";
 import { stripDriftHeader } from "./render.js";
 import type { MemoryMeta, MemoryMetaResult, MemoryStatus } from "./contracts.js";
@@ -65,7 +67,7 @@ export function splitReadWhen(raw: string): string[] {
  * throwing: structural problems are reported as `errors` for the doctor
  * (D07), not raised. `fallbackTopic` is normally the filename minus `.md`.
  */
-export function parseMemoryMeta(raw: string, fallbackTopic: string): MemoryMetaResult {
+export function parseMemoryMeta(raw: string, fallbackTopic: string, opts?: { legacyWhen?: true }): MemoryMetaResult {
   const errors: string[] = [];
   // Strip a head drift-import banner (pre-fix `/mem import` wrote it BEFORE
   // the frontmatter — field study F1) so the block behind it parses again.
@@ -90,7 +92,11 @@ export function parseMemoryMeta(raw: string, fallbackTopic: string): MemoryMetaR
   if (description !== undefined && Buffer.byteLength(description, "utf8") > MAX_DESCRIPTION_BYTES) {
     errors.push(`description exceeds ${MAX_DESCRIPTION_BYTES}B`);
   }
-  const readWhen = get("read_when");
+  // Decode exactly like the read-only compatibility serializer, then enforce
+  // the budget on the final consumed legacy `when` value, not escaped bytes.
+  const when = opts?.legacyWhen ? fm?.fields.get("when") : undefined;
+  const readWhen =
+    get("read_when") ?? (when === undefined ? undefined : truncateMeta(decodeSoftScalar(when), META_LIMITS.when));
   if (readWhen !== undefined && Buffer.byteLength(readWhen, "utf8") > MAX_READ_WHEN_BYTES) {
     errors.push(`read_when exceeds ${MAX_READ_WHEN_BYTES}B`);
   }

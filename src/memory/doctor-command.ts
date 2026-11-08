@@ -34,6 +34,7 @@ import { frontmatterSource } from "./frontmatter.js";
 import { splitEntries } from "./jev/entries.js";
 import type { JevDoctorPort } from "./jev/contracts.js";
 import { parseMemoryMeta } from "./meta.js";
+import { softMetaDiagnostics } from "./soft-meta.js";
 import { memoryDirFor, type MemoryPaths } from "./paths.js";
 import { canonicalDirState, inspectDirNoFollow, listDirNames, listRegular, readRegular } from "./safe-fs.js";
 import { renderTiered } from "./tiered.js";
@@ -301,8 +302,15 @@ export async function handleMemDoctorCommand(
   const renderPort = deps.renderTieredPort ?? DEFAULT_RENDER_PORT;
   const findings = runDoctorFor(cwd, deps.paths, settings, renderPort, now, deps.jev);
   const extra = deps.scoped?.() ?? [];
+  const display = memoryDirFor(cwd, deps.paths);
+  const state = canonicalDirState(display);
+  const soft = softMetaDiagnostics(state.state === "ok" ? state.dir.real : display);
+  const softLines = soft.map(
+    (d) => `E_META_SOFT ${d.field}: ${d.bytes}B exceeds ${d.limit}B; historical value truncated for reading`,
+  );
   const report =
     formatDoctorReport(findings) +
+    (softLines.length ? "\n" + softLines.join("\n") : "") +
     (extra.length
       ? "\n" + extra.map((f) => `${f.code} ${f.scope}: ${f.reason}${f.entryId ? ` (${f.entryId})` : ""}`).join("\n")
       : "");

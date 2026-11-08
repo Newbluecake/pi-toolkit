@@ -1024,7 +1024,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     } catch {
       return false; // deleted / rolled back mid-wait
     }
-    const parsed = parseBlockFile(name, raw);
+    const parsed = parseBlockFile(name, raw, { softLimits: true });
     if ("stray" in parsed) return false;
     if (rev !== undefined && parsed.rev !== rev) return false;
     return eligible(parsed, undefined, {

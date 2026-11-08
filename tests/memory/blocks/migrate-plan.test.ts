@@ -150,3 +150,27 @@ it("deterministic migration contract golden; capture refuses overwrites", () => 
   }
   expect(readFileSync(path, "utf8")).toBe(text);
 });
+
+it("truncates legacy metadata on UTF-8 boundaries and reports each truncation", () => {
+  for (const description of ["a".repeat(111), "中".repeat(100)]) {
+    const p = planMigration([
+      source(
+        "feedback_long.md",
+        `---\ndescription: ${description}\nread_when: ${"w".repeat(95)}\n---\n## ${"中".repeat(34)}\n- A fact\n`,
+      ),
+    ]);
+    const b = parsed(p)[0]!;
+    expect(Buffer.byteLength(b.meta.title!)).toBeLessThanOrEqual(110);
+    expect(b.meta.title).toMatch(/…$/);
+    expect(b.meta.title).not.toContain("�");
+    expect(Buffer.byteLength(b.meta.when!)).toBeLessThanOrEqual(70);
+    expect(Buffer.byteLength(b.meta.section!)).toBeLessThanOrEqual(80);
+    expect(p.report.metaTruncated).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ blockId: b.id, field: "title", from: description, to: b.meta.title }),
+        expect.objectContaining({ blockId: b.id, field: "when" }),
+        expect.objectContaining({ blockId: b.id, field: "section" }),
+      ]),
+    );
+  }
+});

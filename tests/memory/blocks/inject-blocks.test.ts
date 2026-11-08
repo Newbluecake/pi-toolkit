@@ -4,7 +4,7 @@
 // byte-identical to renderTiered, and the external renderer follows the
 // blocks branch with the external eligibility applied.
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
@@ -18,6 +18,8 @@ import { readCorpus } from "../../../src/memory/blocks/store.js";
 import { renderBlocks } from "../../../src/memory/blocks/render.js";
 import { blockRaw, writeBlocksDir } from "./helpers.js";
 import { writeIndexPatch } from "../../../src/memory/jev/index-store.js";
+import { softLegacyMetadata, softMetaDiagnostics } from "../../../src/memory/soft-meta.js";
+import { parseFrontmatter } from "../../../src/memory/frontmatter.js";
 import { entryHash } from "../../../src/memory/jev/entries.js";
 
 const tmpRoots: string[] = [];
@@ -311,4 +313,95 @@ describe("blocks sidecar → renderer (P4 wiring)", () => {
       }).text,
     );
   });
+});
+
+test("historical overlong block metadata renders with one soft diagnostic per block", () => {
+  const fx = fixture();
+  const dir = memoryDirFor(fx.cwd, fx.paths);
+  const real = writeBlocksDir(dir, [
+    { id: "general.001", authority: "user", scope: "global", body: "- keep this rule" },
+  ]);
+  const file = join(real, "general.001.md");
+  writeFileSync(
+    file,
+    blockRaw({ id: "general.001", authority: "user", scope: "global", body: "- keep this rule" }).replace(
+      "status: active",
+      `status: active\nsection: ${"中".repeat(34)}\nwhen: ${"w".repeat(95)}`,
+    ),
+  );
+  writeFileSync(join(dir, "jev-reflex.md"), `---\nread_when: ${"w".repeat(95)}\n---\n- legacy\n`);
+  const parsed = readCorpus(real).blocks[0]!;
+  expect(parsed.errors.filter((e) => e === "E_META_SOFT")).toEqual(["E_META_SOFT"]);
+  expect(Buffer.byteLength(parsed.meta.section!)).toBeLessThanOrEqual(80);
+  const { registration } = section({ layout: "blocks" }, { paths: fx.paths });
+  expect(registration.provider({ ...INPUT, ctx: ctx(fx.cwd) })).toContain("keep this rule");
+  expect(registration.provider({ ...INPUT, ctx: ctx(fx.cwd) })).toContain("keep this rule");
+});
+
+test("legacy and blocks injection soften metadata once per directory field and value without warnings", () => {
+  const fx = fixture();
+  const dir = memoryDirFor(fx.cwd, fx.paths);
+  mkdirSync(dir, { recursive: true });
+  const when = "w".repeat(95);
+  const legacy = `---\ndescription: reflex\nwhen: ${when}\nsource: agent\n---\n- legacy rule\n`;
+  writeFileSync(join(dir, "jev-reflex.md"), legacy);
+  const warn = vi.spyOn(console, "warn");
+  const { registration } = section({ layout: "legacy" }, { paths: fx.paths });
+  expect(registration.provider({ ...INPUT, ctx: ctx(fx.cwd) })).toContain("legacy rule");
+  expect(registration.provider({ ...INPUT, ctx: ctx(fx.cwd) })).toContain("legacy rule");
+  expect(softMetaDiagnostics(dir)).toEqual([{ code: "E_META_SOFT", field: "when", bytes: 95, limit: 70 }]);
+  const normalized = softLegacyMetadata(legacy, dir);
+  expect(Buffer.byteLength(parseFrontmatter(normalized)!.fields.get("when")!.replaceAll('"', ""))).toBeLessThanOrEqual(
+    70,
+  );
+  expect(readFileSync(join(dir, "jev-reflex.md"), "utf8")).toBe(legacy);
+
+  const longSection = "中".repeat(34);
+  const real = writeBlocksDir(dir, [
+    { id: "general.001", authority: "user", scope: "global", body: "- block one" },
+    { id: "general.002", authority: "user", scope: "global", body: "- block two" },
+  ]);
+  for (const id of ["general.001", "general.002"]) {
+    const file = join(real, `${id}.md`);
+    writeFileSync(
+      file,
+      readFileSync(file, "utf8").replace("status: active", `status: active\nsection: ${longSection}`),
+    );
+  }
+  const first = readCorpus(real);
+  expect(first.blocks).toHaveLength(2);
+  expect(first.blocks.every((b) => Buffer.byteLength(b.meta.section!) <= 80)).toBe(true);
+  expect(softMetaDiagnostics(dir)).toEqual([
+    { code: "E_META_SOFT", field: "when", bytes: 95, limit: 70 },
+    { code: "E_META_SOFT", field: "section", bytes: 102, limit: 80 },
+  ]);
+  const blocks = section({ layout: "blocks" }, { paths: fx.paths });
+  expect(blocks.registration.provider({ ...INPUT, ctx: ctx(fx.cwd) })).toContain("block one");
+  expect(
+    section({ layout: "blocks" }, { paths: fx.paths }).registration.provider({ ...INPUT, ctx: ctx(fx.cwd) }),
+  ).toContain("block two");
+  expect(softMetaDiagnostics(dir)).toHaveLength(2);
+  expect(warn).not.toHaveBeenCalled();
+});
+
+test("tiered files renderer reads legacy when at the block byte limit", () => {
+  const fx = fixture();
+  const dir = memoryDirFor(fx.cwd, fx.paths);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "jev-reflex.md"), `---\ndescription: reflex\nwhen: ${"中".repeat(31) + "ab"}\n---\n- fact\n`);
+  const input = {
+    cwd: fx.cwd,
+    profile: "full" as const,
+    access: "memory" as const,
+    coreBytes: 2048,
+    blockBytes: 8192,
+    indexMax: 20,
+  };
+  const out = renderTiered(input, { paths: fx.paths }).text;
+  expect(out).toContain("jev-reflex");
+  expect(out).toContain("when:");
+  expect(out).toContain("…");
+  expect(softMetaDiagnostics(dir)).toEqual([{ code: "E_META_SOFT", field: "when", bytes: 95, limit: 70 }]);
+  expect(renderTiered(input, { paths: fx.paths }).text).toBe(out);
+  expect(softMetaDiagnostics(dir)).toHaveLength(1);
 });

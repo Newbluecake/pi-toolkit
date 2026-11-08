@@ -281,3 +281,35 @@ it("sweep updates only its own persisted clock and fingerprint, never semantic r
     corpusFp: "new-semantic",
   });
 });
+
+it("never rewrites archived historical oversized metadata during recovery or restore", async () => {
+  const d = setup();
+  mkdirSync(join(d, "blocks/archive"));
+  const name = "old.001.md";
+  const raw = serializeBlock(
+    {
+      kind: "block",
+      authority: "agent",
+      status: "active",
+      version: 1,
+      created: now.toISOString(),
+      updated: now.toISOString(),
+    },
+    "old",
+  ).replace("status: active", `status: active\nwhen: ${"w".repeat(95)}`);
+  const path = join(d, "blocks/archive", name);
+  writeFileSync(path, raw);
+  writeFileSync(
+    join(d, "blocks/archive/index.json"),
+    JSON.stringify({ [name]: { id: "old.001", archivedAt: now.toISOString(), reason: "write" } }),
+  );
+  await runner().runSweep(d, "startup");
+  expect(readFileSync(path, "utf8")).toBe(raw);
+  await expect(restoreBlock(d, "old.001")).rejects.toThrow(
+    /E_META: archived when exceeds limit \(95B > 70B\).*manually/,
+  );
+  writeFileSync(path, raw.replace("kind: block\n", ""));
+  await expect(restoreBlock(d, "old.001")).rejects.toThrow("structural corruption");
+  writeFileSync(path, raw);
+  expect(readFileSync(path, "utf8")).toBe(raw);
+});

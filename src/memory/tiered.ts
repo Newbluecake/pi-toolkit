@@ -24,6 +24,7 @@ import {
   type TieredRenderInput,
   type TieredRenderResult,
 } from "./contracts.js";
+import { softLegacyMetadata } from "./soft-meta.js";
 import { frontmatterSource, stripFrontmatter } from "./frontmatter.js";
 import { descriptionOrHeading, parseMemoryMeta, splitSections, type MemorySection } from "./meta.js";
 import { memoryDirFor, toSlug, type MemoryPaths } from "./paths.js";
@@ -182,7 +183,7 @@ export class MetaCache {
       return updated;
     }
     const fallbackTopic = name.replace(/\.md$/, "");
-    const { meta, errors } = parseMemoryMeta(text, fallbackTopic);
+    const { meta, errors } = parseMemoryMeta(softLegacyMetadata(text, dir), fallbackTopic, { legacyWhen: true });
     const bodyAfterFm = stripDriftHeader(stripFrontmatter(text));
     const description = descriptionOrHeading(bodyAfterFm, meta);
     const entry: MetaEntry = { size, mtimeMs, sha1, meta, errors, description };

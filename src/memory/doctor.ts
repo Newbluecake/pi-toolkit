@@ -709,7 +709,7 @@ export function runDoctorBlocks(input: DoctorBlocksInput): BlocksDoctorFinding[]
   // (acceptance fix).
   for (const b of input.blocks) {
     for (const err of b.errors) {
-      if (err === "E_TOO_LARGE") continue;
+      if (err === "E_TOO_LARGE" || err === "E_META_SOFT") continue;
       findings.push({
         id: "D23",
         severity: "warn",

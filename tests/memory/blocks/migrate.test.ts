@@ -224,3 +224,23 @@ it("post-publication fsync failure warns without rolling back a complete directo
   expect(dirFormat(p)).toBe("blocks");
   expect(diag.mock.calls.some(([message]) => message.includes("parent fsync failed"))).toBe(true);
 });
+
+it("commits long legacy descriptions and persists the truncation report", async () => {
+  const p = root();
+  for (const [name, desc] of [
+    ["feedback_111.md", "a".repeat(111)],
+    ["user_300.md", "中".repeat(100)],
+  ]) {
+    fs.writeFileSync(join(p, name!), `---\ndescription: ${desc}\n---\n- preserved fact\n`);
+  }
+  const result = await runMigration(p);
+  expect(result.outcome).toBe("committed");
+  const report = JSON.parse(fs.readFileSync(join(p, "blocks/.migration-report.json"), "utf8"));
+  const records = report.metaTruncated.filter((r: { field: string }) => r.field === "title");
+  expect(records).toHaveLength(2);
+  for (const record of records) {
+    expect(Buffer.byteLength(record.to)).toBeLessThanOrEqual(110);
+    expect(record.to).toMatch(/…$/);
+    expect(fs.readFileSync(join(p, "blocks", `${record.blockId}.md`), "utf8")).toContain(record.to);
+  }
+});

@@ -322,3 +322,18 @@ fold 外层派生 inherited；不改变 native 继承规则。`session-web-file.
 8MiB 字节硬界；每段 100ms 是单调时钟协作预算，无法抢占同步 syscall。文件身份/字节 guard
 不是跨进程原子 CAS；SDK 可缓冲，appended 不代表已 flush/fsync。取消时保留已同步观察，
 最终观察由控制器复制后 release；本包没有控制器、远程入口或生产写接线，现有 Web 写仍拒绝。
+
+## Migration metadata byte limits
+
+The block migration planner truncates copied `title`, `when`, `section`, `heading`, and `until` at UTF-8 code point boundaries, reserving three bytes for `…`. Nonempty `metaTruncated` report entries contain the block id, field, original and truncated values; the same report is exposed by dry-run and persisted with migration. No entry is emitted when no field is truncated, retaining the existing report shape. Block corpus and Jev entry reads truncate over-limit fields in memory only; legacy frontmatter is similarly normalized for files-layout rendering and blocks-layout root scans. Tiered reading accepts legacy `when` as a fallback only when `read_when` is absent. Missing/invalid block kind or name retains the existing stray behavior; length softening never makes it a valid block. Raw revisions and source files remain unchanged and write serialization remains strict.
+
+Soft-diagnostic contract: **startup never emits soft-metadata warnings; `/mem doctor` displays them on demand**. `soft-meta.ts` keeps a bounded (4096) process-global, reload-safe set keyed by SHA-256 of directory + field + original value; raw values are never retained. `/mem doctor` exposes one `E_META_SOFT` line per distinct observed key with the field, original UTF-8 byte count and limit, without the original value or any diagnostic disk write. Legacy `when` read normalization serializes as a JSON string and the consuming `parseMemoryMeta(..., { legacyWhen: true })` uses the same JSON scalar decoder, then enforces the 70B limit on the final decoded value; the strict parser and `read_when` contract are unchanged. Diagnostics are observational, not persistent: entries disappear on restart or capacity eviction and may remain visible after source edits until then. Existing `E_SECTION_TOO_LARGE` per-block doctor findings remain for compatibility. This is not a proof that all possible sources of a historical `E_META` notification have been identified.
+
+### Session Web exact file observation primitives
+
+`safe-fs.ts` is the sole runtime fs import under memory. Its internal-only
+`*SessionObservation*` primitives preserve raw errno and the exact no-follow,
+non-blocking, bigint-stat and chunked-read semantics needed by
+`scopes/session-web-file.ts`; they do not independently validate file type or
+identity. The caller performs those checks and retains the 8 MiB limit. Closing
+is raw `closeSync`, not idempotent; a second close propagates `EBADF`.

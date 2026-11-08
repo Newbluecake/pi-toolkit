@@ -14,6 +14,7 @@ import {
   writeTempRegular,
 } from "../safe-fs.js";
 import { MemoryError } from "../paths.js";
+import { recordSoftMeta, softLegacyMetadata } from "../soft-meta.js";
 import { newTidyId } from "../tidy/manifest.js";
 import type { MemoryWriteGate } from "../contracts.js";
 import type { JevIndexV1 } from "../jev/contracts.js";
@@ -80,7 +81,10 @@ export function readCorpus(
       const stat = statRegularIfExists(realDir, file.name);
       if (!stat) throw new MemoryError("E_UNMIGRATED: file disappeared");
       stamps.push([file.name, stat.size, stat.mtimeMs, stat.ino]);
-      const b = parseBlockFile(file.name, readRegular(realDir, file.name).text);
+      const b = parseBlockFile(file.name, readRegular(realDir, file.name).text, {
+        softLimits: true,
+        onSoftLimit: (field, value) => recordSoftMeta(dirname(realDir), field, value),
+      });
       if ("stray" in b || !parseBlockName(file.name)) strays.push(file.name);
       else blocks.push(b);
       hooks?.afterRead?.(file.name);
@@ -101,12 +105,11 @@ export function readCorpus(
     const legacy: LegacyFingerprint = {
       files: listRegular(dirname(realDir), { names: "v2" })
         .files.sort((a, b) => a.name.localeCompare(b.name))
-        .map((f) => ({
-          name: f.name,
-          sha256: createHash("sha256")
-            .update(readRegular(dirname(realDir), f.name).text)
-            .digest("hex"),
-        })),
+        .map((f) => {
+          const raw = readRegular(dirname(realDir), f.name).text;
+          softLegacyMetadata(raw, dirname(realDir));
+          return { name: f.name, sha256: createHash("sha256").update(raw).digest("hex") };
+        }),
     };
     const result: BlockCorpus = {
       blocks,
@@ -178,6 +181,16 @@ export function replaceBlockLocked(
   const name = `${id}.md`,
     current = parsed(name, readRegular(realDir, name).text);
   if (current.rev !== expectRev) throw new MemoryError(`E_CONFLICT: current rev ${current.rev}\n${current.body}`);
+  // A strict parser drops invalid scalar fields; never silently erase historical metadata on edit.
+  const invalidMeta = current.errors.find(
+    (error) => /^invalid (until|section|heading|title|when)$/.test(error) || error === "E_SECTION_TOO_LARGE",
+  );
+  if (invalidMeta)
+    throw new MemoryError(
+      invalidMeta === "E_SECTION_TOO_LARGE"
+        ? "E_SECTION_TOO_LARGE: section exceeds 80 UTF-8 bytes"
+        : `E_META: ${invalidMeta}`,
+    );
   const meta: BlockMeta = {
     ...next.meta,
     kind: "block",

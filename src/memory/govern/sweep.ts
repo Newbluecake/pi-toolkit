@@ -6,13 +6,14 @@ import { clampSpanMs } from "../../core/deadline.js";
 import type { MemoryWriteGate } from "../contracts.js";
 import type { BlockCorpus } from "../blocks/store.js";
 import { readMarker } from "../blocks/marker.js";
-import { parseBlockFile, serializeBlock } from "../blocks/format.js";
+import { META_LIMITS, parseBlockFile, serializeBlock } from "../blocks/format.js";
 import { residentBlocksOf, residentMeteredBytes } from "../blocks/render.js";
 import { parseArchiveName, parseBlockName } from "../blocks/naming.js";
 import { mergeReview, readIndex } from "../jev/index-store.js";
 import { legacyDrift } from "../blocks/legacy.js";
 import { withMemoryDirLock } from "../lock.js";
 import { MemoryError } from "../paths.js";
+import { recordSoftMeta, softLegacyMetadata } from "../soft-meta.js";
 import {
   ensurePrivateDir,
   inspectDirNoFollow,
@@ -77,7 +78,10 @@ async function readSweepCorpus(
   for (const file of files.files.sort((a, b) => a.name.localeCompare(b.name))) {
     beforeRead();
     const raw = readRegular(dir, file.name).text;
-    const b = parseBlockFile(file.name, raw);
+    const b = parseBlockFile(file.name, raw, {
+      softLimits: true,
+      onSoftLimit: (field, value) => recordSoftMeta(memDir, field, value),
+    });
     if ("stray" in b || !parseBlockName(file.name)) strays.push(file.name);
     else {
       blocks.push(b);
@@ -89,10 +93,9 @@ async function readSweepCorpus(
   const legacy: BlockCorpus["legacy"]["files"][number][] = [];
   for (const file of listRegular(memDir, { names: "v2" }).files.sort((a, b) => a.name.localeCompare(b.name))) {
     beforeRead();
-    legacy.push({
-      name: file.name,
-      sha256: createHash("sha256").update(readRegular(memDir, file.name).text).digest("hex"),
-    });
+    const raw = readRegular(memDir, file.name).text;
+    softLegacyMetadata(raw, memDir);
+    legacy.push({ name: file.name, sha256: createHash("sha256").update(raw).digest("hex") });
   }
   beforeRead();
   const after = inspectDirNoFollow(dir);
@@ -215,7 +218,7 @@ export function createSweepRunner(opts: SweepOptions) {
         if (result.operations + 2 > 50) break;
         await locked(() => {
           const b = parseBlockFile(name, readRegular(archive, name).text);
-          if (!("stray" in b) && b.meta.status !== "archived") {
+          if (!("stray" in b) && b.meta.status !== "archived" && b.errors.every((error) => error === "E_TOO_LARGE")) {
             let tmp = "";
             op(() => {
               tmp = writeTempRegular(
@@ -412,9 +415,27 @@ export async function restoreBlock(memDir: string, target: string, opts: Superse
       const [name, v] = choices[0]!;
       if (listDirNames(join(memDir, "blocks")).includes(`${v.id}.md`))
         throw new MemoryError(`restore conflict: ${v.id} already exists`);
-      const archive = join(memDir, "blocks", "archive"),
-        b = parseBlockFile(name, readRegular(archive, name).text);
-      if ("stray" in b) throw new MemoryError("invalid archived block");
+      const archive = join(memDir, "blocks", "archive");
+      const raw = readRegular(archive, name).text;
+      const overages: { field: keyof typeof META_LIMITS; bytes: number }[] = [];
+      const soft = parseBlockFile(name, raw, {
+        softLimits: true,
+        onSoftLimit: (field, value) => overages.push({ field, bytes: Buffer.byteLength(value) }),
+      });
+      if (
+        "stray" in soft ||
+        soft.errors.some((error) => !["E_TOO_LARGE", "E_META_SOFT", "E_SECTION_TOO_LARGE"].includes(error))
+      )
+        throw new MemoryError("invalid archived block: structural corruption; inspect the archive file manually");
+      if (overages.length) {
+        const { field, bytes } = overages[0]!;
+        throw new MemoryError(
+          `E_META: archived ${field} exceeds limit (${bytes}B > ${META_LIMITS[field]}B); inspect and correct the archived file manually before restore`,
+        );
+      }
+      const b = parseBlockFile(name, raw);
+      if ("stray" in b || b.errors.some((error) => error !== "E_TOO_LARGE"))
+        throw new MemoryError("invalid archived block: structural corruption; inspect the archive file manually");
       governanceGate(memDir, opts.gate, opts.signal);
       const tmp = writeTempRegular(
         archive,

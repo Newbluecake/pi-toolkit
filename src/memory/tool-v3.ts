@@ -28,7 +28,8 @@
  * all mutable state lives in this factory's closure; no module state.
  */
 
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { recordSoftMeta } from "./soft-meta.js";
 import type { ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { MemorySettings } from "../config/settings.js";
 import { resolveWorktreeOrigin } from "../core/worktree-origin.js";
@@ -247,17 +248,23 @@ function resolveTopicName(target: string): string | undefined {
   return canonicalTopic(s);
 }
 
-function readBlock(realDir: string, id: string): ParsedBlock {
+function readBlock(realDir: string, id: string, soft = false): ParsedBlock {
   const name = `${id}.md`;
   const { text: raw } = readRegular(realDir, name);
-  const parsed = parseBlockFile(name, raw);
+  const parsed = parseBlockFile(
+    name,
+    raw,
+    soft
+      ? { softLimits: true, onSoftLimit: (field, value) => recordSoftMeta(dirname(realDir), field, value) }
+      : undefined,
+  );
   if ("stray" in parsed) throw new MemoryError(`E_BAD_PATH: ${name} is not a well-formed block`);
   return parsed;
 }
 
-function readBlockIfExists(realDir: string, id: string): ParsedBlock | undefined {
+function readBlockIfExists(realDir: string, id: string, soft = false): ParsedBlock | undefined {
   try {
-    return readBlock(realDir, id);
+    return readBlock(realDir, id, soft);
   } catch (err) {
     if (err instanceof MemoryError) throw err;
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return undefined;
@@ -732,7 +739,7 @@ export function createMemoryToolV3(deps: MemoryToolV3Deps): ToolDefinition {
         // else is tried as a topic name.
         if (BLOCK_ID_STEM_RE.test(normalized.path.replace(/\.md$/, "").replace(/^\/?(memories\/)?/, ""))) {
           const id = resolveBlockId(normalized.path);
-          const b = readBlockIfExists(realDir, id);
+          const b = readBlockIfExists(realDir, id, true);
           if (b === undefined) {
             throw new MemoryError(`E_NOT_FOUND: block ${id} does not exist — view (no path) lists topics`);
           }

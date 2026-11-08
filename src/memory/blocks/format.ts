@@ -71,7 +71,18 @@ const ORDER = [
   "updated",
   "version",
 ] as const;
-const LIMITS: Record<string, number> = { until: 120, section: 80, heading: 120, title: 110, when: 70 };
+export const META_LIMITS = { until: 120, section: 80, heading: 120, title: 110, when: 70 } as const;
+const LIMITS: Record<string, number> = META_LIMITS;
+/** Truncate at code point boundaries, including the UTF-8 ellipsis in the budget. */
+export function truncateMeta(value: string, limit: number): string {
+  if (Buffer.byteLength(value) <= limit) return value;
+  let out = "";
+  for (const cp of value) {
+    if (Buffer.byteLength(out + cp) > limit - 3) break;
+    out += cp;
+  }
+  return out + "…";
+}
 function decode(value: string): string {
   if (value.startsWith('"')) {
     try {
@@ -83,7 +94,11 @@ function decode(value: string): string {
   }
   return value;
 }
-export function parseBlockFile(name: string, raw: string): ParsedBlock | { stray: true; name: string } {
+export function parseBlockFile(
+  name: string,
+  raw: string,
+  opts?: { softLimits?: true; onSoftLimit?: (field: keyof typeof META_LIMITS, value: string) => void },
+): ParsedBlock | { stray: true; name: string } {
   const parsed = parseArchiveName(name);
   const clean = raw.replace(/^\uFEFF/, "");
   const fm = parseFrontmatter(clean);
@@ -127,7 +142,12 @@ export function parseBlockFile(name: string, raw: string): ParsedBlock | { stray
     const value = values.get(key);
     if (value === undefined) continue;
     if (/[\r\n]/.test(value)) errors.push(`invalid ${key}`);
-    else if (key === "section") {
+    else if (opts?.softLimits && Buffer.byteLength(value) > LIMITS[key]!) {
+      opts.onSoftLimit?.(key, value);
+      meta[key] = truncateMeta(value, LIMITS[key]!);
+      if (key === "section") errors.push("E_SECTION_TOO_LARGE");
+      if (!errors.includes("E_META_SOFT")) errors.push("E_META_SOFT");
+    } else if (key === "section") {
       meta.section = value;
       if (Buffer.byteLength(value) > LIMITS.section!) errors.push("E_SECTION_TOO_LARGE");
     } else if (Buffer.byteLength(value) > LIMITS[key]!) errors.push(`invalid ${key}`);

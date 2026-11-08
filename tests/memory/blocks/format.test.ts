@@ -111,3 +111,12 @@ describe("block format", () => {
     ).toMatchObject({ meta: { authority: "agent" } });
   });
 });
+
+it("strict writes reject overlong title and when; structural failures remain stray", () => {
+  expect(() => serializeBlock({ ...base, title: "a".repeat(111) }, "x")).toThrow("E_META: invalid title");
+  expect(() => serializeBlock({ ...base, when: "a".repeat(95) }, "x")).toThrow("E_META: invalid when");
+  expect(
+    parseBlockFile("x.001.md", serializeBlock(base, "x").replace("kind: block\n", ""), { softLimits: true }),
+  ).toHaveProperty("stray", true);
+  expect(parseBlockFile("invalid.md", serializeBlock(base, "x"), { softLimits: true })).toHaveProperty("stray", true);
+});
