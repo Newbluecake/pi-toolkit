@@ -109,6 +109,10 @@ export const TIER1_DECLARED: Readonly<Record<string, Tier1DeclaredEntry>> = {
   "tests/memory/jev/off-golden.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/memory/jev/wire-predict.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/memory/legacy-golden.test.ts": { kind: "proc", why: "proc:node:child_process" },
+  "tests/memory/scopes/session-web-thenable.test.ts": {
+    kind: "proc",
+    why: "proc:node:child_process; strict unhandled-rejection probe",
+  },
   "tests/memory/safe-fs.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/memory/tidy.test.ts": { kind: "timing", why: "wait:setTimeout(…, 1100)" },
   "tests/quota/credentials.test.ts": { kind: "proc", why: "proc:node:child_process" },

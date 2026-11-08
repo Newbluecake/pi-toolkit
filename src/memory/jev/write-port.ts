@@ -23,7 +23,7 @@ import { frontmatterSource } from "../frontmatter.js";
 import { parseMemoryMeta } from "../meta.js";
 import { clampSpanMs } from "../../core/deadline.js";
 import { entryHash, splitEntries, type EntryFileInfo, type EntryIndex } from "./entries.js";
-import type { MemEntry, RelationVerdict } from "./contracts.js";
+import type { DismissedPair, MemEntry, RelationVerdict } from "./contracts.js";
 import {
   formatWriteEcho,
   formatV3ConflictLine,
@@ -32,7 +32,7 @@ import {
   type WriteEchoInput,
 } from "./format.js";
 import { touchedUserEntries as pairedUserEntries } from "./guard.js";
-import { gcBlockIndex, mergeIndex, readIndex, writeIndexPatch } from "./index-store.js";
+import { gcBlockIndex, isDismissedRelation, mergeIndex, readIndex, writeIndexPatch } from "./index-store.js";
 import { anchorOf } from "./review.js";
 import { prefilter } from "./match.js";
 import { redactForJev } from "./redact.js";
@@ -280,6 +280,7 @@ export function createJevWritePort(deps: JevWritePortDeps): JevWritePort {
     compare: readonly { cand: { id: string }; entry: MemEntry }[],
     answers: Record<string, unknown> | undefined,
     snapshots: ReadonlyMap<string, { readonly rev: string; readonly hash: string }>,
+    dismissed: readonly DismissedPair[],
   ): readonly RelationVerdict[] {
     const out: (RelationVerdict & { readonly oldHash: string })[] = [];
     for (const c of compare) {
@@ -294,6 +295,16 @@ export function createJevWritePort(deps: JevWritePortDeps): JevWritePort {
             ? "supersedes"
             : undefined;
       if (kind === undefined) continue;
+      const answerKind = answer.choice === "duplicate" ? "duplicate" : kind;
+      if (
+        isDismissedRelation(
+          dismissed,
+          { hash: newEntry.hash, anchor: anchorOf(newEntry) },
+          { hash: c.entry.hash, anchor: anchorOf(c.entry) },
+          answerKind,
+        )
+      )
+        continue;
       const p = answer.probabilities[answer.choice] ?? answer.confidence;
       const auto =
         kind === "supersedes" && p >= SUPERSEDE_AUTO_P && out.filter((v) => v.auto).length < AUTO_PER_WRITE_MAX;
@@ -354,9 +365,8 @@ export function createJevWritePort(deps: JevWritePortDeps): JevWritePort {
     }
 
     const taxonomy = deps.taxonomyFor(dir);
-    // Restoring an edge is a permanent decision to keep this pair. Filter
-    // before question construction, not merely at execution: it must never
-    // spend another automatic relation judgment on that restored pair.
+    // Legacy kindless dismissals can suppress a whole pair before asking.
+    // Kind-specific decisions are applied after the classifier answers.
     const dismissed = readIndex(dir).index.review?.dismissed ?? [];
     // Each entry and its revision come from the same raw block read, before
     // the classifier can yield. Never pair a cached entry with a later rev.
@@ -366,13 +376,16 @@ export function createJevWritePort(deps: JevWritePortDeps): JevWritePort {
       .map((b) => blockToEntry(b, today))
       .filter((e) => {
         if (e.inline.isPrivate === true || e.secret) return false;
-        const hashKey = [entry.hash, e.hash].sort().join("+");
-        const anchorKey = [anchorOf(entry), anchorOf(e)].sort().join("+");
-        return !dismissed.some(
-          (d) =>
-            (!d.until || d.until >= today) &&
-            (!d.kind || d.kind === "conflict" || d.kind === "supersedes") &&
-            (d.hashKey === hashKey || d.anchorKey === anchorKey),
+        return !isDismissedRelation(
+          dismissed.filter(
+            (d) =>
+              !d.kind ||
+              d.kind === "conflict" ||
+              d.kind === "supersedes" ||
+              (d.kind === "duplicate" && d.suggestionKey !== undefined),
+          ),
+          { hash: entry.hash, anchor: anchorOf(entry) },
+          { hash: e.hash, anchor: anchorOf(e) },
         );
       });
     const { pool, userEcho } = blockPool(entry, corpus);
@@ -420,7 +433,7 @@ export function createJevWritePort(deps: JevWritePortDeps): JevWritePort {
       }
       if (result.tags === undefined) return EMPTY; // private/secret guard — unreachable here
       const tags = result.tags;
-      const verdicts = blockVerdicts(entry, block.rev, verdictCompare, outcome.answers, snapshots);
+      const verdicts = blockVerdicts(entry, block.rev, verdictCompare, outcome.answers, snapshots, dismissed);
       const echo: string[] = [];
       const input2: WriteEchoInput = {
         kind: "tagged",
@@ -459,7 +472,16 @@ export function createJevWritePort(deps: JevWritePortDeps): JevWritePort {
         if (answer === undefined) continue;
         const p = answer.probabilities[answer.choice] ?? answer.confidence;
         const related = answer.choice === "conflict" || answer.choice === "supersedes" || answer.choice === "duplicate";
-        if (related && p >= SUGGEST_P) {
+        if (
+          related &&
+          !isDismissedRelation(
+            dismissed,
+            { hash: entry.hash, anchor: anchorOf(entry) },
+            { hash: e.hash, anchor: anchorOf(e) },
+            answer.choice as "duplicate" | "conflict" | "supersedes",
+          ) &&
+          p >= SUGGEST_P
+        ) {
           echo.push(formatV3NotSupersededLine(e.block?.id ?? e.file, p));
         }
       }

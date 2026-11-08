@@ -1293,7 +1293,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
         log(`periodic review failed (${outcome.reason})`);
         return;
       }
-      const out = await writeIndexPatch(c.dir, { review: outcome }, deps.writeGate);
+      const out = await writeIndexPatch(c.dir, { review: outcome, reviewBase: c.index.review ?? null }, deps.writeGate);
       if (out === "busy") log("sidecar busy — review results not saved");
       dataCache.delete(c.dir);
     });

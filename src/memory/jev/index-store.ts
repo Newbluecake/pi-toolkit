@@ -189,6 +189,9 @@ function sanitizeDismissed(v: unknown): readonly DismissedPair[] | undefined {
         hashKey: item["hashKey"],
         anchorKey: item["anchorKey"],
         ...(kind === undefined ? {} : { kind }),
+        ...(typeof item["suggestionKey"] === "string"
+          ? { suggestionKey: normalizeSuggestionKey(item["suggestionKey"]) }
+          : {}),
         ...(until === undefined ? {} : { until }),
       });
     }
@@ -208,7 +211,17 @@ function sanitizeReview(v: unknown): ReviewState | undefined {
   ) {
     return undefined;
   }
-  return { lastRunAt: v["lastRunAt"], corpusFp: v["corpusFp"], suggestions, dismissed };
+  return {
+    lastRunAt: v["lastRunAt"],
+    corpusFp: v["corpusFp"],
+    suggestions,
+    dismissed,
+    ...(typeof v["sweepLastRunAt"] === "string" ? { sweepLastRunAt: v["sweepLastRunAt"] } : {}),
+    ...(typeof v["sweepCorpusFp"] === "string" ? { sweepCorpusFp: v["sweepCorpusFp"] } : {}),
+    ...(Array.isArray(v["resolved"])
+      ? { resolved: v["resolved"].filter((x): x is string => typeof x === "string").map(normalizeSuggestionKey) }
+      : {}),
+  };
 }
 
 /** Sanitize an A/P-layer cooldown map: string values with a parseable date
@@ -265,9 +278,120 @@ export function readIndex(dir: string): { index: JevIndexV1; rebuilt: boolean } 
 
 // ───────────────────────────── merge + caps ─────────────────────────────
 
+/** Stable semantic identity; old pN/oN classifier question IDs are not stable. */
+export function suggestionKey(s: ReviewSuggestion): string {
+  const entryId = (anchor: string): string => {
+    const match = /^([^|]+\.\d+\.md)\|/.exec(anchor);
+    return match?.[1] ?? anchor;
+  };
+  const anchors = [entryId(s.a.anchor), ...(s.b ? [entryId(s.b.anchor)] : [])].sort();
+  return JSON.stringify([s.kind, ...anchors]);
+}
+
+/** Read old source-prefixed keys without requiring sidecar migration. */
+export function normalizeSuggestionKey(key: string): string {
+  try {
+    const value: unknown = JSON.parse(key);
+    if (
+      Array.isArray(value) &&
+      (value[0] === "semantic" || value[0] === "governance") &&
+      value.length >= 3 &&
+      value.every((part) => typeof part === "string")
+    )
+      return JSON.stringify(value.slice(1));
+  } catch {
+    // Unknown key shapes remain opaque; never silently discard a tombstone.
+  }
+  return key;
+}
+
+/** Pairwise governance decisions suppress subsequent automatic relation work.
+ * Use the same suggestionKey as storage; legacy block anchors can still yield
+ * stable block identities, even if their recorded bodies have since changed. */
+export function isDismissedRelation(
+  dismissed: readonly DismissedPair[],
+  a: ReviewSuggestion["a"],
+  b: NonNullable<ReviewSuggestion["b"]>,
+  kind?: "duplicate" | "conflict" | "supersedes",
+): boolean {
+  const hashKey = [a.hash, b.hash].sort().join("+");
+  const anchorKey = [a.anchor, b.anchor].sort().join("+");
+  const keyFor = (left: typeof a, right: typeof b, k: "duplicate" | "conflict" | "supersedes") =>
+    suggestionKey({ id: "relation-", kind: k, a: left, b: right, p: 0, at: "" });
+  return dismissed.some((d) => {
+    // A keyed dismissal always has a type, including legacy source-prefixed keys.
+    // When a classifier has not answered yet, it cannot suppress the pair.
+    if (d.suggestionKey !== undefined) {
+      return kind !== undefined && normalizeSuggestionKey(d.suggestionKey) === keyFor(a, b, kind);
+    }
+    if (d.kind !== undefined && d.kind !== kind) return false;
+    if (d.hashKey === hashKey || d.anchorKey === anchorKey) return true;
+    const anchors = d.anchorKey.split("+");
+    if (anchors.length !== 2 || !anchors.every((x) => /^[^|]+\.\d+\.md\|/.test(x))) return false;
+    // Kindless legacy dismissals apply to all relation kinds, including before classification.
+    const k = kind ?? "conflict";
+    return keyFor({ hash: "", anchor: anchors[0]! }, { hash: "", anchor: anchors[1]! }, k) === keyFor(a, b, k);
+  });
+}
+
+function dismissedSuggestion(s: ReviewSuggestion, ds: readonly DismissedPair[]): boolean {
+  const hash = [s.a.hash, ...(s.b ? [s.b.hash] : [])].sort().join("+");
+  const anchor = [s.a.anchor, ...(s.b ? [s.b.anchor] : [])].sort().join("+");
+  return ds.some((d) => {
+    if (d.suggestionKey !== undefined) return normalizeSuggestionKey(d.suggestionKey) === suggestionKey(s);
+    return (
+      (!d.kind || d.kind === s.kind) &&
+      (d.hashKey === hash ||
+        d.anchorKey === anchor ||
+        (s.b !== undefined &&
+          isDismissedRelation(
+            [d],
+            s.a,
+            s.b,
+            s.kind === "duplicate" || s.kind === "conflict" || s.kind === "supersedes" ? s.kind : undefined,
+          )))
+    );
+  });
+}
+
+/** Merge only while holding the directory lock: snapshots never delete live rows. */
+export function mergeReview(
+  current: ReviewState | undefined,
+  incoming: ReviewState,
+  base?: ReviewState | null,
+): ReviewState {
+  current ??= { lastRunAt: "", corpusFp: "", suggestions: [], dismissed: [] };
+  const dismissed = [...current.dismissed];
+  for (const d of incoming.dismissed) {
+    if (!dismissed.some((x) => JSON.stringify(x) === JSON.stringify(d))) dismissed.push(d);
+  }
+  const resolved = [
+    ...new Set([...(current.resolved ?? []), ...(incoming.resolved ?? [])].map(normalizeSuggestionKey)),
+  ];
+  const items = new Map(current.suggestions.map((s) => [suggestionKey(s), s]));
+  for (const s of incoming.suggestions) {
+    const key = suggestionKey(s);
+    const existing = items.get(key);
+    const baseItem = base?.suggestions.find((item) => suggestionKey(item) === key);
+    const changedInFlight =
+      base !== undefined && existing !== undefined && JSON.stringify(existing) !== JSON.stringify(baseItem);
+    if (!changedInFlight && (!existing || s.at > existing.at)) items.set(key, s);
+  }
+  return {
+    ...current,
+    lastRunAt: incoming.lastRunAt > current.lastRunAt ? incoming.lastRunAt : current.lastRunAt,
+    corpusFp: incoming.lastRunAt >= current.lastRunAt ? incoming.corpusFp : current.corpusFp,
+    suggestions: [...items.values()].filter(
+      (s) => !dismissedSuggestion(s, dismissed) && !resolved.includes(suggestionKey(s)),
+    ),
+    dismissed,
+    ...(resolved.length ? { resolved } : {}),
+  };
+}
+
 /** Pure read → patch → merged (no fs). Upserts overwrite by hash; `remove`
- *  wins over an upsert of the same hash (explicit deletion); `review` and
- *  `lastTaggedAt` replace wholesale when present. */
+ *  wins over an upsert of the same hash (explicit deletion); review rows
+ *  merge by stable identity, while lastTaggedAt replaces when present. */
 export function mergeIndex(index: JevIndexV1, patch: IndexPatch): JevIndexV1 {
   const entries: Record<EntryHash, EntryTags> = { ...index.entries };
   for (const [hash, tags] of Object.entries(patch.upsert ?? {})) {
@@ -283,7 +407,7 @@ export function mergeIndex(index: JevIndexV1, patch: IndexPatch): JevIndexV1 {
       ? { lastTaggedAt: patch.lastTaggedAt ?? index.lastTaggedAt }
       : {}),
     ...(patch.review !== undefined
-      ? { review: patch.review }
+      ? { review: mergeReview(index.review, patch.review, patch.reviewBase) }
       : index.review !== undefined
         ? { review: index.review }
         : {}),
@@ -382,7 +506,7 @@ export function gcIndex(index: JevIndexV1, liveHashes: ReadonlySet<EntryHash>): 
 
 /** Exact blocks GC: a content hash survives while ANY block still references it.
  * Old files-layout gcIndex remains cap-triggered and byte-compatible. */
-export function gcBlockIndex(index: JevIndexV1, liveHashes: ReadonlySet<EntryHash>, today: string): JevIndexV1 {
+export function gcBlockIndex(index: JevIndexV1, liveHashes: ReadonlySet<EntryHash>, _today: string): JevIndexV1 {
   const filter = <T>(values: Readonly<Record<string, T>> | undefined): Record<string, T> =>
     Object.fromEntries(Object.entries(values ?? {}).filter(([hash]) => liveHashes.has(hash)));
   const { aInjectedAt: _a, pInjectedAt: _p, review: _r, ...rest } = index;
@@ -400,9 +524,7 @@ export function gcBlockIndex(index: JevIndexV1, liveHashes: ReadonlySet<EntryHas
             suggestions: index.review.suggestions.filter(
               (s) => liveHashes.has(s.a.hash) && (!s.b || liveHashes.has(s.b.hash)),
             ),
-            dismissed: index.review.dismissed.filter(
-              (d) => (!d.until || d.until >= today) && d.hashKey.split("+").every((h) => liveHashes.has(h)),
-            ),
+            dismissed: index.review.dismissed,
           },
         }
       : {}),
@@ -439,6 +561,14 @@ function isLockBusy(err: unknown): boolean {
  *  busy ⇒ "busy" (the patch is dropped, never thrown); genuine fs errors
  *  propagate. */
 export async function writeIndexPatch(dir: string, patch: IndexPatch, gate?: MemoryWriteGate): Promise<"ok" | "busy"> {
+  return updateIndexLocked(dir, (index) => mergeIndex(index, patch), gate);
+}
+
+export async function updateIndexLocked(
+  dir: string,
+  update: (index: JevIndexV1) => JevIndexV1,
+  gate?: MemoryWriteGate,
+): Promise<"ok" | "busy"> {
   try {
     gateCheck(dir, gate);
     return await withMemoryDirLock(
@@ -449,7 +579,7 @@ export async function writeIndexPatch(dir: string, patch: IndexPatch, gate?: Mem
           jdir = join(base, JEV_DIR_NAME);
         gateCheck(dir, gate);
         ensurePrivateDir(jdir);
-        let merged = mergeIndex(readIndex(dir).index, patch);
+        let merged = update(readIndex(dir).index);
         if (base !== dir) {
           const live = new Set(readCorpus(base).blocks.map((b) => entryHash(b.body)));
           merged = gcBlockIndex(merged, live, new Date().toISOString().slice(0, 10));

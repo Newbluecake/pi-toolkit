@@ -253,3 +253,31 @@ it("archive storage names exhausted through r999 skip without overwriting the so
   for (const name of names) expect(readFileSync(join(archive, name), "utf8")).toBe(`occupied:${name}`);
   expect(existsSync(join(archive, "index.json"))).toBe(false);
 });
+
+it("sweep updates only its own persisted clock and fingerprint, never semantic review state", async () => {
+  const d = setup();
+  createBlockLocked(join(d, "blocks"), "rule", { authority: "user", expires: "2020-01-01" }, "rule", now);
+  const { readIndex, writeIndexPatch } = await import("../../../src/memory/jev/index-store.js");
+  const original = {
+    lastRunAt: "2026-01-01T00:00:00.000Z",
+    corpusFp: "semantic-fingerprint",
+    suggestions: [],
+    dismissed: [],
+  };
+  await writeIndexPatch(d, { review: original });
+  await runner().runSweep(d, "startup");
+  const after = readIndex(d).index.review!;
+  expect(after.lastRunAt).toBe(original.lastRunAt);
+  expect(after.corpusFp).toBe(original.corpusFp);
+  expect(after.sweepLastRunAt).toBe(now.toISOString());
+  expect(after.sweepCorpusFp).toBeTruthy();
+  expect(after.suggestions.map((s) => s.kind)).toContain("expired-user");
+  await writeIndexPatch(d, {
+    review: { ...original, lastRunAt: "2026-11-07T00:00:00.000Z", corpusFp: "new-semantic" },
+  });
+  expect(readIndex(d).index.review).toMatchObject({
+    sweepLastRunAt: after.sweepLastRunAt,
+    sweepCorpusFp: after.sweepCorpusFp,
+    corpusFp: "new-semantic",
+  });
+});

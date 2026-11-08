@@ -24,6 +24,8 @@ import {
   readTaxonomyFile,
   removeIndex,
   writeIndexPatch,
+  updateIndexLocked,
+  suggestionKey,
   writeTaxonomyFile,
 } from "./index-store.js";
 import { runReviewPass, anchorOf, markStale } from "./review.js";
@@ -193,10 +195,15 @@ export function createJevCommandPort(deps: JevCommandPortDeps): JevCommandPort {
   };
 
   const patchReview = async (cwd: string, mutate: (review: ReviewState) => ReviewState): Promise<boolean> => {
-    const ctx = indexAndEntries(cwd);
-    if (ctx === undefined || ctx.index.review === undefined) return false;
-    const review = mutate(ctx.index.review);
-    return (await writeIndexPatch(ctx.dir, { review }, deps.gate)) === "ok";
+    const dir = dirOf(cwd);
+    if (dir === undefined) return false;
+    return (
+      (await updateIndexLocked(
+        dir,
+        (index) => (index.review === undefined ? index : { ...index, review: mutate(index.review) }),
+        deps.gate,
+      )) === "ok"
+    );
   };
 
   const statusLine = (cwd: string): string => {
@@ -462,7 +469,7 @@ export function createJevCommandPort(deps: JevCommandPortDeps): JevCommandPort {
     if ("ok" in outcome) {
       return `jev: review run failed (${outcome.reason}${outcome.detail === "" ? "" : `: ${outcome.detail.slice(0, 160)}`})`;
     }
-    const write = await writeIndexPatch(ctx.dir, { review: outcome }, deps.gate);
+    const write = await writeIndexPatch(ctx.dir, { review: outcome, reviewBase: ctx.index.review ?? null }, deps.gate);
     const open = outcome.suggestions.length;
     return `jev: review pass complete — ${open} suggestion(s)${write === "busy" ? " · sidecar busy, results not saved" : ""} → /mem review`;
   };
@@ -475,6 +482,7 @@ export function createJevCommandPort(deps: JevCommandPortDeps): JevCommandPort {
       const dismissed = [
         ...review.dismissed,
         {
+          suggestionKey: suggestionKey(suggestion),
           hashKey:
             suggestion.b === undefined ? suggestion.a.hash : [suggestion.a.hash, suggestion.b.hash].sort().join("+"),
           anchorKey:
@@ -490,7 +498,13 @@ export function createJevCommandPort(deps: JevCommandPortDeps): JevCommandPort {
   const reviewResolve = async (cwd: string, id: string): Promise<void> => {
     await patchReview(cwd, (review) =>
       review.suggestions.some((s) => s.id === id)
-        ? { ...review, suggestions: review.suggestions.filter((s) => s.id !== id) }
+        ? {
+            ...review,
+            suggestions: review.suggestions.filter((s) => s.id !== id),
+            resolved: [
+              ...new Set([...(review.resolved ?? []), suggestionKey(review.suggestions.find((s) => s.id === id)!)]),
+            ],
+          }
         : review,
     );
   };

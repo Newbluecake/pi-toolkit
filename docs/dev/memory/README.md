@@ -8,6 +8,15 @@
 
 `src/memory/` — merged armory-memory: cwd-keyed project memory under `~/.pi/agent/memory/<slug>/`, with default `layout:tiered` injection and `toolSurface:v2` official-field tool surface; explicit `legacy` settings remain the byte-compatible opt-out. The tiered renderer enforces whole-file/whole-section admission and a UTF-8 byte budget; topic index lines carry `description`/`read_when` metadata, while `/mem doctor` reports D01-D14 health and its summary is surfaced by `/mem` and `memory.view`. Slug directories are canonicalized once and may be user-trusted symlinks; file-level symlinks and non-regular files are rejected. All v2 writes, imports, tidy, and restore operations serialize under the directory lock; batch tidy calls the post-write invalidation once. Registers a `pi_project_memory` section into the shared prompt-section hub (`src/sysprompt/hub.ts`, pre-guard, created before `wireMemory` runs so fold order stays memory → agent types → models) instead of owning its own `before_agent_start` hook (sysprompt-stable M3); the hub decides snapshot vs. tail update, `src/memory/inject.ts`'s `memorySection` provider only renders the current live block (pin frontmatter, agent-source fence, tail sentinel, fingerprint-keyed render cache). The `memory` tool lists/writes/appends (child sessions read-only by default, writes carry `source: agent` provenance); `/mem` covers list/path/init/import/doctor/tidy/restore (`init` creates an agent-source `core.md` skeleton stamped `source: agent` — deleting that line locks it as user-authored — and refuses an existing, archived or pin-stand-in primary). Tidy and restore are journaled transactions (`src/memory/tidy/{txn,manifest,journal}.ts`, design `docs/dev/memory/tidy-batch-plan.md` v3.2): the run event records the full planned op list before any intent, every MOVE/CREATE/REPLACE is CAS- and owner-epoch-checked and its result carries a mandatory final observation, an interrupted run stays resumable and is recovered before new work, and manifests are strict v2 (v1 backups restore only with `--legacy`, also through the txn layer). Hard-link-less filesystems refuse txn tidy (fail closed). Directory locks follow M-T4: a lock whose holder cannot be proven dead (old-format, cross-host) is never broken by age — writers get an actionable busy error and only the TUI-only `/mem tidy --break-lock` (epoch bump BEFORE lockBreak) clears it. `/mem tidy --batch` (P3a, `batch-command.ts`) archives stale entries into `archive/` (+ `ARCHIVE.md`, index pruning) and rewrites the rest in model batches sized by the dispatch-time `SpawnRequest.inputBudget` measurement (re-splitting on `input-budget` failures), holding one run lease for the whole command, bounded by `memory.tidy.batch.*` (bounded cost cap, max model runs, activity clock excluding dialog time); `--dry-run`/`--status` are read-only and web-allowed, `--triage` (P3b) is not implemented. `paths|frontmatter|store|render` are pi-free; `index.ts` (`wireMemory`) is the only pi-facing assembly and holds all mutable state in its closure; registered pre-guard. Design: `docs/dev/memory/memory-plan.md`.
 
+## `/mem` discovery by layout
+
+The command description and completions follow the configured layout: blocks omit tidy and advertise
+`restore --block`, while tiered/files retain the existing tidy and restore surface. Migration is marked
+maintenance, as are the `tidy --break-lock` and `jev reset-index` completions. The Jev-off files-layout
+registration remains byte-identical to its frozen golden, including its legacy top-level tidy completion;
+the break-lock completion itself is marked maintenance. Dispatch is unchanged and uses the directory's
+actual format, which can differ from configured layout during migration.
+
 ## Web `/mem` context-free reads (A2f partial)
 
 The direct Web read executor supports `tidy --batch --status`, `tidy --batch --dry-run`, and the deterministic
@@ -299,3 +308,17 @@ owner。secure/locked 测试只用 fake mountinfo 的实际 activate/SDK constru
 ### Web 命令只读函数（A2d，已接生产）
 
 `command-readonly.ts` 提供不依赖 command ctx 的 `executeMemoryRead`：支持空参数、`list`、`path`、`restore`/`restore --legacy`/`restore --trash` 列表及单目录 `migrate --dry-run`/`--report`；其余输入返回 `E_MEM_WEB_UNSUPPORTED`。缺目录的迁移预览拒绝，报告读取失败抛错。仅 plain domain 且 memory 已启用时，宿主把该只读函数引用注入 Web bridge；经过 command handler 的 ledger 与宿主 idle/pending、手动 compact 和 session switch 准入后同步直调，cwd 来自当前宿主 ctx，不进入 SDK slash/capture/native handler。缺端口、抛错、飞书来源及不支持的命令均拒绝，写命令始终拒绝；显式 Web 命令策略 deny/confirm 仍生效。默认 history 模式下同步只读输出直接展示，不依赖 transcript record。输出暂不包含 native 列表的 doctor/Jev 尾注。该函数本身不认证调用者，函数引用只提供只读通道，并非方案中的逐次 MemoryWebCall/owner/lease 证明，不得用于开放写入。测试覆盖真实临时目录及 hub socket 返回；完整写确认、终态和生命周期尚未实现。
+
+### Web session add consumer（B1 第 1 包，未接生产）
+
+`scopes/session-store.ts` 在现有有界 FIFO 中提供 `prepareWebAdd` / `ownsWebPlan` /
+`enqueueConfirmedCommand` / `cancelWeb` / `releaseWeb`；确认等待在 FIFO 外。仅同 store 注册的
+冻结计划、同 kernel 有 binding 的 call 和 reserved receipt 可进入提交；最后同步重读 branch、
+重算 planner/entry、检查文件及 gate 后 consume，恰一次 SDK append，观察真实 fold。异常或
+结果不符在 attempt 后为 unknown 并 poison，不重试。append 若返回 thenable，安装 rejection
+observer 但不等待、不改 unknown 结果；这不能撤回已开始的 effect。Web hash 唯一使用
+`session-memory-fold/v1`：保留有序完整 item/rev、nextN、opsSinceSnap、dropped，唯独剔除
+fold 外层派生 inherited；不改变 native 继承规则。`session-web-file.ts` 只读观察整个 JSONL，
+8MiB 字节硬界；每段 100ms 是单调时钟协作预算，无法抢占同步 syscall。文件身份/字节 guard
+不是跨进程原子 CAS；SDK 可缓冲，appended 不代表已 flush/fsync。取消时保留已同步观察，
+最终观察由控制器复制后 release；本包没有控制器、远程入口或生产写接线，现有 Web 写仍拒绝。

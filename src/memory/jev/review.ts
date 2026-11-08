@@ -18,6 +18,7 @@
 
 import { createHash } from "node:crypto";
 import { lexicalTokens } from "./match.js";
+import { isDismissedRelation, suggestionKey } from "./index-store.js";
 import { redactForJev } from "./redact.js";
 import { buildReviewQuestions, splitBatches } from "./questions.js";
 import { decideReview, decideUserLikeSuggestion, effectiveMeta } from "./decide.js";
@@ -76,10 +77,10 @@ export interface DismissablePair {
   readonly b?: { readonly hash: EntryHash; readonly anchor: string };
 }
 
-/** Dismissed iff hashKey OR anchorKey matches any stored pair (§4.4): editing
- *  past the first 24 code points keeps the pair dismissed (hash changed,
- *  anchor stable); rewriting the head or renaming the section re-opens it. */
+/** Block pairs use shared stable identities; legacy single entries retain
+ *  their hash/anchor matching behavior. */
 export function isDismissed(pair: DismissablePair, dismissed: readonly DismissedPair[]): boolean {
+  if (pair.b !== undefined) return isDismissedRelation(dismissed, pair.a, pair.b);
   const hashKey = hashKeyOf(pair.a, pair.b);
   const anchorKey = anchorKeyOf(pair.a, pair.b);
   return dismissed.some((d) => d.hashKey === hashKey || d.anchorKey === anchorKey);
@@ -327,8 +328,19 @@ export async function runReviewPass(input: RunReviewPassInput): Promise<ReviewPa
     lastRunAt: now,
     corpusFp: corpusFingerprint(input.entries),
     suggestions: [
-      ...suggestionsFrom(answers, pairCands, staleCands, now),
-      ...userLikeSuggestions(input.entries, input.index, now),
+      ...[
+        ...suggestionsFrom(answers, pairCands, staleCands, now),
+        ...userLikeSuggestions(input.entries, input.index, now),
+      ]
+        .filter((s) =>
+          s.b === undefined || (s.kind !== "duplicate" && s.kind !== "conflict" && s.kind !== "supersedes")
+            ? true
+            : !isDismissedRelation(prev?.dismissed ?? [], s.a, s.b, s.kind),
+        )
+        .map((s) => ({
+          ...s,
+          id: `r-${createHash("sha1").update(suggestionKey(s)).digest("hex").slice(0, 16)}`,
+        })),
     ],
     dismissed: prev?.dismissed ?? [],
   };

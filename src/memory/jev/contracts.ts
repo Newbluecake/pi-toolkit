@@ -248,8 +248,9 @@ export interface DismissedPair {
   /** #36: which suggestion kind this dismissal targets — absent = the legacy
    *  pairwise dismissal semantics (kind-agnostic). */
   readonly kind?: ReviewSuggestionKind;
-  /** #36: ISO date — the dismissal auto-expires once passed; absent =
-   *  permanent (the pre-#36 semantics). */
+  /** Stable source/kind/entry identity for permanent dismissal. */
+  readonly suggestionKey?: string;
+  /** Legacy deadline retained for compatibility; dismissals are permanent. */
   readonly until?: string;
 }
 
@@ -258,6 +259,11 @@ export interface ReviewState {
   readonly corpusFp: string;
   readonly suggestions: readonly ReviewSuggestion[];
   readonly dismissed: readonly DismissedPair[];
+  /** Independent governance sweep clock; absent on legacy sidecars. */
+  readonly sweepLastRunAt?: string;
+  readonly sweepCorpusFp?: string;
+  /** Stable keys explicitly resolved by the user. */
+  readonly resolved?: readonly string[];
 }
 
 export interface JevIndexV1 {
@@ -289,6 +295,8 @@ export interface IndexPatch {
   readonly remove?: readonly EntryHash[];
   readonly lastTaggedAt?: string;
   readonly review?: ReviewState;
+  /** Snapshot seen by a review run, for detecting in-flight changes. */
+  readonly reviewBase?: ReviewState | null;
   /** Upserted into the A-layer cooldown map (per-key replace). */
   readonly aInjectedAt?: Readonly<Record<EntryHash, string>>;
   /** Upserted into the P-layer cooldown map (per-key replace). */

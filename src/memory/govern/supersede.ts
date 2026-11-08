@@ -17,7 +17,7 @@ import { join } from "node:path";
 import type { MemoryWriteGate } from "../contracts.js";
 import type { JevIndexV1, RelationVerdict } from "../jev/contracts.js";
 import { entryHash, normalizeBody } from "../jev/entries.js";
-import { readIndex } from "../jev/index-store.js";
+import { isDismissedRelation, readIndex } from "../jev/index-store.js";
 import { withMemoryDirLock } from "../lock.js";
 import { MemoryError } from "../paths.js";
 import { dirFormat, parseBlockName } from "../blocks/naming.js";
@@ -144,12 +144,13 @@ export async function supersede(
           if (next.meta.authority === "agent" && old.meta.authority === "user")
             throw new MemoryError("supersedes ignored: target is a user rule");
           if (!opts.explicit && old.meta.residue) throw new MemoryError("residue requires explicit supersedes");
-          const key = pair(next, old),
-            today = governanceToday(opts.now ?? new Date());
           if (
             !opts.explicit &&
-            readIndex(memDir).index.review?.dismissed.some(
-              (d) => (!d.until || d.until >= today) && (d.hashKey === key.hashKey || d.anchorKey === key.anchorKey),
+            isDismissedRelation(
+              readIndex(memDir).index.review?.dismissed ?? [],
+              { hash: entryHash(next.body), anchor: blockAnchor(next) },
+              { hash: entryHash(old.body), anchor: blockAnchor(old) },
+              "supersedes",
             )
           )
             throw new MemoryError("pair permanently dismissed");
@@ -228,8 +229,15 @@ export async function supersede(
             const oldHash = (v as RelationVerdict & { readonly oldHash?: string }).oldHash;
             if (a.rev !== v.newRev || b.rev !== v.oldRev || (oldHash !== undefined && entryHash(b.body) !== oldHash))
               continue;
-            const key = pair(a, b);
-            if (review.dismissed.some((d) => d.hashKey === key.hashKey || d.anchorKey === key.anchorKey)) continue;
+            if (
+              isDismissedRelation(
+                review.dismissed,
+                { hash: entryHash(a.body), anchor: blockAnchor(a) },
+                { hash: entryHash(b.body), anchor: blockAnchor(b) },
+                "conflict",
+              )
+            )
+              continue;
             const id = `relation-${v.newId}-${v.oldId}`;
             if (!suggestions.some((s) => s.id === id))
               suggestions.push({

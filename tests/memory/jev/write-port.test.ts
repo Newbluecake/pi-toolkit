@@ -976,3 +976,71 @@ it.each([false, true])("abandons stale judgment without sidecar writes (sidecar 
   if (indexBefore) expect(readFileSync(indexPath)).toEqual(indexBefore);
   else expect(existsSync(join(dir, ".jev"))).toBe(false);
 });
+
+it("blocks dismissed conflict is filtered after classifier determines relation kind", async () => {
+  const tmp = mkdtempSync(join(tmpdir(), "wp-dismiss-key-"));
+  tmpRoots.push(tmp);
+  const dir = writeBlocksDir(tmp, [
+    { id: "gen.001", body: "- pipeline old alpha" },
+    { id: "gen.002", body: "- pipeline old beta" },
+  ]);
+  const { readGovernBlock, writeGovernIndexLocked, blockAnchor } =
+    await import("../../../src/memory/govern/supersede.js");
+  const { suggestionKey } = await import("../../../src/memory/jev/index-store.js");
+  const { replaceBlockLocked } = await import("../../../src/memory/blocks/store.js");
+  const a = readGovernBlock(tmp, "gen.001"),
+    b = readGovernBlock(tmp, "gen.002");
+  const suggestion = {
+    id: "relation-gen.001-gen.002",
+    kind: "conflict" as const,
+    a: { hash: entryHash(a.body), anchor: blockAnchor(a) },
+    b: { hash: entryHash(b.body), anchor: blockAnchor(b) },
+    p: 1,
+    at: "",
+  };
+  writeGovernIndexLocked(tmp, {
+    v: 1,
+    entries: {},
+    review: {
+      lastRunAt: "",
+      corpusFp: "",
+      suggestions: [],
+      dismissed: [
+        {
+          hashKey: [suggestion.a.hash, suggestion.b.hash].sort().join("+"),
+          anchorKey: [suggestion.a.anchor, suggestion.b.anchor].sort().join("+"),
+          kind: "conflict",
+          suggestionKey: suggestionKey(suggestion),
+          until: "2000-01-01",
+        },
+      ],
+    },
+  });
+  replaceBlockLocked(dir, a.id, a.rev, { meta: a.meta, body: "- changed replacement pipeline alpha" }, new Date());
+  replaceBlockLocked(dir, b.id, b.rev, { meta: b.meta, body: "- changed replacement pipeline beta" }, new Date());
+  const next = readGovernBlock(tmp, a.id);
+  const fake = fakeClient({
+    answerFor: () =>
+      answersFor({ c1: { type: "choice", choice: "conflict", probabilities: { conflict: 1 }, confidence: 1 } }),
+  });
+  const port = createJevWritePort({
+    client: fake.client,
+    entryIndex: new EntryIndex(),
+    dirFor: () => tmp,
+    taxonomyFor: () => mergeTaxonomy().taxonomy,
+    now: () => FIX_NOW,
+  });
+  const result = await port.afterWrite({
+    cwd: tmp,
+    file: `${a.id}.md`,
+    before: a.raw,
+    after: next.raw,
+    registry: REGISTRY,
+    block: { id: next.id, rev: next.rev, authority: "agent", scopeExplicit: false },
+    wholeRelation: true,
+  });
+  expect(fake.asks).toHaveLength(1);
+  expect(Object.keys(fake.asks[0]!.questions).filter((key) => /^c\d+$/.test(key))).toEqual(["c1"]);
+  expect(result.relations ?? []).toEqual([]);
+  expect(readGovernBlock(tmp, b.id).meta.status).toBe("active");
+});

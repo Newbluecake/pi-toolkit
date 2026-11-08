@@ -277,3 +277,36 @@ it("frozen body hash rejects a mismatched judgment even when revision matches", 
   expect(readFileSync(join(d, "blocks", `${old.id}.md`))).toEqual(before);
   expect(() => readFileSync(join(d, "blocks", ".jev", "index.json"))).toThrow();
 });
+
+it("legacy restored pair stays dismissed after editing both blocks, including expired until", async () => {
+  const d = setup();
+  const a = block(d),
+    b = block(d);
+  expect((await supersede(d, [verdict(a, b)]))[0]?.outcome).toBe("superseded");
+  expect(await restoreSupersededBlock(d, b.id)).toBe(true);
+  const { readIndex } = await import("../../../src/memory/jev/index-store.js");
+  const { writeGovernIndexLocked } = await import("../../../src/memory/govern/supersede.js");
+  const index = readIndex(d).index;
+  expect(index.review!.dismissed[0]!.suggestionKey).toBeUndefined();
+  writeGovernIndexLocked(d, {
+    ...index,
+    review: { ...index.review!, dismissed: index.review!.dismissed.map((item) => ({ ...item, until: "2000-01-01" })) },
+  });
+  const restored = readGovernBlock(d, b.id);
+  replaceBlockLocked(join(d, "blocks"), a.id, a.rev, { meta: a.meta, body: "new completely rewritten content" }, now);
+  replaceBlockLocked(
+    join(d, "blocks"),
+    b.id,
+    restored.rev,
+    { meta: restored.meta, body: "old completely rewritten content" },
+    now,
+  );
+  const next = readGovernBlock(d, a.id),
+    old = readGovernBlock(d, b.id);
+  expect((await supersede(d, [verdict(next, old)]))[0]).toMatchObject({
+    outcome: "skipped",
+    reason: expect.stringContaining("dismissed"),
+  });
+  expect(readGovernBlock(d, b.id).meta.status).toBe("active");
+  expect(readIndex(d).index.review!.suggestions).toEqual([]);
+});

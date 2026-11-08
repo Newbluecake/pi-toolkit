@@ -47,7 +47,7 @@ describe("planSweep", () => {
     expect(p.archive).toEqual([]);
     expect(p.suggestions.map((s) => s.kind)).toContain("until-check");
   });
-  it("deduplicates, honors timed dismissals and reopens after expiry", () => {
+  it("deduplicates and keeps legacy dismissals after expiry", () => {
     const f = fixture("agent", { until: "done" });
     const p = planSweep(f.corpus, f.index, { files: [] }, today, "startup");
     const s = p.suggestions.find((s) => s.kind === "until-check")!;
@@ -60,7 +60,7 @@ describe("planSweep", () => {
     expect(planSweep(f.corpus, { ...f.index, review }, { files: [] }, today, "write").suggestions).toEqual([]);
     expect(
       planSweep(f.corpus, { ...f.index, review }, { files: [] }, "2026-11-08", "write").suggestions.map((s) => s.kind),
-    ).toContain("until-check");
+    ).not.toContain("until-check");
     expect(
       planSweep(
         f.corpus,
@@ -76,7 +76,17 @@ describe("planSweep", () => {
     f.corpus = { ...f.corpus, legacy: { files: [{ name: "core.md", sha256: "new" }] } };
     const p = planSweep(
       f.corpus,
-      { ...f.index, review: { lastRunAt: "2026-11-01", corpusFp: "fp", suggestions: [], dismissed: [] } },
+      {
+        ...f.index,
+        review: {
+          lastRunAt: "",
+          corpusFp: "",
+          sweepLastRunAt: "2026-11-01",
+          sweepCorpusFp: "fp",
+          suggestions: [],
+          dismissed: [],
+        },
+      },
       { files: [{ name: "core.md", sha256: "old" }] },
       today,
       "budget",

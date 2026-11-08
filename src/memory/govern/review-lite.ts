@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { looksSecret } from "../secret-patterns.js";
 import type { MemoryWriteGate } from "../contracts.js";
 import type { MemCommandUiLike, ReviewSuggestion, ReviewSuggestionKind } from "../jev/contracts.js";
-import { readIndex } from "../jev/index-store.js";
+import { isDismissedRelation, readIndex, suggestionKey } from "../jev/index-store.js";
 import { entryHash } from "../jev/entries.js";
 import { readCorpus, trashBlockLocked } from "../blocks/store.js";
 import { residentBlocksOf, residentMeteredBytes } from "../blocks/render.js";
@@ -142,18 +142,15 @@ export async function handleReviewLite(
               now,
             });
           }
-          const duration = s.kind === "expired-user" ? 30 : s.kind === "resident-budget" ? 7 : 14;
           const dismissed =
             choice === "keep"
               ? [
                   ...review.dismissed,
                   {
+                    suggestionKey: suggestionKey(s),
                     hashKey: s.b ? [s.a.hash, s.b.hash].sort().join("+") : s.a.hash,
                     anchorKey: s.b ? [s.a.anchor, s.b.anchor].sort().join("+") : s.a.anchor,
                     kind: s.kind,
-                    ...(s.kind === "scope-check" || s.kind === "conflict" || s.kind === "supersedes"
-                      ? {}
-                      : { until: days(today, duration) }),
                   },
                 ]
               : review.dismissed;
@@ -209,11 +206,12 @@ export async function firstUserReviewPass(
         }
         const id = `migration-${[a.id, b.id].sort().join("-")}`;
         if (review.suggestions.some((s) => s.id === id) || suggestions.some((s) => s.id === id)) continue;
-        const hashKey = [entryHash(a.body), entryHash(b.body)].sort().join("+");
-        const anchorKey = [blockAnchor(a), blockAnchor(b)].sort().join("+");
         if (
-          review.dismissed.some(
-            (d) => (!d.until || d.until >= governanceToday()) && (d.hashKey === hashKey || d.anchorKey === anchorKey),
+          isDismissedRelation(
+            review.dismissed,
+            { hash: entryHash(a.body), anchor: blockAnchor(a) },
+            { hash: entryHash(b.body), anchor: blockAnchor(b) },
+            "conflict",
           )
         )
           continue;

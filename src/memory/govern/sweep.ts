@@ -9,7 +9,7 @@ import { readMarker } from "../blocks/marker.js";
 import { parseBlockFile, serializeBlock } from "../blocks/format.js";
 import { residentBlocksOf, residentMeteredBytes } from "../blocks/render.js";
 import { parseArchiveName, parseBlockName } from "../blocks/naming.js";
-import { readIndex } from "../jev/index-store.js";
+import { mergeReview, readIndex } from "../jev/index-store.js";
 import { legacyDrift } from "../blocks/legacy.js";
 import { withMemoryDirLock } from "../lock.js";
 import { MemoryError } from "../paths.js";
@@ -318,13 +318,9 @@ export function createSweepRunner(opts: SweepOptions) {
             {
               ...latest,
               review: {
-                ...review,
-                lastRunAt: new Date(clock()).toISOString(),
-                corpusFp: corpus.fingerprint,
-                suggestions: [
-                  ...review.suggestions,
-                  ...plan.suggestions.filter((s) => !review.suggestions.some((x) => x.id === s.id)),
-                ],
+                ...mergeReview(review, { ...review, suggestions: plan.suggestions }),
+                sweepLastRunAt: new Date(clock()).toISOString(),
+                sweepCorpusFp: corpus.fingerprint,
               },
             },
             opts.gate,

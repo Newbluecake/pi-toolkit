@@ -48,7 +48,7 @@ it("expired user renew uses CAS, then review dismissal expires", async () => {
   expect(readGovernBlock(dir, b.id).meta.expires).toBe("2026-12-06");
   expect(readGovernBlock(dir, b.id).meta.version).toBe(2);
 });
-it("keep until condition dismisses 14 days, user never offered archive", async () => {
+it("keep until condition dismisses permanently, user never offered archive", async () => {
   const dir = fixture();
   createBlockLocked(join(dir, "blocks"), "rule", { authority: "user", until: "done" }, "rule", now);
   await handleReviewLite(
@@ -63,7 +63,7 @@ it("keep until condition dismisses 14 days, user never offered archive", async (
     },
     { interactive: true, enabled: true, residentBudget: 512, now },
   );
-  expect(readIndex(dir).index.review?.dismissed[0]?.until).toBe("2026-11-20");
+  expect(readIndex(dir).index.review?.dismissed[0]?.until).toBeUndefined();
 });
 it("changed block cannot be edited by stale dialog", async () => {
   const dir = fixture();
@@ -189,4 +189,218 @@ it("first semantic review discards an answer whose user was updated while judge 
   });
   expect(count).toBe(0);
   expect(readIndex(dir).index.review).toBeUndefined();
+});
+
+it("dismissal persists across block edits, reload, and later sweeps", async () => {
+  const dir = fixture();
+  const block = createBlockLocked(join(dir, "blocks"), "rule", { authority: "user", until: "done" }, "old body", now);
+  await handleReviewLite(
+    dir,
+    "",
+    { notify() {}, select: async () => "keep" },
+    { interactive: true, enabled: true, residentBudget: 512, now },
+  );
+  const stored = readIndex(dir).index.review!.dismissed;
+  expect(stored).toHaveLength(1);
+  expect(stored[0]!.suggestionKey).toBeDefined();
+  replaceBlockLocked(
+    join(dir, "blocks"),
+    block.id,
+    block.rev,
+    { meta: block.meta, body: "completely changed body" },
+    now,
+  );
+  const messages: string[] = [];
+  await handleReviewLite(
+    dir,
+    "--list",
+    { notify: (msg) => messages.push(msg), select: async () => "skip" },
+    { interactive: false, enabled: true, residentBudget: 512, now: new Date("2027-01-01T00:00:00Z") },
+  );
+  expect(messages).toEqual(["review: no suggestions"]);
+  expect(readIndex(dir).index.review!.dismissed).toEqual(stored);
+});
+
+it("dismissed migration conflict stays dismissed after both blocks are edited, without dismissing supersedes", async () => {
+  const { supersede } = await import("../../../src/memory/govern/supersede.js");
+  const dir = fixture();
+  const a = createBlockLocked(join(dir, "blocks"), "rule", { authority: "user" }, "first original text", now);
+  const b = createBlockLocked(join(dir, "blocks"), "rule", { authority: "user" }, "second original text", now);
+  const judge = async (pairs: readonly { a: string; b: string }[]) => pairs.map((p) => ({ ...p, p: 1 }));
+  expect(await firstUserReviewPass(dir, judge)).toBe(1);
+  await handleReviewLite(
+    dir,
+    "",
+    { notify() {}, select: async () => "keep" },
+    { interactive: true, enabled: true, residentBudget: 512, now },
+  );
+  expect(readIndex(dir).index.review!.dismissed[0]?.suggestionKey).toBeDefined();
+  replaceBlockLocked(
+    join(dir, "blocks"),
+    a.id,
+    a.rev,
+    { meta: a.meta, body: "rewritten first heading and content" },
+    now,
+  );
+  replaceBlockLocked(
+    join(dir, "blocks"),
+    b.id,
+    b.rev,
+    { meta: b.meta, body: "rewritten second heading and content" },
+    now,
+  );
+  expect(await firstUserReviewPass(dir, judge)).toBe(0);
+  const next = readGovernBlock(dir, a.id),
+    old = readGovernBlock(dir, b.id);
+  const result = await supersede(dir, [
+    { kind: "supersedes", newId: next.id, newRev: next.rev, oldId: old.id, oldRev: old.rev, p: 1, auto: true },
+  ]);
+  expect(result[0]).toMatchObject({ outcome: "superseded" });
+  expect(readGovernBlock(dir, b.id).meta.status).toBe("superseded");
+  expect(readIndex(dir).index.review!.suggestions).toEqual([]);
+});
+
+it("governance dismissal survives section and body edits across semantic review and locked merge", async () => {
+  const { blockToEntry } = await import("../../../src/memory/blocks/adapter.js");
+  const { runReviewPass } = await import("../../../src/memory/jev/review.js");
+  const { writeIndexPatch } = await import("../../../src/memory/jev/index-store.js");
+  const dir = fixture();
+  const a = createBlockLocked(
+    join(dir, "blocks"),
+    "rule",
+    { authority: "user", section: "original" },
+    "release pipeline alpha old",
+    now,
+  );
+  const b = createBlockLocked(
+    join(dir, "blocks"),
+    "rule",
+    { authority: "user", section: "original" },
+    "release pipeline beta old",
+    now,
+  );
+  const judge = async (pairs: readonly { a: string; b: string }[]) => pairs.map((p) => ({ ...p, p: 1 }));
+  expect(await firstUserReviewPass(dir, judge)).toBe(1);
+  await handleReviewLite(
+    dir,
+    "",
+    { notify() {}, select: async () => "keep" },
+    { interactive: true, enabled: true, residentBudget: 512, now },
+  );
+  const editedA = replaceBlockLocked(
+    join(dir, "blocks"),
+    a.id,
+    a.rev,
+    { meta: { ...a.meta, section: "new-section" }, body: "new release pipeline alpha text" },
+    now,
+  );
+  const editedB = replaceBlockLocked(
+    join(dir, "blocks"),
+    b.id,
+    b.rev,
+    { meta: { ...b.meta, section: "new-section" }, body: "new release pipeline beta text" },
+    now,
+  );
+  const entries = [blockToEntry(editedA, "2026-11-08"), blockToEntry(editedB, "2026-11-08")];
+  const index = readIndex(dir).index;
+  expect(index.review!.dismissed).toHaveLength(1);
+  const client: import("../../../src/memory/jev/contracts.js").JevClient = {
+    status: () => ({ kind: "full", model: "test" }),
+    probe: async () => ({ kind: "full", model: "test" }),
+    ask: async (req) => ({
+      ok: true,
+      model: "test",
+      missing: [],
+      costUsd: 0,
+      latencyMs: 0,
+      answers: Object.fromEntries(
+        Object.keys(req.questions).map((id) => [
+          id,
+          { type: "choice", choice: "conflict", probabilities: { conflict: 0.99 }, confidence: 0.99 },
+        ]),
+      ),
+    }),
+  };
+  const run = (inputIndex: typeof index) =>
+    runReviewPass({ client, registry: {}, entries, index: inputIndex, today: "2026-11-08" });
+  const undismissed = await run({ ...index, review: { ...index.review!, dismissed: [] } });
+  if ("ok" in undismissed) throw new Error("unexpected failure");
+  expect(undismissed.suggestions.filter((s) => s.kind === "conflict")).toHaveLength(1);
+  const outcome = await run(index);
+  if ("ok" in outcome) throw new Error("unexpected failure");
+  expect(outcome.suggestions.filter((s) => s.kind === "conflict")).toHaveLength(0);
+  expect(await writeIndexPatch(dir, { review: outcome, reviewBase: index.review ?? null })).toBe("ok");
+  expect(readIndex(dir).index.review!.suggestions.filter((s) => s.kind === "conflict")).toHaveLength(0);
+  // A stale semantic result produced before dismissal must also be rejected at merge.
+  expect(await writeIndexPatch(dir, { review: undismissed, reviewBase: null })).toBe("ok");
+  expect(readIndex(dir).index.review!.suggestions.filter((s) => s.kind === "conflict")).toHaveLength(0);
+});
+
+it("cross-kind conflict dismiss permits semantic supersedes candidate, stale merge and review list", async () => {
+  const { blockToEntry } = await import("../../../src/memory/blocks/adapter.js");
+  const { runReviewPass } = await import("../../../src/memory/jev/review.js");
+  const { writeIndexPatch } = await import("../../../src/memory/jev/index-store.js");
+  const dir = fixture();
+  const a = createBlockLocked(join(dir, "blocks"), "rule", { authority: "user" }, "release pipeline alpha", now);
+  const b = createBlockLocked(join(dir, "blocks"), "rule", { authority: "user" }, "release pipeline beta", now);
+  const judge = async (pairs: readonly { a: string; b: string }[]) => pairs.map((p) => ({ ...p, p: 1 }));
+  expect(await firstUserReviewPass(dir, judge)).toBe(1);
+  const snapshot = readIndex(dir).index;
+  const entries = [blockToEntry(a, "2026-11-08"), blockToEntry(b, "2026-11-08")];
+  let release!: () => void, started!: () => void;
+  const barrier = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const asked = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  const client: import("../../../src/memory/jev/contracts.js").JevClient = {
+    status: () => ({ kind: "full", model: "test" }),
+    probe: async () => ({ kind: "full", model: "test" }),
+    ask: async (req) => {
+      started();
+      await barrier;
+      return {
+        ok: true,
+        model: "test",
+        missing: [],
+        costUsd: 0,
+        latencyMs: 0,
+        answers: Object.fromEntries(
+          Object.keys(req.questions).map((id) => [
+            id,
+            { type: "choice", choice: "a_supersedes_b", probabilities: { a_supersedes_b: 0.99 }, confidence: 0.99 },
+          ]),
+        ),
+      };
+    },
+  };
+  const run = (index: typeof snapshot) => runReviewPass({ client, registry: {}, entries, index, today: "2026-11-08" });
+  const inflight = run(snapshot);
+  await asked;
+  await handleReviewLite(
+    dir,
+    "",
+    { notify() {}, select: async () => "keep" },
+    { interactive: true, enabled: true, residentBudget: 512, now },
+  );
+  const current = readIndex(dir).index;
+  expect(current.review!.dismissed[0]!.kind).toBe("conflict");
+  release();
+  const oldResult = await inflight;
+  if ("ok" in oldResult) throw new Error("unexpected failure");
+  expect(oldResult.suggestions.map((s) => s.kind)).toContain("supersedes");
+  const freshResult = await run(current);
+  if ("ok" in freshResult) throw new Error("unexpected failure");
+  expect(freshResult.suggestions.map((s) => s.kind)).toContain("supersedes");
+  expect(await writeIndexPatch(dir, { review: oldResult, reviewBase: snapshot.review ?? null })).toBe("ok");
+  expect(readIndex(dir).index.review!.suggestions.map((s) => s.kind)).toEqual(["supersedes"]);
+  const messages: string[] = [];
+  await handleReviewLite(
+    dir,
+    "--list",
+    { notify: (s) => messages.push(s), select: async () => "skip" },
+    { interactive: false, enabled: true, residentBudget: 512, now },
+  );
+  expect(messages.join("\n")).toContain("[supersedes]");
 });
