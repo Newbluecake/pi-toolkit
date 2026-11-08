@@ -281,7 +281,7 @@ export class FabricRouter {
     )
       rejection = { ok: false, status: "target_backpressure", key, seq, retryAfterMs: 0 };
     const fromLabel = this.labelOf(from);
-    const record: FabricRecord = {
+    const record: FabricRecord & { wakeDowngraded?: RootWakeDowngrade } = {
       key,
       from,
       to: input.to,
@@ -300,6 +300,7 @@ export class FabricRouter {
         : {}),
       ...(senderLevel !== undefined && from !== "system" ? { level: senderLevel } : {}),
       ...(wake !== undefined ? { wake } : {}),
+      ...(!rejection && wakeDowngraded !== undefined ? { wakeDowngraded } : {}),
       ...(!rejection && canPark
         ? { parked: { at: this.now(), reason: reviveDowngrade ?? ("wake_false" as const) } }
         : {}),

@@ -734,3 +734,36 @@ describe("#34 fabric kind rename vs the hub wire projection", () => {
     expect(reportJson).toBe(legacyJson);
   });
 });
+
+describe("#64 root wake notice projection", () => {
+  it.each([
+    ["root_limit", "已送达但未唤醒（root_limit）；不代表 Root 已处理"],
+    ["root_busy", "已排队，不新增唤醒（root_busy）"],
+    ["root_reserved", "已排队，不新增唤醒（root_reserved）"],
+    [undefined, ""],
+  ])("projects actual delivered %s output without new wire fields", (reason, notice) => {
+    const make = (state: string) =>
+      projectSessionEntry({
+        type: "custom",
+        customType: "subagent:fabric",
+        id: "f1",
+        parentId: null,
+        timestamp: "2026-10-07T00:00:00.000Z",
+        data: {
+          from: "r_ABC12345",
+          to: "root",
+          state,
+          payload: { text: "body" },
+          ...(reason ? { wakeDowngraded: reason } : {}),
+        },
+      })!;
+    const delivered = make("delivered");
+    expect(delivered.content).toBe(`[@r_ABC12345]${notice ? ` · ${notice}` : ""}\nbody`);
+    expect(Object.keys(delivered)).toEqual(["id", "parentId", "type", "timestamp", "customType", "content"]);
+    expect(make("pending").type).toBe("custom");
+    if (!reason)
+      expect(JSON.stringify(delivered)).toBe(
+        '{"id":"f1","parentId":null,"type":"custom_message","timestamp":"2026-10-07T00:00:00.000Z","customType":"subagent:fabric","content":"[@r_ABC12345]\\nbody"}',
+      );
+  });
+});

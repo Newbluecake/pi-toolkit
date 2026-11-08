@@ -155,3 +155,17 @@ describe("renderFabricEntry", () => {
     expect(zero[1]!.trimEnd()).toBe("hello fabric");
   });
 });
+
+describe("#64 root wake notice", () => {
+  it.each([
+    ["root_limit", "已送达但未唤醒（root_limit）；不代表 Root 已处理"],
+    ["root_busy", "已排队，不新增唤醒（root_busy）"],
+    ["root_reserved", "已排队，不新增唤醒（root_reserved）"],
+    [undefined, ""],
+  ])("renders the delivered %s case", (reason, notice) => {
+    const data = { ...record({ state: "delivered" }), ...(reason ? { wakeDowngraded: reason } : {}) };
+    const lines = renderFabricEntry(entry(data), { expanded: false }, theme)!.render(200);
+    expect(lines[0]!.trimEnd()).toBe(` [@r_ABCDEFGH]${notice ? ` · ${notice}` : ""}`);
+    expect(renderFabricEntry(entry({ ...data, state: "pending" }), { expanded: false }, theme)).toBeUndefined();
+  });
+});

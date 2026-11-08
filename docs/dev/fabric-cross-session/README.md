@@ -67,6 +67,14 @@ re-reviewed first. Gates: `tests/integration/fabric-wake*.test.ts`, conformance 
 (`tests/conformance/fabric-wake.test.ts`; run before any pi peer bump), state-machine
 matrix/property in `tests/core/`.
 
+### #64 预算继承、因果深度与展示
+
+可信用户到达是对当前会话整体重新授权：所有仍在运行的 run 共享新的用户到达窗口预算（上限 2），包括旧 run；只继承预算，不重置其因果 level。它是用户到达窗口，不是小时滑窗。
+
+默认 `maxLevel=2`；level 是自主唤醒的因果深度，不是任务树深度。旧 root gate 和跨会话普通 wake 等剩余路径在触及 `level_limit` 时静默降级为 deliver-only；关键例外是 #61 生产 `child→root` 显式唤醒走用户窗口，不受 `level_limit` 限制。若修改限制，必须联动传播、spawn 继承、持久化和跨会话；风险是放大自激链，故暂不改。
+
+根侧已投递记录的可选 `wakeDowngraded` 是展示信息，不是送达或处理凭证；busy/reserved 显示已排队、不新增唤醒，其余降级显示已送达但未唤醒且不代表 Root 已处理。未降级记录投影不变。旧 hub 不识别该字段，仍可读记录但不会显示新提示；新 hub 向旧 UI 沿用既有正文投影，不新增字段或帧。新版 hub 的降级消息 content 变化是声明的行为变更；未降级路径的 wire 字节严格不变。若将来要求旧 hub 的 Web 也显示提示，需新增字段或帧，属于协议变更，须另立项。共享文案位于零依赖 `protocol/fabric-wake-notice.ts`：直接在 UI 引用 `keys.ts` 会引入 `node:buffer` 导致 Vite 构建失败。 解析也由该模块负责：先提取稳定 ASCII reason，再与当前双语格式化结果完整比较，不依赖具体文案；UI 翻译仅替换首行提示，不改正文或 wire 格式。无结构化 marker，旧 hub 的兼容结论不变。
+
 ## Cross-session phase 2
 
 **Cross-session phase 2** (`docs/dev/fabric-cross-session/phase2-plan.md`, §13/§14 + r3 rulings):

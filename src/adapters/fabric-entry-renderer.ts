@@ -1,6 +1,7 @@
 import type { EntryRenderer, Theme } from "@earendil-works/pi-coding-agent";
 import { Container, Markdown, type MarkdownTheme, Text } from "@earendil-works/pi-tui";
 import type { FabricRecord } from "../core/message.js";
+import { fabricWakeNotice } from "../web-hub/protocol/fabric-wake-notice.js";
 
 export const FABRIC_ENTRY_CUSTOM_TYPE = "subagent:fabric";
 
@@ -83,12 +84,13 @@ function markdownThemeFrom(theme: Theme): MarkdownTheme {
 
 export function createFabricEntryRenderer(resolveSender?: FabricSenderResolver): EntryRenderer {
   return (entry, options, theme) => {
-    const data = entry.data as Partial<FabricRecord> | undefined;
+    const data = entry.data as (Partial<FabricRecord> & { wakeDowngraded?: unknown }) | undefined;
     if (data?.state !== "delivered") return undefined;
     const text = data.payload?.text ?? "";
     const sender = formatSender(data.from, data.fromLabel, resolveSender);
     const indent = bodyIndent(options);
-    const header = new Text(theme.fg("muted", `[${sender}]`), indent, 0);
+    const notice = data.to === "root" ? fabricWakeNotice(data.wakeDowngraded) : "";
+    const header = new Text(theme.fg("muted", `[${sender}]${notice ? ` · ${notice}` : ""}`), indent, 0);
     if (text.trim() === "") return header;
     // Header on its own line + the payload as a markdown block, both at the
     // same indent: fabric payloads are model-written prose (progress

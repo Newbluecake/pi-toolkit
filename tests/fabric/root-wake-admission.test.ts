@@ -183,3 +183,26 @@ describe("root admission production stack", () => {
     expect(r.arrive()).toBe(false);
   });
 });
+
+describe("#64 persisted root wake downgrade", () => {
+  it.each([
+    ["root_no_window", { idle: true }, false],
+    ["root_busy", { idle: false }, true],
+    ["root_reserved", { idle: true }, true],
+  ] as const)("retains %s through delivered transition", async (reason, options, arrive) => {
+    const r = rig(options);
+    try {
+      if (arrive) r.arrive();
+      if (reason === "root_reserved") r.send();
+      const result = r.send();
+      expect(result).toMatchObject({ ok: true, wakeDowngraded: reason });
+      await flush();
+      expect(r.fabric.engine.select((x) => x.key === (result.ok ? result.key : ""))[0]).toMatchObject({
+        state: "delivered",
+        wakeDowngraded: reason,
+      });
+    } finally {
+      r.fabric.mailbox.dispose();
+    }
+  });
+});

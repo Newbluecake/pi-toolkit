@@ -12,6 +12,7 @@
 -->
 <script setup lang="ts">
 import { computed, inject } from "vue";
+import { translateWakeNotice } from "../../../../protocol/fabric-wake-notice.js";
 import { useI18n } from "../../composables/useI18n.js";
 import AppIcon from "../../icons/AppIcon.vue";
 import { XS_CUSTOM_TYPE, parseXsMessage, xsMetaBadge } from "../../logic/xsMessage.js";
@@ -30,7 +31,11 @@ const props = defineProps<{
    *  explicitly allowed (exactOptionalPropertyTypes — the entry binding may be undefined). */
   readonly entryId?: string | undefined;
 }>();
-const { t } = useI18n();
+const i18n = useI18n();
+const { t } = i18n;
+const displayText = computed(() =>
+  props.customType === "subagent:fabric" ? translateWakeNotice(props.text, i18n.lang) : props.text,
+);
 
 /** `subagent:` is the toolkit's legacy NAMESPACE (renamed pi-subagent → pi-toolkit; runtime ids keep
  *  it on purpose), not a statement that the message comes from a subagent — usage ticks, compact
@@ -125,7 +130,7 @@ const xsBadge = computed(() => {
         <span class="who">{{ isSubagentNotice ? t("transcript.whoSubagent") : t("transcript.whoNotice") }}</span>
         <span class="kind-chip" translate="no" :title="customType">{{ chipText }}</span>
       </div>
-      <MarkdownView :text="text" />
+      <MarkdownView :text="displayText" />
       <span v-if="truncated" class="badge badge-trunc">{{ t("transcript.truncated") }}</span>
     </div>
   </article>
