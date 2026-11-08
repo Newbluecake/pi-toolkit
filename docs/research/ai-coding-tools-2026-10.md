@@ -163,7 +163,7 @@ Claude Code 在 2026 年已是功能密度最高的终端编码 agent，v2.1.x �
 | 多 agent 编排 / coordinator（Factory、Warp、Antigravity）      | `SubagentWorkflow` 编排引擎 + journal/replay                                                                       |
 | Skills / Agent Skills                                          | `skills/`（dev-flow、agent-handoff），pi 原生 `pi.skills`                                                          |
 | 定时触发 agent（Antigravity Scheduled Tasks、Claude Routines） | `src/schedule/` cron 调度器                                                                                        |
-| Kiro spec 驱动                                                 | dev-spec-dev skill（SDD 两阶段流程）                                                                               |
+| Kiro spec 驱动                                                 | —（原 dev-spec-dev skill 已移除；方案/SDD 由 dev-flow 的方案文档阶段承担）                                         |
 | Steering files / Memories                                      | `src/memory/` cwd-keyed 项目记忆 + tiered 注入 + AGENTS.md                                                         |
 | Web UI / Codex app / Cursor cloud 会话管理                     | `src/web-hub/`（浏览器 UI + managed spawn + resume + 预览面板群）                                                  |
 | 移动端权限审批推送（Claude Code mobile push）                  | feishu-notify + feishuBot（ask_user 卡片双通道作答）                                                               |

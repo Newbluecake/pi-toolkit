@@ -42,7 +42,6 @@ metadata:
 - **产出**：把答案收成 3–8 行需求摘要（目标 / 范围与不做 / 验收标准 / 已定取舍），回本流程定车道，派 Plan 时原样写进 prompt；L2/L3 的摘要同时落进方案文档开头。
 - **提速**：澄清（交互阻塞）期间后台预热 Explore。
 - **两道独立闸门**：「澄清未确认禁止出方案」与「方案未确认禁止开发」都不能跳；方案阶段才冒出的取舍点在方案评审 ∥ 用户确认时一并拍板。
-- **可选的重型澄清**：只有从零的产品级想法、范围本身未定，或用户明确要一份正式需求文档时，才用 `/skill:dev-clarify`（多轮访谈，产出 `docs/dev/{feature}/{feature}-requirements.md`）。
 
 ## 第一步：定车道
 
@@ -247,5 +246,5 @@ opus 档为自适应思考，支持到 `xhigh` / `max`（其余模型按自身�
 | [references/subagent-workflow.md](./references/subagent-workflow.md) | `SubagentWorkflow` 适用场景、限制、模型映射、最小模板               |
 | `scripts/conflict-check.mjs`                                         | 文件域 glob 交集预检脚本                                            |
 
-- 需求模糊 → 第 0 步轻量澄清（产品级想法 / 要正式需求文档时才用 `dev-clarify`）；需求清晰但任务复杂 → 可用 `dev-spec-dev` 的 SDD 流程替代本流程 2-8 步。
+- 需求模糊 → 第 0 步轻量澄清（`ask_user`）；需求清晰但边界很大 → 拆成多个方案分别走 2–8 步，而不是一次性规划。
 - 本 skill 只管「谁来做、怎么并行」；项目规范以项目 `CLAUDE.md` / `AGENTS.md` 为准，派单时写进 subagent prompt。
