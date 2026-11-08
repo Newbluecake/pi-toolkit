@@ -22,6 +22,22 @@ reserve and settle the bounded completion ledger. The command dispatcher also ha
 port or end-to-end async lifecycle exists yet. The promise path is not evidence that
 asynchronous memory writes are safe to enable.
 
+## Web confirmed-step building block (B1 partial, not wired)
+
+`command-confirmed-step.ts` combines the existing private call/receipt kernel with a
+one-attempt synchronous check/consume/commit boundary. Its adapter is responsible for
+holding the appropriate domain lock, performing the complete frozen-plan comparison,
+and confining **all** effects to the synchronous `apply` callback. Abort settles a
+waiting caller and invalidates a late commit; it cannot cancel effects performed by an
+unguarded adapter, or make a detached/asynchronous `apply` safe. The helper's callback
+signature rejects Promise-returning apply functions, including for `void` results; its runtime
+rejects native async functions before consume and reports `E_MEM_EFFECT_UNKNOWN` for a
+thenable returned by an already-invoked callback. These checks cannot detect detached work
+or undo effects already started; `runLocked` remains an unbranded, trusted callback. This helper is not a
+production domain adapter and is not connected to Web dispatch: no write command is
+thereby enabled. Real domain-specific plans, store guards and end-to-end Web tests are
+still required before enabling any command.
+
 ## 局部类型兼容注记（pi 1.5，2026-11-06）
 
 `tidy/cost.ts` 的 `ModelCostLike.tiers` 为显式 `…[] | undefined`：pi 1.5 的价目 DTO 可显式携带 `tiers: undefined`，type-only 边界兼容；本地 pi 1.4 下 typecheck/门禁保持通过，runtime JS 未变，不代表 TESTED_PI_RANGE 已升。详见 `docs/dev/pi-version-adaptation/plan.md`。
@@ -90,6 +106,8 @@ Jev 是一个分类器驱动的核心 memory 子系统，职责三项：召回�
 - 真实 2000 块临时目录基准：开发复跑 **371 ms / 48 写成本 / 8 归档**；独立验收 **418/419/457 ms**，同为 48/8。性能数据不替代边界检查，不承诺任意同步 I/O 都能被硬中断；生产门槛仍为 1000 ms / 50 写成本 / 500 ms 锁等待。
 
 ### 已接线与待接线
+
+- **#50 为 #36 子项，未启动**；当前已有的「写入时比较 + 周期 review + sweep」不等于 #50。
 
 - **已接**：`wireMemory` 复用已有 `session_start` 和 `onAfterWrite` 触发 startup/write sweep；shutdown/reload abort；sweep-origin 写入只失效缓存，不自触发。显式 `supersedes=`、分类关系执行、单边恢复及永久 dismissed 已接工具/命令路径；Jev off 仍可显式取代，agent 永不取代 user。
 - **P5b 待接**：task-done/push/release 的 Jev 事件信号、turn_end 消费，以及 render 预算/索引溢出信号；不能据此宣称全部治理事件已经上线。复用 `createSweepRunner(options).runSweep(memDir, reason, signal?, origin?)`，保持同目录重入合并、session abort 和 sweep-origin 屏蔽。
