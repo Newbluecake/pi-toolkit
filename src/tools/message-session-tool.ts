@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { InvocationRef } from "../fabric/xs/human-grant.js";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "@sinclair/typebox";
@@ -153,6 +154,8 @@ export function createMessageSessionTool(
   deps: MessageSessionToolDeps,
 ): ToolDefinition<typeof MessageSessionParamsLegacy> {
   const replyOn = deps.reply === true;
+  // Per tool activation, keep only a bounded digest and count; never retain message bodies.
+  let streak: { digest: string; failures: number } | undefined;
   return {
     name: "message_session",
     label: "message_session",
@@ -169,6 +172,20 @@ export function createMessageSessionTool(
       // legacy instance: the new fields can never legitimately arrive, and are never forwarded
       const expectReply = replyOn ? params.expectReply : undefined;
       const replyTo = replyOn ? params.replyTo : undefined;
+      const digest = createHash("sha256")
+        .update(
+          JSON.stringify([
+            params.to,
+            params.text,
+            params.wake,
+            expectReply?.timeoutS,
+            expectReply !== undefined,
+            replyTo,
+          ]),
+        )
+        .digest("hex");
+      if (streak?.digest !== digest) streak = { digest, failures: 0 };
+      const current = streak;
       const invocation = deps.activation === true ? deps.invocation?.(toolCallId) : undefined;
       const outcome: XsSendOutcome = await deps.sender.message({
         ...(invocation ? { invocation } : {}),
@@ -179,7 +196,16 @@ export function createMessageSessionTool(
         ...(expectReply !== undefined ? { expectReply } : {}),
         ...(replyTo !== undefined ? { replyTo } : {}),
       });
+      // An older in-flight call must not change the streak for newer parameters.
+      if (streak === current) {
+        current.failures = outcome.status === "bad_args" ? Math.min(current.failures + 1, 5) : 0;
+      }
       let hint = "";
+      if (replyOn && outcome.status === "bad_args" && outcome.reason === "expect_and_reply_to")
+        hint +=
+          "\n发起请求请使用 expectReply 且不要带 replyTo；回复别人时使用 replyTo，其值必须来自请求头，不要编造。两条路径互斥。";
+      if (streak === current && outcome.status === "bad_args" && current.failures >= 2)
+        hint += `\n相同参数已连续失败 ${current.failures} 次，请修改参数或停止重试。若目标是会话名，先用 list_sessions 确认 ref。`;
       if (replyOn) {
         if (outcome.reply?.state === "pending")
           hint += `\n${xsReplyIssuedHint(outcome.reply.requestId, outcome.reply.dueAt)}`;
@@ -188,6 +214,9 @@ export function createMessageSessionTool(
           else if (outcome.effect === "none" && outcome.reason === "rejected") hint += `\n${XS_REPLY_TO_REJECTED_HINT}`;
         } else if (outcome.effect === "unknown") hint += `\n${XS_UNKNOWN_HINT}`;
       } else if (outcome.effect === "unknown") hint = `\n${XS_UNKNOWN_HINT}`;
+      if (outcome.status === "bad_target" || outcome.status === "no_target" || outcome.status === "ambiguous")
+        hint +=
+          "\n`to` 只接受 `list_sessions` 给出的 ref、完整 session id 或精确会话名；先用 `list_sessions` 确认目标再发送。";
       if (deps.alias === true && outcome.status === "alias_unavailable") hint += `\n${XS_ALIAS_UNAVAILABLE_HINT}`;
       if (deps.activation === true && outcome.wakeDowngraded)
         hint += `\n${xsWakeDowngradedHint(outcome.wakeDowngraded, outcome.effect)}`;

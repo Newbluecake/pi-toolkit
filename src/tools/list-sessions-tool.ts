@@ -117,7 +117,7 @@ export function createListSessionsTool(deps: ListSessionsToolDeps): ToolDefiniti
       });
       const text =
         outcome.status !== "ok"
-          ? `list_sessions unavailable: ${outcome.status}${outcome.code !== undefined ? ` (${outcome.code})` : ""}`
+          ? `list_sessions unavailable: ${outcome.status}${outcome.code !== undefined ? ` (${outcome.code})` : ""}${outcome.status === "bad_channel" ? (channel?.trim() === "" ? "。channel 为空字符串不等于省略；不需要过滤请省略该参数。" : "。channel 无效或不在本链路（需要先加入该通道）；不需要过滤请省略该参数。") : ""}`
           : (outcome.rows ?? []).length === 0
             ? "No other joined sessions on this hub."
             : ["Joined sessions on this hub:", ...formatXsSessionRows(outcome.rows ?? [])].join("\n");

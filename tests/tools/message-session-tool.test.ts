@@ -80,6 +80,35 @@ describe("tools/message_session", () => {
     expect((none.content as { type: "text"; text: string }[])[0]!.text).not.toContain(XS_UNKNOWN_HINT);
   });
 
+  it.each([
+    { status: "bad_target", effect: "none", reason: "bad_target" },
+    { status: "no_target", effect: "none" },
+    { status: "ambiguous", effect: "none", candidates: [{ ref: "aaaaaaaaaaaa" }] },
+  ] satisfies XsSendOutcome[])("guides target discovery for $status", async (outcome) => {
+    const h = fakeSender();
+    h.message.mockResolvedValueOnce(outcome);
+    const tool = createMessageSessionTool({ sender: h.sender });
+    const result = await tool.execute("c", { to: "peer", text: "hi" });
+    expect(result.details).toEqual(outcome);
+    expect((result.content[0] as { text: string }).text).toBe(
+      JSON.stringify(outcome) +
+        "\n`to` 只接受 `list_sessions` 给出的 ref、完整 session id 或精确会话名；先用 `list_sessions` 确认目标再发送。",
+    );
+  });
+
+  it.each([
+    { status: "sent", effect: "applied" },
+    { status: "unanswered", effect: "unknown", reason: "client_deadline" },
+    { status: "sent", effect: "none", reason: "rejected" },
+  ] satisfies XsSendOutcome[])("preserves text for other outcomes: $status/$effect", async (outcome) => {
+    const h = fakeSender();
+    h.message.mockResolvedValueOnce(outcome);
+    const result = await createMessageSessionTool({ sender: h.sender }).execute("c", { to: "peer", text: "hi" });
+    expect((result.content[0] as { text: string }).text).toBe(
+      JSON.stringify(outcome) + (outcome.effect === "unknown" ? `\n${XS_UNKNOWN_HINT}` : ""),
+    );
+  });
+
   it("carries wakeDowngraded and candidates verbatim in the result shape (§4.3)", async () => {
     const h = fakeSender();
     h.message.mockResolvedValueOnce({
@@ -100,6 +129,75 @@ describe("tools/message_session", () => {
     const amb = await tool.execute("c", { to: "dup", text: "hi" });
     expect(amb.details).toMatchObject({ status: "ambiguous", effect: "none" });
     expect((amb.details as { candidates?: unknown[] }).candidates).toHaveLength(2);
+  });
+});
+
+describe("message_session bad argument guidance and retry guard", () => {
+  const args = { to: "peer", text: "hello", expectReply: {}, replyTo: "q" + "0".repeat(18) };
+  const bad: XsSendOutcome = { status: "bad_args", effect: "none", reason: "expect_and_reply_to" };
+  const text = (result: { content: readonly unknown[] }) => (result.content[0] as { text: string }).text;
+
+  it("does not expose reply correction on a reply-off instance", async () => {
+    const h = fakeSender();
+    h.message.mockResolvedValue(bad);
+    const tool = createMessageSessionTool({ sender: h.sender });
+    expect(text(await tool.execute("1", args))).toBe(JSON.stringify(bad));
+    expect(h.message).toHaveBeenCalledWith({ to: "peer", text: "hello" });
+  });
+
+  it("explains mutual exclusion, warns on repeated failures and caps the count", async () => {
+    const h = fakeSender();
+    h.message.mockResolvedValue(bad);
+    const tool = createMessageSessionTool({ sender: h.sender, reply: true });
+    const first = text(await tool.execute("1", args));
+    expect(first).toContain("发起请求请使用 expectReply 且不要带 replyTo");
+    expect(first).toContain("值必须来自请求头，不要编造");
+    expect(first).toContain("两条路径互斥");
+    expect(first).not.toContain("连续失败");
+    expect(text(await tool.execute("2", args))).toContain(
+      "相同参数已连续失败 2 次，请修改参数或停止重试。若目标是会话名，先用 list_sessions 确认 ref。",
+    );
+    expect(text(await tool.execute("3", args))).toContain("连续失败 3 次");
+    for (let i = 0; i < 6; i++) await tool.execute("x", args);
+    expect(text(await tool.execute("x", args))).toContain("连续失败 5 次");
+    const fresh = createMessageSessionTool({ sender: h.sender, reply: true });
+    expect(text(await fresh.execute("x", args))).not.toContain("连续失败");
+  });
+
+  it("ignores late failures from an earlier argument group", async () => {
+    const h = fakeSender();
+    let finish!: (outcome: XsSendOutcome) => void;
+    h.message.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    h.message.mockResolvedValue(bad);
+    const tool = createMessageSessionTool({ sender: h.sender, reply: true });
+    const pending = tool.execute("1", args);
+    const changed = { ...args, text: "changed" };
+    await tool.execute("2", changed);
+    finish(bad);
+    expect(text(await pending)).not.toContain("连续失败");
+    expect(text(await tool.execute("3", changed))).toContain("连续失败 2 次");
+  });
+
+  it("resets on argument changes, successful sends and non-validation errors", async () => {
+    const h = fakeSender();
+    h.message.mockResolvedValue(bad);
+    const tool = createMessageSessionTool({ sender: h.sender, reply: true });
+    await tool.execute("1", args);
+    await tool.execute("2", args);
+    const changed = { ...args, text: "changed" };
+    expect(text(await tool.execute("3", changed))).not.toContain("连续失败");
+    expect(text(await tool.execute("4", changed))).toContain("连续失败 2 次");
+    h.message.mockResolvedValueOnce({ status: "sent", effect: "applied" });
+    await tool.execute("5", changed);
+    expect(text(await tool.execute("6", changed))).not.toContain("连续失败");
+    h.message.mockResolvedValueOnce({ status: "unanswered", effect: "unknown", reason: "client_deadline" });
+    expect(text(await tool.execute("7", changed))).not.toContain("连续失败");
+    expect(text(await tool.execute("8", changed))).not.toContain("连续失败");
   });
 });
 
@@ -155,6 +253,30 @@ describe("tools/list_sessions", () => {
     const text = (result.content as { type: "text"; text: string }[])[0]!.text;
     expect(text).toContain("list_sessions unavailable: off (E_XS_OFF)");
     expect(result.details).toMatchObject({ status: "off", code: "E_XS_OFF" });
+  });
+
+  it("explains bad channel without changing valid or omitted filters", async () => {
+    const h = fakeSender();
+    h.list.mockResolvedValueOnce({ status: "bad_channel", reason: "bad_channel" });
+    const tool = createListSessionsTool({ sender: h.sender, channels: true });
+    const invalid = await tool.execute("c", { channel: "" });
+    expect((invalid.content[0] as { text: string }).text).toContain(
+      "channel 为空字符串不等于省略；不需要过滤请省略该参数",
+    );
+    expect(h.list).toHaveBeenLastCalledWith({ channel: "" });
+    h.list.mockResolvedValueOnce({ status: "bad_channel", reason: "bad_channel" });
+    const whitespace = await tool.execute("c", { channel: "  " });
+    expect((whitespace.content[0] as { text: string }).text).toContain("channel 为空字符串不等于省略");
+    h.list.mockResolvedValueOnce({ status: "bad_channel", reason: "bad_channel" });
+    const other = await tool.execute("c", { channel: "other" });
+    expect((other.content[0] as { text: string }).text).toContain(
+      "channel 无效或不在本链路（需要先加入该通道）；不需要过滤请省略该参数",
+    );
+    expect(h.list).toHaveBeenLastCalledWith({ channel: "other" });
+    await tool.execute("c", { channel: "#team" });
+    expect(h.list).toHaveBeenLastCalledWith({ channel: "#team" });
+    await tool.execute("c", {});
+    expect(h.list).toHaveBeenLastCalledWith({});
   });
 
   it("formatXsSessionRows stays token-only (UI-language split)", () => {
