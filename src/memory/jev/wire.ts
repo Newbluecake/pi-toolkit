@@ -109,7 +109,7 @@ import {
   formatStatusLine,
 } from "./format.js";
 import { clearHealthTable, coverage, getHealthTable, notifyFor } from "./health.js";
-import { readIndex, readTaxonomyFile, writeIndexPatch } from "./index-store.js";
+import { mergeIndex, readIndex, readTaxonomyFile, updateIndexLocked, writeIndexPatch } from "./index-store.js";
 import { matchTags, prefilter } from "./match.js";
 import {
   carryFromFinal,
@@ -1173,17 +1173,37 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     recoveryTimer = { handle, at };
   }
 
-  /** Background task queue (bulk tagging / backfill / review): serialized,
-   *  each capped at 120s, aborted on session_shutdown. Main session only. */
-  const enqueue = (name: string, task: (signal: AbortSignal) => Promise<void>): void => {
-    if (isChild) return;
+  /** Running job counts toward the bound; reject newest rather than silently
+   * discard work already accepted. Each job owns its abort and commit lease. */
+  const enqueue = (name: string, task: (signal: AbortSignal, valid: () => boolean) => Promise<void>): void => {
+    if (isChild || bgAbort.signal.aborted) return;
+    if (bgDepth >= deps.settings.jev.backgroundQueueLimit) {
+      log(`${name} rejected: background queue full (limit ${String(deps.settings.jev.backgroundQueueLimit)})`);
+      return;
+    }
     bgDepth += 1;
-    const signal = bgAbort.signal;
+    const sessionSignal = bgAbort.signal;
     bgChain = bgChain
       .then(async () => {
-        if (signal.aborted) return;
-        const r = await withTimeout(task(signal), BACKGROUND_TOTAL_MS);
-        if (r === TIMEOUT) log(`${name} exceeded ${BACKGROUND_TOTAL_MS}ms — abandoned`);
+        if (sessionSignal.aborted) return;
+        const controller = new AbortController();
+        let live = true;
+        const abort = (): void => {
+          live = false;
+          controller.abort();
+        };
+        sessionSignal.addEventListener("abort", abort, { once: true });
+        const valid = (): boolean => live && !sessionSignal.aborted && !controller.signal.aborted;
+        try {
+          const r = await withTimeout(task(controller.signal, valid), BACKGROUND_TOTAL_MS);
+          if (r === TIMEOUT) {
+            abort();
+            log(`${name} exceeded ${BACKGROUND_TOTAL_MS}ms — aborted`);
+          }
+        } finally {
+          abort();
+          sessionSignal.removeEventListener("abort", abort);
+        }
       })
       .catch((err: unknown) => log(`${name} failed: ${String((err as Error)?.message ?? err)}`))
       .finally(() => {
@@ -1191,22 +1211,49 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
       });
   };
 
-  const persistTags = async (dir: string, upserts: Record<EntryHash, EntryTags>): Promise<void> => {
-    if (Object.keys(upserts).length === 0) return;
-    const out = await writeIndexPatch(
-      dir,
-      { upsert: upserts, lastTaggedAt: new Date(now()).toISOString() },
-      deps.writeGate,
-    );
-    if (out === "busy") log("sidecar busy — tagging results not saved");
-    dataCache.delete(dir);
+  const jobGate = (valid: () => boolean): MemoryWriteGate => ({
+    check: (dir) =>
+      valid() ? (deps.writeGate?.check(dir) ?? { ok: true }) : { ok: false, reason: "identity-changed" },
+    capture: (dir) => deps.writeGate?.capture(dir),
+  });
+  const STALE_JOB = Symbol("stale-job");
+  const persistTags = async (
+    dir: string,
+    upserts: Record<EntryHash, EntryTags>,
+    base: Record<EntryHash, EntryTags>,
+    taxonomyRev: string,
+    valid: () => boolean,
+  ): Promise<void> => {
+    if (!valid() || Object.keys(upserts).length === 0) return;
+    try {
+      const out = await updateIndexLocked(
+        dir,
+        (index) => {
+          const currentTaxonomy = mergeTaxonomy(readTaxonomyFile(dir));
+          if (!valid() || !currentTaxonomy.ok || currentTaxonomy.taxonomy.rev !== taxonomyRev) throw STALE_JOB;
+          const live = new Set(taggableEntries(new EntryIndex().get(dir)).map((entry) => entry.hash));
+          const fresh = Object.fromEntries(
+            Object.entries(upserts).filter(
+              ([hash]) => live.has(hash) && JSON.stringify(index.entries[hash]) === JSON.stringify(base[hash]),
+            ),
+          );
+          if (Object.keys(fresh).length === 0) throw STALE_JOB;
+          return mergeIndex(index, { upsert: fresh, lastTaggedAt: new Date(now()).toISOString() });
+        },
+        jobGate(valid),
+      );
+      if (out === "busy") log("sidecar busy — tagging results not saved");
+      dataCache.delete(dir);
+    } catch (err) {
+      if (err !== STALE_JOB && valid()) throw err;
+    }
   };
 
   /** §6.2.3 bulk tagging. `scope: "migration"` runs only when something is
    *  pending or tagged under an older taxonomy; "all" (tag add/enable) always
    *  re-asks every enabled tag. */
   const runBulk = (cwd: string, scope: "migration" | "all"): void => {
-    enqueue("bulk tagging", async (signal) => {
+    enqueue("bulk tagging", async (signal, valid) => {
       const reg = registry;
       const c = corpusFor(cwd);
       if (reg === undefined || c === undefined) return;
@@ -1229,8 +1276,8 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
           upserts[hash] = tags;
         },
       });
-      await persistTags(c.dir, upserts);
-      refreshInactive(cwd);
+      await persistTags(c.dir, upserts, c.index.entries, c.taxonomy.rev, valid);
+      if (valid()) refreshInactive(cwd);
     });
   };
 
@@ -1244,7 +1291,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     const pending = taggableEntries(c.entries).filter((e) => c.index.entries[e.hash] === undefined);
     if (pending.length === 0) return;
     lastBackfillAt = now();
-    enqueue("pending backfill", async (signal) => {
+    enqueue("pending backfill", async (signal, valid) => {
       const reg = registry;
       if (reg === undefined) return;
       const upserts: Record<EntryHash, EntryTags> = {};
@@ -1262,8 +1309,8 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
         if (r.tags !== undefined) upserts[entry.hash] = r.tags;
         else if (!r.outcome.ok) break;
       }
-      await persistTags(c.dir, upserts);
-      refreshInactive(cwd);
+      await persistTags(c.dir, upserts, c.index.entries, c.taxonomy.rev, valid);
+      if (valid()) refreshInactive(cwd);
     });
   };
 
@@ -1277,7 +1324,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     const lastMs = last === undefined ? Number.NaN : Date.parse(last);
     if (Number.isFinite(lastMs) && now() - lastMs < config.reviewIntervalDays * DAY_MS) return;
     if (c.index.review !== undefined && c.index.review.corpusFp === corpusFingerprint(c.entries)) return;
-    enqueue("periodic review", async (signal) => {
+    enqueue("periodic review", async (signal, valid) => {
       const reg = registry;
       if (reg === undefined || client.status().kind !== "full") return;
       const outcome = await runReviewPass({
@@ -1293,7 +1340,26 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
         log(`periodic review failed (${outcome.reason})`);
         return;
       }
-      const out = await writeIndexPatch(c.dir, { review: outcome, reviewBase: c.index.review ?? null }, deps.writeGate);
+      if (!valid()) return;
+      let out: "ok" | "busy";
+      try {
+        out = await updateIndexLocked(
+          c.dir,
+          (index) => {
+            if (
+              !valid() ||
+              JSON.stringify(index.review) !== JSON.stringify(c.index.review) ||
+              corpusFingerprint(new EntryIndex().get(c.dir)) !== corpusFingerprint(c.entries)
+            )
+              throw STALE_JOB;
+            return mergeIndex(index, { review: outcome, reviewBase: c.index.review ?? null });
+          },
+          jobGate(valid),
+        );
+      } catch (err) {
+        if (err === STALE_JOB || !valid()) return;
+        throw err;
+      }
       if (out === "busy") log("sidecar busy — review results not saved");
       dataCache.delete(c.dir);
     });
@@ -2896,6 +2962,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
         // branch on the next turn (arch §3.3.5 恢复) — reset the restored
         // flags so residentTurn rescans instead of trusting in-memory state.
         for (const st of residentStates.values()) st.restored = false;
+        bgAbort.abort();
         bgAbort = new AbortController();
         seedFrom(ctx);
         if (reg === undefined) return; // off(pi-api)

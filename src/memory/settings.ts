@@ -113,6 +113,8 @@ export interface MemoryJevSettings {
   maxCostUsd: number;
   /** 单次 activation 的 Jev 调用总次数上限。Default 800；0–5000。 */
   maxCalls: number;
+  /** Maximum running and queued background jobs. */
+  backgroundQueueLimit: number;
   /** A 层快速通道加白标签（默认只有 risk:"high" 标签能触发 A 注入；2026-11-03 噪音修复）。CSV 或数组，非法 id 静默丢弃。Default []。 */
   fastPathAllowTags: string[];
   /** A 层快速通道黑名单标签（优先于高危/加白判定）。Default []。 */
@@ -419,6 +421,7 @@ export function parseMemorySettings(input: unknown): MemorySettings {
     },
     maxCostUsd: numFloat(jevObj.maxCostUsd, defaults.jev.maxCostUsd, 0.01, 5),
     maxCalls: num(jevObj.maxCalls, defaults.jev.maxCalls, 0, 5000),
+    backgroundQueueLimit: num(jevObj.backgroundQueueLimit, defaults.jev.backgroundQueueLimit, 1, 1024),
     fastPathAllowTags: parseJevTagIdList(jevObj.fastPathAllowTags),
     fastPathDenyTags: parseJevTagIdList(jevObj.fastPathDenyTags),
     fastPathCooldownH: num(jevObj.fastPathCooldownH, defaults.jev.fastPathCooldownH, 0, 720),
@@ -500,6 +503,7 @@ export const DEFAULT_MEMORY_SETTINGS: MemorySettings = {
     review: { intervalDays: 7 },
     maxCostUsd: 0.5,
     maxCalls: 800,
+    backgroundQueueLimit: 32,
     fastPathAllowTags: [],
     fastPathDenyTags: [],
     fastPathCooldownH: 24,

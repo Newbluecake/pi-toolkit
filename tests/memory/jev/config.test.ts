@@ -134,3 +134,12 @@ describe("jevLayoutAllowed / resolveJevWiring blocks acceptance (#36 P4)", () =>
     });
   });
 });
+
+describe("background queue limit", () => {
+  test("defaults to 32 and rejects out-of-range settings", () => {
+    expect(DEFAULT_MEMORY_SETTINGS.jev.backgroundQueueLimit).toBe(32);
+    expect(parseMemorySettings({ jev: { backgroundQueueLimit: 7 } }).jev.backgroundQueueLimit).toBe(7);
+    expect(parseMemorySettings({ jev: { backgroundQueueLimit: 0 } }).jev.backgroundQueueLimit).toBe(32);
+    expect(parseMemorySettings({ jev: { backgroundQueueLimit: 9999 } }).jev.backgroundQueueLimit).toBe(32);
+  });
+});

@@ -313,11 +313,31 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
 
     try {
       const fetchFn = deps.config.proxy === "" ? undefined : makeFetch(deps.config.proxy);
-      const result = await registry.classify(
+      const pending = registry.classify(
         model,
         { state, questions },
         { signal: controller.signal, ...(fetchFn === undefined ? {} : { fetch: fetchFn }) },
       );
+      const result = await new Promise<Awaited<typeof pending> | undefined>((resolve, reject) => {
+        const onAbort = (): void => resolve(undefined);
+        controller.signal.addEventListener("abort", onAbort, { once: true });
+        if (controller.signal.aborted) onAbort();
+        void pending.then(
+          (value) => {
+            controller.signal.removeEventListener("abort", onAbort);
+            resolve(value);
+          },
+          (err: unknown) => {
+            controller.signal.removeEventListener("abort", onAbort);
+            reject(err);
+          },
+        );
+      });
+      if (result === undefined || controller.signal.aborted) {
+        return timedOut && !outerAborted()
+          ? { ok: false, grade: "transient", errorMessage: `timeout after ${String(timeoutMs)}ms` }
+          : { ok: false, grade: "aborted", errorMessage: "aborted" };
+      }
       usageCalls += 1;
       if (result.stopReason === "aborted" || (result.stopReason === "error" && timedOut)) {
         if (timedOut && !outerAborted()) {
@@ -378,7 +398,8 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
     }
     if (deps.isChild && !bucket.tryTake(deps.now())) return fail("budget", "child-session token bucket exhausted");
 
-    await ensureAvailability(req.registry, false);
+    await ensureAvailability(req.registry, false, req.signal);
+    if (req.signal?.aborted === true) return fail("aborted", "aborted");
     const totalBudgetMs = clampSpanMs(req.budgetMs) ?? DEFAULT_BUDGET_MS;
     const startedAt = deps.now();
     const ids = usableIds();

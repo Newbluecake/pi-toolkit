@@ -234,6 +234,14 @@ export const MEMORY_SETTING_SPECS: Record<string, SettingSpec> = {
     ...count("memory.jev.maxCalls", 0, "Per-activation Jev call count cap"),
     max: 5000,
   } as SettingSpec,
+  "memory.jev.backgroundQueueLimit": {
+    ...count(
+      "memory.jev.backgroundQueueLimit",
+      1,
+      "Maximum running and queued Jev background jobs; reject new jobs when full",
+    ),
+    max: 1024,
+  } as SettingSpec,
   "memory.jev.fastPathAllowTags": csvString(
     "memory.jev.fastPathAllowTags",
     "Extra tag ids allowed to trigger the A-layer fast path (default: risk:high tags only)",
