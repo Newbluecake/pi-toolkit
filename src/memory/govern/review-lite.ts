@@ -5,8 +5,14 @@ import { createHash } from "node:crypto";
 import { redactForJev } from "../jev/redact.js";
 import { looksSecret } from "../secret-patterns.js";
 import type { MemoryWriteGate } from "../contracts.js";
-import type { MemCommandUiLike, ReviewSuggestion, ReviewSuggestionKind } from "../jev/contracts.js";
-import { isDismissedRelation, readIndex, suggestionKey } from "../jev/index-store.js";
+import type {
+  MemCommandUiLike,
+  ReviewSuggestion,
+  ReviewSuggestionKind,
+  RevisionAuditPort,
+  FrozenRevisionInput,
+} from "../jev/contracts.js";
+import { isDismissedRelation, mergeReview, readIndex, suggestionKey } from "../jev/index-store.js";
 import { entryHash } from "../jev/entries.js";
 import { readCorpus, trashBlockLocked } from "../blocks/store.js";
 import { parseBlockFile, type ParsedBlock } from "../blocks/format.js";
@@ -23,6 +29,13 @@ import {
   writeGovernIndexLocked,
 } from "./supersede.js";
 import { planSweep } from "./sweep-plan.js";
+import {
+  revisionInputIsLiveLocked,
+  revisionProposalDigest,
+  revisionProposalMatchesInput,
+  validateRevisionProposal,
+  type RevisionReviewInput,
+} from "./revision.js";
 import { archiveBlockLocked, createSweepRunner } from "./sweep.js";
 export const GOVERNANCE_KINDS: readonly ReviewSuggestionKind[] = [
   "expired-user",
@@ -77,7 +90,7 @@ export async function handleReviewLite(
   const suggestions = [...(index.review?.suggestions ?? []), ...transient].filter(
     (s, i, all) =>
       all.findIndex((x) => x.id === s.id) === i &&
-      GOVERNANCE_KINDS.includes(s.kind) &&
+      (s.revision !== undefined || GOVERNANCE_KINDS.includes(s.kind)) &&
       corpus.blocks.some(
         (b) => entryHash(b.body) === s.a.hash && (blockAnchor(b) === s.a.anchor || b.id === s.a.anchor),
       ) &&
@@ -104,12 +117,12 @@ export async function handleReviewLite(
       { value: "keep", label: "Keep" },
       { value: "skip", label: "Skip" },
     ];
-    if (s.kind === "expired-user")
+    if (!s.revision && s.kind === "expired-user")
       options.unshift({ value: "extend", label: "Extend 30 days" }, { value: "delete", label: "Delete" });
-    if ((s.kind === "until-check" || s.kind === "snapshot") && block.meta.authority === "agent")
+    if (!s.revision && (s.kind === "until-check" || s.kind === "snapshot") && block.meta.authority === "agent")
       options.unshift({ value: "archive", label: "Archive" }, { value: "extend", label: "Set expires +30 days" });
-    if (s.kind === "resident-budget") options.unshift({ value: "topic", label: "Downgrade to topic" });
-    if (s.kind === "scope-check") options.unshift({ value: "global", label: "Set global" });
+    if (!s.revision && s.kind === "resident-budget") options.unshift({ value: "topic", label: "Downgrade to topic" });
+    if (!s.revision && s.kind === "scope-check") options.unshift({ value: "global", label: "Set global" });
     const choice = await ui.select(`review · ${s.kind} · ${block.id}`, options);
     if (!choice || choice === "skip" || !options.some((option) => option.value === choice)) continue;
     if (choice === "open") {
@@ -126,6 +139,8 @@ export async function handleReviewLite(
           governanceGate(memDir, opts.gate, opts.signal);
           const live = readGovernBlock(memDir, block.id);
           if (live.rev !== block.rev) throw new Error("entry changed — skipped");
+          if (s.revision && (live.rev !== s.revision.expectedRev || choice !== "keep"))
+            throw new Error("revision is read-only — skipped");
           const latest = readIndex(memDir).index,
             review = latest.review ?? { lastRunAt: "", corpusFp: "", suggestions: [], dismissed: [] };
           if (choice === "archive")
@@ -450,4 +465,169 @@ export async function firstUserReviewCount(
   );
   if (!result.complete && result.reason !== "cas-failed") throw new Error(result.reason ?? "review incomplete");
   return result.added;
+}
+
+/** D factory-only review owner. Audit is an injected C0 port; no fallback
+ * journal, no index lock nesting and no body/metadata mutation. */
+export interface RevisionReviewDeps {
+  readonly audit?: RevisionAuditPort;
+  readonly gate?: MemoryWriteGate;
+  readonly signal?: AbortSignal;
+  isCurrent(): boolean;
+  leaseValid(): boolean;
+  now(): Date;
+}
+export type RevisionSuggestionSaveResult = "saved" | "dismissed" | "resolved" | "stale" | "unavailable";
+function revisionSuggestion(input: RevisionReviewInput, at: string): ReviewSuggestion {
+  const f = input.frozen,
+    p = input.proposal;
+  const side = (b: FrozenRevisionInput["target"]) => ({ hash: entryHash(b.block.body), anchor: b.id });
+  const kind = p.reason === "expired" ? "expired-user" : p.reason === "budget" ? "oversize" : p.reason;
+  return {
+    id: `revision:${p.actionId}`,
+    kind,
+    a: side(f.target),
+    ...(f.context ? { b: side(f.context) } : {}),
+    p: p.relation?.p ?? 0,
+    at,
+    revision: p,
+  };
+}
+function suppressedRevision(
+  index: ReturnType<typeof readIndex>["index"],
+  row: ReviewSuggestion,
+): "dismissed" | "resolved" | false {
+  const review = index.review;
+  if (review?.resolved?.includes(suggestionKey(row))) return "resolved";
+  if (
+    !mergeReview(review, { lastRunAt: "", corpusFp: "", suggestions: [row], dismissed: [] }).suggestions.some(
+      (s) => suggestionKey(s) === suggestionKey(row),
+    )
+  )
+    return "dismissed";
+  return false;
+}
+/** Host can use this before generation; the authoritative repeat is always in
+ * upsert's lock. Stable identity intentionally excludes hash/rev/batch. */
+export async function revisionSuggestionSuppressed(
+  memDir: string,
+  frozen: FrozenRevisionInput,
+  deps: Pick<RevisionReviewDeps, "isCurrent" | "signal">,
+): Promise<"dismissed" | "resolved" | false> {
+  if (deps.signal?.aborted || !deps.isCurrent()) return false;
+  return withMemoryDirLock(
+    memDir,
+    () => {
+      if (deps.signal?.aborted || !deps.isCurrent()) return false;
+      const key = JSON.stringify([
+        "revision",
+        frozen.action,
+        ...[frozen.target.id, ...(frozen.context ? [frozen.context.id] : [])].sort(),
+      ]);
+      const review = readIndex(memDir).index.review;
+      if (review?.resolved?.includes(key)) return "resolved" as const;
+      if (review?.dismissed.some((d) => d.suggestionKey === key)) return "dismissed" as const;
+      return false;
+    },
+    { timeoutMs: 0, log: () => {} },
+  );
+}
+export async function upsertRevisionSuggestion(
+  memDir: string,
+  input: RevisionReviewInput,
+  deps: RevisionReviewDeps,
+): Promise<RevisionSuggestionSaveResult> {
+  const current = () => {
+    try {
+      return !deps.signal?.aborted && deps.isCurrent();
+    } catch {
+      return false;
+    }
+  };
+  try {
+    if (!current()) return "stale";
+    if (!deps.audit) return "unavailable";
+    let proposal = validateRevisionProposal(input.proposal);
+    if (
+      !proposal ||
+      !revisionProposalMatchesInput(proposal, input.frozen) ||
+      memDir !== input.frozen.directory.realpath
+    )
+      return "unavailable";
+    return await withMemoryDirLock(
+      memDir,
+      () => {
+        if (!current() || !revisionInputIsLiveLocked(input.frozen)) return "stale";
+        governanceGate(memDir, deps.gate, deps.signal);
+        // Lease loss is not epoch loss: keep only a suggestion, with its final
+        // digest fixed BEFORE prepared audit. No post-barrier digest swapping.
+        if (proposal!.autoEligible && !deps.leaseValid()) {
+          const { proposalDigest: _old, ...payload } = proposal!;
+          const next = { ...payload, autoEligible: false };
+          proposal = validateRevisionProposal({ ...next, proposalDigest: revisionProposalDigest(next) });
+          if (!proposal) return "unavailable";
+        }
+        const index = readIndex(memDir).index;
+        const row = revisionSuggestion({ ...input, proposal: proposal! }, deps.now().toISOString());
+        const suppression = suppressedRevision(index, row);
+        if (suppression) return suppression;
+        const existing = index.review?.suggestions.find((s) => suggestionKey(s) === suggestionKey(row));
+        // A live newer/different proposal is not replaced by an in-flight result.
+        if (
+          existing?.revision &&
+          existing.revision.proposalDigest !== proposal!.proposalDigest &&
+          (existing.at >= row.at ||
+            (existing.revision.expectedRev === proposal!.expectedRev &&
+              existing.revision.contextExpectedRev === proposal!.contextExpectedRev))
+        )
+          return "stale";
+        if (!current()) return "stale";
+        const prepared = deps.audit!.persistPreparedBarrierLocked({ ...input, proposal: proposal! });
+        if (
+          prepared.kind !== "ok" ||
+          prepared.audit.state !== "prepared" ||
+          prepared.audit.actionId !== proposal!.actionId ||
+          prepared.audit.batchId !== proposal!.batchId ||
+          prepared.audit.proposalDigest !== proposal!.proposalDigest ||
+          prepared.audit.beforeDigest !== input.frozen.target.rawDigest ||
+          prepared.audit.action !== proposal!.action ||
+          prepared.audit.targetId !== proposal!.targetId ||
+          prepared.audit.expectedRev !== proposal!.expectedRev ||
+          prepared.audit.contextId !== proposal!.contextId ||
+          prepared.audit.contextExpectedRev !== proposal!.contextExpectedRev ||
+          prepared.audit.directoryIdentityDigest !== proposal!.directoryIdentityDigest ||
+          prepared.audit.policyVersion !== proposal!.policyVersion ||
+          !prepared.before.equals(input.frozen.target.rawBefore)
+        )
+          return "unavailable";
+        if (!current() || !revisionInputIsLiveLocked(input.frozen) || (proposal!.autoEligible && !deps.leaseValid()))
+          return "stale";
+        const review = mergeReview(index.review, {
+          lastRunAt: row.at,
+          corpusFp: input.frozen.batchId,
+          suggestions: [row],
+          dismissed: [],
+        });
+        if (!review.suggestions.some((s) => s.id === row.id && s.revision?.proposalDigest === proposal!.proposalDigest))
+          return "stale";
+        governanceGate(memDir, deps.gate, deps.signal);
+        if (!current()) return "stale";
+        const writeGate: MemoryWriteGate = {
+          // Never capture/adopt a directory here; the original owner already did.
+          capture() {},
+          check(dir) {
+            const verdict = deps.gate?.check(dir) ?? { ok: true as const };
+            return !current() || (proposal!.autoEligible && !deps.leaseValid())
+              ? { ok: false as const, reason: "identity-changed" as const }
+              : verdict;
+          },
+        };
+        writeGovernIndexLocked(memDir, { ...index, review }, writeGate, deps.signal);
+        return "saved";
+      },
+      { timeoutMs: 0, log: () => {} },
+    );
+  } catch {
+    return current() ? "unavailable" : "stale";
+  }
 }

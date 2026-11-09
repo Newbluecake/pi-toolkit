@@ -42,6 +42,7 @@ import {
   type TaxonomyFileV1,
 } from "./contracts.js";
 import { mergeTaxonomy } from "./taxonomy.js";
+import { validateRevisionProposal } from "../govern/revision.js";
 
 /** `.jev/` under the canonical memory slug directory. */
 export const JEV_DIR_NAME = ".jev";
@@ -159,6 +160,24 @@ function sanitizeSuggestions(v: unknown): readonly ReviewSuggestion[] | undefine
     ) {
       continue;
     }
+    const revision = Object.hasOwn(item, "revision") ? validateRevisionProposal(item["revision"]) : undefined;
+    if (Object.hasOwn(item, "revision") && revision === undefined) continue;
+    if (
+      revision &&
+      (item["id"] !== `revision:${revision.actionId}` ||
+        item["kind"] !==
+          (revision.reason === "expired"
+            ? "expired-user"
+            : revision.reason === "budget"
+              ? "oversize"
+              : revision.reason) ||
+        ![revision.targetId, `${revision.targetId}.md`].some((id) => (a["anchor"] as string).split("|")[0] === id) ||
+        (revision.contextId === undefined
+          ? b !== undefined
+          : !isPlainObject(b) ||
+            ![revision.contextId, `${revision.contextId}.md`].includes((b["anchor"] as string).split("|")[0]!)))
+    )
+      continue;
     out.push({
       id: item["id"],
       kind: item["kind"] as ReviewSuggestion["kind"],
@@ -166,6 +185,7 @@ function sanitizeSuggestions(v: unknown): readonly ReviewSuggestion[] | undefine
       ...(isPlainObject(b) ? { b: { hash: b["hash"] as string, anchor: b["anchor"] as string } } : {}),
       p: item["p"],
       at: item["at"],
+      ...(revision === undefined ? {} : { revision }),
     });
   }
   return out;
@@ -280,6 +300,12 @@ export function readIndex(dir: string): { index: JevIndexV1; rebuilt: boolean } 
 
 /** Stable semantic identity; old pN/oN classifier question IDs are not stable. */
 export function suggestionKey(s: ReviewSuggestion): string {
+  if (s.revision)
+    return JSON.stringify([
+      "revision",
+      s.revision.action,
+      ...[s.revision.targetId, ...(s.revision.contextId ? [s.revision.contextId] : [])].sort(),
+    ]);
   const entryId = (anchor: string): string => {
     const match = /^([^|]+\.\d+\.md)\|/.exec(anchor);
     return match?.[1] ?? anchor;
@@ -506,7 +532,12 @@ export function gcIndex(index: JevIndexV1, liveHashes: ReadonlySet<EntryHash>): 
 
 /** Exact blocks GC: a content hash survives while ANY block still references it.
  * Old files-layout gcIndex remains cap-triggered and byte-compatible. */
-export function gcBlockIndex(index: JevIndexV1, liveHashes: ReadonlySet<EntryHash>, _today: string): JevIndexV1 {
+export function gcBlockIndex(
+  index: JevIndexV1,
+  liveHashes: ReadonlySet<EntryHash>,
+  _today: string,
+  liveRevisions?: ReadonlyMap<string, { readonly rev: string; readonly hash: string }>,
+): JevIndexV1 {
   const filter = <T>(values: Readonly<Record<string, T>> | undefined): Record<string, T> =>
     Object.fromEntries(Object.entries(values ?? {}).filter(([hash]) => liveHashes.has(hash)));
   const { aInjectedAt: _a, pInjectedAt: _p, review: _r, ...rest } = index;
@@ -521,9 +552,19 @@ export function gcBlockIndex(index: JevIndexV1, liveHashes: ReadonlySet<EntryHas
       ? {
           review: {
             ...index.review,
-            suggestions: index.review.suggestions.filter(
-              (s) => liveHashes.has(s.a.hash) && (!s.b || liveHashes.has(s.b.hash)),
-            ),
+            suggestions: index.review.suggestions.filter((s) => {
+              if (!liveHashes.has(s.a.hash) || (s.b && !liveHashes.has(s.b.hash))) return false;
+              if (!s.revision || !liveRevisions) return true;
+              const p = s.revision,
+                target = liveRevisions.get(p.targetId);
+              const context = p.contextId ? liveRevisions.get(p.contextId) : undefined;
+              return (
+                target?.rev === p.expectedRev &&
+                target.hash === s.a.hash &&
+                (p.contextId === undefined ||
+                  (context !== undefined && context.rev === p.contextExpectedRev && context.hash === s.b?.hash))
+              );
+            }),
             dismissed: index.review.dismissed,
           },
         }
@@ -581,8 +622,10 @@ export async function updateIndexLocked(
         ensurePrivateDir(jdir);
         let merged = update(readIndex(dir).index);
         if (base !== dir) {
-          const live = new Set(readCorpus(base).blocks.map((b) => entryHash(b.body)));
-          merged = gcBlockIndex(merged, live, new Date().toISOString().slice(0, 10));
+          const blocks = readCorpus(base).blocks;
+          const live = new Set(blocks.map((b) => entryHash(b.body)));
+          const revisions = new Map(blocks.map((b) => [b.id, { rev: b.rev, hash: entryHash(b.body) }]));
+          merged = gcBlockIndex(merged, live, new Date().toISOString().slice(0, 10), revisions);
         } else merged = capBlind(merged);
         gateCheck(dir, gate);
         const tmp = writeTempRegular(jdir, INDEX_NAME, serializeIndex(merged), INDEX_FILE_MODE);

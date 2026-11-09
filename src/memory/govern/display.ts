@@ -22,14 +22,30 @@ export function blockReviewDisplay(dir: string, today = governanceToday()): stri
   const suggestions = mergeReview(undefined, {
     lastRunAt: "",
     corpusFp: "",
-    suggestions: all.filter((s) => matches(s.a) && (!s.b || matches(s.b))),
+    suggestions: all.filter((s) => s.revision || (matches(s.a) && (!s.b || matches(s.b)))),
     dismissed: index.review?.dismissed ?? [],
     ...(index.review?.resolved === undefined ? {} : { resolved: index.review.resolved }),
   }).suggestions;
   if (!suggestions.length) return "review: no suggestions";
   return [
     `review: ${suggestions.length} suggestions`,
-    ...suggestions.map((s) => `[${s.kind}] ${s.a.anchor.split("|")[0]}${s.b ? ` vs ${s.b.anchor.split("|")[0]}` : ""}`),
+    ...suggestions.map((s) => {
+      const p = s.revision;
+      if (!p) return `[${s.kind}] ${s.a.anchor.split("|")[0]}${s.b ? ` vs ${s.b.anchor.split("|")[0]}` : ""}`;
+      const live = corpus.blocks.find((b) => b.id === p.targetId);
+      const context = p.contextId ? corpus.blocks.find((b) => b.id === p.contextId) : undefined;
+      const stale =
+        !live ||
+        live.rev !== p.expectedRev ||
+        live.meta.status !== "active" ||
+        (p.contextId !== undefined &&
+          (!context || context.rev !== p.contextExpectedRev || context.meta.status !== "active"));
+      const expires =
+        p.action === "expires"
+          ? ` expires=${p.expiry.op === "set" ? p.expiry.nextExpires : "clear"} dateRuleVersion=${p.expiry.dateRuleVersion}`
+          : "";
+      return `[revision ${p.action}] ${p.targetId}@${p.expectedRev}${p.contextId ? ` vs ${p.contextId}@${p.contextExpectedRev}` : ""}${p.autoEligible ? " ·auto-eligible (hint only)" : " ·suggestion"}${stale ? " ·stale" : ""}${expires}`;
+    }),
   ].join("\n");
 }
 

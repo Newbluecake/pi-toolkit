@@ -483,6 +483,7 @@ export function createJevCommandPort(deps: JevCommandPortDeps): JevCommandPort {
         ...review.dismissed,
         {
           suggestionKey: suggestionKey(suggestion),
+          ...(suggestion.revision ? { kind: suggestion.kind } : {}),
           hashKey:
             suggestion.b === undefined ? suggestion.a.hash : [suggestion.a.hash, suggestion.b.hash].sort().join("+"),
           anchorKey:
