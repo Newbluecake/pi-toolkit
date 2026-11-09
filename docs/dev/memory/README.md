@@ -759,3 +759,30 @@ provider 执行 token cap、认证、网络/proxy 或 live 计费。新增 stric
 typecheck/build/格式。合法正文正例真实经过上述工厂 → local controlled registry →
 可核 cap serializer → 原 Promise → client validator/账本；这个本地 byte-token 协议不发网络、
 不代表真实生产 provider conformance；新增真实 SDK 离线门也不冒充 LIVE 验收。fixture 未改，未 install/push，未做 commitAction/audit。
+
+### #50 C0：跨 C/D 契约与原始字节 reader（factory-only，未接线）
+
+`jev/contracts.ts` 是 C/D 共享类型的唯一 owner：追加 `ReviewSuggestion.revision?`、
+冻结输入、完整提案判别联合、证据绑定、审计/恢复结果与同步 `RevisionAuditPort`，并提供
+C 工厂/恢复的 callable 类型（不是实现）。复用 B 的 `RevisionBlockInput`、`ClientProvenance`、
+生成结果与 `JevUsage.budget`，不复制 validator/账本；后续 D 必须复用
+`govern/revision-output.ts`。D 独享的 FreezeSpec/Deps/PlanInput/PrepareDeps/ReviewDeps 留在
+D 模块内部定义，C0 **没有冻结这些内部参数的字段，也没有实现 §3.3 的函数**。
+
+- `safe-fs.ts::readRegularBytes(dir,name,{maxBytes?})` 经 `openRegular` 的 no-follow/regular
+  守卫与 nonblocking open，先检查文件长度再有界分配/分段读取、探测 EOF，并复核 fd 与路径的
+  身份/长度/元数据。默认沿用现有 observation 的 64 MiB 硬界，显式上限只能收紧；D 仍须按
+  块正文/元数据规则设置更紧上限。返回 `{bytes:Buffer,stat:RegularStat}`，超界拒绝而不截断。
+  legacy `readRegular` 完全不变；reader 不解码，非法 UTF-8 的无损 round-trip/parse 拒绝留给 D。
+- `readonly`/`Object.freeze` 不会冻结 Buffer 字节。冻结 owner 必须 ingress 复制并私有保管，
+  每次对外读取再复制；C0 reader 返回的是调用方拥有的新 Buffer，不宣称实现了冻结保管。
+  syscall 间身份/元数据检查也不宣称是对任意并发 writer 的原子文件快照。
+- **root 技术澄清（沿用已批准语义，不新增产品授权）**：旧设计单一 rename 观察形状不能表达
+  expected missing，故 `ApplyObservation.applied` 内按 `expectedAfter.kind` 区分：file 必须带真实
+  digest/rev，proof 仅 rename-observed/link-observed；missing 禁止伪 digest/rev，proof 仅
+  unlink-observed（目标 source unlink 已同步成功）。只 link 到 trash、随后 unlink 失败仍是
+  unknown，绝不能当删除成功。C/E 后续只能凭真实 syscall 观察构造，不能由 proposal 推断。
+  独立 C0 测试含编译期非法组合负例，须另行 strict tsc，不能把 vitest 擦除类型当作类型验收。
+
+本包没有审计屏障、applier、commitAction、冻结/提案/review 实现、恢复命令、生产 binding 或设置
+变更，未动 fixture。C0 独立验收后才能并行实施 C/D；不代表 P50 产品闭环已交付。

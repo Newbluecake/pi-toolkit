@@ -373,6 +373,62 @@ export function readRegular(dir: string, name: string): RegularRead {
   }
 }
 
+export interface RegularBytesRead {
+  /** Caller-owned bytes, never decoded. Snapshot owners must copy on ingress
+   * and return copies on egress: readonly properties/freeze do NOT freeze a Buffer. */
+  bytes: Buffer;
+  stat: RegularStat;
+}
+
+/** Bounded raw read for revision snapshots; legacy readRegular stays unchanged.
+ * maxBytes defaults to the existing 64 MiB observation ceiling and may only
+ * tighten it. Rejects growth, short reads and observed identity/metadata changes;
+ * never truncates or performs UTF-8 replacement. UTF-8/parse admission belongs
+ * to the future revision freezer, not this byte reader. This is not an atomic
+ * snapshot against a writer changing bytes between arbitrary syscalls. */
+export function readRegularBytes(dir: string, name: string, opts: { maxBytes?: number } = {}): RegularBytesRead {
+  if (!isSafeName(name)) throw new MemoryError(`refused to read ${name}: bad-name`);
+  const maxBytes = opts.maxBytes === undefined ? MAX_OBSERVED_BYTES : opts.maxBytes;
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0 || maxBytes > MAX_OBSERVED_BYTES)
+    throw new MemoryError(`invalid raw read limit: ${maxBytes}`);
+  // Nonblocking open also lets openRegular reject a FIFO without waiting for a writer.
+  const fd = openRegular(dir, name, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+  try {
+    const before = fstatSync(fd);
+    if (!before.isFile()) throw new MemoryError(`refused to read ${name}: not a regular file`);
+    if (!Number.isSafeInteger(before.size) || before.size < 0 || before.size > maxBytes)
+      throw new MemoryError(`refused to read ${name}: exceeds raw read limit (${maxBytes} bytes)`);
+    // Allocation and every read are bounded BEFORE touching file contents. Even
+    // a concurrently growing file cannot make readFileSync allocate without bound.
+    const bytes = Buffer.alloc(before.size);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const n = readSync(fd, bytes, offset, Math.min(bytes.length - offset, 64 * 1024), offset);
+      if (n === 0) throw new MemoryError(`refused to read ${name}: changed during raw read (short read)`);
+      offset += n;
+    }
+    const extra = Buffer.alloc(1);
+    if (readSync(fd, extra, 0, 1, offset) !== 0)
+      throw new MemoryError(`refused to read ${name}: changed during raw read (growth)`);
+    const after = fstatSync(fd);
+    const current = lstatSync(join(dir, name));
+    const matches = (st: typeof before): boolean =>
+      st.isFile() &&
+      st.dev === before.dev &&
+      st.ino === before.ino &&
+      st.size === before.size &&
+      st.size <= maxBytes &&
+      st.mtimeMs === before.mtimeMs &&
+      st.ctimeMs === before.ctimeMs &&
+      st.mode === before.mode &&
+      st.nlink === before.nlink;
+    if (!matches(after) || !matches(current)) throw new MemoryError(`refused to read ${name}: changed during raw read`);
+    return { bytes, stat: toRegularStat(after) };
+  } finally {
+    closeSync(fd);
+  }
+}
+
 /** Head-only read (pin detection / doctor previews) — same symlink refusal. */
 export function readRegularHead(dir: string, name: string, bytes: number): RegularRead {
   const fd = openRegular(dir, name, fsConstants.O_RDONLY);

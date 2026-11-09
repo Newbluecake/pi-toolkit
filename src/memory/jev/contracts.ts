@@ -14,6 +14,9 @@
 // pi-ai's classifier API (jev-arch §5.1) so the jev directory never has to
 // import pi. No module-scope mutable state (I4).
 
+import type { MemoryWriteGate } from "../contracts.js";
+import type { IncrementalDirectory } from "../govern/incremental.js";
+
 // ───────────────────────────── entry model (jev-arch §4.1) ─────────────────────────────
 
 /** sha1(normalizeBody(body)).slice(0, 12) — sidecar key; changing ONLY the
@@ -240,6 +243,9 @@ export interface ReviewSuggestion {
   readonly b?: { hash: EntryHash; anchor: string };
   readonly p: number;
   readonly at: string;
+  /** P50 factory-only payload. D must reject an invalid revision as a whole
+   * suggestion, never strip it into a legacy executable suggestion. No wire. */
+  readonly revision?: RevisionProposal;
 }
 
 export interface DismissedPair {
@@ -628,6 +634,321 @@ export type RevisionCoverageResult =
       readonly inputComplete: boolean;
       readonly costUsd: number;
     };
+
+// ───────────────────────────── P50 C0 shared revision contracts (factory-only, no wire) ─────────────────────────────
+// Sole cross-C/D type owner. No audit/revision runtime imports or implementations.
+// D's FreezeSpec/Deps/PlanInput/PrepareDeps/ReviewDeps remain private to D (§3.3).
+
+/** File bytes admitted by D only after lossless UTF-8 round-trip and strict parse.
+ * Copy custody is a runtime obligation: copy rawBefore on ingress, retain the
+ * private copy, return a fresh copy on every read. readonly/Object.freeze do NOT
+ * make Buffer bytes immutable. Do not send rawBefore/path/meta to the client. */
+export interface FrozenRevisionBlock {
+  readonly id: string;
+  readonly rev: string;
+  readonly rawBefore: Buffer;
+  readonly rawDigest: string;
+  readonly block: RevisionBlockInput & {
+    readonly private: false;
+    readonly secret: false;
+    readonly parseErrors: readonly [];
+    readonly storageScope?: never;
+    readonly residue?: never;
+    readonly origin?: never;
+  };
+}
+
+export interface FrozenRevisionInput {
+  readonly v: 1;
+  /** Canonical MEMORY root, not blocks root. Epoch remains a separate live gate. */
+  readonly directory: IncrementalDirectory;
+  /** SHA-256 binding canonical realpath/dev/ino, not sessionEpoch. */
+  readonly directoryIdentityDigest: string;
+  /** P50.1 selection key, diagnostic only; never the final raw-evidence batch. */
+  readonly selectionBatchId: string;
+  /** SHA-256(sessionEpoch, directory identity, sorted frozen action set, policy). */
+  readonly batchId: string;
+  readonly policyVersion: string;
+  /** SHA-256(batchId, action, target.id, target.rev). IDs are 64 lowercase hex. */
+  readonly actionId: string;
+  readonly action: RevisionProposal["action"];
+  readonly target: FrozenRevisionBlock;
+  readonly context?: FrozenRevisionBlock;
+}
+
+export interface RelationEvidence {
+  readonly kind: "conflict" | "supersedes";
+  readonly p: number;
+  /** Frozen pair id/rev/RAW digest; NOT provenance.inputDigest (outbound DTO). */
+  readonly inputDigest: string;
+  readonly provenance: ClientProvenance;
+}
+
+export interface WholeCoverageEvidence {
+  readonly v: 1;
+  readonly verdict: "complete";
+  readonly targetRev: string;
+  /** Full BODY digests from B; audit.beforeDigest separately binds raw bytes. */
+  readonly beforeDigest: string;
+  readonly candidateDigest: string;
+  readonly promptVersion: string;
+  readonly provenance: ClientProvenance;
+  readonly evidenceDigest: string;
+}
+
+/** Independently recomputed expectations, never copied from returned provenance.
+ * Structurally consumed by B's independentCoverageSources once all three exist.
+ * Missing entries can support suggestions only, never automatic permission. */
+export type RevisionEvidenceBindings = Readonly<
+  Partial<
+    Record<
+      "relation" | "generation" | "coverage",
+      {
+        readonly requestDigest: string;
+        readonly inputDigest: string;
+      }
+    >
+  >
+>;
+
+export type ExpiryPayload =
+  | { readonly op: "set"; readonly nextExpires: string; readonly dateRuleVersion: string }
+  | { readonly op: "clear"; readonly dateRuleVersion: string; readonly nextExpires?: never };
+
+export interface RevisionProposalBase {
+  readonly v: 1;
+  readonly actionId: string;
+  readonly batchId: string;
+  readonly targetId: string;
+  readonly expectedRev: string;
+  readonly contextId?: string;
+  readonly contextExpectedRev?: string;
+  readonly reason: "conflict" | "supersedes" | "expired" | "duplicate" | "budget";
+  readonly relation?: RelationEvidence;
+  readonly coverage?: WholeCoverageEvidence;
+  readonly policyVersion: string;
+  readonly directoryIdentityDigest: string;
+  readonly evidenceBindings: RevisionEvidenceBindings;
+  /** Canonical digest of the ENTIRE payload except this field. No Buffer,
+   * registry, signal, function or filesystem path may be persisted in a proposal. */
+  readonly proposalDigest: string;
+  /** Hint only, never commit authorization. E must recheck every locked gate. */
+  readonly autoEligible: boolean;
+}
+
+/** Reuses B's successful generation shape, preserving truncation evidence.
+ * A deterministic suggestion may omit the whole bundle, never part of it.
+ * Body must pass the existing govern/revision-output.ts validator in D. */
+export type RevisionGenerationPayload =
+  | {
+      readonly generatedBody: string;
+      readonly outputDigest: RevisionGenerateSuccess["outputDigest"];
+      readonly generationProvenance: RevisionGenerateSuccess["provenance"];
+      readonly generationInputComplete: RevisionGenerateSuccess["inputComplete"];
+    }
+  | {
+      readonly generatedBody?: never;
+      readonly outputDigest?: never;
+      readonly generationProvenance?: never;
+      readonly generationInputComplete?: never;
+    };
+type RevisionGenerateSuccess = Extract<RevisionGenerateResult, { readonly kind: "ok" }>;
+
+export type RevisionProposal = RevisionProposalBase &
+  (
+    | ({ readonly action: "rewrite-single" | "merge-survivor"; readonly expiry?: never } & RevisionGenerationPayload)
+    | {
+        readonly action: "retire" | "delete";
+        readonly expiry?: never;
+        readonly generatedBody?: never;
+        readonly outputDigest?: never;
+        readonly generationProvenance?: never;
+        readonly generationInputComplete?: never;
+      }
+    | {
+        readonly action: "expires";
+        readonly expiry: ExpiryPayload;
+        readonly generatedBody?: never;
+        readonly outputDigest?: never;
+        readonly generationProvenance?: never;
+        readonly generationInputComplete?: never;
+      }
+  );
+
+type WithoutProposalDigest<T> = T extends unknown ? Omit<T, "proposalDigest"> : never;
+export type RevisionProposalDigestInput = WithoutProposalDigest<RevisionProposal>;
+
+/** Exact E-constructed bytes; C must not serialize a proposal to manufacture them.
+ * Same copy custody as rawBefore, including all getter/read-result boundaries. */
+export type ExpectedAfter =
+  | { readonly kind: "file"; readonly raw: Buffer; readonly digest: string; readonly rev: string }
+  | { readonly kind: "missing"; readonly raw?: never; readonly digest?: never; readonly rev?: never };
+
+/** At most two relative, validated basenames. Never accept absolute paths from
+ * an audit as write targets. C must enforce basename/byte bounds at runtime. */
+export type RevisionPathEvidence = readonly [
+  { readonly area: "blocks" | "trash" | "temp"; readonly name: string },
+  { readonly area: "blocks" | "trash" | "temp"; readonly name: string }?,
+];
+
+/** Root's C0 technical clarification of the already-approved delete/link
+ * semantics (not new product authorization): the old single rename shape could
+ * not express missing. A trash link alone never proves source deletion.
+ * Only trusted synchronous syscall observers in C/E may construct applied;
+ * neither proposals nor post-hoc reads prove application. No applier in C0. */
+export type ApplyObservation =
+  | { readonly kind: "not-applied" }
+  | {
+      readonly kind: "applied";
+      readonly expectedAfter: { readonly kind: "file"; readonly digest: string; readonly rev: string };
+      readonly proof: "rename-observed" | "link-observed";
+      readonly paths?: RevisionPathEvidence;
+    }
+  | {
+      readonly kind: "applied";
+      readonly expectedAfter: { readonly kind: "missing"; readonly digest?: never; readonly rev?: never };
+      readonly proof: "unlink-observed";
+      readonly paths?: RevisionPathEvidence;
+    }
+  | { readonly kind: "unknown"; readonly reason: string; readonly paths?: RevisionPathEvidence };
+
+export interface RevisionAudit {
+  readonly v: 1;
+  readonly origin: "p50-auto" | "p50-suggestion" | "web-b3";
+  readonly batchId: string;
+  readonly actionId: string;
+  readonly directoryIdentityDigest: string;
+  readonly action: RevisionProposal["action"];
+  readonly targetId: string;
+  readonly expectedRev: string;
+  readonly contextId?: string;
+  readonly contextExpectedRev?: string;
+  readonly contextRawDigest?: string;
+  readonly inputDigest: string;
+  readonly proposalDigest: string;
+  readonly expiry?: ExpiryPayload;
+  readonly relation?: RelationEvidence;
+  readonly generationProvenance?: ClientProvenance;
+  readonly generationInputComplete?: boolean;
+  readonly outputDigest?: string;
+  readonly coverage?: WholeCoverageEvidence;
+  readonly evidenceBindings?: RevisionEvidenceBindings;
+  /** Observation of the EXISTING client ledger, never a second budget owner. */
+  readonly budget?: NonNullable<JevUsage["budget"]>;
+  readonly beforeDigest: string;
+  /** No redundant expectedAfterDigest/Rev: one source of expected identity. */
+  readonly expectedAfter?:
+    | { readonly kind: "file"; readonly digest: string; readonly rev: string; readonly file: "after.md" }
+    | { readonly kind: "missing"; readonly digest?: never; readonly rev?: never; readonly file?: never };
+  readonly beforeFile: "before.md";
+  readonly policyVersion: string;
+  readonly state: "prepared" | "proposed" | "committed" | "skipped" | "failed" | "commit-unknown" | "restored";
+  readonly reason?: string;
+  readonly createdAt: string;
+  readonly settledAt?: string;
+  /** Persisted BEFORE restore data syscall. An unresolved attempt forbids a
+   * blind ordinary restore retry; committed/restored are not scan-downgraded. */
+  readonly restoreAttempt?: {
+    readonly state: "intent" | "effect-unknown";
+    readonly startedAt: string;
+    readonly observation?: ApplyObservation;
+    readonly reason?: string;
+  };
+}
+
+export type CommitActionResult =
+  | { readonly kind: "committed"; readonly actionId: string; readonly afterRev?: string }
+  | {
+      readonly kind: "skipped";
+      readonly actionId: string;
+      readonly reason: "stale" | "permission" | "gate" | "digest" | "unavailable";
+    }
+  | {
+      readonly kind: "effect-unknown";
+      readonly actionId: string;
+      readonly dataApplied: boolean | "unknown";
+      readonly expectedAfterRev?: string;
+      readonly reason: "post-apply-failure" | "observation-mismatch" | "finalization-failure";
+    };
+
+export type RestoreRevisionResult =
+  | { readonly kind: "restored"; readonly actionId: string }
+  | {
+      readonly kind: "refused";
+      readonly reason: "state" | "stale" | "permission" | "gate" | "corrupted" | "unavailable" | "ambiguous";
+    }
+  | { readonly kind: "effect-unknown"; readonly dataApplied: true | "unknown"; readonly reason: string };
+
+/** Read-only, bounded classification. Unavailable includes incomplete scans;
+ * never present a truncated enumeration as a complete absence of pending work. */
+export type RevisionRecoveryDiagnostic =
+  | {
+      readonly kind: "action";
+      readonly batchId: string;
+      readonly actionId: string;
+      readonly state: RevisionAudit["state"] | "corrupted";
+      readonly reason?: string;
+    }
+  | { readonly kind: "unavailable"; readonly reason: string };
+
+export interface RevisionAuditDeps {
+  readonly gate?: MemoryWriteGate;
+  readonly signal?: AbortSignal;
+  /** Host epoch/owner/directory lifetime; rechecked inside the SAME memDir lock. */
+  isCurrent(): boolean;
+  now(): Date;
+}
+export type AuditReadResult =
+  | {
+      readonly kind: "ok";
+      readonly audit: RevisionAudit;
+      readonly before: Buffer;
+      readonly expectedAfter?: ExpectedAfter;
+    }
+  | { readonly kind: "missing" | "corrupted" | "unavailable"; readonly reason?: string };
+
+export interface RevisionAuditPort {
+  // All Locked calls are synchronous; caller already owns the memDir lock.
+  readActionLocked(batchId: string, actionId: string): AuditReadResult;
+  persistPreparedBarrierLocked(input: {
+    readonly frozen: FrozenRevisionInput;
+    readonly proposal: RevisionProposal;
+    readonly origin: RevisionAudit["origin"];
+  }): AuditReadResult;
+  persistExpectedAfterBarrierLocked(input: {
+    readonly batchId: string;
+    readonly actionId: string;
+    readonly proposalDigest: string;
+    readonly expected: ExpectedAfter;
+  }): AuditReadResult;
+  /** Audit finalization seam ONLY; not E's commitAction, never applies a body. */
+  finalizeCommitLocked(input: {
+    readonly batchId: string;
+    readonly actionId: string;
+    readonly proposalDigest: string;
+    readonly observation: ApplyObservation;
+    readonly dataDirectories: readonly string[];
+  }): CommitActionResult;
+  scanPendingLocked(): readonly RevisionRecoveryDiagnostic[];
+}
+
+/** Signatures only: C implements these in govern/revision-audit.ts later. No
+ * factory, restore command or runtime binding is exported/implemented by C0. */
+export type CreateRevisionAuditPort = (memDir: string, deps: RevisionAuditDeps) => RevisionAuditPort;
+export interface RestoreRevisionRequest {
+  readonly actionId: string;
+  readonly signal?: AbortSignal;
+}
+export type RestoreRevisionRaw = (
+  memDir: string,
+  request: RestoreRevisionRequest,
+  deps: RevisionAuditDeps,
+) => Promise<RestoreRevisionResult>;
+export type RestoreRevisionRawLocked = (
+  memDir: string,
+  request: RestoreRevisionRequest,
+  deps: RevisionAuditDeps,
+) => RestoreRevisionResult;
 
 /** Closure-owned identity token; forged/copied tokens are not accepted. These
  * helpers are shared by ask and the future in-client generate implementation;
