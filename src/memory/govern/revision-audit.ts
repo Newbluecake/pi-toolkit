@@ -196,13 +196,17 @@ function auditValid(v: unknown): v is RevisionAudit {
     !record(v) ||
     !keys(
       v,
-      "v origin batchId actionId directoryIdentityDigest action targetId expectedRev contextId contextExpectedRev contextRawDigest inputDigest proposalDigest expiry relation generationProvenance generationInputComplete outputDigest coverage evidenceBindings budget beforeDigest expectedAfter beforeFile policyVersion state reason createdAt settledAt commitObservation restoreAttempt",
+      "v origin commitOrigin batchId actionId directoryIdentityDigest action targetId expectedRev contextId contextExpectedRev contextRawDigest inputDigest proposalDigest expiry relation generationProvenance generationInputComplete outputDigest coverage evidenceBindings budget beforeDigest expectedAfter beforeFile policyVersion state reason createdAt settledAt commitObservation restoreAttempt",
     )
   )
     return false;
   if (
     v.v !== 1 ||
     !["p50-auto", "p50-suggestion", "web-b3"].includes(String(v.origin)) ||
+    (v.commitOrigin !== undefined &&
+      (v.state === "prepared" ||
+        typeof v.commitOrigin !== "string" ||
+        !["p50-auto", "web-b3"].includes(v.commitOrigin))) ||
     !ACTIONS.includes(String(v.action)) ||
     !STATES.includes(String(v.state)) ||
     !id(v.targetId) ||
@@ -649,6 +653,7 @@ class Kernel {
           expectedAfter: _e,
           restoreAttempt: _ra,
           commitObservation: _co,
+          commitOrigin: _origin,
           ...oldBase
         } = old.audit;
         const { state: _ns, createdAt: _nc, ...newBase } = a;
@@ -689,12 +694,18 @@ class Kernel {
     batchId: string;
     actionId: string;
     proposalDigest: string;
+    commitOrigin?: "p50-auto" | "web-b3";
     expected: ExpectedAfter;
   }): AuditReadResult {
     try {
       const r = this.read(input.batchId, input.actionId);
       if (r.kind !== "ok") return r;
-      if (r.audit.proposalDigest !== input.proposalDigest) fail("corrupted");
+      if (
+        r.audit.proposalDigest !== input.proposalDigest ||
+        (input.commitOrigin !== undefined &&
+          (typeof input.commitOrigin !== "string" || !["p50-auto", "web-b3"].includes(input.commitOrigin)))
+      )
+        fail("corrupted");
       const expected: ExpectedAfter =
         input.expected.kind === "file"
           ? { ...input.expected, raw: Buffer.from(input.expected.raw) }
@@ -712,7 +723,10 @@ class Kernel {
       if (["commit-unknown", "skipped", "failed", "restored"].includes(r.audit.state))
         return { kind: "unavailable", reason: "expected-after-barrier:terminal-state" };
       if (r.audit.state !== "prepared") {
-        if (canonical(r.audit.expectedAfter) !== canonical(ea))
+        if (
+          (input.commitOrigin !== undefined && r.audit.commitOrigin !== input.commitOrigin) ||
+          canonical(r.audit.expectedAfter) !== canonical(ea)
+        )
           return { kind: "corrupted", reason: "expected-replay-mismatch" };
         return this.completeBarrier(r.audit);
       }
@@ -721,7 +735,15 @@ class Kernel {
         if (statRegularIfExists(dir, "after.md")) fail("corrupted");
         this.writeFile(dir, "after.md", expected.raw);
       }
-      this.writeAudit({ ...r.audit, state: "proposed", expectedAfter: ea }, true);
+      this.writeAudit(
+        {
+          ...r.audit,
+          state: "proposed",
+          expectedAfter: ea,
+          ...(input.commitOrigin === undefined ? {} : { commitOrigin: input.commitOrigin }),
+        },
+        true,
+      );
       return this.read(input.batchId, input.actionId);
     } catch (e) {
       return this.failure(e, "expected-after-barrier");

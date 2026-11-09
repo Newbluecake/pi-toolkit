@@ -80,6 +80,29 @@ export interface SupersedeOptions {
   notify?: (message: string) => void;
 }
 
+/** Pure metadata serialization seam; legacy and controlled appliers share the
+ * exact same now/meta/body computation. No permission or write is implied. */
+export function prepareGovernReplacement(old: ParsedBlock, meta: BlockMeta, now: Date): string {
+  return serializeBlock({ ...meta, version: old.meta.version + 1, updated: now.toISOString() }, old.body, {
+    allowOversize: true,
+  });
+}
+
+/** Single old-file retirement payload; never writes the successor. Caller
+ * must independently prove live/CAS/authority/evidence and cycle safety. */
+export function prepareSupersedeOne(old: ParsedBlock, next: ParsedBlock, now: Date): string {
+  if (
+    old.id === next.id ||
+    old.meta.status !== "active" ||
+    next.meta.status !== "active" ||
+    old.meta.supersededBy ||
+    next.meta.supersededBy ||
+    (old.meta.authority === "user" && next.meta.authority === "agent")
+  )
+    throw new MemoryError("E_BLOCK: ineligible supersession");
+  return prepareGovernReplacement(old, { ...old.meta, status: "superseded", supersededBy: next.id }, now);
+}
+
 /** Governance metadata writes preserve migration provenance (only a tool
  * update clears residue). The caller owns the lock; raw-byte CAS still
  * runs immediately before atomic replace. */
@@ -91,11 +114,7 @@ export function replaceGovernBlockLocked(
 ): void {
   governanceGate(memDir, opts.gate, opts.signal);
   const dir = join(memDir, "blocks");
-  const raw = serializeBlock(
-    { ...meta, version: old.meta.version + 1, updated: (opts.now ?? new Date()).toISOString() },
-    old.body,
-    { allowOversize: true },
-  );
+  const raw = prepareGovernReplacement(old, meta, opts.now ?? new Date());
   const tmp = writeTempRegular(dir, `${old.id}.md`, Buffer.from(raw), 0o600);
   governanceGate(memDir, opts.gate, opts.signal);
   if (readGovernBlock(memDir, old.id).rev !== old.rev) throw new MemoryError("E_CONFLICT");

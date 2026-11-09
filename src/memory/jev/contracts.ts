@@ -815,6 +815,9 @@ export type ApplyObservation =
 export interface RevisionAudit {
   readonly v: 1;
   readonly origin: "p50-auto" | "p50-suggestion" | "web-b3";
+  /** E: actual commit intent, frozen by the expected-after barrier. Original
+   * prepared origin remains immutable when a suggestion is later approved. */
+  readonly commitOrigin?: "p50-auto" | "web-b3";
   readonly batchId: string;
   readonly actionId: string;
   readonly directoryIdentityDigest: string;
@@ -923,6 +926,7 @@ export interface RevisionAuditPort {
     readonly batchId: string;
     readonly actionId: string;
     readonly proposalDigest: string;
+    readonly commitOrigin?: "p50-auto" | "web-b3";
     readonly expected: ExpectedAfter;
   }): AuditReadResult;
   /** Audit finalization seam ONLY; not E's commitAction, never applies a body. */

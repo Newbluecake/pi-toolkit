@@ -2015,6 +2015,9 @@ export function replaceRevisionObserved(
     opts.beforeSyscall?.();
     // Revalidate the exact prepared source AFTER any caller callback.
     revisionSource(dir, tmp, expected.digest, MAX_OBSERVED_BYTES);
+    // Once the syscall is entered an opaque I/O failure cannot prove absence
+    // of an effect (e.g. transport/filesystem error after namespace change).
+    observation = { kind: "unknown", reason: "rename-outcome-unobserved" };
     renameSync(join(dir, tmp), join(dir, name));
     observation = {
       kind: "applied",
@@ -2070,6 +2073,7 @@ export function deleteRevisionObserved(
   opts: RevisionObservedOptions = {},
 ): RevisionObservedResult {
   let observation: import("./jev/contracts.js").ApplyObservation = { kind: "not-applied" };
+  let linked = false;
   try {
     revisionDest(name);
     revisionDest(trashName);
@@ -2078,7 +2082,9 @@ export function deleteRevisionObserved(
     revisionSource(blocks, name, before.digest, MAX_OBSERVED_BYTES);
     opts.beforeSyscall?.();
     revisionSource(blocks, name, before.digest, MAX_OBSERVED_BYTES);
+    observation = { kind: "unknown", reason: "trash-link-outcome-unobserved" };
     linkSync(join(blocks, name), join(trash, trashName));
+    linked = true;
     observation = {
       kind: "unknown",
       reason: "trash-linked-source-not-unlinked",
@@ -2102,6 +2108,12 @@ export function deleteRevisionObserved(
     opts.observe?.(observation);
     return { observation };
   } catch (err) {
+    if (
+      !linked &&
+      observation.kind === "unknown" &&
+      ["EPERM", "ENOTSUP", "EXDEV", "EEXIST"].includes(codeOf(err) ?? "")
+    )
+      observation = { kind: "not-applied" };
     return { observation, error: revisionError(err) };
   }
 }

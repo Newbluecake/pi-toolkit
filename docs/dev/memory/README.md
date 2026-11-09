@@ -854,3 +854,63 @@ bindings/digest 往返。审计端口不 mock；仅在故障 case 注入底层 s
 保持原字节。单次限 2 worker tier1 与 typecheck/build/format 的精确命令、结果及日志交接在
 `/tmp/p50-cd-integration.json`；同步 syscall 不可抢占、任意同 uid writer 的跨 syscall 竞态、真实
 生产 tokenizer/cap/认证/费用/proxy conformance 仍是后续门禁，不能据此宣称产品闭环上线。
+
+## #50 E：唯一受控提交入口（factory-only，2026-11-10）
+
+`govern/revision-commit.ts` 导出唯一 `commitAction(memDir, request, deps)`；
+`createRevisionCommitter` 仅将同一入口绑定到宿主私有端口，不注册 hook、tool、命令或设置。
+上文 C/D 交付时的“没有 E”是历史状态；**F 生产 binding、默认/auto 开关、restore slash、
+真实 B3 确认装配仍未做**。本包没有在 `wireMemory`/`wireJev` 接线，也没有新确认 UI。
+
+- request 只有 origin/actionId/expectedRev/proposalDigest/signal，拒绝未知字段、accessor 和非字符串
+  摘要，不接受可替换正文/日期/来源。宿主 `actionLocked` 提供 D 原工厂保管的 frozen input 与完整
+  proposal；不能用反序列化对象冒充 D 私有 live guard。`runtime/isCurrent/leaseValid` 是可信宿主
+  能力，必须连接同 owner/epoch/plain-main/运行开关，不能由模型或配置字符串自证。
+- 全部提交在同一 canonical memDir 锁内同步执行；依次复核完整 D validator/digest、目录与 blocks
+  身份、epoch/lease/gate/abort、policy、active 根位置、raw SHA256+rev、authority/privacy/Hub/
+  residue/origin 和 review 的 dismiss/resolved。review 的容错 sanitizer 不可静默丢掉坏 tombstone
+  后授权：E 要求实际 review JSON 与完整 sanitize 结果一致，并保有完全匹配的 live revision 行。
+- 自动 rewrite 不使用 `autoEligible` 授权：从冻结 DTO 和宿主私有保管的**真实 generation/coverage
+  maxOutputTokens** 独立重算三套 request/input bindings，再调用 B 的唯一异源函数；完整 coverage、
+  `p >= 0.90`、body validator/digest 与 authority 都须通过。agent expires 只应用冻结 set/clear 日期，活动
+  dateRuleVersion 改变即 stale，不按提交日期重新推导；agent delete 用既有 `isExpired`/本地日历
+  规则复核。**user delete 是所有 origin 的硬禁**，确认不能覆盖该禁令；user expires 不自动，
+  agent context 不得改写或取代 user。C 的 user delete 恢复拒绝保持不变。
+- merge-survivor 的自动首步仍只建议；显式确认后只改 survivor，绝不隐式 retire context。
+  retire 可经同入口的宿主既有一次精确确认能力执行真实单边更新。**自动 retire 仍拒绝**：现有
+  C0/D retire 联合禁止 generation bundle，不能表达 Q2 三套来源；本包没有伪造 generation 证明，
+  没有借 #36 explicit/legacy 路径放行。将来若需自动 retire，须先补经审阅的来源保管契约。
+  `consumeConfirmedLocked` 只是未来 B3 既有 capability 的同步消费 seam，缺端口/返回非 true 拒绝；
+  测试注入的批准函数不是物理人类/Web 生产确认验收。
+- `revision-applier.ts` 是内部 one-attempt adapter；共享 store 的 `prepareBlockReplacement` 与
+  supersede 的 `prepareGovernReplacement/prepareSupersedeOne` 纯序列化 seam，同一 now/meta/body
+  构造 expected Buffer 与实际临时源。先重做 C prepared 全屏障，再 expected-after 全屏障，随后
+  才执行 C strict observed replace 或严格 trash link→source unlink。无 legacy fallback；rename
+  已进入却没有成功观察的 opaque I/O 异常为 unknown，trash link 不等于 source 删除。
+- C0 唯一必要 append：`RevisionAudit.commitOrigin?` 和 expected-after port 的同名可选输入。
+  D 已持久 prepared 的 `origin:p50-suggestion` 必须保持 immutable；否则后续 auto/web 调用重做
+  prepared 会 replay-mismatch。`commitOrigin` 在 proposed 屏障中冻结实际提交意图来源，原 origin
+  保留提案来源；codec 仅接受原始 string 的封闭枚举，不做 String 强转。E 在所有重放/终态快速
+  返回前核对已冻结 commitOrigin 与 request.origin；换来源返回 digest 拒绝，零 applier、零审计改写。
+  旧 C 记录缺字段仍可读取/恢复，旧调用不产生该字段；E 不从旧 origin 推断或补造提交来源：
+  旧 prepared 可在首次 expected-after 屏障冻结真实来源，已 attempted 的旧记录缺来源则 unavailable。
+  旧 C/D 调用和 legacy/off 字节行为保持。未改 wire/fixtures。
+- 每批最多 2 个实际动作的限制读同批真实审计，跨 fresh factory/进程仍有效；proposed 与 unknown
+  保守占额（可能屏障已完成但没有数据 syscall，也不猜未写）。not-applied 的 skipped 不占额。
+  proposed 本身是持久 attempt fence：重入只能报告 unknown/committed，不重跑 applier。写后 gate/
+  fsync/audit/观察失败保留实际字节、before/expected-after/双路径证据，不补偿、不清理、不盲重试。
+  committed 的幂等返回不再写数据；restored 不复活旧提交权。屏障失败可能留下不完整证据，须人工
+  检查，不通过覆盖快照或自动重建证据“修好”。
+
+定向证据：`tests/memory/govern/revision-commit{,-faults,-security}.test.ts` 与独立 helper/worker，
+`tests/integration/memory-revision-commit.test.ts`（两个真实 Node 进程在任何提交前冻结，再同时竞争
+真实目录锁/CAS；只有一个数据效果，另一个 stale）。覆盖真实 B→D→C→E 自动 user/user 与 agent
+rewrite、expires set/clear、确认 retire/merge、严格 delete 及 C raw-byte 恢复，写前/写后实际 syscall
+故障、no-clobber 拒绝、双路径未知、晚到门/日期/权限/来源、unknown 占额和 fresh-factory 零重试。
+独验返工增加真实文件的 confirmed user delete 零 applier/零正文变更、历史 user delete C 恢复拒绝、
+双方来源的各 attempted/终态同源与换源重放矩阵、非法来源类型、旧记录/旧调用字节保持，以及
+merge survivor commit→C raw restore 的双向单文件往返。本轮安全修复不扩展 retire 契约；最小证据
+保管方案单独位于 `/tmp/p50-e-retire-gap.md`，**完整 E 的批准自动 retire 能力仍待补齐**。
+这些是 own `/tmp`、离线受控 provider 协议与注入宿主能力，不是 LIVE/provider/真实 B3 UI 或掉电实验。
+同步 I/O 不可抢占、任意同 uid writer 在 syscall 间的竞争、fsync 非绝对掉电保证、F 的生命周期/
+缓存失效/来源与真实 tokenizer/cap/认证/usage/proxy conformance 等既有限界仍在。

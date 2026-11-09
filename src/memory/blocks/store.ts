@@ -170,6 +170,26 @@ export function createBlockLocked(
   fsyncDir(realDir);
   return parsed(name, raw);
 }
+/** Pure serialization seam shared with the factory-only revision applier.
+ * It grants no permission and performs no filesystem mutation. */
+export function prepareBlockReplacement(
+  current: ParsedBlock,
+  next: { meta: BlockMeta; body: string },
+  now: Date,
+): string {
+  const meta: BlockMeta = {
+    ...next.meta,
+    kind: "block",
+    created: current.meta.created,
+    updated: now.toISOString(),
+    version: current.meta.version + 1,
+  };
+  delete meta.heading;
+  delete meta.residue;
+  delete meta.origin;
+  if (current.meta.heading !== undefined) meta.heading = current.meta.heading;
+  return serializeBlock(meta, next.body);
+}
 export function replaceBlockLocked(
   realDir: string,
   id: string,
@@ -191,18 +211,7 @@ export function replaceBlockLocked(
     throw new MemoryError(
       "E_SECTION_TOO_LARGE: section exceeds 120 UTF-8 bytes — use section= with a shorter value or section=none to clear it",
     );
-  const meta: BlockMeta = {
-    ...next.meta,
-    kind: "block",
-    created: current.meta.created,
-    updated: now.toISOString(),
-    version: current.meta.version + 1,
-  };
-  delete meta.heading;
-  delete meta.residue;
-  delete meta.origin;
-  if (current.meta.heading !== undefined) meta.heading = current.meta.heading;
-  const raw = serializeBlock(meta, next.body);
+  const raw = prepareBlockReplacement(current, next, now);
   checkWrite(realDir, opts);
   const tmp = writeTempRegular(realDir, name, Buffer.from(raw), 0o600);
   checkWrite(realDir, opts);
