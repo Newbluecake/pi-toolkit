@@ -537,6 +537,25 @@ describe("P2 interval editing", () => {
     expect(w.find(".sched-list").exists()).toBe(true);
   });
 
+  it("closes the editor when a successful echo contains an error-like task name", async () => {
+    const { w } = mountPanel({
+      schedules: payload(),
+      runCommand: () =>
+        Promise.resolve({
+          ok: true,
+          data: { output: { entries: [{ text: "Updated task: E_TIMEOUT" }] } },
+        } as CmdOutcome),
+    });
+    await w.find(".sched-task-name").trigger("click");
+    await w.find("[data-schedule-edit]").trigger("click");
+    await w.find('input[name="name"]').setValue("E_TIMEOUT");
+    await w.find("form").trigger("submit");
+    await flushPromises();
+    expect(w.find("form").exists()).toBe(false);
+    expect(w.find('[role="alert"]').exists()).toBe(false);
+    expect(w.find(".sched-list").exists()).toBe(true);
+  });
+
   it.each(["denied", "validation"])("shows %s without claiming a save or bypassing command policy", async (mode) => {
     const { w, runs } = mountPanel({
       schedules: payload(),

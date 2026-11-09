@@ -217,7 +217,7 @@ async function saveEdit(args: string): Promise<void> {
     if (!r.ok) {
       if (!("cancelled" in r))
         actionNote.value = { kind: "err", text: t("schedule.actionFailed", { reason: r.message ?? r.error }) };
-    } else if (/\bE_[A-Z_]+\b/.test(r.output)) {
+    } else if (/^\s*E_[A-Z_]+:/m.test(r.output)) {
       actionNote.value = { kind: "err", text: r.output };
     } else closeDetail();
   } finally {
