@@ -26,6 +26,7 @@ const tmpRoots: string[] = [];
 afterEach(() => {
   for (const d of tmpRoots.splice(0)) rmSync(d, { recursive: true, force: true });
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
 });
 
 function fixture(): { tmp: string; cwd: string; paths: MemoryPaths } {
@@ -73,6 +74,21 @@ describe("memorySection layout dispatch", () => {
       indexMax: DEFAULT_SETTINGS.memory.indexMax,
     }).text;
     expect(out).toBe(direct);
+  });
+
+  test("blocks setting with files uses the same tiered bytes and pointer as explicit tiered", () => {
+    const fx = fixture();
+    vi.stubEnv("ARMORY_MEMORY_ROOT", fx.paths.memoryRoot);
+    const dir = memoryDirFor(fx.cwd, fx.paths);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "core.md"), "# Core\n\n## Rules\n\n- rule\n");
+    writeFileSync(join(dir, "notes.md"), "# Notes\n\n- note\n");
+    const input = { ...INPUT, ctx: ctx(fx.cwd) };
+    const tiered = section({ layout: "tiered" }, { paths: fx.paths }).registration;
+    const fallback = section({ layout: "blocks", migrate: { auto: false } }, { paths: fx.paths }).registration;
+    expect(fallback.provider(input)).toBe(tiered.provider(input));
+    expect(String(fallback.provider(input))).toContain("### core.md");
+    expect(fallback.pointerHint?.(input)).toBe(tiered.pointerHint?.(input));
   });
 
   test("blocks directory + layout:tiered ⇒ blocks render (data format wins)", () => {

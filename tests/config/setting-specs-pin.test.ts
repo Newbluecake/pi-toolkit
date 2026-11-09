@@ -48,8 +48,14 @@ if (process.env.GOV_SPECS_GENERATE === "1") {
     "fabric.wake.decisionRequests",
     "fast.enabled",
   ];
+  // F1 deliberately changes just the layout description; keep the baseline hash
+  // and order as evidence rather than rewriting the historical pin.
+  const oldLayoutDescription =
+    "Injection renderer: tiered (budgeted, default), legacy (byte-identical to pre-#22), or blocks (#36 one file per block; parseable now, renderer lands with #36)";
   const legacySpecs = Object.fromEntries(
-    Object.entries(SETTING_SPECS).filter(([key]) => !declaredAdditions.includes(key)),
+    Object.entries(SETTING_SPECS)
+      .filter(([key]) => !declaredAdditions.includes(key))
+      .map(([key, spec]) => [key, key === "memory.layout" ? { ...spec, description: oldLayoutDescription } : spec]),
   );
   describe("SETTING_SPECS pin (order + content)", () => {
     it("adds exactly declared Fast/scopes/decision keys with non-live defaults and keeps old ordering", () => {
@@ -103,6 +109,12 @@ if (process.env.GOV_SPECS_GENERATE === "1") {
       });
       expect(SETTING_SPECS["fabric.wake.decisionRequests"]?.live).toBeUndefined();
       expect(defaultOf(SETTING_SPECS["fabric.wake.decisionRequests"]!)).toBe(true);
+    });
+    it("declares the F1 layout description and default", () => {
+      expect(SETTING_SPECS["memory.layout"]?.description).toBe(
+        "Injection renderer: blocks (default, one file per block), tiered (budgeted files), or legacy (byte-identical to pre-#22)",
+      );
+      expect(defaultOf(SETTING_SPECS["memory.layout"]!)).toBe("blocks");
     });
     it("lists the same keys in the same order", () => {
       expect(Object.keys(legacySpecs)).toEqual(pin.specs.map(([key]) => key));

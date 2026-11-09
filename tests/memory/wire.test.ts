@@ -248,9 +248,13 @@ describe("wireMemory — toolSurface routing / attachTidy (todo #22 optimize-pla
     expect(tool.description).not.toContain("not implemented");
   });
 
-  test("default settings register v2, inject tiered, and surface doctor in list/view", async () => {
+  test("explicit tiered settings register v2, inject tiered, and surface doctor in list/view", async () => {
     const host = fakePi();
-    wireMemory(host.pi, { settings: DEFAULT_SETTINGS.memory, isChildSession: false, sections: host.hub });
+    wireMemory(host.pi, {
+      settings: { ...DEFAULT_SETTINGS.memory, layout: "tiered" },
+      isChildSession: false,
+      sections: host.hub,
+    });
     seedMemoryFile("core.md", "---\nsource: agent\n---\n# Core\n");
     seedMemoryFile("topic.md", "---\nsource: agent\n---\n# Topic\n");
     const tool = host.tools.get("memory")!;

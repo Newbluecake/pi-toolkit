@@ -160,8 +160,7 @@ export interface MemoryJevPredictSettings {
 
 export type MemoryLayout = "tiered" | "legacy" | "blocks";
 
-/** #36：`"blocks"` 在 P0 只可解析（值域已登记），blocks 渲染器在 P3 合入、默认
- *  值翻转在 P5b；在此之前严禁把 `layout:"blocks"` 写进真实设置。 */
+/** #36 F1：blocks 为默认布局；存量 files 在自动迁移未完成时回退 tiered 渲染。 */
 export interface MemoryMigrateSettings {
   /** true = session_start 惰性自动迁移；false = 只能显式 `/mem migrate`。只接受布尔值。Default true。 */
   auto: boolean;
@@ -472,7 +471,7 @@ export const DEFAULT_MEMORY_SETTINGS: MemorySettings = {
   indexMax: 15,
   maxFileBytes: 262_144,
   maxWriteBytes: 65_536,
-  layout: "tiered",
+  layout: "blocks",
   toolSurface: "v2",
   childProfile: "core",
   coreBytes: 1600,

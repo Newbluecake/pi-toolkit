@@ -38,7 +38,7 @@ import { softMetaDiagnostics } from "./soft-meta.js";
 import { memoryDirFor, type MemoryPaths } from "./paths.js";
 import { canonicalDirState, inspectDirNoFollow, listDirNames, listRegular, readRegular } from "./safe-fs.js";
 import { renderTiered } from "./tiered.js";
-import { dirFormat, parseArchiveName } from "./blocks/naming.js";
+import { dirFormat, effectiveLayout, parseArchiveName } from "./blocks/naming.js";
 import { readCorpus } from "./blocks/store.js";
 import { legacyDrift } from "./blocks/legacy.js";
 import { readBlocksState, readHold } from "./blocks/state.js";
@@ -175,7 +175,11 @@ function runDoctorFor(
     return blocksDoctorFindings(display, settings, now);
   }
   const snapshot = buildSnapshot(cwd, paths, settings, renderPort, now, jev === undefined ? undefined : isoDate(now()));
-  return runDoctor(snapshot, toDoctorSettings(settings), jev === undefined ? undefined : { today: isoDate(now()) });
+  return runDoctor(
+    snapshot,
+    { ...toDoctorSettings(settings), layout: effectiveLayout(settings.layout, format) },
+    jev === undefined ? undefined : { today: isoDate(now()) },
+  );
 }
 
 /** #36 P4 fix round 2: should a "held" directory take the blocks dispatch?

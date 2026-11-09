@@ -310,7 +310,14 @@ function withoutFast(settings: typeof DEFAULT_SETTINGS, input?: unknown) {
   // Verify it explicitly, then project it out without changing frozen hashes/inputs.
   expect(memory.jev.backgroundQueueLimit).toBe(32);
   const { backgroundQueueLimit: _queueLimit, ...oldJev } = memory.jev;
-  const legacyMemory = { ...oldMemory, jev: oldJev };
+  // #36 F1: project only the changed fallback back to the historical tiered value.
+  // Explicit historical tiered/legacy values retain their original semantics.
+  const layoutInput = getPath(normalizedInput, "memory.layout");
+  const historicalLayout = layoutInput === "legacy" ? "legacy" : "tiered";
+  if (layoutInput !== "tiered" && layoutInput !== "legacy" && layoutInput !== "blocks") {
+    expect(memory.layout).toBe("blocks");
+  }
+  const legacyMemory = { ...oldMemory, layout: historicalLayout, jev: oldJev };
   const {
     fabric: {
       wake: { decisionRequests: _dr, ...oldWake },

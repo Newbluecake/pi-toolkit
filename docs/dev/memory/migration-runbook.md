@@ -2,17 +2,23 @@
 
 适用版本：`eb105111494a1ee99308d6bfa0fa636bfdb85edc`。以下 `/mem` 和 `/reload` 是在 pi 的 TUI 输入框中输入，**不是 shell 命令**；标为 shell 的命令在普通终端运行。先读完回退段再开始。
 
+> **升级后首次启动前：先暂停自动迁移并备份。** 默认 `memory.layout=blocks` 且 `memory.migrate.auto=true`，主会话一启动就可能迁移当前项目；自动启动迁移**不要求 TUI**，RPC/print 等主会话也可能触发。先停止目标项目的旧写入者，在启动前将目标配置中的 `memory.migrate.auto` 设为 `false`，按第 2 节用同一环境完成并核对备份；若未能确认实际路径或设置，先停止，不要启动目标会话。
+>
+> 在启动环境对应的设置文件（默认 `~/.pi/agent/pi-toolkit.json`，或绝对路径 `PI_CODING_AGENT_DIR` 下的同名文件；尚未迁移时可能读取 `pi-subagent.json`）中，**合并** `"memory": { "migrate": { "auto": false } }`，不要覆盖其他已有设置；确认目标进程实际读取该文件。设置在 activate 时读取，已有进程不会因文件修改自动改变行为；旧进程需先停止写入。
+>
+> 完成备份后才启动目标会话核对 `/mem path`；若与预先备份的路径不一致，停止并先备份实际根。显式执行 `/mem migrate`、回退、导入或 `--all` 则要求真正的 **TUI 主会话**，与启动时自动迁移的准入条件不同。
+
 ## 1. 前提与影响
 
 - 迁移规划是确定性规则，不调用模型；它按文件、元数据和现有索引拆分或保留整文件，不是语义分类。迁移会改变记忆的组织和注入内容，必须逐项核验。
 - 迁移成功后该目录使用 `blocks/` 布局，`/mem tidy` 禁用，改用 `/mem review`；旧根目录 Markdown 文件**不修改、不删除**，供回退参考。但迁移后新增或编辑的 blocks 不会自动写回旧文件。
-- 在**目标项目目录**启动 pi 的交互式 TUI **主会话**。写迁移、回退、导入以及任何 `--all` 要求 `hasUI && mode === "tui" && !isWebInvocation`；child 会话拒绝迁移。部分只读命令不要求 TUI：Web 的独立只读执行器只实现精确的 `migrate --dry-run` 和 `migrate --report`，不是完整迁移入口。安全门禁未通过会报 `E_GATE: <reason>`。见 `src/memory/command.ts:290-328,612-614`、`src/memory/command-readonly.ts:101-123`。
-- 先在目标会话执行 `/mem path`，确认实际项目记忆目录。默认根是 `/home/bluecake/.pi/agent/memory`（以当前用户 home 为准）；若启动 pi 的环境设置了 `ARMORY_MEMORY_ROOT`，实际根使用该值。项目目录名将 cwd 尾部 `/` 去掉、其余 `/` 替换为 `-`；例如 `/home/bluecake/ai/pi-toolkit` → `-home-bluecake-ai-pi-toolkit`。worktree 会先解析到主仓库 cwd；slug 可能有歧义，以 `/mem path` 为准（`src/memory/paths.ts:20-48`、`src/memory/command.ts:80-85,374-375`）。
+- 完成第 2 节备份并确认 auto 已关闭后，在**目标项目目录**启动 pi 的交互式 TUI **主会话**。写迁移、回退、导入以及任何 `--all` 要求 `hasUI && mode === "tui" && !isWebInvocation`；child 会话拒绝迁移。部分只读命令不要求 TUI：Web 的独立只读执行器只实现精确的 `migrate --dry-run` 和 `migrate --report`，不是完整迁移入口。安全门禁未通过会报 `E_GATE: <reason>`。见 `src/memory/command.ts:290-328,612-614`、`src/memory/command-readonly.ts:101-123`。
+- 备份前在同一环境中按以下规则确定记忆根；备份后才在目标会话执行 `/mem path` 确认实际项目记忆目录。默认根是 `/home/bluecake/.pi/agent/memory`（以当前用户 home 为准）；若启动 pi 的环境设置了 `ARMORY_MEMORY_ROOT`，实际根使用该值。项目目录名将 cwd 尾部 `/` 去掉、其余 `/` 替换为 `-`；例如 `/home/bluecake/ai/pi-toolkit` → `-home-bluecake-ai-pi-toolkit`。worktree 会先解析到主仓库 cwd；slug 可能有歧义，以 `/mem path` 为准（`src/memory/paths.ts:20-48`、`src/memory/command.ts:80-85,374-375`）。
 - 每个显式迁移目录的预算为 60 秒、120,000 操作、20,000 个源文件、64 MiB 源文件总量；触限可能显示 `memory: over-budget — Error: E_BUDGET...`。预演快照也有文件数和字节上限，但其报错形式可能是 `memory error: E_BUDGET: source count` 或 `source bytes`（`src/memory/blocks/migrate.ts:108-127,151-169,410-414,564-618`）。
 
 ## 2. 第 0 步：备份
 
-在与 pi **相同环境**的 shell 运行，先停止所有记忆写入并确认磁盘空间足够；下面用 Bash 和 GNU coreutils。默认根来自 `HOME`，**不是** `PI_CODING_AGENT_DIR`；若启用了 secure vault，以 `/mem path` 和 vault 的实际根为准，备份必须留在已解锁的加密边界内。若自动计算的根与 `/mem path` 不一致，停止并改为在同一 shell 显式设置 `ARMORY_MEMORY_ROOT` 为实际根。
+在与 pi **相同环境**的 shell 运行，先停止所有记忆写入并确认磁盘空间足够；下面用 Bash 和 GNU coreutils。默认根来自 `HOME`，**不是** `PI_CODING_AGENT_DIR`；若启用了 secure vault，以 `/mem path` 和 vault 的实际根为准，备份必须留在已解锁的加密边界内。备份前依据相同启动环境确定实际根；若不确定，停止并先核实，不能为查 `/mem path` 而先启动目标会话。备份后若与 `/mem path` 不一致，停止并在同一 shell 显式设置 `ARMORY_MEMORY_ROOT` 为实际根后再次备份。
 
 先检测尾斜杠并规范化，避免 `memory/` 拼接 `.backup` 后变成 `memory/.backup` 而自复制。`readlink -f` 同时解析根目录 symlink；命令失败或源为 `/` 时停止：
 
@@ -28,7 +34,7 @@ src=$(readlink -f -- "$raw") || { echo '无法解析源'; return 1 2>/dev/null |
 printf 'normalized source: %s\n' "$src"
 ```
 
-核对输出与 `/mem path` 所属的实际根相符后，继续在**同一 shell**运行。备份目录使用解析后源目录的兄弟目录，`mktemp` 不覆盖已有备份；若兄弟目录不在安全 vault 内，停止，不要运行，改在 vault 内选择位于源目录外的安全位置：
+核对输出与目标启动环境的实际根相符后，继续在**同一 shell**运行；启动会话并获得 `/mem path` 后再复核。备份目录使用解析后源目录的兄弟目录，`mktemp` 不覆盖已有备份；若兄弟目录不在安全 vault 内，停止，不要运行，改在 vault 内选择位于源目录外的安全位置：
 
 ```bash
 backup=$(mktemp -d "${src}.backup-$(date +%Y%m%d-%H%M)-XXXXXX") || { echo '无法创建备份'; return 1 2>/dev/null || exit 1; }
@@ -152,7 +158,7 @@ cp -a -- "$target/." "$linkcopy/" && diff -r --no-dereference -- "$target" "$lin
 - blocks 目录禁用 tidy；`/mem review` 实际是 review-lite，`/mem expired` 也路由到该子集。恢复归档块时，使用 `/mem restore --block <id or stored name>`，把占位符替换为实际 ID 或存储名。review-lite 尚不完整展示非治理 Jev 建议及旧 expired 的全部视图（`docs/dev/memory/README.md:108-131`）。
 - Jev 已有标签按条目内容 hash 匹配沿用，未匹配不会因迁移重新调用模型分类；报告里的 oversize 等是规则建议（`src/memory/blocks/migrate-plan.ts:142-145,195-215`）。
 - 旧根文件迁移后发生变化不会自动覆盖 blocks。`/mem migrate --import-legacy --dry-run` 只列出漂移文件；核对后 `/mem migrate --import-legacy` 才追加导入，以内容 hash 去重，需已是 blocks；不覆盖现有块。见 `src/memory/blocks/legacy.ts:44-56,58-124`。
-- `memory.migrate.auto=false` 表示关闭 session_start 的惰性自动迁移，只显式迁移；**不能假设当前值为 false**：此 HEAD 默认 `true`，默认 layout 是 `tiered`，启动自动迁移还要求 layout 为 `blocks`、主会话、安全门禁通过等。以 `/mem migrate --status` 的实际值为准；若要保证试点前不自动迁移，启动目标会话前应先核实设置。证据 `src/memory/settings.ts:475-482`、`src/memory/index.ts:254-274`。
+- `memory.migrate.auto=false` 表示关闭 session_start 的惰性自动迁移，只显式迁移；**不能假设当前值为 false**：此 HEAD 默认 `true`，默认 layout 是 `blocks`，启动自动迁移还要求主会话、files 目录及安全门禁通过等，不要求 TUI。以 `/mem migrate --status` 的实际值为准；若要保证试点前不自动迁移，启动目标会话前应先核实设置。证据 `src/memory/settings.ts:475-482`、`src/memory/index.ts:254-274`。
 
 ### 开关速查及组合边界
 
@@ -179,7 +185,7 @@ cp -a -- "$target/." "$linkcopy/" && diff -r --no-dereference -- "$target" "$lin
   "base_head": "eb105111494a1ee99308d6bfa0fa636bfdb85edc",
   "deliverable": "docs/dev/memory/migration-runbook.md",
   "scope": "文档；用户在 TUI 主会话手动迁移",
-  "critical_correction": "HEAD 的 memory.migrate.auto 默认 true，不能按 false 描述实际默认；status 显示生效值。默认 layout 为 tiered。",
+  "critical_correction": "HEAD 的 memory.migrate.auto 默认 true，不能按 false 描述实际默认；status 显示生效值。默认 layout 为 blocks。",
   "limitations": [
     "迁移规则不调用模型；迁移结果与注入须人工验收",
     "回退不会自动合并迁移后对 blocks 的更改",

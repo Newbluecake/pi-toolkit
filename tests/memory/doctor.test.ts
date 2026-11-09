@@ -809,6 +809,35 @@ if (UPDATE_DOCTOR_GOLDEN && existsSync(DOCTOR_GOLDEN_PATH)) {
 }
 
 describe("doctor-golden (current-5, generate-once §10.1)", () => {
+  it("blocks configuration on files retains tiered D01 and D09 report bytes", async () => {
+    const fx = materializeFixture("current-5");
+    vi.stubEnv("ARMORY_MEMORY_ROOT", fx.paths.memoryRoot);
+    try {
+      const reports: string[] = [];
+      for (const layout of ["tiered", "blocks"] as const) {
+        const notify = vi.fn();
+        const ctx = {
+          ui: { notify, editor: vi.fn(async () => undefined) },
+          hasUI: true,
+          cwd: fx.cwd,
+          sessionManager: { getSessionId: () => "s" },
+        } as unknown as ExtensionCommandContext;
+        await handleMemDoctorCommand("", ctx, {
+          paths: fx.paths,
+          settings: { ...DEFAULT_SETTINGS.memory, layout, migrate: { auto: false } },
+          now: () => NOW_MS,
+        });
+        reports.push((notify.mock.calls[0] as [string, string])[0]);
+      }
+      expect(reports[1]).toBe(reports[0]);
+      expect(reports[1]).toContain("D01");
+      expect(reports[1]).toContain("D09");
+    } finally {
+      vi.unstubAllEnvs();
+      fx.cleanup();
+    }
+  });
+
   it("runDoctor(current-5) via the real command path matches the checked-in golden", async () => {
     const fx = materializeFixture("current-5");
     vi.stubEnv("ARMORY_MEMORY_ROOT", fx.paths.memoryRoot);

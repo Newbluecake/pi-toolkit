@@ -369,7 +369,7 @@ function renderLive(deps: MemorySectionDeps, cwd: string, ctx: ExtensionContext,
     block = result.text;
     info = { omittedSections: [], coreInlined: false, residentBlocks: result.resident.map((b) => b.id) };
     resident = new Map(result.resident.map((b) => [b.id, residentRenderKey(b, today)] as const));
-  } else if (deps.settings.layout === "tiered") {
+  } else if (effectiveLayout(deps.settings.layout, dirFormat(memoryDirFor(cwd, deps.paths))) === "tiered") {
     // todo #22 optimize-plan §2 (P1): the tiered renderer. `access` is
     // computed once per session (§2.4's sticky rule — same tools mid-session
     // never changes the block) and `profile` follows §2.4's table
@@ -476,7 +476,7 @@ function renderScopedSource(
     text = result.text;
     budgetStats = result.budgetStats;
     info = { omittedSections: [], coreInlined: false, residentBlocks: result.resident.map((b) => b.id) };
-  } else if (deps.settings.layout === "tiered") {
+  } else if (effectiveLayout(deps.settings.layout, dirFormat(memoryDirFor(cwd, deps.paths))) === "tiered") {
     const sessionKey = resolveSessionKey(ctx);
     ensureSessionStart(caches, sessionKey);
     const result = renderTiered(
@@ -610,7 +610,10 @@ export function memorySection(deps: MemorySectionDeps): MemorySectionRegistratio
             ? `${corpusStampFingerprint(join(memDir, "blocks"))}:${sidecarStampOf(memDir)}:${localTodayOf(Date.now())}`
             : memoryFingerprint(cwd, deps.paths);
           const sessionKey = resolveSessionKey(input.ctx);
-          const access = deps.settings.layout === "tiered" ? resolveAccess(deps, caches, sessionKey) : "none";
+          const access =
+            effectiveLayout(deps.settings.layout, dirFormat(memDir)) === "tiered"
+              ? resolveAccess(deps, caches, sessionKey)
+              : "none";
           const key = JSON.stringify([
             fingerprint,
             deps.settings.layout,
@@ -677,7 +680,7 @@ export function memorySection(deps: MemorySectionDeps): MemorySectionRegistratio
         if (effectiveLayout(deps.settings.layout, dirFormat(memoryDirFor(cwd, deps.paths))) === "blocks") {
           return "Use the memory tool (action: 'view') to read the current entries.";
         }
-        if (deps.settings.layout === "tiered") {
+        if (effectiveLayout(deps.settings.layout, dirFormat(memoryDirFor(cwd, deps.paths))) === "tiered") {
           return tieredPointerText(deps, caches, cwd, resolveSessionKey(input.ctx));
         }
       } catch {
@@ -733,7 +736,7 @@ export function renderExternalMemoryBlock(
       ).text;
       return text === "" ? undefined : text;
     }
-    if (settings.layout === "tiered") {
+    if (effectiveLayout(settings.layout, dirFormat(memoryDirFor(dir))) === "tiered") {
       const input: TieredRenderInput = {
         cwd: dir,
         profile: settings.childProfile,

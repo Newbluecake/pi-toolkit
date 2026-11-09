@@ -2,9 +2,11 @@
 
 cwd 为键的被动项目记忆：记忆文件放在 `~/.pi/agent/memory/<cwd-slug>/`，每个会话自动把它注入 system prompt（子 agent 会话同样生效，`memory.injectInChildSessions` 默认 `true`）。`memory.enabled` 默认 `true`。worktree 子会话读写的是**主仓库**的记忆目录。
 
-## 注入方式（tiered，默认）
+## 注入方式（blocks，默认）
 
-`memory.layout` 默认 `tiered`：
+`memory.layout` 默认 `blocks`：用户全局规则常驻，其他块按主题索引和相关性召回；每块单独存储。主会话启动时，`memory.migrate.auto` 默认开启并在安全门允许时惰性迁移当前项目的旧文件；旧文件保留。使用 `/mem migrate --status` 查看状态、`/mem doctor` 查看提示；需要回退时用 `/mem migrate --rollback` 再 `/reload`，并核对保留的 blocks 快照中迁移后新增的内容。配置 blocks 但实际仍为 files 时按 tiered 回退。
+
+显式 `memory.layout: "tiered"` 的 files 注入方式：
 
 - 整文件 / 整段落准入，受 UTF-8 字节预算约束；放不下的只留索引。
 - topic 文件的索引行带 `description` / `read_when` 元数据，模型据此决定是否打开；打开用 `memory` 工具。
@@ -16,7 +18,7 @@ cwd 为键的被动项目记忆：记忆文件放在 `~/.pi/agent/memory/<cwd-sl
 
 ## `memory` 工具
 
-`memory.toolSurface` 默认 `v2`（官方字段风格）：`view [path]` / `search` / `create` / `str_replace` / `insert` / `delete` / `rename`，并兼容旧的 `list` / `write` / `append`。
+`memory.toolSurface` 默认 `v2`（files 布局官方字段风格；blocks 布局使用 v3）：`view [path]` / `search` / `create` / `str_replace` / `insert` / `delete` / `rename`，并兼容旧的 `list` / `write` / `append`。
 
 - 写入有目录围栏、文件名白名单、字节上限（单文件 `maxFileBytes` 262144，单次写 `maxWriteBytes` 65536）、权限 0600；写入自动带 `source: agent` 溯源，注入时加"数据非指令"围栏。
 - slug 目录可以是用户信任的符号链接；文件级符号链接和非常规文件被拒绝。

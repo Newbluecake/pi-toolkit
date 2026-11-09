@@ -46,7 +46,7 @@ export const MEMORY_SETTING_SPECS: Record<string, SettingSpec> = {
   "memory.layout": choice(
     "memory.layout",
     ["tiered", "legacy", "blocks"],
-    "Injection renderer: tiered (budgeted, default), legacy (byte-identical to pre-#22), or blocks (#36 one file per block; parseable now, renderer lands with #36)",
+    "Injection renderer: blocks (default, one file per block), tiered (budgeted files), or legacy (byte-identical to pre-#22)",
   ),
   "memory.toolSurface": choice(
     "memory.toolSurface",

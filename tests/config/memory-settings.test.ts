@@ -1,5 +1,5 @@
 // memory-plan §7.10 + todo #22 optimize-plan §9 (P0-b): memory.* settings
-// block — parser tolerance + spec surface. P5 defaults are tiered/v2;
+// block — parser tolerance + spec surface. F1 defaults are blocks/v2;
 // explicit legacy remains the byte-compatible opt-out.
 
 import { describe, expect, it } from "vitest";
@@ -11,7 +11,7 @@ import { DEFAULT_TIDY_BATCH_SETTINGS } from "../../src/memory/tidy/batch-setting
 const defaults = DEFAULT_SETTINGS.memory;
 
 describe("memory settings", () => {
-  it("pins the P5 defaults (tiered injection + v2 tool surface)", () => {
+  it("pins the F1 defaults (blocks injection + v2 tool surface)", () => {
     expect(defaults).toEqual({
       scopes: { session: true, hub: true },
       enabled: true,
@@ -23,7 +23,7 @@ describe("memory settings", () => {
       indexMax: 15,
       maxFileBytes: 262_144,
       maxWriteBytes: 65_536,
-      layout: "tiered",
+      layout: "blocks",
       toolSurface: "v2",
       childProfile: "core",
       coreBytes: 1600,
@@ -213,7 +213,7 @@ describe("memory settings", () => {
   it("layout / toolSurface / childProfile are enum knobs, falling back on garbage", () => {
     expect(parseMemorySettings({ layout: "tiered" }).layout).toBe("tiered");
     expect(parseMemorySettings({ layout: "legacy" }).layout).toBe("legacy");
-    expect(parseMemorySettings({ layout: "bogus" }).layout).toBe("tiered");
+    expect(parseMemorySettings({ layout: "bogus" }).layout).toBe("blocks");
     expect(parseMemorySettings({ toolSurface: "v2" }).toolSurface).toBe("v2");
     expect(parseMemorySettings({ toolSurface: "bogus" }).toolSurface).toBe("v2");
     expect(parseMemorySettings({ childProfile: "full" }).childProfile).toBe("full");
@@ -223,12 +223,12 @@ describe("memory settings", () => {
 
   // ───────────────────── #36 memory-governance plan §4 P0（arch §4.6） ─────────────────────
 
-  it('#36: layout gains a parseable "blocks" value; the default stays tiered until P5b', () => {
+  it("#36: layout accepts blocks and defaults to blocks", () => {
     expect(parseMemorySettings({ layout: "blocks" }).layout).toBe("blocks");
-    expect(parseMemorySettings({}).layout).toBe("tiered");
-    expect(parseMemorySettings({ layout: "bogus" }).layout).toBe("tiered");
-    expect(defaults.layout).toBe("tiered");
-    // blocks 在 P0 只可解析，尚无渲染器 —— loadSettings 同样接受（严禁写进真实设置，P3/P5b 接线）。
+    expect(parseMemorySettings({}).layout).toBe("blocks");
+    expect(parseMemorySettings({ layout: "bogus" }).layout).toBe("blocks");
+    expect(defaults.layout).toBe("blocks");
+    // Explicit blocks remains parseable.
     expect(loadSettings({ memory: { layout: "blocks" } }).memory.layout).toBe("blocks");
   });
 
@@ -490,7 +490,7 @@ describe("memory settings", () => {
     expect(SETTING_SPECS["memory.childProfile"]).toMatchObject({ kind: "enum", values: ["core", "full", "none"] });
     expect(SETTING_SPECS["memory.tidy.timeoutS"]).toMatchObject({ path: "memory.tidy.timeoutMs", time: true });
     expect(SETTING_SPECS["memory.tidy.maxCostUsd"]).toMatchObject({ kind: "number", min: 0.05, max: 50 });
-    expect(defaultOf(SETTING_SPECS["memory.layout"]!)).toBe("tiered");
+    expect(defaultOf(SETTING_SPECS["memory.layout"]!)).toBe("blocks");
     expect(defaultOf(SETTING_SPECS["memory.toolSurface"]!)).toBe("v2");
   });
 

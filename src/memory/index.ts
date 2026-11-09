@@ -417,7 +417,7 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
       // "no block" result before the first render).
       projectSection?.projectSources.freeze(cwd);
       frozenBlocks.set(cwd, lastBlocks.has(cwd) ? lastBlocks.get(cwd) : cache.peek(cwd, budget)?.block);
-    } else if (opts.settings.layout === "tiered") {
+    } else if (effectiveLayout(opts.settings.layout, dirFormat(memoryDirFor(cwd))) === "tiered") {
       lastBlocks.delete(cwd);
     } else {
       cache.delete(cwd);
@@ -705,11 +705,8 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
   // returns v3 for layout:blocks + a blocks/absent/(files+auto) directory —
   // the registration COUNT and NAME stay exactly one `memory` tool (the
   // activate-trace contract).
-  const surface = toolSurfaceFor(
-    opts.settings,
-    dirFormat(memoryDirFor(resolveWorktreeOrigin(process.cwd()) ?? process.cwd())),
-    opts.secureDomainKind === "locked",
-  );
+  const activationFormat = dirFormat(memoryDirFor(resolveWorktreeOrigin(process.cwd()) ?? process.cwd()));
+  const surface = toolSurfaceFor(opts.settings, activationFormat, opts.secureDomainKind === "locked");
   const toolCommon = {
     settings: opts.settings,
     isChildSession: opts.isChildSession,
@@ -728,7 +725,9 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
       : surface === "v2"
         ? createMemoryToolV2({
             ...toolCommon,
-            ...(opts.settings.layout === "tiered" ? { renderBlock: tieredRender } : {}),
+            ...(effectiveLayout(opts.settings.layout, activationFormat) === "tiered"
+              ? { renderBlock: tieredRender }
+              : {}),
             doctorSummary,
             ...(jev === undefined ? {} : { jev: jev.makeWritePort() }),
           })
