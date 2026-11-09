@@ -20,6 +20,7 @@ function harness(
   withFile = false,
   monotonicNow?: () => number,
   queueLimit?: number,
+  text = "new body",
 ) {
   const dir = mkdtempSync(join(tmpdir(), "mem-web-"));
   dirs.push(dir);
@@ -101,7 +102,7 @@ function harness(
     ...(queueLimit !== undefined ? { queueLimit } : {}),
   });
   const controller = new AbortController();
-  const call = kernel.start("session add new body", {
+  const call = kernel.start(`session add ${text}`, {
     cmdId: "id",
     commandOwner: "activation",
     operationGeneration: 1,
@@ -114,8 +115,8 @@ function harness(
   async function prepare(reserve = true) {
     const prepared = await store.prepareWebAdd(call, {
       kind: "session.add",
-      rawArgs: "session add new body",
-      text: "new body",
+      rawArgs: `session add ${text}`,
+      text,
     });
     if (!prepared.ok) throw Error(prepared.code);
     const pending = kernel.confirm(call, prepared.plan.commandPlan);
@@ -147,6 +148,41 @@ function harness(
 }
 
 describe("confirmed session Web consumer, real fold and planner", () => {
+  it.each([
+    [false, false],
+    [false, true],
+    [true, false],
+    [true, true],
+  ])("readable presentation keeps the complete body (snapshot=%s, file=%s)", async (snapshot, withFile) => {
+    const text = `第一段正文。\n\n第二段：${"long-unbroken-body".repeat(40)}\n原样保留最后一行。`;
+    const h = harness("fork", snapshot, withFile, undefined, undefined, text);
+    try {
+      const { plan } = await h.prepare();
+      const presentation = plan.commandPlan.presentation;
+      expect(presentation).toContain(`要写入的正文（全文）：\n${text}\n\n目标：`);
+      expect(presentation).toContain("新增 1 条 session 记忆\n");
+      expect(presentation).toContain(snapshot ? "追加完整快照，不删已有项" : "追加 1 条，不改已有项");
+      expect(presentation).toContain(withFile ? "目标：当前会话（session.jsonl）" : "目标：memory-only");
+      expect(presentation).toContain("权威：user\n影响条目：\n");
+      expect(presentation).toContain("- n2（新增）");
+      expect(presentation.includes("- n1（保留在快照中）")).toBe(snapshot);
+      expect(presentation).toContain(
+        `命令截止时间：${new Date(h.kernel.binding(h.call)!.deadline).toISOString()}\n超时未确认则不执行。`,
+      );
+      expect(presentation).toContain("写入后不可回滚。\n文件型目标首次 conversation flush 前可能尚未落盘。");
+      expect(presentation).not.toContain(h.item.text);
+      expect(presentation).not.toMatch(/完整追加内容|beforeRev|afterRev|entryHash/);
+      expect(presentation).not.toContain(h.file ?? "not-a-file");
+      const manifest = JSON.parse(plan.commandPlan.manifest);
+      expect(manifest.entry).toEqual(plan.entry);
+      expect(manifest.affected).toEqual(plan.affected);
+      expect(h.append).not.toHaveBeenCalled();
+    } finally {
+      h.store.releaseWeb(h.call);
+      h.kernel.dispose();
+    }
+  });
+
   it("revokes the real receipt on the command gate's changed plan without releasing the store observation", async () => {
     const h = harness("fork", false, true);
     const { plan, receipt } = await h.prepare();
@@ -207,7 +243,9 @@ describe("confirmed session Web consumer, real fold and planner", () => {
         { id: "n1", beforeRev: before.items[0]?.rev, afterRev: before.items[0]?.rev, change: "retained-in-snapshot" },
         { id: "n2", beforeRev: null, afterRev: expect.any(String), change: "create" },
       ]);
-      expect(plan.commandPlan.presentation).toContain(h.item.text);
+      // Copy-only change: retained bodies stay in the diagnostic manifest, not the question.
+      expect(plan.commandPlan.presentation).not.toContain(h.item.text);
+      expect(plan.commandPlan.manifest).toContain(h.item.text);
     }
     const outcome = await h.store.enqueueConfirmedCommand(h.call, plan, receipt);
     expect(outcome).toMatchObject({ ok: true, effect: "completed", id: "n2" });

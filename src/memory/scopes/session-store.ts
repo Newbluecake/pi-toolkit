@@ -6,6 +6,7 @@
  * inject verify-only recovery port and call verifyRecovery(receipt) against that manager.
  * Reload/tree/off-on MUST NOT issue receipts. No automatic retry/SDK rollback/fsync promise.
  */
+import { basename } from "node:path";
 import type {
   FoldedSessionItem,
   SessionMemoryEntryV1,
@@ -656,7 +657,7 @@ export function createSessionMemoryStore(deps: SessionMemoryStoreDeps): SessionM
           rawArgs,
           step: 0,
           manifest,
-          presentation: `新增 session 记忆全文：\n${text}\n目标：${file ?? "memory-only"}\nentry: ${entry.op}；影响：${canonicalJson(affected)}\n完整追加内容：${canonicalJson(entry)}\n${entry.op === "snap" ? "仅新增一条；将追加完整快照，不删除已有项，继承标记可能更新。" : "追加一个条目。"}\n截止：${binding.deadline}；不可回滚。文件型目标首次 conversation flush 前可能尚未落盘。`,
+          presentation: `新增 1 条 session 记忆\n${entry.op === "snap" ? "追加完整快照，不删已有项；继承标记可能更新。" : "追加 1 条，不改已有项。"}\n\n要写入的正文（全文）：\n${text}\n\n目标：${file !== undefined ? `当前会话（${basename(file)}）` : "memory-only"}\n权威：user\n影响条目：\n${affected.map((item) => `- ${item.id}（${item.change === "create" ? "新增" : "保留在快照中"}）`).join("\n")}\n\n命令截止时间：${new Date(binding.deadline).toISOString()}\n超时未确认则不执行。\n\n写入后不可回滚。\n文件型目标首次 conversation flush 前可能尚未落盘。`,
         });
         const plan = Object.freeze({
           version: 1 as const,
