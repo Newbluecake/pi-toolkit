@@ -18,7 +18,7 @@ export function appendV4Replacement(
   const parsed = readUntrustedValue(input);
   if (!parsed.ok || !Value.Check(parameters, parsed.value)) return result;
   const { op, storageScope, ...fields } = parsed.value as Record<string, unknown>;
-  if (!result || typeof result !== "object") return result;
+  if (!result || typeof result !== "object" || !("ok" in result) || result.ok !== true) return result;
   // Old view accepts several fields it subsequently ignores (notably session
   // topic). Do not carry those into a stricter v4 success replacement.
   const params = (op === "view" && "ok" in result && result.ok === true

@@ -9,6 +9,9 @@ import {
   type ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_MEMORY_SETTINGS } from "../../../src/memory/settings.js";
+import { MemoryToolParamsV4 } from "../../../src/memory/unified/surface.js";
+import * as v3 from "../../../src/memory/tool-v3.js";
+import { parseBlockFile } from "../../../src/memory/blocks/format.js";
 import { wireMemory } from "../../../src/memory/index.js";
 import { wireMemoryScopes } from "../../../src/memory/scopes/wire.js";
 import { MEMORY_BIND_EVENT, type MemoryBindRequest } from "../../../src/memory/scopes/child-bind.js";
@@ -24,7 +27,7 @@ afterEach(() => {
 });
 describe("scopes-on child hard readonly content (including old allow=true)", () => {
   it.each(["legacy", "v2", "v3"] as const)(
-    "%s actual wiring denies before mkdir, without changing original surface",
+    "%s actual wiring denies before mkdir (blocks now publish v4)",
     async (surface) => {
       const cwd = mkdtempSync(join(tmpdir(), "memory39-readonly-"));
       dirs.push(cwd);
@@ -76,16 +79,23 @@ describe("scopes-on child hard readonly content (including old allow=true)", () 
       const args =
         surface === "legacy"
           ? { action: "write", name: "bad.md", content: "forbidden" }
-          : { command: "create", path: "bad.md", file_text: "forbidden" };
-      await expect(
-        tool.execute(
-          "blocked",
-          args,
-          undefined,
-          undefined,
-          ctx as import("@earendil-works/pi-coding-agent").ExtensionToolContext,
-        ),
-      ).rejects.toThrow(/read-only|E_READONLY/);
+          : surface === "v3"
+            ? { command: "create", topic: "bad", text: "forbidden" }
+            : { command: "create", path: "bad.md", file_text: "forbidden" };
+      const pending = tool.execute(
+        "blocked",
+        args,
+        undefined,
+        undefined,
+        ctx as import("@earendil-works/pi-coding-agent").ExtensionToolContext,
+      );
+      if (surface === "v3") {
+        expect(tool.parameters).toEqual(MemoryToolParamsV4);
+        expect(JSON.parse((await pending).content.map((c) => ("text" in c ? c.text : "")).join(""))).toMatchObject({
+          ok: false,
+          code: "E_READONLY",
+        });
+      } else await expect(pending).rejects.toThrow(/read-only|E_READONLY/);
       const command = f.commands.get("mem") as { handler(args: string, ctx: ExtensionCommandContext): Promise<void> };
       await command.handler("import all", ctx as ExtensionCommandContext);
       await command.handler("init", ctx as ExtensionCommandContext);
@@ -293,4 +303,94 @@ describe("scopes-on real wireJev child derived writes", () => {
       }
     },
   );
+});
+
+it.each([
+  [true, true],
+  [true, false],
+  [false, true],
+  [false, false],
+] as const)("registered child v4 project CRUD: scopes=%s allowWriteInChildSessions=%s", async (scopesOn, allow) => {
+  const cwd = mkdtempSync(join(tmpdir(), "memory-child-v4-grid-"));
+  dirs.push(cwd);
+  vi.stubEnv("ARMORY_MEMORY_ROOT", join(cwd, "memory"));
+  const settings = {
+    ...DEFAULT_MEMORY_SETTINGS,
+    allowWriteInChildSessions: allow,
+    scopes: { session: scopesOn, hub: false },
+    jev: { ...DEFAULT_MEMORY_SETTINGS.jev, enabled: false },
+  };
+  const f = fakePi();
+  f.pi.events = createEventBus();
+  const ctx = { cwd, mode: "rpc", hasUI: false, sessionManager: SessionManager.inMemory(cwd) } as ExtensionContext;
+  const seed = v3.createMemoryToolV3({ settings, isChildSession: false, onAfterWrite() {} });
+  await seed.execute(
+    "seed",
+    { command: "create", topic: "fact", text: "seeded fact" },
+    undefined,
+    undefined,
+    ctx as never,
+  );
+  const dir = join(memoryDirFor(cwd), "blocks"),
+    filename = join(dir, "fact.001.md");
+  const initial = readFileSync(filename, "utf8"),
+    block = parseBlockFile("fact.001.md", initial);
+  if ("stray" in block) throw Error("invalid seeded block");
+  const scopes = wireMemoryScopes(f.pi, {
+    settings,
+    child: true,
+    domain: "plain",
+    gate: { check: () => ({ ok: true }) },
+    locked: () => false,
+    remote: () => undefined,
+    hubPaths: () => {
+      throw Error("hub disabled");
+    },
+  });
+  const factory = vi.spyOn(v3, "createMemoryToolV3"); // Call-through spy: verify the real effective settings, no fake factory/store.
+  try {
+    wireMemory(f.pi, {
+      settings,
+      ...(scopes ? { scopes } : {}),
+      isChildSession: true,
+      sections: createPromptSectionHub(f.pi, {
+        mode: () => "stable",
+        wakeReplay: false,
+        adoptForeignForcedPrompt: false,
+      }),
+    });
+    expect(factory.mock.calls.at(-1)?.[0].settings.allowWriteInChildSessions).toBe(scopesOn ? false : allow);
+    const tool = f.tools.get("memory") as import("@earendil-works/pi-coding-agent").ToolDefinition;
+    expect(tool.parameters).toEqual(MemoryToolParamsV4);
+    const beforeNames = readdirSync(dir);
+    for (const params of [
+      { command: "create", topic: "other", text: "new fact" },
+      { command: "update", path: "fact.001", rev: block.rev, text: "changed fact" },
+      { command: "delete", path: "fact.001" },
+    ]) {
+      const result = await tool.execute("grid", params, undefined, undefined, ctx as never);
+      const output = result.content.map((c) => ("text" in c ? c.text : "")).join("");
+      if (scopesOn || !allow) {
+        expect(JSON.parse(output)).toMatchObject({ ok: false, code: "E_READONLY" });
+        expect(readFileSync(filename, "utf8")).toBe(initial);
+        expect(readdirSync(dir)).toEqual(beforeNames);
+      } else
+        expect(output).toContain(
+          params.command === "create"
+            ? "created other.001"
+            : params.command === "update"
+              ? "updated fact.001"
+              : "deleted fact.001",
+        );
+    }
+    expect(settings.allowWriteInChildSessions).toBe(allow);
+    if (!scopesOn && allow) {
+      expect(existsSync(filename)).toBe(false);
+      expect(existsSync(join(dir, "other.001.md"))).toBe(true);
+    }
+  } finally {
+    factory.mockRestore();
+    scopes?.dispose();
+    f.pi.events.clear();
+  }
 });

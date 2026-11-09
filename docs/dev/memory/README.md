@@ -6,7 +6,7 @@
 
 ## src/memory/
 
-`src/memory/` — merged armory-memory: cwd-keyed project memory under `~/.pi/agent/memory/<slug>/`, with default `layout:blocks` injection; `toolSurface:v2` remains the configured files-layout tool surface, while blocks use v3. Explicit `legacy` settings retain the byte-compatible files-layout opt-out. With blocks configured and files still on disk, effective layout falls back to tiered for injection and doctor; existing blocks take precedence over tiered/legacy configuration. The tiered renderer enforces whole-file/whole-section admission and a UTF-8 byte budget; topic index lines carry `description`/`read_when` metadata, while `/mem doctor` reports layout-specific health findings and its summary is surfaced by `/mem` and `memory.view`. Slug directories are canonicalized once and may be user-trusted symlinks; file-level symlinks and non-regular files are rejected. All v2 writes, imports, tidy, and restore operations serialize under the directory lock; batch tidy calls the post-write invalidation once. Registers a `pi_project_memory` section into the shared prompt-section hub (`src/sysprompt/hub.ts`, pre-guard, created before `wireMemory` runs so fold order stays memory → agent types → models) instead of owning its own `before_agent_start` hook (sysprompt-stable M3); the hub decides snapshot vs. tail update, `src/memory/inject.ts`'s `memorySection` provider only renders the current live block (pin frontmatter, agent-source fence, tail sentinel, fingerprint-keyed render cache). The project `memory` tool uses v3 view/create/update/delete/search in blocks layout (whole-block update with rev/CAS); explicit files layouts retain v2/legacy surfaces. Child sessions are read-only by default, and scopes-on children keep project/Hub content hard read-only even with the old write opt-in. `/mem` covers layout-specific list/path/doctor, read-only review/expired, migration and restore; init/import retain their files-oriented workflows (not block CRUD), and tidy is unavailable in blocks layout (`init` creates an agent-source `core.md` skeleton stamped `source: agent` — deleting that line locks it as user-authored — and refuses an existing, archived or pin-stand-in primary). Files-layout tidy and restore are journaled transactions (`src/memory/tidy/{txn,manifest,journal}.ts`, design `docs/dev/memory/tidy-batch-plan.md` v3.2): the run event records the full planned op list before any intent, every MOVE/CREATE/REPLACE is CAS- and owner-epoch-checked and its result carries a mandatory final observation, an interrupted run stays resumable and is recovered before new work, and manifests are strict v2 (v1 backups restore only with `--legacy`, also through the txn layer). Hard-link-less filesystems refuse txn tidy (fail closed). Directory locks follow M-T4: a lock whose holder cannot be proven dead (old-format, cross-host) is never broken by age — writers get an actionable busy error and only the TUI-only `/mem tidy --break-lock` (epoch bump BEFORE lockBreak) clears it. `/mem tidy --batch` (P3a, `batch-command.ts`) archives stale entries into `archive/` (+ `ARCHIVE.md`, index pruning) and rewrites the rest in model batches sized by the dispatch-time `SpawnRequest.inputBudget` measurement (re-splitting on `input-budget` failures), holding one run lease for the whole command, bounded by `memory.tidy.batch.*` (bounded cost cap, max model runs, activity clock excluding dialog time); `--dry-run`/`--status` are read-only and web-allowed, `--triage` (P3b) is not implemented. `paths|frontmatter|store|render` are pi-free; `index.ts` (`wireMemory`) is the only pi-facing assembly and holds all mutable state in its closure; registered pre-guard. Design: `docs/dev/memory/memory-plan.md`.
+`src/memory/` — merged armory-memory: cwd-keyed project memory under `~/.pi/agent/memory/<slug>/`, with default `layout:blocks` injection; `toolSurface:v2` remains the configured files-layout tool surface, while enabled plain main/child sessions with an actual blocks/v3 surface publish unified v4 (v3 storage/operations underneath); secure/locked sessions retain the original factory. Explicit `legacy` settings retain the byte-compatible files-layout opt-out. With blocks configured and files still on disk, effective layout falls back to tiered for injection and doctor; existing blocks take precedence over tiered/legacy configuration. The tiered renderer enforces whole-file/whole-section admission and a UTF-8 byte budget; topic index lines carry `description`/`read_when` metadata, while `/mem doctor` reports layout-specific health findings and its summary is surfaced by `/mem` and `memory.view`. Slug directories are canonicalized once and may be user-trusted symlinks; file-level symlinks and non-regular files are rejected. All v2 writes, imports, tidy, and restore operations serialize under the directory lock; batch tidy calls the post-write invalidation once. Registers a `pi_project_memory` section into the shared prompt-section hub (`src/sysprompt/hub.ts`, pre-guard, created before `wireMemory` runs so fold order stays memory → agent types → models) instead of owning its own `before_agent_start` hook (sysprompt-stable M3); the hub decides snapshot vs. tail update, `src/memory/inject.ts`'s `memorySection` provider only renders the current live block (pin frontmatter, agent-source fence, tail sentinel, fingerprint-keyed render cache). The project `memory` commands use the existing v3 view/create/update/delete/search operations in blocks layout (whole-block update with rev/CAS); explicit files layouts retain v2/legacy surfaces. Child sessions are read-only by default, and scopes-on children keep project/Hub content hard read-only even with the old write opt-in. `/mem` covers layout-specific list/path/doctor, read-only review/expired, migration and restore; init/import retain their files-oriented workflows (not block CRUD), and tidy is unavailable in blocks layout (`init` creates an agent-source `core.md` skeleton stamped `source: agent` — deleting that line locks it as user-authored — and refuses an existing, archived or pin-stand-in primary). Files-layout tidy and restore are journaled transactions (`src/memory/tidy/{txn,manifest,journal}.ts`, design `docs/dev/memory/tidy-batch-plan.md` v3.2): the run event records the full planned op list before any intent, every MOVE/CREATE/REPLACE is CAS- and owner-epoch-checked and its result carries a mandatory final observation, an interrupted run stays resumable and is recovered before new work, and manifests are strict v2 (v1 backups restore only with `--legacy`, also through the txn layer). Hard-link-less filesystems refuse txn tidy (fail closed). Directory locks follow M-T4: a lock whose holder cannot be proven dead (old-format, cross-host) is never broken by age — writers get an actionable busy error and only the TUI-only `/mem tidy --break-lock` (epoch bump BEFORE lockBreak) clears it. `/mem tidy --batch` (P3a, `batch-command.ts`) archives stale entries into `archive/` (+ `ARCHIVE.md`, index pruning) and rewrites the rest in model batches sized by the dispatch-time `SpawnRequest.inputBudget` measurement (re-splitting on `input-budget` failures), holding one run lease for the whole command, bounded by `memory.tidy.batch.*` (bounded cost cap, max model runs, activity clock excluding dialog time); `--dry-run`/`--status` are read-only and web-allowed, `--triage` (P3b) is not implemented. `paths|frontmatter|store|render` are pi-free; `index.ts` (`wireMemory`) is the only pi-facing assembly and holds all mutable state in its closure; registered pre-guard. Design: `docs/dev/memory/memory-plan.md`.
 
 ## Blocks section repair
 
@@ -449,7 +449,7 @@ Hub operations still use user authority and require the existing approval path; 
 `authority: agent` is ignored for Hub, not independently rejected. A create request must omit `id` and
 `rev`, including empty strings.
 
-## Unified tool · phase 1 (internal routing only)
+## Unified tool · phase 1 (historical internal-routing baseline)
 
 `wireMemory` creates one activation-local `unified/dispatcher.ts` instance. The registered blocks/v3
 `memory` execute port passes through the project adapter without changing its arguments, text/usage
@@ -477,14 +477,14 @@ real start restoring writes in a new SessionManager while leaving the old branch
 abort, shutdown and actual layout predicates. `tests/boundary/pi-free.test.ts` scans the unified roots
 and their shared operation/read ports, including transitive value imports.
 
-## Unified tool · phase 2 core (v4 factory; activation switch remains separate)
+## Unified tool · phase 2 core (factory delivery; production switch below)
 
 `unified/index.ts` exports the pi-free v4 surface, closed `MemoryToolParamsV4`, normalizer, DTOs and
 UTF-8 surface measurement. `createMemoryToolV4` takes host-owned `project.run/inspect` and a fresh
 `currentScoped()` resolver; it creates no owner, approval, store, path resolver, timer or hook. This
-core package does **not** change `wireMemory`'s actual registration decision or any existing fixture.
-The follow-up assembly package must select v4 only when the actual `toolSurfaceFor` result is v3,
-and must continue using the phase-1 scoped-registration and effective child-settings predicates.
+core-only delivery did **not** change `wireMemory`'s actual registration decision or any existing fixture.
+The assembly below selects v4 only when the actual `toolSurfaceFor` result is v3,
+and continues using the phase-1 scoped-registration and effective child-settings predicates.
 
 - Public params require `command`; `scope` alone defaults to project. `op/storageScope` are not
   published. Internal alias normalization is opt-in, refuses either mixed field pair even when
@@ -522,8 +522,48 @@ and must continue using the phase-1 scoped-registration and effective child-sett
   Other calls rename op/storageScope and retain the remaining fields, including actual rev.
   The assembly caller is responsible for asserting these flags only for a registered blocks v4.
 
-Core tests live in the new `tests/memory/unified/v4-*.test.ts` files; `wire.test.ts` is unchanged.
+Core tests live in `tests/memory/unified/v4-*.test.ts`; production tests now live in `wire.test.ts`.
 They cover full aggregate JSON, real temporary SessionManager and Hub writes through production
 approval/store kernels, executable replacements and the exact description+snippet+joined-guidelines+
 JSON-schema UTF-8 budget formula. Existing v3, alias, off-golden and phase-1 wire tests remain the
 inactive-path differential baseline; no old text or schema was shortened to meet the new budget.
+
+## Unified tool · phase 2 production registration (2026-11-09)
+
+- `wireMemory` computes the actual `toolSurfaceFor(settings, activationFormat, secureLocked)` result once. Only
+  `v3` **and** memory enabled **and** plain main or child session selects `createMemoryToolV4`, through the single
+  activation-local dispatcher. Returned `v2` or `legacy` always keeps the old factory. Thus held normally
+  stays v2; files+auto can return v3 and publish v4; secureLocked files stays v2. No config-label or directory-name
+  shortcut exists. Disabled-memory and secure/locked direct callers retain the old project factory even
+  if the selector returns v3. Plain child sessions also publish v4; readonly and authority gates do not change:
+  scopes-on forces the effective allowWriteInChildSessions=false and the denying project gate; scopes-off
+  retains the original write opt-in. Scopes registration remains `wiringExists && (!child || scopes.session)`.
+- The v4 project port runs the original v3 operations and uses `createProjectInspectorV4` with the same deps
+  for read-only aggregate/search inspection. The scoped v4 resolver takes `scopes.group()?.runtime()` on each
+  call, never `scopes.current()?.tool`: the latter filters through the owner's catch-and-false identity check.
+  The owner exposes a read-only `inspect` using the unchanged read inspector with a diagnostic capability
+  that does **not** swallow `getSessionFile/getSessionId` exceptions. Session `view` still distinguishes
+  observed poison from getter failures; `getBranch/getLeafId/getSessionFile` errors reach error/E_INTERNAL,
+  retain originalMessage and omit the failed group. Legacy capability/read/write gates remain unchanged.
+  v4 writes use `runtime.tool.dispatch`, never alias `run`, and share the existing owner/approval/enqueue path.
+- After successful `pi.registerTool`, `v4Registered` becomes true. Alias execution passes
+  `v4Registration: () => ({ active, registered })` to `dispatchScopedMemory`; only both true, old-schema-valid
+  calls with `result.ok === true` receive a replacement. Failures, v2/files and secure/locked paths do
+  not. No schema/description change is made to scoped_memory and no new hook/owner/store is created.
+- `memory-tool-surface.json` declares only complete canonical `blocksUnified`, `blocksUnifiedJev`,
+  `blocksUnifiedChild` variants plus their `bytes.*` counters: **2231B / 2315B / 2295B**, measured with the
+  existing description+snippet+newline-joined-guidelines+JSON-schema UTF-8 formula. All preexisting keys
+  remain exact, pinned by canonical comparisons, fixed byte counters and pre-v4 per-key SHA-256 assertions.
+  `scoped-memory-tool-surface.json` is registered as a B-level golden, unchanged; Agent nested golden stays
+  unchanged. v4's single boundary sentence identifies scoped_memory as the session/Hub compatibility alias;
+  its existing first sentence already fixes that alias's boundary. Scope-selection strategy lives only in
+  `skills/memory-jev/SKILL.md`, including Hub capacity and human-turn invalidation by background notifications.
+- Production tests execute both registered approval entrypoints through tree abort and shutdown, real v4
+  session writes, executable alias view replacement, failed-alias no-replacement, the actual surface selector
+  matrix, raw-getter diagnostics, and real tiered/files session+Hub create/view/update/delete with precise
+  approval. Existing factory v3 tests remain the old operation/throwing-error baseline; the production Jev
+  test now expects v4 but still proves real tagging, g1, sidecar and supersede behavior. Child production tests
+  pin all four scopes-on/off × allow-true/false project CRUD cells (including the real effective settings),
+  authority-before-unknown-field validation in both tools, Hub group omission with diagnostics-only status and
+  zero Hub reads, and close/tree registration/write behavior. The actual registered child surface is compared
+  to all four canonical blocksUnifiedChild fields in tool-surface.test.ts, never the Agent golden.

@@ -11,6 +11,8 @@ import { createSessionMemoryStore, sessionPoisonIdentity } from "./session-store
 import { sharedSessionPoisonRegistry } from "./session-poison.js";
 import { createHubMemoryProvider } from "./hub-store.js";
 import { createScopedMemoryCommand, trustedNativeMemoryCommand, type NativeMemoryCommandContext } from "./command.js";
+import { inspectScopedMemory } from "../unified/read.js";
+import type { ScopedV4Port } from "../unified/types.js";
 import { createScopedMemoryTool } from "./tool.js";
 import { createScopedMemoryDoctor } from "./doctor.js";
 import { hubMemoryRoot } from "./hub-slot.js";
@@ -303,6 +305,21 @@ export function createMemoryOwner(deps: MemoryOwnerDeps) {
     caps,
     tracker,
     tool,
+    // Diagnostic-only capability: do not collapse identity getter exceptions into locked/disabled.
+    inspect: ((scope, call) => {
+      const diagnostic = {
+        ...common,
+        capability: () => {
+          if (disposed || !deps.isCurrent() || deps.locked()) return "locked" as const;
+          return manager.getSessionId() === sid && manager.getSessionFile() === file
+            ? ("ok" as const)
+            : ("locked" as const);
+        },
+      };
+      return scope === "session"
+        ? inspectScopedMemory(diagnostic, "session", call)
+        : inspectScopedMemory(diagnostic, "hub", call);
+    }) as ScopedV4Port["inspect"],
     command,
     doctor,
     signal: abort.signal as AbortSignal,

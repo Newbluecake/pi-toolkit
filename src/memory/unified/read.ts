@@ -1,5 +1,5 @@
 import { scopedFailure } from "../scopes/error-messages.js";
-import { scopedReadGate, type ScopedToolDeps } from "../scopes/tool-surface.js";
+import { scopedReadGate, type ScopedSurfaceDeps } from "../scopes/tool-surface.js";
 import { scopedReadError } from "./errors.js";
 import type {
   HubEntry,
@@ -26,17 +26,17 @@ export function selectScopedEntries<T extends { id: string; item: { text: string
     .slice(0, 50);
 }
 export function inspectScopedMemory(
-  deps: ScopedToolDeps,
+  deps: ScopedSurfaceDeps,
   scope: "session",
   call: MemoryV4Params,
 ): ReadInspection<SessionReadGroup>;
 export function inspectScopedMemory(
-  deps: ScopedToolDeps,
+  deps: ScopedSurfaceDeps,
   scope: "hub",
   call: MemoryV4Params,
 ): ReadInspection<HubReadGroup>;
 export function inspectScopedMemory(
-  deps: ScopedToolDeps,
+  deps: ScopedSurfaceDeps,
   scope: "session" | "hub",
   call: MemoryV4Params,
 ): ReadInspection<SessionReadGroup | HubReadGroup> {

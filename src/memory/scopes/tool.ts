@@ -1,6 +1,6 @@
 /** Factory-only scoped surface. Host owns all ports, lifecycle and human provenance. */
 import { inspectScopedMemory } from "../unified/read.js";
-import { appendV4Replacement, type V4Registration } from "../unified/replacement.js";
+import type { V4Registration } from "../unified/replacement.js";
 import type { ScopedV4Port } from "../unified/types.js";
 import { withScopedMessage } from "./error-messages.js";
 import { Type } from "@sinclair/typebox";
@@ -59,9 +59,21 @@ export function createScopedMemoryTool(deps: ScopedToolDeps, options?: { v4Regis
   async function dispatch(toolCallId: string, input: unknown, signal?: AbortSignal): Promise<unknown> {
     return withScopedMessage(await dispatchScopedMemory(deps, toolCallId, input, signal));
   }
-  async function run(toolCallId: string, input: unknown, signal?: AbortSignal): Promise<unknown> {
-    const result = await dispatch(toolCallId, input, signal);
-    return options ? appendV4Replacement(result, input, parameters, options.v4Registration()) : result;
+  async function run(
+    toolCallId: string,
+    input: unknown,
+    signal?: AbortSignal,
+    registration = options,
+  ): Promise<unknown> {
+    return withScopedMessage(
+      await dispatchScopedMemory(
+        deps,
+        toolCallId,
+        input,
+        signal,
+        registration ? { ...registration, parameters } : undefined,
+      ),
+    );
   }
   return {
     name: "scoped_memory",

@@ -34,7 +34,7 @@ import type { SystemPromptMode } from "../sysprompt/hub.js";
  */
 
 import type { MemoryWebWritePort } from "./scopes/web-write-port.js";
-import type { ExtensionContext, ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext, ExtensionToolContext, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { MemorySettings } from "../config/settings.js";
 import type { PromptSectionHub } from "../sysprompt/hub.js";
 import type { MemoryWriteGate, TidyPort } from "./contracts.js";
@@ -52,7 +52,7 @@ import { memorySection, renderExternalMemoryBlock } from "./inject.js";
 import { RenderCache, type InjectBudget } from "./render.js";
 import { createMemoryTool } from "./tool.js";
 import { createMemoryToolV2 } from "./tool-v2.js";
-import { createMemoryToolV3 } from "./tool-v3.js";
+import { createMemoryToolV3, createProjectInspectorV4 } from "./tool-v3.js";
 import { renderTiered } from "./tiered.js";
 import { runDoctor } from "./doctor.js";
 import { createStartupReminder, collectDoctorFindings, type RenderTieredPort } from "./doctor-command.js";
@@ -715,14 +715,15 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
     ...(opts.scopes ? { writeGate: gate } : {}),
     ...(opts.sessionSignal === undefined ? {} : { sessionSignal: opts.sessionSignal }),
   };
+  const blocksDeps = {
+    ...toolCommon,
+    writeGate: gate,
+    doctorSummary,
+    ...(surface !== "v3" || jev === undefined ? {} : { jev: jev.makeWritePort() }),
+  };
   const projectTool =
     surface === "v3"
-      ? createMemoryToolV3({
-          ...toolCommon,
-          writeGate: gate,
-          doctorSummary,
-          ...(jev === undefined ? {} : { jev: jev.makeWritePort() }),
-        })
+      ? createMemoryToolV3(blocksDeps)
       : surface === "v2"
         ? createMemoryToolV2({
             ...toolCommon,
@@ -738,12 +739,35 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
             onAfterWrite,
             ...(opts.scopes ? { writeGate: gate } : {}),
           });
+  const v4Active = opts.settings.enabled && (opts.secureDomainKind ?? "plain") === "plain" && surface === "v3";
+  let v4Registered = false;
   const dispatcher = createMemoryDispatcher({
     project: (...args: Parameters<typeof projectTool.execute>) => projectTool.execute(...args),
     currentScoped: () => opts.scopes?.current()?.tool,
+    v4Registration: () => ({ active: v4Active, registered: v4Registered }),
+    ...(v4Active
+      ? {
+          unified: {
+            project: {
+              run: (id: string, params: unknown, signal: AbortSignal | undefined, ctx: ExtensionToolContext) =>
+                projectTool.execute(id, params as never, signal, undefined, ctx),
+              inspect: createProjectInspectorV4(blocksDeps),
+            },
+            // group.runtime is a read-only live handle; unlike current(), it does not swallow getter failures.
+            currentScoped: () => {
+              const runtime = opts.scopes?.group()?.runtime();
+              return runtime ? { inspect: runtime.inspect, dispatch: runtime.tool.dispatch } : undefined;
+            },
+            child: opts.isChildSession,
+            scopesOn: !!opts.scopes,
+            jev: jevOn,
+          },
+        }
+      : {}),
   });
   opts.scopes?.attachDispatcher(dispatcher);
-  pi.registerTool(surface === "v3" ? { ...projectTool, execute: dispatcher.project } : projectTool);
+  pi.registerTool(dispatcher.v4 ?? (surface === "v3" ? { ...projectTool, execute: dispatcher.project } : projectTool));
+  v4Registered = dispatcher.v4 !== undefined;
   pi.registerCommand(
     "mem",
     createMemCommand({
