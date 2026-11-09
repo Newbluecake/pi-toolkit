@@ -168,3 +168,66 @@ poll bounds or append-only projection; the current ordinary writer remains versi
 path may be added without changing ordinary transaction semantics). Integration tests are tier2 by the manifest's
 `tests/integration/` prefix. The new every/core-clock/consumer drivers use a real flock-backed writer through the test-only
 v2 seeder and are explicitly tier2 in `tests/tiers.ts`; the pure raw timer backend test remains tier1.
+
+## Interval P2 (2026-11-09, #76): producers, strict diagnostics and explicit v2 migration
+
+P2 supersedes P1's **no producer / no migration** restriction, not its arbitration or off/secure contracts.
+
+- Tool `every` and CLI `--every` accept the P1 decimal duration grammar (s/m/h/d, whole seconds,
+  30s..365d). Create requires exactly one of cron/at/every; update may omit all to retain the old
+  definition, or submit exactly one to replace it. Empty/null values cannot clear schedules or evade
+  exclusivity. External `everyMs`/`intervalMs`/`anchorAt` remain rejected, including tool-schema bypasses.
+  `tz` on an interval is rejected **before ensureStore/sweep/write**; switching from cron never inherits tz.
+- Producer parsing carries only a provisional interval anchor (or the old anchor for an interval edit).
+  Create stamps `anchorAt=ctx.now` in the successful writer transaction. Existing `changeTask` compares
+  normalized execution definitions first: equal `90m`/`1.5h` and name-only edits preserve grid/hash;
+  execution changes settle the old grid, then reanchor at lock time. Interval success text reports ID,
+  normalized seconds, anchor, next (UTC seconds), and aggregate-once catch-up policy.
+- `ScheduleAgent.intervalReady()` admits local-only operation, but a configured router requires a live
+  interval-capable handshake; an absent/old hub returns `E_UNSUPPORTED` before IO, with connect/update +
+  `/webhub restart` or explicit disable + `/reload` instructions. No changes under `web-hub/agent/` are needed.
+- **Declared outward error-contract change**: new or resubmitted cron definitions now use
+  `parseCron(expr, {strictSteps:true})`. Every `x/n`, `*/n`, range-step and list-step is checked against
+  its field maximum (minute 59 / hour 23 / day-of-month 31 / month 12 / day-of-week 7), **not** the chosen
+  subrange length. Previously `*/90 * * * *` silently meant minute=0 hourly; now writes return
+  `E_INVALID`, the violated bound, and the copyable `every:"90m"` / `--every 90m` alternative.
+  Default parsing / stored compilation retain legacy expansion; name/prompt edits do not force repair.
+  Tool/CLI list/get append `legacy-step` plus the fix, and hub projections append `legacyStep?` only for
+  affected legacy tasks (no old task or hash rewrite).
+- `TxBody.upgradeToV2?:true` is the explicit producer migration signal. First interval creation/conversion
+  passes it in the same flock/atomic replacement as the task. Ordinary transactions still ignore draft
+  version changes and retain v1; writers keep v2 whenever the read base was v2, even after all interval
+  tasks are converted/deleted, terminal writes, receipts or housekeeping. Cron/once-only creates and edits
+  remain v1. There is no schema/hash/count migration for existing tasks; defHash already includes the
+  complete stored `when` (interval **and** anchor), with the original canonical SHA-256 algorithm.
+- Read/repair rules remain P1: v1 and v2 validate separately; unknown versions fail closed and refuse
+  repair without touching bytes. Pre-interval reader compatibility is exercised against the historical
+  `14e95e95` reader snapshot in `tests/schedule/compat/v1-reader.ts` (imports rebased, version pinned to 1):
+  it reads v1 and returns degraded/schema on an actual producer-written v2 file, without writes/crashes.
+  Upgrade readers and restart/reload before producing v2; rollback after first v2 needs an offline backup
+  restore and may lose new work or duplicate external effects, never online downgrade/repair.
+- **UI limitation explicitly retained**: interval rows/detail/next/UTC/catch-up display remains supported;
+  the new form constructs the existing `/schedule edit` command and uses tracked confirm/results. The
+  existing default web policy is still **deny**, and this package neither modifies nor bypasses it.
+  The form gives the actionable local `webHub.webCommandPolicy.schedule=confirm` + `/reload` hint and
+  displays transport/business errors without claiming a save. This is **not delivered as default Web
+  editability**; changing the default needs a separate declared package. Under an explicit existing
+  override, the form can edit name/prompt/schedule (including intervals) without serializing internal
+  anchor/millisecond fields or tz for every. Offline/stale/control-off remains read-only. CSS is external
+  in `styles/schedule.css` under `.sched-edit` (no Vue style block/static inline style, per CSP).
+
+### P2 evidence and gates
+
+- `tests/integration/schedule-p2-producer.test.ts`: actual tool/ops → real flock writer, commit anchor,
+  90m next, both forms' pause/resume + single catch-up, five-hour reopen + marking, DST grids, v1/once
+  retention, atomic v2 conversion, equivalent interval/hash preservation, v2 non-downgrade, old-reader
+  safe refusal, hub peer admission and zero-IO validation/legacy-step behavior.
+- `tests/integration/schedule-wiring.test.ts`: actual activate tool production → close → reopen five hours
+  later, both real executors, exactly one wake/spawn and durable catch-up report (no test-only v2 seeder).
+- `tests/commands/schedule.test.ts`, `tests/schedule/core/cron.test.ts`,
+  `tests/web-hub/hub/schedule-project.test.ts`, `tests/web-hub/ui/schedule-panel.test.ts`: CLI/quoted UI
+  command round-trip, strict boundaries/legacy behavior, optional projection diagnostic, editor confirm,
+  deny/business-error display and offline/stale/control gating. P1 large-backlog/budget/secure tests remain.
+- Frozen A fixtures are not regenerated. `schedule-off-golden.json`, `reflex-off-golden.json`,
+  `thread-rebind-off-golden.json` are unchanged by this package; any concurrently changed activation
+  trace belongs to the separate child-message-speed registration package, not schedule P2.

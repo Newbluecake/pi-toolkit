@@ -429,6 +429,7 @@ export async function changeTask(
         return {
           value: { kind: "changed", task: structuredClone(task), hashChanged: after !== before, missed },
           write: true,
+          ...(task.when.kind === "every" ? { upgradeToV2: true as const } : {}),
         };
       },
     );

@@ -114,6 +114,8 @@ export type TxResult<T> =
 export interface TxBody<T> {
   value: T;
   write: boolean;
+  /** Explicit producer-only migration, committed atomically with the first interval definition. */
+  upgradeToV2?: true;
 }
 export interface TxCtx {
   /** Lock-time clock. */
@@ -644,8 +646,8 @@ export function openSessionStore(opts: SessionStoreOpts): SessionStore {
             return;
           }
           housekeeping(draft, ctx.now);
-          // P1 never upgrades a v1 ledger. Every existing v2 mutation preserves v2.
-          draft.v = base.v;
+          // Only an explicit producer migration may upgrade; no mutation can downgrade v2.
+          draft.v = base.v === 2 || r.upgradeToV2 === true ? 2 : 1;
           const validation = validateStateFile(draft, opts.sessionId);
           if (!validation.ok) {
             out = { ok: false, code: "E_DEGRADED", detail: validation.error };

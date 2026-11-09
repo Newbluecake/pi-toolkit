@@ -233,7 +233,7 @@ describe("SchedulePanel", () => {
     expect(w.text()).toContain("1800s");
   });
 
-  it("detail view is READ-ONLY: no approve/reject actions, no hash note (r2 §6-W1)", async () => {
+  it("detail view still ignores approval fields; editing is explicit and no hash note appears", async () => {
     const { w } = mountPanel({ schedules: makePayload() });
     // the legacy-pending task (pendingApproval:true + offer on the wire) opens the SAME
     // read-only view — no action row, no hash note, no tracked command of any kind
@@ -492,4 +492,84 @@ describe("interval P1 mounted consumer", () => {
     expect(w.text()).toContain("UTC");
     expect(w.text()).toContain("interval reminder");
   });
+});
+
+describe("P2 interval editing", () => {
+  const A = Date.parse("2026-11-09T10:07:23Z");
+  const interval = () => ({
+    ...makeTask(),
+    task: {
+      ...makeTask().task,
+      name: "90m reminder",
+      when: { kind: "every" as const, everyMs: 5_400_000, anchorAt: A },
+    },
+    nextAt: A + 5_400_000,
+  });
+  const payload = () => makePayload([makeSession({ tasks: [], intervalTasks: [interval()], runs: [] })]);
+
+  it("edits an interval through the existing tracked command + confirm, never serializing tz/anchor/everyMs", async () => {
+    const { w, runs } = mountPanel({
+      schedules: payload(),
+      runCommand: (_n, _a, opts) =>
+        Promise.resolve(
+          opts?.confirm ? ({ ok: true } as CmdOutcome) : ({ ok: false, error: "E_CONFIRM_REQUIRED" } as CmdOutcome),
+        ),
+    });
+    await w.find(".sched-task-name").trigger("click");
+    await w.find("[data-schedule-edit]").trigger("click");
+    expect(w.find('input[name="when"]').element).toHaveProperty("value", "5400s");
+    expect(w.find('input[name="tz"]').exists()).toBe(false);
+    await w.find('input[name="when"]').setValue("45s");
+    await w.find('input[name="name"]').setValue('edited "reminder"');
+    await w.find('textarea[name="prompt"]').setValue("one report only");
+    await w.find("form").trigger("submit");
+    await flushPromises();
+    expect(runs).toHaveLength(1);
+    expect(runs[0]![1]).toBe("schedule");
+    expect(runs[0]![2]).toBe('edit s_abcd2345 --name "edited \\"reminder\\"" --every "45s" -- one report only');
+    expect(runs[0]![2]).not.toMatch(/--tz|anchorAt|everyMs/);
+    expect(w.find(".command-confirm").exists()).toBe(true);
+    await w.find(".command-confirm-run").trigger("click");
+    await flushPromises();
+    expect(runs).toHaveLength(2);
+    expect(runs[1]![3]?.confirm).toBe(true);
+    expect(runs[1]![3]?.id).not.toBe(runs[0]![3]?.id);
+    expect(w.find(".sched-list").exists()).toBe(true);
+  });
+
+  it.each(["denied", "validation"])("shows %s without claiming a save or bypassing command policy", async (mode) => {
+    const { w, runs } = mountPanel({
+      schedules: payload(),
+      runCommand: () =>
+        Promise.resolve(
+          mode === "denied"
+            ? ({ ok: false, error: "E_DENIED" } as CmdOutcome)
+            : ({
+                ok: true,
+                data: {
+                  output: { entries: [{ text: "E_INVALID: every must be whole seconds within 30s..365d; use 45s" }] },
+                },
+              } as CmdOutcome),
+        ),
+    });
+    await w.find(".sched-task-name").trigger("click");
+    await w.find("[data-schedule-edit]").trigger("click");
+    await w.find('input[name="when"]').setValue("10s");
+    await w.find("form").trigger("submit");
+    await flushPromises();
+    expect(runs).toHaveLength(1);
+    expect(w.find("form").exists()).toBe(true);
+    expect(w.find('[role="alert"]').text()).toContain(mode === "denied" ? "E_DENIED" : "E_INVALID");
+    expect(w.text()).toContain("webHub.webCommandPolicy.schedule");
+  });
+
+  it.each([{ down: true }, { conn: "closed" }, { commandsEnabled: false }])(
+    "offline/stale/control-off remains read-only: %j",
+    async (over) => {
+      const { w, runs } = mountPanel({ schedules: payload(), ...over });
+      await w.find(".sched-task-name").trigger("click");
+      expect(w.find("[data-schedule-edit]").exists()).toBe(false);
+      expect(runs).toHaveLength(0);
+    },
+  );
 });

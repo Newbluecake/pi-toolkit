@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createScheduleCommand, parseFlags, splitPrompt, tokenizeScheduleArgs } from "../../src/commands/schedule.js";
+import { scheduleEditArgs } from "../../src/web-hub/ui/src/logic/schedule.js";
 import { createTask } from "../../src/schedule/agent/ops.js";
 import { manualClaim } from "../../src/schedule/core/claim.js";
 import { finishRun, openSessionStore } from "../../src/schedule/core/writer.js";
@@ -164,7 +165,9 @@ describe("add / edit / list / show / log", () => {
   it("flag errors and invalid definitions are reported, not thrown", async () => {
     env = a3Env();
     const h = harness(env);
-    expect(await h.run(`add x --cron "0 8 * * *" --at 2026-02-01T09:00 -- p`)).toMatch(/只能给一个/);
+    expect(await h.run(`add x --cron "0 8 * * *" --at 2026-02-01T09:00 -- p`)).toMatch(
+      /give exactly one of cron, at, every/,
+    );
     expect(await h.run(`add x --cron "99 * * * *" -- p`)).toMatch(/E_INVALID/);
     expect(await h.run(`add x --cron "0 8 * * *" --timeout abc -- p`)).toMatch(/整数秒/);
     expect(await h.run(`add x --tz UTC -- p`)).toMatch(/--tz 需要/);
@@ -382,5 +385,77 @@ describe("--all matrix (§5.2)", () => {
     await addTask(third, { ...foreign }, env.fake.now());
     expect(await h.run(`pause ${foreign.id} --all`)).toMatch(/多个会话中出现/);
     expect(readOk(other).tasks[0]!.enabled).toBe(true);
+  });
+});
+
+describe("interval P2 CLI", () => {
+  it("executes the UI-generated edit command with quoted name and verbatim prompt", async () => {
+    env = a3Env();
+    const h = harness(env);
+    await h.run("add interval --every 90m -- initial prompt");
+    const task = readOk(env.agent.store()!).tasks[0]!;
+    const args = scheduleEditArgs(task, {
+      name: 'a "quoted" \\name',
+      kind: "every",
+      value: "45s",
+      tz: "ignored",
+      prompt: "report -- once\nnext line",
+    });
+    expect(args).toBeTypeOf("string");
+    expect(await h.run(args!)).toContain("已修改");
+    const updated = readOk(env.agent.store()!).tasks[0]!;
+    expect(updated.name).toBe('a "quoted" \\name');
+    expect(updated.prompt).toBe("report -- once\nnext line");
+    expect(updated.when).toEqual({ kind: "every", everyMs: 45_000, anchorAt: env.fake.now() });
+    expect(
+      scheduleEditArgs(task, { name: "a -- b", kind: "every", value: "45s", tz: "UTC", prompt: "report" }),
+    ).toBeUndefined();
+  });
+  it("--every create/edit normalizes, returns id/anchor/next/policy and writes v2", async () => {
+    env = a3Env();
+    const h = harness(env);
+    const result = await h.run("add interval --every 90m -- report once");
+    const s = readOk(env.agent.store()!),
+      task = s.tasks[0]!;
+    expect(s.v).toBe(2);
+    expect(task.when).toEqual({ kind: "every", everyMs: 5_400_000, anchorAt: env.fake.now() });
+    expect(result).toContain(task.id);
+    expect(result).toContain("5400s");
+    expect(result).toContain("anchor");
+    expect(result).toContain("next 2026-01-01 01:30:30 UTC");
+    expect(result).toContain("catch-up: aggregate once");
+    const hash = defHash(task);
+    env.fake.advance(1000);
+    expect(await h.run(`edit ${task.id} --every 1.5h`)).toContain("5400s");
+    expect(defHash(readOk(env.agent.store()!).tasks[0]!)).toBe(hash);
+    await h.run(`edit ${task.id} --every 45s`);
+    expect(readOk(env.agent.store()!).tasks[0]!.when).toEqual({
+      kind: "every",
+      everyMs: 45_000,
+      anchorAt: env.fake.now(),
+    });
+  });
+
+  it.each([
+    ["--every 90m --cron '0 * * * *'", "give exactly one of cron, at, every"],
+    ["--every 90m --at 2026-12-01T00:00", "give exactly one of cron, at, every"],
+    ["--every 90m --tz UTC", "remove tz"],
+    ["--every 90min", "every unit must be s/m/h/d"],
+    ["--cron '*/90 * * * *'", "--every 90m"],
+  ])("rejects %s before creating the store", async (flags, error) => {
+    env = a3Env();
+    expect(await harness(env).run(`add interval ${flags} -- report once`)).toContain(error);
+    expect(env.agent.store()).toBeUndefined();
+  });
+
+  it("invalid interval edit leaves bytes/rev unchanged", async () => {
+    env = a3Env();
+    const h = harness(env);
+    await h.run(ADD);
+    const task = readOk(env.agent.store()!).tasks[0]!;
+    const before = JSON.stringify(readOk(env.agent.store()!));
+    env.fake.advance(3 * 3_600_000);
+    expect(await h.run(`edit ${task.id} --every 90m --tz UTC`)).toContain("remove tz");
+    expect(JSON.stringify(readOk(env.agent.store()!))).toBe(before);
   });
 });

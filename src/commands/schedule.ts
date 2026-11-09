@@ -56,8 +56,9 @@ const ONCE_SHAPE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/;
 
 const USAGE = [
   "/schedule [list] [--all] — 列出任务",
-  '/schedule add <名称> --cron "0 8 * * *" | --at 2026-12-01T09:00 [--tz Asia/Shanghai] [--form background|message] [--feishu|--no-feishu] [--type T] [--model p/id] [--thinking low] [--timeout 1800] [--handoff] [--worktree] -- <prompt>',
+  '/schedule add <名称> --cron "0 8 * * *" | --at 2026-12-01T09:00 | --every 90m [--tz Asia/Shanghai] [--form background|message] [--feishu|--no-feishu] [--type T] [--model p/id] [--thinking low] [--timeout 1800] [--handoff] [--worktree] -- <prompt>',
   "/schedule edit <id> [同上参数] [-- <prompt>] — 修改（立即生效）",
+  "--every：s/m/h/d（d=24h），最多三位小数，整秒且 30s..365d；UTC elapsed，不可与 --tz 同用；错过聚合补一次。",
   "/schedule show <id> · log [<id>] — 完整定义与 hash · 运行历史（可加 --all）",
   "/schedule pause|resume|rm <id> — 暂停 / 恢复 / 删除",
   "/schedule run <id> — 立即运行（仅本会话）；/schedule repair — 修复损坏的账本，并重置调度器栅栏阻塞（仅本地）",
@@ -118,7 +119,7 @@ export function splitPrompt(args: string): { head: string; prompt: string | unde
   return { head: args.slice(0, m.index), prompt: args.slice(m.index + m[0].length).trim() };
 }
 
-const VALUE_FLAGS = new Set(["name", "cron", "at", "tz", "form", "type", "model", "thinking", "timeout"]);
+const VALUE_FLAGS = new Set(["name", "cron", "at", "every", "tz", "form", "type", "model", "thinking", "timeout"]);
 const BOOL_FLAGS = new Set([
   "all",
   "feishu",
@@ -167,10 +168,12 @@ function flagsToRaw(p: Parsed, prompt: string | undefined, nameFromPositional?: 
   if (f.has("feishu") && f.has("no-feishu")) return { error: "--feishu 与 --no-feishu 互斥" };
   if (f.has("feishu")) raw.feishu = true;
   if (f.has("no-feishu")) raw.feishu = false;
-  if (f.has("cron") && f.has("at")) return { error: "--cron 与 --at 只能给一个" };
+  if (["cron", "at", "every"].filter((k) => f.has(k)).length > 1)
+    return { error: "give exactly one of cron, at, every; keep only one of --cron / --at / --every" };
   const tz = f.get("tz");
   if (f.has("cron")) raw.when = { kind: "cron", expr: f.get("cron"), ...(tz === undefined ? {} : { tz }) };
   else if (f.has("at")) raw.when = { kind: "once", at: f.get("at"), ...(tz === undefined ? {} : { tz }) };
+  else if (f.has("every")) raw.when = { kind: "every", every: f.get("every"), ...(tz === undefined ? {} : { tz }) };
   else if (tz !== undefined) return { error: "--tz 需要与 --cron 或 --at 一起给出" };
   const bg: Record<string, unknown> = {};
   if (f.has("type")) bg.type = f.get("type");
@@ -485,8 +488,13 @@ export function createScheduleCommand(deps: ScheduleCommandDeps): Omit<Registere
     };
     if (built.name === undefined) built.name = await ask("任务名称（≤40 字符）");
     if (built.when === undefined) {
-      const w = await ask("时间：5 段 cron（如 0 8 * * *）或一次性本地时间 YYYY-MM-DDTHH:mm");
-      if (w !== undefined) built.when = ONCE_SHAPE.test(w) ? { kind: "once", at: w } : { kind: "cron", expr: w };
+      const w = await ask("时间：间隔（如 90m）、5 段 cron（如 0 8 * * *）或一次性本地时间 YYYY-MM-DDTHH:mm");
+      if (w !== undefined)
+        built.when = ONCE_SHAPE.test(w)
+          ? { kind: "once", at: w }
+          : /^[0-9.]+[a-z]+$/.test(w)
+            ? { kind: "every", every: w }
+            : { kind: "cron", expr: w };
     }
     if (built.prompt === undefined) built.prompt = await ask("任务 prompt（后台任务需自包含）");
     if (built.name === undefined || built.when === undefined || built.prompt === undefined)
@@ -495,7 +503,7 @@ export function createScheduleCommand(deps: ScheduleCommandDeps): Omit<Registere
     if (!res.ok) return void notify(ctx, failText(res), "error");
     notify(
       ctx,
-      `已创建并启用 ${res.value.id} "${res.value.name}"（hash ${defHash(res.value).slice(0, 8)}）。仅在本会话打开时运行。`,
+      `已创建并启用 ${res.value.id} "${res.value.name}"（hash ${defHash(res.value).slice(0, 8)}）。仅在本会话打开时运行。${res.value.when.kind === "every" ? ` ${taskLine(res.value, { next: nextOf(res.value, now()) })} · catch-up: aggregate once.` : ""}`,
     );
   }
 
@@ -513,7 +521,10 @@ export function createScheduleCommand(deps: ScheduleCommandDeps): Omit<Registere
     if (Object.keys(built).length === 0) return void notify(ctx, "没有要修改的内容。", "warning");
     const res = await updateTask(deps.ports(agent, ctx), id, built);
     if (!res.ok) return void notify(ctx, failText(res), "error");
-    notify(ctx, `已修改 ${id}（hash ${defHash(res.value).slice(0, 8)}），立即生效。`);
+    notify(
+      ctx,
+      `已修改 ${id}（hash ${defHash(res.value).slice(0, 8)}），立即生效。${res.value.when.kind === "every" ? ` ${taskLine(res.value, { next: nextOf(res.value, now()) })} · catch-up: aggregate once.` : ""}`,
+    );
   }
 
   function revokeOpts(agent: ScheduleAgent, ctx: ExtensionCommandContext, own: boolean): RevokeOpts {

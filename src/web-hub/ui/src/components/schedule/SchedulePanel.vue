@@ -206,6 +206,23 @@ function openDetail(taskId: string): void {
 }
 function closeDetail(): void {
   detailTaskId.value = null;
+  actionNote.value = null;
+}
+async function saveEdit(args: string): Promise<void> {
+  if (!canWrite.value || conn.value !== "open" || detailTaskId.value === null || busyTaskId.value !== null) return;
+  busyTaskId.value = detailTaskId.value;
+  actionNote.value = null;
+  try {
+    const r = await tracked.run("schedule", args);
+    if (!r.ok) {
+      if (!("cancelled" in r))
+        actionNote.value = { kind: "err", text: t("schedule.actionFailed", { reason: r.message ?? r.error }) };
+    } else if (/\bE_[A-Z_]+\b/.test(r.output)) {
+      actionNote.value = { kind: "err", text: r.output };
+    } else closeDetail();
+  } finally {
+    busyTaskId.value = null;
+  }
 }
 </script>
 
@@ -213,7 +230,24 @@ function closeDetail(): void {
   <PickerSheet :label="t('schedule.panelTitle')" class="sched-scrim" @close="emit('close')">
     <!-- detail view (swaps the whole dialog body; the task can vanish mid-view — a removed
          task falls back to the list view). -->
-    <ScheduleTaskDetail v-if="detailTask !== null" :task="detailTask" @back="closeDetail" @close="emit('close')" />
+    <ScheduleTaskDetail
+      v-if="detailTask !== null"
+      :task="detailTask"
+      :can-edit="canWrite && conn === 'open'"
+      :busy="busyTaskId !== null"
+      :error="actionNote?.text"
+      @save="void saveEdit($event)"
+      @back="closeDetail"
+      @close="emit('close')"
+    >
+      <CommandConfirm
+        v-if="trackedConfirm"
+        :name="trackedConfirm.name"
+        :args="trackedConfirm.args"
+        @confirm="tracked.confirm()"
+        @cancel="tracked.cancel()"
+      />
+    </ScheduleTaskDetail>
     <div v-else class="sched-dialog">
       <header class="sched-head">
         <h3 class="sched-title">

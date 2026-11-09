@@ -542,3 +542,32 @@ button.sched-row-name:hover {
 .chip-sched .num {
   font-variant-numeric: tabular-nums;
 }
+
+/* P2 editor: external stylesheet only (CSP forbids Vue style blocks / static inline styles). */
+.sched-edit fieldset {
+  border: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+.sched-edit label {
+  display: grid;
+  gap: var(--sp-1);
+}
+.sched-edit input,
+.sched-edit textarea,
+.sched-edit select {
+  font: inherit;
+  width: 100%;
+  box-sizing: border-box;
+  color: var(--c-text);
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  padding: var(--sp-2);
+}
+.sched-edit textarea {
+  min-height: 8rem;
+  resize: vertical;
+}

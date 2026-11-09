@@ -35,10 +35,10 @@ import { SCHED_TASK_ID_RE } from "../web-hub/protocol/schedule.js";
 const ACTIONS = ["list", "get", "create", "update", "pause", "resume", "delete", "run_now", "history"] as const;
 
 export const SCHEDULE_TOOL_DESCRIPTION =
-  "Manage scheduled tasks that belong to THIS session. A task runs on a cron schedule or once, either as a " +
+  "Manage scheduled tasks that belong to THIS session. A task runs on a cron schedule, once, or at an elapsed UTC interval (every), either as a " +
   "background subagent (form=background: runs in a clean context; its final reply is the report) or as a " +
   "message into this session (form=message). Tasks only run while this session is open; a run that is " +
-  "missed because the session was closed is skipped, never replayed. Run results appear as messages in this " +
+  "missed on cron/at is skipped, never replayed; every aggregates missed due points into at most one catch-up run. Run results appear as messages in this " +
   "session. IMPORTANT: tasks you create or change take effect immediately and keep running on schedule until paused or deleted. " +
   "Only create or change a scheduled task when the user asked for it, and tell the user the task id and its next run. " +
   "Actions: list, get, create, update, pause, resume, delete, run_now (immediate run), " +
@@ -61,11 +61,18 @@ export const ScheduleToolParams = Type.Object(
     ),
     cron: Type.Optional(
       Type.String({
-        description: 'Recurring schedule: 5-field cron expression, e.g. "0 8 * * *". Give cron OR at, not both.',
+        description:
+          'Recurring schedule: 5-field cron expression, e.g. "0 8 * * *". Give exactly one of cron, at, every.',
       }),
     ),
     at: Type.Optional(
-      Type.String({ description: "One-off local time YYYY-MM-DDTHH:mm (in tz). Give at OR cron, not both." }),
+      Type.String({ description: "One-off local time YYYY-MM-DDTHH:mm (in tz). Give exactly one of cron, at, every." }),
+    ),
+    every: Type.Optional(
+      Type.String({
+        description:
+          'Elapsed UTC interval: lowercase s/m/h/d (d=24h), up to 3 decimals, whole seconds within 30s..365d; e.g. "90m" or "1.5h". Give exactly one of cron, at, every; never combine every with tz. Missed due points aggregate into one catch-up run.',
+      }),
     ),
     tz: Type.Optional(
       Type.String({
@@ -151,10 +158,16 @@ function flatToRaw(p: ScheduleToolParams): RawFields | OpFail {
   if (p.form !== undefined) raw.form = p.form;
   if (p.prompt !== undefined) raw.prompt = p.prompt;
   if (p.feishu !== undefined) raw.feishu = p.feishu;
-  if (p.cron !== undefined && p.at !== undefined)
-    return { ok: false, code: "E_INVALID", detail: "give cron OR at, not both" };
+  if ([p.cron, p.at, p.every].filter((v) => v !== undefined).length > 1)
+    return {
+      ok: false,
+      code: "E_INVALID",
+      detail: "give exactly one of cron, at, every; remove the other schedule fields",
+    };
   if (p.cron !== undefined) raw.when = { kind: "cron", expr: p.cron, ...(p.tz === undefined ? {} : { tz: p.tz }) };
   else if (p.at !== undefined) raw.when = { kind: "once", at: p.at, ...(p.tz === undefined ? {} : { tz: p.tz }) };
+  else if (p.every !== undefined)
+    raw.when = { kind: "every", every: p.every, ...(p.tz === undefined ? {} : { tz: p.tz }) };
   else if (p.tz !== undefined) return { ok: false, code: "E_INVALID", detail: "tz must accompany cron or at" };
   const bg: Record<string, unknown> = {};
   if (p.agentType !== undefined) bg.type = p.agentType;
@@ -188,7 +201,7 @@ export function createScheduleTool(deps: ScheduleToolDeps): ToolDefinition<typeo
       if (refusal !== undefined) return failure(refusal.code, refusal.detail);
       // Fields the AI may never write — also rejected here in case the host does not enforce the schema.
       const rawParams = params as Record<string, unknown>;
-      for (const key of SCHED_UPDATE_FORBIDDEN_FIELDS) {
+      for (const key of [...SCHED_UPDATE_FORBIDDEN_FIELDS, "everyMs", "intervalMs", "anchorAt"]) {
         if (key === "id" && action !== "create") continue;
         if (rawParams[key] !== undefined)
           return failure(
@@ -253,7 +266,7 @@ export function createScheduleTool(deps: ScheduleToolDeps): ToolDefinition<typeo
           if (!res.ok) return failOp(res);
           notifyActive(ctx, "created", res.value, now());
           return out(
-            `Created task ${res.value.id} "${res.value.name}". It is ${ACTIVE_NOTE}${nextText(res.value, now())}`,
+            `Created task ${res.value.id} "${res.value.name}". It is ${ACTIVE_NOTE}${nextText(res.value, now())}${res.value.when.kind === "every" ? ` ${taskLine(res.value)} · catch-up: aggregate once.` : ""}`,
             { id: res.value.id },
           );
         }
@@ -266,9 +279,12 @@ export function createScheduleTool(deps: ScheduleToolDeps): ToolDefinition<typeo
           const res = await updateTask(ports(), taskId!, raw);
           if (!res.ok) return failOp(res);
           notifyActive(ctx, "updated", res.value, now());
-          return out(`Updated task ${res.value.id}. Task is ${ACTIVE_NOTE}${nextText(res.value, now())}`, {
-            id: res.value.id,
-          });
+          return out(
+            `Updated task ${res.value.id}. Task is ${ACTIVE_NOTE}${nextText(res.value, now())}${res.value.when.kind === "every" ? ` ${taskLine(res.value)} · catch-up: aggregate once.` : ""}`,
+            {
+              id: res.value.id,
+            },
+          );
         }
         case "pause":
         case "resume": {

@@ -181,6 +181,8 @@ export interface ScheduleAgent {
   runNow(req: { taskId: string; reqId: string; defHash?: string }): Promise<ScheduleRunNowResult>;
   /** A local ledger write happened (A1/A2/A3): notify the hub and re-check the clock. */
   changed(): void;
+  /** Local-only is ready; a configured hub must have completed an interval-capable handshake. */
+  intervalReady?(): boolean;
   /**
    * Subscribe to every local ledger write (the same signal `changed()` forwards to the coordinator; also
    * fired for the clock's / executors' writes). Synchronous, errors swallowed; returns the unsubscribe.
@@ -510,6 +512,7 @@ export function createScheduleAgent(deps: ScheduleAgentDeps): ScheduleAgent {
       return coordinator;
     },
     clock,
+    intervalReady: () => deps.router === undefined || deps.router.link()?.intervalReady?.() === true,
     store: getStore,
     ensureStore() {
       if (store !== undefined) return store;

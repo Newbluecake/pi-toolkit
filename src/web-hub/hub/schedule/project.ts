@@ -6,7 +6,7 @@
  * droppedReports. Pure: no IO beyond the compiled-when math, no clock reads (`now` is injected).
  */
 import { compileTask } from "../../../schedule/core/occurrence.js";
-import { nextOccurrence } from "../../../schedule/core/cron.js";
+import { nextOccurrence, parseCron } from "../../../schedule/core/cron.js";
 import {
   defHash,
   isExecutable,
@@ -74,6 +74,8 @@ const feishuOf = (run: RunRecord, state: ScheduleStateFile, deps: ProjectDeps): 
 };
 
 function taskProjection(task: ScheduleTask, state: ScheduleStateFile, deps: ProjectDeps): StoredTaskProjection {
+  const strict = task.when.kind === "cron" ? parseCron(task.when.expr, { strictSteps: true }) : undefined;
+  const legacyStep = strict?.ok === false && strict.error.includes(" exceeds ") ? strict.error : undefined;
   const hash = defHash(task);
   const occ = state.occ[task.id];
   const compiled = compileTask(task);
@@ -89,6 +91,7 @@ function taskProjection(task: ScheduleTask, state: ScheduleStateFile, deps: Proj
   }
   return {
     task,
+    ...(legacyStep === undefined ? {} : { legacyStep }),
     defHash: hash,
     executable: isExecutable(task),
     pendingApproval: false,

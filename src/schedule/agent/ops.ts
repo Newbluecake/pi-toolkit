@@ -10,7 +10,7 @@
  */
 import { randomBytes } from "node:crypto";
 import { changeTask, type TaskChange } from "../core/claim.js";
-import { compileWhen, validateWhen } from "../core/cron.js";
+import { compileWhen, parseEvery, parseCron, validateWhen } from "../core/cron.js";
 import { initOcc } from "../core/occurrence.js";
 import { SchedFsError } from "../core/paths.js";
 import {
@@ -25,7 +25,6 @@ import {
   type ScheduleForm,
   type ScheduleTask,
   type ScheduleThinkingLevel,
-  type ScheduleWhen,
   type StoredWhen,
   SCHEDULE_THINKING_LEVELS,
 } from "../core/spec.js";
@@ -47,7 +46,7 @@ export interface OpOrigin {
 }
 
 export interface OpsPorts {
-  agent: Pick<ScheduleAgent, "ensureStore" | "store" | "gate" | "changed">;
+  agent: Pick<ScheduleAgent, "ensureStore" | "store" | "gate" | "changed" | "intervalReady">;
   now(): number;
   limits: { defaultTimeoutS: number; maxTimeoutS: number };
   /** Registry check for `bg.type`; `names()` only feeds the error text. */
@@ -86,7 +85,7 @@ export function defOf(task: ScheduleTask): TaskDef {
 
 // ----------------------------------------------------------------- field parsing
 
-const WHEN_KEYS = new Set(["kind", "expr", "at", "tz"]);
+const WHEN_KEYS = new Set(["kind", "expr", "at", "every", "tz"]);
 const BG_KEYS = new Set(["type", "model", "thinking", "timeoutS", "consultMain", "handoff", "isolation"]);
 const DEFAULT_TZ_FALLBACK = "UTC";
 
@@ -116,12 +115,25 @@ export interface RawFields {
   bg?: unknown;
 }
 
-function parseWhen(raw: unknown, base: StoredWhen | undefined, ports: OpsPorts): OpResult<ScheduleWhen> {
+function parseWhen(raw: unknown, base: StoredWhen | undefined, ports: OpsPorts): OpResult<StoredWhen> {
   if (!isRec(raw)) return fail("E_INVALID", "when must be an object {kind, expr|at, tz}");
   const bad = unknownKeys(raw, WHEN_KEYS);
   if (bad !== undefined) return fail("E_INVALID", `when: unknown field "${bad}"`);
   const kind = raw.kind;
-  if (kind !== "cron" && kind !== "once") return fail("E_INVALID", 'when.kind must be "cron" or "once"');
+  if (kind === "every") {
+    if (Object.hasOwn(raw, "tz"))
+      return fail("E_INVALID", 'every uses elapsed UTC time; remove tz and keep every:"90m"');
+    if (Object.hasOwn(raw, "expr") || Object.hasOwn(raw, "at"))
+      return fail("E_INVALID", 'give exactly one of cron, at, every; keep every:"90m"');
+    const parsed = parseEvery(raw.every as string);
+    if (!parsed.ok) return fail("E_INVALID", parsed.error);
+    return {
+      ok: true,
+      value: { kind: "every", everyMs: parsed.everyMs, anchorAt: base?.kind === "every" ? base.anchorAt : ports.now() },
+    };
+  }
+  if (kind !== "cron" && kind !== "once") return fail("E_INVALID", 'when.kind must be "cron", "once" or "every"');
+  if (Object.hasOwn(raw, "every")) return fail("E_INVALID", "give exactly one of cron, at, every; remove every");
   const tz = raw.tz ?? (base?.kind === "every" ? undefined : base?.tz) ?? ports.defaultTz();
   if (typeof tz !== "string" || tz === "") return fail("E_INVALID", "when.tz must be an IANA time zone name");
   if (kind === "cron") {
@@ -247,8 +259,17 @@ export function resolveDef(raw: RawFields, base: TaskDef | undefined, ports: Ops
     if (!w.ok) return w;
     when = w.value;
   }
-  if (when === undefined) return fail("E_INVALID", "when is required");
+  if (when === undefined) return fail("E_INVALID", "give exactly one of cron, at, every");
   if (whenChanged || base === undefined) {
+    if (when.kind === "cron") {
+      const strict = parseCron(when.expr, { strictSteps: true });
+      if (!strict.ok) return fail("E_INVALID", strict.error);
+    }
+    if (when.kind === "every" && ports.agent.intervalReady?.() === false)
+      return fail(
+        "E_UNSUPPORTED",
+        'connect an interval-capable hub (update hub and run /webhub restart), or disable webHub and /reload; then retry every:"90m"',
+      );
     const v = validateWhen(when, ports.now());
     if (!v.ok) return fail("E_INVALID", v.error);
   } else if (!compileWhen(when).ok) {
@@ -356,9 +377,14 @@ export async function createTask(ports: OpsPorts, raw: RawFields, origin: OpOrig
     let id = newTaskId();
     while (draft.tasks.some((t) => t.id === id)) id = newTaskId();
     const task = taskOf(id, def.value, ownerCwd, origin, ctx.now);
+    if (task.when.kind === "every") task.when = { ...task.when, anchorAt: ctx.now };
     draft.tasks.push(task);
     draft.occ[id] = initOcc(task, ctx.now);
-    return { value: structuredClone(task), write: true };
+    return {
+      value: structuredClone(task),
+      write: true,
+      ...(task.when.kind === "every" ? { upgradeToV2: true as const } : {}),
+    };
   });
   if (!r.ok) return fail(r.code, r.detail);
   if (r.value === "limit") return fail("E_LIMIT", `at most ${SCHED_MAX_TASKS_PER_SESSION} tasks per session`);

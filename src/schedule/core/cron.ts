@@ -94,7 +94,7 @@ function parseAtom(text: string, spec: FieldSpec): number | undefined {
   return undefined;
 }
 
-function parseField(text: string, spec: FieldSpec): Set<number> | string {
+function parseField(text: string, spec: FieldSpec, strictSteps = false): Set<number> | string {
   const out = new Set<number>();
   for (const item of text.split(",")) {
     if (item === "") return `${spec.name}: empty list item`;
@@ -103,9 +103,19 @@ function parseField(text: string, spec: FieldSpec): Set<number> | string {
     const base = slash[0]!;
     let step = 1;
     if (slash.length === 2) {
-      if (!/^[0-9]{1,2}$/.test(slash[1]!)) return `${spec.name}: bad step in ${JSON.stringify(item)}`;
+      if (!(strictSteps ? /^[0-9]+$/ : /^[0-9]{1,2}$/).test(slash[1]!))
+        return `${spec.name}: bad step in ${JSON.stringify(item)}`;
       step = Number(slash[1]);
-      if (step < 1) return `${spec.name}: step must be ≥ 1`;
+      if (step < 1) return `${spec.name}: step must be ≥ 1${strictSteps ? `; use a step within 1..${spec.max}` : ""}`;
+      if (strictSteps && step > spec.max) {
+        const fix =
+          spec.name === "minute" && step <= 365 * 24 * 60
+            ? `for an elapsed ${step}-minute interval, remove cron and use every:"${step}m" (CLI: --every ${step}m)`
+            : spec.name === "hour"
+              ? `use cron:"0 0 * * *" for daily midnight, or remove cron and use every:"${step}h" for elapsed time`
+              : `use a ${spec.name} step within 1..${spec.max}; for elapsed time remove cron and use every:"24h" (CLI: --every 24h)`;
+        return `${spec.name} step ${step} exceeds ${spec.max}; ${fix}`;
+      }
     }
     let lo: number;
     let hi: number;
@@ -133,13 +143,13 @@ function parseField(text: string, spec: FieldSpec): Set<number> | string {
   return out;
 }
 
-export function parseCron(expr: string): CronParse {
+export function parseCron(expr: string, options: { strictSteps?: boolean } = {}): CronParse {
   if (typeof expr !== "string" || expr.length > CRON_EXPR_MAX_CHARS) return { ok: false, error: "cron: too long" };
   const parts = expr.trim().split(/\s+/);
   if (parts.length !== 5 || parts[0] === "") return { ok: false, error: "cron: need exactly 5 fields" };
   const sets: number[][] = [];
   for (let i = 0; i < 5; i++) {
-    const r = parseField(parts[i]!, FIELD_SPECS[i]!);
+    const r = parseField(parts[i]!, FIELD_SPECS[i]!, options.strictSteps);
     if (typeof r === "string") return { ok: false, error: `cron: ${r}` };
     if (r.size === 0) return { ok: false, error: `cron: ${FIELD_SPECS[i]!.name} matches nothing` };
     sets.push([...r].sort((x, y) => x - y));
@@ -448,7 +458,12 @@ export function parseEvery(text: string): { ok: true; everyMs: number } | { ok: 
   const fail = (error: string): { ok: false; error: string } => ({ ok: false, error });
   if (typeof text !== "string" || text.length > 32) return fail("every: expected at most 32 characters");
   const m = /^(0|[1-9]\d{0,8})(?:\.(\d{1,3}))?(s|m|h|d)$/.exec(text.trim());
-  if (m === null) return fail('every unit must be s/m/h/d; use every:"90m" or every:"1.5h"');
+  if (m === null)
+    return fail(
+      text.trim().endsWith("ms")
+        ? 'every must be whole seconds within 30s..365d; use every:"45s"'
+        : 'every unit must be s/m/h/d; use every:"90m" or every:"1.5h"',
+    );
   const scales: Record<string, bigint> = { s: 1000n, m: 60_000n, h: 3_600_000n, d: 86_400_000n };
   const numerator = BigInt(m[1]!) * 1000n + BigInt((m[2] ?? "").padEnd(3, "0"));
   const product = numerator * scales[m[3]!]!;

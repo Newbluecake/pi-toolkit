@@ -456,3 +456,24 @@ export function fmtIntervalTs(ts) {
         .replace("T", " ") + " UTC"
     : "";
 }
+
+/** Build the existing policy-governed /schedule edit command, never a new write channel.
+ * Double quotes/backslashes match tokenizeScheduleArgs; prompt remains the verbatim -- tail.
+ * @param {import("@protocol/schedule.js").StoredTask} task
+ * @param {{name:string,prompt:string,kind:string,value:string,tz:string}} draft
+ */
+export function scheduleEditArgs(task, draft) {
+  if (!/^s_[a-z2-7]{8}$/.test(task.id)) return undefined;
+  if ([draft.name, draft.value, draft.tz].some((v) => /(^|\s)--(\s|$)/.test(v))) return undefined;
+  const quote = (s) => `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+  if (!["cron", "once", "every"].includes(draft.kind)) return undefined;
+  const flags = [`edit ${task.id}`, `--name ${quote(draft.name)}`];
+  const old = task.when;
+  const oldValue = old.kind === "every" ? `${old.everyMs / 1000}s` : old.kind === "cron" ? old.expr : old.at;
+  const changed = draft.kind !== old.kind || draft.value !== oldValue || (old.kind !== "every" && draft.tz !== old.tz);
+  if (changed) {
+    flags.push(`--${draft.kind === "once" ? "at" : draft.kind} ${quote(draft.value)}`);
+    if (draft.kind !== "every") flags.push(`--tz ${quote(draft.tz)}`);
+  }
+  return `${flags.join(" ")} -- ${draft.prompt}`;
+}

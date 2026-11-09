@@ -489,6 +489,8 @@ export interface ScheduleTaskProjectionWire {
   nextAt?: number;
   /** `"never"` = no occurrence within the 400-day horizon / budget. */
   degraded?: "never";
+  /** Stored oversized steps retain their legacy meaning; new submissions must be corrected. */
+  legacyStep?: string;
   totals: { fired: number; missed: number; skipped: number; manual: number };
   /** @deprecated No longer produced; retained for old peers and UIs. */
   offer?: { offerId: string; expiresAt: number };

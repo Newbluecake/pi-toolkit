@@ -3,9 +3,6 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vites
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import activate from "../../src/index.js";
-import { emptyStateFile } from "../../src/schedule/core/spec.js";
-import { initOcc } from "../../src/schedule/core/occurrence.js";
-import { everyTask } from "../schedule/core/every-fixtures.js";
 import type { RunOutcome } from "../../src/core/types.js";
 import type { SpawnServiceDeps } from "../../src/service/spawn-service.js";
 import {
@@ -563,19 +560,35 @@ describe("refusals", () => {
   });
 });
 
-describe("interval P1 test-only v2 consumer through actual activate and executors", () => {
+describe("interval P2 production producer through actual activate, reopen and executors", () => {
   it.each(["background", "message"] as const)(
     "reopens a five-hour %s backlog, executes only the latest point once and keeps v2",
     async (form) => {
       const A = Date.now() - 5 * 3_600_000,
         D = 5_400_000;
-      const task = { ...everyTask(A, D, form), ownerCwd: sb.home };
-      const state = emptyStateFile(SID);
-      state.v = 2;
-      state.tasks = [task];
-      state.occ[task.id] = initOcc(task, A);
-      mkdirSync(join(schedDir, SID), { recursive: true, mode: 0o700 });
-      writeFileSync(join(schedDir, SID, "state.json"), JSON.stringify(state), { mode: 0o600 });
+      // Produce through the real registered tool, close for five hours, then reopen.
+      const wall = vi.spyOn(Date, "now").mockReturnValue(A);
+      const first = await openSession();
+      let task: any;
+      try {
+        const result = await first.tool({
+          action: "create",
+          name: "90 minute task",
+          every: "90m",
+          form,
+          feishu: true,
+          prompt: "report once",
+        });
+        expect(result.details.ok).toBe(true);
+        task = first.ledger().tasks[0];
+        expect(task.when).toEqual({ kind: "every", everyMs: D, anchorAt: A });
+        expect(first.ledger().v).toBe(2);
+        expect(first.ledger().runs).toHaveLength(0);
+      } finally {
+        await first.shutdown();
+        wall.mockRestore();
+        resetGlobals();
+      }
       const s = await openSession();
       try {
         await until(() => s.ledger().runs.length === 1, "one durable aggregate run");

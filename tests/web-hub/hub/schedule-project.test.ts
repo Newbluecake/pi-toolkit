@@ -315,3 +315,16 @@ describe("interval P1 append-only projection", () => {
     expect(projectSession(state({ tasks: [legacy], runs: [run()] }), deps).runs[0]).not.toHaveProperty("catchUp");
   });
 });
+
+describe("P2 legacy-step diagnostics", () => {
+  it("preserves the old next occurrence while appending an actionable diagnostic only to legacy oversized steps", () => {
+    const t = task({ when: { kind: "cron", expr: "*/90 * * * *", tz: "UTC" } });
+    const legacy = projectSession(state({ tasks: [t] }), { now: NOW, receipts: new Map(), bot: noBot });
+    expect(legacy.tasks[0]!.nextAt).toBe(NOW + 3_600_000);
+    expect(legacy.tasks[0]!.legacyStep).toContain("minute step 90 exceeds 59");
+    expect(legacy.tasks[0]!.legacyStep).toContain("--every 90m");
+    const current = projectSession(state({ tasks: [task()] }), { now: NOW, receipts: new Map(), bot: noBot });
+    expect(current.tasks[0]).not.toHaveProperty("legacyStep");
+    expect(current).not.toHaveProperty("intervalTasks");
+  });
+});

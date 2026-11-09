@@ -1,6 +1,6 @@
 <!--
-  ScheduleTaskDetail (scheduled-reports W1, plan r3 §5.6): the read-only full-definition
-  view of ONE scheduled task. Rendered INSIDE SchedulePanel (same lazy chunk, same PickerSheet
+  ScheduleTaskDetail (scheduled-reports W1, plan r3 §5.6): the full-definition
+  view and policy-governed editor of ONE scheduled task. Rendered INSIDE SchedulePanel (same lazy chunk, same PickerSheet
   — the panel swaps its body), never a second stacked sheet.
 
   Shows the full definition verbatim: the complete prompt (plain text nodes only, never
@@ -10,16 +10,40 @@
   live `schedules` snapshot, so a change elsewhere re-renders the view.
 -->
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import type { StoredTaskProjection } from "@protocol/schedule.js";
 import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";
-import { fmtTs, whenParts } from "../../logic/schedule.js";
+import { fmtTs, whenParts, scheduleEditArgs } from "../../logic/schedule.js";
 
 const props = defineProps<{
   readonly task: StoredTaskProjection;
+  readonly canEdit?: boolean;
+  readonly busy?: boolean;
+  readonly error?: string | undefined;
 }>();
-const emit = defineEmits<{ back: []; close: [] }>();
+const emit = defineEmits<{ back: []; close: []; save: [args: string] }>();
+const editing = ref(false);
+const invalid = ref(false);
+const draft = ref({ name: "", prompt: "", kind: "every", value: "", tz: "UTC" });
+function beginEdit(): void {
+  const task = props.task.task;
+  const w = task.when;
+  draft.value = {
+    name: task.name,
+    prompt: task.prompt,
+    kind: w.kind,
+    value: w.kind === "every" ? `${w.everyMs / 1000}s` : w.kind === "cron" ? w.expr : w.at,
+    tz: w.kind === "every" ? "UTC" : w.tz,
+  };
+  invalid.value = false;
+  editing.value = true;
+}
+function save(): void {
+  const args = scheduleEditArgs(props.task.task, draft.value);
+  invalid.value = args === undefined;
+  if (args !== undefined && props.canEdit && !props.busy) emit("save", args);
+}
 const { t } = useI18n();
 
 const def = computed(() => props.task.task);
@@ -55,8 +79,37 @@ const createdLabel = computed(() =>
         <AppIcon name="x" class="icon-sm" />
       </button>
     </header>
+    <slot />
 
-    <ul class="review-kv">
+    <p v-if="invalid" class="sched-empty" role="alert">{{ t("schedule.editInvalid") }}</p>
+    <p v-if="error" class="sched-empty" role="alert">{{ error }}</p>
+    <p v-if="task.legacyStep" class="sched-empty">legacy-step: {{ task.legacyStep }}</p>
+    <button v-if="canEdit && !editing" type="button" class="btn btn-ghost" data-schedule-edit @click="beginEdit">
+      {{ t("schedule.taskEdit") }}
+    </button>
+    <form v-if="editing" class="sched-sec sched-edit" @submit.prevent="save">
+      <fieldset :disabled="busy || !canEdit">
+        <label>{{ t("schedule.editName") }}<input v-model="draft.name" name="name" maxlength="40" required /></label>
+        <label
+          >{{ t("schedule.kvWhen") }}
+          <select v-model="draft.kind" name="kind">
+            <option value="cron">cron</option>
+            <option value="once">at</option>
+            <option value="every">every</option>
+          </select>
+        </label>
+        <label>{{ t("schedule.editWhen") }}<input v-model="draft.value" name="when" required /></label>
+        <label v-if="draft.kind !== 'every'"
+          >{{ t("schedule.editTz") }}<input v-model="draft.tz" name="tz" required
+        /></label>
+        <p v-else>{{ t("schedule.editEveryHint") }}</p>
+        <label>{{ t("schedule.reviewPromptLabel") }}<textarea v-model="draft.prompt" name="prompt" required /></label>
+        <p>{{ t("schedule.editPolicyHint") }}</p>
+        <button type="submit" class="btn btn-primary">{{ t("schedule.editSave") }}</button>
+        <button type="button" class="btn btn-ghost" @click="editing = false">{{ t("schedule.cancel") }}</button>
+      </fieldset>
+    </form>
+    <ul v-else class="review-kv">
       <li>
         <span class="k">{{ t("schedule.kvWhen") }}</span>
         <span class="v" translate="no">{{ whenLabel }}</span>

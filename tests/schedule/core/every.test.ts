@@ -357,7 +357,7 @@ describe("P1 labels, bounded accounting and version contract", () => {
     expect(await store.repair()).toMatchObject({ ok: false, code: "E_DEGRADED" });
     expect(readFileSync(file, "utf8")).toBe(bytes);
   });
-  it("P1 writer cannot introduce every or v2 into v1", async () => {
+  it("ordinary writer cannot introduce every or v2 into v1 without explicit migration", async () => {
     e = env(A);
     const store = e.store();
     const t = everyTask(A);
