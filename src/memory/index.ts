@@ -1,3 +1,4 @@
+import { createMemoryDispatcher } from "./unified/dispatcher.js";
 import type { MemoryScopesWiring } from "./scopes/wire.js";
 import { createScopedProjection } from "./scoped-projection.js";
 import type { SystemPromptMode } from "../sysprompt/hub.js";
@@ -714,7 +715,7 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
     ...(opts.scopes ? { writeGate: gate } : {}),
     ...(opts.sessionSignal === undefined ? {} : { sessionSignal: opts.sessionSignal }),
   };
-  pi.registerTool(
+  const projectTool =
     surface === "v3"
       ? createMemoryToolV3({
           ...toolCommon,
@@ -736,8 +737,13 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
             isChildSession: opts.isChildSession,
             onAfterWrite,
             ...(opts.scopes ? { writeGate: gate } : {}),
-          }),
-  );
+          });
+  const dispatcher = createMemoryDispatcher({
+    project: (...args: Parameters<typeof projectTool.execute>) => projectTool.execute(...args),
+    currentScoped: () => opts.scopes?.current()?.tool,
+  });
+  opts.scopes?.attachDispatcher(dispatcher);
+  pi.registerTool(surface === "v3" ? { ...projectTool, execute: dispatcher.project } : projectTool);
   pi.registerCommand(
     "mem",
     createMemCommand({

@@ -448,3 +448,31 @@ error detail alongside the general guidance. This changes no authorization or pe
 Hub operations still use user authority and require the existing approval path; an explicitly supplied
 `authority: agent` is ignored for Hub, not independently rejected. A create request must omit `id` and
 `rev`, including empty strings.
+
+## Unified tool · phase 1 (internal routing only)
+
+`wireMemory` creates one activation-local `unified/dispatcher.ts` instance. The registered blocks/v3
+`memory` execute port passes through the project adapter without changing its arguments, text/usage
+result or thrown error. `toolSurfaceFor` and the v2/legacy factory branches remain unchanged; neither
+schema publishes `scope`, `all` or v4. `wireMemoryScopes.attachDispatcher` supplies the same dispatcher
+to the already-registered scoped facade; each execute resolves `wiring.current()?.tool` anew, never
+caching an owner across calls or approvals. Factory-only scoped callers use the same stateless
+`dispatchScopedMemory` function, not a second implementation or dispatcher instance.
+
+The old `scopes/tool.ts` implementation is split without changing its checks: dispatcher-side shape
+validation → child authority → unknown fields → storageScope → read gate → string fields/authority/
+body/from/topic → op/hub state/rev checks. Session and Hub adapters only forward to the shared
+`scopes/tool-operations.ts` view and original approval/enqueue path. `scopes/tool-surface.ts` holds the
+unchanged read gate/projection and host port types; the old exports remain re-exported by `tool.ts`.
+Failure messages still come from `scopes/error-messages.ts`, with the original `run` boundary applying
+`withScopedMessage` once and preserving specific messages. No store/authorization/cap semantics,
+paths, approval owners or registration hooks move into the dispatcher.
+
+Scopes wiring owns a closure-local `closed` flag: shutdown/dispose prevent context, tree or child
+binding from reopening an owner. A real main-session `session_start` re-enables owner construction;
+ordinary calls with a fresh context cannot do so. Production-registration tests in
+`tests/memory/scopes/dispatcher-lifecycle.test.ts` verify zero appends after either close path, then a
+real start restoring writes in a new SessionManager while leaving the old branch unchanged.
+`tests/memory/unified/wire.test.ts` additionally pins the production surfaces, error text, tree approval
+abort, shutdown and actual layout predicates. `tests/boundary/pi-free.test.ts` scans the unified roots
+and their shared operation/read ports, including transitive value imports.

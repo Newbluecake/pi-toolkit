@@ -187,6 +187,17 @@ describe("pi-free boundaries", () => {
     expect(offenders, offenders.join("; ")).toEqual([]);
   });
 
+  it("unified memory dispatcher/adapters and shared scoped operations stay pi-free", () => {
+    const roots = [
+      ...globSync("src/memory/unified/**/*.ts", { cwd: ROOT }),
+      "src/memory/scopes/tool-surface.ts",
+      "src/memory/scopes/tool-operations.ts",
+    ].map((file) => resolve(ROOT, file));
+    expect(roots.length).toBeGreaterThanOrEqual(6);
+    const offenders = memoryOffenders(roots);
+    expect(offenders, offenders.join("; ")).toEqual([]);
+  });
+
   it("memory paths/frontmatter/store/render value closure stays pi-free; roots also reject pi types", () => {
     const roots = ["paths", "frontmatter", "store", "render"].flatMap((name) =>
       globSync(`src/memory/${name}.ts`, { cwd: ROOT }).map((file) => resolve(ROOT, file)),
