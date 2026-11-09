@@ -1111,3 +1111,5 @@ arch r5 §7.2 的 X1–X6：
 | 低置信冲突     | **仅建议**                      | 中间置信带只进建议列表，不自动、不占自动预算                                                                 |
 | expires        | **允许对 agent 块自动写**       | 仅 `authority: agent`；user 块只能提议，需用户确认才落盘                                                     |
 | 跨 project/Hub | **跨项目仅建议**                | 跨 canonical memDir 一律不自动落盘；同 Hub 内也只提案，落盘需用户确认                                        |
+
+- 2026-11-09 root 重裁 Q2：#50 允许「独立、异源的 whole-coverage 完整覆盖 + 关系置信度 ≥0.90」的窄条件自动提交（单文件原子、先审计、可撤销、单批 ≤2、agent 永不取代 user）；partial/conflict-only 仍只建议；无法证明来源分离 ⇒ 只建议（见 [P50 设计 §4.3](p50-design.md#43-q2-自动资格异源判定与可信-provenance)）。
