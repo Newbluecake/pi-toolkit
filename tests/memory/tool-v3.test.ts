@@ -903,7 +903,7 @@ describe("section repair in v3 writes", () => {
       const fx = fixture([
         {
           id: "repair.001",
-          section: "中".repeat(34),
+          section: "中".repeat(41),
           heading: "heading",
           body: "- fact",
           audience: "child",
@@ -938,8 +938,12 @@ describe("section repair in v3 writes", () => {
   test("create and update enforce UTF-8 limit, and normal sections inherit unchanged", async () => {
     const fx = fixture([{ id: "normal.001", section: "original", body: "- fact" }]);
     const { tool } = makeTool(fx);
+    const atLimit = "中".repeat(40);
+    await exec(tool, { command: "create", topic: "boundary", text: `<!-- mem section=${atLimit} -->\n- at limit` });
+    expect(block(fx, "boundary.001").meta.section).toBe(atLimit);
     let before = block(fx, "normal.001");
-    const oversized = "中".repeat(27);
+    const oversized = "中".repeat(40) + "x";
+    expect(Buffer.byteLength(oversized)).toBe(121);
     for (const params of [
       { command: "create", topic: "normal", text: `<!-- mem section=${oversized} -->\n- new` },
       { command: "update", path: "normal.001", rev: before.rev, text: `<!-- mem section=${oversized} -->\n- fact` },

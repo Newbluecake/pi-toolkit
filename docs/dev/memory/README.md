@@ -12,7 +12,7 @@
 
 V3 inline write metadata accepts `section=value` or `section="multi word"`; `section=none`
 clears it. Create persists the explicit value; update inherits an omitted value and replaces
-or clears an explicit one. The normal 80 UTF-8 byte limit still applies, without truncation.
+or clears an explicit one. The normal 120 UTF-8 byte limit still applies, without truncation.
 A migrated oversize section remains readable but an update that inherits it is refused with
 repair instructions. Supplying a shorter section or clearing it repairs the block under the
 same locked revision check. The legacy Jev inline guard remains strict; v3 removes this

@@ -342,13 +342,13 @@ test("historical overlong block metadata renders with one soft diagnostic per bl
     file,
     blockRaw({ id: "general.001", authority: "user", scope: "global", body: "- keep this rule" }).replace(
       "status: active",
-      `status: active\nsection: ${"中".repeat(34)}\nwhen: ${"w".repeat(95)}`,
+      `status: active\nsection: ${"中".repeat(41)}\nwhen: ${"w".repeat(95)}`,
     ),
   );
   writeFileSync(join(dir, "jev-reflex.md"), `---\nread_when: ${"w".repeat(95)}\n---\n- legacy\n`);
   const parsed = readCorpus(real).blocks[0]!;
   expect(parsed.errors.filter((e) => e === "E_META_SOFT")).toEqual(["E_META_SOFT"]);
-  expect(Buffer.byteLength(parsed.meta.section!)).toBeLessThanOrEqual(80);
+  expect(Buffer.byteLength(parsed.meta.section!)).toBeLessThanOrEqual(120);
   const { registration } = section({ layout: "blocks" }, { paths: fx.paths });
   expect(registration.provider({ ...INPUT, ctx: ctx(fx.cwd) })).toContain("keep this rule");
   expect(registration.provider({ ...INPUT, ctx: ctx(fx.cwd) })).toContain("keep this rule");
@@ -372,7 +372,7 @@ test("legacy and blocks injection soften metadata once per directory field and v
   );
   expect(readFileSync(join(dir, "jev-reflex.md"), "utf8")).toBe(legacy);
 
-  const longSection = "中".repeat(34);
+  const longSection = "中".repeat(41);
   const real = writeBlocksDir(dir, [
     { id: "general.001", authority: "user", scope: "global", body: "- block one" },
     { id: "general.002", authority: "user", scope: "global", body: "- block two" },
@@ -386,10 +386,10 @@ test("legacy and blocks injection soften metadata once per directory field and v
   }
   const first = readCorpus(real);
   expect(first.blocks).toHaveLength(2);
-  expect(first.blocks.every((b) => Buffer.byteLength(b.meta.section!) <= 80)).toBe(true);
+  expect(first.blocks.every((b) => Buffer.byteLength(b.meta.section!) <= 120)).toBe(true);
   expect(softMetaDiagnostics(dir)).toEqual([
     { code: "E_META_SOFT", field: "when", bytes: 95, limit: 70 },
-    { code: "E_META_SOFT", field: "section", bytes: 102, limit: 80 },
+    { code: "E_META_SOFT", field: "section", bytes: 123, limit: 120 },
   ]);
   const blocks = section({ layout: "blocks" }, { paths: fx.paths });
   expect(blocks.registration.provider({ ...INPUT, ctx: ctx(fx.cwd) })).toContain("block one");

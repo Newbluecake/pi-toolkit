@@ -704,7 +704,7 @@ export function runDoctorBlocks(input: DoctorBlocksInput): BlocksDoctorFinding[]
   }
   // D23: parse errors (inline-meta remains, invalid frontmatter values,
   // agent scope ignored) + stray files in blocks/. Only the BODY oversize
-  // (`E_TOO_LARGE`) is D20's subject — an over-limit `section` (>80B,
+  // (`E_TOO_LARGE`) is D20's subject — an over-limit `section` (>120B,
   // `E_SECTION_TOO_LARGE`) has no other reporter, so D23 covers it
   // (acceptance fix).
   for (const b of input.blocks) {

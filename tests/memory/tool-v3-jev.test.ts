@@ -435,7 +435,7 @@ describe("v3 jev: relation verdicts (§5.4 — P5a executes)", () => {
 
 describe("v3 jev fix-round", () => {
   test("section repair passes the real Jev inline guard without triggering classification or relations", async () => {
-    const fx = fixture([{ id: "gen.001", section: "中".repeat(34), body: "- fact", allowOversize: true }]);
+    const fx = fixture([{ id: "gen.001", section: "中".repeat(41), body: "- fact", allowOversize: true }]);
     const tool = makeTool(fx);
     const before = block(fx, "gen.001");
     const reply = await exec(

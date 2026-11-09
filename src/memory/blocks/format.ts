@@ -71,7 +71,7 @@ const ORDER = [
   "updated",
   "version",
 ] as const;
-export const META_LIMITS = { until: 120, section: 80, heading: 120, title: 110, when: 70 } as const;
+export const META_LIMITS = { until: 120, section: 120, heading: 120, title: 110, when: 70 } as const;
 const LIMITS: Record<string, number> = META_LIMITS;
 /** Truncate at code point boundaries, including the UTF-8 ellipsis in the budget. */
 export function truncateMeta(value: string, limit: number): string {
@@ -233,7 +233,7 @@ export function serializeBlock(meta: BlockMeta, body: string, opts?: { allowOver
       if (/[\r\n]/.test(value)) throw new MemoryError(`E_META: invalid ${key}`);
       if (LIMITS[key] !== undefined && Buffer.byteLength(value) > LIMITS[key]!) {
         if (key === "section") {
-          if (!opts?.allowOversize) throw new MemoryError("E_SECTION_TOO_LARGE: section exceeds 80 UTF-8 bytes");
+          if (!opts?.allowOversize) throw new MemoryError("E_SECTION_TOO_LARGE: section exceeds 120 UTF-8 bytes");
         } else throw new MemoryError(`E_META: invalid ${key}`);
       }
       value = /["\\]|^\s|\s$/.test(value) ? JSON.stringify(value) : value;

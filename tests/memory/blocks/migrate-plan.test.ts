@@ -156,7 +156,7 @@ it("truncates legacy metadata on UTF-8 boundaries and reports each truncation", 
     const p = planMigration([
       source(
         "feedback_long.md",
-        `---\ndescription: ${description}\nread_when: ${"w".repeat(95)}\n---\n## ${"中".repeat(34)}\n- A fact\n`,
+        `---\ndescription: ${description}\nread_when: ${"w".repeat(95)}\n---\n## ${"中".repeat(41)}\n- A fact\n`,
       ),
     ]);
     const b = parsed(p)[0]!;
@@ -164,7 +164,7 @@ it("truncates legacy metadata on UTF-8 boundaries and reports each truncation", 
     expect(b.meta.title).toMatch(/…$/);
     expect(b.meta.title).not.toContain("�");
     expect(Buffer.byteLength(b.meta.when!)).toBeLessThanOrEqual(70);
-    expect(Buffer.byteLength(b.meta.section!)).toBeLessThanOrEqual(80);
+    expect(Buffer.byteLength(b.meta.section!)).toBeLessThanOrEqual(120);
     expect(p.report.metaTruncated).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ blockId: b.id, field: "title", from: description, to: b.meta.title }),

@@ -187,7 +187,7 @@ export function replaceBlockLocked(
   if (invalidMeta) throw new MemoryError(`E_META: ${invalidMeta}`);
   if (current.errors.includes("E_SECTION_TOO_LARGE") && next.meta.section === current.meta.section)
     throw new MemoryError(
-      "E_SECTION_TOO_LARGE: section exceeds 80 UTF-8 bytes — use section= with a shorter value or section=none to clear it",
+      "E_SECTION_TOO_LARGE: section exceeds 120 UTF-8 bytes — use section= with a shorter value or section=none to clear it",
     );
   const meta: BlockMeta = {
     ...next.meta,

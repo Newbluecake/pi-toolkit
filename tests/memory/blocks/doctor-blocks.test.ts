@@ -114,13 +114,13 @@ describe("D23 strays and parse errors", () => {
 });
 
 describe("D23 over-limit section (acceptance fix #3)", () => {
-  test("a >80B section reports as D23; D20 stays about the body only", () => {
+  test("a >120B section reports as D23; D20 stays about the body only", () => {
     // serializeBlock REFUSES an oversize section, so write the file raw —
     // exactly what a hand-edited block looks like on disk.
     const tmp = mkdtempSync(join(tmpdir(), "pi-mem-d23-"));
     tmpRoots.push(tmp);
     const realDir = writeBlocksDir(join(tmp, "mem"), []);
-    const longSection = "S".repeat(120);
+    const longSection = "S".repeat(121);
     writeFileSync(
       join(realDir, "quota.001.md"),
       [
