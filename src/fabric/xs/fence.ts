@@ -28,9 +28,8 @@
  *   switch     : `session_before_switch` | `session_before_fork` → `session_shutdown` |
  *                `session_start` (same no-event cancel path; a slow async before_switch
  *                handler keeps the window closed — correct: the switch really is in progress)
- *   web_exec / topic_switch / goal : late-bound read-only ports, read at CHECK time
+ *   web_exec / topic_switch : late-bound read-only ports, read at CHECK time
  *                (`undefined` = inactive, `true` = active, THROWS = active — fail closed).
- *                `goal` active only downgrades a wake (`wakeOnly`), it never rejects delivery.
  *
  * Zero-hang: the fence never makes a caller wait — a hit returns synchronously; `stuck` only
  * costs the sender a `none` it may retry later. Pi-free by construction (XS0 source-scan gate:
@@ -83,8 +82,6 @@ export interface FencePorts {
   webExec?: FencePort;
   /** topic-switch pending hold ∨ B1 mid-switch marker (`wire.ts`'s read-only `fenceActive()`). */
   topicSwitch?: FencePort;
-  /** /goal loop running ⇒ `wakeOnly` (downgrade wake, never reject). */
-  goal?: FencePort;
 }
 
 export interface FenceStatus {
@@ -192,13 +189,12 @@ export function createSessionFence(options: SessionFenceOptions = {}): SessionFe
 
   function check(): FenceVerdict {
     // Fixed deterministic order: event windows first, then ports; a rejecting window always
-    // wins over `goal`'s wakeOnly downgrade.
+    // rejects dispatch without waiting.
     for (const name of EVENT_WINDOW_ORDER) {
       if (windows.has(name)) return { ok: false, reason: `fenced:${name}` };
     }
     if (portActive(ports.webExec)) return { ok: false, reason: "fenced:web_exec" };
     if (portActive(ports.topicSwitch)) return { ok: false, reason: "fenced:topic_switch" };
-    if (portActive(ports.goal)) return { ok: false, reason: "fenced:goal", wakeOnly: true };
     return { ok: true };
   }
 
@@ -267,7 +263,6 @@ export function createSessionFence(options: SessionFenceOptions = {}): SessionFe
       }
       if (portActive(ports.webExec)) openNames.push("web_exec");
       if (portActive(ports.topicSwitch)) openNames.push("topic_switch");
-      if (portActive(ports.goal)) openNames.push("goal");
       return oldestOpenMs === undefined
         ? { open: openNames, stuck: stuckNames }
         : { open: openNames, stuck: stuckNames, oldestOpenMs };

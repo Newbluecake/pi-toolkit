@@ -197,7 +197,7 @@ describe("wiring: available agent types are injected into the system prompt", ()
     expect(hook, "the hub's before_agent_start registers even in a child session (D6)").toBeTypeOf("function");
     expect(hook!({ systemPrompt: "BASE" }, {})).toBeUndefined();
 
-    // The strictly host-only surface (e.g. /goal's own command + tools) never duplicates into a
+    // The strictly host-only surface (e.g. /agent command + tools) never duplicates into a
     // child session; `agent_end` itself is NOT that marker anymore — child-context-switch plan.md
     // §2/§7 (P3) registers it pre-guard too (self-check + child keepalive settle).
     expect(child.handlers.has("agent_end"), "child-context-switch (P3) also registers agent_end pre-guard").toBe(true);
@@ -222,7 +222,7 @@ describe("wiring: available agent types are injected into the system prompt", ()
 
     // ...and the fresh instance owns the claim: a child session spawned after
     // the reload still gets only the hub's (inert) hook plus the child-context-switch
-    // pre-guard surface (P3) — never a duplicate of the strictly host-only /goal wiring.
+    // pre-guard surface (P3) — never a duplicate of the strictly host-only /agent wiring.
     const child = fakePi();
     activate(child.pi as never);
     expect(child.handlers.has("agent_end")).toBe(true);
@@ -240,7 +240,7 @@ describe("wiring: available agent types are injected into the system prompt", ()
     // set (before_agent_start / context_with_system / session_start /
     // session_compact / model_select / session_tree / turn_start /
     // agent_settled) — but never the strictly host-only hooks/tools that
-    // register past the HOST_KEY guard (e.g. /goal's own command).
+    // register past the HOST_KEY guard (e.g. /agent command).
     // bash-timeout-grace plan §3.4/§3.5 (P5): `agent_before_settle` joins this
     // set too — `wireChildBashJobs` registers it pre-guard (default settings:
     // `bashJobs.childSessions`/`childSettleHold` both true) for the settle-

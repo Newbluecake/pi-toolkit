@@ -520,7 +520,7 @@ export interface WebHubControl {
    * fabric-cross-session plan §3.3 L7 (W1): attribution port for the causal-level reset. An `extension`-sourced `input`
    * event is a HUMAN prompt iff it is a prompt the web hub itself dispatched on a browser user's behalf — answered by a
    * pure, synchronous text lookup in the command ledger (the entry is registered BEFORE `sendUserMessage`). Anything the
-   * ledger does not vouch for (topic-switch re-injection, goal loop, `/agent reload fire`, other extensions) is `undefined`.
+   * ledger does not vouch for (topic-switch re-injection, `/agent reload fire`, other extensions) is `undefined`.
    */
   attributeInput(text: string): "web_prompt" | undefined;
   /** 2026-11-04 mention-handled fix: the mention input interceptor's consumption report —

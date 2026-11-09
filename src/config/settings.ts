@@ -113,9 +113,6 @@ export type { TodoArchiveSettings, TodoNudgeSettings, TodoSettings } from "../to
 import { DEFAULT_HUD_SETTINGS, parseHudSettings } from "../hud/settings.js";
 import type { HudSettings } from "../hud/settings.js";
 export type { HudSettings } from "../hud/settings.js";
-import { DEFAULT_GOAL_SETTINGS, parseGoalSettings } from "../goal/settings.js";
-import type { GoalSettings } from "../goal/settings.js";
-export type { GoalSettings } from "../goal/settings.js";
 import { DEFAULT_TITLE_SETTINGS, parseTitleSettings } from "../title/settings.js";
 import type { TitleSettings } from "../title/settings.js";
 export type { TitleSettings } from "../title/settings.js";
@@ -214,8 +211,6 @@ export interface AgentSettings {
   quota: QuotaSettings;
   /** Load-aware dispatch（docs/dev/sysload/plan.md）：CPU/MEM/DISK 监控 + 派发闸门 + 阶梯提示。 */
   load: LoadSettings;
-  /** /goal 目标驱动持续运行（goal-plan v4）。 */
-  goal: GoalSettings;
   /** Merged plugins (plugin-merge): HUD footer takeover. Default on; `enabled:false` leaves pi's built-in footer untouched. */
   hud: HudSettings;
   /** web-hub browser UI (plan 包 I). Default OFF: when disabled there is zero wiring, zero network, zero disk. */
@@ -287,7 +282,6 @@ export const DEFAULT_SETTINGS: AgentSettings = {
   quota: DEFAULT_QUOTA_SETTINGS,
   load: DEFAULT_LOAD_SETTINGS,
   extend: DEFAULT_EXTEND_SETTINGS,
-  goal: DEFAULT_GOAL_SETTINGS,
   hud: DEFAULT_HUD_SETTINGS,
   webHub: DEFAULT_WEBHUB_SETTINGS,
   webSearch: { enabled: true },
@@ -372,9 +366,6 @@ export const TIME_SETTING_MS_PATHS: readonly string[] = [
   "fabric.rootMinIntervalMs",
   // fabric-thread P0 (arch §11.1): single-steer budget stored as fabric.threads.steerTimeoutS.
   "fabric.threads.steerTimeoutMs",
-  "goal.evalTimeoutMs",
-  "goal.untilCmdTimeoutMs",
-  "goal.deliveryWatchdogMs",
   "memory.tidy.timeoutMs",
   "memory.tidy.batch.totalTimeoutMs",
   "memory.jev.recall.waitMs",
@@ -577,7 +568,6 @@ function parseSettingsSource(source: unknown): AgentSettings {
     quota: parseQuotaSettings(value.quota),
     load: parseLoadSettings(value.load),
     extend: parseExtendSettings(value.extend),
-    goal: parseGoalSettings(value.goal),
     hud: parseHudSettings(value.hud),
     webHub: parseWebHubSettings(value.webHub),
     webSearch: parseEnabledGroup(value.webSearch, DEFAULT_SETTINGS.webSearch),

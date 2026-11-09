@@ -120,7 +120,6 @@ const SYSLOAD_FILE_CLOSURE: Record<string, string[]> = {
     "../ask-user/settings.js",
     "../todo/settings.js",
     "../hud/settings.js",
-    "../goal/settings.js",
     "../title/settings.js",
     "../reload/settings.js",
     "../sysprompt/settings.js",
@@ -180,8 +179,6 @@ const SYSLOAD_FILE_CLOSURE: Record<string, string[]> = {
   "src/reload/settings.ts": [],
   // #56 ⑧: title block settings — self-contained (no imports at all).
   "src/title/settings.ts": [],
-  // #56 ⑧: goal block settings — self-contained (no imports at all).
-  "src/goal/settings.ts": [],
   // #56 ⑧: hud block settings — EnabledGroup is a type-only import.
   "src/hud/settings.ts": [],
   // #56 ⑧: todo block settings — EnabledGroup is a type-only import.

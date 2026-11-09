@@ -29,7 +29,6 @@
     "mem",
     "cache-ttl",
     "thread",
-    "goal",
     "agent",
     "task",
     "pi-hud-refresh",

@@ -605,7 +605,7 @@ describe("cmd-history I1 integration — web dispatch over a real hub × real st
   it("records, projects and refreshes web commands; sync/async/confirm/busy/deferred/model-failed/third-party/sensitive/new-leave; log hygiene", async () => {
     const home = newHome();
     const b = await boot(home, [
-      { CMDH_POLICY_JSON: JSON.stringify({ goal: "confirm" }), CMDH_FABRIC: "1", CMDH_THIRD_PARTY: "zzthird" },
+      { CMDH_POLICY_JSON: JSON.stringify({ title: "confirm" }), CMDH_FABRIC: "1", CMDH_THIRD_PARTY: "zzthird" },
     ]);
     const agent = b.agents[0]!;
     const hub = b.hub;
@@ -684,23 +684,23 @@ describe("cmd-history I1 integration — web dispatch over a real hub × real st
     expect(whEntry.output?.entries?.some((e: any) => e.text?.includes("hub-cap on"))).toBe(true);
 
     // ---- confirm → effect-none refusal records NOTHING; the confirmed resend records ----
-    const refused = await hub.rpc("webCmd", { sessionId, name: "goal", args: "" });
+    const refused = await hub.rpc("webCmd", { sessionId, name: "title", args: "" });
     expect(refused.first.ok).toBe(false);
     expect(refused.first.code).toBe("E_CONFIRM_REQUIRED");
     expect(refused.first.effect).toBe("none");
     expect(refused.first.data).toBeUndefined();
-    expect(readCmdEntries(sessionFile).some((e: any) => e.name === "goal")).toBe(false);
-    const confirmed = await hub.rpc("webCmd", { sessionId, name: "goal", args: "", confirm: true });
+    expect(readCmdEntries(sessionFile).some((e: any) => e.name === "title")).toBe(false);
+    const confirmed = await hub.rpc("webCmd", { sessionId, name: "title", args: "", confirm: true });
     expect(confirmed.first.ok).toBe(true);
     expect(confirmed.first.data.history).toBe("recorded");
     await until(
       () => Promise.resolve(readCmdEntries(sessionFile)),
       (entries) => entries.some((e) => e.cmdId === confirmed.id),
-      "confirmed /goal record lands",
+      "confirmed /title record lands",
     );
-    const goalEntry = readCmdEntries(sessionFile).find((e: any) => e.cmdId === confirmed.id)!;
-    expect(goalEntry.name).toBe("goal");
-    expect(goalEntry.state).toBe("done");
+    const titleEntry = readCmdEntries(sessionFile).find((e: any) => e.cmdId === confirmed.id)!;
+    expect(titleEntry.name).toBe("title");
+    expect(titleEntry.state).toBe("done");
 
     // ---- busy: an allow-policy command still executes (commands bypass the busy queue) ----
     await agent.rpc("busy", { on: true });
@@ -871,19 +871,19 @@ describe("cmd-history I1 integration — TUI dispatch and the cmdHistory:false c
     await hub.rpc("historySnapshot", { sessionId: onInspect.sessionId });
     await hub.rpc("historySnapshot", { sessionId: offInspect.sessionId });
 
-    // TUI /goal: identical terminal output on both agents (the observe proxy is a pure tee).
-    const onGoal = await on.rpc("tuiCmd", { name: "goal", args: "" });
-    const offGoal = await off.rpc("tuiCmd", { name: "goal", args: "" });
-    expect(onGoal.uiCalls).toEqual(offGoal.uiCalls); // terminal parity (same notify args)
-    expect(onGoal.uiCalls.some((c: any) => c.m === "notify")).toBe(true);
-    const onGoalEntry = await until(
-      () => Promise.resolve(readCmdEntries(onFile).find((e: any) => e.name === "goal")),
+    // TUI /title auto (disabled in this harness): identical terminal output on both agents (the observe proxy is a pure tee).
+    const onTitle = await on.rpc("tuiCmd", { name: "title", args: "auto" });
+    const offTitle = await off.rpc("tuiCmd", { name: "title", args: "auto" });
+    expect(onTitle.uiCalls).toEqual(offTitle.uiCalls); // terminal parity (same notify args)
+    expect(onTitle.uiCalls.some((c: any) => c.m === "notify")).toBe(true);
+    const onTitleEntry = await until(
+      () => Promise.resolve(readCmdEntries(onFile).find((e: any) => e.name === "title")),
       (e) => e !== undefined,
-      "TUI /goal record lands",
+      "TUI /title record lands",
     );
-    expect(onGoalEntry.source).toBe("tui");
-    expect(onGoalEntry.state).toBe("done");
-    expect(onGoalEntry.phase).toBe("end"); // fast command: single self-contained end
+    expect(onTitleEntry.source).toBe("tui");
+    expect(onTitleEntry.state).toBe("done");
+    expect(onTitleEntry.phase).toBe("end"); // fast command: single self-contained end
     expect(readCmdEntries(offFile)).toHaveLength(0); // off-agent writes nothing
 
     // TUI /webhub token: terminal still shows the refusal; the record is header-only.
@@ -963,7 +963,7 @@ describe("cmd-history I1 integration — secure LOCKED skips every write", () =>
     expect(inspect0.secureDomain).toBe("locked");
     const sessionFile: string = inspect0.sessionFile;
 
-    const ran = await agent.rpc("tuiCmd", { name: "goal", args: "" });
+    const ran = await agent.rpc("tuiCmd", { name: "title", args: "" });
     expect(ran.uiCalls.some((c: any) => c.m === "notify")).toBe(true); // the command executed
     await new Promise((r) => setTimeout(r, 500));
     expect(readCmdEntries(sessionFile)).toHaveLength(0); // LOCKED ⇒ appendEntry never called

@@ -11,7 +11,6 @@ import { CACHE_TTL_SETTING_SPECS } from "../cache-ttl/setting-specs.js";
 import { WORKFLOW_SETTING_SPECS } from "../workflow/setting-specs.js";
 import { BASH_JOBS_SETTING_SPECS } from "../bash/setting-specs.js";
 import { FABRIC_SETTING_SPECS } from "../fabric/setting-specs.js";
-import { GOAL_SETTING_SPECS } from "../goal/setting-specs.js";
 import { QUOTA_SETTING_SPECS } from "../quota/setting-specs.js";
 import { LOAD_SETTING_SPECS } from "../sysload/setting-specs.js";
 import { SYSTEM_PROMPT_SETTING_SPECS } from "../sysprompt/setting-specs.js";
@@ -46,7 +45,7 @@ const BUDGET_DESCRIPTIONS: Record<keyof DeadlineBudget, string> = {
     "Grace after the total budget for extendable runs, including explicit Agent timeouts (default 600 seconds); fixed runs have no grace; 0 = off",
   maxExtensions: "Max deadline extensions per run; 0 = no extension and no grace",
   maxTotalFactor:
-    "Hard ceiling as a multiple of the run's total budget, explicit timeout_s included (fixed-deadline system runs — workflow children, /goal verifier, RPC — are always 1)",
+    "Hard ceiling as a multiple of the run's total budget, explicit timeout_s included (fixed-deadline system runs — workflow children, RPC — are always 1)",
   extendStepMs:
     "Max seconds granted by a single extend_subagent_timeout call (default 3600); also widens the hard ceiling for extendable runs to total + maxExtensions × step; 0 = legacy (no per-grant cap, factor-only ceiling)",
 };
@@ -160,7 +159,6 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
   ...WORKFLOW_SETTING_SPECS,
   ...BASH_JOBS_SETTING_SPECS,
   ...FABRIC_SETTING_SPECS,
-  ...GOAL_SETTING_SPECS,
   ...QUOTA_SETTING_SPECS,
   ...LOAD_SETTING_SPECS,
   ...SYSTEM_PROMPT_SETTING_SPECS,

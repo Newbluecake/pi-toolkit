@@ -34,8 +34,8 @@ describe("legacy consult.* settings block is ignored (#40)", () => {
         expect(loadSettings({ consult: junk })).toEqual(baseline);
       }
       // A legacy block next to real settings must not disturb them.
-      const mixed = loadSettings({ consult: LEGACY_BLOCK, goal: { maxTurns: 7 } });
-      expect(mixed.goal.maxTurns).toBe(7);
+      const mixed = loadSettings({ consult: LEGACY_BLOCK, concurrencyLimit: 7 });
+      expect(mixed.concurrencyLimit).toBe(7);
       expect(warn).not.toHaveBeenCalled();
       expect(error).not.toHaveBeenCalled();
     } finally {

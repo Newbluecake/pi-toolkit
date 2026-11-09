@@ -37,8 +37,6 @@ export const TOOLKIT_USAGE: Readonly<Record<string, string>> = {
   // (r1 #3 condensed form).
   "cache-ttl":
     "on | off | auto | save | keepalive on|off|reset | status | probe | measure [<provider>/<id>] [--long] [--estimate] [--yes] | measure status|cancel",
-  // src/goal/command.ts description.
-  goal: '<goal> [--until-cmd "cmd"] [--until "condition"] [--max-turns N] [--budget-tokens N] [--max-minutes N] | status | pause | resume | clear',
   // src/title/command.ts description.
   title: "status | auto",
   // src/commands/webhub.ts description (subcommands beyond `status` are web-deny — the

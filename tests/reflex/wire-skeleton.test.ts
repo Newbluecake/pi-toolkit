@@ -52,7 +52,7 @@ const deps = (kind: ReflexWireDeps["secureDomainKind"] = "plain"): ReflexWireDep
     quota: () => undefined,
     git: (async () => ({}) as never) as never,
   },
-  fences: { topicSwitchActive: () => false, goalBusy: () => false },
+  fences: { topicSwitchActive: () => false },
 });
 
 const ctx = {} as any;

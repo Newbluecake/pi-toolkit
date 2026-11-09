@@ -48,7 +48,6 @@ const assistantTools = (...calls: Array<{ name: string; arguments?: unknown }>) 
 function harness(
   opts: {
     topic?: () => boolean;
-    goal?: () => boolean;
     autoResolve?: string[];
     appendThrows?: boolean;
     gitHangs?: boolean;
@@ -93,7 +92,7 @@ function harness(
         return Promise.resolve({ code: 1, stdout: "", stderr: "", killed: false });
       }) as never,
     },
-    fences: { topicSwitchActive: opts.topic ?? (() => false), goalBusy: opts.goal ?? (() => false) },
+    fences: { topicSwitchActive: opts.topic ?? (() => false) },
     clock,
     monoNow: () => (mono += 5),
   };
@@ -359,17 +358,13 @@ describe("I6 / fences: zero execution, zero record", () => {
     expect(h.wiring!.snapshot().counters.candidates).toBe(0);
   });
 
-  it("topic-switch hold (fence) ⇒ veto, goal active ⇒ veto", async () => {
+  it("topic-switch hold (fence) ⇒ veto", async () => {
     const t = harness({ topic: () => true });
     t.input(JOBS_Q);
-    const g = harness({ goal: () => true });
-    g.input(JOBS_Q);
     await flush();
     t.settled();
-    g.settled();
     expect(t.appended).toEqual([]);
-    expect(g.appended).toEqual([]);
-    expect(t.listCalls.n + g.listCalls.n).toBe(0);
+    expect(t.listCalls.n).toBe(0);
   });
 });
 

@@ -147,7 +147,6 @@ const control = {
   "cmdDesc.cache-ttl": "Change cache TTL / keepalive settings.",
   "cmdDesc.mem": "Change project memory.",
   "cmdDesc.webhub": "Manage the Web Hub.",
-  "cmdDesc.goal": "Change the goal loop.",
   "cmdDesc.topic-switch": "Change topic-switch settings or state.",
   "cmdDesc.watch": "Toggle the Feishu notification on task completion.",
   "cmdDesc.task": "Dispatch a background subagent to run the task.",

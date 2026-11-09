@@ -1274,7 +1274,7 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
     // the wait (the pool's occupancy at completion time is a different,
     // less useful number — the caller wants to know what the pool looked
     // like WHEN it dispatched). spawnAndWait itself is left untouched since
-    // it is a stable, widely-used port (goal/hook.ts, index.ts forwarding,
+    // it is a stable, widely-used port (index.ts forwarding,
     // etc.) whose return type (`Promise<RunOutcome>`) must not change.
     async spawnAndWaitWithSlots(req) {
       const started = await service.spawn({ ...req, expectAck: true });

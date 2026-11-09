@@ -74,6 +74,8 @@ Check before and after any refactor: `git diff --quiet origin/dev -- tests/fixtu
 | B 契约 golden | `available-models-golden.txt`, `feishu-spawn-http-golden.json`, `memory-legacy-golden.json` (+ `memory/{tiered,doctor}-golden`), `memory/blocks-golden/*.txt`, `memory/doctor-golden/blocks-*.json`, `memory/migrate-golden/**`, `memory/blocks-off-golden.json` (B-level contracts; recorded once with `PI_TOOLKIT_UPDATE_BLOCKS_GOLDEN=1`, which refuses existing files; later changes require a declared contract update), `message-agent-wake-schema-golden.json`, `web-hub-ui/quota-legacy-golden.json`, `version/version-anchor-golden.html`, `quota/topbar-no-quota-golden.html`, `governance/activate-trace.json` (activate() registration-order contract; refresh only with `PI_TOOLKIT_UPDATE_TRACE=1 npx vitest run tests/governance` when a registration is added/changed on purpose), `scoped-memory-tool-surface.json`（scoped 工具面契约：阶段 1/2 字节不变，阶段 3 亦保留）, `memory-tool-surface.json` (jev tool-description contract; only new keys may be added when a declared tool-description variant ships — e.g. the jev `MEMORY_TOOL_V2_TEXT_JEV` variant — existing keys' bytes never change) | update only for a declared outward behaviour change; say why in the commit |
 | C 按规则刷新 | `preview-denylist-corpus.json` (bump `PREVIEW_DENYLIST_VERSION` + run `node scripts/dev/preview-denylist-audit.mjs`), `docs/dev/preview-perf/baseline*.json` (only `npm run probe:preview-perf -- --write-baseline`) | per its own rule |
 
+2026-11-09 `/goal` 功能移除属**声明式对外表面变更**：四张冻结件（`schedule-off-golden.json` / `reflex-off-golden.json` / `thread-rebind-off-golden.json` / `tools/agent-nested-surface-golden.json`）的 `goal` 条目、相关计数与工具描述中的 `/goal verifier` 措辞因功能移除同时过期，经用户批准一并更新；B 级 `activate-trace.json` 按声明式注册变更刷新，其余冻结件字节不变。
+
 ## pi peer bump checklist
 
 Current baseline (**Breaking Change**, 2026-11-07 user decision): pi 1.0–1.4 are no longer supported.
@@ -134,7 +136,6 @@ Format: entry — one-line role | README to read first and when. `src/*` rows wi
 | `src/schedule/` — session-aware scheduled tasks (cron/once; default off). | `docs/dev/scheduled-reports/README.md` · 动 schedule 前（schedule-off golden 勿重生） |
 | `src/reload/` — deferred `/reload` (settings-gated by `reload.defer`): parks the reload while subagents/workflows are active, fires it once the fleet settles; `now` forces, `cancel` cancels. | `docs/dev/deferred-reload/README.md` · 动 deferred reload/派发门/自动继续前 |
 | `src/fast/` — session-scoped service-tier contracts (controller / payload wiring in development). | `docs/dev/fast-command/README.md` · 动 Fast 状态/持久化/payload/child 接线前 |
-| `src/goal/` — `/goal` objective-driven loop: pure state machine (four phases), session store, `agent_settled` loop hook, `/goal` command. Design: `docs/dev/goal/goal-plan.md`. | — |
 | `src/delivery/` — notification outbox: staged → finalize → batched → delivered → consumed, with caller-ack suppression and hold-window coalescing. | — |
 | `src/workflow/` — `SubagentWorkflow` engine: orchestrator, journal/replay, background registry, `agent()` queue/worktree. | `docs/dev/workflow/README.md` · 动 workflow 前 |
 | `src/adapters/` — pi-facing shims (compat probing, outbox store, run log). | — |

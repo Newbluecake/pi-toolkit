@@ -368,7 +368,7 @@ export interface HostCallHandlerDeps {
    * totalMs = W.hardAt − now` with **no `timeoutPolicy`** — a program-derived
    * explicit budget resolves to a fixed-deadline child
    * (agent-explicit-timeout-extend §2.2: workflow children, like consult /
-   * /goal / RPC runs, stay non-extendable even though the workflow itself is
+   * RPC runs, stay non-extendable even though the workflow itself is
    * extendable) — and every `agent()` ack carries it as `deadlineAt` (the
    * worker's settle-wait bound). Children still never outlive the workflow:
    * it ends at `killAt()` and `stopOwned` structurally stops them. Without

@@ -243,7 +243,7 @@ describe("recovery runner scheduling/accounting", () => {
       if (change === "epoch") f.arrival();
       if (change === "stop") f.store.noteStop("abort-admission");
       if (change === "busy") f.busy.web = () => "busy";
-      if (change === "unknown") f.busy.goal = () => "unknown";
+      if (change === "unknown") f.busy.otherRoot = () => "unknown";
       if (change === "pairs") f.progress("new");
       f.flush();
       expect(f.sent).toEqual([]);
@@ -514,7 +514,7 @@ describe("current BAS ownership and fixed supervised deadline", () => {
     const f = fixture();
     f.start();
     f.bas();
-    f.busy.goal = () => "unknown";
+    f.busy.otherRoot = () => "unknown";
     f.runner.context();
     expect(f.abort).toHaveBeenCalledOnce();
     expect(f.runner.effective).toBe(false);

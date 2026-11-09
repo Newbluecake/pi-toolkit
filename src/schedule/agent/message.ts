@@ -188,7 +188,7 @@ export interface ScheduleHolder {
 }
 
 export interface MessageSchedulerInstallDeps {
-  /** fence ports of the xs wiring: web resume exec / topic-switch / goal (late-bound getters). */
+  /** fence ports of the xs wiring: web resume exec / topic-switch (late-bound getters). */
   fencePorts?: FencePorts;
   /** `holder.current.xs.controller.busy` — root wake in flight. */
   rootWakeBusy?: () => boolean;

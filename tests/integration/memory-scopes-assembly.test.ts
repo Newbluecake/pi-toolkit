@@ -609,7 +609,6 @@ describe("#39 actual root activation with official SDK and offline provider", ()
             releaseCapabilityAlert() {
               log.push("capability");
             },
-            disposeGoalHook() {},
             scheduleSurfaceShutdown() {},
             sealChildBashJobs: async () => {},
           },

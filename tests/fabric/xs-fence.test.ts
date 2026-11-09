@@ -219,25 +219,13 @@ describe("xs-fence: ports (late-bound, read at check time, fail closed)", () => 
       ok: false,
       reason: "fenced:topic_switch",
     });
-    expect(makeFence({ ports: { goal: boom } }).fence.check()).toEqual({
-      ok: false,
-      reason: "fenced:goal",
-      wakeOnly: true,
-    });
   });
 
-  it("goal ⇒ wakeOnly: downgrades a wake, never rejects the delivery (§7.2 goal row)", () => {
-    const { fence } = makeFence({ ports: { goal: () => true } });
-    expect(fence.check()).toEqual({ ok: false, reason: "fenced:goal", wakeOnly: true });
-    expect(fence.status().open).toEqual(["goal"]);
-    expect(fence.status().stuck).toEqual([]); // ports have no age — never "stuck"
-  });
-
-  it("a rejecting window beats goal's wakeOnly; deterministic reason order", () => {
-    const { fence } = makeFence({ ports: { goal: () => true } });
+  it("event windows beat late-bound ports; deterministic reason order", () => {
+    const { fence } = makeFence({ ports: { topicSwitch: () => true } });
     fence.onEvent({ type: "session_before_tree" });
     expect(fence.check()).toEqual({ ok: false, reason: "fenced:tree" });
-    const all = makeFence({ ports: { goal: () => true } });
+    const all = makeFence({ ports: { topicSwitch: () => true } });
     all.fence.onEvent({ type: "session_before_switch" });
     all.fence.onEvent({ type: "session_before_compact" });
     expect(all.fence.check()).toEqual({ ok: false, reason: "fenced:compaction" }); // fixed order, no wakeOnly
@@ -307,15 +295,6 @@ describe("xs-fence: session generation + dispatch-point recheck (M1 / §7.4)", (
       ok: false,
       reason: "fenced:switch",
     });
-  });
-
-  it("verifyDispatch mirrors check()'s wakeOnly for a goal port that turns active mid-dispatch", () => {
-    let goalActive = false;
-    const { fence } = makeFence({ ports: { goal: () => goalActive } });
-    const guard = fence.beginDispatch();
-    expect(guard).toEqual({ ok: true, gen: 0 });
-    goalActive = true;
-    expect(fence.verifyDispatch(0)).toEqual({ ok: false, reason: "fenced:goal", wakeOnly: true });
   });
 });
 

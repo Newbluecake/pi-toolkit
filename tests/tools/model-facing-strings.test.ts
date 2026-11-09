@@ -146,7 +146,7 @@ describe("model-facing tool strings", () => {
   it("U4: extend_subagent_timeout description covers timeout_s runs and names the fixed-deadline exception", () => {
     const extendTimeout = tools().find((tool) => tool.name === "extend_subagent_timeout")!;
     expect(extendTimeout.description).toContain("runs dispatched with an explicit timeout_s alike");
-    expect(extendTimeout.description).toContain("(/goal verifier, RPC)");
+    expect(extendTimeout.description).toContain("(RPC)");
     expect(extendTimeout.description).not.toContain("Only default-budget runs");
   });
 

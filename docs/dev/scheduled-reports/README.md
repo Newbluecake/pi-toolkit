@@ -61,7 +61,7 @@ bound to the still-`dispatched` flight** (first compaction only, closed by a hum
 from `verifyDispatch` (compaction window ONLY — tree/switch/gen change are not), pauses the 60 s start budget and is hard-capped at
 `SCHED_START_COMPACTION_MAX_MS` (600 s) from the send; a foreign compaction keeps the dispatcher fenced. **Authorization re-check**:
 `before_agent_start` (and `context`, before the first model call) re-reads the fence — any open window other than our own running
-compaction (`goal` aside), or a generation change ⇒ the trigger is refused (`unknown(owner-closed)`, aborted, never resent).
+compaction, or a generation change ⇒ the trigger is refused (`unknown(owner-closed)`, aborted, never resent).
 **Revocation generation**: `pause`/`rm` record `revokedAt[taskId]` in the scheduler (`revokeTask`, process-local); a message run /
 handoff whose source run was claimed at or before it is refused at enqueue and at the send CAS (so a handoff of a once-claimed task
 reaching the queue AFTER a pause can never wake); a handoff's `onEnd` fires exactly once (`ended`), and the adapter writes one recap.
@@ -77,3 +77,7 @@ Anthropic stub, C-S6 needs tsx else skip) — **run before any pi peer bump**, t
 task-snapshot compare is the backstop); same-uid hostile model can edit the ledger file (same-uid trust); vault predicate is agent-side
 only (hub has no vault roots — H1 #3); Feishu global budgets live in F1's process memory; a ui dialog end/late-start interleave on the same `(kind,title)` that exceeds `UI_END_SETTLE_MS` (2 s buffer after the last end) can let one dispatch through while a dialog is still open (exits: `/schedule repair`, `/fabric fence reset`); hub per-task accumulators are capped (64 observed/`pendingUnknown` runKeys per task; per H1 residual #4 the excess is left to the session-reopen digest);
 a compaction event delayed beyond the 5 s attribution window by a slow handler ahead of ours degrades to the 60 s budget, and a foreign compaction that starts inside the window of a still-pending trigger is mis-attributed (only the budget pause — authorization is re-checked at `before_agent_start`/`context`) (fail closed); the wiring was written before its integration tests (mutation-verified afterwards, see report).
+
+## Objective-loop removal (2026-11-09)
+
+The goal fence source and its open-window exemption are removed; the scheduler retains all SDK/UI/root-wake/compaction guards. Its off golden has the user-approved command/hook removal only; no schedule behavior is otherwise changed.

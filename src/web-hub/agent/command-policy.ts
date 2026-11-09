@@ -113,7 +113,7 @@ export function parameterizedBuiltinPolicy(
  * mutates settings, writes files, dispatches a subagent, or sends external notifications is
  * `confirm`; sub-commands whose only UI is a TUI-only selector with no text fallback are `deny`.
  * Reference (read-only, per plan §12.3): `src/commands/status.ts`, `src/memory/command.ts`,
- * `src/cache-ttl/cache-ttl.ts`, `src/todo/index.ts`, `src/goal/command.ts`, `src/commands/task.ts`,
+ * `src/cache-ttl/cache-ttl.ts`, `src/todo/index.ts`, `src/commands/task.ts`,
  * `src/feishu-notify/index.ts`, `src/hud/index.ts`, `src/session-nav/index.ts`,
  * `src/commands/webhub.ts`.
  */
@@ -242,12 +242,6 @@ const PI_TOOLKIT_TABLE: Readonly<Record<string, SubPolicyFn>> = {
   // /tasklist [no args] → read-only listing (text fallback, §4.9). `clear` is destructive.
   tasklist(tokens) {
     return { policy: tokens[0] === undefined ? "allow" : "confirm" };
-  },
-  // /goal [status] → read-only. pause/resume/clear mutate the loop; any other single token is
-  // free-text objective, which starts a new loop (also mutating).
-  goal(tokens) {
-    const sub = tokens[0];
-    return { policy: sub === undefined || sub === "status" ? "allow" : "confirm" };
   },
   // /task always dispatches a background subagent.
   task() {

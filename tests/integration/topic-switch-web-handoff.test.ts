@@ -117,7 +117,7 @@ function topicDeps(clock: FakeClock): TopicSwitchDeps {
     settings: () => settings,
     titleModel: "",
     warmth: { assess: () => ({ state: "cold", reason: "ttl-elapsed", nextWriteTtl: "5m" }) },
-    stack: () => ({ activeRuns: () => 0, backgroundBash: () => 0, goalBusy: () => false }),
+    stack: () => ({ activeRuns: () => 0, backgroundBash: () => 0 }),
     remote: () => undefined,
     clock,
   };

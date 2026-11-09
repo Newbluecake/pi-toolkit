@@ -6,7 +6,7 @@ import type { CausalLevel } from "./wake-level.js";
  *  - `source` `interactive` / `rpc` (terminal or rpc client) ⇒ human ⇒ reset.
  *  - `source` `extension` ⇒ reset only when the web hub vouches that the text is a prompt it dispatched for a browser
  *    user (`attributeInput(text) === "web_prompt"`, a pure ledger lookup). Everything else an extension injects —
- *    topic-switch re-injection of an already-seen input, `/goal` loop continuations, `/agent reload fire`, another
+ *    topic-switch re-injection of an already-seen input, `/agent reload fire`, another
  *    extension's `sendUserMessage` — never resets. Web hub off ⇒ no port ⇒ extension input never resets.
  *
  * The handler only reads; it never transforms or swallows input (`continue` always), so it may sit anywhere in the

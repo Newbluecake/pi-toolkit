@@ -127,9 +127,6 @@
       "registerTool(bash)",
       "registerTool(bash_job)",
       "registerTool(SubagentWorkflow)",
-      "on(agent_end)",
-      "on(agent_settled)",
-      "registerCommand(goal)",
       "registerCommand(agent)",
       "registerCommand(task)",
       "registerMessageRenderer(subagent:task-started)",
@@ -213,7 +210,7 @@
       "on(session_shutdown)",
       "registerCommand(topic-switch)"
     ],
-    "count": 211,
+    "count": 208,
     "phase2": [
       "ui.setStatus(claude-code-todo-status:clear)",
       "ui.setStatus(cache-ttl:clear)",
@@ -357,9 +354,6 @@
       "registerTool(bash)",
       "registerTool(bash_job)",
       "registerTool(SubagentWorkflow)",
-      "on(agent_end)",
-      "on(agent_settled)",
-      "registerCommand(goal)",
       "registerCommand(agent)",
       "registerCommand(task)",
       "registerMessageRenderer(subagent:task-started)",
@@ -443,7 +437,7 @@
       "on(session_shutdown)",
       "registerCommand(topic-switch)"
     ],
-    "count": 192,
+    "count": 189,
     "phase2": [
       "ui.setStatus(claude-code-todo-status:clear)",
       "ui.setStatus(cache-ttl:clear)",
@@ -549,9 +543,6 @@
       "registerTool(bash)",
       "registerTool(bash_job)",
       "registerTool(SubagentWorkflow)",
-      "on(agent_end)",
-      "on(agent_settled)",
-      "registerCommand(goal)",
       "registerCommand(agent)",
       "registerCommand(task)",
       "registerMessageRenderer(subagent:task-started)",
@@ -593,7 +584,7 @@
       "on(session_shutdown)",
       "registerCommand(topic-switch)"
     ],
-    "count": 112,
+    "count": 109,
     "phase2": [
       "ui.setStatus(cache-ttl:clear)",
       "ui.setStatus(quota:clear)",
@@ -775,9 +766,6 @@
       "registerTool(bash)",
       "registerTool(bash_job)",
       "registerTool(SubagentWorkflow)",
-      "on(agent_end)",
-      "on(agent_settled)",
-      "registerCommand(goal)",
       "registerCommand(agent)",
       "registerCommand(task)",
       "registerMessageRenderer(subagent:task-started)",
@@ -883,7 +871,7 @@
       "on(session_shutdown)",
       "registerCommand(topic-switch)"
     ],
-    "count": 256,
+    "count": 253,
     "phase2": [
       "ui.setStatus(claude-code-todo-status:clear)",
       "ui.setStatus(cache-ttl:clear)",
@@ -1239,9 +1227,6 @@
       "registerTool(bash)",
       "registerTool(bash_job)",
       "registerTool(SubagentWorkflow)",
-      "on(agent_end)",
-      "on(agent_settled)",
-      "registerCommand(goal)",
       "registerCommand(agent)",
       "registerCommand(task)",
       "registerMessageRenderer(subagent:task-started)",
@@ -1341,7 +1326,7 @@
       "on(session_shutdown)",
       "registerCommand(topic-switch)"
     ],
-    "count": 252,
+    "count": 249,
     "phase2": [
       "ui.setStatus(claude-code-todo-status:clear)",
       "ui.setStatus(cache-ttl:clear)",

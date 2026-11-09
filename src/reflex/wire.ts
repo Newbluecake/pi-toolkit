@@ -64,7 +64,6 @@ export interface ReflexWireDeps {
   fences: {
     /** Late-bound: topic-switch is wired AFTER the R layer. */
     topicSwitchActive: () => boolean;
-    goalBusy: () => boolean;
   };
   /** PD9: injected wall clock (default `systemClock`, unref'd + segmented). Tests pass a FakeClock. */
   clock?: Clock;
@@ -527,7 +526,8 @@ export function wireReflex(pi: ExtensionAPI, deps: ReflexWireDeps): ReflexWiring
         imageCount: event.images?.length ?? 0,
         text: event.text,
         topicSwitchActive: deps.fences.topicSwitchActive(),
-        goalBusy: deps.fences.goalBusy(),
+        // Historical backtest fact only; no live objective-loop owner remains.
+        goalBusy: false,
         inFlight,
       });
       if (!gate.pass) return CONTINUE;

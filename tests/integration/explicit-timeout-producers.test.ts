@@ -21,7 +21,6 @@ import { RPC_REQUEST_CHANNEL, RPC_VERSION, replyChannel } from "../../src/rpc/pr
  *  X1 workflow child run  — real SubagentWorkflow(timeout_s) → child pinned
  *     to W.hardAt (fixed, factor 1) while the workflow itself stays 2×.
  *  X2 (retired)           — was the consult fork; consult was removed (#40).
- *  X3 /goal verifier      — the /goal command + loop hook.
  *  X4 memory tidy         — the /mem tidy command (readonly tool domain).
  *  X5 RPC spawn           — the stack's RPC server on the events bus; a
  *                           request smuggling `timeoutPolicy` is rejected.
@@ -299,74 +298,9 @@ describe("program-derived producers stay fixed (X1-X6, real entries)", () => {
     await host.emit("session_shutdown", { reason: "quit" });
   }, 30_000);
 
-  it("X3: the /goal verifier run is fixed at settings.goal.evalTimeoutMs (real /goal + loop hook)", async () => {
-    writeAgentFiles(home);
-    writeSettings(home, { hud: { enabled: false }, goal: { verifierType: "worker", evalTimeoutS: 20 } });
-    const branch: unknown[] = [];
-    const host = fakePi(branch);
-    stubDriver({ create: () => false, resume: () => false }); // the verifier settles at once
-    const captured = spyRunnerRun();
-    activate(host.pi);
-    const notifications: Array<{ message: string; level: string }> = [];
-    const ctx = host.ctx({
-      hasUI: true,
-      mode: "tui",
-      isIdle: () => true,
-      hasPendingMessages: () => false,
-      cwd: scratch,
-      // The default goal.verifierModelHint is a strict pair — admission checks
-      // it against the host registry, so expose exactly that model.
-      modelRegistry: {
-        getAvailable: () => [{ provider: "cloudrouter-anthropic", id: "claude-sonnet-5", name: "Verifier" }],
-        find: (provider: string, id: string) =>
-          provider === "cloudrouter-anthropic" && id === "claude-sonnet-5"
-            ? { provider, id, name: "Verifier" }
-            : undefined,
-      },
-      ui: {
-        notify: (message: string, level: string) => notifications.push({ message, level }),
-        setStatus: () => undefined,
-        setEditorComponent: () => () => undefined,
-        getEditorComponent: () => undefined,
-        setFooter: () => () => undefined,
-        addAutocompleteProvider: () => undefined,
-      },
-    });
-    await host.emit("session_start", { reason: "startup" }, ctx);
-
-    // Real entry: the /goal command handler activate() registered.
-    const goal = host.commands.get("goal");
-    expect(goal).toBeDefined();
-    await goal!.handler('fix the tests --until "all tests green" --max-turns 5', ctx);
-
-    // Real entry: the loop hook's agent_end/agent_settled pair drives evaluate().
-    await host.emit(
-      "agent_end",
-      {
-        type: "agent_end",
-        messages: [
-          {
-            role: "assistant",
-            stopReason: "stop",
-            usage: { input: 100, output: 50, cacheRead: 0, cost: { total: 0.02 } },
-          },
-        ],
-      },
-      ctx,
-    );
-    await host.emit("agent_settled", { type: "agent_settled" }, ctx);
-
-    await until(() => captured.some((c) => c.req.displayMeta?.label === "goal-eval-1"));
-    const verifier = captured.find((c) => c.req.displayMeta?.label === "goal-eval-1")!;
-    expect(verifier.req.timeoutPolicy).toBe("fixed");
-    expect(verifier.budget.maxTotalFactor).toBe(1);
-    expect(verifier.budget.totalMs).toBe(20_000); // settings.goal.evalTimeoutS (merged into the budget)
-    await host.emit("session_shutdown", { reason: "quit" });
-  }, 30_000);
-
   it("X4: a /mem tidy proposal run is fixed, factor 1, readonly tool domain (real /mem command)", async () => {
     writeAgentFiles(home);
-    writeSettings(home, { hud: { enabled: false }, memory: { tidy: { agentType: "worker" } } });
+    writeSettings(home, { hud: { enabled: false }, memory: { layout: "tiered", tidy: { agentType: "worker" } } });
     const proj = join(scratch, "proj");
     mkdirSync(proj, { recursive: true });
     const memRoot = join(scratch, "mem");

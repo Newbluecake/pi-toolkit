@@ -3,7 +3,6 @@ import { createIdleRecoveryStore } from "../../src/todo/idle-recovery-store.js";
 import {
   createIdleRecoveryHost,
   RECOVERY_BUSY_SOURCES,
-  recoveryGoalBusy,
   recoveryScheduleBusy,
   type RecoveryBusy,
   type RecoveryIdentity,
@@ -131,16 +130,6 @@ describe("idle recovery host synchronous gates", () => {
       expect(f.entries).toHaveLength(0);
     },
   );
-  it.each(["active", "paused"])("goal %s retains root", (state) => {
-    expect(recoveryGoalBusy({ initialized: true, evaluating: false, state })).toBe("busy");
-  });
-  it("goal missing/unknown/evaluating vs confirmed absence", () => {
-    expect(recoveryGoalBusy(undefined)).toBe("unknown");
-    expect(recoveryGoalBusy({ initialized: false, evaluating: false, state: null })).toBe("unknown");
-    expect(recoveryGoalBusy({ initialized: true, evaluating: false, state: "future-kind" })).toBe("unknown");
-    expect(recoveryGoalBusy({ initialized: true, evaluating: true, state: null })).toBe("busy");
-    expect(recoveryGoalBusy({ initialized: true, evaluating: false, state: null })).toBe("clear");
-  });
   it("future schedule alone clear; due, pending, degraded or absent not clear", () => {
     const value = { initialized: true, degraded: false, pending: false, nextAt: 101 };
     expect(recoveryScheduleBusy(value, 100)).toBe("clear");

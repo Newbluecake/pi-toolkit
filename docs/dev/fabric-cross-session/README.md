@@ -107,15 +107,16 @@ capability (`absent` ⇒ `host_unsupported` deliver-only; `unknown` ⇒ **optimi
 wake-unknown-optimistic 2026-11: the first run is authorized by BAS or aborted at its first
 `context` sight before any provider request on verified-shape hosts 1.0.4/1.1.0/1.4.0 — legacy
 conformance + C-X12 gates; other shapes degrade to a bounded supervised run; `woke:true` means
-"dispatch accepted", same as `start_deferred`, not a provider-request guarantee), goal and quotas.
+"dispatch accepted", same as `start_deferred`, not a provider-request guarantee), and quotas.
 root deadline `fabric.wake.rootRunMaxS` (default 900s) starts at dispatch, including
 pre-start compaction. Token authorization and dedup survive /reload; marked unauthorized/expired
 triggers abort before their first provider request (B1); human handover only after proven own-run
 start. Peer-upgrade gates: C-X1…C-X12 with real pi, **plus** the self-gated legacy conformance
 (`PI_TOOLKIT_LEGACY_PI_DIR=… npx vitest run tests/conformance/fabric-xs-legacy.test.ts` against
 unpacked pi 1.0.4 and 1.1.0 — local only, never in CI) — run both before any pi peer bump.
-Mutation fences (compaction/tree/switch/web_exec/topic_switch) reject ALL ingress; goal
-only downgrades wake. A 30s stuck warning never opens a fence; input/run-start is NOT completion
+Mutation fences (compaction/tree/switch/web_exec/topic_switch) reject ALL ingress. Current hosts
+expose no goal fence port; historical `goal` wake-only downgrade tokens remain only in the append-only
+wire vocabulary for old peers. A 30s stuck warning never opens a fence; input/run-start is NOT completion
 evidence (r3 M1); local `/fabric fence reset` is the manual escape. M2 effects: before-send
 cancellation/origin change = `none`; after-send no verdict = `unknown`, received remote evidence
 stays intact. Busy recipient = `unknown/queued` (may be queued, never blindly resend). Defaults
@@ -562,7 +563,7 @@ in wake requests and quiet notices in a later natural turn, asserting exact pros
 of injected sid/xid/messageId/activationKey sentinels. Run alongside C-X1…C-X14, bridge legacy gates,
 stack teardown, nine XsHarness suites, governance/mention and all three untouched off goldens.
 
-Accepted residuals: receiver sample/write re-entry or later human/goal/schedule activity can make idle
+Accepted residuals: receiver sample/write re-entry or later human/schedule activity can make idle
 advice a false positive (non-blocking, “大概率” only). The 2000-message scan or a lost started push may
 leave a **live** mirror on delivered; read-only lookup cannot detect that omission, hence observation
 wording and activation's started no-op. Expiry retains the farthest phase but overrides observation,
@@ -701,7 +702,7 @@ route remains paused; its provenance-unavailable statements do not govern this s
   change: used=0/root=0 and successive real arrivals still open new windows.
 - The budget WeakSet deduplicates the **same event object**, weakly held. A rewrapped event
   is not the same arrival identity; there is no cross-process/external replay proof. Machine
-  RPC, un-attributed extension/topic-switch/goal continuations, child/tool/completion events
+  RPC, un-attributed extension/topic-switch continuations, child/tool/completion events
   and user-role/text wrappers do not reset the budget. The shared legacy classifier is NOT
   changed: RPC continues its old causal-level-only reset, but never opens this budget.
   Web attribution is the existing port, not a new authentication layer.
@@ -744,3 +745,7 @@ opportunities on unknown state, missing confirmations, reload or a busy→idle r
 fail-closed outcomes, not a promise of immediate Root processing. SDK `isIdle` also includes
 manual compaction; this getter pair does not independently distinguish compaction from run
 startup. No new compaction fence or lifecycle observation hook is introduced or certified here.
+
+## Retired objective-loop owner (2026-11-09)
+
+No live goal fence port or root-wake goal policy remains. Historical `goal` fence/downgrade wire tokens and wakeOnly consumer handling remain for old-peer compatibility (append-only wire), not as producers or a hidden objective loop. Session lifecycle reasons are local literal types, independent of the deleted subsystem.

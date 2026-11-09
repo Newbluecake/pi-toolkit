@@ -17,7 +17,7 @@
     ["budget.retrySlackS", "d85674437fb08ea51e803ada9df66dc8cb0edadcd99111cfb9dda739c7219d36"],
     ["budget.totalGraceS", "5c0d54b33b308ac9b8f34f8e90d4f2897ce7864118842894d37125af4ddb1417"],
     ["budget.maxExtensions", "588e38bd631d171404ca3b8ee22c57b4b2fc93b8da5dcd81c378d7b9c4ac8386"],
-    ["budget.maxTotalFactor", "1ea2b065e04c7cabc87dfe2cc1f7179eb5aec3d509357532d2a8b3b1ea19b0fd"],
+    ["budget.maxTotalFactor", "b734ab6e2c7bfa9a1defd52e50a4c0c9a8c79be5fcc2e894594e24f5e9066aab"],
     ["budget.extendStepS", "e8960d01a9b469db8c55f38c738f5a3cbedd5ee22de01d672cb56dc5c32e80f5"],
     ["concurrencyLimit", "9d8edd643ea924b0947890f60132ff3c461bd8de820edb521b5052e4f8cd73ef"],
     ["agent.queueWhenFull", "037d4774cf341a1b50be5a25936a87b8a95c2acfff0b8ac4b904cf8d0d3eba42"],
@@ -249,16 +249,6 @@
     ["fabric.crossSession.alias.autoFromCwd", "df7505be55bc5f56fb23952f4fa61c73d61f17f4ef852e500f9977e885b5316c"],
     ["fabric.crossSession.activation.enabled", "47a31d1a3fef95a9dbd60a5a8c48580ff3c36fac4d628966f2eb9412aec62a75"],
     ["fabric.crossSession.askRedirect.enabled", "5325816dba36a3835a01f010b67b8af3856d8cd25ee9ea5d300107883189ec3c"],
-    ["goal.enabled", "303485501709fe6021f6b7e7cb430a853aee960ce84563096da8033af77e0900"],
-    ["goal.maxTurns", "f7942010579fd27776a0122c4ea1e77108e741ff17de823a68e4ac5fa9936081"],
-    ["goal.maxMinutes", "d96f497eb393ef36b05196803c6a29d9292cd49cf2f339849b1538a6a659b844"],
-    ["goal.budgetTokens", "efa2f10daea477941d82eaefce0f9b30a31709cda928a00905770693a80dd5c0"],
-    ["goal.budgetCostUsd", "8816797aad8e8ae7729d34afbaff3ad16f1098e160edaab33584c4b1b97b0727"],
-    ["goal.verifierType", "860f0e9ab23fc43fb9cc50e60654dd2c6e66b79ed9239d74b33b331681f4b70c"],
-    ["goal.verifierModelHint", "f6ef02f45c51e836c0a2089f14e51459c7afda059444c0b0b7a17c525570957e"],
-    ["goal.evalTimeoutS", "da098defacf95cade3c4a31822a97efd833f4175a8ff757c8cf94625a1701765"],
-    ["goal.untilCmdTimeoutS", "b8575c11a5af0b3312cba6155f45f7258704f18653bcd7f6f11647d57afe512b"],
-    ["goal.deliveryWatchdogS", "27667c3b971a5f4b9c3801aa544b0d732ffb8a47292d7ceba5c792192d1db644"],
     ["quota.enabled", "85c7ae1c22603a9dd6720f8f8930c2c3f4ac692841aa34393437b799d51d0db3"],
     ["quota.providers", "e39ac4713e6a538abcd8d02bf66408fc718fb69f79b54d973fde7050e257ca64"],
     ["quota.subscriptionProviders", "7def79a0b5cab234ba721741a79418a4ba6827e52077357064fa4e1cc457f049"],
@@ -345,5 +335,5 @@
     ["reflex.autoResolve", "fa7252fca5b9d9612274c53c53b4ac0d2b8440a9574f7ddc36a4edb81bd9a726"],
     ["reflex.drafts.enabled", "424d403597834a370e6e25a0f89c9b2409242400cba7fde08de293bb5f820729"]
   ],
-  "all": "910c532259c981748db576539c993349c5d1d58c4ab587bae394463c87665213"
+  "all": "2f73c394a0f9680511365a0cb8cff56c15da58139739e2dd19c839ca6a25de3d"
 }

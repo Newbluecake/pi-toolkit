@@ -16,10 +16,10 @@
         "bash_job",
         "SubagentWorkflow"
       ],
-      "commands": ["cache-ttl", "goal", "agent", "task", "title", "topic-switch"],
+      "commands": ["cache-ttl", "agent", "task", "title", "topic-switch"],
       "handlerCounts": {
-        "agent_end": 4,
-        "agent_settled": 7,
+        "agent_end": 3,
+        "agent_settled": 6,
         "agent_start": 1,
         "before_agent_start": 5,
         "before_provider_request": 1,
@@ -96,10 +96,10 @@
         "bash_job",
         "SubagentWorkflow"
       ],
-      "commands": ["cache-ttl", "goal", "agent", "task", "title", "topic-switch"],
+      "commands": ["cache-ttl", "agent", "task", "title", "topic-switch"],
       "handlerCounts": {
-        "agent_end": 4,
-        "agent_settled": 7,
+        "agent_end": 3,
+        "agent_settled": 6,
         "agent_start": 1,
         "before_agent_start": 5,
         "before_provider_request": 1,
@@ -176,10 +176,10 @@
         "bash_job",
         "SubagentWorkflow"
       ],
-      "commands": ["secure", "cache-ttl", "goal", "agent", "task", "title", "topic-switch"],
+      "commands": ["secure", "cache-ttl", "agent", "task", "title", "topic-switch"],
       "handlerCounts": {
-        "agent_end": 4,
-        "agent_settled": 7,
+        "agent_end": 3,
+        "agent_settled": 6,
         "agent_start": 1,
         "before_agent_start": 5,
         "before_provider_request": 1,

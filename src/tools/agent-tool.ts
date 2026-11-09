@@ -201,7 +201,7 @@ const leadingFields = {
         "earlier, and each extension adds at most budget.extendStepS (default 3600s). With extensions " +
         "disabled (extend.enabled=false) the timeout is a hard cap and the run stops right at it. Inside a subagent " +
         "the grace window is silent: nobody is notified and there is no extension tool there. Runs the system starts " +
-        "with a fixed deadline (/goal verifier, RPC, workflow children) are not affected. To stop a run right " +
+        "with a fixed deadline (RPC, workflow children) are not affected. To stop a run right " +
         "at its deadline, abort_subagent it when the grace notice arrives.",
     }),
   ),
@@ -264,7 +264,7 @@ const topTimeoutDescription =
   "(default 3600s). An earlier absolute deadline still wins. With extensions disabled (extend.enabled=false) the timeout is a hard cap " +
   "at effective T. Phase watchdogs, abort and parent lifecycle may stop it sooner: this is not a guaranteed lifetime. " +
   "Inside a subagent the grace window is silent and there is no extension tool there. Runs the system starts with a fixed deadline " +
-  "(/goal verifier, RPC, workflow children) and /task are outside this Agent-tool floor. A fixed-policy resume still has no grace. " +
+  "(RPC, workflow children) and /task are outside this Agent-tool floor. A fixed-policy resume still has no grace. " +
   "Use extend_subagent_timeout on a grace notice, or abort_subagent to stop immediately.";
 export const AgentToolParams = Type.Object({
   ...leadingFields,

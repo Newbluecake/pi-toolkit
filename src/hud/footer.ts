@@ -1,7 +1,7 @@
 /**
  * pi-hud 移植：footer 安装与全部 render* 函数（TUI 重代码，真机验证不测单测）。
  * 通过 ctx.ui.setFooter 整体替换 pi 内置 footer；footerData.getExtensionStatuses()
- * 聚合渲染其他扩展 status（cache-ttl / goal / feishu-notify 的状态行继续可见）。
+ * 聚合渲染其他扩展 status（cache-ttl / feishu-notify 的状态行继续可见）。
  */
 import { resolve, sep } from "node:path";
 import { performance } from "node:perf_hooks";

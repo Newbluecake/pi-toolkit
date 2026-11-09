@@ -154,9 +154,6 @@ import {
 import { FleetWidgetController } from "./ui/fleet-widget.js";
 import { ArchiveControl } from "./archive/control.js";
 import { TODO_WIDGET_MOUNTED_EVENT } from "./ui/widget-mount-events.js";
-import type { GoalSession, GoalSessionStartReason } from "./goal/state.js";
-import { readBackGoalRecord } from "./goal/store.js";
-import { buildResumeHintText, goalBadgeText } from "./goal/texts.js";
 import { createWorkflowActivityRegistry, type WorkflowActivityRegistry } from "./workflow/activity.js";
 import { createWorkerHost } from "./workflow/lifecycle.js";
 import { createOrchestrator, type Orchestrator } from "./workflow/orchestrator.js";
@@ -365,8 +362,6 @@ export interface Stack {
   loadTransition?(): { gateCleared: boolean; provenRecovered: boolean; escalatedTo?: "warn" | "crit" } | undefined;
   refreshLoadStatus(): void;
   loadHintState?: LoadHintState;
-  /** /goal 目标驱动持续运行的 session 级运行态（goal-plan v4）。无持久 timer，纯数据。 */
-  goal: GoalSession;
   /**
    * workflow-worktree plan D13 (v2.1 condition 2, frozen interface §4): tears down THIS
    * stack's spawn-service worktree waiters/timers and the runtime-adapter's live write-back
@@ -420,7 +415,7 @@ export interface Stack {
 }
 
 /**
- * quota-plan §4.1：HUD status key `"quota"`（与 `cache-ttl`/`goal` 并列分槽，
+ * quota-plan §4.1：HUD status key `"quota"`（与 `cache-ttl` 并列分槽，
  * integration-map §8）。逐字照抄 cache-keepalive 的 safeSetStatus：try/catch +
  * `ctx.ui.setStatus` 双探测——陈旧 ctx / print 模式下静默（R8）。
  */
@@ -559,8 +554,8 @@ export function buildSessionStack(
   settings: AgentSettings,
   types: AgentTypeRegistry,
   mergedExtensions: readonly SubagentExtensionPoints[],
-  /** /goal 读回口径（v4 条件 8）需要 session_start 的 reason；默认 "reload"（静默读回）。 */
-  sessionReason: GoalSessionStartReason = "reload",
+  /** Session lifecycle reason for cross-session membership inheritance. */
+  sessionReason: "new" | "resume" | "fork" | "reload" | "startup" = "reload",
   loadHintState?: LoadHintState,
   externalInput?: StackExternalInput,
   xsInput: StackXsInput = {},
@@ -2187,28 +2182,8 @@ export function buildSessionStack(
     widgetRef.current = widget;
     parts.fleetWidget = widget;
   }
-  // /goal：session 级运行态重建（goal-plan v4 条件 8）。读回走 getBranch()
-  // （MAJ-5：防 fork 废弃分支复活 goal）；读回到的 active 一律已降级 paused
-  // （条件 2，store 层完成）。readBack 不可用时仅内存态（G5a 同款降级）。
-  const goalBranch = readBack
-    ? ((ctx.sessionManager as { getBranch?: () => readonly unknown[] }).getBranch?.() ?? [])
-    : [];
-  const rehydratedGoal = readBackGoalRecord(goalBranch, sessionReason);
-  const goal: GoalSession = { settings: settings.goal, record: rehydratedGoal.record };
-  if (rehydratedGoal.record) {
-    try {
-      if (typeof ctx.ui?.setStatus === "function") ctx.ui.setStatus("goal", goalBadgeText(rehydratedGoal.record));
-    } catch {
-      // 徽标 best effort
-    }
-    if (rehydratedGoal.notify && ctx.hasUI) {
-      try {
-        ctx.ui.notify(buildResumeHintText(rehydratedGoal.record), "info");
-      } catch {
-        // best effort
-      }
-    }
-  }
+  // Retired custom entries (including subagent:goal) have no reader here: never
+  // rehydrate, validate or access their data; each live subsystem folds only its own entries.
   const schedule = scheduleWiring?.createAgent({ ctx });
   // scheduled-reports I1: the `message` (A2) and `background` (A1) executors, BEFORE `schedule.start()` (index.ts).
   const scheduleBackground =
@@ -2483,7 +2458,6 @@ export function buildSessionStack(
     ...(scheduleBackground !== undefined ? { scheduleBackground } : {}),
     rpc,
     workflow,
-    goal,
     worktreeLate,
     worktreeOrphans,
     worktreeOrphansStartup,

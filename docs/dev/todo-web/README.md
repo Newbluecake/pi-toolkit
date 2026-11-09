@@ -60,16 +60,20 @@ counting口径: E1 「N 条后台完成通知」（子 agent/workflow/bash job�
 依赖已完成的 `in_progress`，metadata 仅可收窄而非授权；每窗口最多 2 次、全 session 同组合只试一次，
 seen 达 256 闭锁；Stop 仅由新的合格真人到达解除；先记账再发送，unknown 不退款。runner 有 15 分钟
 期限和 10 秒宽限；空闲门要求 SDK idle/无 pending，query、workflow、jobs、notifier、web、两种 schedule、
-otherRoot 和 goal 全 clear，缺失/未知闭锁。
+otherRoot 全 clear，缺失/未知闭锁。
 
 **未接生产**：`wireTodo` 不注册 recovery Host；生产缺真实 `AgentSession.subscribe` 时 runner 为
 `effective-off`，extension 的 `agent_settled` hook 本身不得排恢复。可信 arrival producer 和生产忙态口
 也未接入。独立单元测试不是生产启用证明。
 
 **尚未验证**：真实时钟下期限、跨 reload 账本语义（replay 只恢复账本，不恢复 live window）、与 #61
-fabric 唤醒、`/goal`、schedule 的真实拓扑互斥；异步 hook / deferred 输入 / reload 组合的 conformance
+fabric 唤醒、schedule 的真实拓扑互斥；异步 hook / deferred 输入 / reload 组合的 conformance
 已知不支持。历史设计及裁定见 `../todo-idle-recovery/plan.md`，其旧阶段计划不代表当前实现状态。
 
 **Nudge backoff default**: `todo.nudge.cooldownTurns` defaults to 3 silent turns; consecutive
 no-touch nudges use 3 / 6 / 12 / 12 silent turns (cap = 4 × base). The next turn after
 the silent interval is eligible to fire, so persistent candidates fire 4 / 7 / 13 turns apart.
+
+## Objective-loop removal (2026-11-09)
+
+Idle recovery no longer lists or probes a goal owner. The remaining busy sources still fail closed on unknown. Generic unknown-source tests now use `otherRoot`; production recovery remains effective-off as above.

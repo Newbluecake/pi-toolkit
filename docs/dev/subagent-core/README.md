@@ -17,7 +17,7 @@
   policy. Type/request floor overrides cannot lower the host floor. Invalid negative/nonfinite floors are
   discarded by `mergeBudget`; `0` disables the floor and huge finite spans are clamped. Generic `mergeBudget`
   does **not** floor total: unmarked programmatic producers (`/task`, RPC, fabric wake, workflow children,
-  goal verifier, schedule) remain unchanged even with extendable policy or pool/load rejection flags.
+  schedule) remain unchanged even with extendable policy or pool/load rejection flags.
 - Explicit `timeout_s: 1` and `1799` are intentionally raised by the default floor, not just omitted values.
   A fixed-policy resume also gets the floor but **keeps fixed policy** (no grace/extension). Phase watchdogs,
   earlier absolute deadlines, abort and parent lifecycle remain authoritative: the floor is **not a promise
@@ -151,7 +151,7 @@ spawn admission resolves it once (`req.timeoutPolicy` ?? resume-inherited ?? sha
 `budgetOverride.totalMs`), applies it via `applyBudgetPolicy({ fixedDeadline })`, and the resolved value lands
 in `diag.timeoutPolicy`, persisted through terminal entries, the non-terminal journal, tombstones and
 terminal rebuilds, and inherited by resumes (R-inherit). Program-derived runs (workflow children,
-`/goal` verifier, tidy, RPC) stay fixed-deadline. **Known accepted trade-off**: a nested extendable run's
+tidy, RPC) stay fixed-deadline. **Known accepted trade-off**: a nested extendable run's
 grace window notifies nobody (CC2 suppression) and child sessions have no `extend_subagent_timeout` —
 it silently lives up to `min(G,(f−1)·T)` past its deadline while the parent turn keeps waiting; the main
 session can still extend it by run id.
@@ -202,8 +202,9 @@ schedule at all). Rules that are easy to break:
   `compact-hint/register.ts`) stay separate `session_shutdown` handlers: their registration order relative to the other plugins'
   handlers is pinned by the activation-trace golden and the matrix test's handler counts;
 - the gaps found in 7-1 were fixed one per commit in 7b (`docs/dev/source-governance/batch2-step7-report.md` §7b); the matrix test
-  `tests/integration/stack-teardown-matrix.test.ts` pins each fix. Path C now also disposes: `external` (G7), the `/goal` hook
-  timers (G9, activate-level), the usage broadcaster (G1, after drain/seal), the coalescer/ack-hold windows by **discard, not
+  `tests/integration/stack-teardown-matrix.test.ts` pins the remaining fixes. Historically, path C also disposed the `/goal`
+  hook timers (G9, activate-level); that step and its dedicated regression were removed with the feature. Path C now also
+  disposes: `external` (G7), the usage broadcaster (G1, after drain/seal), the coalescer/ack-hold windows by **discard, not
   flush** (G2/G3 — the persisted `batched` outbox records are redelivered by the next stack's `reconcile`), the notifier retry
   timers (G10, after drain/seal so shutdown-time notices still reach the closing session) and the bash job manager (G4,
   timers only — the `parts.bashJobs` slot stays, path A still needs it as `prevBashJobs`); the child-switch `onDisabled`
@@ -425,3 +426,7 @@ P4c 续包实际 SDK 反例：`SessionManager.newSession()` 可让同一个实�
 而 Runner state 的已捕获 sid 尚未变化。`PiSessionHandle.getBranchEntries()` 因此同时保留构造时原 manager，
 在 branch read 前后核验 SDK 的实际 manager/sid；变化抛错，由 peek/capture 拒绝，不能把新空 branch
 当成旧 parent 的 empty seed。实际 Stack admission 测试已钉住这一负例；未改 SDK 或取消/预算语义。
+
+## `/goal` removal (2026-11-09)
+
+The objective loop, settings, hook teardown and Stack member are removed. Unknown custom session entries (including `subagent:goal`) are ignored: no payload read, migration, status badge or continuation. Regression: `tests/integration/retired-goal-entries.test.ts`. Three off goldens have a user-approved declared removal of the command and two hooks; all other frozen surfaces remain untouched. The nested Agent parameter description removes only the retired verifier example in the same approved declaration. The budget-factor setting description also drops that retired example in the approved single-key pin update; all other setting-spec hashes are unchanged.

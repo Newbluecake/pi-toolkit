@@ -595,7 +595,7 @@ async function confirmLatestCompletion(host: ActivateHost): Promise<void> {
   await host.emit("message_start", {
     message: { role: "custom", customType: last.message.customType, content: last.message.content },
   });
-  // goal/hook.ts's agent_end handler iterates event.messages — carry an empty list.
+  // Carry the SDK agent_end message payload.
   await host.emit("agent_end", { messages: [] });
   await host.emit("agent_settled", {});
 }

@@ -35,7 +35,6 @@ interface StackOptions {
   capability?: "unknown" | "observed" | "absent";
   hostIdle?: boolean; // default true
   hostFlipsOnTrigger?: boolean; // Fpi2 simulation (default true)
-  goalFence?: boolean; // goal port active
   wakeQuotaSpent?: number; // pre-charged wakesInPerHour
 }
 
@@ -83,7 +82,6 @@ function buildStack(options: StackOptions = {}): Stack {
 
   const fence = createSessionFence({
     clock,
-    ...(options.goalFence ? { ports: { goal: () => true } } : {}),
   });
   const inbox = new XsInbox(12, clock);
   const dedup = new XsDedup(256, clock);
@@ -129,7 +127,6 @@ function buildStack(options: StackOptions = {}): Stack {
       receive: () => membership.receive,
       host: hostCtl,
       guard: () => undefined,
-      goalRunning: () => false,
       inboundWakeAvailable: () => wakeCharges < 12,
       chargeInboundWake: () => {
         wakeCharges++;
@@ -277,16 +274,6 @@ describe("xs truth table §4.5 (row by row)", () => {
     });
   });
 
-  it("row 8b: goal fence active ⇒ wake-only downgrade 'goal', delivery itself unaffected", () => {
-    const s = buildStack({ capability: "observed", goalFence: true });
-    expect(s.receiver.deliver(s.input({ wake: true }))).toEqual({
-      effect: "applied",
-      woke: false,
-      wakeDowngraded: "goal",
-    });
-    expect(s.receiver.deliver(s.input())).toEqual({ effect: "applied", woke: false }); // plain delivery passes
-  });
-
   it("row 8c: hop beyond maxLevel ⇒ deliver-only level_limit", () => {
     const s = buildStack({ capability: "observed" });
     expect(s.receiver.deliver(s.input({ wake: true, level: 2 }))).toEqual({
@@ -334,7 +321,6 @@ describe("xs truth table §4.5 (row by row)", () => {
       [{ capability: "absent" }, true],
       [{ capability: "observed", receive: "deliver" }, true],
       [{ capability: "observed", hostIdle: false }, true],
-      [{ capability: "observed", goalFence: true }, true],
       [{ capability: "observed" }, true], // level_limit below
       [{ capability: "observed", wakeQuotaSpent: 12 }, true],
     ];
@@ -398,7 +384,6 @@ const replyRows: ReplyTruthRow[] = [
     [
       ["busy", { hostIdle: false }, "busy"],
       ["host", { capability: "absent" }, "host_unsupported"],
-      ["goal", { goalFence: true }, "goal"],
       ["quota", { wakeQuotaSpent: 12 }, "inbound_wake_rate"],
     ] as const
   ).map(([name, options, reason]): ReplyTruthRow => ({

@@ -132,6 +132,20 @@ describe("CommandConfirm.vue (2026-10-20 redesign)", () => {
     expect(w2.find(".command-confirm-desc").text()).toBe(MESSAGES.en.control!["cmdDesc.generic"]);
   });
 
+  it.each(["en", "zh"] as const)("retired goal command uses a readable generic fallback in %s", (lang) => {
+    setLangOverride(lang);
+    const historicalCommand = { name: "goal", args: "status" };
+    const w = mountConfirm(historicalCommand);
+    expect(MESSAGES[lang].control!["cmdDesc.goal"]).toBeUndefined();
+    expect(w.find(".command-confirm-code").text()).toBe("/goal status");
+    const description = w.find(".command-confirm-desc").text();
+    expect(description).toBe(MESSAGES[lang].control!["cmdDesc.generic"]);
+    expect(description.trim().length).toBeGreaterThan(0);
+    expect(w.text()).not.toContain("undefined");
+    expect(w.text()).not.toContain("control.cmdDesc.goal");
+    expect(w.find(".command-confirm-run").exists()).toBe(true);
+  });
+
   it("zh rendering: title 执行 /cmd？ + per-command zh description", () => {
     setLangOverride("zh");
     const w = mountConfirm({ name: "new", args: "" });

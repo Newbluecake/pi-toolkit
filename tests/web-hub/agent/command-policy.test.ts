@@ -166,15 +166,6 @@ describe("resolveCommandPolicy — pi-toolkit sub-command table (§4.6 pi-toolki
     expect(resolve("tasklist", "clear", "extension").policy).toBe("confirm");
   });
 
-  it("/goal: no-args/status allow, everything else (pause/resume/clear/free-text objective) confirms", () => {
-    expect(resolve("goal", "", "extension").policy).toBe("allow");
-    expect(resolve("goal", "status", "extension").policy).toBe("allow");
-    expect(resolve("goal", "pause", "extension").policy).toBe("confirm");
-    expect(resolve("goal", "resume", "extension").policy).toBe("confirm");
-    expect(resolve("goal", "clear", "extension").policy).toBe("confirm");
-    expect(resolve("goal", "ship the thing", "extension").policy).toBe("confirm");
-  });
-
   it("/task, /watch, /feishu-test always confirm; /pi-hud-refresh always allows", () => {
     expect(resolve("task", "do it", "extension").policy).toBe("confirm");
     expect(resolve("watch", "", "extension").policy).toBe("confirm");

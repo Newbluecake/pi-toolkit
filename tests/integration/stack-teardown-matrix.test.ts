@@ -20,7 +20,6 @@ import { BASELINE, emitAll, fakeCtx, fakePi, resetGlobals, sandbox, type FakePi 
 import { resetSecureDomainForTests } from "../../src/secure/domain.js";
 import { getXsWakeLedger } from "../../src/fabric/xs/wake-ledger.js";
 import { logMethod, trackTimers } from "./helpers/teardown-probe.js";
-import { createGoalRecord } from "../../src/goal/state.js";
 import { getChildSwitchCapability, resetChildSwitchCapabilityForTests } from "../../src/context-switch/capability.js";
 
 const probe = {
@@ -246,7 +245,7 @@ afterEach(async () => {
 interface Act {
   h: FakePi;
   sid: string;
-  /** Texts the activation sent through `pi.sendUserMessage` (the /goal loop's only outward channel). */
+  /** Texts the activation sent through `pi.sendUserMessage` (the activation's user-message channel). */
   userMessages: string[];
   /** Set once a session_shutdown has been fired on it (afterEach quits every activation that never saw one). */
   shutDown?: true;
@@ -789,31 +788,6 @@ describe("teardown matrix: residual timers and the gaps they prove (after a /rel
     const redelivered = b.h.sent.filter((m) => m.message?.customType === "subagent:notification");
     expect(redelivered.length).toBe(1);
     expect(JSON.stringify(redelivered[0])).toContain("r_n");
-  }, 60_000);
-
-  it("G9 FIXED: the /goal delivery watchdog is cancelled at shutdown and no longer talks through the OLD pi", async () => {
-    const a = await boot();
-    await fire(a, "session_start", "startup");
-    const goal = probe.stacks[0].goal;
-    goal.record = createGoalRecord({
-      objective: "x",
-      maxTurns: 20,
-      maxMinutes: 0,
-      budgetTokens: 0,
-      budgetCostUsd: 0,
-      now: Date.now(),
-    });
-    const tui = fakeCtx(box.home, { sid: a.sid, mode: "tui" }).ctx;
-    await emitAll(a.h, "agent_settled", { type: "agent_settled" }, tui);
-    await tick();
-    await tick();
-    expect(a.userMessages.length).toBe(1); // the continuation
-    expect(timers.outstanding().map((o) => o.site)).toContain("src/goal/hook.ts");
-    await fire(a, "session_shutdown", "reload");
-    // 7b G9: the activation teardown cancels it (before: still pending, retry at 30 s + brake report at 60 s on the old pi)
-    expect(timers.outstanding().map((o) => o.site)).not.toContain("src/goal/hook.ts");
-    await vi.advanceTimersByTimeAsync(120_000);
-    expect(a.userMessages.length).toBe(1);
   }, 60_000);
 
   it("GAP-G12 CLOSED: wake-service timers are cleared by fabric.dispose (mailbox.dispose → inbox.dispose), nothing outlives shutdown", async () => {

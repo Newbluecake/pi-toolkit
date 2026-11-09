@@ -7,7 +7,7 @@ afterEach(async () => {
 }, 20_000);
 
 describe("XW real hub child × two activate-built stacks × real sockets", () => {
-  it("join/list, deliver-only evidence, N1 then applied wake, reply, busy queued, goal downgrade and mutation fences", async () => {
+  it("join/list, deliver-only evidence, N1 then applied wake, reply, busy queued and mutation fences", async () => {
     h = new XsHarness();
     const { a, b, aid, bid } = await joinedPair(h);
     expect((await list(a)).rows).toEqual([expect.objectContaining({ ref: bid.slice(0, 12), receive: "wake" })]);
@@ -58,13 +58,6 @@ describe("XW real hub child × two activate-built stacks × real sockets", () =>
     });
     expect((await b.rpc("inspect")).queued).toBe(1);
     await b.rpc("settle");
-    await b.rpc("cmd", { name: "goal", args: "do work --until-cmd true" });
-    await freshSender();
-    expect(await send(a, bid, "goal deliver without wake", true)).toMatchObject({
-      effect: "applied",
-      wakeDowngraded: "goal",
-    });
-    await b.rpc("cmd", { name: "goal", args: "clear" });
     await b.rpc("event", { type: "session_before_compact" });
     await freshSender();
     const before = (await b.rpc("inspect")).messages.length;

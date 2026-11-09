@@ -136,7 +136,6 @@ const control = {
   "cmdDesc.cache-ttl": "修改缓存 TTL / 保活设置。",
   "cmdDesc.mem": "修改项目记忆。",
   "cmdDesc.webhub": "管理 Web Hub。",
-  "cmdDesc.goal": "修改目标循环。",
   "cmdDesc.topic-switch": "修改新话题切换的设置或状态。",
   "cmdDesc.watch": "切换任务完成时的飞书通知。",
   "cmdDesc.task": "派发一个后台子 agent 执行任务。",

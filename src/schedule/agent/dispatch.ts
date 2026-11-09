@@ -712,7 +712,7 @@ export function createMessageScheduler(deps: MessageSchedulerDeps): MessageSched
     if (deps.rootWakeBusy?.() === true || deps.xsWakeOwned?.() === true) return "wait";
     if (uiOpenCount() > 0) return "wait";
     if (uiLastEndAt !== undefined && clock.now() - uiLastEndAt < UI_END_SETTLE_MS) return "wait";
-    if (!fence.check().ok) return "wait"; // goal downgrades to wait too — never a rejection
+    if (!fence.check().ok) return "wait";
     return "ok";
   }
 
@@ -1059,12 +1059,11 @@ export function createMessageScheduler(deps: MessageSchedulerDeps): MessageSched
 
   /**
    * I1 review r1 #2: has the session moved (or is a mutation window open) under a flight that has not made its first
-   * model call? Our OWN compaction while it is still running is the only tolerated open window; `goal` only downgrades
-   * waking and never counts. A compaction we did not trigger (or one that ended while another window opened) blocks.
+   * model call? Our OWN compaction while it is still running is the only tolerated open window. A compaction we did not trigger (or one that ended while another window opened) blocks.
    */
   function sessionMovedUnder(f: Flight): boolean {
     if (fence.generation() !== f.gen) return true;
-    const open = fence.status().open.filter((n) => n !== "goal");
+    const open = fence.status().open;
     if (open.length === 0) return false;
     return !(f.compacting === true && open.every((n) => n === "compaction"));
   }

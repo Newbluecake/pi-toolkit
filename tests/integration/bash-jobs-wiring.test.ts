@@ -1118,7 +1118,6 @@ describe("L1 todo #20: host-view capability declaration lifecycle across stack r
 describe("G4: bash job manager disposal at shutdown", () => {
   const stubActivation = {
     defensiveXsTeardown: () => undefined,
-    disposeGoalHook: () => undefined,
     releaseCapabilityAlert: () => undefined,
     scheduleSurfaceShutdown: () => undefined,
     sealChildBashJobs: async () => undefined,

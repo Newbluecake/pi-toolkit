@@ -63,6 +63,15 @@ describe("TxCommand.vue", () => {
     expect(w.find("button.btn-icon").exists()).toBe(true); // CopyButton
   });
 
+  it("historical goal command remains readable without a command-specific description", () => {
+    const w = mountCard(view({ name: "goal", args: "status", output: undefined, notice: "no-output" }));
+    expect(w.find(".cmd-invocation").text()).toBe("/goal status");
+    expect(w.find(".cmd-state").text()).toContain("done");
+    expect(w.find(".cmd-card-body").text().trim().length).toBeGreaterThan(0);
+    expect(w.text()).not.toContain("undefined");
+    expect(w.text()).not.toContain("cmdDesc.goal");
+  });
+
   it("zh locale: 「命令」/「不进上下文」/ feishu source chip「飞书」", () => {
     setLangOverride("zh");
     const w = mountCard(view({ source: "feishu", output: { entries: [] }, notice: "no-output" }));

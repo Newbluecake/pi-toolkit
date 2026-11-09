@@ -196,7 +196,7 @@ describe("wireWebHub — cmd round trip over the socket (§4.1/§4.2)", () => {
     // …and stays attributable after the hub's own input observer advanced the entry (handler order is unspecified)
     fire("input", { type: "input", text: "from the browser", source: "extension" }, ctx);
     expect(control.attributeInput("from the browser")).toBe("web_prompt");
-    // extension text the ledger never dispatched (topic-switch re-injection, goal loop, /agent reload fire) is not
+    // extension text the ledger never dispatched (topic-switch re-injection, machine continuation, /agent reload fire) is not
     expect(control.attributeInput("/agent reload fire")).toBeUndefined();
     expect(control.attributeInput("topic switch reinjection")).toBeUndefined();
   });

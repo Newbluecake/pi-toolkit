@@ -139,7 +139,6 @@ const SETTINGS = (over: { webCommandPolicy?: Record<string, string> } = {}) => (
   todo: { enabled: false },
   askUser: { enabled: false },
   quota: { enabled: false },
-  goal: { enabled: false },
   cacheTtl: { mode: "off" },
   fleetWidget: false,
 });

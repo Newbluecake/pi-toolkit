@@ -101,7 +101,7 @@ function harness(
       quota: () => undefined,
       git: (() => Promise.resolve({ code: gitMode.code, stdout: "", stderr: "", killed: false })) as never,
     },
-    fences: { topicSwitchActive: () => false, goalBusy: () => false },
+    fences: { topicSwitchActive: () => false },
     clock,
     monoNow: () => (mono += 5),
     ...(opts.draftsDir !== undefined ? { draftsDir: opts.draftsDir } : {}),

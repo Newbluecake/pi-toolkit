@@ -132,7 +132,7 @@ export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
  * Timeout-policy 分类的取值（agent-explicit-timeout-extend plan §2.2）。
  * - "fixed": 硬顶 —— 不宽限、不延长（applyBudgetPolicy 钳 maxTotalFactor = 1，⇒ H === D0）。
  * - "extendable": 复用默认预算旋钮（totalGraceMs / maxExtensions / maxTotalFactor）宽限与延长。
- * 缺省语义 = "fixed"（fail-safe + 兼容：workflow 子 run / consult / goal / tidy / RPC 全部程序派生显式预算保持硬顶）。
+ * 缺省语义 = "fixed"（fail-safe + 兼容：workflow 子 run / consult / tidy / RPC 全部程序派生显式预算保持硬顶）。
  */
 export type TimeoutPolicy = "fixed" | "extendable";
 
@@ -326,7 +326,7 @@ export interface SpawnRequest {
    * detaches the external listener so an abort of the caller's turn (Esc /
    * compact_context / compact-hint forced compaction) no longer cancels
    * this run. Only for fire-and-forget background spawns — blocking
-   * spawnAndWait callers (nested Agent, workflow, /goal verifier) keep
+   * spawnAndWait callers (nested Agent, workflow) keep
    * full-turn linkage on purpose (Esc killing a run the turn is blocked
    * on is a feature). Cancellation paths that go through
    * activeCancels (abort_subagent, watchdog timeout, ...) are unaffected

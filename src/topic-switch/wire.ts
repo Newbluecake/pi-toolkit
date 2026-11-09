@@ -71,7 +71,7 @@ export interface TopicSwitchDeps {
   settings(): TopicSwitchSettings;
   titleModel: string;
   warmth: CacheWarmthPort;
-  stack(): { activeRuns(): number; backgroundBash(): number; goalBusy(): boolean } | undefined;
+  stack(): { activeRuns(): number; backgroundBash(): number } | undefined;
   remote(): AskUserRemotePort | undefined;
   clock?: Clock;
 }
@@ -616,7 +616,6 @@ export function wireTopicSwitch(pi: ExtensionAPI, deps: TopicSwitchDeps): TopicS
     | "cooldownActive"
     | "activeRuns"
     | "backgroundBash"
-    | "goalBusy"
     | "branch"
     | "warmth"
     | "prefixTokens"
@@ -633,7 +632,6 @@ export function wireTopicSwitch(pi: ExtensionAPI, deps: TopicSwitchDeps): TopicS
       ),
       activeRuns: safeOr(() => stackView?.activeRuns() ?? 0, 0),
       backgroundBash: safeOr(() => stackView?.backgroundBash() ?? 0, 0),
-      goalBusy: safeOr(() => stackView?.goalBusy() ?? false, false),
       branch: () => buildBranchView(branch),
       warmth: () =>
         deps.warmth.assess(ctx, Date.now(), {

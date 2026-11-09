@@ -17,7 +17,6 @@ export const RECOVERY_BUSY_SOURCES = [
   "scheduleMemory",
   "schedulePersistent",
   "otherRoot",
-  "goal",
 ] as const;
 export type RecoveryBusySource = (typeof RECOVERY_BUSY_SOURCES)[number];
 export interface RecoveryIdentity {
@@ -74,14 +73,6 @@ function tri(value: unknown): RecoveryBusy {
 }
 export function combineRecoveryBusy(values: readonly RecoveryBusy[]): RecoveryBusy {
   return values.includes("busy") ? "busy" : values.includes("unknown") ? "unknown" : "clear";
-}
-/** Missing/uninitialized goal is NOT proof of absence; paused goals still own root. */
-export function recoveryGoalBusy(
-  value: { initialized: boolean; evaluating: boolean; state: string | null } | undefined,
-): RecoveryBusy {
-  if (!value || value.initialized !== true || typeof value.evaluating !== "boolean") return "unknown";
-  if (value.evaluating || value.state === "active" || value.state === "paused") return "busy";
-  return value.state === null || value.state === "completed" || value.state === "aborted" ? "clear" : "unknown";
 }
 /** Caller folds actual persistent runs/notes/reports/digest into pending. A future schedule
  * alone is clear; degraded/uninitialized/unknown storage is never guessed empty.

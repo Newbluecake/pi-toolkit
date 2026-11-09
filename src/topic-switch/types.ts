@@ -66,7 +66,6 @@ export type SkipReason =
   | "draining"
   | "cooldown"
   | "background"
-  | "goal"
   | "todo"
   | "source"
   | "prefix"
@@ -93,7 +92,6 @@ export interface GateFacts {
   cooldownActive: boolean;
   activeRuns: number;
   backgroundBash: number;
-  goalBusy: boolean;
   origin: "input" | "web";
   source: InputSourceLike;
   text: string;
