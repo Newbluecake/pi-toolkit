@@ -376,6 +376,93 @@ export interface ClassifierRegistryLike {
   }>;
 }
 
+// ───────────────────────────── P50 controlled classify (opt-in only) ─────────────────────────────
+
+export type ClassifyResult = Awaited<ReturnType<NonNullable<ClassifierRegistryLike["classify"]>>>;
+export type ClassifyContext = { state: JsonObject; questions: Record<string, JevQuestion> };
+
+/** Actual successful identity. Unknown/unverified routes are diagnostic only,
+ * NEVER independent-source evidence. Digests are SHA-256 of canonical JSON. */
+export interface ClientProvenance {
+  readonly provider: string;
+  readonly model: string;
+  readonly adapterId: string;
+  readonly chainVersion: string;
+  readonly routeIdentity: string;
+  readonly routeAliases: readonly string[];
+  readonly requestChainId: string;
+  readonly requestDigest: string;
+  readonly inputDigest: string;
+  readonly trusted: boolean;
+}
+
+export interface CanonicalClassifyRoute {
+  readonly provider: string;
+  readonly model: string;
+  /** Canonical route digest, not the requested chain id. */
+  readonly routeIdentity: string;
+  /** Complete canonical alias set, including the requested and returned ids. */
+  readonly routeAliases: readonly string[];
+}
+
+export interface ClassifyBounds {
+  /** Verified bound including provider formatting/prompt overhead, not bytes/4. */
+  readonly maxInputTokens: number;
+  readonly maxOutputTokens: number;
+  readonly priceUsdPerMillion: { readonly input: number; readonly output: number };
+}
+
+/** Trusted host seam, NOT implemented by the stock pi 1.5 classify API.
+ * prepare is synchronous/pure, binds the exact frozen DTO, and returns undefined
+ * unless input AND executable provider output limits and prices are known.
+ * dispatch must issue exactly ONE provider call (no hidden retries), enforce
+ * both bounds at transport level, and return the original provider promise and
+ * actual identity/usage, including late/errored responses. Abort is advisory.
+ * A provider ignoring bounds can still overbill: client records all actual cost.
+ * resolveRoute must use canonical registry/adapter evidence, never simply copy
+ * result.provider/model or split the requested id. Missing proof => untrusted.
+ * No default implementation: passing an arbitrary maxTokens option to the SDK
+ * is NOT proof that the provider enforces it. */
+export interface ControlledClassifyTransport {
+  prepare(input: {
+    readonly registry: ClassifierRegistryLike;
+    readonly model: object;
+    readonly requestChainId: string;
+    readonly context: ClassifyContext;
+    readonly requestDigest: string;
+  }):
+    | {
+        readonly adapterId: string;
+        readonly chainVersion: string;
+        readonly bounds: ClassifyBounds;
+        dispatch(opts: { readonly signal: AbortSignal; readonly fetch?: FetchLike }): Promise<ClassifyResult>;
+        resolveRoute(result: ClassifyResult): CanonicalClassifyRoute | undefined;
+      }
+    | undefined;
+}
+
+/** Closure-owned identity token; forged/copied tokens are not accepted. These
+ * helpers are shared by ask and the future in-client generate implementation;
+ * callers cannot dispatch a provider with a reservation outside this kernel. */
+export interface ClientAttemptReservation {
+  readonly id: string;
+  readonly jobId?: string;
+  readonly maxProviderCalls: number;
+  readonly reservedCostUsd: number;
+}
+export interface ClientAttemptBudgetInput {
+  readonly mode: "sync" | "background";
+  readonly jobId?: string;
+  readonly jobCostCapUsd?: number;
+  readonly maxProviderCalls: number;
+  readonly worstCostUsd: number;
+}
+
+export interface ClientAnswerProvenance {
+  readonly questionIds: readonly string[];
+  readonly provenance: ClientProvenance;
+}
+
 // ───────────────────────────── client / status (jev-arch §5.1–§5.3) ─────────────────────────────
 
 export type JevDuty = "probe" | "recall" | "error" | "tag" | "tag-major" | "review";
@@ -389,6 +476,9 @@ export interface JevRequest {
   /** sync: ≤3 batches in flight · background: ≤4, aborted on session_shutdown. */
   readonly mode: "sync" | "background";
   readonly signal?: AbortSignal;
+  /** P50 only; absent job cap is the client cap. A named job requires a cap. */
+  readonly jobId?: string;
+  readonly jobCostCapUsd?: number;
 }
 
 export type JevOutcome =
@@ -399,6 +489,9 @@ export type JevOutcome =
       readonly missing: readonly string[];
       readonly costUsd: number;
       readonly latencyMs: number;
+      /** P50 only. Split answers retain per-dispatch evidence; never flatten. */
+      readonly sources?: readonly ClientAnswerProvenance[];
+      readonly provenance?: ClientProvenance;
     }
   | {
       readonly ok: false;
@@ -409,6 +502,20 @@ export type JevOutcome =
 export interface JevUsage {
   readonly costUsd: number;
   readonly calls: number;
+  /** P50 only; absent off, so legacy reports remain byte-identical. */
+  readonly budget?: {
+    readonly settledCostUsd: number;
+    readonly reservedCostUsd: number;
+    readonly reservedCalls: number;
+    readonly outstanding: number;
+    readonly zombies: number;
+    readonly queued: { readonly sync: number; readonly background: number };
+    readonly costSource: "none" | "usage" | "reserve" | "mixed";
+    readonly overReservedUsd: number;
+    readonly adjustmentUsd: number;
+    readonly exhausted: boolean;
+    readonly disposed: boolean;
+  };
 }
 
 export interface JevClient {

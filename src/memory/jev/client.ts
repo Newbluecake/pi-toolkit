@@ -11,9 +11,18 @@
 //
 // Pi-free root.
 
+import { createHash } from "node:crypto";
+import { systemClock } from "../../core/clock.js";
 import { clampSpanMs } from "../../core/deadline.js";
 import type {
   ClassifierRegistryLike,
+  ClassifyContext,
+  ClassifyResult,
+  ControlledClassifyTransport,
+  ClientAttemptReservation,
+  ClientAttemptBudgetInput,
+  ClientProvenance,
+  ClientAnswerProvenance,
   FetchLike,
   HealthTable,
   JevAnswer,
@@ -82,16 +91,31 @@ class Semaphore {
   private active = 0;
   private readonly queue: (() => void)[] = [];
   constructor(private readonly max: number) {}
-  async acquire(): Promise<() => void> {
+  get queued(): number {
+    return this.queue.length;
+  }
+  async acquire(limit = Infinity, signal?: AbortSignal): Promise<(() => void) | undefined> {
+    if (signal?.aborted === true) return undefined;
     if (this.active < this.max) {
       this.active += 1;
       return () => this.release();
     }
+    if (this.queue.length >= limit) return undefined;
     return new Promise((resolve) => {
-      this.queue.push(() => {
+      const onAbort = (): void => {
+        const index = this.queue.indexOf(next);
+        if (index < 0) return;
+        this.queue.splice(index, 1);
+        signal?.removeEventListener("abort", onAbort);
+        resolve(undefined);
+      };
+      const next = (): void => {
+        signal?.removeEventListener("abort", onAbort);
         this.active += 1;
         resolve(() => this.release());
-      });
+      };
+      this.queue.push(next);
+      signal?.addEventListener("abort", onAbort, { once: true });
     });
   }
   private release(): void {
@@ -140,16 +164,25 @@ export interface CreateJevClientDeps {
   readonly bucket?: TokenBucket;
   readonly makeFetch?: (proxy: string) => FetchLike | undefined;
   readonly log?: (line: string) => void;
+  /** Explicit host-only opt-in; no settings or production handler wiring. */
+  readonly p50?: { readonly enabled: boolean; readonly transport?: ControlledClassifyTransport };
 }
 
 export type JevClientHandle = JevClient & {
   usage(): JevUsage;
+  dispose(): void;
+  reserveClientAttempt(input: ClientAttemptBudgetInput): ClientAttemptReservation | undefined;
+  /** Finalizes from original provider observations; no caller-supplied usage. */
+  settleClientAttempt(reservation: ClientAttemptReservation): void;
+  /** Releases unused capacity; dispatched work is never erased. */
+  releaseClientAttempt(reservation: ClientAttemptReservation): void;
   onStatusChange(cb: (prev: JevStatus, next: JevStatus) => void): () => void;
   abortBackground(): void;
   markInactive(inactive: boolean): void;
 };
 
 export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
+  const p50 = deps.p50?.enabled === true;
   const health = deps.health ?? getHealthTable();
   const bucket = deps.bucket ?? createTokenBucket();
   const makeFetch = deps.makeFetch ?? ((proxy: string) => createProxyFetch(proxy));
@@ -169,6 +202,167 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
   const syncSem = new Semaphore(SYNC_CONCURRENCY);
   const backgroundSem = new Semaphore(BACKGROUND_CONCURRENCY);
 
+  // All accounting lives in this client, shared by both logical channels.
+  // A reservation covers a complete failover/context-split plan; each actual
+  // dispatch consumes one call and one slice. Original promises alone settle
+  // slices; a high-level race may only estimate them, never release them.
+  let disposed = false;
+  const lifecycle = new AbortController();
+  let sequence = 0;
+  let reservedCostUsd = 0;
+  let reservedCalls = 0;
+  let outstanding = 0;
+  let zombies = 0;
+  let overReservedUsd = 0;
+  let adjustmentUsd = 0;
+  let knownCharges = 0;
+  let reserveCharges = 0;
+  type Slice = { reserve: number; settled: boolean; charged: boolean; zombie: boolean };
+  type ReservationState = {
+    token: ClientAttemptReservation;
+    calls: number;
+    cost: number;
+    chargedCost: number;
+    slices: Set<Slice>;
+    job: { spent: number; reserved: number; cap: number } | undefined;
+  };
+  const reservations = new Map<ClientAttemptReservation, ReservationState>();
+  // Named job caps are immutable for this activation, bounded independently of
+  // user-controlled ids. Full table fails closed rather than evicting live caps.
+  const jobs = new Map<string, { spent: number; reserved: number; cap: number }>();
+
+  function reserveClientAttempt(input: ClientAttemptBudgetInput): ClientAttemptReservation | undefined {
+    if (!p50 || disposed || zombies > 0 || budgetExhausted) return undefined;
+    const sem = input.mode === "background" ? backgroundSem : syncSem;
+    if (sem.queued >= 4 || reservations.size >= 15) return undefined;
+    if (
+      !Number.isSafeInteger(input.maxProviderCalls) ||
+      input.maxProviderCalls < 1 ||
+      !finiteNonnegative(input.worstCostUsd)
+    )
+      return undefined;
+    // Zero config caps retain their old meaning (unlimited), but unknown
+    // transport quotes never reach this function as a free estimate.
+    if (deps.config.maxCalls > 0 && usageCalls + reservedCalls + input.maxProviderCalls > deps.config.maxCalls)
+      return undefined;
+    if (deps.config.maxCostUsd > 0 && usageCostUsd + reservedCostUsd + input.worstCostUsd > deps.config.maxCostUsd)
+      return undefined;
+    let job: ReservationState["job"];
+    if (input.jobId !== undefined) {
+      if (!finiteNonnegative(input.jobCostCapUsd)) return undefined;
+      job = jobs.get(input.jobId);
+      if (job === undefined) {
+        if (jobs.size >= 128) return undefined;
+        job = { spent: 0, reserved: 0, cap: input.jobCostCapUsd };
+        jobs.set(input.jobId, job);
+      }
+      if (job.cap !== input.jobCostCapUsd || job.spent + job.reserved + input.worstCostUsd > job.cap) return undefined;
+    } else if (input.jobCostCapUsd !== undefined) {
+      // An unnamed per-request cap is not a reusable job ledger.
+      if (!finiteNonnegative(input.jobCostCapUsd) || input.worstCostUsd > input.jobCostCapUsd) return undefined;
+    }
+    const token: ClientAttemptReservation = Object.freeze({
+      id: `jev-${++sequence}`,
+      ...(input.jobId === undefined ? {} : { jobId: input.jobId }),
+      maxProviderCalls: input.maxProviderCalls,
+      reservedCostUsd: input.worstCostUsd,
+    });
+    reservations.set(token, {
+      token,
+      calls: input.maxProviderCalls,
+      cost: input.worstCostUsd,
+      chargedCost: 0,
+      slices: new Set(),
+      job,
+    });
+    reservedCalls += input.maxProviderCalls;
+    reservedCostUsd += input.worstCostUsd;
+    if (job !== undefined) job.reserved += input.worstCostUsd;
+    return token;
+  }
+
+  function charge(state: ReservationState, slice: Slice, actual: number | undefined): void {
+    if (slice.charged) return;
+    slice.charged = true;
+    reservedCostUsd -= slice.reserve;
+    const cost = actual ?? slice.reserve;
+    usageCostUsd += cost;
+    state.chargedCost += cost;
+    if (actual === undefined) reserveCharges++;
+    else knownCharges++;
+    if (state.job !== undefined) {
+      state.job.reserved -= slice.reserve;
+      state.job.spent += cost;
+    }
+    recordOverrun(slice, actual);
+  }
+
+  function recordOverrun(slice: Slice, actual: number | undefined): void {
+    if (actual !== undefined && actual > slice.reserve) {
+      overReservedUsd += actual - slice.reserve;
+      budgetExhausted = true; // latch; a later refund cannot revive admission
+    }
+    if (deps.config.maxCostUsd > 0 && usageCostUsd + reservedCostUsd > deps.config.maxCostUsd + 1e-12)
+      budgetExhausted = true;
+  }
+
+  function settleSlice(state: ReservationState, slice: Slice, reported?: unknown): void {
+    if (slice.settled) return;
+    slice.settled = true;
+    outstanding--;
+    if (slice.zombie) {
+      slice.zombie = false;
+      zombies--;
+    }
+    const actual = finiteNonnegative(reported) ? reported : undefined;
+    if (slice.charged) {
+      if (actual !== undefined) {
+        const delta = actual - slice.reserve;
+        usageCostUsd += delta;
+        state.chargedCost += delta;
+        adjustmentUsd += delta;
+        reserveCharges--;
+        knownCharges++;
+        if (state.job !== undefined) state.job.spent += delta;
+        recordOverrun(slice, actual);
+      }
+    } else charge(state, slice, actual);
+    state.slices.delete(slice);
+  }
+
+  function settleClientAttempt(token: ClientAttemptReservation): void {
+    const state = reservations.get(token);
+    if (state === undefined) return;
+    reservations.delete(token); // identity checked, idempotent
+    reservedCalls -= state.calls;
+    reservedCostUsd -= state.cost;
+    if (state.job !== undefined) state.job.reserved -= state.cost;
+    state.calls = 0;
+    state.cost = 0;
+    for (const slice of state.slices) {
+      charge(state, slice, undefined);
+      if (!slice.settled && !slice.zombie) {
+        slice.zombie = true;
+        zombies++;
+      }
+    }
+  }
+
+  function assertDispatchAdmission(state: ReservationState, cost: number, signal?: AbortSignal): boolean {
+    return (
+      !disposed &&
+      signal?.aborted !== true &&
+      zombies === 0 &&
+      !budgetExhausted &&
+      reservations.get(state.token) === state &&
+      state.calls > 0 &&
+      state.cost + 1e-12 >= cost &&
+      (deps.config.maxCalls <= 0 || usageCalls < deps.config.maxCalls) &&
+      (deps.config.maxCostUsd <= 0 || usageCostUsd + reservedCostUsd <= deps.config.maxCostUsd + 1e-12) &&
+      (state.job === undefined || state.job.spent + state.job.reserved <= state.job.cap + 1e-12)
+    );
+  }
+
   function currentStatus(): JevStatus {
     return summarizeStatus({
       classifiers: deps.config.classifiers,
@@ -183,6 +377,7 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
   }
 
   function emitStatusChangeIfAny(): void {
+    if (p50 && disposed) return;
     const next = currentStatus();
     if (lastStatus !== undefined && statusEquals(lastStatus, next)) return;
     const prev = lastStatus ?? next;
@@ -197,6 +392,7 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
     signal?: AbortSignal,
   ): Promise<void> {
     const now = deps.now();
+    if (p50 && disposed) return;
     if (!force && now - availabilityAt < AVAILABILITY_CACHE_MS) return;
     if (signal?.aborted === true) return; // keep the last known snapshot, do not call the registry
     const resolvePromise = resolveAvailability(registry, deps.config.classifiers);
@@ -213,7 +409,7 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
     // abort firing mid-flight can't cancel the underlying call, but it does
     // let `probe()` return promptly instead of hanging on it; the snapshot
     // from a race that resolves later is simply dropped.
-    if (resolved === undefined) return;
+    if (resolved === undefined || (p50 && disposed)) return;
     availability = resolved;
     availabilityAt = deps.now();
     // Stale no-auth/not-found health entries reset to unknown once the
@@ -469,12 +665,375 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
     );
   }
 
+  type Prepared = NonNullable<ReturnType<ControlledClassifyTransport["prepare"]>>;
+  type Planned = { prepared: Prepared; context: ClassifyContext; digest: string; cost: number; id: string };
+
+  function planClassify(req: JevRequest): Map<string, Planned[]> | undefined {
+    const transport = deps.p50?.transport;
+    if (transport === undefined) return undefined;
+    const plans = new Map<string, Planned[]>();
+    for (const id of deps.config.classifiers) {
+      const { provider, model: modelId } = splitId(id);
+      const model = req.registry.getModelOfType?.("classifier", provider, modelId);
+      if (model === undefined) continue;
+      const entries = Object.entries(req.questions);
+      const mid = Math.ceil(entries.length / 2);
+      const batches = [
+        req.questions,
+        ...[entries.slice(0, mid), entries.slice(mid)].filter((h) => h.length > 0).map((h) => Object.fromEntries(h)),
+      ];
+      const planned: Planned[] = [];
+      for (const questions of batches) {
+        // Freeze exactly what the adapter sees, before queue/availability awaits.
+        const serialized = canonicalJson({ state: req.state, questions });
+        const context = deepFreeze(JSON.parse(serialized) as ClassifyContext);
+        const digest = sha256(serialized);
+        const prepared = transport.prepare({
+          registry: req.registry,
+          model,
+          requestChainId: id,
+          context,
+          requestDigest: digest,
+        });
+        if (prepared === undefined) return undefined;
+        const bounds = prepared.bounds;
+        if (
+          !Number.isSafeInteger(bounds.maxInputTokens) ||
+          bounds.maxInputTokens < 1 ||
+          !Number.isSafeInteger(bounds.maxOutputTokens) ||
+          bounds.maxOutputTokens < 1 ||
+          !finiteNonnegative(bounds.priceUsdPerMillion?.input) ||
+          !finiteNonnegative(bounds.priceUsdPerMillion?.output)
+        )
+          return undefined;
+        const cost =
+          (bounds.maxInputTokens * bounds.priceUsdPerMillion.input +
+            bounds.maxOutputTokens * bounds.priceUsdPerMillion.output) /
+          1_000_000;
+        if (!finiteNonnegative(cost)) return undefined;
+        planned.push({ prepared, context, digest, cost, id });
+      }
+      plans.set(id, planned);
+    }
+    return plans;
+  }
+
+  function provenanceFor(plan: Planned, result: ClassifyResult): ClientProvenance {
+    let route: ReturnType<Prepared["resolveRoute"]>;
+    try {
+      route = plan.prepared.resolveRoute(result);
+    } catch {
+      route = undefined;
+    }
+    const actualId = `${result.provider}/${result.model}`;
+    const trusted =
+      nonempty(result.provider) &&
+      nonempty(result.model) &&
+      nonempty(plan.prepared.adapterId) &&
+      nonempty(plan.prepared.chainVersion) &&
+      route !== undefined &&
+      route.provider === result.provider &&
+      route.model === result.model &&
+      /^[a-f0-9]{64}$/.test(route.routeIdentity) &&
+      Array.isArray(route.routeAliases) &&
+      route.routeAliases.every(nonempty) &&
+      route.routeAliases.includes(plan.id) &&
+      route.routeAliases.includes(actualId);
+    return Object.freeze({
+      provider: nonempty(result.provider) ? result.provider : "",
+      model: nonempty(result.model) ? result.model : "",
+      adapterId: plan.prepared.adapterId,
+      chainVersion: plan.prepared.chainVersion,
+      routeIdentity: trusted ? route!.routeIdentity : "unknown",
+      routeAliases: Object.freeze(trusted ? [...new Set(route!.routeAliases)].sort() : []),
+      requestChainId: plan.id,
+      requestDigest: plan.digest,
+      inputDigest: sha256(canonicalJson(plan.context.state)),
+      trusted,
+    });
+  }
+
+  // Shared provider engine: B's in-client generate method must use this
+  // after the SAME reservation + semaphore admission, not copy counters or
+  // race a provider promise in revision.ts. The result type/usage extractor is
+  // generic; all registration, timeout, zombie and late adjustment is here.
+  async function dispatchProvider<T>(
+    state: ReservationState,
+    cost: number,
+    dispatch: (opts: { signal: AbortSignal; fetch?: FetchLike }) => Promise<T>,
+    actualCostUsd: (result: T) => unknown,
+    timeoutMs: number,
+    signal: AbortSignal,
+  ): Promise<
+    | { ok: true; value: T; costUsd: number }
+    | { ok: false; grade: "unavailable" | "transient" | "aborted" | "budget"; errorMessage: string }
+  > {
+    const controller = new AbortController();
+    let timedOut = false;
+    const onAbort = (): void => controller.abort();
+    signal.addEventListener("abort", onAbort, { once: true });
+    // Set up anything that can call host code BEFORE the final admission check.
+    let fetchFn: FetchLike | undefined;
+    try {
+      fetchFn = deps.config.proxy === "" ? undefined : makeFetch(deps.config.proxy);
+    } catch {
+      signal.removeEventListener("abort", onAbort);
+      return { ok: false, grade: "unavailable", errorMessage: "proxy unavailable" };
+    }
+    if (!assertDispatchAdmission(state, cost, signal)) {
+      signal.removeEventListener("abort", onAbort);
+      return {
+        ok: false,
+        grade: signal.aborted || disposed ? "aborted" : "budget",
+        errorMessage: "dispatch admission revoked",
+      };
+    }
+    // LINEARIZATION: no await or host callback between check and registration.
+    const slice: Slice = { reserve: cost, settled: false, charged: false, zombie: false };
+    state.calls--;
+    reservedCalls--;
+    usageCalls++;
+    state.cost -= cost;
+    state.slices.add(slice);
+    outstanding++;
+    let pending: Promise<T>;
+    try {
+      pending = dispatch({
+        signal: controller.signal,
+        ...(fetchFn === undefined ? {} : { fetch: fetchFn }),
+      });
+    } catch (err) {
+      pending = Promise.reject(err);
+    }
+    // Observer is attached to the ORIGINAL promise, not the abort race. It
+    // remains after timeout/dispose and performs exactly one accounting update.
+    const observed = pending.then(
+      (result) => {
+        let actual: unknown;
+        try {
+          actual = actualCostUsd(result);
+        } catch {
+          actual = undefined;
+        }
+        settleSlice(state, slice, actual);
+        return { value: result, costUsd: finiteNonnegative(actual) ? actual : cost };
+      },
+      (err: unknown) => {
+        settleSlice(state, slice);
+        throw err;
+      },
+    );
+    const timer = systemClock.setTimer(clampSpanMs(timeoutMs) ?? DEFAULT_BUDGET_MS, () => {
+      timedOut = true;
+      controller.abort();
+    });
+    let removeRaceListener = (): void => {};
+    try {
+      const result = await Promise.race([
+        observed,
+        new Promise<undefined>((resolve) => {
+          const aborted = (): void => resolve(undefined);
+          controller.signal.addEventListener("abort", aborted, { once: true });
+          removeRaceListener = () => controller.signal.removeEventListener("abort", aborted);
+          if (signal.aborted || controller.signal.aborted) {
+            controller.abort();
+            aborted();
+          }
+        }),
+      ]);
+      if (result === undefined || signal.aborted || controller.signal.aborted) {
+        // Block even a same-request failover BEFORE releasing its logical slot.
+        if (!slice.settled && !slice.zombie) {
+          slice.zombie = true;
+          zombies++;
+        }
+        charge(state, slice, undefined);
+        return {
+          ok: false,
+          grade: signal.aborted ? "aborted" : "transient",
+          errorMessage: timedOut ? "timeout" : "aborted",
+        };
+      }
+      return { ok: true, ...result };
+    } catch (err) {
+      return { ok: false, grade: signal.aborted ? "aborted" : "transient", errorMessage: String(err) };
+    } finally {
+      systemClock.clearTimer(timer);
+      removeRaceListener();
+      signal.removeEventListener("abort", onAbort);
+    }
+  }
+
+  async function dispatchClassify(
+    plan: Planned,
+    state: ReservationState,
+    timeoutMs: number,
+    signal: AbortSignal,
+  ): Promise<
+    | { ok: true; result: ClassifyResult; provenance: ClientProvenance; costUsd: number }
+    | { ok: false; grade: "unavailable" | "transient" | "context" | "aborted" | "budget"; errorMessage: string }
+  > {
+    const attempt = await dispatchProvider(
+      state,
+      plan.cost,
+      (opts) => plan.prepared.dispatch(opts),
+      (result) => result.usage?.cost?.total,
+      timeoutMs,
+      signal,
+    );
+    if (!attempt.ok) return attempt;
+    const result = attempt.value;
+    if (result.stopReason !== "stop")
+      return {
+        ok: false,
+        grade: result.stopReason === "aborted" ? "aborted" : classifyError(result.errorMessage ?? ""),
+        errorMessage: result.errorMessage ?? result.stopReason,
+      };
+    return { ok: true, result, provenance: provenanceFor(plan, result), costUsd: attempt.costUsd };
+  }
+
+  async function askBudgeted(req: JevRequest): Promise<JevOutcome> {
+    if (disposed || req.signal?.aborted === true) return fail("aborted", "client disposed or request aborted");
+    if (zombies > 0 || budgetExhausted) return fail("budget", "outstanding zombie or exhausted budget");
+    if (deps.config.classifiers.length === 0) return fail("off", "no classifiers configured");
+    let plans: ReturnType<typeof planClassify>;
+    try {
+      plans = planClassify(req);
+    } catch {
+      plans = undefined;
+    }
+    if (plans === undefined || plans.size === 0)
+      return fail("unavailable", "revision-unavailable: controlled classify bounds/quote unavailable");
+    const all = [...plans.values()].flat();
+    const reservation = reserveClientAttempt({
+      mode: req.mode,
+      maxProviderCalls: all.length,
+      worstCostUsd: all.reduce((n, p) => n + p.cost, 0),
+      ...(req.jobId === undefined ? {} : { jobId: req.jobId }),
+      ...(req.jobCostCapUsd === undefined ? {} : { jobCostCapUsd: req.jobCostCapUsd }),
+    });
+    if (reservation === undefined) return fail("budget", "queue/call/cost reservation unavailable");
+    const state = reservations.get(reservation)!;
+    const background = req.mode === "background" ? new AbortController() : undefined;
+    if (background !== undefined) backgroundAborts.add(background);
+    const deadline = new AbortController();
+    let deadlineElapsed = false;
+    const combined = linkedSignals([
+      lifecycle.signal,
+      deadline.signal,
+      ...(req.signal === undefined ? [] : [req.signal]),
+      ...(background === undefined ? [] : [background.signal]),
+    ]);
+    const sem = req.mode === "background" ? backgroundSem : syncSem;
+    let release: (() => void) | undefined;
+    const startedAt = deps.now();
+    const totalBudgetMs = clampSpanMs(req.budgetMs) ?? DEFAULT_BUDGET_MS;
+    const deadlineTimer = systemClock.setTimer(totalBudgetMs, () => {
+      deadlineElapsed = true;
+      deadline.abort();
+    });
+    try {
+      // The real shared semaphore, not a parallel P50 worker pool.
+      release = await sem.acquire(4, combined.signal);
+      if (release === undefined)
+        return fail(
+          deadlineElapsed ? "timeout" : combined.signal.aborted ? "aborted" : "budget",
+          "channel queue full or cancelled",
+        );
+      if (!assertDispatchAdmission(state, 0, combined.signal))
+        return fail(
+          deadlineElapsed ? "timeout" : combined.signal.aborted ? "aborted" : "budget",
+          "queued admission revoked",
+        );
+      if (deps.isChild && !bucket.tryTake(deps.now())) return fail("budget", "child-session token bucket exhausted");
+      await ensureAvailability(req.registry, false, combined.signal);
+      if (combined.signal.aborted) return fail(deadlineElapsed ? "timeout" : "aborted", "availability interrupted");
+      const errors: string[] = [];
+      for (const id of usableIds()) {
+        const candidates = plans.get(id);
+        if (candidates === undefined) continue;
+        const answers: Record<string, JevAnswer> = {};
+        const sources: ClientAnswerProvenance[] = [];
+        // Only the full batch runs initially; a context error unlocks the two
+        // pre-reserved halves. No further split, no hidden retries.
+        let attempts = 1;
+        for (let i = 0; i < attempts; i++) {
+          const plan = candidates[i];
+          if (plan === undefined) continue;
+          const remaining = totalBudgetMs - (deps.now() - startedAt);
+          if (remaining <= 0) return fail("timeout", "request budget elapsed");
+          const attempt = await dispatchClassify(
+            plan,
+            state,
+            Math.min(remaining, Math.max(1, Math.ceil(totalBudgetMs / 2))),
+            combined.signal,
+          );
+          if (attempt.ok) {
+            const answered = Object.keys(plan.context.questions).filter(
+              (key) => attempt.result.answers[key] !== undefined,
+            );
+            for (const key of answered) answers[key] = attempt.result.answers[key]!;
+            sources.push({ questionIds: answered, provenance: attempt.provenance });
+          } else {
+            if (attempt.grade === "budget" || attempt.grade === "aborted")
+              return fail(deadlineElapsed ? "timeout" : attempt.grade, attempt.errorMessage);
+            if (attempt.grade === "context" && i === 0) {
+              attempts = candidates.length;
+              continue;
+            }
+            if (attempt.grade !== "context") recordFailure(id, attempt.errorMessage);
+            errors.push(`${id}: ${capCp(attempt.errorMessage, 120)}`);
+          }
+        }
+        if (sources.length > 0) {
+          if (disposed || combined.signal.aborted) return fail("aborted", "client authority revoked");
+          everSucceeded = true;
+          lastModel = id;
+          health.set(id, { state: "ok", transientFails: 0 });
+          emitStatusChangeIfAny();
+          return {
+            ok: true,
+            model: id,
+            answers,
+            missing: computeMissing(req.questions, answers),
+            costUsd: state.chargedCost,
+            latencyMs: deps.now() - startedAt,
+            sources,
+            ...(sources.length === 1 && attempts === 1 ? { provenance: sources[0]!.provenance } : {}),
+          };
+        }
+      }
+      return fail("all-failed", capCp(errors.join(" · ") || "all configured classifiers failed", 300));
+    } catch (err) {
+      return fail("all-failed", String(err));
+    } finally {
+      settleClientAttempt(reservation);
+      systemClock.clearTimer(deadlineTimer);
+      combined.dispose();
+      if (background !== undefined) backgroundAborts.delete(background);
+      release?.();
+    }
+  }
+
   return {
     status: () => currentStatus(),
+    reserveClientAttempt,
+    settleClientAttempt,
+    releaseClientAttempt: settleClientAttempt,
+    dispose(): void {
+      if (disposed) return;
+      disposed = true;
+      if (!p50) return; // off path preserves legacy abort/failover behavior
+      lifecycle.abort();
+      for (const token of [...reservations.keys()]) settleClientAttempt(token);
+      statusSubscribers.clear();
+    },
 
     async ask(req: JevRequest): Promise<JevOutcome> {
       const sem = req.mode === "background" ? backgroundSem : syncSem;
+      if (p50) return askBudgeted(req);
       const release = await sem.acquire();
+      if (release === undefined) return fail("budget", "queue full");
       const abortController = req.mode === "background" ? new AbortController() : undefined;
       if (abortController !== undefined) backgroundAborts.add(abortController);
       try {
@@ -499,7 +1058,34 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
     },
 
     usage(): JevUsage {
-      return { costUsd: usageCostUsd, calls: usageCalls };
+      return {
+        costUsd: usageCostUsd,
+        calls: usageCalls,
+        ...(p50
+          ? {
+              budget: {
+                settledCostUsd: usageCostUsd,
+                reservedCostUsd: Math.max(0, reservedCostUsd),
+                reservedCalls,
+                outstanding,
+                zombies,
+                queued: { sync: syncSem.queued, background: backgroundSem.queued },
+                costSource:
+                  knownCharges > 0
+                    ? reserveCharges > 0
+                      ? ("mixed" as const)
+                      : ("usage" as const)
+                    : reserveCharges > 0
+                      ? ("reserve" as const)
+                      : ("none" as const),
+                overReservedUsd,
+                adjustmentUsd,
+                exhausted: budgetExhausted,
+                disposed,
+              },
+            }
+          : {}),
+      };
     },
 
     onStatusChange(cb: (prev: JevStatus, next: JevStatus) => void): () => void {
@@ -526,4 +1112,100 @@ function combineSignals(a: AbortSignal, b: AbortSignal): AbortSignal {
   b.addEventListener("abort", onAbort, { once: true });
   if (a.aborted || b.aborted) controller.abort();
   return controller.signal;
+}
+
+function finiteNonnegative(n: unknown): n is number {
+  return typeof n === "number" && Number.isFinite(n) && n >= 0;
+}
+function nonempty(s: unknown): s is string {
+  return typeof s === "string" && s.length > 0;
+}
+function sha256(s: string): string {
+  return createHash("sha256").update(s).digest("hex");
+}
+function canonicalJson(value: unknown): string {
+  if (
+    value === null ||
+    typeof value === "string" ||
+    typeof value === "boolean" ||
+    (typeof value === "number" && Number.isFinite(value))
+  )
+    return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (typeof value === "object" && value !== null && Object.getPrototypeOf(value) === Object.prototype)
+    return `{${Object.keys(value)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${canonicalJson((value as Record<string, unknown>)[k])}`)
+      .join(",")}}`;
+  throw new Error("non-JSON classify input");
+}
+function deepFreeze<T>(value: T): T {
+  if (typeof value === "object" && value !== null) {
+    for (const child of Object.values(value)) deepFreeze(child);
+    Object.freeze(value);
+  }
+  return value;
+}
+function linkedSignals(signals: readonly AbortSignal[]): { signal: AbortSignal; dispose(): void } {
+  const controller = new AbortController();
+  const abort = (): void => controller.abort();
+  for (const signal of signals) {
+    signal.addEventListener("abort", abort, { once: true });
+    if (signal.aborted) controller.abort();
+  }
+  return {
+    signal: controller.signal,
+    dispose: () => {
+      for (const s of signals) s.removeEventListener("abort", abort);
+    },
+  };
+}
+
+/** Route separation only, not statistical independence. Caller must separately
+ * bind each request/input digest to its frozen relation/generation/coverage DTO.
+ * Split results MUST be checked source-by-source, never via outcome.model. */
+export function independentCoverageSources(
+  relation: ClientProvenance,
+  generation: ClientProvenance,
+  coverage: ClientProvenance,
+  expected?: Readonly<
+    Record<
+      "relation" | "generation" | "coverage",
+      {
+        readonly requestDigest: string;
+        readonly inputDigest: string;
+      }
+    >
+  >,
+): boolean {
+  const valid = (p: ClientProvenance): boolean =>
+    p !== null &&
+    typeof p === "object" &&
+    p.trusted === true &&
+    [p.provider, p.model, p.adapterId, p.chainVersion, p.requestChainId].every(nonempty) &&
+    [p.routeIdentity, p.requestDigest, p.inputDigest].every((s) => /^[a-f0-9]{64}$/.test(s)) &&
+    Array.isArray(p.routeAliases) &&
+    p.routeAliases.length > 0 &&
+    p.routeAliases.every(nonempty) &&
+    p.routeAliases.includes(p.requestChainId) &&
+    p.routeAliases.includes(`${p.provider}/${p.model}`);
+  if (expected === undefined || ![relation, generation, coverage].every(valid)) return false;
+  for (const [key, provenance] of [
+    ["relation", relation],
+    ["generation", generation],
+    ["coverage", coverage],
+  ] as const) {
+    if (
+      expected[key] === undefined ||
+      provenance.requestDigest !== expected[key].requestDigest ||
+      provenance.inputDigest !== expected[key].inputDigest
+    )
+      return false;
+  }
+  return [relation, generation].every(
+    (other) =>
+      coverage.routeIdentity !== other.routeIdentity &&
+      !(coverage.provider === other.provider && coverage.model === other.model) &&
+      !coverage.routeAliases.some((alias) => other.routeAliases.includes(alias)),
+  );
 }
