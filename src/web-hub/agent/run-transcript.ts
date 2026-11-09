@@ -38,6 +38,7 @@ import { projectSessionEntry } from "../protocol/keys.js";
 import type { AgentFrame, WireEntry, WireEvent } from "../protocol/messages.js";
 import { RUN_TX, type RunTxReplyFrame, type RunTxReqFrame } from "../protocol/run-transcript.js";
 import type { SendResult } from "./connection.js";
+import { takeChildMessageSpeed } from "../../child/message-speed-bridge.js";
 import { createEventTap, type EventTap } from "./event-tap.js";
 
 /** Terminal snapshot fields the file path needs (§4.2): hub reads the session file itself. */
@@ -75,6 +76,7 @@ interface TapRecord {
   firstMissing?: number;
   readonly detach: () => void;
   readonly tap: EventTap;
+  speedCompletion?: { release(): void; revoke(): void };
   ended?: { status: string };
 }
 
@@ -106,6 +108,7 @@ export function createRunTranscripts(deps: {
 } {
   const taps = new Map<string, TapRecord>();
   let endedPending: EndedPending[] = [];
+  let speedLinkLive = true;
 
   const isLive = (rec: TapRecord): boolean => taps.get(rec.runId) === rec;
 
@@ -130,6 +133,8 @@ export function createRunTranscripts(deps: {
   const removeTap = (rec: TapRecord): void => {
     if (taps.get(rec.runId) !== rec) return;
     taps.delete(rec.runId);
+    rec.speedCompletion?.release();
+    delete rec.speedCompletion;
     try {
       rec.detach();
     } catch {
@@ -373,7 +378,28 @@ export function createRunTranscripts(deps: {
         res = port.observe(runId, {
           onEvent: (e) => {
             if (rec !== undefined && rec.ended === undefined && isLive(rec)) {
-              rec.tap.handle(e as { type: string } & Record<string, unknown>);
+              const event = e as { type: string } & Record<string, unknown>;
+              if (event.type === "message_end") {
+                // pi awaits child extension message_end BEFORE synchronously notifying
+                // public observers. Read and project in THIS stack: no await, no raw
+                // recomputation, and projectMessage still strips untrusted containers.
+                let stampedSeq = 0;
+                const activeRec = rec;
+                const revoke = (): void => {
+                  if (!isLive(activeRec) || activeRec.ended !== undefined || stampedSeq === 0) return;
+                  activeRec.firstMissing = Math.min(activeRec.firstMissing ?? stampedSeq, stampedSeq);
+                  tryGap(activeRec); // existing protocol asks the hub to replace from history
+                };
+                const read = takeChildMessageSpeed(event.message, revoke);
+                const completion = speedLinkLive ? read : undefined;
+                if (!speedLinkLive) read?.release();
+                if (completion !== undefined) {
+                  rec.speedCompletion?.release();
+                  rec.speedCompletion = { release: completion.release, revoke };
+                }
+                rec.tap.handle(event, undefined, completion?.core);
+                stampedSeq = rec.seq;
+              } else rec.tap.handle(event);
             }
           },
           onEnd: (status) => {
@@ -397,7 +423,16 @@ export function createRunTranscripts(deps: {
   };
 
   const onLink = (live: boolean): void => {
-    if (!live) return;
+    speedLinkLive = live;
+    if (!live) {
+      // Existing transport retry/seq behavior stays intact, but a completion and
+      // its rollback callback must never survive a disconnect/reconnect boundary.
+      for (const rec of taps.values()) {
+        rec.speedCompletion?.release();
+        delete rec.speedCompletion;
+      }
+      return;
+    }
     if (!deps.enabled()) {
       // The new link's hub never advertised runtx.v1 (e.g. an older hub won the socket):
       // nothing on this channel is decodable there — tear down instead of leaking frames.

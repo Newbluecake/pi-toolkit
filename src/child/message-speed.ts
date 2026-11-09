@@ -1,8 +1,9 @@
-/** Child-local observation only: no hub client, global registry, timer or SDK message mutation. */
+/** Child-local observation with a weak completion bridge; no hub client, timer or SDK message mutation. */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentSettings } from "../config/settings.js";
 import { createMessageSpeed, type MessageSpeedOwner } from "../web-hub/agent/message-speed.js";
 import { messageSpeedBinding } from "../web-hub/agent/message-speed-binding.js";
+import { createChildMessageSpeedBridge } from "./message-speed-bridge.js";
 import { wireMessageSpeed } from "../web-hub/agent/message-speed-wire.js";
 
 export interface ChildMessageSpeedOptions {
@@ -23,20 +24,27 @@ export function wireChildMessageSpeed(
   let current: ExtensionContext | undefined;
   let manager: ExtensionContext["sessionManager"] | undefined;
   let owner: MessageSpeedOwner | undefined;
+  const currentOwner = (): MessageSpeedOwner | undefined =>
+    current !== undefined &&
+    current.sessionManager === manager &&
+    current.sessionManager.getSessionId() === owner?.sessionId
+      ? owner
+      : undefined;
+  const bridge = createChildMessageSpeedBridge(currentOwner);
+  let persisted = false;
   const speed = createMessageSpeed({
     ...(options.monotonicNow ? { monotonicNow: options.monotonicNow } : {}),
-    currentOwner: () =>
-      current !== undefined &&
-      current.sessionManager === manager &&
-      current.sessionManager.getSessionId() === owner?.sessionId
-        ? owner
-        : undefined,
+    currentOwner,
     getCurrentContext: () => current,
     sessionId: (ctx: ExtensionContext) => ctx.sessionManager.getSessionId(),
     ...(options.secureRecheckForWrite ? { secureRecheckForWrite: options.secureRecheckForWrite } : {}),
-    appendEntry: (type, data) => pi.appendEntry(type, data),
+    appendEntry: (type, data) => {
+      pi.appendEntry(type, data);
+      persisted = true;
+    },
   });
   const clear = () => {
+    bridge.clear();
     speed.reset();
     current = undefined;
     manager = undefined;
@@ -52,7 +60,7 @@ export function wireChildMessageSpeed(
       clear();
   };
   // Reuse the existing public raw-proof port and invisible custom-entry renderer.
-  // No EventTap: this batch deliberately does NOT stamp live run messages.
+  // The bridge is read only by an already attached public run observer.
   wireMessageSpeed(pi, speed, (ctx) => {
     noteContext(ctx);
     return owner !== undefined;
@@ -69,9 +77,16 @@ export function wireChildMessageSpeed(
     };
     speed.event({ type: event.type });
   });
-  const forward = (event: { type: string }, ctx: ExtensionContext) => {
+  const forward = (event: { type: string; message?: { role?: string } }, ctx: ExtensionContext) => {
     noteContext(ctx);
-    speed.event(event as Record<string, unknown>);
+    if (event.type === "turn_end") {
+      persisted = false;
+      speed.event(event as Record<string, unknown>);
+      bridge.clear(!persisted); // history is authoritative; failure requests a fresh snapshot
+    } else {
+      if (event.type !== "message_start" || event.message?.role === "assistant") bridge.clear();
+      speed.event(event as Record<string, unknown>);
+    }
   };
   pi.on("turn_start", forward);
   pi.on("message_start", forward);
@@ -88,7 +103,7 @@ export function wireChildMessageSpeed(
   });
   pi.on("message_end", (event, ctx) => {
     noteContext(ctx);
-    speed.end(event.message);
+    if (event.message.role === "assistant") bridge.complete(event.message, speed.end(event.message));
   });
   // Child AgentSession.dispose() need not emit shutdown. All closures belong ONLY
   // to this pi instance (no external roots); agent_end/settled release context and

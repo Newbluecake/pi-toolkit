@@ -1,6 +1,8 @@
 // @vitest-environment happy-dom
 /** Real child extension → public provider proof → pre-terminal seal → persisted run reader → drawer. */
 import { mount } from "@vue/test-utils";
+import { nextTick } from "vue";
+import { createRunTranscripts } from "../../src/web-hub/agent/run-transcript.js";
 import { expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -28,9 +30,13 @@ import { initialState, reduce } from "../../src/web-hub/ui/src/logic/state.js";
 import RunTranscript from "../../src/web-hub/ui/src/components/drawer/RunTranscript.vue";
 import type { AgentState } from "../../src/web-hub/ui/src/types.js";
 
-it.each([true, false])(
-  "child installed=%s: terminal finalLeafId contains only proven metadata, refresh/reopen drawer",
-  async (installed) => {
+it.each([
+  [true, true],
+  [true, false],
+  [false, true],
+])(
+  "child installed=%s, drawer already open=%s: live and terminal metadata agree",
+  async (installed, alreadyOpen) => {
     const root = mkdtempSync(join(tmpdir(), "child-speed-b2-"));
     const manager = SessionManager.create(root, join(root, "sessions"));
     const settingsManager = SettingsManager.inMemory({
@@ -57,6 +63,14 @@ it.each([true, false])(
     let fetches = 0;
     let sawRaw = 0;
     let finalMessage: unknown;
+    let releaseTurnEnd!: () => void;
+    const turnEndGate = new Promise<void>((resolve) => {
+      releaseTurnEnd = resolve;
+    });
+    let messageObserved!: () => void;
+    const observed = new Promise<void>((resolve) => {
+      messageObserved = resolve;
+    });
     const toolkit = readSettingsNoMigrate(join(root, "absent.json"));
     toolkit.webHub.enabled = true;
     toolkit.cacheTtl.keepalive = false;
@@ -79,6 +93,9 @@ it.each([true, false])(
           });
           pi.on("provider_stream_event", () => {
             sawRaw++;
+          });
+          pi.on("turn_end", async () => {
+            if (alreadyOpen) await turnEndGate; // hold tools/turn completion AFTER public message_end
           });
           if (installed)
             wireChildSession(pi, toolkit, undefined, {
@@ -148,6 +165,7 @@ it.each([true, false])(
     const reader = createRunFileReader();
     let session: Awaited<ReturnType<typeof createAgentSession>>["session"] | undefined;
     let wrapper: ReturnType<typeof mount> | undefined;
+    let rt: ReturnType<typeof createRunTranscripts> | undefined;
     try {
       await loader.reload();
       expect(loader.getExtensions().errors).toEqual([]);
@@ -185,7 +203,82 @@ it.each([true, false])(
           return undefined;
         },
       });
-      const outcome = await runner.run({ runId: "r_b2", prompt: "synthetic child request" }, DEFAULT_BUDGET);
+      if (alreadyOpen) {
+        let liveState = [
+          {
+            event: "agents",
+            data: [
+              {
+                agentKey: "A",
+                kind: "tui",
+                pid: 1,
+                cwd: root,
+                state: "live",
+                pluginVersion: "1",
+                outdated: false,
+                prompts: [],
+              },
+            ],
+          },
+          { event: "subscribing", data: { agentKey: "A", clientId: "c1" } },
+          { event: "history", data: { agentKey: "A", entries: [], tailMessages: [], fromSeq: 0, hasMore: false } },
+          { event: "run_select", data: { agentKey: "A", runId: "r_b2" } },
+          { event: "run_subscribing", data: { agentKey: "A", runId: "r_b2", at: 100, retries: 0 } },
+          {
+            event: "run_history",
+            data: {
+              agentKey: "A",
+              runId: "r_b2",
+              entries: [],
+              tailMessages: [],
+              fromSeq: 1,
+              hasMore: false,
+              terminal: false,
+              live: true,
+              status: "running",
+            },
+          },
+        ].reduce((state, msg) => reduce(state, msg), initialState(null));
+        wrapper = mount(RunTranscript, {
+          props: { agent: liveState.agents.get("A") as unknown as AgentState, now: 5000 },
+          attachTo: document.body,
+        });
+        rt = createRunTranscripts({
+          port: () => ({
+            info: () => ({ status: "running", terminal: false }),
+            branch: () => handle.getBranchEntries(),
+            observe: (_id, l) => ({ kind: "attached", detach: handle.observe(l.onEvent) }),
+          }),
+          enabled: () => true,
+          now: () => 5000,
+          setTimer: () => ({ cancel() {} }),
+          trySend: (f) => {
+            if (f.t === "run_ev") {
+              liveState = reduce(liveState, { event: "run_ev", data: { ...f, agentKey: "A" } });
+              void wrapper!.setProps({ agent: liveState.agents.get("A") as unknown as AgentState });
+              if (f.e.type === "message_end" && f.e.message?.role === "assistant") messageObserved();
+            }
+            return "written";
+          },
+        });
+        rt.onWatch("r_b2", true);
+      }
+      const running = runner.run({ runId: "r_b2", prompt: "synthetic child request" }, DEFAULT_BUDGET);
+      if (alreadyOpen) {
+        await observed;
+        await nextTick();
+        expect(wrapper!.text()).toContain("hello child");
+        expect(wrapper!.text().includes("20.0 tokens/s")).toBe(installed);
+        expect(appendAtTurn).toBeNull();
+        expect(
+          manager.getBranch().filter((e) => e.type === "custom" && e.customType === "subagent:web-msg-speed"),
+        ).toHaveLength(0);
+        wrapper!.unmount();
+        wrapper = undefined;
+        rt!.resetForSession();
+        releaseTurnEnd();
+      }
+      const outcome = await running;
       expect(outcome.status).toBe("completed");
       expect(fetches).toBe(1);
       expect(sawRaw).toBeGreaterThan(0);
@@ -266,6 +359,8 @@ it.each([true, false])(
       }
       expect(JSON.stringify(manager.buildSessionContext())).not.toContain("piToolkitGeneration");
     } finally {
+      releaseTurnEnd();
+      rt?.resetForSession();
       wrapper?.unmount();
       reader.dispose();
       session?.dispose();

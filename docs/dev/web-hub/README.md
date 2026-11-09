@@ -898,8 +898,8 @@ Design, compiled-App evidence and manual physical-device/AT limits:
   mid，exact 最终对象引用 + 当前 ctx/session/loop/message generation + owner token 同步
   recheck，不匹配只跳过不写）；#77 批 2 明确扩大到 child 持久 metadata：同样只写
   `subagent:web-msg-speed` custom entry，不写 SDK assistant。child `/api/run/*` 详情在
-  重新打开/刷新后由该 entry 恢复，旧历史不回填（recent 不兜底），已打开 drawer 的即时
-  出数不在本批范围内。
+  重新打开/刷新后由该 entry 恢复，旧历史不回填（recent 不兜底）；#77 批 3 另补已打开
+  drawer 的即时出数，见下述 live/历史最终一致性规则。
   wire 唯一容器为 `WireEntry.piToolkitGeneration`（类型见 `protocol/messages.ts`，纯 optional
   追加，`WireEntrySchema` 开放、无 PROTO bump；投影在 `keys.ts` 条件展开，历史 map 上限
   512 已加载 entries）。`subagent:web-msg-speed` custom(data) 是 display:false 墓碑，
@@ -927,8 +927,8 @@ Design, compiled-App evidence and manual physical-device/AT limits:
   真刷新恢复，费用不变、767px 两 chip 不重叠。此为组件浏览器集成，不宣称真实 hub/App
   网络、真实 provider、收费覆盖率或物理移动设备已验证；默认 tier2 运行不启动浏览器，
   浏览器需显式设该环境变量。P2 的独立 App fakeHub 浏览器验收不替代本条删除链。
-  child producer 的历史持久化见下；本批不 stamp child live core，已打开 drawer 仍不即时
-  出数。UI 可消费合法 child live core 不意味着当前 child 请求会当场产生数值。
+  child producer 的历史持久化见下；#77 批 3 在合法 child `message_end` core 上补 live
+  盖章，仍不承诺所有 child 请求都会产生数值。
   旧历史永不回填，并非所有 Requests 都显示。
 
 - **#77 批 2 child 接线/清理**：`src/index.ts` pre-guard child 分支经
@@ -940,13 +940,29 @@ Design, compiled-App evidence and manual physical-device/AT limits:
   `message_start`、原始未合并 `message_update`、`provider_stream_event`、`message_end` 与扩展
   `turn_end` 分别采样/验证/以公开 `messageEntryId` 关联后同步 append。raw port 同样复核当前
   ctx owner，观察到换 owner 即废弃整轮。无需 `session_start`；`agent_end`/`agent_settled`
-  释放 pending/context，shutdown 仅作防御。无进程级注册表、外部订阅或 timer；hooks 只由
-  child 自身持有，`AgentSession.dispose()` 不发 shutdown 也能整体 GC，不依赖 shutdown 退订。
+  释放 pending/context，shutdown 仅作防御。除批 3 弱完成桥外无进程级注册表、外部订阅或
+  timer；hooks 只由 child 持有，`AgentSession.dispose()` 不发 shutdown 也能整体 GC，不依赖 shutdown 退订。
   append 在扩展 `turn_end` 内完成，因此正常终态 runner seal 固定的 `finalLeafId` 祖先链可见
   metadata；seal 后补写不能用作兜底。验证：`tests/child/message-speed.test.ts` 的 fail-closed
   矩阵，以及 `tests/integration/subagent-message-speed.test.ts` 真实 SDK fake Responses 流 →
   RuntimeRunner seal → 持久 jsonl → run-file-reader → production reducer → RunTranscript drawer，
   同时验证 extension 缺失只隐藏、费用独立和 SDK/model context 不带 metadata。
+
+- **#77 批 3 live/历史最终一致性**：`child/message-speed-bridge.ts` 通过
+  `Symbol.for("pi-subagent:child-message-speed-completion")` 共享 WeakMap，每 enabled child
+  最多一槽，以最终 SDK message 对象为弱 key，绑定 sessionId、sessionGeneration、
+  activationGeneration、ownerToken；child 在 `message_end` 获得合法实测 core 后发布，父
+  `run-transcript.ts` public observer 在同一同步调用栈读取一次，EventTap 剥除不可信容器后
+  **只盖 wire 副本**（无父侧重算/SDK mutation/协议变更）。assistant 下一消息/turn、owner
+  变化、agent end/settled/shutdown 清槽；unsubscribe/reset/link-down 释放精确旧槽与弱撤销
+  回调，不让旧回调影响新 tap，成功持久化后静默清理。off 不建桥，无新增 hook/timer/client。
+  **历史是唯一最终真源**：live 不等可能含长工具执行的 `turn_end`；该处 guard/append 失败
+  时清槽并向仍活跃的原 tap 尽力发既有 `run_gap`，由 hub 用历史快照替换，撤销异常不抛。
+  可接受的不一致仅为「live 曾显示，撤销竞态/失败后成功刷新时 chip 消失」，不向历史补数；
+  不承诺网络失败时未刷新的 DOM 当场撤销。缺桥/失效/换 owner 只隐藏。
+  证据：`tests/child/message-speed-live.test.ts`（真实组件、同值、并发/重订阅/断线/resume/
+  持久失败），`tests/integration/subagent-message-speed.test.ts`（真实 SDK 扩展→public observer
+  的同步窗口，`turn_end` barrier 前一个 Vue tick 出 `20.0 tokens/s`，稍后从真实文件恢复同值）。
 
 ### Activity drawer interaction
 
