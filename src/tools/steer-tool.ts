@@ -53,7 +53,7 @@ export const SteerToolParams = Type.Object({
         '(to "root", kind "report") and arrive in your context as a subagent:fabric message after the ' +
         "subagent's next turn — end your turn instead of polling. Needs fabric (message_agent); without it, " +
         "or for an external-agent run, the text is delivered verbatim (no reply). Reports are per-run quota " +
-        "limited (fabric.reportQuota, default 10) — a reply over quota is dropped.",
+        "limited (fabric.reportQuota, default 3) — a reply over quota is dropped.",
     }),
   ),
 });

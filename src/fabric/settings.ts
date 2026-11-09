@@ -751,7 +751,7 @@ export const DEFAULT_FABRIC_SETTINGS: FabricSettings = {
   enabled: false,
   minIntervalMs: 30_000,
   maxPerRun: 20,
-  reportQuota: 10,
+  reportQuota: 3,
   directiveQuota: 5,
   deadLetterQuota: 5,
   maxChars: 2_000,

@@ -8,6 +8,7 @@ import {
 } from "../../src/tools/message-agent-tool.js";
 
 const generation = () => 3;
+const reportQuotaSnapshot = () => ({ used: 0, limit: 3, remaining: 3 });
 const FIXTURE = new URL("../fixtures/message-agent-wake-schema-golden.json", import.meta.url);
 const OFF_GOLDEN = new URL("../fixtures/fabric-wake-off-golden.json", import.meta.url);
 
@@ -52,7 +53,12 @@ describe("message_agent wake execution", () => {
 
   it("wake on: forwards an explicit wake to the router; omitted wake adds NO key (legacy admission input)", async () => {
     const admit = vi.fn(admitOk);
-    const tool = createMessageAgentTool({ router: { admit } as never, from: "r_CHILD001", generation, wakeOn: true });
+    const tool = createMessageAgentTool({
+      router: { admit, reportQuotaSnapshot } as never,
+      from: "r_CHILD001",
+      generation,
+      wakeOn: true,
+    });
     await tool.execute("c", { to: "root", kind: "report", text: "x", wake: true } as never);
     await tool.execute("c", { to: "root", kind: "report", text: "x", wake: false } as never);
     await tool.execute("c", { to: "root", kind: "report", text: "x" });
@@ -66,7 +72,7 @@ describe("message_agent wake execution", () => {
     const admit = vi.fn(admitOk);
     const send = vi.fn();
     const tool = createMessageAgentTool({
-      router: { admit } as never,
+      router: { admit, reportQuotaSnapshot } as never,
       mention: { send } as never,
       from: "r_CHILD001",
       generation,
@@ -83,7 +89,7 @@ describe("message_agent wake execution", () => {
   it("wake on: the explicit wake rides to the @label channel as a 4th argument only when given", async () => {
     const send = vi.fn(async () => ({ ok: false as const, status: "unknown_label" as const, label: "b" }));
     const tool = createMessageAgentTool({
-      router: { admit: vi.fn() } as never,
+      router: { admit: vi.fn(), reportQuotaSnapshot } as never,
       mention: { send } as never,
       from: "r_CHILD001",
       generation,
@@ -97,7 +103,11 @@ describe("message_agent wake execution", () => {
 
   it("wake OFF: a stray `wake` argument is dropped — router input and invalid_wake behave exactly as before", async () => {
     const admit = vi.fn(admitOk);
-    const tool = createMessageAgentTool({ router: { admit } as never, from: "r_CHILD001", generation });
+    const tool = createMessageAgentTool({
+      router: { admit, reportQuotaSnapshot } as never,
+      from: "r_CHILD001",
+      generation,
+    });
     const result = await tool.execute("c", { to: "root", kind: "progress", text: "x", wake: true } as never);
     expect(result.details).toMatchObject({ ok: true });
     expect(admit).toHaveBeenCalledWith("r_CHILD001", { to: "root", kind: "progress", text: "x", generation: 3 });
@@ -112,9 +122,14 @@ describe("message_agent wake execution", () => {
       wake: false,
       wakeDowngraded: "level_limit" as const,
     }));
-    const tool = createMessageAgentTool({ router: { admit } as never, from: "r_CHILD001", generation, wakeOn: true });
+    const tool = createMessageAgentTool({
+      router: { admit, reportQuotaSnapshot } as never,
+      from: "r_CHILD001",
+      generation,
+      wakeOn: true,
+    });
     const result = await tool.execute("c", { to: "root", kind: "report", text: "x", wake: true } as never);
-    expect(JSON.parse((result.content[0] as { text: string }).text)).toMatchObject({
+    expect(JSON.parse((result.content[0] as { text: string }).text.split("（report")[0]!)).toMatchObject({
       wake: false,
       wakeDowngraded: "level_limit",
     });

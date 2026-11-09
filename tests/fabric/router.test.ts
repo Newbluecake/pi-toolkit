@@ -81,7 +81,12 @@ class FailingUpdateStore implements OutboxStore<FabricRecord> {
   }
 }
 
-function makeRouter(store: OutboxStore<FabricRecord>, now = 1, deadLetterQuota = 1) {
+function makeRouter(
+  store: OutboxStore<FabricRecord>,
+  now = 1,
+  deadLetterQuota = 1,
+  patch: Partial<typeof config> = {},
+) {
   const engine = createDeliveryEngine<FabricRecord, FabricRecord["state"]>({
     store,
     allowed: {
@@ -105,7 +110,7 @@ function makeRouter(store: OutboxStore<FabricRecord>, now = 1, deadLetterQuota =
     engine,
     tree,
     new FabricThrottle({ minIntervalMs: 0, rootMinIntervalMs: 0, backoffMs: 0 }),
-    { ...config, deadLetterQuota },
+    { ...config, deadLetterQuota, ...patch },
     () => now,
   );
   return { engine, tree, router };
@@ -480,4 +485,110 @@ describe("fabric router mention admission", () => {
     expect(restored.via?.mode).toBeUndefined();
     expect(restored.via?.hops).toEqual(["r_ABCDEFGH", "root", "r_12345678"]);
   });
+});
+
+describe("per-run report budget receipts", () => {
+  it("uses the default three reports, excludes progress, and resets for a new run", async () => {
+    const { DEFAULT_FABRIC_SETTINGS } = await import("../../src/fabric/settings.js");
+    expect(DEFAULT_FABRIC_SETTINGS.reportQuota).toBe(3);
+    const { router, engine, tree } = makeRouter(new MemoryOutboxStore<FabricRecord>(), 1, 1, {
+      reportQuota: DEFAULT_FABRIC_SETTINGS.reportQuota,
+      rootInboxCap: 10,
+    });
+    for (const [i, remaining] of [2, 1, 0].entries()) {
+      expect(router.admit("r_ABCDEFGH", { to: "root", kind: "report", text: "x", generation: 1 })).toMatchObject({
+        ok: true,
+        quota: { used: i + 1, limit: 3, remaining },
+      });
+    }
+    expect(router.admit("r_ABCDEFGH", { to: "root", kind: "report", text: "x", generation: 1 })).toMatchObject({
+      ok: false,
+      status: "quota_exhausted",
+      used: 3,
+      quota: 3,
+    });
+    const progress = router.admit("r_ABCDEFGH", { to: "root", kind: "progress", text: "x", generation: 1 });
+    expect(progress.ok).toBe(true);
+    expect(progress).not.toHaveProperty("quota");
+    tree.tombstone("r_ABCDEFGH", 1, 100);
+    expect(router.admit("r_12345678", { to: "root", kind: "report", text: "x", generation: 1 })).toMatchObject({
+      ok: true,
+      quota: { used: 1, limit: 3, remaining: 2 },
+    });
+    expect(engine.select((r) => r.kind === "report" && r.rejected === undefined)).toHaveLength(4);
+  });
+
+  it("zero blocks reports instead of disabling the quota", () => {
+    const { router } = makeRouter(new MemoryOutboxStore<FabricRecord>(), 1, 1, { reportQuota: 0 });
+    expect(router.admit("r_ABCDEFGH", { to: "root", kind: "report", text: "x", generation: 1 })).toMatchObject({
+      status: "quota_exhausted",
+      used: 0,
+      quota: 0,
+    });
+  });
+});
+
+it("shares the budget with legacy mention resumes, atomically reserves, and restores it on hydrate", async () => {
+  const { createMentionChannel } = await import("../../src/fabric/mention.js");
+  const { router, tree, engine } = makeRouter(new MemoryOutboxStore<FabricRecord>(), 1, 1, {
+    reportQuota: 3,
+    rootInboxCap: 10,
+  });
+  const send = () => router.admit("r_ABCDEFGH", { to: "root", kind: "report", text: "x", generation: 1 });
+  expect(send()).toMatchObject({ quota: { used: 1, limit: 3, remaining: 2 } });
+  expect(send()).toMatchObject({ quota: { used: 2, limit: 3, remaining: 1 } });
+  tree.tombstone("r_12345678", 1, 100);
+  let finish!: (value: { runId: "r_NEW00001" }) => void;
+  const pending = new Promise<{ runId: "r_NEW00001" }>((resolve) => {
+    finish = resolve;
+  });
+  let spawns = 0;
+  const mention = createMentionChannel({
+    router,
+    registry: { resolve: () => ({ runId: "r_12345678", type: "worker", parent: "root" }) },
+    query: { get: () => ({ status: "completed" }) as never },
+    spawn: {
+      spawn: () => {
+        spawns++;
+        return pending as never;
+      },
+    },
+    from: "r_ABCDEFGH",
+    generation: () => 1,
+    canMessage: ["mention"],
+  });
+  const first = mention.send("builder", "report", "first");
+  const second = mention.send("builder", "report", "second");
+  expect(spawns).toBe(1);
+  expect(send()).toMatchObject({ status: "quota_exhausted", used: 3, quota: 3 });
+  finish({ runId: "r_NEW00001" });
+  expect(await first).toMatchObject({ status: "resumed", quota: { used: 3, limit: 3, remaining: 0 } });
+  expect(await second).toMatchObject({ status: "quota_exhausted", used: 3, quota: 3 });
+  const reloaded = makeRouter(new MemoryOutboxStore<FabricRecord>(), 1, 1, { reportQuota: 3 });
+  reloaded.router.hydrate(engine.select(() => true));
+  expect(reloaded.router.admit("r_ABCDEFGH", { to: "root", kind: "report", text: "x", generation: 1 })).toMatchObject({
+    status: "quota_exhausted",
+    used: 3,
+    quota: 3,
+  });
+});
+
+it("conservatively consumes a legacy mention reservation if spawn fails", async () => {
+  const { createMentionChannel } = await import("../../src/fabric/mention.js");
+  const { router, tree } = makeRouter(new MemoryOutboxStore<FabricRecord>(), 1, 1, { reportQuota: 1 });
+  tree.tombstone("r_12345678", 1, 100);
+  const channel = createMentionChannel({
+    router,
+    registry: { resolve: () => ({ runId: "r_12345678", type: "worker", parent: "root" }) },
+    query: { get: () => ({ status: "completed" }) as never },
+    spawn: { spawn: async () => ({ error: { kind: "config", message: "busy", retryable: false } }) as never },
+    from: "r_ABCDEFGH",
+    generation: () => 1,
+    canMessage: ["mention"],
+  });
+  expect(await channel.send("builder", "report", "x")).toMatchObject({
+    status: "resume_failed",
+    quota: { used: 1, limit: 1, remaining: 0 },
+  });
+  expect(await channel.send("builder", "report", "x")).toMatchObject({ status: "quota_exhausted", used: 1, quota: 1 });
 });

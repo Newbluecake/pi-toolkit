@@ -159,10 +159,16 @@ describe("router wake policy — root matrix (plan §3.1)", () => {
 });
 
 describe("router with wake OFF (no wakePolicy) is byte-identical", () => {
-  it("never reads `wake`, never stamps level/wake, no result extras; progress+wake:true is NOT invalid_wake", () => {
+  it("never reads `wake`, never stamps level/wake, only report quota receipt; progress+wake:true is NOT invalid_wake", () => {
     const { router, stored } = setup(undefined);
     const r = send(router, { wake: true });
-    expect(r).toEqual({ ok: true, status: "accepted", key: expect.any(String), seq: 1 });
+    expect(r).toEqual({
+      ok: true,
+      status: "accepted",
+      key: expect.any(String),
+      seq: 1,
+      quota: { used: 1, limit: 10, remaining: 9 },
+    });
     const rec = stored((r as { key: string }).key);
     expect(rec).not.toHaveProperty("level");
     expect(rec).not.toHaveProperty("wake");

@@ -113,9 +113,9 @@ export function createMessageAgentTool(deps: MessageAgentToolDeps): ToolDefiniti
             'context; use it to ask or report back), "progress" (to:"root" only renders in the TUI display), ' +
             '"directive" (parent to its own child run only)',
         );
-      const wake = wakeOn ? (params as { wake?: unknown }).wake : undefined;
-      if (wake !== undefined && typeof wake !== "boolean") throw new Error("message_agent: wake must be a boolean");
       try {
+        const wake = wakeOn ? (params as { wake?: unknown }).wake : undefined;
+        if (wake !== undefined && typeof wake !== "boolean") throw new Error("message_agent: wake must be a boolean");
         const result: AdmissionResult | MentionSendResult =
           wake === true && params.kind === "progress"
             ? { ok: false, status: "invalid_wake", reason: "progress_never_wakes" }
@@ -138,22 +138,46 @@ export function createMessageAgentTool(deps: MessageAgentToolDeps): ToolDefiniti
                     ...(deps.canMessage === undefined ? {} : { canMessage: deps.canMessage }),
                   });
                 })();
+        // Do not overwrite the legacy numeric `quota` in quota_exhausted. Success/resume receipts
+        // retain their admission-time snapshot even if another concurrent send has since completed.
+        const reportQuota =
+          params.kind === "report"
+            ? "quota" in result && typeof result.quota === "object" && result.quota !== null
+              ? result.quota
+              : deps.router.reportQuotaSnapshot(deps.from)
+            : undefined;
+        const decorated =
+          reportQuota && !("quota" in result && typeof result.quota === "object") ? { ...result, reportQuota } : result;
+        const hint = reportQuota
+          ? `（report ${reportQuota.used}/${reportQuota.limit} 已用，剩 ${reportQuota.remaining} 次）` +
+            (!result.ok && result.status === "quota_exhausted"
+              ? "（report 额度已耗尽，请勿再试；请在最终结果或完成汇报中提供信息。）"
+              : "")
+          : "";
         return {
-          content: [{ type: "text", text: JSON.stringify(result) }],
-          details: result,
+          content: [{ type: "text", text: JSON.stringify(decorated) + hint }],
+          details: decorated,
         };
       } catch (error) {
         // #33: the router's throw text is frozen byte-for-byte; keep it as the prefix and append kind guidance so the
         // model can self-correct (a bare "message not authorized" sent it guessing across 6+ sessions).
-        if (error instanceof Error && error.message === "message not authorized") {
+        const guidance =
+          error instanceof Error && error.message === "message not authorized"
+            ? ` — ${messageAgentKindHint({
+                to: params.to,
+                kind: params.kind,
+                ...(deps.canMessage === undefined ? {} : { canMessage: deps.canMessage }),
+              })}`
+            : "";
+        if (params.kind === "report") {
+          const quota = deps.router.reportQuotaSnapshot(deps.from);
+          const message = error instanceof Error ? error.message : String(error);
           throw new Error(
-            `${error.message} — ${messageAgentKindHint({
-              to: params.to,
-              kind: params.kind,
-              ...(deps.canMessage === undefined ? {} : { canMessage: deps.canMessage }),
-            })}`,
+            `${message}${guidance}（report ${quota.used}/${quota.limit} 已用，剩 ${quota.remaining} 次）`,
+            { cause: error },
           );
         }
+        if (guidance && error instanceof Error) throw new Error(`${error.message}${guidance}`, { cause: error });
         throw error;
       }
     },

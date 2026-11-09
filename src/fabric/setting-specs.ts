@@ -12,7 +12,7 @@ export const FABRIC_SETTING_SPECS: Record<string, SettingSpec> = {
     description: "Minimum interval between messages on one link",
   }),
   "fabric.maxPerRun": count("fabric.maxPerRun", 0, "Progress messages per sender run"),
-  "fabric.reportQuota": count("fabric.reportQuota", 0, "Report messages per sender run"),
+  "fabric.reportQuota": count("fabric.reportQuota", 0, "Report messages per sender run (default 3; 0 blocks reports)"),
   "fabric.directiveQuota": count("fabric.directiveQuota", 0, "Directive messages per sender run"),
   "fabric.deadLetterQuota": count("fabric.deadLetterQuota", 0, "Dead letters per sender run"),
   "fabric.maxChars": count("fabric.maxChars", 0, "Maximum message characters"),
