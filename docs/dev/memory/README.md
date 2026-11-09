@@ -786,3 +786,71 @@ D 模块内部定义，C0 **没有冻结这些内部参数的字段，也没有�
 
 本包没有审计屏障、applier、commitAction、冻结/提案/review 实现、恢复命令、生产 binding 或设置
 变更，未动 fixture。C0 独立验收后才能并行实施 C/D；不代表 P50 产品闭环已交付。
+
+## #50 C/D 串行整合：raw 审计与 review 保管（factory-only，2026-11-10）
+
+本节收口独立交付的 C `cf28c624` / D `26d0ae86`；上文 A+B/C0 的「尚无审计/提案实现」
+是当时的历史边界，不再代表 factory 代码现状。**C/D 已实现但仍未接生产**：没有 E 的
+统一 `commitAction` / 受控正文 applier，没有 F 的 `wireMemory/wireJev` revision binding、
+restore slash、设置翻转或自动提交。`autoEligible` 始终只是提示，不是写权限。
+
+### C：严格 raw-byte 屏障与恢复内核
+
+`govern/revision-audit.ts::createRevisionAuditPort` 是同步 Locked 工厂，调用方必须持有同一
+canonical memDir 锁；不另造账本/锁/模型通路。每动作保管在
+`blocks/.jev/revisions/<batchId>/<actionId>/`，`before.md` 精确保留原 Buffer，
+`audit.json` 绑定最终 proposalDigest、原 rev/raw SHA256、目录身份及双方证据；before/body digest
+不可混用。目录 0700、文件 0600，no-follow/正规文件/uid/dev/ino/有界读取守卫；不收编或 chmod
+已有宽权限路径。缺审计端口时 D 拒绝，不退回未审计 index。
+
+- prepared 先保存 before 与最终提案证据，再完成文件和 action→batch→revisions→.jev→blocks→memory
+  全目录屏障，才可返回 ok。匹配重放也重做证据文件 fsync 与完整目录链；合法 JSON/已有 marker
+  不是上次 fsync 成功的证明。证据不一致/残缺拒绝，绝不覆盖旧快照。
+- expected-after 只接受未来 E 提供的精确 Buffer/digest/rev 或 missing，不从 proposal/current 文件
+  serialize 推导；finalize 只消费可信真实 syscall 观察。这些 seam **不是 E commitAction**。
+  写后 gate/fsync/审计失败保留实际字节并报 effect-unknown，不补偿、不重试 applier。
+- `scanPendingLocked` 只读分类，不把 proposed 的 expected-after 命中自动升级 committed。
+  `restoreRevisionRaw` / `restoreRevisionRawLocked` 仅 committed、同目录同 id、raw SHA256+rev CAS，
+  恢复原 Buffer 而不 bump version/规范化；持久 restore intent 阻止写后未知状态被盲重试。
+  这些恢复 API 没有注册命令，也不以可丢弃 review index 授权恢复。
+
+### D：冻结输入、真实 B 准备与唯一 review owner
+
+`govern/revision.ts` 在真实锁中冻结原 Buffer/rev/目录身份，私有保管 Buffer 并通过 getter 返回
+副本；DTO 仅含 allowlist，拒绝不能无损 UTF-8 round-trip、parse/权限/位置等不合格输入。模型阶段不占锁。
+`prepareRevisionProposal` 只调用既有 A/B client，同一个预算/来源 owner；从冻结 DTO 独立重算
+relation/generation/coverage bindings，复用唯一 `revision-output` validator。截断/partial/unknown/
+同源/缺证据/lease 失效只建议，epoch 失效连建议也不写。完整提案 codec 严格拒绝未知字段、
+半生成 bundle、坏 digest，非法 revision 整条丢弃，不剥 revision 后回退成 legacy 可执行建议。
+
+`review-lite.ts::upsertRevisionSuggestion` 在同一个真实锁内重读 live rev/raw/身份/authority/status、
+检查 epoch/dismiss/resolved，先调用 C prepared barrier，再经现有 `writeGovernIndexLocked` 写
+review index；prepared 失败零 index 发布。index 失败可能留下 prepared 证据，但不动正文。
+`index-store` 完整往返提案；稳定 key 为 `["revision",action,...sortedTargetContextIds]`，不含
+rev/hash/batch，dismiss/resolved 不因改正文、新 rev/epoch/batch 或迟到结果复活。
+revision 交互仅 open/keep/skip，展示冻结 rev/日期与 stale，不进入旧 extend/delete 分支。
+
+### CD-01 闭合与证据身份
+
+真实 B 在无法核验 actual identity 时合法返回 `trusted:false, provider:"", model:"",
+routeIdentity:"unknown", routeAliases:[]`，保留 requested 身份作诊断但不回填 actual/canonical。
+D 会保存完整生成 bundle 为 suggestion-only；原 C parser 要求 provider/model 非空，导致这条合法
+提案在 prepared 被拒。现在 C 与 D provenance schema 对齐：只有 `trusted:false` 可接受空 actual
+字段与 unknown route；`trusted:true` 仍要求非空 provider/model 和 64 位十六进制 route identity，
+adapter/version/requestChainId、request/input digest、封闭字段等校验保持。**不伪造身份、不删
+provenance、不提升 autoEligible**；翻 trusted、缺 provenance/digest、未知字段均拒绝读取。
+
+联合证据：`tests/memory/govern/revision-cd.test.ts` 的 19 项测试运行真实临时 BOM/CRLF/非 ASCII/
+旧 version 文件 → 真实锁内 freeze → 实际 B client + 受控离线 registry transport/预算 → D prepare
+→ **真实 C** prepared 文件/目录屏障 → 真实 review index → 新 C/command 工厂及 fresh index 读取、
+dismiss 后新 rev/batch/epoch 抑制。包含 trusted 异源正向、真实 B unknown suggestion-only、epoch/
+变 rev 拒绝、prepared 写入/rename/目录同步/重放 fsync 故障零 index，精确 raw 与所有 provenance/
+bindings/digest 往返。审计端口不 mock；仅在故障 case 注入底层 safe-fs 原语失败，顺序观察仍委托
+真实原语。C/D 邻接加 SDK 离线门合计 22 文件 / 706 测试通过。
+
+测试是本地 byte-token 协议的 synthetic actual identity/cost，不冒充 LIVE provider 验证；邻接
+`client-p50-sdk.test.ts` 才是实际 SDK + 离线 HTTP 门。这里的「重启」是丢弃工厂/缓存后读真实磁盘，
+不是进程 kill/掉电持久性实验。不执行 expected-after/finalize/E 正文 commit，不开启 F，fixtures
+保持原字节。单次限 2 worker tier1 与 typecheck/build/format 的精确命令、结果及日志交接在
+`/tmp/p50-cd-integration.json`；同步 syscall 不可抢占、任意同 uid writer 的跨 syscall 竞态、真实
+生产 tokenizer/cap/认证/费用/proxy conformance 仍是后续门禁，不能据此宣称产品闭环上线。

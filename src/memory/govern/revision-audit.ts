@@ -108,7 +108,11 @@ function provenance(v: unknown): boolean {
   )
     return false;
   return (
-    ["provider", "model", "adapterId", "chainVersion", "routeIdentity", "requestChainId"].every((k) => text(v[k])) &&
+    ["adapterId", "chainVersion", "requestChainId"].every((k) => text(v[k])) &&
+    // B preserves unknown actual identity as empty strings, never requested-id
+    // fallback. Retain that evidence for suggestions; trusted identity stays strict.
+    ["provider", "model"].every((k) => text(v[k]) || (v.trusted === false && v[k] === "")) &&
+    (digest(v.routeIdentity) || (v.trusted === false && v.routeIdentity === "unknown")) &&
     digest(v.requestDigest) &&
     digest(v.inputDigest) &&
     typeof v.trusted === "boolean" &&
