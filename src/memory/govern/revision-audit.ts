@@ -23,6 +23,7 @@ import { parseBlockFile, BLOCK_BODY_MAX_BYTES, MAX_FRONTMATTER_BYTES } from "../
 import { parseBlockName } from "../blocks/naming.js";
 import { looksSecret } from "../secret-patterns.js";
 import { withMemoryDirLock } from "../lock.js";
+import { validateRevisionRequestSpec, validateRetireEvidence, validateRevisionProposal } from "./revision.js";
 import type {
   ApplyObservation,
   AuditReadResult,
@@ -196,7 +197,7 @@ function auditValid(v: unknown): v is RevisionAudit {
     !record(v) ||
     !keys(
       v,
-      "v origin commitOrigin batchId actionId directoryIdentityDigest action targetId expectedRev contextId contextExpectedRev contextRawDigest inputDigest proposalDigest expiry relation generationProvenance generationInputComplete outputDigest coverage evidenceBindings budget beforeDigest expectedAfter beforeFile policyVersion state reason createdAt settledAt commitObservation restoreAttempt",
+      "v origin commitOrigin batchId actionId directoryIdentityDigest action targetId expectedRev contextId contextExpectedRev contextRawDigest inputDigest proposalDigest expiry relation generationProvenance generationInputComplete outputDigest coverage generationRequest retireEvidence evidenceBindings budget beforeDigest expectedAfter beforeFile policyVersion state reason createdAt settledAt commitObservation restoreAttempt",
     )
   )
     return false;
@@ -227,6 +228,9 @@ function auditValid(v: unknown): v is RevisionAudit {
   if ((v.reason !== undefined && !text(v.reason)) || (v.settledAt !== undefined && !date(v.settledAt))) return false;
   if (v.action === "expires" ? !expiry(v.expiry) : v.expiry !== undefined) return false;
   if (v.evidenceBindings !== undefined && !bindings(v.evidenceBindings)) return false;
+  if (v.retireEvidence !== undefined && (v.action !== "retire" || !validateRetireEvidence(v.retireEvidence)))
+    return false;
+  if (v.generationRequest !== undefined && !validateRevisionRequestSpec(v.generationRequest)) return false;
   if (
     v.relation !== undefined &&
     (!record(v.relation) ||
@@ -252,7 +256,12 @@ function auditValid(v: unknown): v is RevisionAudit {
       !provenance(v.coverage.provenance))
   )
     return false;
-  if (v.generationProvenance !== undefined || v.outputDigest !== undefined || v.generationInputComplete !== undefined) {
+  if (
+    v.generationRequest !== undefined ||
+    v.generationProvenance !== undefined ||
+    v.outputDigest !== undefined ||
+    v.generationInputComplete !== undefined
+  ) {
     if (
       !["rewrite-single", "merge-survivor"].includes(String(v.action)) ||
       !provenance(v.generationProvenance) ||
@@ -579,6 +588,10 @@ class Kernel {
     try {
       this.check(true);
       const { frozen: f, proposal: p, origin } = input;
+      // New proof fields require the full closed D union. Old C-only records
+      // retain their historical surface; never retrofit/strip an invalid field.
+      if ((Object.hasOwn(p, "generationRequest") || Object.hasOwn(p, "retireEvidence")) && !validateRevisionProposal(p))
+        fail("corrupted");
       const before = Buffer.from(f.target.rawBefore);
       const parsed = block(before, f.target.id);
       const { proposalDigest: pd, ...payload } = p;
@@ -635,6 +648,8 @@ class Kernel {
             }
           : {}),
         ...(p.coverage ? { coverage: p.coverage } : {}),
+        ...(p.generationRequest ? { generationRequest: p.generationRequest } : {}),
+        ...(p.action === "retire" && p.retireEvidence ? { retireEvidence: p.retireEvidence } : {}),
         evidenceBindings: p.evidenceBindings,
         beforeDigest: f.target.rawDigest,
         beforeFile: "before.md",

@@ -11,6 +11,8 @@ import { looksSecret } from "../secret-patterns.js";
 import type { MemoryWriteGate } from "../contracts.js";
 import type {
   ClassifyContext,
+  ClassifierRegistryLike,
+  AuditReadResult,
   ClientProvenance,
   ExpiryPayload,
   FrozenRevisionBlock,
@@ -24,6 +26,9 @@ import type {
   RevisionProposal,
   RevisionProposalDigestInput,
   RevisionRequestBudget,
+  RevisionRequestSpec,
+  RetireEvidence,
+  RevisionAuditPort,
   WholeCoverageEvidence,
 } from "../jev/contracts.js";
 import {
@@ -41,6 +46,7 @@ const REV = /^[1-9][0-9]*-[a-f0-9]{6}$/;
 // BOM + frontmatter + body + delimiters. Never use the 64MiB reader default.
 const RAW_LIMIT = MAX_FRONTMATTER_BYTES + BLOCK_BODY_MAX_BYTES + 32;
 const LIVE = Symbol("p50-d-frozen-live-check");
+const RETIRE_SOURCE = Symbol("p50-d-retire-source");
 const sha = (value: string | Buffer): string => createHash("sha256").update(value).digest("hex");
 
 /** B's canonical grammar, intentionally local (not a second output validator). */
@@ -190,6 +196,61 @@ function coverage(v: unknown): v is WholeCoverageEvidence {
   const { evidenceDigest, ...payload } = v;
   return digest(payload) === evidenceDigest;
 }
+function requestSpec(v: unknown): v is RevisionRequestSpec {
+  return (
+    record(v, ["v", "promptVersion", "maxOutputTokens"], ["v", "promptVersion", "maxOutputTokens"]) &&
+    v.v === 1 &&
+    v.promptVersion === REVISION_PROMPT_VERSION &&
+    typeof v.maxOutputTokens === "number" &&
+    Number.isSafeInteger(v.maxOutputTokens) &&
+    v.maxOutputTokens > 0
+  );
+}
+function sourceRef(v: unknown): v is RetireEvidence["source"] {
+  return (
+    record(v, ["batchId", "actionId", "proposalDigest"], ["batchId", "actionId", "proposalDigest"]) &&
+    hex(v.batchId) &&
+    hex(v.actionId) &&
+    hex(v.proposalDigest)
+  );
+}
+/** Shared closed data codecs; C consumes these pure exports, D never imports C. */
+export function validateRevisionRequestSpec(value: unknown): RevisionRequestSpec | undefined {
+  try {
+    const v = dataCopy(value);
+    return requestSpec(v) ? deepFreeze(v) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+export function validateRetireEvidence(value: unknown): RetireEvidence | undefined {
+  try {
+    const v = dataCopy(value);
+    const fields = [
+      "v",
+      "source",
+      "successorRawDigest",
+      "generationRequest",
+      "generationProvenance",
+      "generationInputComplete",
+      "outputDigest",
+      "coverageRequest",
+    ];
+    return record(v, fields, fields) &&
+      v.v === 1 &&
+      sourceRef(v.source) &&
+      hex(v.successorRawDigest) &&
+      requestSpec(v.generationRequest) &&
+      provenance(v.generationProvenance) &&
+      v.generationInputComplete === true &&
+      hex(v.outputDigest) &&
+      requestSpec(v.coverageRequest)
+      ? deepFreeze(v as unknown as RetireEvidence)
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
 function expiry(v: unknown): v is ExpiryPayload {
   if (!record(v, ["op", "nextExpires", "dateRuleVersion"], ["op", "dateRuleVersion"]) || !text(v.dateRuleVersion))
     return false;
@@ -230,7 +291,16 @@ export function validateRevisionProposal(value: unknown): RevisionProposal | und
     if (
       !record(
         v,
-        [...base, "generatedBody", "outputDigest", "generationProvenance", "generationInputComplete", "expiry"],
+        [
+          ...base,
+          "generatedBody",
+          "outputDigest",
+          "generationProvenance",
+          "generationInputComplete",
+          "generationRequest",
+          "retireEvidence",
+          "expiry",
+        ],
         required,
       ) ||
       v.v !== 1 ||
@@ -257,7 +327,9 @@ export function validateRevisionProposal(value: unknown): RevisionProposal | und
       return undefined;
     const bundle = ["generatedBody", "outputDigest", "generationProvenance", "generationInputComplete"];
     if (v.action === "rewrite-single" || v.action === "merge-survivor") {
-      if ("expiry" in v) return undefined;
+      if ("expiry" in v || "retireEvidence" in v) return undefined;
+      if ("generationRequest" in v && (!requestSpec(v.generationRequest) || !bundle.every((k) => k in v)))
+        return undefined;
       if (bundle.some((k) => k in v)) {
         if (
           !bundle.every((k) => k in v) ||
@@ -268,12 +340,20 @@ export function validateRevisionProposal(value: unknown): RevisionProposal | und
         const output = validateRevisionOutput(v.generatedBody);
         if (!output.ok || output.body !== v.generatedBody || output.outputDigest !== v.outputDigest) return undefined;
       }
-    } else if (bundle.some((k) => k in v) || (v.action === "expires" ? !expiry(v.expiry) : "expiry" in v))
+    } else if (
+      "generationRequest" in v ||
+      ("retireEvidence" in v && (v.action !== "retire" || !validateRetireEvidence(v.retireEvidence))) ||
+      bundle.some((k) => k in v) ||
+      (v.action === "expires" ? !expiry(v.expiry) : "expiry" in v)
+    )
       return undefined;
     if (
       v.coverage &&
       ((v.coverage as WholeCoverageEvidence).targetRev !== v.expectedRev ||
-        ("outputDigest" in v && (v.coverage as WholeCoverageEvidence).candidateDigest !== v.outputDigest))
+        ("outputDigest" in v && (v.coverage as WholeCoverageEvidence).candidateDigest !== v.outputDigest) ||
+        (v.action === "retire" &&
+          v.retireEvidence !== undefined &&
+          (v.coverage as WholeCoverageEvidence).candidateDigest !== (v.retireEvidence as RetireEvidence).outputDigest))
     )
       return undefined;
     const { proposalDigest, ...payload } = v;
@@ -297,18 +377,24 @@ export function validateRevisionProposal(value: unknown): RevisionProposal | und
 }
 function completeIndependentEvidence(p: RevisionProposal): boolean {
   const b = p.evidenceBindings;
+  const g =
+    p.action === "retire"
+      ? p.retireEvidence?.generationProvenance
+      : (p.action === "rewrite-single" || p.action === "merge-survivor") &&
+          p.generatedBody !== undefined &&
+          p.generationInputComplete
+        ? p.generationProvenance
+        : undefined;
   return (
-    (p.action === "rewrite-single" || p.action === "merge-survivor") &&
-    p.generatedBody !== undefined &&
+    !!g &&
     p.contextId !== undefined &&
-    p.generationInputComplete &&
     p.relation !== undefined &&
     p.relation.p >= 0.9 &&
     p.coverage !== undefined &&
     b.relation !== undefined &&
     b.generation !== undefined &&
     b.coverage !== undefined &&
-    independentCoverageSources(p.relation.provenance, p.generationProvenance, p.coverage.provenance, {
+    independentCoverageSources(p.relation.provenance, g, p.coverage.provenance, {
       relation: b.relation,
       generation: b.generation,
       coverage: b.coverage,
@@ -327,8 +413,10 @@ export interface RevisionFreezeSpec extends RevisionFreezeAction {
   readonly policyVersion: string;
   /** Entire batch's action set. Defaults to this one action; maximum 16. */
   readonly actions?: readonly RevisionFreezeAction[];
+  readonly retireSource?: RetireEvidence["source"];
 }
 export interface RevisionFreezeDeps {
+  readonly audit?: RevisionAuditPort;
   readonly gate?: MemoryWriteGate;
   readonly signal?: AbortSignal;
   isCurrent(): boolean;
@@ -338,11 +426,22 @@ export function revisionDirectoryIdentityDigest(d: Pick<IncrementalDirectory, "r
   return digest([d.realpath, d.dev, d.ino]);
 }
 function allowed(deps: RevisionFreezeDeps, dir: string): boolean {
-  return !deps.signal?.aborted && deps.isCurrent() && (deps.gate === undefined || deps.gate.check(dir).ok);
+  return (
+    !deps.signal?.aborted && deps.isCurrent() === true && (deps.gate === undefined || deps.gate.check(dir).ok === true)
+  );
 }
 function readBlock(dir: string, selected: { readonly id: string; readonly rev: string }): FrozenRevisionBlock {
   if (!id(selected.id) || !rev(selected.rev)) throw new Error("id/rev");
   const bytes = readRegularBytes(join(dir, "blocks"), `${selected.id}.md`, { maxBytes: RAW_LIMIT }).bytes;
+  return revisionBlockFromRaw(selected.id, bytes, selected.rev);
+}
+/** Historical admission shares ALL live parsing rules, but grants no LIVE
+ * capability. Buffer custody is independent of the caller's mutable bytes. */
+export function revisionBlockFromRaw(blockId: string, rawBytes: Buffer, expectedRev: string): FrozenRevisionBlock {
+  if (!id(blockId) || !rev(expectedRev) || !Buffer.isBuffer(rawBytes) || rawBytes.length > RAW_LIMIT)
+    throw new Error("raw bounds");
+  const selected = { id: blockId, rev: expectedRev };
+  const bytes = Buffer.from(rawBytes);
   const raw = bytes.toString("utf8");
   if (!Buffer.from(raw, "utf8").equals(bytes)) throw new Error("lossy UTF8");
   const parsed = parseBlockFile(`${selected.id}.md`, raw);
@@ -488,6 +587,20 @@ export function freezeRevisionInputsLocked(
       ...selected,
     };
     Object.defineProperty(input, LIVE, { value: live });
+    const sourceDescriptor = Object.getOwnPropertyDescriptor(spec, "retireSource");
+    if (sourceDescriptor) {
+      if (!("value" in sourceDescriptor)) throw new Error("source accessor");
+      const ref = dataCopy(sourceDescriptor.value);
+      if (spec.action !== "retire" || !sourceRef(ref)) throw new Error("retire source");
+      if (!deps.audit) return { kind: "refused", reason: "unavailable" };
+      const sourceRead = deps.audit.readActionLocked(ref.batchId, ref.actionId);
+      // A requested proof that is missing, corrupt or semantically inconsistent
+      // must NEVER become an evidence-free confirmed operation.
+      if (sourceRead.kind !== "ok") return { kind: "refused", reason: "unavailable" };
+      const decision = readRevisionRetireSourceLocked(input, ref, deps.audit, sourceRead);
+      if (decision.kind === "invalid-unavailable") return { kind: "refused", reason: "unavailable" };
+      Object.defineProperty(input, RETIRE_SOURCE, { value: decision });
+    }
     return Object.freeze(input);
   } catch {
     return { kind: "refused", reason: "permission" };
@@ -522,6 +635,241 @@ export function revisionProposalMatchesInput(p: RevisionProposal, f: FrozenRevis
   );
 }
 
+interface RetireSourceCustody {
+  readonly auditDigest: string;
+  readonly base: Omit<RetireEvidence, "coverageRequest">;
+  readonly before: FrozenRevisionBlock;
+  readonly after: FrozenRevisionBlock;
+  readonly generationBinding: NonNullable<RevisionEvidenceBindings["generation"]>;
+}
+type RetireSourceResult =
+  | { readonly kind: "qualified"; readonly custody: RetireSourceCustody }
+  | { readonly kind: "legacy-no-evidence" }
+  | { readonly kind: "invalid-unavailable" };
+/** Caller owns the canonical memDir lock. No review dependency: source review
+ * GC is harmless when the complete immutable C audit/raw evidence survives. */
+function readRevisionRetireSourceLocked(
+  f: FrozenRevisionInput,
+  ref: RetireEvidence["source"],
+  audit: RevisionAuditPort,
+  alreadyRead?: Extract<AuditReadResult, { kind: "ok" }>,
+): RetireSourceResult {
+  const invalid = Object.freeze({ kind: "invalid-unavailable" as const });
+  try {
+    if (f.action !== "retire" || !f.context || !revisionInputIsLiveLocked(f)) return invalid;
+    const r = alreadyRead ?? audit.readActionLocked(ref.batchId, ref.actionId);
+    if (r.kind !== "ok") return invalid;
+    const a = r.audit,
+      e = r.expectedAfter,
+      o = a.commitObservation;
+    if (
+      a.action !== "merge-survivor" ||
+      a.state !== "committed" ||
+      Object.hasOwn(a, "restoreAttempt") ||
+      a.batchId !== ref.batchId ||
+      a.actionId !== ref.actionId ||
+      a.proposalDigest !== ref.proposalDigest ||
+      a.directoryIdentityDigest !== f.directoryIdentityDigest ||
+      a.policyVersion !== f.policyVersion ||
+      a.targetId !== f.context.id ||
+      a.contextId !== f.target.id ||
+      a.contextExpectedRev !== f.target.rev ||
+      a.contextRawDigest !== f.target.rawDigest ||
+      !e ||
+      e.kind !== "file" ||
+      a.expectedAfter?.kind !== "file" ||
+      e.digest !== a.expectedAfter.digest ||
+      e.rev !== a.expectedAfter.rev ||
+      e.digest !== f.context.rawDigest ||
+      e.rev !== f.context.rev ||
+      !o ||
+      o.kind !== "applied" ||
+      o.expectedAfter.kind !== "file" ||
+      o.expectedAfter.digest !== e.digest ||
+      o.expectedAfter.rev !== e.rev ||
+      typeof a.generationInputComplete !== "boolean" ||
+      !a.generationProvenance ||
+      !a.outputDigest
+    )
+      return invalid;
+    const before = revisionBlockFromRaw(a.targetId, r.before, a.expectedRev);
+    const after = revisionBlockFromRaw(a.targetId, e.raw, e.rev);
+    if (
+      before.rawDigest !== a.beforeDigest ||
+      after.rawDigest !== f.context.rawDigest ||
+      !after.rawBefore.equals(f.context.rawBefore) ||
+      before.block.authority !== after.block.authority ||
+      a.inputDigest !==
+        digest([
+          [before.id, before.rev, before.rawDigest],
+          [f.target.id, f.target.rev, f.target.rawDigest],
+        ])
+    )
+      return invalid;
+    const output = validateRevisionOutput(after.block.body);
+    if (!output.ok || output.body !== after.block.body || output.outputDigest !== a.outputDigest) return invalid;
+    const storedBinding = a.evidenceBindings?.generation;
+    if (
+      !storedBinding ||
+      a.generationProvenance.requestDigest !== storedBinding.requestDigest ||
+      a.generationProvenance.inputDigest !== storedBinding.inputDigest
+    )
+      return invalid;
+    const hasSpec = Object.hasOwn(a, "generationRequest");
+    const spec = hasSpec ? validateRevisionRequestSpec(a.generationRequest) : undefined;
+    if (hasSpec && !spec) return invalid;
+    // The outbound projection/input digest contains no token cap. The sentinel
+    // only satisfies this pure helper's request facade for a legacy record; it
+    // is NEVER dispatched, persisted as a spec, or used to sign a request digest.
+    const outbound = prepareRevisionOutbound(
+      {
+        registry: {},
+        mode: "sync",
+        budgetMs: 1,
+        maxOutputTokens: spec?.maxOutputTokens ?? 1,
+        instruction: "merge-survivor",
+        target: before.block,
+        context: f.target.block,
+      },
+      "generate",
+    );
+    if (
+      !outbound ||
+      storedBinding.inputDigest !== digest(outbound.outbound) ||
+      a.generationInputComplete !== outbound.inputComplete
+    )
+      return invalid;
+    // Only otherwise consistent historical bytes/bindings get legacy handling.
+    // No absent specification or unknown request digest is fabricated here.
+    if (!hasSpec) return Object.freeze({ kind: "legacy-no-evidence" });
+    if (!spec || a.generationInputComplete !== true || !outbound.inputComplete) return invalid;
+    const binding = revisionRequestDigests(outbound.outbound, spec.maxOutputTokens);
+    if (
+      revisionCanonicalJson(binding) !== revisionCanonicalJson(a.evidenceBindings?.generation) ||
+      a.generationProvenance.requestDigest !== binding.requestDigest ||
+      a.generationProvenance.inputDigest !== binding.inputDigest
+    )
+      return invalid;
+    const base = deepFreeze({
+      v: 1 as const,
+      source: { ...ref },
+      successorRawDigest: after.rawDigest,
+      generationRequest: spec,
+      generationProvenance: dataCopy(a.generationProvenance) as unknown as ClientProvenance,
+      generationInputComplete: true as const,
+      outputDigest: output.outputDigest,
+    });
+    const custody = Object.freeze({
+      base,
+      before,
+      after,
+      auditDigest: digest(a),
+      generationBinding: Object.freeze(binding),
+    });
+    return Object.freeze({ kind: "qualified", custody });
+  } catch {
+    return invalid;
+  }
+}
+function retireSourceResult(f: FrozenRevisionInput): RetireSourceResult | undefined {
+  return (f as FrozenRevisionInput & { [RETIRE_SOURCE]?: RetireSourceResult })[RETIRE_SOURCE];
+}
+function retireCustody(f: FrozenRevisionInput): RetireSourceCustody | undefined {
+  const result = retireSourceResult(f);
+  return result?.kind === "qualified" ? result.custody : undefined;
+}
+/** Same-lock source/live evidence repeat for review and the final data syscall.
+ * Confirmed callers must still have truthful source evidence when it is present;
+ * only automatic callers require the independent complete coverage decision. */
+export function revisionRetireEvidenceIsLiveLocked(
+  f: FrozenRevisionInput,
+  p: RevisionProposal,
+  audit: RevisionAuditPort,
+  automatic = false,
+): boolean {
+  try {
+    if (p.action !== "retire" || !p.retireEvidence || !f.context) return false;
+    const held = retireCustody(f),
+      re = p.retireEvidence;
+    if (!held || revisionCanonicalJson(held.base.source) !== revisionCanonicalJson(re.source)) return false;
+    const currentResult = readRevisionRetireSourceLocked(f, re.source, audit);
+    if (currentResult.kind !== "qualified") return false;
+    const current = currentResult.custody;
+    if (current.auditDigest !== held.auditDigest || current.before.rawDigest !== held.before.rawDigest) return false;
+    const { coverageRequest, ...base } = re;
+    if (revisionCanonicalJson(base) !== revisionCanonicalJson(current.base)) return false;
+    const relationDTO = revisionRelationContext(f);
+    const expectedRelation = { requestDigest: digest(relationDTO), inputDigest: digest(relationDTO.state) };
+    const coverageDTO = prepareRevisionOutbound(
+      {
+        registry: {},
+        mode: "sync",
+        budgetMs: 1,
+        maxOutputTokens: coverageRequest.maxOutputTokens,
+        target: f.target.block,
+        context: f.context.block,
+        candidateBody: current.after.block.body,
+      },
+      "coverage",
+    );
+    if (!coverageDTO?.inputComplete) return false;
+    const expected = {
+      relation: expectedRelation,
+      generation: current.generationBinding,
+      coverage: revisionRequestDigests(coverageDTO.outbound, coverageRequest.maxOutputTokens),
+    };
+    if (
+      revisionCanonicalJson(expected) !== revisionCanonicalJson(p.evidenceBindings) ||
+      (p.relation &&
+        (p.relation.inputDigest !== revisionFrozenRelationDigest(f) ||
+          p.relation.provenance.requestDigest !== expected.relation.requestDigest ||
+          p.relation.provenance.inputDigest !== expected.relation.inputDigest)) ||
+      (p.coverage &&
+        (p.coverage.targetRev !== f.target.rev ||
+          p.coverage.beforeDigest !== sha(f.target.block.body) ||
+          p.coverage.candidateDigest !== re.outputDigest ||
+          p.coverage.promptVersion !== coverageRequest.promptVersion ||
+          p.coverage.provenance.requestDigest !== expected.coverage.requestDigest ||
+          p.coverage.provenance.inputDigest !== expected.coverage.inputDigest))
+    )
+      return false;
+    return (
+      !automatic ||
+      (!!p.relation &&
+        p.relation.p >= 0.9 &&
+        !!p.coverage &&
+        independentCoverageSources(p.relation.provenance, re.generationProvenance, p.coverage.provenance, expected))
+    );
+  } catch {
+    return false;
+  }
+}
+/** New source-body specs are binding even for confirmation. Older bodies omit
+ * the field and retain their old behavior; they can never become retire sources. */
+export function revisionGenerationRequestMatchesInput(p: RevisionProposal, f: FrozenRevisionInput): boolean {
+  if ((p.action !== "rewrite-single" && p.action !== "merge-survivor") || !p.generationRequest) return true;
+  const spec = p.generationRequest;
+  const outbound = prepareRevisionOutbound(
+    {
+      registry: {},
+      mode: "sync",
+      budgetMs: 1,
+      maxOutputTokens: spec.maxOutputTokens,
+      instruction: p.action,
+      target: f.target.block,
+      ...(p.action === "merge-survivor" && f.context ? { context: f.context.block } : {}),
+    },
+    "generate",
+  );
+  if (!outbound || !p.generationProvenance) return false;
+  const expected = revisionRequestDigests(outbound.outbound, spec.maxOutputTokens);
+  return (
+    revisionCanonicalJson(expected) === revisionCanonicalJson(p.evidenceBindings.generation) &&
+    p.generationProvenance.requestDigest === expected.requestDigest &&
+    p.generationProvenance.inputDigest === expected.inputDigest
+  );
+}
+
 export interface RevisionPlanCandidate {
   readonly frozen: FrozenRevisionInput;
   readonly reason: RevisionProposal["reason"];
@@ -530,6 +878,8 @@ export interface RevisionPlanCandidate {
   readonly evidenceBindings?: RevisionEvidenceBindings;
   readonly generation?: Extract<Awaited<ReturnType<JevClientHandle["generateRevision"]>>, { kind: "ok" }>;
   readonly expiry?: ExpiryPayload;
+  readonly generationRequest?: RevisionRequestSpec;
+  readonly retireEvidence?: RetireEvidence;
   /** Trusted deterministic rule output, not model input. E must recheck it. */
   readonly expired?: { readonly targetRev: string; readonly rawDigest: string; readonly policyVersion: string };
 }
@@ -567,12 +917,14 @@ export function planRevisionActions(input: RevisionPlanInput): readonly Revision
       ...(c.relation ? { relation: c.relation } : {}),
       ...(c.coverage ? { coverage: c.coverage } : {}),
       ...(f.action === "expires" ? { expiry: c.expiry! } : {}),
+      ...(f.action === "retire" && c.retireEvidence ? { retireEvidence: c.retireEvidence } : {}),
       ...((f.action === "rewrite-single" || f.action === "merge-survivor") && c.generation
         ? {
             generatedBody: c.generation.body,
             outputDigest: c.generation.outputDigest,
             generationProvenance: c.generation.provenance,
             generationInputComplete: c.generation.inputComplete,
+            ...(c.generationRequest ? { generationRequest: c.generationRequest } : {}),
           }
         : {}),
       autoEligible: false,
@@ -595,19 +947,25 @@ export function planRevisionActions(input: RevisionPlanInput): readonly Revision
       autoCount < 2 &&
       (f.action === "rewrite-single"
         ? completeIndependentEvidence(p)
-        : f.action === "expires"
-          ? f.target.block.authority === "agent"
-          : f.action === "delete"
-            ? f.target.block.authority === "agent" && expired
-            : false);
+        : f.action === "retire"
+          ? retireCustody(f) !== undefined && p.retireEvidence !== undefined
+          : f.action === "expires"
+            ? f.target.block.authority === "agent"
+            : f.action === "delete"
+              ? f.target.block.authority === "agent" && expired
+              : false);
     if (eligible) {
       const next = { ...base, autoEligible: true };
-      p = validateRevisionProposal({
+      // For retire this codec is the single static independence decision;
+      // failed eligibility retains the already-valid suggestion-only proposal.
+      const eligibleProposal = validateRevisionProposal({
         ...next,
         proposalDigest: revisionProposalDigest(next as RevisionProposalDigestInput),
       });
-      if (!p) continue;
-      autoCount++;
+      if (eligibleProposal) {
+        p = eligibleProposal;
+        autoCount++;
+      }
     }
     out.push(p);
   }
@@ -679,7 +1037,7 @@ export async function prepareRevisionProposal(
 ): Promise<RevisionPrepareResult> {
   const current = () => {
     try {
-      return !deps.attempt.signal.aborted && !deps.requestBudget?.signal?.aborted && deps.attempt.isCurrent();
+      return !deps.attempt.signal.aborted && !deps.requestBudget?.signal?.aborted && deps.attempt.isCurrent() === true;
     } catch {
       return false;
     }
@@ -690,6 +1048,7 @@ export async function prepareRevisionProposal(
     const suppressed = await deps.isSuppressed(input);
     if (!current()) return { kind: "stale" };
     if (suppressed) return { kind: suppressed };
+    if (input.action === "retire") return await prepareRetireProposal(input, deps, current);
     const client = deps.client,
       budget = deps.requestBudget;
     if (
@@ -724,6 +1083,13 @@ export async function prepareRevisionProposal(
       deps.attempt.capReached();
       return { kind: "unavailable" };
     }
+    const generationRequest = validateRevisionRequestSpec({
+      v: 1,
+      promptVersion: REVISION_PROMPT_VERSION,
+      maxOutputTokens: request.maxOutputTokens,
+    });
+    if (!generationRequest) return { kind: "unavailable" };
+    Object.freeze(request);
     const generated = await client.generateRevision(request);
     if (!current()) return { kind: "stale" };
     if (generated.kind !== "ok") return { kind: "unavailable" };
@@ -824,6 +1190,7 @@ export async function prepareRevisionProposal(
             ...generated,
             inputComplete: generated.inputComplete && outbound.inputComplete,
           },
+          generationRequest,
           evidenceBindings: expected,
           ...(rel ? { relation: rel } : {}),
           ...(cover ? { coverage: cover } : {}),
@@ -836,6 +1203,148 @@ export async function prepareRevisionProposal(
   } catch {
     return current() ? { kind: "unavailable" } : { kind: "stale" };
   }
+}
+
+/** Retire consumes a historical generation, and issues only fresh relation and
+ * coverage on A/B's original client. No generation slot/call is spent here. */
+async function prepareRetireProposal(
+  input: FrozenRevisionInput,
+  deps: RevisionPrepareDeps,
+  current: () => boolean,
+): Promise<RevisionPrepareResult> {
+  const decision = retireSourceResult(input);
+  const plain = (): RevisionPrepareResult => {
+    const p = planRevisionActions({
+      candidates: [{ frozen: input, reason: deps.reason }],
+      autoEnabled: false,
+      leaseValid: false,
+    })[0];
+    return p ? { kind: "ok", proposal: p } : { kind: "unavailable" };
+  };
+  if (!Object.hasOwn(input, RETIRE_SOURCE) || decision?.kind === "legacy-no-evidence") return plain();
+  if (decision?.kind !== "qualified") return { kind: "unavailable" };
+  const source = decision.custody;
+  const client = deps.client,
+    budget = deps.requestBudget;
+  if (
+    !client ||
+    !budget ||
+    !budget.registry ||
+    !input.context ||
+    (budget.jobId !== undefined && budget.jobId !== input.batchId) ||
+    !budgetAvailable(client) ||
+    !(budget.jobCostCapUsd !== undefined && Number.isFinite(budget.jobCostCapUsd) && budget.jobCostCapUsd > 0) ||
+    !(Number.isFinite(budget.budgetMs) && budget.budgetMs > 0)
+  )
+    return { kind: "unavailable" };
+  // Keep the same registry reference for A's controlled transport binding.
+  // Its existing client owns classifier capability/model admission; do not
+  // manufacture a wrapper or require an extra SDK method for this branch.
+  const registry = budget.registry as typeof budget.registry & ClassifierRegistryLike;
+  const coverageRequest = validateRevisionRequestSpec({
+    v: 1,
+    promptVersion: REVISION_PROMPT_VERSION,
+    maxOutputTokens: budget.maxOutputTokens,
+  });
+  if (!coverageRequest) return { kind: "unavailable" };
+  const signal = budget.signal ? AbortSignal.any([budget.signal, deps.attempt.signal]) : deps.attempt.signal;
+  const relationDTO = revisionRelationContext(input);
+  const binding = { requestDigest: digest(relationDTO), inputDigest: digest(relationDTO.state) };
+  const outcome = await client.ask({
+    ...relationDTO,
+    registry,
+    mode: budget.mode,
+    duty: "review",
+    budgetMs: budget.budgetMs,
+    signal,
+    jobId: input.batchId,
+    jobCostCapUsd: budget.jobCostCapUsd,
+  });
+  if (!current()) return { kind: "stale" };
+  if (!budgetAvailable(client)) {
+    deps.attempt.capReached();
+    return { kind: "unavailable" };
+  }
+  if (!outcome.ok) return { kind: "unavailable" };
+  const answer = outcome.answers.revisionRelation,
+    sources = outcome.sources?.filter((s) => s.questionIds.includes("revisionRelation"));
+  if (
+    !answer ||
+    answer.type !== "choice" ||
+    (answer.choice !== "conflict" && answer.choice !== "supersedes") ||
+    outcome.missing.length ||
+    sources?.length !== 1 ||
+    sources[0]!.questionIds.length !== 1 ||
+    sources[0]!.provenance.requestDigest !== binding.requestDigest ||
+    sources[0]!.provenance.inputDigest !== binding.inputDigest
+  )
+    return plain();
+  const p = answer.probabilities[answer.choice];
+  if (p === undefined || !Number.isFinite(p) || p < 0 || p > 1) return plain();
+  const relation: RelationEvidence = {
+    kind: answer.choice,
+    p,
+    inputDigest: revisionFrozenRelationDigest(input),
+    provenance: sources[0]!.provenance,
+  };
+  const request: RevisionCoverageRequest = Object.freeze({
+    ...budget,
+    maxOutputTokens: coverageRequest.maxOutputTokens,
+    signal,
+    jobId: input.batchId,
+    target: input.target.block,
+    context: input.context.block,
+    candidateBody: source.after.block.body,
+  });
+  const dto = prepareRevisionOutbound(request, "coverage");
+  if (!dto?.inputComplete) return plain();
+  const coverageBinding = revisionRequestDigests(dto.outbound, coverageRequest.maxOutputTokens);
+  const result = await client.judgeRevisionCoverage(request);
+  if (!current()) return { kind: "stale" };
+  if (!budgetAvailable(client)) {
+    deps.attempt.capReached();
+    return { kind: "unavailable" };
+  }
+  let coverage: WholeCoverageEvidence | undefined;
+  if (
+    result.kind === "ok" &&
+    result.verdict === "complete" &&
+    result.inputComplete &&
+    result.targetRev === input.target.rev &&
+    result.beforeDigest === sha(input.target.block.body) &&
+    result.candidateDigest === source.base.outputDigest &&
+    result.promptVersion === coverageRequest.promptVersion &&
+    result.provenance.requestDigest === coverageBinding.requestDigest &&
+    result.provenance.inputDigest === coverageBinding.inputDigest
+  ) {
+    const payload = {
+      v: 1 as const,
+      verdict: "complete" as const,
+      targetRev: result.targetRev,
+      beforeDigest: result.beforeDigest,
+      candidateDigest: result.candidateDigest,
+      promptVersion: result.promptVersion,
+      provenance: result.provenance,
+    };
+    coverage = { ...payload, evidenceDigest: digest(payload) };
+  }
+  const retireEvidence = validateRetireEvidence({ ...source.base, coverageRequest });
+  if (!retireEvidence) return { kind: "unavailable" };
+  const proposal = planRevisionActions({
+    candidates: [
+      {
+        frozen: input,
+        reason: deps.reason,
+        relation,
+        evidenceBindings: { relation: binding, generation: source.generationBinding, coverage: coverageBinding },
+        retireEvidence,
+        ...(coverage ? { coverage } : {}),
+      },
+    ],
+    autoEnabled: deps.autoEnabled,
+    leaseValid: deps.attempt.leaseValid(),
+  })[0];
+  return proposal ? { kind: "ok", proposal } : { kind: "unavailable" };
 }
 
 /** Local audit origin type is reused; no audit implementation is imported. */

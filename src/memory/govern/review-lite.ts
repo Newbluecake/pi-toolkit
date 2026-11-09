@@ -31,6 +31,7 @@ import {
 import { planSweep } from "./sweep-plan.js";
 import {
   revisionInputIsLiveLocked,
+  revisionRetireEvidenceIsLiveLocked,
   revisionProposalDigest,
   revisionProposalMatchesInput,
   validateRevisionProposal,
@@ -559,6 +560,11 @@ export async function upsertRevisionSuggestion(
       () => {
         if (!current() || !revisionInputIsLiveLocked(input.frozen)) return "stale";
         governanceGate(memDir, deps.gate, deps.signal);
+        const sourceCurrent = () =>
+          proposal!.action !== "retire" ||
+          !proposal!.retireEvidence ||
+          revisionRetireEvidenceIsLiveLocked(input.frozen, proposal!, deps.audit!);
+        if (!sourceCurrent()) return "stale";
         // Lease loss is not epoch loss: keep only a suggestion, with its final
         // digest fixed BEFORE prepared audit. No post-barrier digest swapping.
         if (proposal!.autoEligible && !deps.leaseValid()) {
@@ -600,7 +606,12 @@ export async function upsertRevisionSuggestion(
           !prepared.before.equals(input.frozen.target.rawBefore)
         )
           return "unavailable";
-        if (!current() || !revisionInputIsLiveLocked(input.frozen) || (proposal!.autoEligible && !deps.leaseValid()))
+        if (
+          !current() ||
+          !revisionInputIsLiveLocked(input.frozen) ||
+          !sourceCurrent() ||
+          (proposal!.autoEligible && !deps.leaseValid())
+        )
           return "stale";
         const review = mergeReview(index.review, {
           lastRunAt: row.at,
@@ -617,7 +628,7 @@ export async function upsertRevisionSuggestion(
           capture() {},
           check(dir) {
             const verdict = deps.gate?.check(dir) ?? { ok: true as const };
-            return !current() || (proposal!.autoEligible && !deps.leaseValid())
+            return !current() || !sourceCurrent() || (proposal!.autoEligible && !deps.leaseValid())
               ? { ok: false as const, reason: "identity-changed" as const }
               : verdict;
           },

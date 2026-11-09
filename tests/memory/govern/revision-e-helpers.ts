@@ -52,7 +52,19 @@ afterEach(() => {
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
 
-export async function fixture(unknown = false, authority: "agent" | "user" = "agent") {
+export async function fixture(
+  unknown = false,
+  authority: "agent" | "user" = "agent",
+  options: {
+    relationGenerationSame?: boolean;
+    coverageSame?: boolean;
+    coverageRelationSame?: boolean;
+    coverageAliasOverlap?: boolean;
+    failover?: boolean;
+    coverageVerdict?: "complete" | "partial" | "unknown";
+    relationP?: number;
+  } = {},
+) {
   const dir = fs.mkdtempSync(join(tmpdir(), "p50-cd-"));
   roots.push(dir);
   const blocks = join(dir, "blocks");
@@ -104,6 +116,12 @@ export async function fixture(unknown = false, authority: "agent" | "user" = "ag
   const indexPath = join(blocks, ".jev/index.json");
   const actionPath = (f = frozen) => join(blocks, ".jev/revisions", f.batchId, f.actionId);
   const calls: string[] = [];
+  const relationActual = options.relationGenerationSame ? "generation" : "relation";
+  const coverageActual = options.coverageSame
+    ? "generation"
+    : options.coverageRelationSame
+      ? relationActual
+      : "coverage";
   const registry: RevisionRegistryLike & ClassifierRegistryLike = {
     complete: async (model, context, opts): Promise<RevisionTransportResult> => {
       expect(fs.existsSync(join(dir, ".lock"))).toBe(false);
@@ -113,12 +131,15 @@ export async function fixture(unknown = false, authority: "agent" | "user" = "ag
       expect(opts.maxRetries).toBe(0);
       expect(context.messages).toHaveLength(1);
       calls.push(chain);
+      if (chain.endsWith("/fail")) throw Error("controlled real failover");
       const text =
-        chain === "judge/main" ? '{"verdict":"complete"}' : "Keep the budget and café 规则; keep the directory lock.";
+        chain === "judge/main"
+          ? JSON.stringify({ verdict: options.coverageVerdict ?? "complete" })
+          : "Keep the budget and café 规则; keep the directory lock.";
       expect(Buffer.byteLength(text)).toBeLessThan(opts.maxTokens);
       return {
         provider: "offline",
-        model: chain === "judge/main" ? "coverage" : "generation",
+        model: chain === "judge/main" ? coverageActual : "generation",
         stopReason: "stop",
         content: [{ type: "text", text }],
         usage: { cost: { total: 0.001 } },
@@ -131,22 +152,24 @@ export async function fixture(unknown = false, authority: "agent" | "user" = "ag
       calls.push("rel/main");
       return {
         provider: "offline",
-        model: "relation",
+        model: relationActual,
         stopReason: "stop",
         answers: {
           revisionRelation: {
             type: "choice",
             choice: "conflict",
-            probabilities: { conflict: 0.99, supersedes: 0.01 },
-            confidence: 0.99,
+            probabilities: { conflict: options.relationP ?? 0.99, supersedes: 1 - (options.relationP ?? 0.99) },
+            confidence: options.relationP ?? 0.99,
           },
         },
         usage: { input: 100, cost: { total: 0.001 } },
       };
     },
   };
-  const bindings: RegistryRevisionBinding[] = ["gen/main", "judge/main"].map((chain) => {
-    const actual = chain === "judge/main" ? "coverage" : "generation";
+  const bindings: RegistryRevisionBinding[] = (
+    options.failover ? ["gen/fail", "gen/main", "judge/fail", "judge/main"] : ["gen/main", "judge/main"]
+  ).map((chain) => {
+    const actual = chain === "judge/main" ? coverageActual : "generation";
     return {
       registry,
       requestChainId: chain,
@@ -170,7 +193,11 @@ export async function fixture(unknown = false, authority: "agent" | "user" = "ag
         provider: "offline",
         model: actual,
         routeIdentity: hash(`offline/${actual}`),
-        routeAliases: [chain, `offline/${actual}`],
+        routeAliases: [
+          chain,
+          `offline/${actual}`,
+          ...(options.coverageAliasOverlap && chain === "judge/main" ? ["rel/main"] : []),
+        ],
       }),
     };
   });
@@ -182,9 +209,9 @@ export async function fixture(unknown = false, authority: "agent" | "user" = "ag
       dispatch: (opts) => registry.classify!(input.model, input.context, opts),
       resolveRoute: () => ({
         provider: "offline",
-        model: "relation",
-        routeIdentity: hash("offline/relation"),
-        routeAliases: ["rel/main", "offline/relation"],
+        model: relationActual,
+        routeIdentity: hash(`offline/${relationActual}`),
+        routeAliases: ["rel/main", `offline/${relationActual}`],
       }),
     }),
   };
@@ -203,8 +230,8 @@ export async function fixture(unknown = false, authority: "agent" | "user" = "ag
       transport,
       revision: {
         transport: createRegistryRevisionTransport(bindings),
-        models: ["gen/main"],
-        coverageModels: ["judge/main"],
+        models: options.failover ? ["gen/fail", "gen/main"] : ["gen/main"],
+        coverageModels: options.failover ? ["judge/fail", "judge/main"] : ["judge/main"],
       },
     },
   });
@@ -265,6 +292,7 @@ export async function fixture(unknown = false, authority: "agent" | "user" = "ag
     indexPath,
     actionPath,
     client,
+    registry,
     calls,
     freeze,
     prepare,

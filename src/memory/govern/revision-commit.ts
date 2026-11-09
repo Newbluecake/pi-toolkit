@@ -22,6 +22,8 @@ import {
   revisionCanonicalJson,
   revisionFrozenRelationDigest,
   revisionInputIsLiveLocked,
+  revisionGenerationRequestMatchesInput,
+  revisionRetireEvidenceIsLiveLocked,
   revisionProposalMatchesInput,
   revisionRelationContext,
   validateRevisionProposal,
@@ -90,7 +92,7 @@ function expectedEvidence(p: RevisionProposal, owned: OwnedRevisionAction): bool
   )
     return false;
   const f = owned.frozen;
-  const gcap = owned.generationMaxOutputTokens,
+  const gcap = p.generationRequest?.maxOutputTokens ?? owned.generationMaxOutputTokens,
     ccap = owned.coverageMaxOutputTokens;
   if (!Number.isSafeInteger(gcap) || !Number.isSafeInteger(ccap) || gcap! < 1 || ccap! < 1) return false;
   const generation: RevisionGenerateRequest = {
@@ -293,17 +295,32 @@ export async function commitAction(
           if (!output.ok || output.body !== p.generatedBody || output.outputDigest !== p.outputDigest)
             return skipped("digest");
         }
+        if (
+          !revisionGenerationRequestMatchesInput(p, f) ||
+          ((p.action === "rewrite-single" || p.action === "merge-survivor") &&
+            p.generationRequest &&
+            owned.generationMaxOutputTokens !== undefined &&
+            owned.generationMaxOutputTokens !== p.generationRequest.maxOutputTokens)
+        )
+          return skipped("digest");
+        const sourceCurrent = (automatic: boolean) =>
+          p.action !== "retire" || !p.retireEvidence
+            ? !automatic
+            : revisionRetireEvidenceIsLiveLocked(f, p, audit, automatic);
+        if (p.action === "retire" && p.retireEvidence && !sourceCurrent(false)) return skipped("stale");
         const now = new Date(deps.now().getTime());
         if (req.origin === "p50-auto") {
           if (p.action === "rewrite-single") {
             if (!expectedEvidence(p, owned)) return skipped("permission");
+          } else if (p.action === "retire") {
+            if (!sourceCurrent(true)) return skipped("permission");
           } else if (p.action === "expires") {
             if (f.target.block.authority !== "agent") return skipped("permission");
           } else if (p.action === "delete") {
             const old = parseBlockFile(`${f.target.id}.md`, f.target.rawBefore.toString("utf8"));
             if (f.target.block.authority !== "agent" || "stray" in old || !isExpired(old.meta, governanceToday(now)))
               return skipped("permission");
-          } else return skipped("permission"); // merge first step suggestion-only; retire lacks a three-source bundle.
+          } else return skipped("permission"); // merge first step remains suggestion-only.
         } else if (!deps.consumeConfirmedLocked) return skipped("unavailable");
         const prepared = audit.persistPreparedBarrierLocked({
           frozen: f,
@@ -316,6 +333,11 @@ export async function commitAction(
         const check = () => {
           guard(true);
           checkReview(memDir, p);
+          // Independence was decided once above on immutable proposal routes.
+          // Repeat the full independent binding/source snapshot match here;
+          // any change invalidates that decision instead of judging a new route.
+          if (p.action === "retire" && p.retireEvidence && !sourceCurrent(false)) refuse("stale");
+          if (!revisionGenerationRequestMatchesInput(p, f)) refuse("digest");
         };
         check();
         if (req.origin === "web-b3" && deps.consumeConfirmedLocked!(req, p) !== true) return skipped("permission");

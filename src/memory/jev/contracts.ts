@@ -736,6 +736,25 @@ export interface RevisionProposalBase {
   readonly autoEligible: boolean;
 }
 
+/** Locally frozen BEFORE the real request, never reconstructed from settings
+ * or returned provenance. Optional on old body proposals/audits. */
+export interface RevisionRequestSpec {
+  readonly v: 1;
+  readonly promptVersion: string;
+  readonly maxOutputTokens: number;
+}
+/** Historical generation custody, NOT an executable retire body. */
+export interface RetireEvidence {
+  readonly v: 1;
+  readonly source: { readonly batchId: string; readonly actionId: string; readonly proposalDigest: string };
+  readonly successorRawDigest: string;
+  readonly generationRequest: RevisionRequestSpec;
+  readonly generationProvenance: ClientProvenance;
+  readonly generationInputComplete: true;
+  readonly outputDigest: string;
+  readonly coverageRequest: RevisionRequestSpec;
+}
+
 /** Reuses B's successful generation shape, preserving truncation evidence.
  * A deterministic suggestion may omit the whole bundle, never part of it.
  * Body must pass the existing govern/revision-output.ts validator in D. */
@@ -745,20 +764,38 @@ export type RevisionGenerationPayload =
       readonly outputDigest: RevisionGenerateSuccess["outputDigest"];
       readonly generationProvenance: RevisionGenerateSuccess["provenance"];
       readonly generationInputComplete: RevisionGenerateSuccess["inputComplete"];
+      readonly generationRequest?: RevisionRequestSpec;
     }
   | {
       readonly generatedBody?: never;
       readonly outputDigest?: never;
       readonly generationProvenance?: never;
       readonly generationInputComplete?: never;
+      readonly generationRequest?: never;
     };
 type RevisionGenerateSuccess = Extract<RevisionGenerateResult, { readonly kind: "ok" }>;
 
 export type RevisionProposal = RevisionProposalBase &
   (
-    | ({ readonly action: "rewrite-single" | "merge-survivor"; readonly expiry?: never } & RevisionGenerationPayload)
+    | ({
+        readonly action: "rewrite-single" | "merge-survivor";
+        readonly expiry?: never;
+        readonly retireEvidence?: never;
+      } & RevisionGenerationPayload)
     | {
-        readonly action: "retire" | "delete";
+        readonly action: "retire";
+        readonly retireEvidence?: RetireEvidence;
+        readonly generationRequest?: never;
+        readonly expiry?: never;
+        readonly generatedBody?: never;
+        readonly outputDigest?: never;
+        readonly generationProvenance?: never;
+        readonly generationInputComplete?: never;
+      }
+    | {
+        readonly action: "delete";
+        readonly retireEvidence?: never;
+        readonly generationRequest?: never;
         readonly expiry?: never;
         readonly generatedBody?: never;
         readonly outputDigest?: never;
@@ -767,6 +804,8 @@ export type RevisionProposal = RevisionProposalBase &
       }
     | {
         readonly action: "expires";
+        readonly generationRequest?: never;
+        readonly retireEvidence?: never;
         readonly expiry: ExpiryPayload;
         readonly generatedBody?: never;
         readonly outputDigest?: never;
@@ -833,6 +872,8 @@ export interface RevisionAudit {
   readonly relation?: RelationEvidence;
   readonly generationProvenance?: ClientProvenance;
   readonly generationInputComplete?: boolean;
+  readonly generationRequest?: RevisionRequestSpec;
+  readonly retireEvidence?: RetireEvidence;
   readonly outputDigest?: string;
   readonly coverage?: WholeCoverageEvidence;
   readonly evidenceBindings?: RevisionEvidenceBindings;

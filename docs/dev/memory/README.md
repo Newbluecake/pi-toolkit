@@ -857,6 +857,8 @@ bindings/digest 往返。审计端口不 mock；仅在故障 case 注入底层 s
 
 ## #50 E：唯一受控提交入口（factory-only，2026-11-10）
 
+> 以下是 `6d292477` 初版 E 与安全返工的历史交付边界；后续自动 retire 的已实现 factory 能力见下一节。
+
 `govern/revision-commit.ts` 导出唯一 `commitAction(memDir, request, deps)`；
 `createRevisionCommitter` 仅将同一入口绑定到宿主私有端口，不注册 hook、tool、命令或设置。
 上文 C/D 交付时的“没有 E”是历史状态；**F 生产 binding、默认/auto 开关、restore slash、
@@ -914,3 +916,70 @@ merge survivor commit→C raw restore 的双向单文件往返。本轮安全修
 这些是 own `/tmp`、离线受控 provider 协议与注入宿主能力，不是 LIVE/provider/真实 B3 UI 或掉电实验。
 同步 I/O 不可抢占、任意同 uid writer 在 syscall 间的竞争、fsync 非绝对掉电保证、F 的生命周期/
 缓存失效/来源与真实 tokenizer/cap/认证/usage/proxy conformance 等既有限界仍在。
+
+## #50 E 自动 retire：持久生成规格与历史来源保管（factory-only，2026-11-10）
+
+在 `6d292477` 的两项安全修复上补齐自动 retire 的 factory 链；上述初版的“自动 retire 仍拒绝”
+是历史状态。**仍未接 F**：没有 wire/index/settings/默认/auto 开关、生产调度或第二确认 UI 变更。
+源 survivor 仍须先通过原 host-confirmed 端口提交；retire 是另一个只改 old target 的单文件动作。
+
+### 契约与历史准入
+
+- 正文 proposal 和源 C audit 追加可选 `generationRequest:{v:1,promptVersion,maxOutputTokens}`。
+  D 在真实 generate 前复制并冻结 spec 与 request，成功后复用唯一 body validator，spec 随完整
+  生成 bundle 进入 proposalDigest，再由源 prepared 屏障保管，E 之后才可写。字段存在而半 bundle、
+  非法版本/cap/digest 不回退旧路径；source commit 也从冻结输入和持久 spec 重算 generation binding。
+  旧无字段正文仍读/确认/恢复，不回填 spec，不可作自动 retire 来源。
+- `retireEvidence` 是 retire 独享的封闭可选元数据：source 的 batch/action/proposalDigest 引用、
+  successorRawDigest、generationRequest/provenance/inputComplete=true/outputDigest 与独立
+  coverageRequest；沿用顶层 target/context id/rev、relation/coverage/evidenceBindings。retire 顶层或
+  evidence 内均不接 generatedBody/raw/path/额外执行参数；candidate 只取本次真实冻结 successor。
+  新增字段全部进完整 digest，getter/toJSON/toString 不执行，坏 revision 整条拒绝而非 strip 后执行。
+- `revisionBlockFromRaw` 从既有 live reader 提取纯严格准入，复用无损 UTF-8、parse/重复字段/
+  全元数据、secret/private/Hub/residue/origin/active 规则。历史 before/after 与 live reader 用同一
+  构造器；Buffer ingress/egress 都复制。它只给 DTO，不授 LIVE；只有真实 locked freeze 可授
+  原私有 LIVE 和新的私有 source custody。C 对 D 只消费纯 codec，D 通过注入原 audit port 读 C，
+  不引入反向 runtime import、第二审计/建议/费用 owner。
+
+### 源、准备与提交
+
+- source 必须同目录、同受支持 policy、action=merge-survivor、state=committed，file expected-after
+  与真实 applied 观察匹配，且**不存在任何 restoreAttempt 字段**。源 audit/before/after/spec/生成
+  元数据必须完整；源 context 必须等本次 old target 的 id/rev/rawDigest。restored/unknown/缺观察，
+  或手工放回相同 after，均不恢复资格。源 review GC 不影响完整 audit 的正向使用。
+- 源 before survivor + 本次 old bytes + 源持久 spec 独立重建 generation；fresh relation 用 old +
+  successor-after；fresh coverage 固定 old + successor context + 原样候选 body + 调用前冻结的
+  coverage spec。三份 expected 各自重算，不照抄结果、不用当前配置补签；候选须经唯一 validator
+  原样 body/digest 通过，脱敏/截断不完整或 partial/unknown 不自动。
+- D 的真实 retire prepare 分支仅调用现 A/B client 的新 relation/coverage，**不重跑 generation，
+  不消耗新的 generate 槽**；继续原 queue/预算/abort/zombie/费用。每次自动资格复核固定调用一次
+  `independentCoverageSources(R,G,C,expected)`，只要求 coverage 分别异于 relation/generation，
+  允许 R=G；真实异源 failover 可以通过。同 coverage 来源、低于 `0.90` 或不可信实际身份只建议。
+- review 与 E 都在原同一 memDir 锁内重读 source；E 最后 data-syscall 守卫再复核。私有 freeze
+  同时保存源 audit 摘要，防止调用后 source/proposal 协同改 spec/provenance 冒充冻结历史。
+  source 读取显式区分 qualified / legacy-no-evidence / invalid-unavailable；只有未提供 source，或
+  已核对引用/原始输入/输出/既存绑定一致的合法旧 source 缺 spec，才可给 confirmed-only 建议。
+  指定 source 缺失、非 committed、引用 digest 错、cap 与历史 binding 不符或任何语义不自洽，在
+  freeze 即拒绝，不把 undefined/lack-of-custody 当兼容许可；无 retire review/audit 或确认消费。
+  模型始终在锁外；source restore/retire 的锁序决定先后，不宣称两独立动作的跨文件事务。
+- E 仍是唯一提交入口，原 applier 不变，只对 old target 写 superseded/supersededBy；successor 与
+  source evidence 不写。source 身份/活体 raw+rev/authority/status/位置、owner/epoch/lease/gate、
+  dismiss/resolved、全来源 user-delete 硬禁及 commitOrigin 重放规则均保留。缺 retireEvidence 的
+  旧合法 retire 仍 confirmed-only；合法但不足自动资格的证据不能凭 autoEligible 越权。
+- 当前 admitted pass 的完整 frozen action set 决定 batch，不按动作/重试重造 batch。实际动作最多
+  两个，proposed/unknown 保守占额，低置信建议不占实际额；fresh factory/进程不清零。写前两
+  全屏障、一次真实 syscall、写后 fsync/finalize、effect-unknown 禁重试/补偿，以及 C raw 恢复协议
+  不变。retire 恢复也只恢复 old target 的精确 Buffer。
+
+新证据位于 `tests/memory/govern/revision-retire{,-codec,-faults}.test.ts`、独立 helper/worker 和
+`tests/integration/memory-revision-retire.test.ts`：真实 B→D→C→E 源 merge 确认→丢弃工厂/源 review
+GC→fresh relation+coverage→自动 retire→raw restore；包含 user↔user、R=G、真实 failover、未知
+实际身份/partial/同源拒自动、历史无 spec、getter/闭合/digest/独立 cap/provenance 伪造、源各状态/
+真实恢复 intent/恢复后放回 after、最后 syscall 门、同批 unknown cap、模型晚到，以及真实两进程
+CAS/源恢复竞争与两个确定锁序。successor 在 retire/恢复动作自身的成功和失败中精确不变。
+
+测试仍是 own `/tmp`、受控离线 registry 协议及 synthetic 实际身份/费用，不是 LIVE provider 或
+真实 B3 确认验收；实际 SDK serializer/观察门继续由既有 client-p50-sdk 邻接覆盖。没有扩大 B
+helper/validator、引入 provider/client/ledger 或修改 fixtures。同步 syscall 不可抢占、恶意同 uid
+跨 syscall 竞争、fsync 非绝对掉电保证及生产 tokenizer/cap/认证/usage/proxy conformance 等既有
+限界仍在；本包不能被解释成 F 已上线或自动治理默认开启。
