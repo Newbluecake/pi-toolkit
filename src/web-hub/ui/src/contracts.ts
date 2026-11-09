@@ -443,10 +443,9 @@ export interface RunTranscriptProps {
  *
  * task58 (web-hub-tokens-speed plan §5.3): `generation` — the mid→GenerationCore map the
  * reducer rebuilds from exactly the current loaded entries (`generationHistoryIndex`).
- * OPTIONAL so the frozen `AgentState`/`RunTxState` mirrors (types.ts — outside this task's
- * file domain) and the drawer's hand-built projection stay assignable unchanged; absent ⇒
- * history assistant items show no speed (the live stamped-core path in `entries.ts` still
- * works — it reads the message itself, not this map).
+ * Optional for structural callers with no history metadata; the main-session and drawer
+ * projections both pass their reducer-owned map. When absent, history items show no speed;
+ * an explicitly stamped live item can still supply its own core in `entries.ts`.
  */
 export type TranscriptSource = Pick<
   AgentState,

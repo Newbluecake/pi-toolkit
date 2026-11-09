@@ -1404,6 +1404,17 @@
       "registerTool(bash)",
       "registerTool(bash_job)",
       "on(agent_before_settle)",
+      "on(provider_stream_event)",
+      "registerEntryRenderer(subagent:web-msg-speed)",
+      "on(agent_start)",
+      "on(turn_start)",
+      "on(message_start)",
+      "on(turn_end)",
+      "on(message_update)",
+      "on(message_end)",
+      "on(agent_end)",
+      "on(agent_settled)",
+      "on(session_shutdown)",
       "on(before_provider_request)",
       "on(tool_execution_start)",
       "on(tool_execution_end)",
@@ -1422,7 +1433,7 @@
       "on(agent_end)",
       "on(session_compact)"
     ],
-    "count": 56,
+    "count": 67,
     "phase2": [],
     "phase2Count": 0
   }

@@ -896,13 +896,19 @@ Design, compiled-App evidence and manual physical-device/AT limits:
   未到而撤销，仅不持久。
 - **持久 metadata 机制**：主 session metadata 持久化（显式 `turn_end.messageEntryId`
   mid，exact 最终对象引用 + 当前 ctx/session/loop/message generation + owner token 同步
-  recheck，不匹配只跳过不写）；child/run 详情仅 live，旧历史不回填（recent 不兜底）。
+  recheck，不匹配只跳过不写）；#77 批 2 明确扩大到 child 持久 metadata：同样只写
+  `subagent:web-msg-speed` custom entry，不写 SDK assistant。child `/api/run/*` 详情在
+  重新打开/刷新后由该 entry 恢复，旧历史不回填（recent 不兜底），已打开 drawer 的即时
+  出数不在本批范围内。
   wire 唯一容器为 `WireEntry.piToolkitGeneration`（类型见 `protocol/messages.ts`，纯 optional
   追加，`WireEntrySchema` 开放、无 PROTO bump；投影在 `keys.ts` 条件展开，历史 map 上限
   512 已加载 entries）。`subagent:web-msg-speed` custom(data) 是 display:false 墓碑，
   旧 UI 不渲染。
 - **边界**：不做收费/GPU 真实吞吐/字符估算/端到端兑底承诺，也不声称一般流式均支持
-  tokens/s 显示（仅满足上述归属与本地观测窗口条件）；child 无公开 raw 端口，保守 hide 且永不 append。
+  tokens/s 显示（仅满足上述归属与本地观测窗口条件）。child 复用相同测速器/标量 binding
+  与公开 `provider_stream_event` raw proof，口径仍是 **provider 总输出 token ÷ 本地首末非空
+  delta 窗口**；不比主 session 更精确。缺 raw proof / usage 冲突 / 窗口不足 / 持久化失败 /
+  换 owner / 锁定 / child extension 缺失一律跳过，不得估算。
   tests: `tests/web-hub/agent/{message-speed,message-speed-p0,wiring-message-speed}.test.ts`、
   `tests/web-hub/protocol/message-generation.test.ts`。
 
@@ -921,8 +927,26 @@ Design, compiled-App evidence and manual physical-device/AT limits:
   真刷新恢复，费用不变、767px 两 chip 不重叠。此为组件浏览器集成，不宣称真实 hub/App
   网络、真实 provider、收费覆盖率或物理移动设备已验证；默认 tier2 运行不启动浏览器，
   浏览器需显式设该环境变量。P2 的独立 App fakeHub 浏览器验收不替代本条删除链。
-  当前 child producer 无同等公开 raw port，保守隐藏且无持久化；UI 可消费合法 child live
-  core 不意味着当前 child 请求会产生数值。旧历史永不回填，并非所有 Requests 都显示。
+  child producer 的历史持久化见下；本批不 stamp child live core，已打开 drawer 仍不即时
+  出数。UI 可消费合法 child live core 不意味着当前 child 请求会当场产生数值。
+  旧历史永不回填，并非所有 Requests 都显示。
+
+- **#77 批 2 child 接线/清理**：`src/index.ts` pre-guard child 分支经
+  `src/child/wire.ts` 注入同步 `ctx => secureGuards?.recheckForWrite(ctx)` 权限闭包；plain 无
+  guards 时明确返回 undefined，而未传闭包时测速器拒绝持久化。`src/child/message-speed.ts`
+  仅在 `webHub.enabled && webHub.subagentTranscript !== "off"` 时安装 hooks/renderer，off 零注册
+  零 append；复用 agent 叶子模块，不引入 hub runtime/client。`agent_start` lazy 建立
+  sessionManager/sessionId + activation/session generation/owner token，`turn_start`、assistant
+  `message_start`、原始未合并 `message_update`、`provider_stream_event`、`message_end` 与扩展
+  `turn_end` 分别采样/验证/以公开 `messageEntryId` 关联后同步 append。raw port 同样复核当前
+  ctx owner，观察到换 owner 即废弃整轮。无需 `session_start`；`agent_end`/`agent_settled`
+  释放 pending/context，shutdown 仅作防御。无进程级注册表、外部订阅或 timer；hooks 只由
+  child 自身持有，`AgentSession.dispose()` 不发 shutdown 也能整体 GC，不依赖 shutdown 退订。
+  append 在扩展 `turn_end` 内完成，因此正常终态 runner seal 固定的 `finalLeafId` 祖先链可见
+  metadata；seal 后补写不能用作兜底。验证：`tests/child/message-speed.test.ts` 的 fail-closed
+  矩阵，以及 `tests/integration/subagent-message-speed.test.ts` 真实 SDK fake Responses 流 →
+  RuntimeRunner seal → 持久 jsonl → run-file-reader → production reducer → RunTranscript drawer，
+  同时验证 extension 缺失只隐藏、费用独立和 SDK/model context 不带 metadata。
 
 ### Activity drawer interaction
 

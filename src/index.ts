@@ -289,7 +289,13 @@ export default function activate(rawPi: ExtensionAPI): void {
   // `-e`/`--no-extensions`, outside settings.json). Must not depend on any feature setting.
   if (isChildSession) {
     markChildExtensionActivated();
-    wireChildSession(pi, preGuardSettings, { canUse: (ctx) => secureGuards?.recheckForWrite(ctx) === undefined });
+    wireChildSession(
+      pi,
+      preGuardSettings,
+      { canUse: (ctx) => secureGuards?.recheckForWrite(ctx) === undefined },
+      // Explicit synchronous permission closure, even in plain domains without guards.
+      { secureRecheckForWrite: (ctx) => secureGuards?.recheckForWrite(ctx) },
+    );
     // traffic-merge T3（§2.3）：子会话只注册录制钩子（含 agent_settled / cache_warming_decision），
     // 无命令/服务/重放；isActive = 进程内 toolkit claim 存活（主会话发布；secure 域 settings 已强制
     // enabled=false，这里双保险在 assemble 内部复查）。childSessions=false 只禁落库不禁改写归属（拍板①）。
