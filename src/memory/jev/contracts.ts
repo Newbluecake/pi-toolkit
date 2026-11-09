@@ -846,6 +846,10 @@ export interface RevisionAudit {
   readonly reason?: string;
   readonly createdAt: string;
   readonly settledAt?: string;
+  /** Actual trusted syscall observation, including bounded two-path unknown
+   * evidence. Diagnostic ONLY: never read paths back as filesystem write targets.
+   * Distinct from restoreAttempt.observation; does not authorize recovery. */
+  readonly commitObservation?: ApplyObservation;
   /** Persisted BEFORE restore data syscall. An unresolved attempt forbids a
    * blind ordinary restore retry; committed/restored are not scan-downgraded. */
   readonly restoreAttempt?: {

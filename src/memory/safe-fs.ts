@@ -22,6 +22,7 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
+  opendirSync,
   readdirSync,
   readFileSync,
   readSync,
@@ -1885,6 +1886,224 @@ export function inspectDirNoFollow(path: string): { dev: number; ino: number; mt
   const st = lstatSync(path);
   if (st.isSymbolicLink() || !st.isDirectory()) throw new MemoryError(`not-dir: ${path} is not a real directory`);
   return { dev: st.dev, ino: st.ino, mtimeMs: st.mtimeMs, names: readdirSync(path) };
+}
+
+// ───────────────── P50-only strict, observed primitives (no legacy fallback) ─────────────────
+// The caller holds the memory lock. These narrow synchronous seams record the
+// actual syscall, NOT a post-hoc file read. No cleanup/compensation follows an
+// applied/unknown result; two-path evidence must survive inspection/restart.
+export interface RevisionObservedResult {
+  observation: import("./jev/contracts.js").ApplyObservation;
+  error?: string;
+}
+export interface RevisionObservedOptions {
+  /** Last gate/CAS/identity check, immediately before the data syscall. */
+  beforeSyscall?: () => void;
+  /** Trusted synchronous observer. Throwing here is a POST-apply failure. */
+  observe?: (observation: import("./jev/contracts.js").ApplyObservation) => void;
+}
+
+/** Bounded enumeration, including the overflow probe. Unlike listDirNames, I/O
+ * errors and incomplete enumeration are never collapsed to an empty list. */
+export function listRevisionNamesBounded(dir: string, maxEntries: number): string[] {
+  if (!Number.isSafeInteger(maxEntries) || maxEntries < 1 || maxEntries > 4096)
+    throw new MemoryError("invalid revision scan bound");
+  const handle = opendirSync(dir);
+  const names: string[] = [];
+  try {
+    for (;;) {
+      const entry = handle.readSync();
+      if (!entry) return names.sort();
+      if (names.length >= maxEntries) throw new MemoryError("revision scan incomplete: entry limit");
+      names.push(entry.name);
+    }
+  } finally {
+    handle.closeSync();
+  }
+}
+
+/** Single-level mkdir, never recursive/adopt/chmod. The owner validates the
+ * parent, and fsyncs it even after a prior interrupted creation. */
+export function ensureRevisionPrivateDir(parent: string, name: string, dev: number): void {
+  if (!isSafeName(name)) throw new MemoryError("revision bad-name");
+  try {
+    mkdirSync(join(parent, name), { mode: 0o700 });
+  } catch (err) {
+    if (codeOf(err) !== "EEXIST") throw err;
+  }
+  const st = inspectDirSecurityNoFollow(join(parent, name));
+  if (st.dev !== dev || st.uid !== process.getuid?.() || (st.mode & 0o077) !== 0)
+    throw new MemoryError("revision directory permission/device refused");
+  fsyncDir(parent);
+}
+
+export function inspectRevisionFileSecurity(
+  dir: string,
+  name: string,
+): { dev: number; ino: number; uid: number; mode: number } {
+  if (!isSafeName(name)) throw new MemoryError("revision bad-name");
+  const st = lstatSync(join(dir, name));
+  if (!st.isFile() || st.isSymbolicLink()) throw new MemoryError("revision non-regular file");
+  return { dev: st.dev, ino: st.ino, uid: st.uid, mode: st.mode };
+}
+
+/** Re-establish an existing evidence file's durability without rewriting it.
+ * The caller binds the no-follow fd to its already-inspected inode/device;
+ * fsync errors propagate, and observed swaps/metadata changes are refused. */
+export function fsyncRevisionFile(dir: string, name: string, expected: { dev: number; ino: number }): void {
+  if (!isSafeName(name)) throw new MemoryError("revision bad-name");
+  const fd = openRegular(dir, name, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+  try {
+    const before = fstatSync(fd);
+    if (
+      before.dev !== expected.dev ||
+      before.ino !== expected.ino ||
+      before.uid !== process.getuid?.() ||
+      (before.mode & 0o077) !== 0
+    )
+      throw new MemoryError("revision fsync file identity/permission changed");
+    fsyncSync(fd);
+    const matches = (st: typeof before): boolean =>
+      st.isFile() &&
+      st.dev === before.dev &&
+      st.ino === before.ino &&
+      st.uid === before.uid &&
+      st.mode === before.mode &&
+      st.size === before.size &&
+      st.mtimeMs === before.mtimeMs &&
+      st.ctimeMs === before.ctimeMs &&
+      st.nlink === before.nlink;
+    if (!matches(fstatSync(fd)) || !matches(lstatSync(join(dir, name))))
+      throw new MemoryError("revision evidence changed during file fsync");
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function revisionSource(dir: string, name: string, digest: string, maxBytes: number): void {
+  if (!isSafeName(name) || Buffer.byteLength(name) > 255 || !/^[a-f0-9]{64}$/.test(digest))
+    throw new MemoryError("revision bad source binding");
+  const read = readRegularBytes(dir, name, { maxBytes });
+  const st = inspectRevisionFileSecurity(dir, name);
+  if (
+    st.dev !== read.stat.dev ||
+    st.ino !== read.stat.ino ||
+    st.uid !== process.getuid?.() ||
+    (st.mode & 0o077) !== 0 ||
+    createHash("sha256").update(read.bytes).digest("hex") !== digest
+  )
+    throw new MemoryError("revision source digest/permission changed");
+}
+function revisionDest(name: string): void {
+  if (!isSafeName(name) || Buffer.byteLength(name) > 255) throw new MemoryError("revision bad destination");
+}
+function revisionError(err: unknown): string {
+  return `${codeOf(err) ?? "IO"}: ${String(err)}`.slice(0, 300);
+}
+
+export function replaceRevisionObserved(
+  dir: string,
+  tmp: string,
+  name: string,
+  expected: { readonly digest: string; readonly rev: string },
+  opts: RevisionObservedOptions = {},
+): RevisionObservedResult {
+  let observation: import("./jev/contracts.js").ApplyObservation = { kind: "not-applied" };
+  try {
+    revisionDest(name);
+    revisionSource(dir, tmp, expected.digest, MAX_OBSERVED_BYTES);
+    opts.beforeSyscall?.();
+    // Revalidate the exact prepared source AFTER any caller callback.
+    revisionSource(dir, tmp, expected.digest, MAX_OBSERVED_BYTES);
+    renameSync(join(dir, tmp), join(dir, name));
+    observation = {
+      kind: "applied",
+      expectedAfter: { kind: "file", digest: expected.digest, rev: expected.rev },
+      proof: "rename-observed",
+    };
+    opts.observe?.(observation);
+    return { observation };
+  } catch (err) {
+    return { observation, error: revisionError(err) };
+  }
+}
+
+export function createRevisionObserved(
+  dir: string,
+  tmp: string,
+  name: string,
+  expected: { readonly digest: string; readonly rev: string },
+  opts: RevisionObservedOptions = {},
+): RevisionObservedResult {
+  let observation: import("./jev/contracts.js").ApplyObservation = { kind: "not-applied" };
+  try {
+    revisionDest(name);
+    revisionSource(dir, tmp, expected.digest, MAX_OBSERVED_BYTES);
+    opts.beforeSyscall?.();
+    revisionSource(dir, tmp, expected.digest, MAX_OBSERVED_BYTES);
+    linkSync(join(dir, tmp), join(dir, name));
+    observation = {
+      kind: "applied",
+      expectedAfter: { kind: "file", digest: expected.digest, rev: expected.rev },
+      proof: "link-observed",
+      paths: [
+        { area: "temp", name: tmp },
+        { area: "blocks", name },
+      ],
+    };
+    opts.observe?.(observation);
+    unlinkSync(join(dir, tmp));
+    return { observation };
+  } catch (err) {
+    return { observation, error: revisionError(err) };
+  }
+}
+
+/** Delete proof is ONLY source unlink. A successful trash link followed by ANY
+ * failure is unknown, never applied-missing/not-applied; retain both paths. */
+export function deleteRevisionObserved(
+  blocks: string,
+  name: string,
+  trash: string,
+  trashName: string,
+  before: { readonly digest: string; readonly rev: string },
+  opts: RevisionObservedOptions = {},
+): RevisionObservedResult {
+  let observation: import("./jev/contracts.js").ApplyObservation = { kind: "not-applied" };
+  try {
+    revisionDest(name);
+    revisionDest(trashName);
+    if (inspectDirSecurityNoFollow(blocks).dev !== inspectDirSecurityNoFollow(trash).dev)
+      throw new MemoryError("revision cross-device delete");
+    revisionSource(blocks, name, before.digest, MAX_OBSERVED_BYTES);
+    opts.beforeSyscall?.();
+    revisionSource(blocks, name, before.digest, MAX_OBSERVED_BYTES);
+    linkSync(join(blocks, name), join(trash, trashName));
+    observation = {
+      kind: "unknown",
+      reason: "trash-linked-source-not-unlinked",
+      paths: [
+        { area: "blocks", name },
+        { area: "trash", name: trashName },
+      ],
+    };
+    opts.beforeSyscall?.();
+    revisionSource(blocks, name, before.digest, MAX_OBSERVED_BYTES);
+    unlinkSync(join(blocks, name));
+    observation = {
+      kind: "applied",
+      expectedAfter: { kind: "missing" },
+      proof: "unlink-observed",
+      paths: [
+        { area: "blocks", name },
+        { area: "trash", name: trashName },
+      ],
+    };
+    opts.observe?.(observation);
+    return { observation };
+  } catch (err) {
+    return { observation, error: revisionError(err) };
+  }
 }
 
 /** #39 read-only security metadata: no listing, following, creation or permission repair.
