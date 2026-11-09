@@ -33,7 +33,8 @@ import {
   type ScheduleForm,
   type ScheduleRunKind,
   type ScheduleRunState,
-  type ScheduleTaskDef,
+  type StoredTask,
+  type CatchUp,
 } from "../../web-hub/protocol/schedule.js";
 
 export type {
@@ -45,8 +46,19 @@ export type {
   ScheduleRunState,
   ScheduleThinkingLevel,
   ScheduleWhen,
+  StoredWhen,
+  StoredTask,
+  EveryWhen,
+  CatchUp,
 } from "../../web-hub/protocol/schedule.js";
 export {
+  displayTz,
+  EVERY_MIN_MS,
+  EVERY_MAX_MS,
+  EVERY_GRACE_MS,
+  MAX_EPOCH_MS,
+  isEpoch,
+  isEveryWhen,
   SCHED_HASH_RE,
   SCHED_RUN_KEY_RE,
   SCHED_TASK_ID_RE,
@@ -57,7 +69,7 @@ export {
 } from "../../web-hub/protocol/schedule.js";
 
 /** The task definition (§4.1). Same shape as the wire `ScheduleTaskDef`. */
-export type ScheduleTask = ScheduleTaskDef;
+export type ScheduleTask = StoredTask;
 export type TaskId = string;
 export type ReqId = string;
 
@@ -169,7 +181,7 @@ export interface Holder {
   epoch: string;
 }
 
-export type MissedCause = "offline" | "late" | "once-past";
+export type MissedCause = "offline" | "late" | "once-past" | "paused";
 
 export interface MissedEntry {
   /** Per-task monotone. */
@@ -189,6 +201,7 @@ export interface MissedEntry {
 }
 
 export interface OccState {
+  resumePending?: true;
   defHash: string;
   /** Auto-occurrence decided watermark (UTC epoch ms), monotone non-decreasing. */
   decidedThrough: number;
@@ -217,6 +230,7 @@ export const SCHED_DROPPED_REASONS = [
 export const SCHED_REPORT_SKIPPED_REASONS = ["report-skipped(index-cap)", "report-skipped(cap)"] as const;
 
 export interface RunRecord {
+  catchUp?: CatchUp;
   /** auto `${taskId}@${T}`; manual `${taskId}@m-${hash8(reqId)}`. */
   runKey: string;
   taskId: string;
@@ -277,7 +291,7 @@ export interface DigestState {
 }
 
 export interface ScheduleStateFile {
-  v: 1;
+  v: 1 | 2;
   /** Must equal the directory's sid, otherwise the file is degraded. */
   sessionId: string;
   /** +1 on every write. */

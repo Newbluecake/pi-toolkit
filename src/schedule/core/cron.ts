@@ -25,7 +25,18 @@
  *
  * No module-level mutable state: every `CompiledWhen` owns its own `Intl.DateTimeFormat`.
  */
-import { SCHED_COUNT_CAP, SCHED_NEXT_CANDIDATE_BUDGET, SCHED_NEXT_HORIZON_MS, type ScheduleWhen } from "./spec.js";
+import {
+  SCHED_COUNT_CAP,
+  SCHED_NEXT_CANDIDATE_BUDGET,
+  SCHED_NEXT_HORIZON_MS,
+  type StoredWhen,
+  type EveryWhen,
+  isEveryWhen,
+  isEpoch,
+  EVERY_MIN_MS,
+  EVERY_MAX_MS,
+  MAX_EPOCH_MS,
+} from "./spec.js";
 
 const MIN_MS = 60_000;
 const HOUR_MS = 3_600_000;
@@ -193,7 +204,8 @@ function daysInMonth(y: number, m: number): number {
 
 // ----------------------------------------------------------------- compiled schedule
 
-export interface CompiledWhen {
+export type CompiledWhen = EveryWhen | LegacyCompiledWhen;
+export interface LegacyCompiledWhen {
   readonly kind: "cron" | "once";
   readonly tz: string;
   /** cron only. */
@@ -246,8 +258,12 @@ function constantDayOffset(fmt: Intl.DateTimeFormat, w0: number): number | undef
 
 const ONCE_AT_RE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/;
 
-export function compileWhen(when: ScheduleWhen): CompileResult {
+export function compileWhen(when: StoredWhen): CompileResult {
   if (when === null || typeof when !== "object") return { ok: false, error: "when: not an object" };
+  if (when.kind === "every")
+    return isEveryWhen(when)
+      ? { ok: true, when: { ...when } }
+      : { ok: false, error: "when.every: invalid interval or anchor" };
   if (!isValidTimeZone(when.tz))
     return { ok: false, error: `when.tz: unsupported time zone ${JSON.stringify(when.tz)}` };
   const fmt = makeFormatter(when.tz)!;
@@ -291,6 +307,14 @@ interface IterBudget {
 function enumerate(c: CompiledWhen, after: number, until: number, limit: number, budget: IterBudget): number[] {
   const out: number[] = [];
   if (!(until > after) || limit <= 0) return out;
+  if (c.kind === "every") {
+    let t = nextEvery(c, after);
+    while (t !== undefined && t <= until && out.length < limit) {
+      out.push(t);
+      t = nextEvery(c, t);
+    }
+    return out;
+  }
   if (c.kind === "once") {
     if (c.at! > after && c.at! <= until) out.push(c.at!);
     return out;
@@ -358,6 +382,7 @@ export interface NextOpts {
 
 /** Smallest occurrence `t > after` within the horizon/budget, else `undefined`. */
 export function nextOccurrence(c: CompiledWhen, after: number, opts: NextOpts = {}): number | undefined {
+  if (c.kind === "every") return nextEvery(c, after);
   const horizon = opts.horizonMs ?? SCHED_NEXT_HORIZON_MS;
   const budget: IterBudget = { steps: opts.candidateBudget ?? SCHED_NEXT_CANDIDATE_BUDGET, exhausted: false };
   return enumerate(c, after, after + horizon, 1, budget)[0];
@@ -372,6 +397,10 @@ export interface OccurrenceCount {
 
 /** Number of occurrences in `(a, b]` — THE shared counter (§4.4). */
 export function countOccurrences(c: CompiledWhen, a: number, b: number): OccurrenceCount {
+  if (c.kind === "every") {
+    const n = everyCount(c, a, b);
+    return { count: Math.min(n, SCHED_COUNT_CAP), capped: n > SCHED_COUNT_CAP };
+  }
   const budget: IterBudget = { steps: COUNT_STEP_BUDGET, exhausted: false };
   const got = enumerate(c, a, b, SCHED_COUNT_CAP + 1, budget);
   if (got.length > SCHED_COUNT_CAP) return { count: SCHED_COUNT_CAP, capped: true };
@@ -386,6 +415,7 @@ export function occurrencesBetween(c: CompiledWhen, a: number, b: number, limit:
 /** True iff `t` is an occurrence of `c` (the EARLIER instance of an ambiguous wall time only). */
 export function isOccurrence(c: CompiledWhen, t: number): boolean {
   if (!Number.isSafeInteger(t)) return false;
+  if (c.kind === "every") return t > c.anchorAt && (t - c.anchorAt) % c.everyMs === 0;
   if (c.kind === "once") return t === c.at;
   if (t % MIN_MS !== 0) return false;
   return enumerate(c, t - 1, t, 1, { steps: 10_000, exhausted: false })[0] === t;
@@ -393,6 +423,11 @@ export function isOccurrence(c: CompiledWhen, t: number): boolean {
 
 /** Local wall time `YYYY-MM-DD HH:mm` of `t` in the schedule's tz (display only). */
 export function formatLocal(c: CompiledWhen, t: number): string {
+  if (c.kind === "every")
+    return new Date(t)
+      .toISOString()
+      .replace(/\.\d{3}Z$/, "")
+      .replace("T", " ");
   const v = civilOf(c.fmt, t);
   const p = (n: number): string => String(n).padStart(2, "0");
   return `${v.y}-${p(v.m)}-${p(v.d)} ${p(v.hh)}:${p(v.mm)}`;
@@ -401,10 +436,38 @@ export function formatLocal(c: CompiledWhen, t: number): string {
 export type WhenValidation = { ok: true; when: CompiledWhen; next: number } | { ok: false; error: string };
 
 /** Create-time check (§4.4): parses, tz supported, and at least one hit within 400 days of `now`. */
-export function validateWhen(when: ScheduleWhen, now: number): WhenValidation {
+export function validateWhen(when: StoredWhen, now: number): WhenValidation {
   const r = compileWhen(when);
   if (!r.ok) return r;
   const next = nextOccurrence(r.when, now);
   if (next === undefined) return { ok: false, error: "when: no occurrence within 400 days" };
   return { ok: true, when: r.when, next };
+}
+
+export function parseEvery(text: string): { ok: true; everyMs: number } | { ok: false; error: string } {
+  const fail = (error: string): { ok: false; error: string } => ({ ok: false, error });
+  if (typeof text !== "string" || text.length > 32) return fail("every: expected at most 32 characters");
+  const m = /^(0|[1-9]\d{0,8})(?:\.(\d{1,3}))?(s|m|h|d)$/.exec(text.trim());
+  if (m === null) return fail('every unit must be s/m/h/d; use every:"90m" or every:"1.5h"');
+  const scales: Record<string, bigint> = { s: 1000n, m: 60_000n, h: 3_600_000n, d: 86_400_000n };
+  const numerator = BigInt(m[1]!) * 1000n + BigInt((m[2] ?? "").padEnd(3, "0"));
+  const product = numerator * scales[m[3]!]!;
+  if (product % 1_000_000n !== 0n || product < BigInt(EVERY_MIN_MS) * 1000n || product > BigInt(EVERY_MAX_MS) * 1000n)
+    return fail('every must be whole seconds within 30s..365d; use every:"45s"');
+  return { ok: true, everyMs: Number(product / 1000n) };
+}
+/** k≥1; strict >after, with checked BigInt arithmetic even near the Date limit. */
+export function nextEvery(w: EveryWhen, after: number): number | undefined {
+  if (!isEveryWhen(w) || !Number.isSafeInteger(after)) return undefined;
+  const a = BigInt(w.anchorAt),
+    d = BigInt(w.everyMs);
+  const k = after < w.anchorAt ? 1n : (BigInt(after) - a) / d + 1n;
+  const n = a + k * d;
+  return n <= BigInt(MAX_EPOCH_MS) ? Number(n) : undefined;
+}
+/** Exact, uncapped count in (from, through], without enumerating history. */
+export function everyCount(w: EveryWhen, from: number, through: number): number {
+  if (!isEveryWhen(w) || !Number.isSafeInteger(from) || !isEpoch(through) || through <= from) return 0;
+  const first = nextEvery(w, from);
+  return first === undefined || first > through ? 0 : Math.floor((through - first) / w.everyMs) + 1;
 }

@@ -455,3 +455,41 @@ describe("AgentCard ⏰ badge", () => {
     expect(mountCard({}).find(".chip-sched").exists()).toBe(false); // no schedules slot at all
   });
 });
+
+describe("interval P1 mounted consumer", () => {
+  it("renders one interval row/detail with UTC seconds, a catch-up badge and the existing single-task actions", async () => {
+    const at = Date.parse("2026-11-09T10:07:23Z");
+    const interval = {
+      ...makeTask(),
+      task: {
+        ...makeTask().task,
+        name: "interval reminder",
+        id: "s_aaaaaaab",
+        when: { kind: "every" as const, everyMs: 45_000, anchorAt: at },
+      },
+      nextAt: at + 45_000,
+    };
+    const catchUp = {
+      cause: "resume" as const,
+      fromExclusive: at - 90_000,
+      through: at,
+      dueCount: 2,
+      recoveredAt: at + 1,
+    };
+    const { w } = mountPanel({
+      schedules: makePayload([
+        makeSession({ tasks: [], intervalTasks: [interval], runs: [makeRun({ taskId: interval.task.id, catchUp })] }),
+      ]),
+    });
+    expect(w.findAll(".sched-task")).toHaveLength(1);
+    expect(w.text()).toContain("every 45s");
+    expect(w.text()).toContain("2026-11-09 10:07:23 UTC");
+    expect(w.text()).toContain("2026-11-09 10:08:08 UTC");
+    expect(w.text()).toContain("catch-up ×2");
+    await w.find(".sched-task-name").trigger("click");
+    expect(w.find(".review-kv").exists()).toBe(true);
+    expect(w.text()).toContain("every 45s");
+    expect(w.text()).toContain("UTC");
+    expect(w.text()).toContain("interval reminder");
+  });
+});

@@ -1,3 +1,5 @@
+import { displayTz } from "../core/spec.js";
+import { catchUpText, localTime as storedLocalTime } from "./view.js";
 /**
  * Scheduled tasks — `message` form glue (plan r3 §6.2/§6.3, §12 A2): content builders, the
  * settled-result sink, the capability refusal helper and `installMessageScheduler`, the pi-facing
@@ -75,12 +77,17 @@ function localTime(ms: number, tz: string): string {
 }
 
 const whenLabel = (run: RunRecord, task: ScheduleTask): string =>
-  run.kind === "manual" ? "立即运行" : localTime(run.scheduledAt, task.when.tz);
+  run.kind === "manual"
+    ? "立即运行"
+    : task.when.kind === "every"
+      ? storedLocalTime(task.when, run.scheduledAt)
+      : localTime(run.scheduledAt, displayTz(task.when));
 
 /** The wake message the main session receives (§6.2). The header is fixed so the model can recognise it. */
 export function wakeContent(run: RunRecord, task: ScheduleTask): string {
   return [
     `[定时消息 ${task.name} · ${whenLabel(run, task)}]`,
+    ...(run.catchUp === undefined ? [] : [catchUpText(run)]),
     "这是一条按计划自动触发的消息，不是用户当面输入；请按下面的要求处理，最后一条回复会作为本次定时运行的结果。",
     "",
     task.prompt,
@@ -98,7 +105,10 @@ function utf8Prefix(buf: Buffer, max: number): Buffer {
 /** The report file body (≤ SCHED_REPORT_MAX_BYTES; truncation is marked). */
 export function renderReport(task: ScheduleTask, run: RunRecord, text: string): Buffer {
   const body = text === "" ? "（本次运行没有文本输出）" : text;
-  const full = Buffer.from(`# ${task.name} · ${whenLabel(run, task)}\n\n${body}\n`, "utf8");
+  const full = Buffer.from(
+    `# ${task.name} · ${whenLabel(run, task)}${run.catchUp === undefined ? "" : `\n${catchUpText(run)}`}\n\n${body}\n`,
+    "utf8",
+  );
   if (full.length <= SCHED_REPORT_MAX_BYTES) return full;
   const tail = Buffer.from("\n\n…（已截断）\n", "utf8");
   return Buffer.concat([utf8Prefix(full, SCHED_REPORT_MAX_BYTES - tail.length), tail]);
@@ -151,7 +161,7 @@ export function createLedgerResultSink(deps: LedgerResultSinkDeps): SchedResultS
         return r.ok;
       }
       const r = await writeReportLocked(store, {
-        reportFile: reportFileOf(run.taskId, run.scheduledAt, task.when.tz),
+        reportFile: reportFileOf(run.taskId, run.scheduledAt, displayTz(task.when)),
         allocateUnique: true,
         data: renderReport(task, run, text),
         now: deps.now(),

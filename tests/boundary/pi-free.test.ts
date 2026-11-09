@@ -162,6 +162,14 @@ describe("pi-free boundaries", () => {
     });
   }
 
+  it("schedule/core including interval math and transactions stays pi-free through its value closure", () => {
+    const roots = globSync("src/schedule/core/*.ts", { cwd: ROOT }).map((file) => resolve(ROOT, file));
+    expect(roots).toContain(resolve(ROOT, "src/schedule/core/interval.ts"));
+    expect(roots).toContain(resolve(ROOT, "src/schedule/core/every.ts"));
+    const offenders = memoryOffenders(roots);
+    expect(offenders, offenders.join("; ")).toEqual([]);
+  });
+
   it("#39 pure scoped kernels and child-bind stay pi-free (PI-facing owner/wire are not pure domain)", () => {
     const names = [
       "types",

@@ -38,9 +38,17 @@ import {
   unlinkSync,
   writeSync,
 } from "node:fs";
+import { clampSpanMs } from "../../core/deadline.js";
 import { randomBytes } from "node:crypto";
 import { isAbsolute, join } from "node:path";
-import { SCHED_STORE_LOCK_FILE, withDirLock, withSessionLock, type LockOpts, type LockOutcome } from "./lock.js";
+import {
+  SCHED_STORE_LOCK_FILE,
+  SCHED_LOCK_TIMEOUT_MS,
+  withDirLock,
+  withSessionLock,
+  type LockOpts,
+  type LockOutcome,
+} from "./lock.js";
 import {
   closeQuiet,
   fdPath,
@@ -56,7 +64,7 @@ import {
   type InVaultPredicate,
   type StoreRoot,
 } from "./paths.js";
-import { listSessionDirs, readSessionState, readStateAt, type SessionStateRead } from "./reader.js";
+import { listSessionDirs, readSessionState, readStateAt, validateStateFile, type SessionStateRead } from "./reader.js";
 import type { ProcessIdentity } from "./recovery.js";
 import {
   emptyStateFile,
@@ -478,6 +486,7 @@ export interface SessionStore {
   transactPlanned<P extends { validUntil: number }, T>(
     plan: (snapshot: ScheduleStateFile, now: number) => { plan: P } | { done: T },
     apply: (draft: ScheduleStateFile, plan: P, ctx: TxCtx) => TxBody<T>,
+    budget?: { deadlineMono: number },
   ): Promise<TxResult<T>>;
   /** Quarantine a corrupt state.json to `state.json.bak` and start empty (`/schedule repair`).
    *  Uses the ordinary lock: a live holder ⇒ E_BUSY (there is no forced break, review M6). */
@@ -498,11 +507,20 @@ export function openSessionStore(opts: SessionStoreOpts): SessionStore {
     ...(opts.inVault === undefined ? {} : { inVault: opts.inVault }),
   };
 
-  function lockOpts(): LockOpts {
+  function lockOpts(deadlineMono?: number): LockOpts {
     return {
       monotonic: mono,
       holderInfo: { pid: opts.self.pid, start: opts.self.start, host: opts.self.host, epoch: opts.epoch, at: now() },
-      ...(opts.lockTimeoutMs === undefined ? {} : { timeoutMs: opts.lockTimeoutMs }),
+      ...(deadlineMono === undefined
+        ? opts.lockTimeoutMs === undefined
+          ? {}
+          : { timeoutMs: opts.lockTimeoutMs }
+        : {
+            timeoutMs:
+              clampSpanMs(
+                Math.min(opts.lockTimeoutMs ?? SCHED_LOCK_TIMEOUT_MS, SCHED_LOCK_TIMEOUT_MS, deadlineMono - mono()),
+              ) ?? 1,
+          }),
       ...(opts.sleep === undefined ? {} : { sleep: opts.sleep }),
       ...(opts.flockBin === undefined ? {} : { flockBin: opts.flockBin }),
     };
@@ -582,7 +600,10 @@ export function openSessionStore(opts: SessionStoreOpts): SessionStore {
   async function lockedAttempt<T>(
     create: boolean,
     body: (draft: ScheduleStateFile, ctx: TxCtx) => TxBody<T> | { retry: true },
+    deadlineMono?: number,
   ): Promise<Inner<T>> {
+    if (deadlineMono !== undefined && mono() >= deadlineMono)
+      return { ok: false, code: "E_BUSY", detail: "reconcile budget exhausted" };
     const sess = create ? await createSess() : openSess();
     if (sess.kind === "error") return { ok: false, code: sess.code, detail: sess.detail };
     if (sess.kind === "missing") {
@@ -590,10 +611,12 @@ export function openSessionStore(opts: SessionStoreOpts): SessionStore {
       const r = body(emptyStateFile(opts.sessionId), { now: now(), rev: 0, dirFd: undefined });
       if ("retry" in r) return r;
       if (!r.write) return { ok: true, value: r.value, rev: 0, wrote: false };
-      return lockedAttempt(true, body);
+      return lockedAttempt(true, body, deadlineMono);
     }
     const fd = sess.fd;
     try {
+      if (deadlineMono !== undefined && mono() >= deadlineMono)
+        return { ok: false, code: "E_BUSY", detail: "reconcile budget exhausted before lock" };
       let out: Inner<T> | undefined;
       const locked: LockOutcome<void> = await withSessionLock(
         fd,
@@ -607,6 +630,10 @@ export function openSessionStore(opts: SessionStoreOpts): SessionStore {
           const base = read.kind === "ok" ? read.state : emptyStateFile(opts.sessionId);
           const draft = structuredClone(base);
           const ctx: TxCtx = { now: now(), rev: base.rev, dirFd: fd };
+          if (deadlineMono !== undefined && mono() >= deadlineMono) {
+            out = { ok: false, code: "E_BUSY", detail: "reconcile budget exhausted" };
+            return;
+          }
           const r = body(draft, ctx);
           if ("retry" in r) {
             out = r;
@@ -617,7 +644,13 @@ export function openSessionStore(opts: SessionStoreOpts): SessionStore {
             return;
           }
           housekeeping(draft, ctx.now);
-          draft.v = 1;
+          // P1 never upgrades a v1 ledger. Every existing v2 mutation preserves v2.
+          draft.v = base.v;
+          const validation = validateStateFile(draft, opts.sessionId);
+          if (!validation.ok) {
+            out = { ok: false, code: "E_DEGRADED", detail: validation.error };
+            return;
+          }
           draft.sessionId = opts.sessionId;
           draft.rev = base.rev + 1;
           const bytes = serializeToFit(draft);
@@ -636,7 +669,7 @@ export function openSessionStore(opts: SessionStoreOpts): SessionStore {
           }
           out = { ok: true, value: r.value, rev: draft.rev, wrote: true };
         },
-        lockOpts(),
+        lockOpts(deadlineMono),
       );
       if (!locked.ok) {
         if (locked.gone === true) return { retry: true };
@@ -678,27 +711,36 @@ export function openSessionStore(opts: SessionStoreOpts): SessionStore {
   async function transactPlanned<P extends { validUntil: number }, T>(
     plan: (snapshot: ScheduleStateFile, now: number) => { plan: P } | { done: T },
     apply: (draft: ScheduleStateFile, plan: P, ctx: TxCtx) => TxBody<T>,
+    budget?: { deadlineMono: number },
   ): Promise<TxResult<T>> {
     for (let attempt = 0; attempt < SCHED_TX_PLAN_ATTEMPTS; attempt++) {
+      if (budget !== undefined && mono() >= budget.deadlineMono)
+        return { ok: false, code: "E_BUSY", detail: "reconcile budget exhausted" };
       const snap = read();
       if (snap.kind === "degraded") return { ok: false, code: "E_DEGRADED", detail: `${snap.reason}: ${snap.detail}` };
       const base = snap.kind === "ok" ? snap.state : emptyStateFile(opts.sessionId);
       const planAt = now();
       const m0 = mono();
+      if (budget !== undefined && m0 >= budget.deadlineMono)
+        return { ok: false, code: "E_BUSY", detail: "reconcile budget exhausted before plan" };
       const p = plan(base, planAt);
       if ("done" in p) return { ok: true, value: p.done, rev: base.rev, wrote: false };
-      const r = await lockedAttempt<T>(false, (draft, ctx) => {
-        const skew = Math.abs(ctx.now - planAt - (mono() - m0));
-        if (
-          ctx.rev !== base.rev ||
-          ctx.now < planAt ||
-          ctx.now > p.plan.validUntil ||
-          skew > SCHED_PLAN_CLOCK_SKEW_MS
-        ) {
-          return { retry: true };
-        }
-        return apply(draft, p.plan, ctx);
-      });
+      const r = await lockedAttempt<T>(
+        false,
+        (draft, ctx) => {
+          const skew = Math.abs(ctx.now - planAt - (mono() - m0));
+          if (
+            ctx.rev !== base.rev ||
+            ctx.now < planAt ||
+            ctx.now > p.plan.validUntil ||
+            skew > SCHED_PLAN_CLOCK_SKEW_MS
+          ) {
+            return { retry: true };
+          }
+          return apply(draft, p.plan, ctx);
+        },
+        budget?.deadlineMono,
+      );
       if (!("retry" in r)) return r;
     }
     return { ok: false, code: "E_BUSY", detail: "state or clock kept changing while planning (re-planned 3 times)" };
@@ -720,6 +762,7 @@ export function openSessionStore(opts: SessionStoreOpts): SessionStore {
             return;
           }
           if (
+            cur.detail === "state.v: unsupported version" ||
             cur.reason === "symlink" ||
             cur.reason === "not-file" ||
             cur.reason === "owner" ||
@@ -731,6 +774,7 @@ export function openSessionStore(opts: SessionStoreOpts): SessionStore {
           }
           renameSync(fdPath(fd, SCHED_STATE_FILE), fdPath(fd, `${SCHED_STATE_FILE}.bak`));
           const fresh = emptyStateFile(opts.sessionId);
+          fresh.v = cur.version ?? fresh.v; // Explicit repair of a recognized v2 never downgrades it.
           fresh.rev = 1;
           try {
             atomicWriteAt(fd, SCHED_STATE_FILE, Buffer.from(JSON.stringify(fresh), "utf8"), opts.faults);

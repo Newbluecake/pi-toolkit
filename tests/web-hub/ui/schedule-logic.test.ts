@@ -348,3 +348,52 @@ describe("schedSummaryOf (schedule-auto-approve §3-P3)", () => {
     expect(schedSummaryOf([SCHED_CAP], degraded, SCHED_SID)).toEqual({ count: 0, live: false });
   });
 });
+
+describe("interval P1 consumer slot", () => {
+  it("merges legacy/interval tasks into one list/count and displays seconds in UTC with catch-up badge data", () => {
+    const now = Date.parse("2026-11-09T10:07:23Z");
+    const legacy = makeTask();
+    const interval = {
+      ...makeTask(),
+      task: { ...makeTask().task, id: "s_aaaaaaab", when: { kind: "every" as const, everyMs: 45_000, anchorAt: now } },
+      nextAt: now + 45_000,
+    };
+    const catchUp = {
+      cause: "reopen" as const,
+      fromExclusive: now - 90_000,
+      through: now,
+      dueCount: 2,
+      recoveredAt: now + 1,
+    };
+    const session = makeSession({
+      tasks: [legacy],
+      intervalTasks: [interval],
+      runs: [makeRun({ taskId: interval.task.id, catchUp })],
+    });
+    const payload = makePayload([session]);
+    expect(isSchedulesPayloadLike(payload)).toBe(payload);
+    expect(scheduleBadgeOf([SCHED_CAP], payload, session.sessionId)).toEqual({ count: 2 });
+    expect(schedSummaryOf([SCHED_CAP], payload, session.sessionId)?.count).toBe(2);
+    const rows = taskRowsOf(session, now);
+    expect(rows).toHaveLength(2);
+    expect(rows[1]).toMatchObject({ id: interval.task.id, nextIn: "2026-11-09 10:08:08 UTC", lastRun: { catchUp } });
+    expect(rows[1]!.whenText).toContain("every 45s · anchor 2026-11-09 10:07:23 UTC");
+    const panel = panelView({
+      hubCaps: [SCHED_CAP],
+      payload,
+      sessionId: session.sessionId,
+      offline: false,
+      stale: false,
+      canWrite: true,
+      now,
+    });
+    expect(panel).toMatchObject({
+      kind: "ready",
+      tasks: [expect.anything(), { id: interval.task.id, when: { kind: "every", tz: "UTC" } }],
+      runs: [{ interval: true, catchUp }],
+    });
+    expect(
+      isSchedulesPayloadLike(makePayload([{ ...session, intervalTasks: Array.from({ length: 8 }, () => interval) }])),
+    ).toBeUndefined();
+  });
+});

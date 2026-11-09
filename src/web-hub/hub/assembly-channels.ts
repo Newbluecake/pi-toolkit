@@ -1,4 +1,4 @@
-import { SCHED_HUB_CAP } from "../protocol/schedule.js";
+import { SCHED_HUB_CAP, SCHED_INTERVAL_CAP } from "../protocol/schedule.js";
 import {
   AVATAR_HUB_CAP,
   CMD_ARGS_HUB_CAPS,
@@ -212,7 +212,7 @@ export function assembleHubCaps(ctx: HubAssembly): readonly string[] {
     // scheduled-reports plan r3 §10.1 (H1): `sched.v1` iff `config.schedule` exists (same
     // two-surface tail-append rule; absent ⇒ caps byte-identical). Declared even when the
     // store root failed to resolve (spawn.v1 precedent: the UI needs the cap to explain).
-    ...(config.schedule === undefined ? [] : [SCHED_HUB_CAP]),
+    ...(config.schedule === undefined ? [] : [SCHED_HUB_CAP, SCHED_INTERVAL_CAP]),
   ];
 
   return extraHubCaps;

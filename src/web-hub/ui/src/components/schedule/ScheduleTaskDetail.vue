@@ -11,13 +11,13 @@
 -->
 <script setup lang="ts">
 import { computed } from "vue";
-import type { ScheduleTaskProjectionWire } from "@protocol/schedule.js";
+import type { StoredTaskProjection } from "@protocol/schedule.js";
 import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";
 import { fmtTs, whenParts } from "../../logic/schedule.js";
 
 const props = defineProps<{
-  readonly task: ScheduleTaskProjectionWire;
+  readonly task: StoredTaskProjection;
 }>();
 const emit = defineEmits<{ back: []; close: [] }>();
 const { t } = useI18n();
@@ -27,6 +27,7 @@ const when = computed(() => whenParts(def.value.when));
 const whenLabel = computed(() => {
   const w = when.value;
   if (w.kind === "cron") return t("schedule.whenCron", { expr: w.expr, tz: w.tz });
+  if (w.kind === "every") return t("schedule.whenEvery", { expr: w.expr });
   if (w.kind === "once") return t("schedule.whenOnce", { expr: w.expr, tz: w.tz });
   return t("schedule.whenInvalid");
 });

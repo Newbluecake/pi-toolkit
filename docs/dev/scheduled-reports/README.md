@@ -81,3 +81,90 @@ a compaction event delayed beyond the 5 s attribution window by a slow handler a
 ## Objective-loop removal (2026-11-09)
 
 The goal fence source and its open-window exemption are removed; the scheduler retains all SDK/UI/root-wake/compaction guards. Its off golden has the user-approved command/hook removal only; no schedule behavior is otherwise changed.
+
+## Interval P1 (2026-11-09, #76): consumers and execution kernel only
+
+Specification: [interval-and-catchup-design.md](interval-and-catchup-design.md), §6.2 P1. **No production interval producer yet**:
+`schedule` tool / command flags, external `when` validation and legacy cron step diagnostics stay cron/once-only.
+New ledgers are still v1; ordinary transactions preserve the version read and cannot upgrade v1. A test-only v2 fixture
+(or a later P2 producer) is needed to exercise interval execution. Existing v2 mutations, receipts, terminal writes,
+housekeeping and explicit repair of a structurally damaged, recognized v2 preserve v2. Unknown versions are degraded
+and **cannot be repaired automatically or by `/schedule repair`** (manual inspection required). Known corrupt JSON/schema
+repair keeps the existing quarantine semantics; unreadable JSON cannot establish a version.
+
+### Pure contracts and arbitration
+
+- Storage uses `StoredWhen = ScheduleWhen | {kind:"every", everyMs, anchorAt}` / `StoredTask`; **legacy wire
+  `ScheduleTaskDef.when` is not widened**. `spec.ts` re-exports the pure vocabulary and `displayTz` from protocol.
+  `cron.ts` owns `parseEvery` / `nextEvery` / `everyCount` plus formatter-free every branches of compile/next/count/between/isOccurrence.
+  `every.ts` is a convenience re-export, not another implementation. The hub's reviewed import closure is unchanged.
+- Decimal parser: trim outside only, lowercase s/m/h/d, ≤3 decimals, ≤32 input characters, exact BigInt ratio,
+  whole seconds, inclusive 30s..365d; `90m` and `1.5h` normalize to the same 5,400,000ms. Grid = A+kD, k≥1;
+  arithmetic checks safe integer / Date bounds, never zeroes a corrupt anchor. UTC only, no tz on stored every.
+- `interval.ts`: `planEveryDue` plans the **whole** `(decidedThrough, now]` window arithmetically;
+  `reconcileEvery` gates before read and under the lock, then `transactPlanned` verifies rev/time/skew and the
+  definition/watermark before a single durable commit. Legacy `planSweep` and `autoClaim` explicitly yield every.
+  Latest T within 24h inclusive + no nonterminal task run ⇒ missed += N−1, fired +=1, watermark=T, at most one
+  `${taskId}@${T}` run (background dispatching / message queued). Busy (either form) ⇒ skipped +=N, no replacement;
+  expired ⇒ missed +=N; both advance T and clear resumePending. N=0 clears only resumePending. Gate/lock failure
+  moves nothing. Only a proven durable fire reaches the executor; uncertain commits get deduplicated unknown(no-outcome)
+  readback, never dispatch/replay. Terminal failure/crash cannot reclaim the decided window.
+- Missed accounting materializes **only the final ≤64 chunks**, each ≤10,000 points. Quotient/remainder arithmetic
+  advances cumulative total and seq for omitted chunks; no occurrence or historical-chunk loop. Test observes chunk
+  steps for N=1,000,000,123, not just the total.
+- Pause decides the old enabled window as `paused` in the same task-change transaction, keeps A/D while disabled;
+  false→true persists `resumePending` without voiding the paused gap. Repeated pause/resume is a semantic no-op.
+  Name-only edits preserve hash/grid; execution changes settle the old grid without executing it and reanchor an
+  interval to transaction `ctx.now`. Manual claims never touch the automatic grid/watermark.
+
+### Owner clock, refresh priority and bounds
+
+`openedAt` is the clock's fixed `deps.armedSince` (new owner epoch at startup/reopen/reload), **not** a refresh timestamp.
+Every path does dead-holder recovery before interval reconciliation, then arms only a **future** grid point.
+
+| Lock-time snapshot                               | Catch-up cause (only when a run is created) |
+| ------------------------------------------------ | ------------------------------------------- |
+| resumePending                                    | resume (highest priority)                   |
+| otherwise first owed F < fixed openedAt          | reopen                                      |
+| otherwise N>1 or now−T>60s                       | late                                        |
+| otherwise (including F=openedAt and exactly 60s) | no catchUp                                  |
+
+Online refresh/poke/changed, timer, poll and heartbeat do not reset openedAt; their arrival order does not classify a run.
+The 30s poll checks enabled every backlog/resumePending even with unchanged stat/rev; pure cron/once keeps its stat fast path.
+One serial work chain and ≤8 task slots per round (taskId + definition hash, epoch scoped by clock instance) merge all sources.
+Each task has first + at most one 2s retry; one shared earliest-retry timer; 10s shared monotonic deadline, ≤16 logical
+reconciles and ≤48 planning/lock attempts. Writer locks use min(existing lock budget, remaining round budget), with
+checks before planning/replanning/locked apply; no Promise.race around writes. A rotating cursor carries unfinished tail
+work to the next poll. Failure cannot rearm an old point at 0ms. Pure every timers ≤12 (fire/poll/heartbeat/retry + ≤8
+uncertain readbacks); dispose clears all. Production uses the segmented/unref clock, with a 365d raw-backend test.
+Synchronous fsync/IO remains non-preemptible; this is a bound on **starting** work, not physical IO cancellation.
+
+### Consumers, wire and security
+
+- Durable optional `run.catchUp = {cause,fromExclusive,through,dueCount,recoveredAt}` is the single source for
+  background prompt/header/report, message wake/report and history: “这是补跑；合并 N 次到期，本次只执行一次” plus
+  UTC window/original plan/recovery instants. Compact tokens use `catch-up ×N` only.
+- `displayTz(every)=UTC`; status renders HH:mm:ss UTC / MM-DD HH:mm:ss UTC; view/message/report and hub/UI/Feishu
+  have explicit every branches. Cron/once keep their existing minute text (report header's prior seconds included).
+  New interval report paths use UTC and the unchanged minute filename grammar + locked collision suffix allocation.
+- Append-only `intervalTasks?` carries every projections; old `tasks` includes only cron/once, runs are not duplicated.
+  No intervals ⇒ no intervalTasks/catchUp keys. Both hello/cap surfaces append `sched.interval.v1` only when the
+  existing schedule port/config exists. `SchedHubLink.intervalReady()` provides future P2 admission without opening
+  creation now. UI merges both task arrays once; hub observation **and** armObserve ignore every, consuming committed
+  missedLog only. No PROTO/schema rewrite, no every disguised as cron.
+- **Registration hard gate**: `config/settings.ts::applySecureDomainOverrides` clones schedule and forces enabled=false
+  for secure/locked in both settings entry paths, above file/session overrides. Actual activate integration covers
+  secure/locked × absent/explicit true × absent/preexisting v1 store: no tool, command, prompt/status, hello cap,
+  HubConfig.schedule, directory or ledger migration. Existing orphan guard remains the only off residue. Runtime
+  locked checks remain, including before clock reads; no claim that SDK tools can be unregistered mid-process.
+- Expansion audit: full `src` grep for `when.tz` and schedule cron/once binary branches was reviewed. Remaining direct
+  accesses are narrowed legacy compiler/view branches or the deliberately legacy-only external parser; UI whenParts
+  is a display union with an explicit every arm; dispatch's once-only enabled exemption intentionally stays once-only.
+  No boundary allowlist relaxation, default flip, frozen fixture change, or production input change.
+
+P2 owns the producer transaction's explicit v1→v2 upgrade, normalized-equivalence admission/anchor commit and strict
+step diagnostics/cap admission. It must not alter P1's stored every shape, hash algorithm, window verdict, labels,
+poll bounds or append-only projection; the current ordinary writer remains version-preserving (an explicit upgrade
+path may be added without changing ordinary transaction semantics). Integration tests are tier2 by the manifest's
+`tests/integration/` prefix. The new every/core-clock/consumer drivers use a real flock-backed writer through the test-only
+v2 seeder and are explicitly tier2 in `tests/tiers.ts`; the pure raw timer backend test remains tier1.

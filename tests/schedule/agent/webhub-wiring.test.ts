@@ -112,6 +112,8 @@ describe("wireWebHub × schedule port", () => {
     const s = await live(deps({ schedule: p }), ["sched.v1"]);
     const hello = s.frames().find((f) => f.t === "hello") as { caps: string[] };
     expect(hello.caps).toContain("sched.v1");
+    expect(hello.caps).toContain("sched.interval.v1");
+    expect(p.link?.intervalReady?.()).toBe(false);
     expect(p.caps).toBe(1);
     expect(p.link?.ready()).toBe(true);
     p.link!.send({ t: "sched_changed", sessionId: "sid-1" });
@@ -134,6 +136,12 @@ describe("wireWebHub × schedule port", () => {
     const p = port();
     await live(deps({ schedule: p }), []);
     expect(p.link?.ready()).toBe(false);
+  });
+
+  it("interval readiness is negotiated only on a live interval-capable hub", async () => {
+    const p = port();
+    await live(deps({ schedule: p }), ["sched.v1", "sched.interval.v1"]);
+    expect(p.link?.intervalReady?.()).toBe(true);
   });
 
   it("r2: hello carries sched.v1 but NOT sched.confirm.v1 (retired); a stray sched_decide still reaches the port", async () => {
@@ -168,6 +176,7 @@ describe("wireWebHub × schedule port", () => {
     const s = await live(deps(), ["sched.v1"]);
     const hello = s.frames().find((f) => f.t === "hello") as { caps: string[] };
     expect(hello.caps).not.toContain("sched.v1");
+    expect(hello.caps).not.toContain("sched.interval.v1");
   });
 
   it("HubConfig.schedule is written with the port and control on", async () => {

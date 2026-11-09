@@ -26,7 +26,15 @@ import { useI18n } from "../../composables/useI18n.js";
 import { useTicker } from "../../composables/useTicker.js";
 import { useTrackedCommand } from "../../composables/useTrackedCommand.js";
 import { registerScheduleExtra } from "../../i18n/schedule-extra.js";
-import { fmtTs, panelView, relIn, runReasonKey, runStateKey } from "../../logic/schedule.js";
+import {
+  allScheduleTasks,
+  fmtIntervalTs,
+  fmtTs,
+  panelView,
+  relIn,
+  runReasonKey,
+  runStateKey,
+} from "../../logic/schedule.js";
 import { CONTROL_VIEW, HUB_CTX } from "../control/controlContext.js";
 import CommandConfirm from "../control/CommandConfirm.vue";
 import PickerSheet from "../control/PickerSheet.vue";
@@ -87,7 +95,7 @@ interface PanelTask {
   id: string;
   name: string;
   form: "background" | "message";
-  when: { kind: "cron" | "once" | "invalid"; expr: string; tz: string };
+  when: { kind: "cron" | "once" | "every" | "invalid"; expr: string; tz: string };
   enabled: boolean;
   createdBy: string;
   feishu: boolean;
@@ -110,6 +118,8 @@ interface PanelRun {
   reportFile: string | undefined;
   runId: string | undefined;
   feishu: string;
+  interval?: boolean;
+  catchUp?: { dueCount: number };
 }
 type PanelModel =
   | { kind: "none" }
@@ -156,14 +166,16 @@ const model = computed(
     }) as unknown as PanelModel,
 );
 
-function whenLabel(when: { kind: "cron" | "once" | "invalid"; expr: string; tz: string }): string {
+function whenLabel(when: { kind: "cron" | "once" | "every" | "invalid"; expr: string; tz: string }): string {
   if (when.kind === "cron") return t("schedule.whenCron", { expr: when.expr, tz: when.tz });
+  if (when.kind === "every") return t("schedule.whenEvery", { expr: when.expr });
   if (when.kind === "once") return t("schedule.whenOnce", { expr: when.expr, tz: when.tz });
   return t("schedule.whenInvalid");
 }
 
-function nextLabel(nextAt: number | undefined, degraded: boolean): string {
+function nextLabel(nextAt: number | undefined, degraded: boolean, interval = false): string {
   if (degraded || nextAt === undefined) return t("schedule.taskNextNever");
+  if (interval) return t("schedule.taskNext", { t: fmtIntervalTs(nextAt) });
   const relative = relIn(nextAt, ticker.now.value);
   if (relative === "due") return t("schedule.taskDue");
   return t("schedule.taskNextRelative", { t: relative });
@@ -178,7 +190,9 @@ const detailTaskId = ref<string | null>(null);
 const detailTask = computed(() => {
   if (detailTaskId.value === null || model.value.kind !== "ready") return null;
   const proj = hub?.state.value.schedules?.sessions.find((s) => s.sessionId === props.sessionId);
-  return proj?.tasks.find((task) => task.task.id === detailTaskId.value) ?? null;
+  return proj === undefined
+    ? null
+    : (allScheduleTasks(proj).find((task) => task.task.id === detailTaskId.value) ?? null);
 });
 
 watch(detailTask, (task) => {
@@ -268,7 +282,9 @@ function closeDetail(): void {
                 </div>
                 <div class="sched-task-meta">
                   <strong>{{
-                    task.enabled ? nextLabel(task.nextAt, task.degraded) : t("schedule.taskTriggerPaused")
+                    task.enabled
+                      ? nextLabel(task.nextAt, task.degraded, task.when.kind === "every")
+                      : t("schedule.taskTriggerPaused")
                   }}</strong>
                   <span class="sched-task-when" :title="whenLabel(task.when)">{{ whenLabel(task.when) }}</span>
                 </div>
@@ -327,7 +343,10 @@ function closeDetail(): void {
               <span class="sched-run-state">{{ t(`schedule.runState.${runStateKey(run.state)}`) }}</span>
               <span class="sched-run-task" translate="no">{{ run.taskName || run.taskId }}</span>
               <span v-if="run.kind === 'manual'" class="chip">{{ t("schedule.runManual") }}</span>
-              <span class="sched-run-time">{{ fmtTs(run.startedAt) }}</span>
+              <span v-if="run.catchUp" class="chip">catch-up ×{{ run.catchUp.dueCount }}</span>
+              <span class="sched-run-time">{{
+                run.interval ? fmtIntervalTs(run.startedAt) : fmtTs(run.startedAt)
+              }}</span>
               <span class="sched-run-sub">
                 <template v-if="run.reason"
                   >{{ runReasonKey(run.state, run.reason) ? t(`schedule.runReason.${run.reason}`) : run.reason }} ·

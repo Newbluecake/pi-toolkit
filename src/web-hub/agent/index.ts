@@ -39,6 +39,7 @@ import type { ScheduleWebHubPort } from "../../schedule/agent/coordinator.js";
 import {
   SCHED_AGENT_CAPS,
   SCHED_HUB_CAP,
+  SCHED_INTERVAL_CAP,
   type SchedDecideFrame,
   type SchedReceiptsFrame,
   type SchedRunFrame,
@@ -1472,6 +1473,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   const schedulePort = deps.schedule;
   schedulePort?.bindLink({
     ready: () => conn?.status().state === "live" && (conn?.caps.includes(SCHED_HUB_CAP) ?? false),
+    intervalReady: () => conn?.status().state === "live" && (conn?.caps.includes(SCHED_INTERVAL_CAP) ?? false),
     send: (frame) => conn?.send(frame),
   });
   const binding: BindingPort = {

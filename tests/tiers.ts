@@ -34,11 +34,19 @@ export const BASE_TEST_INCLUDE: readonly string[] = ["tests/**/*.test.ts", "test
 // #65: memory-web-command-confirm.test.ts + memory-web-command-dispatch.test.ts
 // are deliberately covered by these prefixes (real SDK / >5s settled barrier).
 // The opt-in real-browser probe lives in scripts/, never the daily test project.
+// Schedule interval P1: schedule-secure-activate and schedule-interval-lock are integration/
+// (actual activate / real kernel lock), hence covered by this prefix, never the secure mount project.
 export const TIER2_DIRS: readonly string[] = ["tests/integration/", "tests/conformance/"];
 
 /** Tier 2 files outside TIER2_DIRS (plan D2): real private lock / plain child processes /
  * build-artifact-dependent suites. Not real-mount — those are SECURE_MOUNT_FILES. */
 export const TIER2_FILES: readonly string[] = [
+  // Interval P1: these drivers use the real single-file writer/flock through fixtures (hidden
+  // from lexical proc scanning). Pure raw timer arithmetic remains tier1; contention/activate
+  // end-to-end tests are already covered by the integration/ prefix above.
+  "tests/schedule/core/every.test.ts",
+  "tests/schedule/agent/every-clock.test.ts",
+  "tests/schedule/agent/every-consumers.test.ts",
   // Root WebHub activation attempts a real Unix socket connection via its wiring.
   "tests/web-hub/agent/memory-lifecycle-wiring.test.ts",
   // private lock file only — no mount (keeps its fast unit behaviour out of tier1)

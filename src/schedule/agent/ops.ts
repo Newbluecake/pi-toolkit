@@ -26,6 +26,7 @@ import {
   type ScheduleTask,
   type ScheduleThinkingLevel,
   type ScheduleWhen,
+  type StoredWhen,
   SCHEDULE_THINKING_LEVELS,
 } from "../core/spec.js";
 import { finishRun, removeTask, type SessionStore } from "../core/writer.js";
@@ -66,7 +67,7 @@ export interface OpsPorts {
 export interface TaskDef {
   name: string;
   form: ScheduleForm;
-  when: ScheduleWhen;
+  when: StoredWhen;
   prompt: string;
   feishu: boolean;
   bg?: ScheduleBg;
@@ -115,13 +116,13 @@ export interface RawFields {
   bg?: unknown;
 }
 
-function parseWhen(raw: unknown, base: ScheduleWhen | undefined, ports: OpsPorts): OpResult<ScheduleWhen> {
+function parseWhen(raw: unknown, base: StoredWhen | undefined, ports: OpsPorts): OpResult<ScheduleWhen> {
   if (!isRec(raw)) return fail("E_INVALID", "when must be an object {kind, expr|at, tz}");
   const bad = unknownKeys(raw, WHEN_KEYS);
   if (bad !== undefined) return fail("E_INVALID", `when: unknown field "${bad}"`);
   const kind = raw.kind;
   if (kind !== "cron" && kind !== "once") return fail("E_INVALID", 'when.kind must be "cron" or "once"');
-  const tz = raw.tz ?? (base?.tz as unknown) ?? ports.defaultTz();
+  const tz = raw.tz ?? (base?.kind === "every" ? undefined : base?.tz) ?? ports.defaultTz();
   if (typeof tz !== "string" || tz === "") return fail("E_INVALID", "when.tz must be an IANA time zone name");
   if (kind === "cron") {
     if (raw.at !== undefined) return fail("E_INVALID", "when: `at` only applies to kind once");
@@ -211,6 +212,8 @@ function parseBg(raw: unknown, base: ScheduleBg | undefined, ports: OpsPorts): O
  * when it is new or changed (renaming an expired once-task must stay possible).
  */
 export function resolveDef(raw: RawFields, base: TaskDef | undefined, ports: OpsPorts): OpResult<TaskDef> {
+  const unsupported = Object.keys(raw).find((key) => ["every", "everyMs", "intervalMs", "anchorAt"].includes(key));
+  if (unsupported !== undefined) return fail("E_INVALID", `unknown field "${unsupported}"`);
   let name = base?.name;
   if (raw.name !== undefined) {
     if (typeof raw.name !== "string") return fail("E_INVALID", "name must be a string");
@@ -371,6 +374,13 @@ export async function updateTask(ports: OpsPorts, id: string, raw: RawFields): P
   if (refusal !== undefined) return refusalOf(refusal);
   const store = ports.agent.store();
   if (store === undefined || !SCHED_TASK_ID_RE.test(id)) return fail("E_INVALID", `no such task ${id}`);
+  // Validate before any sweep or transaction can write. Recheck under the writer lock below.
+  const snapshot = store.read();
+  if (snapshot.kind === "degraded") return fail("E_DEGRADED", snapshot.detail);
+  const existing = snapshot.kind === "ok" ? snapshot.state.tasks.find((t) => t.id === id) : undefined;
+  if (existing === undefined) return fail("E_INVALID", `no such task ${id}`);
+  const checked = resolveDef(raw, defOf(existing), ports);
+  if (!checked.ok) return checked;
   const change = await changeTask(store, id, (task) => {
     const def = resolveDef(raw, defOf(task), ports);
     if (!def.ok) return { refuse: def.code, detail: def.detail };

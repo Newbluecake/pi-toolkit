@@ -23,6 +23,8 @@ import type {
   SchedulesPayloadWire,
   ScheduleSessionProjectionWire,
   ScheduleTaskProjectionWire,
+  EveryTaskProjection,
+  StoredTaskProjection,
 } from "../../protocol/schedule.js";
 
 export interface ReceiptView {
@@ -71,7 +73,7 @@ const feishuOf = (run: RunRecord, state: ScheduleStateFile, deps: ProjectDeps): 
   return "waiting";
 };
 
-function taskProjection(task: ScheduleTask, state: ScheduleStateFile, deps: ProjectDeps): ScheduleTaskProjectionWire {
+function taskProjection(task: ScheduleTask, state: ScheduleStateFile, deps: ProjectDeps): StoredTaskProjection {
   const hash = defHash(task);
   const occ = state.occ[task.id];
   const compiled = compileTask(task);
@@ -98,11 +100,12 @@ function taskProjection(task: ScheduleTask, state: ScheduleStateFile, deps: Proj
       skipped: occ?.skippedTotal ?? 0,
       manual: state.manualTotal[task.id] ?? 0,
     },
-  };
+  } as StoredTaskProjection;
 }
 
 function runProjection(run: RunRecord, state: ScheduleStateFile, deps: ProjectDeps): ScheduleRunProjectionWire {
   return {
+    ...(run.catchUp === undefined ? {} : { catchUp: run.catchUp }),
     runKey: run.runKey,
     taskId: run.taskId,
     kind: run.kind,
@@ -123,7 +126,16 @@ export function projectSession(state: ScheduleStateFile, deps: ProjectDeps): Sch
   return {
     sessionId: state.sessionId,
     rev: state.rev,
-    tasks: state.tasks.map((t) => taskProjection(t, state, deps)),
+    tasks: state.tasks
+      .filter((t) => t.when.kind !== "every")
+      .map((t) => taskProjection(t, state, deps) as ScheduleTaskProjectionWire),
+    ...(state.tasks.some((t) => t.when.kind === "every")
+      ? {
+          intervalTasks: state.tasks
+            .filter((t) => t.when.kind === "every")
+            .map((t) => taskProjection(t, state, deps) as EveryTaskProjection),
+        }
+      : {}),
     runs,
     droppedReports: state.reportStats.droppedIndexCap,
   };

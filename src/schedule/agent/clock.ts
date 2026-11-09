@@ -26,8 +26,10 @@
  */
 import { statSync } from "node:fs";
 import { join } from "node:path";
+import { clampSpanMs } from "../../core/deadline.js";
 import type { Clock, TimerHandle } from "../../core/clock.js";
 import { autoClaim, recoverRuns, sweep, type AutoClaimResult, type ClaimGate } from "../core/claim.js";
+import { reconcileEvery, planEveryDue } from "../core/interval.js";
 import { nextOccurrence } from "../core/cron.js";
 import { compileTask, SCHED_SUPPLEMENTAL_SWEEP_DELAY_MS } from "../core/occurrence.js";
 import { sameHolder, type JudgeOpts, type ProcessIdentity } from "../core/recovery.js";
@@ -124,6 +126,7 @@ export function createSessionClock(deps: SessionClockDeps): SessionClock {
   const retryTimers = new Set<TimerHandle>();
   /** Per-task floor: occurrences ≤ floor were already attempted by this clock (no re-fire loop). */
   const tried = new Map<string, number>();
+  let hasEvery = false;
   let lastRev = -1;
   let lastStamp: FileStamp | undefined;
   let degraded: string | undefined;
@@ -133,7 +136,7 @@ export function createSessionClock(deps: SessionClockDeps): SessionClock {
 
   const enqueue = (fn: () => Promise<void>): Promise<void> => {
     const p = chain.then(async () => {
-      if (disposed) return;
+      if (disposed || deps.gate()?.code === "E_SECURE") return;
       try {
         await fn();
       } catch (err) {
@@ -150,20 +153,24 @@ export function createSessionClock(deps: SessionClockDeps): SessionClock {
   };
 
   function snapshot(): ScheduleStateFile | undefined {
+    if (deps.gate()?.code === "E_SECURE") return undefined;
     const store = deps.store.get();
     if (store === undefined) {
       lastRev = 0;
+      hasEvery = false;
       return undefined;
     }
     const r = store.read();
     if (r.kind === "ok") {
       degraded = undefined;
       lastRev = r.state.rev;
+      hasEvery = r.state.tasks.some((t) => t.when.kind === "every");
       return r.state;
     }
     if (r.kind === "absent") {
       degraded = undefined;
       lastRev = 0;
+      hasEvery = false;
       return undefined;
     }
     if (degraded !== r.reason) warn(`ledger degraded (${r.reason}): ${r.detail} — /schedule repair`);
@@ -190,7 +197,10 @@ export function createSessionClock(deps: SessionClockDeps): SessionClock {
     if (occ === undefined || !isExecutable(task) || occ.defHash !== defHash(task)) return undefined;
     const c = compileTask(task);
     if (c === undefined) return undefined;
-    const after = Math.max(occ.decidedThrough, deps.armedSince - 1, tried.get(task.id) ?? Number.NEGATIVE_INFINITY);
+    const after =
+      task.when.kind === "every"
+        ? Math.max(occ.decidedThrough, clock.now())
+        : Math.max(occ.decidedThrough, deps.armedSince - 1, tried.get(task.id) ?? Number.NEGATIVE_INFINITY);
     return nextOccurrence(c, after);
   }
 
@@ -206,10 +216,15 @@ export function createSessionClock(deps: SessionClockDeps): SessionClock {
       if (t !== undefined && (next === undefined || t < next.t)) next = { t, taskId: task.id };
     }
     if (next === undefined) return;
-    fireTimer = clock.setTimer(Math.max(0, next.t - now), () => {
-      fireTimer = undefined;
-      void enqueue(fireDue);
-    });
+    fireTimer = clock.setTimer(
+      state.tasks.find((t) => t.id === next!.taskId)?.when.kind === "every"
+        ? (clampSpanMs(next.t - now) ?? 1)
+        : Math.max(0, next.t - now),
+      () => {
+        fireTimer = undefined;
+        void enqueue(fireDue);
+      },
+    );
   }
 
   /** Pending supplemental sweep instants (deduped, bounded); one timer targets the earliest. */
@@ -242,8 +257,12 @@ export function createSessionClock(deps: SessionClockDeps): SessionClock {
   }
 
   async function doSweep(): Promise<void> {
+    if (deps.gate()?.code === "E_SECURE") return;
     const store = deps.store.get();
     if (store === undefined) return;
+    const read = store.read();
+    if (read.kind === "ok") hasEvery = read.state.tasks.some((t) => t.when.kind === "every");
+    if (read.kind === "ok" && read.state.tasks.every((t) => t.when.kind === "every")) return;
     for (let round = 0; round < SCHED_SWEEP_ROUNDS && !disposed; round++) {
       const r = await sweep(store, { armedSince: deps.armedSince });
       if (r.kind === "error") {
@@ -257,6 +276,7 @@ export function createSessionClock(deps: SessionClockDeps): SessionClock {
   }
 
   async function doRecover(force: boolean): Promise<void> {
+    if (deps.gate()?.code === "E_SECURE") return;
     const store = deps.store.get();
     if (store === undefined) return;
     if (!force) {
@@ -280,8 +300,13 @@ export function createSessionClock(deps: SessionClockDeps): SessionClock {
     const store = deps.store.get();
     const state = snapshot();
     if (store === undefined || state === undefined) return arm();
+    if (hasEvery) {
+      await doRecover(false);
+      await doEvery();
+    }
     const now = clock.now();
     for (const task of state.tasks) {
+      if (task.when.kind === "every") continue;
       if (disposed) return;
       const t = candidate(task, state);
       if (t === undefined || t > now) continue;
@@ -302,6 +327,130 @@ export function createSessionClock(deps: SessionClockDeps): SessionClock {
       handleClaim(store, task, t, res);
     }
     arm();
+  }
+
+  // All wake sources share a round, task slots and ONE retry timer. No source can
+  // reset the 8 tasks × 2 reconciles × 3 writer attempts / 10s budget.
+  let everyRound:
+    | { start: number; deadline: number; slots: Map<string, { hash: string; attempts: number; retryAt?: number }> }
+    | undefined;
+  let everyRetry: TimerHandle | undefined;
+  let cursor = 0;
+  const uncertainEvery = new Map<string, TimerHandle>();
+  function scheduleEveryUncertain(store: SessionStore, taskId: string): void {
+    if (disposed || uncertainEvery.has(taskId) || uncertainEvery.size >= 8) return;
+    const h = clock.setTimer(SCHED_UNCERTAIN_RECHECK_MS, () => {
+      // Keep the dedup slot until the serialized readback finishes, not merely until timer fire.
+      void enqueue(async () => {
+        const r = await store.transact((draft, ctx) => {
+          const runs = draft.runs.filter(
+            (run) => run.taskId === taskId && !isTerminalRunState(run.state) && sameHolder(run.holder, deps.holder),
+          );
+          for (const run of runs) finishRun(draft, run.runKey, { state: "unknown", reason: "no-outcome" }, ctx.now);
+          return { value: runs.length > 0, write: runs.length > 0 };
+        });
+        uncertainEvery.delete(taskId);
+        if (r.ok && r.value) deps.onChanged?.();
+        else if (!r.ok && !disposed) scheduleEveryUncertain(store, taskId);
+      });
+    });
+    uncertainEvery.set(taskId, h);
+  }
+  function armEveryRetry(): void {
+    everyRetry = clear(everyRetry);
+    if (disposed || everyRound === undefined) return;
+    const ats = [...everyRound.slots.values()].flatMap((s) => (s.retryAt === undefined ? [] : [s.retryAt]));
+    if (ats.length === 0) return;
+    const delay = Math.min(...ats) - mono();
+    if (delay <= 0 || mono() + delay >= everyRound.deadline) return;
+    everyRetry = clock.setTimer(clampSpanMs(delay)!, () => {
+      everyRetry = undefined;
+      void enqueue(async () => {
+        await doRecover(false);
+        await doEvery();
+        arm();
+      });
+    });
+  }
+  async function doEvery(): Promise<void> {
+    if (disposed || deps.gate()?.code === "E_SECURE") return;
+    const store = deps.store.get();
+    const state = snapshot();
+    if (store === undefined || state === undefined) return;
+    const tasks = state.tasks.filter((t) => t.enabled && t.when.kind === "every");
+    if (tasks.length === 0) {
+      everyRetry = clear(everyRetry);
+      everyRound = undefined;
+      return;
+    }
+    const m = mono();
+    if (everyRound === undefined || m - everyRound.start >= SCHED_POLL_MS) {
+      everyRetry = clear(everyRetry);
+      everyRound = { start: m, deadline: m + clampSpanMs(10_000)!, slots: new Map() };
+    }
+    const round = everyRound;
+    // Epoch is fixed by this clock instance; a definition change cancels its stale slot.
+    for (const [id, slot] of round.slots) {
+      const task = tasks.find((t) => t.id === id);
+      if (task === undefined || defHash(task) !== slot.hash) {
+        delete slot.retryAt;
+      }
+    }
+    const start = cursor % tasks.length;
+    for (let i = 0; i < tasks.length && !disposed && mono() < round.deadline; i++) {
+      const task = tasks[(start + i) % tasks.length]!;
+      const occ = state.occ[task.id];
+      if (
+        occ === undefined ||
+        (planEveryDue(task, occ, clock.now(), deps.armedSince).dueCount === 0 && !occ.resumePending)
+      )
+        continue;
+      let slot = round.slots.get(task.id);
+      if (
+        slot !== undefined &&
+        (slot.hash !== defHash(task) || slot.attempts >= 2 || slot.retryAt === undefined || slot.retryAt > mono())
+      )
+        continue;
+      if (slot === undefined) {
+        if (round.slots.size >= 8) continue;
+        slot = { hash: defHash(task), attempts: 0 };
+        round.slots.set(task.id, slot);
+      }
+      delete slot.retryAt;
+      slot.attempts++;
+      cursor = (start + i + 1) % tasks.length;
+      const refusal = deps.preflight?.(task);
+      const result: AutoClaimResult =
+        refusal === undefined
+          ? await reconcileEvery(store, {
+              taskId: task.id,
+              holder: deps.holder,
+              openedAt: deps.armedSince,
+              deadlineMono: round.deadline,
+              gate: deps.gate,
+            })
+          : { kind: "ineligible", reason: "gate", detail: refusal.code };
+      if (disposed) return;
+      if (result.kind === "fired") {
+        deps.onChanged?.();
+        try {
+          deps.onFired(result.run, task);
+        } catch (err) {
+          warn(`executor threw: ${String(err)}`);
+        }
+      } else if (result.kind === "overlap" || result.kind === "missed" || (result.kind === "lost" && occ.resumePending))
+        deps.onChanged?.();
+      if (result.kind === "error" && result.uncertain) {
+        scheduleEveryUncertain(store, task.id);
+      } else if (
+        ((result.kind === "error" && result.code === "E_BUSY") ||
+          (result.kind === "ineligible" && result.detail === "E_BUSY")) &&
+        slot.attempts < 2 &&
+        mono() + SCHED_BUSY_RETRY_MS < round.deadline
+      )
+        slot.retryAt = mono() + clampSpanMs(SCHED_BUSY_RETRY_MS)!;
+    }
+    armEveryRetry();
   }
 
   function handleClaim(store: SessionStore, task: ScheduleTask, t: number, res: AutoClaimResult): void {
@@ -375,6 +524,7 @@ export function createSessionClock(deps: SessionClockDeps): SessionClock {
     await doSweep();
     if (disposed) return;
     await doRecover(forceRecover);
+    if (hasEvery) await doEvery();
     if (disposed) return;
     const store = deps.store.get();
     if (store !== undefined) lastStamp = stampOf(store);
@@ -397,7 +547,8 @@ export function createSessionClock(deps: SessionClockDeps): SessionClock {
             if (lastRev !== before) await doSweep();
           }
           await doRecover(false);
-          if (changed) arm();
+          if (hasEvery) await doEvery(); // Deliberately independent of stat/rev changes.
+          if (changed || hasEvery) arm();
         }
       }).finally(() => {
         if (!disposed) schedulePoll();
@@ -416,6 +567,10 @@ export function createSessionClock(deps: SessionClockDeps): SessionClock {
       if (Math.abs(drift) > SCHED_DRIFT_MS) {
         void enqueue(async () => {
           await doSweep();
+          if (hasEvery) {
+            await doRecover(false);
+            await doEvery();
+          }
           arm();
         });
       }
@@ -437,8 +592,11 @@ export function createSessionClock(deps: SessionClockDeps): SessionClock {
       void enqueue(async () => {
         const before = lastRev;
         snapshot();
-        if (lastRev === before) return;
-        await doSweep();
+        if (lastRev !== before) await doSweep();
+        if (hasEvery) {
+          await doRecover(false);
+          await doEvery();
+        }
         arm();
       });
     },
@@ -461,6 +619,10 @@ export function createSessionClock(deps: SessionClockDeps): SessionClock {
       beatTimer = clear(beatTimer);
       for (const h of retryTimers) clock.clearTimer(h);
       retryTimers.clear();
+      everyRetry = clear(everyRetry);
+      for (const h of uncertainEvery.values()) clock.clearTimer(h);
+      uncertainEvery.clear();
+      everyRound = undefined;
       next = undefined;
     },
   };

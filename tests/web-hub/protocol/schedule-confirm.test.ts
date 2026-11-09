@@ -44,12 +44,12 @@ const HUB: Array<Record<string, unknown>> = [
 ];
 
 describe("sched.confirm.v1 frames", () => {
-  it("cap string and limits; sched.v1 caps untouched", () => {
+  it("legacy confirm string and limits; interval cap appended without reviving confirm", () => {
     expect(SCHED_CONFIRM_CAP).toBe("sched.confirm.v1");
     expect(SCHED_CONFIRM_OFFERS_MAX).toBe(8);
     expect(SCHED_CONFIRM_CLOSED_MAX).toBe(8);
-    expect([...SCHED_HUB_CAPS]).toEqual(["sched.v1"]);
-    expect([...SCHED_AGENT_CAPS]).toEqual(["sched.v1"]);
+    expect([...SCHED_HUB_CAPS]).toEqual(["sched.v1", "sched.interval.v1"]);
+    expect([...SCHED_AGENT_CAPS]).toEqual(["sched.v1", "sched.interval.v1"]);
   });
 
   it.each(AGENT)("agent→hub round-trips %o (and is not a hub frame)", (f) => {
