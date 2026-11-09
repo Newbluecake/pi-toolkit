@@ -15,7 +15,7 @@ import {
 } from "../safe-fs.js";
 import { MemoryError } from "../paths.js";
 import { recordSoftMeta, softLegacyMetadata } from "../soft-meta.js";
-import { listTrashEntries, newTidyId } from "../tidy/manifest.js";
+import { listTrashEntries, newMemoryId } from "../trash.js";
 import { withMemoryDirLock } from "../lock.js";
 import type { MemoryWriteGate } from "../contracts.js";
 import type { JevIndexV1 } from "../jev/contracts.js";
@@ -224,7 +224,7 @@ export function trashBlockLocked(
   const current = parsed(name, readRegular(realDir, name).text);
   if (expectRev !== undefined && current.rev !== expectRev)
     throw new MemoryError(`E_CONFLICT: current rev ${current.rev}\n${current.body}`);
-  const trashName = `${newTidyId(new Date(), process.pid, randomBytes(3).toString("hex"))}-${name}`;
+  const trashName = `${newMemoryId(new Date(), process.pid, randomBytes(3).toString("hex"))}-${name}`;
   checkWrite(realDir, opts);
   ensurePrivateDir(join(realDir, ".trash"));
   const trash = inspectDirNoFollow(join(realDir, ".trash"));

@@ -12,7 +12,7 @@
  */
 
 import { randomBytes } from "node:crypto";
-import { newTidyId } from "./tidy/manifest.js";
+import { newMemoryId } from "./trash.js";
 import type { ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { MemorySettings } from "../config/settings.js";
 import { resolveWorktreeOrigin } from "../core/worktree-origin.js";
@@ -537,11 +537,11 @@ const TRASH_DIR = ".trash";
 const TRASH_KEEP = 20;
 
 /** `.trash` id in the exact shape `safe-fs` TRASH_NAME_RE and
- *  `tidy/manifest` listTrashEntries accept (ms-precision stamp + 6 hex) —
+ *  `trash.ts` listTrashEntries accept (ms-precision stamp + 6 hex) —
  *  the previous local stamp dropped the milliseconds and used base36, so
  *  `/mem restore --trash` never listed tool/review deletions. */
 function trashId(): string {
-  return newTidyId(new Date(), process.pid, randomBytes(3).toString("hex"));
+  return newMemoryId(new Date(), process.pid, randomBytes(3).toString("hex"));
 }
 
 // ───────────────────────────── main factory ─────────────────────────────

@@ -1,12 +1,12 @@
 # 项目记忆 · 开发者要点
 
-> 何时读：改动 `src/memory/**`、`memory.*` 设置键、`/mem` 命令、tidy/restore 事务之前；涉及 `src/memory/jev/**`、`memory.jev.*` 时另读下方「Jev」一节。
+> 何时读：改动 `src/memory/**`、`memory.*` 设置键、`/mem` 命令、trash/block restore之前；涉及 `src/memory/jev/**`、`memory.jev.*` 时另读下方「Jev」一节。
 > 来源：AGENTS.md@fcbf71dc 的对应条目，原文搬运，未改写（仅路径按目录移动更新）。新的实现细节直接写在这里，不要再写回 AGENTS.md。
-> 相关：`memory-plan.md`、`tidy-batch-plan.md`、`jev-arch.md`（v2.1）、`jev-plan.md`（v2）。
+> 相关：`memory-plan.md`、`jev-arch.md`（v2.1）、`jev-plan.md`（v2）。
 
 ## src/memory/
 
-`src/memory/` — merged armory-memory: cwd-keyed project memory under `~/.pi/agent/memory/<slug>/`, with default `layout:blocks` injection; `toolSurface:v2` remains the configured files-layout tool surface, while enabled plain main/child sessions with an actual blocks/v3 surface publish unified v4 (v3 storage/operations underneath); secure/locked sessions retain the original factory. Explicit `legacy` settings retain the byte-compatible files-layout opt-out. With blocks configured and files still on disk, effective layout falls back to tiered for injection and doctor; existing blocks take precedence over tiered/legacy configuration. The tiered renderer enforces whole-file/whole-section admission and a UTF-8 byte budget; topic index lines carry `description`/`read_when` metadata, while `/mem doctor` reports layout-specific health findings and its summary is surfaced by `/mem` and `memory.view`. Slug directories are canonicalized once and may be user-trusted symlinks; file-level symlinks and non-regular files are rejected. All v2 writes, imports, tidy, and restore operations serialize under the directory lock; batch tidy calls the post-write invalidation once. Registers a `pi_project_memory` section into the shared prompt-section hub (`src/sysprompt/hub.ts`, pre-guard, created before `wireMemory` runs so fold order stays memory → agent types → models) instead of owning its own `before_agent_start` hook (sysprompt-stable M3); the hub decides snapshot vs. tail update, `src/memory/inject.ts`'s `memorySection` provider only renders the current live block (pin frontmatter, agent-source fence, tail sentinel, fingerprint-keyed render cache). The project `memory` commands use the existing v3 view/create/update/delete/search operations in blocks layout (whole-block update with rev/CAS); explicit files layouts retain v2/legacy surfaces. Child sessions are read-only by default, and scopes-on children keep project/Hub content hard read-only even with the old write opt-in. `/mem` covers layout-specific list/path/doctor, read-only review/expired, migration and restore; init/import retain their files-oriented workflows (not block CRUD), and tidy is unavailable in blocks layout (`init` creates an agent-source `core.md` skeleton stamped `source: agent` — deleting that line locks it as user-authored — and refuses an existing, archived or pin-stand-in primary). Files-layout tidy and restore are journaled transactions (`src/memory/tidy/{txn,manifest,journal}.ts`, design `docs/dev/memory/tidy-batch-plan.md` v3.2): the run event records the full planned op list before any intent, every MOVE/CREATE/REPLACE is CAS- and owner-epoch-checked and its result carries a mandatory final observation, an interrupted run stays resumable and is recovered before new work, and manifests are strict v2 (v1 backups restore only with `--legacy`, also through the txn layer). Hard-link-less filesystems refuse txn tidy (fail closed). Directory locks follow M-T4: a lock whose holder cannot be proven dead (old-format, cross-host) is never broken by age — writers get an actionable busy error and only the TUI-only `/mem tidy --break-lock` (epoch bump BEFORE lockBreak) clears it. `/mem tidy --batch` (P3a, `batch-command.ts`) archives stale entries into `archive/` (+ `ARCHIVE.md`, index pruning) and rewrites the rest in model batches sized by the dispatch-time `SpawnRequest.inputBudget` measurement (re-splitting on `input-budget` failures), holding one run lease for the whole command, bounded by `memory.tidy.batch.*` (bounded cost cap, max model runs, activity clock excluding dialog time); `--dry-run`/`--status` are read-only and web-allowed, `--triage` (P3b) is not implemented. `paths|frontmatter|store|render` are pi-free; `index.ts` (`wireMemory`) is the only pi-facing assembly and holds all mutable state in its closure; registered pre-guard. Design: `docs/dev/memory/memory-plan.md`.
+`src/memory/` — merged armory-memory: cwd-keyed project memory under `~/.pi/agent/memory/<slug>/`, with default `layout:blocks` injection; `toolSurface:v2` remains the configured files-layout tool surface, while enabled plain main/child sessions with an actual blocks/v3 surface publish unified v4 (v3 storage/operations underneath); secure/locked sessions retain the original factory. Explicit `legacy` settings retain the byte-compatible files-layout opt-out. With blocks configured and files still on disk, effective layout falls back to tiered for injection and doctor; existing blocks take precedence over tiered/legacy configuration. The tiered renderer enforces whole-file/whole-section admission and a UTF-8 byte budget; topic index lines carry `description`/`read_when` metadata, while `/mem doctor` reports layout-specific health findings and its summary is surfaced by `/mem` and `memory.view`. Slug directories are canonicalized once and may be user-trusted symlinks; file-level symlinks and non-regular files are rejected. All v2 writes, imports, and trash restore operations serialize under the directory lock. Registers a `pi_project_memory` section into the shared prompt-section hub (`src/sysprompt/hub.ts`, pre-guard, created before `wireMemory` runs so fold order stays memory → agent types → models) instead of owning its own `before_agent_start` hook (sysprompt-stable M3); the hub decides snapshot vs. tail update, `src/memory/inject.ts`'s `memorySection` provider only renders the current live block (pin frontmatter, agent-source fence, tail sentinel, fingerprint-keyed render cache). The project `memory` commands use the existing v3 view/create/update/delete/search operations in blocks layout (whole-block update with rev/CAS); explicit files layouts retain v2/legacy surfaces. Child sessions are read-only by default, and scopes-on children keep project/Hub content hard read-only even with the old write opt-in. `/mem` covers layout-specific list/path/doctor, read-only review/expired, migration and restore; init/import retain their files-oriented workflows (not block CRUD). `/mem tidy` and all `memory.tidy.*` settings were removed (breaking, 2026-11-09). Standalone `restore --trash` and blocks `restore --block` remain; legacy tidy backup restores are explicitly refused, without parsing or modifying their journals/manifests. Unverifiable directory lock owners require manual operator inspection; age alone never breaks a lock. `paths|frontmatter|store|render` are pi-free; `index.ts` (`wireMemory`) is the only pi-facing assembly and holds all mutable state in its closure; registered pre-guard. Design: `docs/dev/memory/memory-plan.md`.
 
 ## Blocks section repair
 
@@ -18,27 +18,39 @@ repair instructions. Supplying a shorter section or clearing it repairs the bloc
 same locked revision check. The legacy Jev inline guard remains strict; v3 removes this
 blocks-only token before invoking it. Tool descriptions and frozen fixtures are unchanged.
 
-## `/mem` discovery by layout
+## `/mem` discovery and removal compatibility
 
-The command description and completions follow the configured layout: blocks omit tidy and advertise
-`restore --block`, while tiered/files retain the existing tidy and restore surface. Migration is marked
-maintenance, as are the `tidy --break-lock` and `jev reset-index` completions. The Jev-off files-layout
-registration remains byte-identical to its frozen golden, including its legacy top-level tidy completion;
-the break-lock completion itself is marked maintenance. Dispatch is unchanged and uses the directory's
-actual format, which can differ from configured layout during migration.
+All layouts omit the removed tidy command and completions. Files advertise `restore --trash`;
+blocks additionally advertise `restore --block`. Migration and `jev reset-index` are maintenance actions.
+Jev-off command/doctor fields changed only for the declared tidy removal and manual D01 guidance;
+the frozen contract's other fields remain unchanged. The `jev-off-golden.json` registration is missing
+from AGENTS.md's frozen table; its local generate-once contract still applies outside this approved update.
 
-## Web `/mem` context-free reads (A2f partial)
+`/mem tidy` was redundant: blocks never supported it, and #50 incremental inspection is the intended
+replacement (P50.1 exists; P50.2/3 are still pending, not a complete replacement today).
+Root `archive/`, `.backup/` manifests/journals and `.tidy-run.json` are deliberately ignored by scanning
+and startup; they are neither recovered nor deleted. Native `restore [id]` / `restore --legacy [id]`
+reach the error/notification exit with the safe [manual recovery runbook](../../guide/memory.md#legacy-tidy-backup-recovery). Deleted files remain recoverable via `restore --trash [id]`, under the directory
+lock, write gate and strict atomic no-clobber link; conflicts leave both copies intact. No hard-link
+support means refusal (never rename fallback). Link/unlink partial failures are marked mutated, notify
+that the destination may have changed, invalidate caches, and require inspecting both paths before retrying. Existing trash ID bytes remain
+unchanged in `trash.ts` (`newMemoryId` and `listTrashEntries`). No old lease or manifest is read during
+trash recovery. Block archives remain supported and separate from obsolete root tidy archives.
 
-The direct Web read executor supports `tidy --batch --status`, `tidy --batch --dry-run`, and the deterministic
-`tidy --dry-run --frontmatter` preview (either flag order) without command context,
-recovery, lease acquisition or model calls. The preview applies the existing snapshot
-and frontmatter planner only; it never enters the native frontmatter write mode.
-Batch reads require live settings to enable batch; block-layout tidy remains refused.
-Other tidy previews and scoped/Jev views remain unsupported on this path. Direct reads
-reserve and settle the bounded completion ledger. The command dispatcher also has a
-29-minute timeout and boundary cleanup for asynchronous bridge promises, but the real
-`memoryRead` port remains synchronous and read-only. The separate #65 session-add write
-port described below does not change this signature or route through the native handler.
+D01 degraded-primary guidance is manual: rename the stand-in to `core.md` when absent; if an archived
+`core.md` already exists, merge the always-on rules into it and ensure `status: active`.
+This is **D01, not D02** (D02 is primary `coreBytes` overflow). `/mem migrate` converts files to blocks;
+it does not rename the root file or preserve non-core pinned user rules as global residents.
+
+## Web `/mem` context-free reads
+
+The direct executor retains list/path, trash listing and supported migration previews. Removed tidy
+previews/status are unknown and never read-only-whitelisted. Bare `restore`, backup IDs and
+`restore --legacy` return `E_MEM_WEB_UNSUPPORTED` with the manual-recovery steps/runbook, not successful
+read output. Only exact `restore --trash` is a trash listing; Web trash/block mutations remain unsupported.
+No backup refusal enumerates `.backup`. Direct reads retain bounded completion-ledger
+settlement and never invoke native write handlers, recover journals, acquire leases or call models.
+The separate #65 session-add write port below is unchanged.
 
 ## Web confirmed-step building block (B1 partial, not wired)
 
@@ -96,11 +108,9 @@ probe 的 barrier/计数仅在测试 host，生产同步 apply 不加 await；�
 不是 cancel 线性化时刻，unknown 不等于未写且不得盲重试。reentrant cancel 已发布 unknown 后，
 后来的明确观察只用于清理，不升级 ledger。设计详见 `web-write-seam-design.md`。
 
-## 局部类型兼容注记（pi 1.5，2026-11-06）
-
-`tidy/cost.ts` 的 `ModelCostLike.tiers` 为显式 `…[] | undefined`：pi 1.5 的价目 DTO 可显式携带 `tiers: undefined`，type-only 边界兼容；本地 pi 1.4 下 typecheck/门禁保持通过，runtime JS 未变，不代表 TESTED_PI_RANGE 已升。详见 `docs/dev/pi-version-adaptation/plan.md`。
-
-**`.trash` ids (invariant).** Every soft-delete into `<memDir>/.trash/` (the `memory` tool's `delete` in `tool-v2.ts`, Jev review edits in `jev/entry-edit.ts`; tidy and restore only read it) names the file `<id>-<name>` with `id = newTidyId(now, pid, 6 hex)` — `\d{8}T\d{9}Z-<pid>-[0-9a-f]{6}` (millisecond stamp). That is the only shape `tidy/manifest.ts` `listTrashEntries` and `safe-fs.ts` `TRASH_NAME_RE` accept, so `/mem restore --trash` can list and restore it; a hand-rolled stamp (the pre-9bc556b8 second-precision/base36 one) silently makes deletions unrecoverable from the command. Pinned by `tests/memory/tool-v2.test.ts` (list + restore) and `tests/memory/jev/entry-edit.test.ts`. Residual: the trash name segment must also be a v2-safe name (`[A-Za-z0-9][A-Za-z0-9._-]*.md`); a legacy-named file deleted by review is listed but `restoreFromTrash` rejects it (`INVALID_LOC`).
+**`.trash` ids (invariant).** File and block soft-deletes retain the historical millisecond/hex grammar
+`\d{8}T\d{9}Z-<pid>-[0-9a-f]{6}-<name>` through `trash.ts`; files restore requires a v2-safe name.
+The shared ID helper is also used by blocks migration and Hub trash; removing tidy must not change their bytes.
 
 ## Jev（`src/memory/jev/`）
 
@@ -179,7 +189,7 @@ Jev 是一个分类器驱动的核心 memory 子系统，职责三项：召回�
 - **C4 已消除治理子集限制**（`fc3230d2` / `6ae35450`）：blocks `/mem review` 合并现有侧车建议（包括非治理类型）与即时治理建议；`/mem expired` 独立展示 active 块的 expires/until、区分权威。两者均为只读，`--run` 不启动整理；详见文末「`/mem review` 与 `/mem expired` 只读展示」。历史 P5a/P7 交接中关于“仅 review-lite 子集”的描述已不代表当前状态。
 - **删除恢复与归档/取代恢复分开**：`restore --block` 用于归档或已取代的块；已删除块在 `blocks/.trash/`，`restore --trash` 自 `e0993f03` 起按磁盘实际布局分派（blocks 读 `blocks/.trash`、files 读根 `.trash`，互不混合；恢复走块存储入口，保留锁/写入门/rev 复核与同名冲突拒绝）。真实 command 链路（create→delete→列出→按 id 恢复→校验正文/rev）由 `tests/memory/blocks/trash-command.test.ts` 覆盖。
 
-P5a 核心证据：`tests/memory/govern/{sweep-plan,sweep,supersede,review-lite}.test.ts`、`tests/integration/memory-blocks-{governance,supersede-race}.test.ts`；相邻门禁包含工具 v3/Jev、命令/tidy、pi-free、activate-trace 与既有 memory golden。
+P5a 核心证据：`tests/memory/govern/{sweep-plan,sweep,supersede,review-lite}.test.ts`、`tests/integration/memory-blocks-{governance,supersede-race}.test.ts`；相邻门禁包含工具 v3/Jev、命令/restore、pi-free、activate-trace 与既有 memory golden。
 
 ### #36 C5 治理标记与迁移 reload 提醒（2026-11-08）
 
@@ -391,7 +401,7 @@ owner。secure/locked 测试只用 fake mountinfo 的实际 activate/SDK constru
 
 ### Web 命令只读函数（A2d，已接生产）
 
-`command-readonly.ts` 提供不依赖 command ctx 的 `executeMemoryRead`：支持空参数、`list`、`path`、`restore`/`restore --legacy`/`restore --trash` 列表及单目录 `migrate --dry-run`/`--report`；其余输入返回 `E_MEM_WEB_UNSUPPORTED`。缺目录的迁移预览拒绝，报告读取失败抛错。仅 plain domain 且 memory 已启用时，宿主把该只读函数引用注入 Web bridge；经过 command handler 的 ledger 与宿主 idle/pending、手动 compact 和 session switch 准入后同步直调，cwd 来自当前宿主 ctx，不进入 SDK slash/capture/native handler。缺端口、抛错、飞书来源及不支持的命令均拒绝，写命令始终拒绝；显式 Web 命令策略 deny/confirm 仍生效。默认 history 模式下同步只读输出直接展示，不依赖 transcript record。输出暂不包含 native 列表的 doctor/Jev 尾注。该函数本身不认证调用者，函数引用只提供只读通道，并非方案中的逐次 MemoryWebCall/owner/lease 证明，不得用于开放写入。测试覆盖真实临时目录及 hub socket 返回；完整 session-add 写确认、终态和生命周期现由上文 #65 独立可选端口承担，不改变这个只读函数。
+`command-readonly.ts` 提供不依赖 command ctx 的 `executeMemoryRead`：支持空参数、`list`、`path`、精确 `restore --trash` 列表及单目录 `migrate --dry-run`/`--report`；裸 `restore`、旧备份 ID 与 `restore --legacy` 经最终错误出口返回带安全手工恢复步骤和 runbook 链接的 `E_MEM_WEB_UNSUPPORTED`，不是成功列表。其余输入也返回 `E_MEM_WEB_UNSUPPORTED`。缺目录的迁移预览拒绝，报告读取失败抛错。仅 plain domain 且 memory 已启用时，宿主把该只读函数引用注入 Web bridge；经过 command handler 的 ledger 与宿主 idle/pending、手动 compact 和 session switch 准入后同步直调，cwd 来自当前宿主 ctx，不进入 SDK slash/capture/native handler。缺端口、抛错、飞书来源及不支持的命令均拒绝，写命令始终拒绝；显式 Web 命令策略 deny/confirm 仍生效。默认 history 模式下同步只读输出直接展示，不依赖 transcript record。输出暂不包含 native 列表的 doctor/Jev 尾注。该函数本身不认证调用者，函数引用只提供只读通道，并非方案中的逐次 MemoryWebCall/owner/lease 证明，不得用于开放写入。测试覆盖真实临时目录及 hub socket 返回；完整 session-add 写确认、终态和生命周期现由上文 #65 独立可选端口承担，不改变这个只读函数。
 
 ### Web session add consumer（B1 第 1 包；包4 现已装配）
 

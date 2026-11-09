@@ -22,6 +22,8 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { MemoryError } from "../../src/memory/paths.js";
 import {
+  createFsyncWarningState,
+  fsyncDirBestEffort,
   closeSessionObservation,
   fstatSessionObservation,
   lstatSessionObservation,
@@ -650,5 +652,29 @@ describe("internal exact session observation primitives", () => {
       timeout: 5000,
     });
     expect(output.trim()).toBe("true");
+  });
+});
+
+describe("shared best-effort directory fsync", () => {
+  it("fsync failure never throws and warns only once per path in the supplied state", () => {
+    const dir = tmp(),
+      path = join(dir, "not-a-directory"),
+      other = join(dir, "another-file");
+    writeFileSync(path, "x");
+    writeFileSync(other, "y");
+    const warnings: string[] = [],
+      state = createFsyncWarningState();
+    expect(() => fsyncDirBestEffort(path, (message) => warnings.push(message), state)).not.toThrow();
+    expect(() => fsyncDirBestEffort(path, (message) => warnings.push(message), state)).not.toThrow();
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain(path);
+    expect(warnings[0]).toContain("best-effort directory fsync failed");
+    fsyncDirBestEffort(other, (message) => warnings.push(message), state);
+    fsyncDirBestEffort(other, (message) => warnings.push(message), state);
+    expect(warnings).toHaveLength(2);
+    expect(warnings[1]).toContain(other);
+    expect(state.warnings).toEqual(new Set([path, other]));
+    fsyncDirBestEffort(path, (message) => warnings.push(message), createFsyncWarningState());
+    expect(warnings).toHaveLength(3); // no process-global suppression
   });
 });

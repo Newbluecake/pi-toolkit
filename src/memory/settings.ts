@@ -1,14 +1,8 @@
 /**
  * memory · settings (#56 batch 2 ⑧): the `memory` block's types, frozen defaults and never-throws parser
- * (cwd-keyed project memory; tidy batch limits come from `./tidy/batch-settings.ts`). `src/config/settings.ts`
+ * (cwd-keyed project memory). `src/config/settings.ts`
  * imports ONLY this module for the block.
  */
-import {
-  DEFAULT_TIDY_BATCH_SETTINGS,
-  resolveTidyBatchSettings,
-  type TidyBatchSettings,
-} from "./tidy/batch-settings.js";
-
 /**
  * Merged armory-memory (memory-plan §3.1): cwd-keyed project memory under
  * `~/.pi/agent/memory/<slug>/` — auto-injection, the `memory` tool, `/mem`.
@@ -78,7 +72,6 @@ export interface MemorySettings {
   /** P50.1 trigger aggregation; off preserves all existing behavior. */
   incremental: MemoryIncrementalSettings;
   doctor: MemoryDoctorSettings;
-  tidy: MemoryTidySettings;
   /** Jev 核心 memory：jev-plan v2 §4 J3 / jev-arch §9.1. */
   jev: MemoryJevSettings;
 }
@@ -197,35 +190,6 @@ export interface MemoryDoctorSettings {
   /** `updated` age (days) past which a file is flagged stale (D08 warn).
    *  Default 60. */
   staleDays: number;
-}
-
-export interface MemoryTidySettings {
-  /** Agent type used for the tidy proposal-drafting subagent's system prompt
-   *  / model hint ONLY — the runtime forces `toolDomain:"readonly"` (§7.0)
-   *  regardless of this type's own `tools` list, so it can never widen what
-   *  the proposal run can do. Default "Plan". */
-  agentType: string;
-  /** Strict `provider/id`, or "" to use the current main-session model at
-   *  dispatch time (§7.1). Default "". */
-  model: string;
-  /** Hard total budget for a tidy run (no grace, no extension). File stores
-   *  `tidy.timeoutS`. Default 180_000 (180s). */
-  timeoutMs: number;
-  /** Total input bytes a tidy/restore snapshot may cover before `/mem tidy`
-   *  asks the user to narrow the file set. Default 49_152. */
-  maxInputBytes: number;
-  /** Hard cap on the tidy proposal's total output bytes (§7.2); over this,
-   *  the WHOLE proposal is discarded, zero writes. Default 65_536. */
-  maxOutputBytes: number;
-  /** Cumulative cost cap (USD) for a tidy run; only enforced for a priced
-   *  model (§7.1's N1: an unpriced model runs with a "no cost guarantee"
-   *  warning instead of this gate). Default 2.0; never 0. */
-  maxCostUsd: number;
-  /** Turn-boundary cap; a tidy run is aborted (zero writes) once it would
-   *  start turn `maxTurns + 1`. Default 4. */
-  maxTurns: number;
-  /** Batch tidy controls (§11); parsed by the frozen pi-free batch settings resolver. */
-  batch: TidyBatchSettings;
 }
 
 /** `memory.jev.classifiers` 必须匹配 `provider/id`（斜杠两侧均非空白、无空白字符）；否则记进 `classifiersRejected`（J3，Q34）。 */
@@ -395,24 +359,6 @@ export function parseMemorySettings(input: unknown): MemorySettings {
     staleDays: num(doctorObj.staleDays, defaults.doctor.staleDays, 7, 3650),
   };
 
-  const tidyRaw = value.tidy;
-  const tidyObj: Record<string, unknown> =
-    tidyRaw && typeof tidyRaw === "object" && !Array.isArray(tidyRaw) ? (tidyRaw as Record<string, unknown>) : {};
-  const maxInputBytes = num(tidyObj.maxInputBytes, defaults.tidy.maxInputBytes, 8192, 262_144);
-  const tidy: MemoryTidySettings = {
-    agentType:
-      typeof tidyObj.agentType === "string" && tidyObj.agentType.trim() !== ""
-        ? tidyObj.agentType
-        : defaults.tidy.agentType,
-    model: typeof tidyObj.model === "string" ? tidyObj.model : defaults.tidy.model,
-    timeoutMs: num(tidyObj.timeoutMs, defaults.tidy.timeoutMs, 30_000, 1_800_000),
-    maxInputBytes,
-    maxOutputBytes: num(tidyObj.maxOutputBytes, defaults.tidy.maxOutputBytes, 4096, 262_144),
-    maxCostUsd: numFloat(tidyObj.maxCostUsd, defaults.tidy.maxCostUsd, 0.05, 50),
-    maxTurns: num(tidyObj.maxTurns, defaults.tidy.maxTurns, 1, 20),
-    batch: resolveTidyBatchSettings(tidyObj.batch, maxInputBytes),
-  };
-
   const jevRaw = value.jev;
   const jevObj: Record<string, unknown> =
     jevRaw && typeof jevRaw === "object" && !Array.isArray(jevRaw) ? (jevRaw as Record<string, unknown>) : {};
@@ -483,7 +429,6 @@ export function parseMemorySettings(input: unknown): MemorySettings {
     governance,
     incremental,
     doctor,
-    tidy,
     jev,
   };
 }
@@ -518,16 +463,6 @@ export const DEFAULT_MEMORY_SETTINGS: MemorySettings = {
     taskDoneTrigger: true,
   },
   doctor: { notifyOnStart: true, staleDays: 60 },
-  tidy: {
-    agentType: "Plan",
-    model: "",
-    timeoutMs: 180_000,
-    maxInputBytes: 49_152,
-    maxOutputBytes: 65_536,
-    maxCostUsd: 2.0,
-    maxTurns: 4,
-    batch: { ...DEFAULT_TIDY_BATCH_SETTINGS },
-  },
   jev: {
     enabled: true,
     classifiers: ["opencode/jev-1.13-free", "opencode/jev-1.13"],

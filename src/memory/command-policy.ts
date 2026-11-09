@@ -26,10 +26,10 @@ export function classifyMemoryCommand(rawArgs: string): MemoryCommandClass {
     return f.has("--dry-run") || f.has("--report") || f.has("--status") ? "read" : "destructive";
   }
   if (head === "restore") {
-    if (tail.length === 0 || exact("--trash") || exact("--legacy")) return "read";
+    if (tail.length === 0 || exact("--trash")) return "read";
     const flags = tail.filter((x) => x.startsWith("-"));
     if (
-      flags.some((x) => !["--trash", "--legacy", "--block"].includes(x)) ||
+      flags.some((x) => !["--trash", "--block"].includes(x)) ||
       new Set(flags).size !== flags.length ||
       flags.length > 1 ||
       tail.length > 2
@@ -37,19 +37,6 @@ export function classifyMemoryCommand(rawArgs: string): MemoryCommandClass {
       return "unknown";
     if (tail.length === 2 && (flags.length !== 1 || tail[0] !== flags[0])) return "unknown";
     return "destructive";
-  }
-  if (head === "tidy") {
-    const known = new Set(["--batch", "--dry-run", "--status", "--frontmatter", "--archive-only", "--break-lock"]);
-    if (tail.some((x) => !known.has(x)) || new Set(tail).size !== tail.length) return "unknown";
-    const flags = new Set(tail);
-    if (flags.has("--break-lock")) return tail.length === 1 ? "destructive" : "unknown";
-    if (flags.has("--dry-run") || flags.has("--status")) {
-      if (flags.has("--dry-run") && flags.has("--status")) return "unknown";
-      if (flags.has("--status")) return flags.has("--batch") && tail.length === 2 ? "read" : "unknown";
-      if (flags.has("--batch")) return tail.length === 2 ? "read" : "unknown";
-      return tail.length === 1 || (tail.length === 2 && flags.has("--frontmatter")) ? "read" : "unknown";
-    }
-    return "flow";
   }
   if (head === "jev") {
     if (tail.length === 0 || exact("report")) return "read";

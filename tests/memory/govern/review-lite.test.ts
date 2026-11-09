@@ -134,7 +134,7 @@ it("migration-generated id anchors and scope-check actions are usable", async ()
   expect(readGovernBlock(dir, b.id).meta.scope).toBe("global");
 });
 
-it("command routes blocks tidy and restore explicitly, without Jev or a tidy agent", async () => {
+it("command restores blocks explicitly without Jev", async () => {
   const { createMemCommand } = await import("../../../src/memory/command.js");
   const { DEFAULT_SETTINGS } = await import("../../../src/config/settings.js");
   const { memoryDirFor } = await import("../../../src/memory/paths.js");
@@ -159,8 +159,6 @@ it("command routes blocks tidy and restore explicitly, without Jev or a tidy age
     ui: { notify: (m: string) => messages.push(m) },
   } as unknown as import("@earendil-works/pi-coding-agent").ExtensionCommandContext;
   const command = createMemCommand({ paths, settings: { ...DEFAULT_SETTINGS.memory, layout: "blocks" } });
-  await command.handler("tidy --batch", ctx);
-  expect(messages.pop()).toBe("memory: /mem tidy is disabled for block-layout directories — use /mem review");
   await command.handler(`restore --block ${b.id}`, ctx);
   expect(messages.pop()).toContain("restored:");
   expect(readGovernBlock(dir, b.id).meta.status).toBe("active");

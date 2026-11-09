@@ -170,7 +170,7 @@ export interface SkippedEntry {
 const V2_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.md$/;
 
 /** Same filename-acceptance regex the v2 tool surface / tiered renderer /
- *  doctor / tidy use. Exported so those layers share exactly one pattern. */
+ *  doctor use. Exported so those layers share exactly one pattern. */
 export function isV2Name(name: string): boolean {
   return V2_NAME_RE.test(name);
 }
@@ -199,6 +199,9 @@ export function listRegular(
   const files: RegularFileEntry[] = [];
   const skipped: SkippedEntry[] = [];
   for (const name of entries) {
+    // Removed tidy data is inert: do not stat, descend into, parse or recover it.
+    // Root archive/ is unrelated to the active blocks/archive/ namespace.
+    if (["archive", ".backup", ".tidy-run.json", ".tidy", "manifest.json", "journal.jsonl"].includes(name)) continue;
     if (!name.endsWith(".md")) continue;
     if (opts.names === "v2" && !isV2Name(name)) {
       skipped.push({ name, kind: "bad-name" });
@@ -482,7 +485,7 @@ export function createExclusive(dir: string, tmp: string, name: string): CreateR
   }
 }
 
-/** Atomic no-clobber rename (`rename` command / restore-from-trash), degrading
+/** Legacy no-clobber rename (`rename` command), degrading
  *  the same way `createExclusive` does. */
 export function renameNoClobber(dir: string, from: string, to: string): CreateResult {
   const fromPath = join(dir, from);
@@ -510,6 +513,50 @@ export function renameNoClobber(dir: string, from: string, to: string): CreateRe
   }
   unlinkSync(fromPath);
   return {};
+}
+
+/** Restore-only strict move: atomic link or refuse, NEVER check-then-rename.
+ * A failed source cleanup is a partial mutation, not an untouched failure;
+ * retain both names for inspection instead of risking an unsafe rollback.
+ * The legacy renameNoClobber fallback contract above intentionally stays unchanged.
+ */
+export function moveFileNoClobberStrict(dir: string, from: string, to: string): void {
+  const src = join(dir, from),
+    dst = join(dir, to);
+  const before = lstatRegular(src);
+  try {
+    linkSync(src, dst);
+  } catch (err) {
+    if (codeOf(err) === "EEXIST") throw txnErr("EXISTS", `${to} already exists; restore refused`);
+    if (noHardlink(err))
+      throw txnErr(
+        "NO_HARDLINK",
+        `Restore refused: atomic no-clobber link unavailable (${codeOf(err)}); no rename fallback, source retained.`,
+      );
+    throw txnErr("IO", `Restore link failed; source retained: ${String(err)}`);
+  }
+  try {
+    const source = lstatRegular(src),
+      target = lstatRegular(dst);
+    if (
+      source.dev !== before.dev ||
+      source.ino !== before.ino ||
+      source.size !== before.size ||
+      target.dev !== before.dev ||
+      target.ino !== before.ino ||
+      target.size !== before.size
+    )
+      throw new Error("source or destination identity changed after link");
+    unlinkSync(src);
+  } catch (err) {
+    // link already created a destination. Unlink may even have completed before
+    // an IO failure surfaced; never describe either partial state as effect:none.
+    throw txnErr(
+      "RESTORE_PARTIAL",
+      `Restore incomplete: destination may have changed; inspect both ${from} and ${to} before retrying. No automatic rollback: ${String(err)}`,
+      true,
+    );
+  }
 }
 
 // ───────────────────────────── legacy write/append (frozen semantics) ─────────────────────────────
@@ -626,7 +673,7 @@ function pickQuarantineName(dirParent: string): string {
  * Delete `<parent.real>/<childName>` ONLY if it is a real directory (never a
  * symlink) containing nothing but plain regular files (a "flat" directory) —
  * used to physically remove an old `.backup/<id>/` past the retention count
- * (P4 tidy). Any child entry that is itself a symlink, a subdirectory, or
+ * (shared filesystem cleanup). Any child entry that is itself a symlink, a subdirectory, or
  * any other non-regular type refuses the WHOLE operation: nothing is deleted,
  * not even the regular siblings. `parent` must already be canonicalized
  * (`canonicalDir`/`canonicalDirState`) — this never realpaths on its own.
@@ -774,7 +821,7 @@ export function removeFlatDir(
   return { removed: true, count: deleted };
 }
 
-// ───────────────────────────── transaction storage primitives (tidy P2a) ─────────────────────────────
+// ───────────────────────────── transaction storage primitives (shared filesystem helpers) ─────────────────────────────
 
 /** Errors from the transaction primitives carry whether a syscall may have
  * changed the directory.  Recovery uses this bit to decide whether an
@@ -1073,7 +1120,7 @@ function noHardlink(err: unknown): boolean {
 function hardlinkError(err: unknown, path = process.cwd(), mutated = false): TxnFsError {
   return txnErr(
     "NO_HARDLINK",
-    `memory dir ${path} is on a filesystem without hard-link support (${codeOf(err) ?? "unknown"}) — /mem tidy --batch and restore need link(2) for no-clobber moves; move ~/.pi/agent/memory to a local filesystem or use plain /mem tidy <file>`,
+    `memory dir ${path} is on a filesystem without hard-link support (${codeOf(err) ?? "unknown"}) — this operation needs link(2) for no-clobber moves; use a local filesystem with hard-link support`,
     mutated,
   );
 }

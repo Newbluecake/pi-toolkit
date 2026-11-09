@@ -25,7 +25,7 @@ import {
 
 const FILE = "governance-markers.json";
 const MAX_BYTES = 64 * 1024;
-// Same migration id shape as blocks/migrate.ts (newTidyId), not a guessed generation.
+// Same migration id shape as blocks/migrate.ts (newMemoryId), not a guessed generation.
 const MIGRATION_ID = /^\d{8}T\d{9}Z-\d+-[0-9a-f]{6}$/;
 const RELOAD_TEXT = "memory: migrated block memory — /reload to refresh memory";
 

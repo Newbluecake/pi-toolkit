@@ -29,7 +29,6 @@ import { mergeExtensionPoints } from "./extensions/registry.js";
 import { buildSessionStack } from "./stack.js";
 import type { ActivationTeardown } from "./stack-teardown.js";
 import {
-  createTidyPort,
   forwardNotifier,
   forwardOrphans,
   forwardQuery,
@@ -231,10 +230,6 @@ export default function activate(rawPi: ExtensionAPI): void {
   // injectInChildSessions=true, aligned with the original plugin). M3: memory
   // registers a section into the hub instead of its own before_agent_start
   // hook — the hub folds memory -> agent types -> models in one handler.
-  // todo #22 optimize-plan P0-b: the return value is captured so the
-  // post-guard block below (main session only, structurally — a child
-  // session returns before that code ever runs) can attach a real
-  // `TidyPort` for `/mem tidy`/`/mem restore`.
   let memoryWiring: ReturnType<typeof wireMemory> | undefined;
   // #26 (no-user-guard-confirm plan): the memory touched>0 commits' session
   // lifecycle controller — a FRESH controller on every session_start,
@@ -378,11 +373,6 @@ export default function activate(rawPi: ExtensionAPI): void {
   });
   pi.on("session_compact", (_event, ctx) => restoreArchive(ctx));
   xs.registerFenceHooks(pi);
-  // todo #22 optimize-plan P0-b (§7's spawn port): reads the CURRENT session
-  // stack, same late-bound `holder.current` pattern as `forwardSpawn` below.
-  // Only reached for the main session — structurally guaranteed by the
-  // HOST_KEY early-return above, so this never runs for a child session.
-  memoryWiring?.attachTidy(createTidyPort(holder));
   const releaseBackgroundStatus = publishBackgroundStatus(() => {
     const stack = holder.current;
     // Background workflows count as running subagent work (between child runs they have no live run).

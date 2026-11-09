@@ -2,9 +2,7 @@ import type { Notifier } from "./delivery/notifier.js";
 import type { OrphanRegistry } from "./runtime/reaper.js";
 import type { QueryService } from "./service/query-service.js";
 import type { SpawnService } from "./service/spawn-service.js";
-import type { SpawnRequest } from "./core/types.js";
 import type { BashJobManager } from "./bash/manager.js";
-import type { TidyPort, TidySpawnRequest } from "./memory/contracts.js";
 import type { WorkflowToolDeps } from "./tools/workflow-tool.js";
 import type { WorkflowQueryPort } from "./tools/workflow-target.js";
 import type { Stack } from "./stack.js";
@@ -21,26 +19,6 @@ export type StackHolder = { current?: Stack };
 export function requireStack(holder: StackHolder): Stack {
   if (!holder.current) throw new Error("pi-toolkit: no active session yet");
   return holder.current;
-}
-/** todo #22 optimize-plan §7.0 (P0-b): projects the memory module's narrow
- *  `TidySpawnRequest` onto a real `SpawnRequest`, always forcing the P0-r
- *  readonly tool domain literal through untouched — `wireMemory`'s
- *  `TidyPort` is the only caller. */
-function mapTidySpawnRequest(req: TidySpawnRequest): SpawnRequest {
-  return {
-    type: req.type,
-    prompt: req.prompt,
-    ...(req.label === undefined ? {} : { label: req.label }),
-    ...(req.cwd === undefined ? {} : { cwd: req.cwd }),
-    ...(req.modelOverride === undefined ? {} : { modelOverride: req.modelOverride }),
-    ...(req.thinkingOverride === undefined ? {} : { thinkingOverride: req.thinkingOverride }),
-    ...(req.totalMs === undefined ? {} : { budgetOverride: { totalMs: req.totalMs } }),
-    ...(req.schema === undefined ? {} : { schema: req.schema }),
-    ...(req.inputBudget === undefined ? {} : { inputBudget: req.inputBudget }),
-    toolDomain: req.toolDomain,
-    expectAck: req.expectAck,
-    suppressDelivery: req.suppressDelivery,
-  };
 }
 export function forwardSpawn(holder: StackHolder): SpawnService {
   return {
@@ -150,23 +128,5 @@ export function forwardNotifier(holder: StackHolder): Notifier {
     get ackedSuppressions() {
       return requireStack(holder).notifier.ackedSuppressions;
     },
-  };
-}
-
-/** todo #22 optimize-plan P0-b (§7's spawn port): reads the CURRENT session stack, same late-bound
- *  `holder.current` pattern as `forwardSpawn`. Only reached for the main session (post-guard). */
-export function createTidyPort(holder: StackHolder): TidyPort {
-  // G8 (7b): once the session stack is gone (shutdown cleared the holder) a still-running `/mem tidy` must degrade
-  // instead of throwing out of its command: spawn reports an error outcome, waitOutcome says "pending" (⇒ the
-  // command's existing timeout/withhold path), abort says "nothing aborted".
-  return {
-    spawn: (req) =>
-      holder.current
-        ? holder.current.spawn.spawn(mapTidySpawnRequest(req))
-        : Promise.resolve({ error: { message: "no active session" } }),
-    waitOutcome: (runId, waitMs) =>
-      holder.current ? holder.current.spawn.waitOutcome(runId, waitMs) : Promise.resolve({ kind: "pending" as const }),
-    abort: (runId, cause) => (holder.current ? holder.current.spawn.abort(runId, cause) : Promise.resolve(false)),
-    snapshot: (runId) => holder.current?.query.get(runId),
   };
 }

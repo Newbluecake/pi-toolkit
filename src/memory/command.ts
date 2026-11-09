@@ -1,7 +1,7 @@
 /**
  * `/mem` slash command — human surface for project memory
  * (memory-plan §5.4): list / path / import [--force] [slug|all] / doctor /
- * tidy / restore.
+ * trash / block restore.
  *
  * Translated line-by-line from the standalone @getpipher/armory-memory
  * plugin, with the repository command-handler error convention applied:
@@ -15,16 +15,15 @@
  *   an explicit slug list is a serial `for…of` `await` loop, NOT
  *   `Promise.all` — the first rejection stops the batch and already-imported
  *   slugs keep their results, matching the pre-#22 synchronous behavior.
- * - `doctor` / `tidy` / `restore` dispatch to the (still-stubbed) P3/P4
- *   command handlers; their "not implemented yet" rejection flows through
- *   the same try/catch → warning notify as every other command error.
+ * - Doctor and standalone restore errors flow through the same
+ *   try/catch → warning notify as every other command error.
  */
 
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { isWebInvocation } from "../commands/capture.js";
 import { resolveWorktreeOrigin } from "../core/worktree-origin.js";
 import type { MemorySettings } from "../config/settings.js";
-import type { MemoryWriteGate, TidyPort } from "./contracts.js";
+import type { MemoryWriteGate } from "./contracts.js";
 import { parseTagsAddArgs, tokenizeTagsArgs } from "./jev/command-port.js";
 import type {
   ClassifierRegistryLike,
@@ -42,7 +41,7 @@ import { restoreBlock } from "./govern/sweep.js";
 import { handleMemReview } from "./jev/review-command.js";
 import { readMarker } from "./blocks/marker.js";
 import { dirFormat, parseBlockName } from "./blocks/naming.js";
-import { listTrashEntries } from "./tidy/manifest.js";
+import { listTrashEntries } from "./trash.js";
 import { restoreTrashedBlock } from "./blocks/store.js";
 import {
   runMigration,
@@ -56,22 +55,29 @@ import { legacyDrift, importLegacy } from "./blocks/legacy.js";
 import { readBlocksState, readHold } from "./blocks/state.js";
 import { join } from "node:path";
 import { memoryDirFor, defaultPaths, type MemoryPaths } from "./paths.js";
-import { canonicalMemoryDir, canonicalDir, ensureMemoryDir, inspectDirNoFollow, readRegular } from "./safe-fs.js";
+import {
+  canonicalMemoryDir,
+  canonicalDir,
+  ensureMemoryDir,
+  inspectDirNoFollow,
+  readRegular,
+  TxnFsError,
+} from "./safe-fs.js";
 import { discoverCCProjects, importAll, importProject, listMemory, type ImportResult } from "./store.js";
 import { formatSize } from "./render.js";
 import { handleMemDoctorCommand, collectDoctorFindings, type RenderTieredPort } from "./doctor-command.js";
 import { summaryLine } from "./doctor.js";
 import { handleMemInitCommand } from "./init-command.js";
-import { handleMemTidyCommand } from "./tidy/command.js";
+import { restoreFromTrash, LEGACY_BACKUP_REFUSAL } from "./trash.js";
 
 export type CommandHandler = (args: string, ctx: ExtensionCommandContext) => Promise<void>;
 
 const DESCRIPTION =
-  "Project memory. /mem · /mem list · /mem init · /mem import [--force] [slug|all] · /mem path · /mem doctor · /mem tidy [--batch] · /mem restore [--legacy]";
+  "Project memory. /mem · /mem list · /mem init · /mem import [--force] [slug|all] · /mem path · /mem doctor · /mem restore --trash";
 /** With a jev port the description gains the new subcommands (J4's jev/tags,
- *  J8's review/expired); without one it must stay byte-identical (I9 / off
- *  golden). */
-const DESCRIPTION_JEV = `${DESCRIPTION} · /mem jev · /mem tags · /mem review · /mem expired · 维护: /mem tidy --break-lock · /mem jev reset-index`;
+ *  J8's review/expired). The 2026-11-09 tidy removal is a declared
+ *  command-surface change; unrelated Jev-off bytes remain frozen. */
+const DESCRIPTION_JEV = `${DESCRIPTION} · /mem jev · /mem tags · /mem review · /mem expired · 维护: /mem jev reset-index`;
 
 function fmtImport(r: ImportResult): string {
   const s = r.skipped ? `, ${r.skipped} skipped (exists)` : "";
@@ -92,15 +98,11 @@ export interface CreateMemCommandDeps {
   contentWriteGate?: MemoryWriteGate;
   paths?: MemoryPaths;
   writeGate?: MemoryWriteGate;
-  /** Default false — used only by the `/mem tidy`/`/mem restore` gate (§7). */
+  /** Child sessions cannot restore files. */
   isChildSession?: boolean;
-  /** §7's spawn port; undefined ⇒ "tidy unavailable in this session". Wired
-   *  by `wireMemory`'s `attachTidy` (post-guard, main session only). */
-  getTidyPort?: () => TidyPort | undefined;
-  /** Activate-time memory settings shared by doctor and tidy. */
+  /** Activate-time memory settings used by doctor. */
   settings?: MemorySettings;
   renderBlock?: RenderTieredPort;
-  runDoctor?: typeof import("./doctor.js").runDoctor;
   onAfterWrite?: (cwd: string) => void;
   /** Jev command port (`/mem jev`, `/mem tags`; jev-plan J4). `undefined` ⇔
    *  jev is not wired: every new branch below is skipped, the completion
@@ -114,24 +116,11 @@ const MEM_SUBCOMMANDS: ReadonlyArray<{ value: string; description: string }> = [
   { value: "path", description: "显示记忆目录路径" },
   { value: "import", description: "从 Claude Code 导入记忆 [--force] [slug|all]" },
   { value: "doctor", description: "记忆健康检查（D01-D14）" },
-  { value: "tidy", description: "治理记忆 [--batch|--dry-run|--status|--break-lock] [file…]" },
-  { value: "restore", description: "恢复 tidy 备份 [--trash]" },
+  { value: "restore", description: "恢复回收项 [--trash]" },
 ];
 
 const MEM_SECOND_LEVEL: Record<string, ReadonlyArray<{ value: string; description: string }>> = {
-  tidy: [
-    { value: "tidy --batch", description: "批量归档与规整（仅 TUI）" },
-    { value: "tidy --batch --dry-run", description: "预览批量计划，不写入" },
-    { value: "tidy --batch --status", description: "查看批量运行状态" },
-    { value: "tidy --batch --archive-only", description: "只执行批量归档" },
-    { value: "tidy --break-lock", description: "维护：撤销并打破残留锁（仅 TUI）" },
-    { value: "tidy --dry-run", description: "只预览，不写入" },
-    { value: "tidy --frontmatter", description: "只整理 frontmatter" },
-  ],
-  restore: [
-    { value: "restore --trash", description: "从回收项恢复" },
-    { value: "restore --legacy", description: "显式恢复 v1 旧备份" },
-  ],
+  restore: [{ value: "restore --trash", description: "从回收项恢复" }],
   import: [{ value: "import --force", description: "覆盖已存在的同名文件" }],
 };
 
@@ -169,7 +158,6 @@ export function createMemCommand(deps: CreateMemCommandDeps): {
   handler: CommandHandler;
 } {
   const isChildSession = deps.isChildSession ?? false;
-  const getTidyPort = deps.getTidyPort ?? (() => undefined);
   const jev = deps.jev;
   // J8: a dedicated `EntryIndex` for review/expired's hash→MemEntry lookups
   // — only ever `.get()`'d on a review/expired/doctor dispatch, and only
@@ -180,12 +168,12 @@ export function createMemCommand(deps: CreateMemCommandDeps): {
     const dir = dirFor(c);
     return dir === undefined || entryIndex === undefined ? [] : entryIndex.get(dir);
   };
-  // Preserve the jev-off files-layout golden; blocks expose their own layout-specific menu.
+  // Blocks expose their own layout-specific menu; files use the declared Jev-off contract.
   const blocks = deps.settings?.layout === "blocks";
   const subcommands = [
-    ...(jev === undefined ? MEM_SUBCOMMANDS : [...MEM_SUBCOMMANDS, ...MEM_JEV_SUBCOMMANDS])
-      .filter((item) => !blocks || item.value !== "tidy")
-      .map((item) => (blocks && item.value === "restore" ? { ...item, description: "恢复归档块 [--block]" } : item)),
+    ...(jev === undefined ? MEM_SUBCOMMANDS : [...MEM_SUBCOMMANDS, ...MEM_JEV_SUBCOMMANDS]).map((item) =>
+      blocks && item.value === "restore" ? { ...item, description: "恢复归档块 [--block]" } : item,
+    ),
     ...(blocks
       ? [
           {
@@ -199,7 +187,6 @@ export function createMemCommand(deps: CreateMemCommandDeps): {
     ? { ...MEM_SECOND_LEVEL }
     : { ...MEM_SECOND_LEVEL, ...MEM_JEV_SECOND_LEVEL };
   if (blocks) {
-    delete secondLevel.tidy;
     secondLevel.restore = [{ value: "restore --block", description: "恢复归档块" }, ...MEM_SECOND_LEVEL.restore!];
   }
   const scopedHelp = deps.scopedRouter ? " · /mem session|hub status (list equivalent; status recommended)" : "";
@@ -221,18 +208,9 @@ export function createMemCommand(deps: CreateMemCommandDeps): {
         const head = tokens.length > 1 || (tokens.length === 1 && a.endsWith(" ")) ? tokens[0] : undefined;
         if (head !== undefined) {
           const second = secondLevel[head] ?? [];
-          // Preserve the compact legacy menu for a bare `tidy ` prompt; the
-          // batch surface is discoverable as soon as the user starts typing
-          // its flag (and remains available through exact completion values).
-          const visible =
-            head === "tidy" && a === "tidy "
-              ? second.filter((item) => item.value === "tidy --dry-run" || item.value === "tidy --frontmatter")
-              : head === "restore" && a === "restore " && !blocks
-                ? second.filter((item) => item.value === "restore --trash")
-                : second;
           const typed = a.trim();
           return (
-            visible
+            second
               .filter((item) => item.value.startsWith(typed) || item.value.slice(head.length + 1).startsWith(partial))
               // `value` carries the full argument text (pi-tui's applyCompletion replaces the
               // whole argument prefix with it); `label` stays the completed tail only, like
@@ -515,20 +493,46 @@ export function createMemCommand(deps: CreateMemCommandDeps): {
           }
           return;
         }
-        if (sub === "tidy" || sub === "restore") {
-          await handleMemTidyCommand(sub, rest.join(" "), ctx, {
-            ...(deps.paths === undefined ? {} : { paths: deps.paths }),
-            isChildSession,
-            getTidyPort,
-            settings: () =>
-              deps.settings ??
-              (() => {
-                throw new Error("memory settings unavailable");
-              })(),
-            ...(deps.runDoctor === undefined ? {} : { runDoctor: deps.runDoctor }),
-            ...(deps.onAfterWrite === undefined ? {} : { onAfterWrite: deps.onAfterWrite }),
-            ...(jev === undefined ? {} : { preserveInlineMeta: true }),
+        if (sub === "restore") {
+          // Old tidy journals/manifests/archives are deliberately never opened or recovered.
+          if (rest[0] !== "--trash") throw new Error(LEGACY_BACKUP_REFUSAL);
+          if (isChildSession || !isInteractive(ctx)) {
+            if (ctx.hasUI) ctx.ui.notify("/mem restore requires the interactive main session", "warning");
+            return;
+          }
+          if (rest.length > 2 || rest.some((arg, i) => i > 0 && arg.startsWith("-")))
+            throw new Error("usage: /mem restore --trash [id]");
+          const root = canonicalDir(memoryDirFor(cwd, deps.paths))?.real;
+          const entries = root ? listTrashEntries(root) : [];
+          if (!rest[1]) {
+            ctx.ui.notify(
+              entries.length ? entries.map((e) => `  ${e.id} — ${e.name}`).join("\n") : "trash is empty",
+              "info",
+            );
+            return;
+          }
+          const result = await restoreFromTrash(
+            cwd,
+            rest[1],
+            "skip",
+            deps.paths,
+            deps.writeGate ?? plainMemoryWriteGate,
+          ).catch((err: unknown) => {
+            if (err instanceof TxnFsError && err.mutated) {
+              try {
+                deps.onAfterWrite?.(cwd);
+              } catch {
+                /* preserve the partial-mutation observation */
+              }
+            }
+            throw err;
           });
+          if (!result.restored) {
+            ctx.ui.notify(result.reason ?? "restore refused", "warning");
+            return;
+          }
+          deps.onAfterWrite?.(cwd);
+          ctx.ui.notify("restore --trash: restored", "info");
           return;
         }
         if (sub === "jev" && jev !== undefined) {
@@ -681,7 +685,7 @@ async function handleMemJev(
   const notify = (text: string, level: "info" | "warning" = "info"): void => {
     // Silent refusal without a UI — the framework offers no output channel
     // for /mem commands in print/RPC-no-UI mode (same convention as every
-    // other /mem branch and tidy's §7 gate; verifier item 2).
+    // other /mem branch and the restore gate; verifier item 2).
     if (ctx.hasUI) ctx.ui.notify(text, level);
   };
   if ((op === "retag" || op === "reset-index") && (jev.isChildSession || !ctx.hasUI)) {
@@ -727,7 +731,7 @@ async function handleMemTags(
   };
   const gated = (): boolean => {
     // No-UI refusals are silent (framework has no output channel here) —
-    // same convention as handleMemJev above and tidy's §7 gate.
+    // same convention as handleMemJev above and the restore gate.
     if (jev.isChildSession || !ctx.hasUI) {
       notify(`tags: ${op} requires the interactive main session`, "warning");
       return false;

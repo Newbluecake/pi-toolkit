@@ -25,7 +25,9 @@ describe("command-usage — table bounds (r1 #3: handwritten table stays within 
     expect(TOOLKIT_USAGE.agent).toContain("<runId> equivalent");
     expect(TOOLKIT_USAGE.webhub).toContain("token rotate");
     expect(TOOLKIT_USAGE.webhub).not.toContain("proxy");
-    expect(TOOLKIT_USAGE.mem).toContain("restore [--legacy]");
+    expect(TOOLKIT_USAGE.mem).toContain("restore --trash [id]");
+    expect(TOOLKIT_USAGE.mem).not.toContain("tidy");
+    expect(TOOLKIT_USAGE.mem).not.toContain("--legacy");
     expect(TOOLKIT_USAGE.mem).not.toContain("session|hub");
     expect(TOOLKIT_USAGE.tasklist).toBe("clear");
   });

@@ -1,4 +1,4 @@
-// Tidy/review pure logic: candidate pairing, obsolescence candidates,
+// Review pure logic: candidate pairing, obsolescence candidates,
 // dismissed-pair matching, staleness marking and the review pass itself
 // (jev-arch §6.3.2–§6.3.4 — the PURE parts only; the interactive `/mem
 // review` flow and `/mem expired` are J8).

@@ -114,7 +114,7 @@ Format: entry — one-line role | README to read first and when. `src/*` rows wi
 | `src/fabric/` — inter-agent message fabric: tree routing, wake phase 1, cross-session xs (reply, channels, broadcast, unread inbox, aliases). | `docs/dev/fabric-cross-session/README.md` · 动 message_agent/message_session/xs 协议前（三个 off golden 勿重生） |
 | ↳ `src/fabric/thread/` — Thread 订阅直通（飞书群话题 → 直派 run 直投，跳过主会话回合）：ThreadEngine、lane/缓冲/handback，宿主接线在 `src/stack.ts` + `src/web-hub/agent/commands.ts`。 | `docs/dev/fabric-thread/README.md` · 动 thread 订阅/直投/handback/thr_* 帧前（thread-off golden 勿重生） |
 | `src/todo/` — Claude Code-style task tools + aboveEditor widget + web projection. | `docs/dev/todo-web/README.md` · 动 todo 前 |
-| `src/memory/` — cwd-keyed project memory (tiered injection, `memory` tool, `/mem`, journaled tidy/restore). | `docs/dev/memory/README.md` · 动 memory/tidy 前（memory golden 勿重生） |
+| `src/memory/` — cwd-keyed project memory (tiered injection, `memory` tool, `/mem`, trash/block restore). | `docs/dev/memory/README.md` · 动 memory/restore 前（memory golden 勿重生） |
 | `src/sysprompt/` + `src/prompt-sections/` — frozen-snapshot system-prompt sections with tail updates; pi-free half in `prompt-sections`. | `docs/dev/sysprompt-stable/README.md` · 动任何 system prompt 动态段前 |
 | `src/web-hub/` — browser UI over a per-machine hub daemon (`webHub.enabled`, default off): protocol/hub/agent/ui, control plane, LAN, Feishu bot, panels. | `docs/dev/web-hub/README.md`（索引 + 总体不变式）· 动 hub/协议/wire/UI 前；子系统另读下面子行 |
 | ↳ `src/web-hub/hub/feishu/` — Feishu bot, durable receive, cross-session mirror. | `docs/dev/feishu-bot/README.md` · 动飞书 bot/xs mirror 前 |

@@ -13,8 +13,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import * as safeFs from "../../src/memory/safe-fs.js";
-import * as lease from "../../src/memory/tidy/lease.js";
-import * as txn from "../../src/memory/tidy/txn.js";
 import * as jevClient from "../../src/memory/jev/client.js";
 import { executeMemoryRead } from "../../src/memory/command-readonly.js";
 import { memoryDirFor } from "../../src/memory/paths.js";
@@ -91,9 +89,6 @@ describe("context-free Web memory reads", () => {
       vi.spyOn(safeFs, "ensurePrivateDir"),
       vi.spyOn(safeFs, "writeTempRegular"),
       vi.spyOn(safeFs, "replaceAtomic"),
-      vi.spyOn(lease, "leaseCreate"),
-      vi.spyOn(lease, "leaseRefresh"),
-      vi.spyOn(txn, "recoverRun"),
       vi.spyOn(jevClient, "createJevClient"),
     ];
     const before = [
@@ -107,11 +102,6 @@ describe("context-free Web memory reads", () => {
       ok: true,
       output: "  20260101T000000000Z-123-abcdef — old.md",
     });
-    expect(executeMemoryRead("restore", cwd, paths)).toEqual({
-      ok: true,
-      output: "  (trash) 20260101T000000000Z-123-abcdef — old.md",
-    });
-    expect(executeMemoryRead("restore --legacy", cwd, paths)).toEqual(executeMemoryRead("restore", cwd, paths));
     expect(executeMemoryRead("migrate --report", cwd, paths)).toEqual({ ok: true, output: '{"result":"ok"}' });
     const preview = executeMemoryRead("migrate --dry-run", cwd, paths);
     expect(preview.ok).toBe(true);
@@ -137,7 +127,7 @@ describe("context-free Web memory reads", () => {
     "tidy --dry-run --batch",
     "tidy --dry-run --frontmatter",
     "tidy --frontmatter --dry-run",
-  ])("%s reads a populated tree without mutation or recovery", (args) => {
+  ])("%s is removed and cannot mutate or recover a populated tree", (args) => {
     const root = mkdtempSync(join(tmpdir(), "mem-web-read-"));
     roots.push(root);
     const cwd = join(root, "project");
@@ -159,56 +149,16 @@ describe("context-free Web memory reads", () => {
       vi.spyOn(safeFs, "ensurePrivateDir"),
       vi.spyOn(safeFs, "writeTempRegular"),
       vi.spyOn(safeFs, "replaceAtomic"),
-      vi.spyOn(lease, "leaseCreate"),
-      vi.spyOn(lease, "leaseRefresh"),
-      vi.spyOn(txn, "recoverRun"),
       vi.spyOn(jevClient, "createJevClient"),
     ];
     try {
       const result = executeMemoryRead(args, cwd, paths, DEFAULT_MEMORY_SETTINGS);
-      expect(result.ok).toBe(true);
-      if (!result.ok) throw new Error("read failed");
-      const expected = args.includes("--status")
-        ? "lock: pid 123 on test-host"
-        : args.includes("--frontmatter")
-          ? '"name": "topic.md"'
-          : "archive candidates 0; normalize batches 0; reported 0";
-      expect(result.output).toContain(expected);
-      if (args.includes("--status")) {
-        expect(result.output).toContain("lease: pid 123 on test-host");
-        expect(result.output).toContain("invalid manifest:");
-      }
+      expect(result).toMatchObject({ ok: false, code: "E_MEM_WEB_UNSUPPORTED" });
       expect(snapshotTree(dir)).toEqual(before);
       for (const spy of forbidden) expect(spy).not.toHaveBeenCalled();
     } finally {
       for (const spy of forbidden) spy.mockRestore();
     }
-  });
-  test("tidy respects batch configuration and block layout without mutating either", () => {
-    const root = mkdtempSync(join(tmpdir(), "mem-web-read-"));
-    roots.push(root);
-    const cwd = join(root, "project");
-    const paths = { memoryRoot: join(root, "memory"), ccProjectsRoot: join(root, "cc") };
-    const dir = memoryDirFor(cwd, paths);
-    mkdirSync(dir, { recursive: true });
-    const disabled = {
-      ...DEFAULT_MEMORY_SETTINGS,
-      tidy: { ...DEFAULT_MEMORY_SETTINGS.tidy, batch: { ...DEFAULT_MEMORY_SETTINGS.tidy.batch, enabled: false } },
-    };
-    for (const args of ["tidy --batch --status", "tidy --batch --dry-run"]) {
-      expect(executeMemoryRead(args, cwd, paths, disabled)).toMatchObject({ ok: false, code: "E_MEM_WEB_UNSUPPORTED" });
-      expect(executeMemoryRead(args, cwd, paths)).toMatchObject({ ok: false, code: "E_MEM_WEB_UNSUPPORTED" });
-    }
-    mkdirSync(join(dir, "blocks"));
-    writeFileSync(join(dir, "blocks", ".layout.json"), "{}");
-    writeFileSync(join(dir, "blocks", "nested.md"), "block content");
-    const before = snapshotTree(dir);
-    for (const args of ["tidy --batch --status", "tidy --batch --dry-run", "tidy --dry-run --frontmatter"])
-      expect(executeMemoryRead(args, cwd, paths, DEFAULT_MEMORY_SETTINGS)).toMatchObject({
-        ok: false,
-        code: "E_MEM_WEB_UNSUPPORTED",
-      });
-    expect(snapshotTree(dir)).toEqual(before);
   });
   test.each(["init", "restore --trash 123", "tidy --dry-run", "migrate --status", "list unexpected"])(
     "%s fails closed with no filesystem changes",

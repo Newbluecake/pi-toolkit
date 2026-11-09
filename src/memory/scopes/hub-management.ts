@@ -17,7 +17,7 @@ import { MemoryError } from "../paths.js";
 import { readCorpus } from "../blocks/store.js";
 import { parseBlockFile, type ParsedBlock } from "../blocks/format.js";
 import { listDirNames, renameNoClobber, fsyncDir } from "../safe-fs.js";
-import { newTidyId } from "../tidy/manifest.js";
+import { newMemoryId } from "../trash.js";
 import {
   checkHubSlot,
   dirSecurityMatches,
@@ -198,7 +198,7 @@ export function archiveHubDeleteLocked(
   if (b.rev !== rev || b.rev !== provenance.rev || b.meta.updated !== provenance.updated) error("E_CONFLICT");
   const entries = readArchive(ctx);
   if (Object.keys(entries).length >= HUB_ARCHIVE_MAX_ENTRIES) error("E_FULL", "archive bound (no eviction)");
-  const name = `${newTidyId(ctx.now, process.pid, randomBytes(3).toString("hex"))}-${id}.md`;
+  const name = `${newMemoryId(ctx.now, process.pid, randomBytes(3).toString("hex"))}-${id}.md`;
   entries[name] = { id, digest: bodyTextDigest(b.body), provenance, state: "trashed" };
   // Preflight bounded serialization before even creating .trash.
   if (utf8Bytes(JSON.stringify({ v: 1, entries })) > HUB_ARCHIVE_MAX_BYTES) error("E_FULL");

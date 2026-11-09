@@ -16,12 +16,8 @@ describe("memory command classification", () => {
     "migrate --report",
     "migrate --status",
     "migrate --dry-run --import-legacy",
-    "tidy --dry-run --frontmatter",
-    "tidy --batch --dry-run",
-    "tidy --batch --status",
     "restore",
     "restore --trash",
-    "restore --legacy",
     "session list",
     "session status",
     "session path",
@@ -41,10 +37,6 @@ describe("memory command classification", () => {
     "restore id",
     "restore --trash id",
     "restore --block id",
-    "tidy",
-    "tidy --batch",
-    "tidy --frontmatter",
-    "tidy --break-lock",
     "session add hello",
     "hub add hello",
     "hub rm n1",
@@ -63,7 +55,6 @@ describe("memory command classification", () => {
     "not-a-command",
     "session rm n1",
     "migrate --dry-run --rollback",
-    "tidy --batch --triage",
     "migrate --unknown",
     "doctor --unknown",
   ])("requires confirmation for %s", (input) => expect(needsConfirm(input)).toBe(true));
@@ -74,13 +65,6 @@ describe("memory command classification", () => {
 
 describe("closed read syntax", () => {
   it.each([
-    "tidy --dry-run --status",
-    "tidy --dry-run --dry-run",
-    "tidy --batch --status --frontmatter",
-    "tidy --dry-run --unknown",
-    "tidy --dry-run file.md",
-    "tidy --status",
-    "tidy --batch --dry-run --frontmatter",
     "hub show --unknown",
     "hub show",
     "hub show topic.001 extra",
@@ -128,7 +112,6 @@ describe("strict Web write parser (package 2)", () => {
       "migrate --all",
       "init",
       "import --force",
-      "tidy",
       "restore --block x",
     ]) {
       expect(parseMemoryWriteRequest(args)).toMatchObject({ ok: false, code: "E_MEM_WEB_UNSUPPORTED" });

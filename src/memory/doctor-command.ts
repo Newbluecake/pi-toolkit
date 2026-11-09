@@ -275,7 +275,7 @@ function blocksDoctorFindings(memDir: string, settings: MemorySettings, now: () 
   return runDoctorBlocks(hold === undefined ? input : { ...input, hold });
 }
 
-/** P5 shared health port for the v2 directory view and tidy integration. */
+/** P5 shared health port for the v2 directory view. */
 export function collectDoctorFindings(
   cwd: string,
   paths: MemoryPaths | undefined,

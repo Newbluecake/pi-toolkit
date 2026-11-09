@@ -177,8 +177,8 @@ const PI_TOOLKIT_TABLE: Readonly<Record<string, SubPolicyFn>> = {
     // Anything else is a bare runId/prefix (`/agent r_xxx`) — a read-only detail view.
     return { policy: "allow" };
   },
-  // /mem [list] · path · doctor → read-only. init/import/tidy/restore write files or (tidy/restore)
-  // are multi-step interactive flows the web caller cannot drive (§4.9's downgrade-to-cancel row).
+  // /mem [list] · path · doctor → read-only. init/import/restore write files or
+  // involve multi-step interactive flows the web caller cannot drive (§4.9's downgrade-to-cancel row).
   // J4 (Q35): the read-only jev surfaces — bare `mem jev` (report) and `mem tags` / `mem tags
   // list` — are allow; the state-changing `mem jev probe|retag|reset-index` and
   // `mem tags add|rm|disable|enable` follow the generic confirm class (anti-misclick only).
@@ -206,15 +206,6 @@ const PI_TOOLKIT_TABLE: Readonly<Record<string, SubPolicyFn>> = {
       return { policy: tokens[1] === "--list" ? "allow" : "confirm" };
     }
     if (sub === "expired") return { policy: "confirm" };
-    // Batch's read-only surfaces are safe to invoke from the web hub. The
-    // interactive archive/normalize and lock-break flows remain confirmed.
-    if (
-      sub === "tidy" &&
-      tokens[1] === "--batch" &&
-      (tokens[2] === "--dry-run" || tokens[2] === "--status") &&
-      tokens.length === 3
-    )
-      return { policy: "allow" };
     return { policy: "confirm" };
   },
   // /cache-ttl [status] → read-only. Every mode switch / keepalive toggle / save mutates process

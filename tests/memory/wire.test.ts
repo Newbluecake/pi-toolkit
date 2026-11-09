@@ -228,7 +228,7 @@ describe("wireMemory (§7.8, M3: registers into the hub)", () => {
   });
 });
 
-describe("wireMemory — toolSurface routing / attachTidy (todo #22 optimize-plan §14.1 L group)", () => {
+describe("wireMemory — toolSurface routing (todo #22 optimize-plan §14.1 L group)", () => {
   function fakeUiCtx(cwdArg: string) {
     const notifications: { message: string; level?: string }[] = [];
     const ctx = {
@@ -387,54 +387,5 @@ describe("wireMemory — toolSurface routing / attachTidy (todo #22 optimize-pla
     wire(host, { toolSurface: "v2" });
     const tool = host.tools.get("memory")!;
     expect(tool.description).toBe(MEMORY_TOOL_V2_TEXT.description);
-  });
-
-  test("attachTidy: unattached ⇒ /mem tidy reports 'tidy unavailable in this session'", async () => {
-    const host = fakePi();
-    wire(host);
-    const cmd = host.commands.get("mem")!;
-    const { ctx, notifications } = fakeUiCtx(cwd);
-    await cmd.handler("tidy", ctx);
-    expect(notifications[0]!.message).toContain("tidy unavailable in this session");
-    expect(notifications[0]!.level).toBe("warning");
-  });
-
-  test("attachTidy: attached ⇒ /mem tidy reaches the real P4 handler instead", async () => {
-    const host = fakePi();
-    const result = wire(host);
-    result.attachTidy({
-      spawn: async () => ({ error: { message: "unused" } }),
-      waitOutcome: async () => ({ kind: "pending" }) as any,
-      abort: async () => true,
-      snapshot: () => undefined,
-    });
-    const cmd = host.commands.get("mem")!;
-    const { ctx, notifications } = fakeUiCtx(cwd);
-    await cmd.handler("tidy", ctx);
-    expect(notifications[0]!.message).toContain("no memory directory for");
-    expect(notifications[0]!.level).toBe("warning");
-  });
-
-  test("attachTidy: a CHILD session's /mem tidy is refused before the port is even consulted", async () => {
-    const host = fakePi();
-    let portConsulted = false;
-    wireMemory(host.pi, {
-      settings: { ...DEFAULT_SETTINGS.memory, layout: "legacy", toolSurface: "legacy" },
-      isChildSession: true,
-      sections: host.hub,
-    }).attachTidy({
-      spawn: async () => {
-        portConsulted = true;
-        return { error: { message: "unused" } };
-      },
-      waitOutcome: async () => ({ kind: "pending" }) as any,
-      abort: async () => true,
-      snapshot: () => undefined,
-    });
-    const cmd = host.commands.get("mem")!;
-    const { ctx, notifications } = fakeUiCtx(cwd);
-    await cmd.handler("tidy", ctx);
-    expect(notifications[0]!.message).toContain("only available in the main session");
-    expect(portConsulted).toBe(false);
   });
 });

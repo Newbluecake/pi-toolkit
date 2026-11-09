@@ -219,7 +219,7 @@ export const PRESET_TAGS: readonly TagDef[] = (
       id: "memory-system",
       label: "Memory maintenance",
       description:
-        "Maintaining project memory itself: /mem usage, entry style, tidy rules, tagging and inline authority syntax.",
+        "Maintaining project memory itself: /mem usage, entry style, maintenance rules, tagging and inline authority syntax.",
       risk: "normal",
       match: { tools: ["memory"] },
     },

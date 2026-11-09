@@ -28,11 +28,6 @@ import type { SystemPromptMode } from "../sysprompt/hub.js";
  * - `memory.toolSurface` selects `tool.ts` (legacy, unchanged, §2.7 复审
  *   新-3) or `tool-v2.ts` (P2's implementation) — defaults are tiered/v2 after P5;
  *   explicit legacy settings preserve the old paths (§9).
- * - `wireMemory` returns `{ attachTidy }`: `src/index.ts` (post-guard, main
- *   session only) calls it once with a `TidyPort` that reads the CURRENT
- *   session stack (same late-bound `holder.current` pattern the rest of
- *   `src/index.ts` uses); `/mem tidy`/`/mem restore` read the attached port
- *   through a closure-local variable, not a module global.
  *
  * All mutable state (the RenderCache and the freezeInjectionAfterWrite
  * frozenBlocks map) lives in THIS closure (§5.2/§5.5: no module-scope
@@ -46,7 +41,7 @@ import type { MemoryWebWritePort } from "./scopes/web-write-port.js";
 import type { ExtensionContext, ExtensionToolContext, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { MemorySettings } from "../config/settings.js";
 import type { PromptSectionHub } from "../sysprompt/hub.js";
-import type { MemoryWriteGate, TidyPort } from "./contracts.js";
+import type { MemoryWriteGate } from "./contracts.js";
 import { createSweepRunner, type SweepRender } from "./govern/sweep.js";
 import { createGovernanceSignals, type BudgetDirectoryIdentity, type GovernanceSignal } from "./govern/signals.js";
 import { createFirstUserReviewHost } from "./jev/first-user-review.js";
@@ -63,7 +58,6 @@ import { createMemoryTool } from "./tool.js";
 import { createMemoryToolV2 } from "./tool-v2.js";
 import { createMemoryToolV3, createProjectInspectorV4 } from "./tool-v3.js";
 import { renderTiered } from "./tiered.js";
-import { runDoctor } from "./doctor.js";
 import { createStartupReminder, collectDoctorFindings, type RenderTieredPort } from "./doctor-command.js";
 import { summaryLine } from "./doctor.js";
 import { canonicalDir, inspectDirSecurityNoFollow, statRegularIfExists } from "./safe-fs.js";
@@ -101,7 +95,6 @@ export interface WireMemoryOpts {
   /** Cross-package P5 ports. Defaults are intentionally absent only for
    *  direct unit callers; production wiring always supplies these. */
   renderBlock?: RenderTieredPort;
-  runDoctor?: typeof runDoctor;
   /** jev-plan J6 / I11: the secure-domain verdict (`secureDomain.kind`).
    *  Anything but "plain" keeps Jev unwired. Absent ⇒ "plain". */
   secureDomainKind?: JevDomainKind;
@@ -123,11 +116,6 @@ export interface WireMemoryResult {
   /** Read-only Web executor; no native handler or write grant is exposed. */
   readonly webRead: MemoryReadPort;
   readonly webWrite?: MemoryWebWritePort;
-  /** §7's spawn port for `/mem tidy`/`/mem restore`. Called at most once by
-   *  `src/index.ts`, post-guard, main session only; `undefined` restores the
-   *  "tidy unavailable in this session" fallback (child sessions never get
-   *  this called at all). */
-  attachTidy(port: TidyPort | undefined): void;
   /** external-agent plan §5.6：导出给外部 agent run（droid）的记忆块（子会话视角）。
    *  P5 经 holder 晚绑定给 `ExternalAgentsPort` 的 `memoryBlock` 端口；
    *  `externalAgents.droid.injectMemory=false` 时 P5 干脆不传该端口。 */
@@ -156,13 +144,11 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
   const frozenBlocks = new Map<string, string | undefined>();
   const lastBlocks = new Map<string, string | undefined>();
   const tieredRender = opts.renderBlock ?? renderTiered;
-  const doctorRunner = opts.runDoctor ?? runDoctor;
   const budget: InjectBudget = {
     inlineMax: opts.settings.inlineMax,
     byteCap: opts.settings.byteCap,
     indexMax: opts.settings.indexMax,
   };
-  let tidyPort: TidyPort | undefined;
   // jev-plan §1.1: settings-period wiring verdict. off ⇒ nothing below
   // changes (no hooks, no ports, no extra render work — I9).
   const jevVerdict = resolveJevWiring(opts.settings, opts.secureDomainKind ?? "plain");
@@ -915,11 +901,9 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
             contentWriteGate: gate,
           }
         : {}),
-      getTidyPort: () => tidyPort,
       writeGate: gate,
       settings: opts.settings,
       renderBlock: tieredRender,
-      runDoctor: doctorRunner,
       onAfterWrite,
       ...(jev === undefined ? {} : { jev: jev.commandPort }),
     }),
@@ -956,9 +940,6 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
   return {
     ...(webWrite ? { webWrite } : {}),
     webRead: (args, cwd) => executeMemoryRead(args, cwd, undefined, opts.settings),
-    attachTidy(port) {
-      tidyPort = port;
-    },
     renderForExternal(cwd: string): string | undefined {
       return renderExternalMemoryBlock({ settings: opts.settings, cache }, cwd);
     },

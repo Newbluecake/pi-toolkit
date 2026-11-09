@@ -158,6 +158,8 @@ describe("D01 — primary core (degraded stand-in / no primary at all)", () => {
     );
     expect(f).toHaveLength(1);
     expect(f[0]).toMatchObject({ severity: "info", file: "p.md" });
+    expect(f[0]?.fix).toBe("Manually merge the always-on rules into core.md and ensure its status is active.");
+    expect(f[0]?.fix).not.toMatch(/\/mem (?:tidy|migrate)/);
   });
   it("negative (review): archived MEMORY.md is not called out as a hand-maintained index", () => {
     const f = findingsOf(
@@ -863,4 +865,13 @@ describe("doctor-golden (current-5, generate-once §10.1)", () => {
       fx.cleanup();
     }
   });
+});
+
+it("D01 missing core.md gives manual primary guidance, not a migration command or a D02 fix", () => {
+  const snapshot = snap([file("p.md", { meta: meta({ pin: true }) })]);
+  const findings = runDoctor(snapshot, SETTINGS);
+  expect(findings.find((f) => f.id === "D01")?.fix).toBe(
+    "Manually rename this file to core.md to make it the always-on primary core.",
+  );
+  expect(findings.some((f) => f.id === "D02")).toBe(false);
 });

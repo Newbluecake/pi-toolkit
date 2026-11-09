@@ -283,7 +283,7 @@ describe("default listing + completions (I9 surface)", () => {
     const cmd = createMemCommand({ paths, jev: stubPort() });
     expect(cmd.description).toContain("/mem jev");
     expect(cmd.description).toContain("/mem tags");
-    expect(cmd.description).toContain("维护: /mem tidy --break-lock · /mem jev reset-index");
+    expect(cmd.description).toContain("维护: /mem jev reset-index");
     expect(cmd.getArgumentCompletions("jev reset")[0]?.description).toContain("维护");
     const values = (prefix: string) => cmd.getArgumentCompletions(prefix).map((c) => c.value);
     expect(values("j")).toEqual(["jev"]);

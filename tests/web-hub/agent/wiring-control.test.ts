@@ -763,19 +763,34 @@ describe("wireWebHub — readonly memory port", () => {
     const { sentUserMessages } = await connectFullCaps({
       memoryRead: (args, cwd) => executeMemoryRead(args, cwd, paths),
     });
-    const commands = ["list", "path", "restore", "migrate --dry-run", "doctor", "init"];
+    const commands = ["list", "path", "restore", "migrate --dry-run", "doctor", "init", "restore --legacy old-v2"];
     for (const [i, args] of commands.entries()) {
       const id = `mem0000000000000${i}`;
       hub!.send(hub!.conns[0]!, cmdFrame(id, { op: "command", name: "mem", args }));
       await waitUntil(() => hub!.all().some((f) => f.t === "cmd_result" && f.id === id));
     }
     const results = hub!.all().filter((f) => f.t === "cmd_result");
-    expect(results).toHaveLength(6);
-    for (const [i, text] of ["note.md", `memory dir: ${dir}`, "no backups or trash entries", "note.md"].entries())
+    expect(results).toHaveLength(7);
+    for (const [i, text] of [
+      [0, "note.md"],
+      [1, `memory dir: ${dir}`],
+      [3, "note.md"],
+    ] as const)
       expect(results[i]).toMatchObject({
         ok: true,
         data: { output: { entries: [{ text: expect.stringContaining(text) }] } },
       });
+    for (const i of [2, 6]) {
+      expect(results[i]).toMatchObject({
+        ok: false,
+        code: "E_UNSUPPORTED",
+        effect: "none",
+        message: expect.stringContaining("Legacy tidy backups are no longer supported"),
+      });
+      expect(results[i]).toMatchObject({ message: expect.stringContaining("#legacy-tidy-backup-recovery") });
+      expect(results[i]).toMatchObject({ message: expect.stringContaining("Stop all memory writers") });
+      expect(results[i]).not.toHaveProperty("data.output");
+    }
     for (const result of results.slice(4))
       expect(result).toMatchObject({
         ok: false,

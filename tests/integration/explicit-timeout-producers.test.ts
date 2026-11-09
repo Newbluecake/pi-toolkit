@@ -21,7 +21,6 @@ import { RPC_REQUEST_CHANNEL, RPC_VERSION, replyChannel } from "../../src/rpc/pr
  *  X1 workflow child run  — real SubagentWorkflow(timeout_s) → child pinned
  *     to W.hardAt (fixed, factor 1) while the workflow itself stays 2×.
  *  X2 (retired)           — was the consult fork; consult was removed (#40).
- *  X4 memory tidy         — the /mem tidy command (readonly tool domain).
  *  X5 RPC spawn           — the stack's RPC server on the events bus; a
  *                           request smuggling `timeoutPolicy` is rejected.
  *  X6 literal guard       — the only `timeoutPolicy: "extendable"` write in
@@ -295,59 +294,6 @@ describe("program-derived producers stay fixed (X1-X6, real entries)", () => {
       const read = await host.call("get_run_result", { run_id: child.req.runId });
       return ["aborted", "timed_out", "failed"].includes(String(read.details?.status));
     });
-    await host.emit("session_shutdown", { reason: "quit" });
-  }, 30_000);
-
-  it("X4: a /mem tidy proposal run is fixed, factor 1, readonly tool domain (real /mem command)", async () => {
-    writeAgentFiles(home);
-    writeSettings(home, { hud: { enabled: false }, memory: { layout: "tiered", tidy: { agentType: "worker" } } });
-    const proj = join(scratch, "proj");
-    mkdirSync(proj, { recursive: true });
-    const memRoot = join(scratch, "mem");
-    const slugDir = join(memRoot, proj.replace(/\/+$/, "").replace(/\//g, "-"));
-    mkdirSync(slugDir, { recursive: true });
-    writeFileSync(join(slugDir, "core.md"), "# Notes\n\nkeep this tidy\n");
-    vi.stubEnv("ARMORY_MEMORY_ROOT", memRoot);
-
-    const branch: unknown[] = [];
-    const host = fakePi(branch);
-    stubDriver({ create: () => false, resume: () => false }); // the proposal run settles
-    const captured = spyRunnerRun();
-    activate(host.pi);
-    const ctx = host.ctx({
-      hasUI: true,
-      mode: "tui",
-      cwd: proj,
-      model: { provider: "acme", id: "tidy-model" },
-      ui: {
-        notify: () => undefined,
-        confirm: async () => true,
-        setStatus: () => undefined,
-        setEditorComponent: () => () => undefined,
-        getEditorComponent: () => undefined,
-        setFooter: () => () => undefined,
-        addAutocompleteProvider: () => undefined,
-      },
-    });
-    await host.emit("session_start", { reason: "startup" }, ctx);
-
-    // Real entry: the /mem command handler activate() registered; the tidy
-    // port reaches the CURRENT session's real SpawnService (index.ts wiring).
-    const mem = host.commands.get("mem");
-    expect(mem).toBeDefined();
-    await mem!.handler("tidy", ctx);
-
-    await until(() => captured.some((c) => c.req.displayMeta?.label === "mem-tidy"));
-    const tidy = captured.find((c) => c.req.displayMeta?.label === "mem-tidy")!;
-    expect(tidy.req.timeoutPolicy).toBe("fixed");
-    expect(tidy.budget.maxTotalFactor).toBe(1);
-    // P0-r: toolDomain is consumed by the adapter (NOT_THREADED) — the
-    // runner-visible footprint of the readonly domain is the toolScope policy's
-    // allow set (the builtin readonly four).
-    const allow = tidy.req.toolScope?.policy?.allow;
-    expect(allow).toBeInstanceOf(Set);
-    for (const name of ["read", "grep", "find", "ls"]) expect(allow!.has(name)).toBe(true);
-    expect(tidy.budget.totalMs).toBe(180_000); // memory.tidy.timeoutMs default (merged into the budget)
     await host.emit("session_shutdown", { reason: "quit" });
   }, 30_000);
 

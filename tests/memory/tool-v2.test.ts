@@ -366,12 +366,12 @@ describe("I5: delete / rename", () => {
     writeFile(fx.memDir, "a.md", "---\nsource: agent\n---\ncontent");
     const { tool } = makeTool(fx);
     await exec(tool, { command: "delete", path: "a.md" }, fakeCtx(fx.cwd));
-    const { listTrashEntries } = await import("../../src/memory/tidy/manifest.js");
+    const { listTrashEntries } = await import("../../src/memory/trash.js");
     const listed = listTrashEntries(fx.memDir);
     expect(listed.map((e) => e.name)).toEqual(["a.md"]);
     expect(listed[0]!.fileName).toMatch(/^\d{8}T\d{9}Z-\d+-[0-9a-f]{6}-a\.md$/);
     // ...and the restore side (safe-fs TRASH_NAME_RE) accepts it end to end
-    const { restoreFromTrash } = await import("../../src/memory/tidy/restore.js");
+    const { restoreFromTrash } = await import("../../src/memory/trash.js");
     expect(await restoreFromTrash(fx.cwd, listed[0]!.id, "skip", fx.paths)).toEqual({ restored: true });
     expect(readFileSync(join(fx.memDir, "a.md"), "utf8")).toBe("---\nsource: agent\n---\ncontent");
   });

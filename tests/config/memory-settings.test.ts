@@ -6,7 +6,6 @@ import { describe, expect, it } from "vitest";
 import { DEFAULT_SETTINGS, loadSettings, TIME_SETTING_MS_PATHS } from "../../src/config/settings.js";
 import { parseMemorySettings } from "../../src/memory/settings.js";
 import { currentOf, defaultOf, isKnownSettingKey, SETTING_SPECS, settingKeys } from "../../src/config/setting-specs.js";
-import { DEFAULT_TIDY_BATCH_SETTINGS } from "../../src/memory/tidy/batch-settings.js";
 
 const defaults = DEFAULT_SETTINGS.memory;
 
@@ -42,16 +41,6 @@ describe("memory settings", () => {
         taskDoneTrigger: true,
       },
       doctor: { notifyOnStart: true, staleDays: 60 },
-      tidy: {
-        agentType: "Plan",
-        model: "",
-        timeoutMs: 180_000,
-        maxInputBytes: 49_152,
-        maxOutputBytes: 65_536,
-        maxCostUsd: 2.0,
-        maxTurns: 4,
-        batch: { ...DEFAULT_TIDY_BATCH_SETTINGS },
-      },
       jev: {
         enabled: true,
         classifiers: ["opencode/jev-1.13-free", "opencode/jev-1.13"],
@@ -93,6 +82,14 @@ describe("memory settings", () => {
       expect(parseMemorySettings(input)).toEqual(defaults);
     }
     expect(parseMemorySettings({})).toEqual(defaults);
+  });
+
+  it("ignores retired tidy input but exposes no tidy settings or duration paths", () => {
+    expect(loadSettings({ memory: { tidy: { timeoutS: 1, batch: { enabled: true } } } }).memory).toEqual(defaults);
+    expect(parseMemorySettings({ tidy: { model: "obsolete", agentType: "Plan" } })).toEqual(defaults);
+    expect(Object.hasOwn(defaults, "tidy")).toBe(false);
+    expect(Object.keys(SETTING_SPECS).filter((key) => key.startsWith("memory.tidy."))).toEqual([]);
+    expect(TIME_SETTING_MS_PATHS.filter((path) => path.startsWith("memory.tidy."))).toEqual([]);
   });
 
   it("tolerates garbage field-by-field and never throws", () => {
@@ -333,142 +330,6 @@ describe("memory settings", () => {
     expect(parseMemorySettings({ doctor: null }).doctor).toEqual(defaults.doctor);
   });
 
-  it("tidy block: field-by-field fallback; model/agentType accept any non-empty string (validated only at dispatch time, §7.1)", () => {
-    const parsed = parseMemorySettings({
-      tidy: {
-        agentType: "verifier",
-        model: "cr-anthropic/claude-opus-5-5",
-        timeoutMs: 60_000,
-        maxInputBytes: 20_000,
-        maxOutputBytes: 10_000,
-        maxCostUsd: 1.5,
-        maxTurns: 2,
-      },
-    });
-    expect(parsed.tidy).toEqual({
-      agentType: "verifier",
-      model: "cr-anthropic/claude-opus-5-5",
-      timeoutMs: 60_000,
-      maxInputBytes: 20_000,
-      maxOutputBytes: 10_000,
-      maxCostUsd: 1.5,
-      maxTurns: 2,
-      batch: { ...DEFAULT_TIDY_BATCH_SETTINGS, targetBytes: 20_000 },
-    });
-    // model accepts a free-form (non-strict-provider/id) value too — §7.1
-    // resolves/WARNs about that at DISPATCH time (P4), not at settings-parse time.
-    expect(parseMemorySettings({ tidy: { model: "not a strict ref" } }).tidy.model).toBe("not a strict ref");
-    expect(parseMemorySettings({ tidy: { model: "" } }).tidy.model).toBe("");
-    // an empty agentType string falls back (never registers a blank agent type name)
-    expect(parseMemorySettings({ tidy: { agentType: "" } }).tidy.agentType).toBe(defaults.tidy.agentType);
-    // maxCostUsd never 0; garbage falls back
-    expect(parseMemorySettings({ tidy: { maxCostUsd: 0 } }).tidy.maxCostUsd).toBe(defaults.tidy.maxCostUsd);
-    expect(parseMemorySettings({ tidy: { maxCostUsd: -1 } }).tidy.maxCostUsd).toBe(defaults.tidy.maxCostUsd);
-    expect(parseMemorySettings({ tidy: { maxCostUsd: 51 } }).tidy.maxCostUsd).toBe(defaults.tidy.maxCostUsd);
-    // a fractional cost cap is preserved (float, not floored like the byte/turn fields)
-    expect(parseMemorySettings({ tidy: { maxCostUsd: 3.25 } }).tidy.maxCostUsd).toBe(3.25);
-    expect(parseMemorySettings({ tidy: "nope" }).tidy).toEqual(defaults.tidy);
-    expect(parseMemorySettings({ tidy: { maxTurns: 0 } }).tidy.maxTurns).toBe(defaults.tidy.maxTurns);
-    expect(parseMemorySettings({ tidy: { maxTurns: 21 } }).tidy.maxTurns).toBe(defaults.tidy.maxTurns);
-  });
-
-  it("timeoutMs round-trips through the file's timeoutS seconds key (TIME_SETTING_MS_PATHS)", () => {
-    expect(loadSettings({ memory: { tidy: { timeoutS: 60 } } }).memory.tidy.timeoutMs).toBe(60_000);
-  });
-
-  it("parses the frozen batch settings with per-field tolerance and every boundary", () => {
-    const batch = {
-      enabled: false,
-      targetBytes: 8192,
-      maxModelRuns: 1,
-      maxTotalCostUsd: 0.1,
-      totalTimeoutS: 300,
-      outputTokPerSec: 5,
-    };
-    expect(loadSettings({ memory: { tidy: { maxInputBytes: 8192, batch } } }).memory.tidy.batch).toEqual({
-      enabled: false,
-      targetBytes: 8192,
-      maxModelRuns: 1,
-      maxTotalCostUsd: 0.1,
-      totalTimeoutMs: 300_000,
-      outputTokPerSec: 5,
-    });
-    expect(
-      loadSettings({
-        memory: {
-          tidy: {
-            maxInputBytes: 262_144,
-            batch: {
-              targetBytes: 262_144,
-              maxModelRuns: 20,
-              maxTotalCostUsd: 100,
-              totalTimeoutS: 7200,
-              outputTokPerSec: 500,
-            },
-          },
-        },
-      }).memory.tidy.batch,
-    ).toEqual({
-      enabled: true,
-      targetBytes: 262_144,
-      maxModelRuns: 20,
-      maxTotalCostUsd: 100,
-      totalTimeoutMs: 7_200_000,
-      outputTokPerSec: 500,
-    });
-    expect(
-      parseMemorySettings({
-        tidy: {
-          batch: {
-            enabled: "yes",
-            targetBytes: 999_999,
-            maxModelRuns: 0,
-            maxTotalCostUsd: 0,
-            totalTimeoutMs: 1,
-            outputTokPerSec: 501,
-          },
-        },
-      }).tidy.batch,
-    ).toEqual(DEFAULT_TIDY_BATCH_SETTINGS);
-  });
-
-  it("uses maxInputBytes as the batch target ceiling", () => {
-    expect(
-      parseMemorySettings({ tidy: { maxInputBytes: 16_384, batch: { targetBytes: 32_768 } } }).tidy.batch.targetBytes,
-    ).toBe(16_384);
-  });
-
-  it("registers the batch duration path and keeps specs/parser/editor listing in parity", () => {
-    expect(TIME_SETTING_MS_PATHS).toContain("memory.tidy.batch.totalTimeoutMs");
-    const keys = [
-      "memory.tidy.batch.enabled",
-      "memory.tidy.batch.targetBytes",
-      "memory.tidy.batch.maxModelRuns",
-      "memory.tidy.batch.maxTotalCostUsd",
-      "memory.tidy.batch.totalTimeoutS",
-      "memory.tidy.batch.outputTokPerSec",
-    ];
-    expect(keys.every((key) => settingKeys().includes(key))).toBe(true);
-    expect(Object.keys(SETTING_SPECS).filter((key) => key.startsWith("memory.tidy.batch."))).toEqual(keys);
-    for (const key of keys) {
-      const spec = SETTING_SPECS[key]!;
-      expect(isKnownSettingKey(key), key).toBe(true);
-      expect(spec.live, key).toBeUndefined();
-      expect(defaultOf(spec), key).not.toBeUndefined();
-      expect(currentOf(DEFAULT_SETTINGS, spec), key).not.toBe("(unset)");
-    }
-    expect(SETTING_SPECS["memory.tidy.batch.totalTimeoutS"]).toMatchObject({
-      path: "memory.tidy.batch.totalTimeoutMs",
-      time: true,
-      min: 300,
-      max: 7200,
-    });
-    expect(SETTING_SPECS["memory.tidy.batch.targetBytes"]).toMatchObject({ min: 8192, max: 262_144, integer: true });
-    expect(SETTING_SPECS["memory.tidy.batch.maxModelRuns"]).toMatchObject({ min: 1, max: 20, integer: true });
-    expect(SETTING_SPECS["memory.tidy.batch.maxTotalCostUsd"]).toMatchObject({ min: 0.1, max: 100 });
-    expect(SETTING_SPECS["memory.tidy.batch.outputTokPerSec"]).toMatchObject({ min: 5, max: 500 });
-  });
-
   it("exposes the new §9 knobs in SETTING_SPECS, all non-live", () => {
     const keys = [
       "memory.layout",
@@ -480,13 +341,6 @@ describe("memory settings", () => {
       "memory.topicMaxBytes",
       "memory.doctor.notifyOnStart",
       "memory.doctor.staleDays",
-      "memory.tidy.agentType",
-      "memory.tidy.model",
-      "memory.tidy.timeoutS",
-      "memory.tidy.maxInputBytes",
-      "memory.tidy.maxOutputBytes",
-      "memory.tidy.maxCostUsd",
-      "memory.tidy.maxTurns",
     ];
     for (const key of keys) {
       expect(isKnownSettingKey(key), key).toBe(true);
@@ -496,8 +350,6 @@ describe("memory settings", () => {
     expect(SETTING_SPECS["memory.layout"]).toMatchObject({ kind: "enum", values: ["tiered", "legacy", "blocks"] });
     expect(SETTING_SPECS["memory.toolSurface"]).toMatchObject({ kind: "enum", values: ["v2", "legacy"] });
     expect(SETTING_SPECS["memory.childProfile"]).toMatchObject({ kind: "enum", values: ["core", "full", "none"] });
-    expect(SETTING_SPECS["memory.tidy.timeoutS"]).toMatchObject({ path: "memory.tidy.timeoutMs", time: true });
-    expect(SETTING_SPECS["memory.tidy.maxCostUsd"]).toMatchObject({ kind: "number", min: 0.05, max: 50 });
     expect(defaultOf(SETTING_SPECS["memory.layout"]!)).toBe("blocks");
     expect(defaultOf(SETTING_SPECS["memory.toolSurface"]!)).toBe("v2");
   });

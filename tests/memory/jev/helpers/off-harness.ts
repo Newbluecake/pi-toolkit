@@ -2,7 +2,7 @@
  * J0 off-golden harness（jev-plan §4 J0 第 4 条；arch §9.2「off 的证明」）。
  *
  * 在**未接线 jev 的当前 dev** 上，把 `wireMemory` 的全部可观察面（注册序列、注入渲染、
- * 工具脚本、/mem 命令与补全、doctor、启动提醒、tidy prompt）录成一份 `OffRecord`。
+ * 工具脚本、/mem 命令与补全、doctor、启动提醒）录成一份 `OffRecord`。
  * J0 用它在 dev 上生成 A′ golden `tests/fixtures/memory/jev-off-golden.json`；J6/J7 合入后
  * 用同一份 harness 重放五种 off 配置，前四种必须与 golden 逐字节相等，`pi-api` 走
  * 逐字段比对 + `PI_API_ALLOWED_DIFF`（off-golden.test.ts 导出，J0 为空）。
@@ -40,8 +40,6 @@ import type { SectionRegistration } from "../../../../src/sysprompt/hub.js";
 import { canonicalJson } from "../../../../src/memory/tool-surface.js";
 import { collectDoctorFindings } from "../../../../src/memory/doctor-command.js";
 import { formatDoctorReport, type DoctorFinding } from "../../../../src/memory/doctor.js";
-import { buildTidyPrompt, type TidyPromptFile } from "../../../../src/memory/tidy/prompt.js";
-import { frontmatterSource } from "../../../../src/memory/frontmatter.js";
 import {
   materializeEmptyFixture,
   materializeFixture,
@@ -309,7 +307,6 @@ export interface OffRecord {
     report: string;
   };
   reminder: { notifications: readonly string[] };
-  tidyPrompt: string;
 }
 
 // ───────────────────────────── fixtures / ctx ─────────────────────────────
@@ -562,7 +559,7 @@ export async function recordMemoryOff(config: OffConfigName): Promise<OffRecord>
         notifications.push({ sub: sub === "" ? "(default)" : sub, level: n.level, message: n.message });
     }
     const completions: Record<string, unknown> = {};
-    for (const prefix of ["", "t", "tidy ", "restore ", "j", "r"]) {
+    for (const prefix of ["", "t", "restore ", "j", "r"]) {
       completions[prefix === "" ? "(empty)" : prefix] = mem.getArgumentCompletions?.(prefix) ?? null;
     }
 
@@ -597,27 +594,6 @@ export async function recordMemoryOff(config: OffConfigName): Promise<OffRecord>
       );
     }
 
-    // ── tidyPrompt（current-5）──
-    useFixtureRoot(cmdFx);
-    const tidyFiles: TidyPromptFile[] = [];
-    for (const name of cmdFx.names) {
-      const body = readFileSync(join(cmdFx.memDir, name), "utf8");
-      tidyFiles.push({
-        name,
-        body,
-        isPrimaryCore: name === "core.md",
-        handWritten: frontmatterSource(body) !== "agent",
-      });
-    }
-    const tidyPrompt = buildTidyPrompt({
-      cwd: cmdFx.cwd,
-      files: tidyFiles,
-      migrationMode: !cmdFx.names.includes("core.md"),
-      coreBytes: settings.coreBytes,
-      topicMaxBytes: settings.topicMaxBytes,
-      ...(settings.topicWarnBytes === undefined ? {} : { topicWarnBytes: settings.topicWarnBytes }),
-    });
-
     const roots = [envTmp, ...new Set(fixtures.map((f) => f.paths.memoryRoot))];
     const masked = maskDeep(
       {
@@ -627,7 +603,6 @@ export async function recordMemoryOff(config: OffConfigName): Promise<OffRecord>
         command: { notifications, completions },
         doctor: { findings: findings.map(serializeFinding), report: formatDoctorReport(findings) },
         reminder: { notifications: reminderNotes },
-        tidyPrompt,
       },
       roots,
     ) as OffRecord;

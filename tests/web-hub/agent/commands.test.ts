@@ -886,9 +886,14 @@ describe("direct Web memory reads", () => {
       });
       expect(h.sent[1]).toMatchObject({ ok: true, data: { output: { entries: [{ text: `memory dir: ${dir}` }] } } });
       expect(h.sent[2]).toMatchObject({
-        ok: true,
-        data: { output: { entries: [{ text: "no backups or trash entries" }] } },
+        ok: false,
+        code: "E_UNSUPPORTED",
+        effect: "none",
+        message: expect.stringContaining("Legacy tidy backups are no longer supported"),
       });
+      expect(h.sent[2]).toMatchObject({ message: expect.stringContaining("#legacy-tidy-backup-recovery") });
+      expect(h.sent[2]).toMatchObject({ message: expect.stringContaining("without overwriting live files") });
+      expect(h.sent[2]).not.toHaveProperty("data.output");
       expect(h.sent[3]).toMatchObject({
         ok: true,
         data: { output: { entries: [{ text: expect.stringContaining("note.md") }] } },

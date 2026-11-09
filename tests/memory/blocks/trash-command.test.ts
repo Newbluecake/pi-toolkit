@@ -8,7 +8,7 @@ import { createMemCommand } from "../../../src/memory/command.js";
 import { createMemoryToolV3 } from "../../../src/memory/tool-v3.js";
 import { memoryDirFor } from "../../../src/memory/paths.js";
 import { parseBlockFile } from "../../../src/memory/blocks/format.js";
-import { listTrashEntries } from "../../../src/memory/tidy/manifest.js";
+import { listTrashEntries } from "../../../src/memory/trash.js";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -31,7 +31,7 @@ function setup() {
   } as unknown as ExtensionContext & ExtensionCommandContext;
   const settings = DEFAULT_SETTINGS.memory;
   const tool = createMemoryToolV3({ settings, paths, isChildSession: false, onAfterWrite: () => {} });
-  const cmd = createMemCommand({ paths, settings, getTidyPort: () => ({}) as never });
+  const cmd = createMemCommand({ paths, settings });
   return { cwd, dir, blocks, paths, notes, ctx, tool, cmd };
 }
 async function deleted(f: ReturnType<typeof setup>) {

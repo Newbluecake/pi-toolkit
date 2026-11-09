@@ -96,7 +96,7 @@ v3 提供以下五种操作，具体参数以工具描述为准：
 - **expired**：展示 active 块的已过期 expires 和所有 until，区分 user/agent；同一块可占两行。已取代/归档的块不参与；命令本身不延期、不删除。
 - **restore --block**：恢复已取代或归档的单块。恢复不会递归恢复它曾取代的其他块，删除取代者也不会自动撤销其关系。
 - **删除恢复另走 trash**：已删除块在 `blocks/.trash/`，`/mem restore --trash` 自 `e0993f03` 起按实际布局分派（blocks 读 `blocks/.trash`、files 读根 `.trash`，互不混合）。不要把两种布局的 trash 或 `--block` 混用。
-- **tidy 在 blocks 禁用**：不能用旧 `/mem tidy`（含 batch）整理 blocks；改用 review 建议与治理。
+- **tidy 已移除**：所有布局均不再提供 `/mem tidy`；使用现有 review 建议与治理。#50 的 P50.2/3 尚未完成。
 - **doctor**：不再仅 D01–D14；包含 blocks 漂移、悬空取代、迁移/回退等诊断。启动提示受 `memory.doctor.notifyOnStart` 控制；历史软元数据超限在 doctor 按需展示，不在启动刷警告。
 
 显式 `/mem migrate`、`--all`、导入旧漂移及回退等写迁移要求真实 TUI 主会话和安全门通过。回退用 `/mem migrate --rollback` 后 `/reload`，会保留 blocks 快照并设置 hold；迁移后的新内容须人工核对，不会自动合回旧文件。`--all` 不是默认试点步骤；请按 runbook 操作。
@@ -164,7 +164,7 @@ scopes 在 plain 域且宿主能力满足时装配；secure/locked 不创建 sco
 - tiered：整文件/整段落准入，受 UTF-8 字节预算约束；放不下只留索引。topic 文件索引带 description/read_when；core.md 与 pin 文件参与核心区选择。`pin: true` 是旧文件布局的常驻约定，不是 blocks 的 global。
 - legacy：保留旧的索引与最新文件内联方式（indexMax=15、inlineMax=3、byteCap=4000），作为显式兼容退出选项。
 - files 的 `memory.toolSurface` 默认 v2：view/search/create/str_replace/insert/delete/rename，并保留 list/write/append 兼容入口。不要把这组操作用于 v3。
-- 文件工具有目录围栏、文件名白名单、权限 0600、单文件 maxFileBytes=262144 与单次写 maxWriteBytes=65536 上限。所有 v2 写入、导入、tidy、restore 在目录锁内串行；用户信任的 slug 目录 symlink 可用，文件级 symlink/非常规文件拒绝。
+- 文件工具有目录围栏、文件名白名单、权限 0600、单文件 maxFileBytes=262144 与单次写 maxWriteBytes=65536 上限。所有 v2 写入、导入、回收项恢复 在目录锁内串行；用户信任的 slug 目录 symlink 可用，文件级 symlink/非常规文件拒绝。
 
 files 条目可带行内 user/lesson、expires、until、tags、private 等标记；手写文件未标 source: agent 时条目默认 user，agent 创建文件默认 agent。改写/删除用户令、翻转 provenance 或归档用户文件都没有旧的确认框，仍须用户决定并转述 voided 回显。gate 标记不再有拦截行为。
 
@@ -173,15 +173,41 @@ files 条目可带行内 user/lesson、expires、until、tags、private 等标�
 ```text
 /mem init                           初始化旧文件核心骨架
 /mem import [--force] [slug|all]     从 Claude Code 复制旧文件，原件不动
-/mem tidy [--batch] [--dry-run] [--status] [--frontmatter] [--break-lock]
-/mem restore [--legacy]             查看/还原 tidy 备份
-/mem restore --trash                查看/还原根 .trash 的删除快照
+/mem restore --trash [id]           列出/恢复已删除文件（blocks 也支持）
+/mem restore --trash                只列出根 .trash 的删除快照（files）
 ```
 
 这些是 files 工作流，不是 blocks 的整理/创建入口；导入旧文件不等于更新已迁移的块，blocks 的旧文件漂移应核对后走 `migrate --import-legacy`。
 
-tidy 是带日志的事务：先记录计划，再逐项 CAS 写入；中断可恢复。batch 按成本/次数上限归档和重写，dry-run/status 只读；无法确认已死的锁不会按锁龄强拆，break-lock 仅真实 TUI 可用。不支持硬链接的文件系统拒绝事务式 tidy。
+`/mem tidy` 及 `memory.tidy.*` 设置已彻底移除（breaking）。旧 `.backup` journal/manifest、根 `archive/` 与 tidy 运行记录保留在磁盘上但被忽略，不会自动恢复。`/mem restore <备份 id>` 或 `--legacy` 会明确拒绝并提示手工恢复；`--trash` 与 blocks 的 `--block` 恢复仍可用。同名文件冲突不覆盖。无法确认已死的目录锁必须人工核实，不能按锁龄强拆。
 
 files 的 review/expired 当前也只读展示，不能继续依赖旧版交互延期/删除语义。根 `.trash/` 的删除快照仅保留最近 20 份；超过保留数的快照不可恢复，编辑也没有自动备份。未 pin 的 core.md 改名可能退出旧核心常驻区；这是 files 的特定风险，不是 blocks 中重命名 topic 的做法。
 
-设计与运维参考：[开发者 README](../dev/memory/README.md)、[块治理架构](../dev/memory-governance/arch.md)、[迁移 runbook](../dev/memory/migration-runbook.md)、[files 设计](../dev/memory/memory-plan.md)、[tidy 事务](../dev/memory/tidy-batch-plan.md)。
+设计与运维参考：[开发者 README](../dev/memory/README.md)、[块治理架构](../dev/memory-governance/arch.md)、[迁移 runbook](../dev/memory/migration-runbook.md)、[files 设计](../dev/memory/memory-plan.md)。
+
+<a id="legacy-tidy-backup-recovery"></a>
+
+## 旧 tidy 备份的安全手工恢复
+
+`/mem restore` 不再读取或重放旧 tidy 备份。这不是删除回收站恢复，也不是布局迁移；
+损坏、未知版本、来源不明或无法核对完整性的备份应**停止处理**，保留原件另行排查。
+不要运行旧 executor 或把备份 ID/文件传给 `--trash`、`--block`、`migrate`。
+
+1. **停写**：停止目标项目的 pi、agent 和其他记忆写入者；在新会话启动前暂停自动迁移。
+   不要为了查询路径而启动一个会自动迁移的主会话。锁龄不是死亡证据；不能按年龄删除锁，
+   无法确认持有者已经退出时停止恢复。
+2. **定位真实目录**：核对相同启动环境、`ARMORY_MEMORY_ROOT`、主仓库/worktree 归属和 symlink 的真实目标。
+   仅在已经停写的现有会话中用只读 `/mem path` 辅助核对；没有这样的会话时，按
+   [迁移 runbook 的路径与备份步骤](../dev/memory/migration-runbook.md#2-第-0-步备份)从环境和磁盘核实。
+   无法确定唯一真实目录时停止。secure 数据的副本必须留在同一已解锁加密边界内。
+3. **完整备份**：把整个真实记忆目录（包括隐藏文件、`.backup/`、journal、manifest、
+   根 `archive/`、`.trash/`、blocks 与布局标记）保存为目录外的独立副本，不能用硬链接充当备份。
+   核对文件清单、字节/哈希与权限；没有完整且核验过的副本前不做任何恢复。
+4. **只读检查**：只读查看副本中的 manifest/journal/归档与当前 live 文件，分清记录的操作、
+   原文件、备份文件与实际最终状态；JSON 能解析不代表可恢复。缺文件、哈希不符、损坏或未知格式立即停止，
+   不猜测事务结果，不修改或清理原 journal/manifest/archive。
+5. **独立目录核对**：把候选内容复制到另一个独立工作目录，逐项比较正文、元数据、权限与当前 live，
+   先由人确认需要找回的内容及其来源。不得让该目录进入实际记忆扫描，也不自动 replay 或批量复制覆盖。
+6. **人工选择性恢复**：保持停写，最后再次核对目标状态；只把已确认的内容写入新的、无同名冲突的文件，
+   **不覆盖现有 live 文件**。需要合并现存条目时另行人工审阅并走正常编辑流程，不以旧文件直接覆盖。
+   核验结果、常驻规则/权威标记与文件内容后才恢复写入；所有原始 journal、manifest、archive 和完整备份继续保留。

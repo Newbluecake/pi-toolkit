@@ -11,7 +11,7 @@
 ## 1. 前提与影响
 
 - 迁移规划是确定性规则，不调用模型；它按文件、元数据和现有索引拆分或保留整文件，不是语义分类。迁移会改变记忆的组织和注入内容，必须逐项核验。
-- 迁移成功后该目录使用 `blocks/` 布局，`/mem tidy` 禁用，改用 `/mem review`；旧根目录 Markdown 文件**不修改、不删除**，供回退参考。但迁移后新增或编辑的 blocks 不会自动写回旧文件。
+- 迁移成功后该目录使用 `blocks/` 布局，`/mem tidy` 已从所有布局移除，使用现有 `/mem review` 建议；旧根目录 Markdown 文件**不修改、不删除**，供回退参考。但迁移后新增或编辑的 blocks 不会自动写回旧文件。
 - 完成第 2 节备份并确认 auto 已关闭后，在**目标项目目录**启动 pi 的交互式 TUI **主会话**。写迁移、回退、导入以及任何 `--all` 要求 `hasUI && mode === "tui" && !isWebInvocation`；child 会话拒绝迁移。部分只读命令不要求 TUI：Web 的独立只读执行器只实现精确的 `migrate --dry-run` 和 `migrate --report`，不是完整迁移入口。安全门禁未通过会报 `E_GATE: <reason>`。见 `src/memory/command.ts:290-328,612-614`、`src/memory/command-readonly.ts:101-123`。
 - 备份前在同一环境中按以下规则确定记忆根；备份后才在目标会话执行 `/mem path` 确认实际项目记忆目录。默认根是 `/home/bluecake/.pi/agent/memory`（以当前用户 home 为准）；若启动 pi 的环境设置了 `ARMORY_MEMORY_ROOT`，实际根使用该值。项目目录名将 cwd 尾部 `/` 去掉、其余 `/` 替换为 `-`；例如 `/home/bluecake/ai/pi-toolkit` → `-home-bluecake-ai-pi-toolkit`。worktree 会先解析到主仓库 cwd；slug 可能有歧义，以 `/mem path` 为准（`src/memory/paths.ts:20-48`、`src/memory/command.ts:80-85,374-375`）。
 - 每个显式迁移目录的预算为 60 秒、120,000 操作、20,000 个源文件、64 MiB 源文件总量；触限可能显示 `memory: over-budget — Error: E_BUDGET...`。预演快照也有文件数和字节上限，但其报错形式可能是 `memory error: E_BUDGET: source count` 或 `source bytes`（`src/memory/blocks/migrate.ts:108-127,151-169,410-414,564-618`）。
@@ -149,13 +149,13 @@ cp -a -- "$target/." "$linkcopy/" && diff -r --no-dereference -- "$target" "$lin
 ## 8. 常见问题
 
 - `memory migration requires the interactive main session`：写操作或 `--all` 不在真正 TUI 主会话，或是 child；改到目标项目的主 TUI。child 若被只读层先拦截也可能显示 `E_CHILD_READONLY: project memory is readonly`。
-- `memory dir busy: lock … is held by … since … (owner cannot be verified) — if no pi process holds it, run /mem tidy --break-lock`：目录锁在等待期限内未取得。先停止同目录其他记忆写入并等待，确认持锁主机和进程；锁龄本身不是进程死亡证据。提示中的 `/mem tidy --break-lock` 在 blocks 目录禁用 tidy 时不可盲目使用；不要手动删锁，先核实并排查（`src/memory/lock.ts:29-33,71-115`）。迁移内的锁错误也可能包在 `memory: aborted — ...` 中。
+- `memory dir busy: lock … (owner cannot be verified)`：目录锁在等待期限内未取得。先停止同目录其他记忆写入并等待，确认持锁主机和进程；锁龄本身不是进程死亡证据。`/mem tidy --break-lock` 已移除，只有人工确认无人持锁后才能清理残留锁；未确认前不要删除。迁移内的锁错误也可能包在 `memory: aborted — ...` 中。
 - `over-budget` / `E_BUDGET`：超出时间、操作、文件数或字节预算。停止并保存输出，核对源目录规模及机器负载，先处理原因，再单目录重试；不要反复并发重试。dry-run 的文件数/字节报错也要处理。
 - `E_GATE: locked`、`E_GATE: unmounted`、`E_GATE: identity-changed`：分别表示安全域锁定、vault 未挂载或目录身份无法确认/改变；停止操作，检查正确 vault 已解锁且挂载、路径身份未变，必要时安全重启会话。不要绕过 gate 或在卸载后的底层路径写入（`src/secure/memory-gate.ts:38-50`）。迁移过程中也可能作为 `aborted` 的 reason 出现。
 
 ## 9. 迁移后
 
-- blocks 目录禁用 tidy。`/mem review` 只读展示现有 Jev 建议与即时治理建议，不限于治理子集；`/mem expired` 独立展示 active 块的已过期 `expires` 和所有 `until` 条件，区分 user/agent（同一块可占两行），不包含已取代或归档块。两者均不运行 sweep、分类器或交互式修改；`until` 只供核对，不能据此断言事件已发生。当前实现见 [README 的只读展示说明](README.md#mem-review-与-mem-expired-只读展示)。
+- tidy 已彻底移除。`/mem review` 只读展示现有 Jev 建议与即时治理建议，不限于治理子集；`/mem expired` 独立展示 active 块的已过期 `expires` 和所有 `until` 条件，区分 user/agent（同一块可占两行），不包含已取代或归档块。两者均不运行 sweep、分类器或交互式修改；`until` 只供核对，不能据此断言事件已发生。当前实现见 [README 的只读展示说明](README.md#mem-review-与-mem-expired-只读展示)。
 - 恢复归档或已取代的块用 `/mem restore --block <id or stored name>`，把占位符替换为实际 ID 或存储名；这不是删除恢复。已删除块保存在 `blocks/.trash/`，`restore --trash` 自 `e0993f03` 起在 blocks 布局下列出并恢复该目录（files 布局仍用根 `.trash/`，两者互不混合）。
 - Jev 已有标签按条目内容 hash 匹配沿用，未匹配不会因迁移重新调用模型分类；报告里的 oversize 等是规则建议（`src/memory/blocks/migrate-plan.ts:142-145,195-215`）。
 - 旧根文件迁移后发生变化不会自动覆盖 blocks。`/mem migrate --import-legacy --dry-run` 只列出漂移文件；核对后 `/mem migrate --import-legacy` 才追加导入，以内容 hash 去重，需已是 blocks；不覆盖现有块。见 `src/memory/blocks/legacy.ts:44-56,58-124`。

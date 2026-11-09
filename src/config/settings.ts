@@ -81,7 +81,6 @@ export type {
   MemoryDoctorSettings,
   MemoryLayout,
   MemorySettings,
-  MemoryTidySettings,
   MemoryToolSurface,
 } from "../memory/settings.js";
 import { DEFAULT_WORKFLOW_BUDGET, DEFAULT_WORKFLOW_SETTINGS, parseWorkflowSettings } from "../workflow/settings.js";
@@ -366,8 +365,6 @@ export const TIME_SETTING_MS_PATHS: readonly string[] = [
   "fabric.rootMinIntervalMs",
   // fabric-thread P0 (arch §11.1): single-steer budget stored as fabric.threads.steerTimeoutS.
   "fabric.threads.steerTimeoutMs",
-  "memory.tidy.timeoutMs",
-  "memory.tidy.batch.totalTimeoutMs",
   "memory.jev.recall.waitMs",
   // memory-predict plan §10: file keys `memory.jev.predict.model.waitS` /
   // `requestBudgetS` (integer seconds), internal millisecond fields below.

@@ -105,8 +105,8 @@ describe("resolveCommandPolicy — pi-toolkit sub-command table (§4.6 pi-toolki
     expect(resolve("mem", "init", "extension").policy).toBe("confirm"); // one-shot write, like import
     expect(resolve("mem", "tidy", "extension").policy).toBe("confirm");
     expect(resolve("mem", "restore --trash", "extension").policy).toBe("confirm");
-    expect(resolve("mem", "tidy --batch --dry-run", "extension").policy).toBe("allow");
-    expect(resolve("mem", "tidy --batch --status", "extension").policy).toBe("allow");
+    expect(resolve("mem", "tidy --batch --dry-run", "extension").policy).toBe("confirm");
+    expect(resolve("mem", "tidy --batch --status", "extension").policy).toBe("confirm");
     expect(resolve("mem", "tidy --batch", "extension").policy).toBe("confirm");
     expect(resolve("mem", "tidy --break-lock", "extension").policy).toBe("confirm");
   });

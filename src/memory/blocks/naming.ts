@@ -28,7 +28,7 @@ export function canonicalTopic(stem: string): string | undefined {
 export function nextSeq(topic: string, used: Iterable<string>): number {
   let max = 0;
   for (const name of used) {
-    // Trash has a newTidyId prefix; names from all three namespaces participate.
+    // Trash has a newMemoryId prefix; names from all three namespaces participate.
     const candidate = name.replace(/^\d{8}T\d{9}Z-\d+-[0-9a-f]{6}-/, "");
     const parsed = parseArchiveName(candidate);
     if (parsed?.topic === topic) max = Math.max(max, parsed.seq);

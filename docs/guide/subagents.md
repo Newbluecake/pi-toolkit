@@ -97,7 +97,7 @@ subagent 之间的可选 fire-and-forget 消息：`"fabric": { "enabled": true }
 - 前置：装好 droid CLI，已登录或设置 `FACTORY_API_KEY`。强烈建议在 `~/.factory/update-policy.json` 里 `{"disableAutoUpdate":true}`（自更新会导致协议漂移）。
 - **模型白名单**：`externalAgents.droid.models` 非空时，既是系统提示里展示的模型，也是新 spawn 的白名单——名单外的 `droid/<id>` 在派发前被拒，额度提示与改派建议也只列名单内模型；空列表（默认）= 自动，沿用 droid 的模型目录。resume 已有 run 不受白名单影响。
 - 计费：droid 用量 × 底层模型的 pi 单价折算；匹配不上显示 `unpriced`，不会推断为 0。
-- 额度闸门见 [额度与负载](quota-load.md)。`toolDomain:"readonly"` 对 droid 不可用，所以 tidy 不会使用 droid。
+- 额度闸门见 [额度与负载](quota-load.md)。`toolDomain:"readonly"` 对 droid 不可用。
 - 权限：droid 以高自治级别运行并自动批准权限请求，同时会读取你的全局 skills / AGENTS.md / MCP，使用前请确认可接受。
 
 完整说明：[docs/dev/external-agent/README.md](../dev/external-agent/README.md)。

@@ -17,14 +17,14 @@ const STATUSES: readonly MemoryStatus[] = ["active", "stale", "archived"];
 const MAX_FRONTMATTER_LINES = 40;
 const MAX_FRONTMATTER_BYTES = 2048;
 // 2026-10-16 user ruling: 160B → 300B (≈100 CJK chars). Single source of
-// truth — every surface (doctor D07 text, tidy prompt/validation, docs) reads
+// truth — every surface (doctor D07 text, docs) reads
 // these constants. The tiered index still renders its own 110B cut.
 export const MAX_DESCRIPTION_BYTES = 300;
 export const MAX_READ_WHEN_BYTES = 240;
 
 /** Truncate a single-line frontmatter field value to `maxBytes` UTF-8 bytes
  *  at a code-point boundary (never splits a surrogate pair), appending "…"
- *  only when it still fits — tidy's apply-time normalize for over-limit
+ *  only when it still fits — metadata normalization for over-limit
  *  description/read_when (2026-10-16). */
 export function truncateMetaField(value: string, maxBytes: number): string {
   if (Buffer.byteLength(value, "utf8") <= maxBytes) return value;
@@ -42,7 +42,7 @@ export function truncateMetaField(value: string, maxBytes: number): string {
 
 /** True iff `message` is one of `parseMemoryMeta`'s pure length-overage
  *  errors (`description exceeds NB` / `read_when exceeds NB`) — the only
- *  frontmatter problems tidy may auto-truncate instead of rejecting. */
+ *  frontmatter length problems, distinct from structural errors. */
 export function isMetaLengthOverage(message: string): boolean {
   return /^(description|read_when) exceeds \d+B$/.test(message);
 }

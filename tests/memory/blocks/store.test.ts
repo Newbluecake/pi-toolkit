@@ -9,8 +9,8 @@ import {
   topicSummary,
   trashBlockLocked,
 } from "../../../src/memory/blocks/store.js";
-import { listTrashEntries } from "../../../src/memory/tidy/manifest.js";
-import { restoreFromTrash } from "../../../src/memory/tidy/restore.js";
+import { listTrashEntries } from "../../../src/memory/trash.js";
+import { restoreFromTrash } from "../../../src/memory/trash.js";
 import { defaultPaths } from "../../../src/memory/paths.js";
 import type { JevIndexV1 } from "../../../src/memory/jev/contracts.js";
 import { entryHash } from "../../../src/memory/jev/entries.js";

@@ -198,13 +198,12 @@ const SYSLOAD_FILE_CLOSURE: Record<string, string[]> = {
   // #56 ⑧: workflow block settings — self-contained (type-only core/types import).
   "src/workflow/settings.ts": [],
   // #56 ⑧: memory block settings — the tidy batch limits (pinned below: only ../contracts.js).
-  "src/memory/settings.ts": ["./tidy/batch-settings.js"],
+  "src/memory/settings.ts": [],
   // #56 ⑧: webHub/feishuBot block settings — LAN host/origin classification (L16 第一处) + the browser-safe,
   // import-free shared CIDR parser (LAN security P0). The hub whitelist is NOT loosened: these are the same two files.
   "src/web-hub/agent/settings.ts": ["../protocol/client-allow.js", "../protocol/lan.js"],
   "src/sysload/io-ledger.ts": [],
   // P0's compatibility re-export keeps the shared file limits available to pi-free callers.
-  "src/memory/tidy/batch-settings.ts": ["../contracts.js"],
   "src/memory/contracts.ts": [],
   "src/sysload/mounts.ts": ["./procfs.js"],
   "src/sysload/procfs.ts": [],

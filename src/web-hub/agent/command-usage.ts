@@ -32,7 +32,7 @@ export const TOOLKIT_USAGE: Readonly<Record<string, string>> = {
   agent:
     "status [runId] (recommended; <runId> equivalent) | costs | settings (list | set <k> <v> | reset <k>) | reload (now | cancel); advanced: budget",
   // src/memory/command.ts DESCRIPTION.
-  mem: "list | init | import [--force] [slug|all] | path | doctor | tidy [--batch] | restore [--legacy]",
+  mem: "list | init | import [--force] [slug|all] | path | doctor | restore --trash [id]",
   // src/cache-ttl/cache-ttl.ts `USAGE` constant minus the "usage: /cache-ttl " prefix
   // (r1 #3 condensed form).
   "cache-ttl":

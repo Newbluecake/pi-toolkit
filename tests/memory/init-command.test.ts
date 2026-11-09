@@ -84,7 +84,7 @@ describe("runMemInit", () => {
     expect(meta.description).toContain("每轮");
     expect(meta.updated).toBeDefined();
     // 2026-10-21 ruling: the skeleton is a template meant to stay rewritable
-    // by tidy/agent ⇒ stamped `source: agent`; deleting the line locks it.
+    // by the memory tool/agent ⇒ stamped `source: agent`; deleting the line locks it.
     expect(meta.source).toBe("agent");
     expect(content).toContain("# 核心规则（每轮）");
     // created with the tool's private-file mode
@@ -156,7 +156,7 @@ describe("handleMemInitCommand", () => {
     expect(writes).toEqual([fx.cwd]);
   });
 
-  test("migration hint lists the topic-file count and the tidy preview command", async () => {
+  test("initialization hint lists the topic-file count and manual core guidance", async () => {
     const fx = fixture();
     writeMemFile(fx, "build.md", TOPIC_FILE);
     const { ctx, notifications } = fakeCtx(fx.cwd);

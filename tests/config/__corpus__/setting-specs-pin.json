@@ -141,19 +141,6 @@
     ["memory.incremental.taskDoneTrigger", "5e38bf7996c21cddb9f4bbbf2074e93ca886e74e1990c6b52dc0782d20569d6a"],
     ["memory.doctor.notifyOnStart", "69f0bc0e5d03be4a3373bc47018284da82363fb73422cb677744108247c75121"],
     ["memory.doctor.staleDays", "09cb26552cdfe6f6b19250e8eeaf401382264a637c43d50b1c993044dc298479"],
-    ["memory.tidy.agentType", "9429afc2435c89005cbdce966afb71b65140a6829e29e614022263843ffbddf6"],
-    ["memory.tidy.model", "29ac773645df63ec6b103c620105b2fccfdd882d8735abba3ce219f3b6cae2bf"],
-    ["memory.tidy.timeoutS", "8c1ec4c7abcae995b595b2f8f95af76b3bd88363c950dd3510e752232750eb2f"],
-    ["memory.tidy.maxInputBytes", "b97cec231d928fd7251946cc146536304c88b26b5f9269763a95a6081572560b"],
-    ["memory.tidy.maxOutputBytes", "58907612c150de606abbc55802dc505f6967dbf1a9ab679bba7fe2011ba49f71"],
-    ["memory.tidy.maxCostUsd", "9aa5f662b47fa5b757683e574866b0673a193d986db7b8f8a67a03509fc477cd"],
-    ["memory.tidy.maxTurns", "6ccc13b84191a2e59171ae4f50be17247e5c45bd80577024a9bf313ddf518254"],
-    ["memory.tidy.batch.enabled", "3cf9143d39d4a65735d721225f53034e2b7a0b5e76dfaa17239195f4a87b6657"],
-    ["memory.tidy.batch.targetBytes", "2dff2b374358f4bfc5881c295e8af25c1c992cd200989e5ee445b9b069eaded5"],
-    ["memory.tidy.batch.maxModelRuns", "e8156f195f69237e571923358dc6ed82fd7df3ba658e77c9f2f9192ae2fab415"],
-    ["memory.tidy.batch.maxTotalCostUsd", "9131edf7a7a15aa2fc098c37adc324ccf619fb6ff5e125e41a071b85abde6f3a"],
-    ["memory.tidy.batch.totalTimeoutS", "d2e1bfd8cf64875bab22a297e3731a033c4959c7fc4aec8639cfb8ddbafbb271"],
-    ["memory.tidy.batch.outputTokPerSec", "ef03b0dd0425dc1cb18e6c6f43ec10605d093e338b00f5f2b3f6081f4c3a2980"],
     ["memory.jev.enabled", "564e17a607e55bbb16fd1468adb08862bb71b73a0228502b9674144133bde33c"],
     ["memory.jev.classifiers", "f8271afe786508dcaa2cdef1db2c179d2b98ad6ed756892ec105533407f34c89"],
     ["memory.jev.proxy", "c9a30dd88f1f6d3646c76338e6efc8a95c95116698f92fb701e45d28ba12da5d"],
@@ -341,7 +328,7 @@
     ["reflex.autoResolve", "fa7252fca5b9d9612274c53c53b4ac0d2b8440a9574f7ddc36a4edb81bd9a726"],
     ["reflex.drafts.enabled", "424d403597834a370e6e25a0f89c9b2409242400cba7fde08de293bb5f820729"]
   ],
-  "all": "7fe64e7a0496f5f54f6c87357db4c790a84e34a75b79c0d44171a5e292d4bfb1",
+  "all": "f1a9633d4145929288df1e7f21d7d2aa441096cf3ca34d7a7272d83b48fde5d4",
   "declaredChanges": {
     "p50_1": [
       {
