@@ -1,4 +1,5 @@
 /** Factory-only scoped surface. Host owns all ports, lifecycle and human provenance. */
+import { scopedFailure, withScopedMessage } from "./error-messages.js";
 import { randomBytes } from "node:crypto";
 import { Type } from "@sinclair/typebox";
 import { bodyTextDigest, isFromRef, isHubTopic, readUntrustedValue, scopedOpDigest, utf8Bytes } from "./limits.js";
@@ -30,7 +31,7 @@ export interface ScopedToolDeps extends ScopedSurfaceDeps {
   readonly humanTurn: () => HumanTurn | undefined;
   readonly projectLabel: () => string;
 }
-export const scopedFailure = (code: ScopedMemoryErrorCode) => ({ ok: false as const, code });
+export { scopedFailure } from "./error-messages.js";
 export function scopedReadGate(deps: ScopedSurfaceDeps, scope: "session" | "hub"): ScopedMemoryErrorCode | undefined {
   if (!deps.enabled[scope] || (scope === "hub" && deps.child)) return "E_SCOPE_DISABLED";
   if (deps.capability() !== "ok" || deps.signal().aborted) return "E_WRITE_GATE";
@@ -60,7 +61,7 @@ export function scopedView(deps: ScopedSurfaceDeps, scope: "session" | "hub") {
     const gate = scopedReadGate(deps, "hub");
     if (gate) return scopedFailure(gate);
     const inspected = deps.hub!.management.inspect(item.id);
-    if (!inspected.ok) return inspected;
+    if (!inspected.ok) return withScopedMessage(inspected);
     items.push({ ...inspected.item, rev: inspected.rev });
   }
   return {
@@ -121,7 +122,7 @@ export function createScopedMemoryTool(deps: ScopedToolDeps) {
     },
     { additionalProperties: false },
   );
-  async function run(toolCallId: string, input: unknown, signal?: AbortSignal): Promise<unknown> {
+  async function runInner(toolCallId: string, input: unknown, signal?: AbortSignal): Promise<unknown> {
     const parsed = readUntrustedValue(input);
     if (!parsed.ok || !parsed.value || typeof parsed.value !== "object" || Array.isArray(parsed.value))
       return scopedFailure("E_META_INVALID");
@@ -217,7 +218,7 @@ export function createScopedMemoryTool(deps: ScopedToolDeps) {
         },
         combined,
       );
-      if (!approval.approved) return scopedFailure(approval.code);
+      if (!approval.approved) return scopedFailure(approval.code, approval.message);
       cap = approval.cap;
     }
     try {
@@ -230,6 +231,9 @@ export function createScopedMemoryTool(deps: ScopedToolDeps) {
     } finally {
       if (cap) deps.caps.revoke(cap);
     }
+  }
+  async function run(toolCallId: string, input: unknown, signal?: AbortSignal): Promise<unknown> {
+    return withScopedMessage(await runInner(toolCallId, input, signal));
   }
   return {
     name: "scoped_memory",

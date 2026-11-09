@@ -122,8 +122,11 @@ describe("declared-only factory tool", () => {
     expect(await f.tool.run("c", create)).toMatchObject({ ok: true, id: "n1" });
     const target = f.session.view().items[0]!;
     expect(target.item.authority).toBe("agent");
-    expect(await f.tool.run("u", { ...create, op: "update", id: "n1" })).toEqual({ ok: false, code: "E_REV_REQUIRED" });
-    expect(await f.tool.run("u", { ...create, op: "update", id: "n1", rev: "deadbeef" })).toEqual({
+    expect(await f.tool.run("u", { ...create, op: "update", id: "n1" })).toMatchObject({
+      ok: false,
+      code: "E_REV_REQUIRED",
+    });
+    expect(await f.tool.run("u", { ...create, op: "update", id: "n1", rev: "deadbeef" })).toMatchObject({
       ok: false,
       code: "E_CONFLICT",
     });
@@ -158,7 +161,7 @@ describe("declared-only factory tool", () => {
   it("child explicit authority (even agent) and inherited user mutation rejected", async () => {
     const f = fixture(true);
     for (const authority of ["agent", "user", null])
-      expect(await f.tool.run("c", { ...create, authority })).toEqual({ ok: false, code: "E_CHILD_AUTHORITY" });
+      expect(await f.tool.run("c", { ...create, authority })).toMatchObject({ ok: false, code: "E_CHILD_AUTHORITY" });
     expect(await f.tool.run("c", create)).toMatchObject({ ok: true });
     expect(f.tool.parameters.properties.storageScope).toMatchObject({ const: "session" });
     f.branch.push({
@@ -182,7 +185,7 @@ describe("declared-only factory tool", () => {
     });
     const target = f.session.view().items.find((i) => i.item.id === "n2");
     expect(target).toBeDefined();
-    expect(await f.tool.run("d", { storageScope: "session", op: "delete", id: "n2", rev: target!.rev })).toEqual({
+    expect(await f.tool.run("d", { storageScope: "session", op: "delete", id: "n2", rev: target!.rev })).toMatchObject({
       ok: false,
       code: "E_AUTHORITY",
     });
@@ -190,7 +193,7 @@ describe("declared-only factory tool", () => {
   it("real hub inspect rev + shared approval + store, no proof means no popup", async () => {
     const f = fixture(),
       op = { ...create, storageScope: "hub", topic: "general" };
-    expect(await f.tool.run("c", op)).toEqual({ ok: false, code: "E_HUB_NEEDS_HUMAN_TURN" });
+    expect(await f.tool.run("c", op)).toMatchObject({ ok: false, code: "E_HUB_NEEDS_HUMAN_TURN" });
     expect(f.dialogs()).toBe(0);
     f.tracker.noteInteractive(f.owner());
     expect(await f.tool.run("c", op)).toMatchObject({ ok: true, id: "general.001" });
@@ -208,10 +211,10 @@ describe("declared-only factory tool", () => {
   it("model selfauth fields and disabled/secure/locked/unknown rejected before reads", async () => {
     const f = fixture();
     for (const key of ["grant", "owner", "source", "authorized", "cap"])
-      expect(await f.tool.run("c", { ...create, [key]: true })).toEqual({ ok: false, code: "E_META_INVALID" });
+      expect(await f.tool.run("c", { ...create, [key]: true })).toMatchObject({ ok: false, code: "E_META_INVALID" });
     for (const c of ["disabled", "secure", "locked", "unknown"] as const) {
       f.capability(c);
-      expect(await f.tool.run("v", { op: "view", storageScope: "session" })).toEqual({
+      expect(await f.tool.run("v", { op: "view", storageScope: "session" })).toMatchObject({
         ok: false,
         code: "E_WRITE_GATE",
       });
@@ -240,7 +243,7 @@ describe("declared-only factory tool", () => {
         },
       },
     });
-    expect(await bad.run("c", { ...create, authority: "user" })).toEqual({ ok: false, code: "E_HUB_CAP_STALE" });
+    expect(await bad.run("c", { ...create, authority: "user" })).toMatchObject({ ok: false, code: "E_HUB_CAP_STALE" });
     expect(f.branch).toEqual([]);
     const late = createScopedMemoryTool({
       ...f.deps,
@@ -253,10 +256,13 @@ describe("declared-only factory tool", () => {
         },
       },
     });
-    expect(await late.run("c", { ...create, authority: "user" })).toEqual({ ok: false, code: "E_STALE_SESSION" });
+    expect(await late.run("c", { ...create, authority: "user" })).toMatchObject({ ok: false, code: "E_STALE_SESSION" });
     expect(f.branch).toEqual([]);
     f.controller.abort();
-    expect(await f.tool.run("v", { op: "view", storageScope: "session" })).toEqual({ ok: false, code: "E_WRITE_GATE" });
+    expect(await f.tool.run("v", { op: "view", storageScope: "session" })).toMatchObject({
+      ok: false,
+      code: "E_WRITE_GATE",
+    });
   });
 });
 
@@ -274,7 +280,7 @@ it("unavailable actual shared approval / RPC local-forbidden never pop up", asyn
     },
   });
   const tool = createScopedMemoryTool({ ...f.deps, sharedApproval: approval });
-  expect(await tool.run("c", { ...create, authority: "user" })).toEqual({
+  expect(await tool.run("c", { ...create, authority: "user" })).toMatchObject({
     ok: false,
     code: "E_HUB_CONFIRM_UNAVAILABLE",
   });
@@ -311,9 +317,13 @@ it("real approval rejects Feishu, busy reentry; cancel+late answer cannot affect
   const pending = tool.run("c", { ...create, authority: "user" });
   const first = callback!;
   expect(first({ kind: "answer", answers: { "0": affirm }, origin: "feishu", originKind: "feishu" })).toBe(false);
-  expect(await tool.run("busy", { ...create, authority: "user" })).toEqual({ ok: false, code: "E_HUB_RATE" });
+  expect(JSON.parse((await tool.execute("busy", { ...create, authority: "user" })).content[0]!.text)).toEqual({
+    ok: false,
+    code: "E_HUB_RATE",
+    message: "上一个批准请求仍在进行中；请等它结算（批准 / 拒绝 / 超时）后再重试。",
+  });
   controller.abort();
-  expect(await pending).toEqual({ ok: false, code: "E_HUB_DECLINED" });
+  expect(await pending).toMatchObject({ ok: false, code: "E_HUB_DECLINED" });
   expect(closed).toBe(1);
   expect(f.branch).toEqual([]);
   controller = new AbortController();
@@ -323,6 +333,21 @@ it("real approval rejects Feishu, busy reentry; cancel+late answer cannot affect
   expect(callback!({ kind: "answer", answers: { "0": affirm }, origin: "browser", originKind: "loopback" })).toBe(true);
   expect(await next).toMatchObject({ ok: true });
   expect(f.session.view().items).toHaveLength(1);
+});
+
+it("tool execute preserves the per-turn approval limit message after three approved dialogs", async () => {
+  const f = fixture();
+  f.tracker.noteInteractive(f.owner());
+  const op = { ...create, authority: "user" };
+  for (let i = 0; i < 3; i++) expect(await f.tool.run(`approved-${i}`, op)).toMatchObject({ ok: true });
+  expect(f.dialogs()).toBe(3);
+  expect(JSON.parse((await f.tool.execute("limit", op)).content[0]!.text)).toEqual({
+    ok: false,
+    code: "E_HUB_RATE",
+    message: "本回合批准请求次数已达上限，因此不能继续请求；请等待用户的新消息后再按需重试。",
+  });
+  expect(f.dialogs()).toBe(3);
+  expect(f.session.view().items).toHaveLength(3);
 });
 
 it("delete approval freezes exact Hub body and CAS rejects a changed target after confirmation", async () => {
@@ -369,7 +394,7 @@ it("delete approval freezes exact Hub body and CAS rejects a changed target afte
       rev: original.rev,
       text: "model empty substitute",
     }),
-  ).toEqual({ ok: false, code: "E_CONFLICT" });
+  ).toMatchObject({ ok: false, code: "E_CONFLICT" });
   expect(frozen?.operation).toMatchObject({
     text: "old full body",
     expectRev: original.rev,
@@ -383,11 +408,11 @@ it("oversized and malformed provenance rejected before human dialogs; getters ne
   const f = fixture();
   f.tracker.noteInteractive(f.owner());
   let getterCalls = 0;
-  expect(await f.tool.run("c", { ...create, authority: "user", text: "x".repeat(1025) })).toEqual({
+  expect(await f.tool.run("c", { ...create, authority: "user", text: "x".repeat(1025) })).toMatchObject({
     ok: false,
     code: "E_TOO_LARGE",
   });
-  expect(await f.tool.run("c", { ...create, authority: "user", from: "untrusted-source" })).toEqual({
+  expect(await f.tool.run("c", { ...create, authority: "user", from: "untrusted-source" })).toMatchObject({
     ok: false,
     code: "E_FROM_INVALID",
   });
@@ -398,7 +423,7 @@ it("oversized and malformed provenance rejected before human dialogs; getters ne
       return "user";
     },
   };
-  expect(await f.tool.run("c", malicious)).toEqual({ ok: false, code: "E_META_INVALID" });
+  expect(await f.tool.run("c", malicious)).toMatchObject({ ok: false, code: "E_META_INVALID" });
   expect(getterCalls).toBe(0);
   expect(f.dialogs()).toBe(0);
   expect(f.branch).toEqual([]);
@@ -469,7 +494,7 @@ it.each(["user", "agent"] as const)(
   async (authority) => {
     const f = fixture();
     const op = { op: "create", storageScope: "hub", topic: "general", text: "must not persist", authority };
-    expect(await f.tool.run("no-proof", op)).toEqual({ ok: false, code: "E_HUB_NEEDS_HUMAN_TURN" });
+    expect(await f.tool.run("no-proof", op)).toMatchObject({ ok: false, code: "E_HUB_NEEDS_HUMAN_TURN" });
     expect(f.dialogs()).toBe(0);
     f.tracker.noteInteractive(f.owner());
     const approval = createOpApprovalPort({
@@ -477,10 +502,36 @@ it.each(["user", "agent"] as const)(
       registry: f.registry,
       select: async (_title, choices) => choices[0],
     });
-    expect(await createScopedMemoryTool({ ...f.deps, sharedApproval: approval }).run("decline", op)).toEqual({
+    expect(await createScopedMemoryTool({ ...f.deps, sharedApproval: approval }).run("decline", op)).toMatchObject({
       ok: false,
       code: "E_HUB_DECLINED",
     });
     expect(f.hub.view().items).toEqual([]);
   },
 );
+
+it("explains the screenshot input and preserves the existing hub authority semantics", async () => {
+  const f = fixture();
+  const result = (await f.tool.run("screenshot", {
+    storageScope: "hub",
+    authority: "agent",
+    id: "",
+    rev: "",
+    op: "create",
+  })) as { ok: boolean; code: string; message: string };
+  expect(result).toMatchObject({ ok: false, code: "E_META_INVALID" });
+  expect(result.message).toContain("user");
+  expect(result.message).toContain("id");
+  expect(result.message).toContain("rev");
+  expect(result.message).toContain("空字符串");
+  expect(f.hub.view().items).toEqual([]);
+});
+
+it("adds guidance to failures returned by the underlying management port", async () => {
+  const f = fixture();
+  expect(await f.tool.run("bad-id", { op: "view", storageScope: "hub", id: "invalid" })).toMatchObject({
+    ok: false,
+    code: "E_META_INVALID",
+    message: expect.any(String),
+  });
+});

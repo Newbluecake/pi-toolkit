@@ -427,3 +427,13 @@ it("native session add and Hub add/rm preserve original direct command behavior 
   expect(f.hub.view().items).toEqual([]);
   expect(popups).toBe(0);
 });
+
+it("adds guidance to command and underlying management failures", async () => {
+  const f = fixture();
+  expect(await f.command.route("session add")).toMatchObject({
+    result: { ok: false, code: "E_META_INVALID", message: expect.stringContaining("create") },
+  });
+  expect(await f.command.route("hub show invalid")).toMatchObject({
+    result: { ok: false, code: "E_META_INVALID", message: expect.any(String) },
+  });
+});

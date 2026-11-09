@@ -438,3 +438,13 @@ is raw `closeSync`, not idempotent; a second close propagates `EBADF`.
 `memory.layout` 默认 `blocks`；`memory.migrate.auto` 仍默认 true。主会话启动时只对当前 cwd 的 files 目录、且写入闸门通过时惰性迁移；旧文件保留。`/mem migrate --status` 查看配置和磁盘状态，`/mem doctor` 查看诊断；`/mem migrate --rollback` 后 `/reload`，回退保留 blocks 快照，迁移后新增内容需人工核对。G2 正式 PASS，G1 仍长期 BLOCKED 且其风险已由用户显式接受；自动取代误判率没有 G1 数据背书。
 
 注入（普通、scoped、外部 agent、pointer）与 files doctor 统一使用 `effectiveLayout`：blocks 配置加 files 格式时回退 tiered，blocks 目录优先于显式 tiered/legacy；迁移准入本身仍按配置和安全门执行。
+
+## Scoped memory failure guidance
+
+`scopes/error-messages.ts` provides an exhaustive, pi-free `Record<ScopedMemoryErrorCode, string>`.
+The tool and native scoped command add `message` to failure results at their boundaries, preserving
+`code`, other fields and any more specific message. Hub management retains its existing specific
+error detail alongside the general guidance. This changes no authorization or persistence rules:
+Hub operations still use user authority and require the existing approval path; an explicitly supplied
+`authority: agent` is ignored for Hub, not independently rejected. A create request must omit `id` and
+`rev`, including empty strings.

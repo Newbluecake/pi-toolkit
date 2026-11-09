@@ -4,6 +4,7 @@ import type { MemorySettings } from "../../config/settings.js";
 import type { AskUserRemotePort } from "../../ask-user/remote.js";
 import { isWebInvocation } from "../../commands/capture.js";
 import { createHumanDispatchHookOwner, type HumanDispatchBridge } from "../../web-hub/agent/human-dispatch-proof.js";
+import { scopedFailure } from "./error-messages.js";
 import { resolveHubSlot } from "./hub-slot.js";
 import { receiveMemoryChildBinding, type MemoryBindRequest } from "./child-bind.js";
 import { createMemoryOwner, hasMemoryManagerCapabilities, type MemoryOwnerRuntime } from "./owner.js";
@@ -238,7 +239,7 @@ export function wireMemoryScopes(
         return r
           ? r.tool.execute(id, input, signal)
           : {
-              content: [{ type: "text" as const, text: JSON.stringify({ ok: false, code: "E_STALE_SESSION" }) }],
+              content: [{ type: "text" as const, text: JSON.stringify(scopedFailure("E_STALE_SESSION")) }],
               details: undefined,
             };
       },
@@ -275,7 +276,7 @@ export function wireMemoryScopes(
         return (
           (await current()?.command.route(args)) ?? {
             handled: /^(session|hub)(?: |$)/.test(args),
-            result: { ok: false, code: "E_STALE_SESSION" },
+            result: scopedFailure("E_STALE_SESSION"),
           }
         );
       } finally {

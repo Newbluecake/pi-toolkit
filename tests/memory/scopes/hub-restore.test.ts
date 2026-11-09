@@ -340,7 +340,11 @@ describe("complete frozen restore confirmation", () => {
     const p = f.provider.management.prepareRestore(f.name);
     if (!p.ok || p.confirmation.kind !== "restore") throw Error("prepare");
     f.source({ ...nextSource, label: "changed source" });
-    expect(await f.provider.management.commit(p.token)).toEqual({ ok: false, code: "E_STALE_SESSION" });
+    expect(await f.provider.management.commit(p.token)).toMatchObject({
+      ok: false,
+      code: "E_STALE_SESSION",
+      message: expect.stringContaining("command source changed"),
+    });
     expect(p.confirmation.newSource).toEqual(nextSource);
     expect(readdirSync(f.trash)).toEqual([f.name]);
     expect(f.provider.view().items).toEqual([]);

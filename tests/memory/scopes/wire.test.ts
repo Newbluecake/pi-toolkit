@@ -105,7 +105,7 @@ describe("scopes activation group", () => {
         }
         expect(paths).not.toHaveBeenCalled();
         expect(branch).not.toHaveBeenCalled();
-        expect((await wiring.command("session add no-authority", ctx)).result).toEqual({
+        expect((await wiring.command("session add no-authority", ctx)).result).toMatchObject({
           ok: false,
           code: "E_STALE_SESSION",
         });
