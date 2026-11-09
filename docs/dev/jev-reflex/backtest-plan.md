@@ -66,6 +66,7 @@ B0 契约 ──┬─► B1 回测核心（corpus/markers/split/replay/evidence
 | B3′ | B3       | 原 B3 run resume / 原 verifier resume    | —                                     | <60 行    |
 
 > verifier 一律 `schema:"verdict/v1"`；GLM 开发不派 GLM 验收；GPT 开发派 Claude 系验收；任何包不派 Kimi、不派 GPT 系验收。B0 规模较 r1 增大（DRX 解析器 + 隔离进程测试 + parity），若主会话判定过大，可把 `draft-regex.ts` 拆成 B0a（先合入）而不改变后续包。
+> （该约束已于 2026-11-09 解除：GPT 系可参与验收，仍须与开发模型异源）
 
 ## 4. 分包细则
 

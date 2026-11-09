@@ -27,7 +27,7 @@ metadata:
 2. **按序回退**：首选报错（过载/429/超时/额度耗尽）换下一个，不在同一模型上反复重试。注入表里列了某模型时**不得因「可用模型列表界面里没看到」就静默换模型**，按注入的完整 ID 直接派，被拒才降级并明说原因。传输故障 ⇒ `resume` 同一 run（**换 provider 也走 resume**，不 abort 后重派）；**安全策略拒绝 ≠ 传输错误**，不得自动换模型重发原 prompt（处置见 models.md）。
 3. **fable 只用于复杂任务（L3）**，且须 `ask_user` 批准（阶梯见 models.md）；疑难默认天花板是 opus 档。
 4. **能并行必并行**：可并行任务必须在**同一条消息**发多个 `Agent`，或在 `SubagentWorkflow` 里 `parallel()`/`pipeline()`；顺序派发不算并行。**同一轮并行 >6 个 agent 必须用 `SubagentWorkflow`**（全局并发上限默认 6，第 7 个起排队且有超时）。workflow 子任务可用 `isolation:"worktree"`（分支 `pi-agent-<runId>` 由调度方自己合并）、按调用指定 `model`/`thinking`；需跨调用共享未提交改动的任务仍留在 `Agent`（详见 references/subagent-workflow.md）。**每轮派单前先做并行自检**（见「并行调度」）；选串行必须能指出具体硬依赖（谁消费谁的产物、谁和谁写同一文件），「稳妥起见」「先看看结果」不是合法理由。
-5. **评审独立性**：评审模型 ≠ 方案模型；验收模型 ≠ 开发模型（走回退链跳过同系）；**验收禁任何 GPT 系**；评审/验收不得向被评对象的作者询问对错。
+5. **评审独立性**：评审模型 ≠ 方案模型；验收模型 ≠ 开发模型（走回退链跳过同系）；评审/验收不得向被评对象的作者询问对错。
 6. **先澄清后规划**：需求模糊先做第 0 步轻量澄清（HARD GATE），禁止拿模糊需求派 Plan。
 7. **workflow 不越权**：`SubagentWorkflow` 只用于已确认方案后的批量执行或阶段内 fan-out，用户闸门留在主会话。
 8. **进度可追踪**：L2/L3 必须 `TaskCreate` 建 todo 并实时更新。
@@ -82,17 +82,17 @@ metadata:
 「订阅余量」指 [quota] 行未触 L3（≥90%）；订阅线有余量时在候选阶段升为首选（前端开发除外：kimi-k3 档首选）。已下线/不进路由的线路以 memory 的 provider 表为准，本表不重复登记。
 「kimi-k3 档」在上下文允许时优先用 256k 档（同订阅，价格约为长档的一半）；仅当任务需要超过 256k（大文件通读、大包验收、长会话 resume）才用长档。
 
-| 阶段                        | 首选                                              | 回退                              | 说明                                                                                                                     |
-| --------------------------- | ------------------------------------------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| **核心调度**（主会话）      | opus 档                                           | kimi-k3 档（订阅）                | 拆解、派单、汇总、裁定                                                                                                   |
-| **代码探索**                | glm 档（订阅）⇄ deepseek-flash 档 → sonnet 档     | kimi-k3 档（订阅）                | `Explore`，只读；glm 与 deepseek-flash 并列（便宜、1M 上下文，适合广撒网 grep/读文件）                                   |
-| **架构设计**                | opus 档                                           | gpt-sol 档                        | `architect`，仅 L3 / 新模块从零搭建                                                                                      |
-| **方案制定**                | opus 档                                           | sonnet 档（简单方案）→ kimi-k3 档 | `Plan`                                                                                                                   |
-| **复杂任务方案 / 疑难攻坚** | opus 档                                           | gpt-sol 档                        | 仅 L3 / 连续 2 轮无进展；Blocker 或仍卡死 → `ask_user` 批准后升 fable 档                                                 |
-| **前端开发**                | kimi-k3 档（订阅）→ glm 档（订阅）                | sonnet 档 → opus 档               | `frontend-dev`（内置 deveye 浏览器调试，页面 bug 派单给可访问 URL/端口）                                                 |
-| **方案评审**                | gpt-sol 档 ⇄ kimi-k3 档（订阅）                   | glm 档（订阅）→ sonnet 档         | `reviewer`；必须与方案模型异源；GPT 线限流/不可用或需要更便宜的评审时改 kimi-k3 档                                       |
-| **开发实施**                | glm 档（订阅）→ sonnet 档 ⇄ gpt-sol 档            | kimi-k3 档（订阅）→ opus 档       | `general`（`general-purpose` 仅杂项多步）；sonnet 与 gpt-sol 并列首选，多包按包分摊                                      |
-| **任务验收**                | glm 档（订阅；开发用了 GLM 的包禁派）→ kimi-k3 档 | deepseek-flash 档 → sonnet 档     | `verifier`；异源；**禁任何 GPT 系**；验收用模型订阅将尽（≥80%）优先 deepseek-flash 档；打回后复验优先 resume 原 verifier |
+| 阶段                        | 首选                                              | 回退                              | 说明                                                                                                                                                              |
+| --------------------------- | ------------------------------------------------- | --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **核心调度**（主会话）      | opus 档                                           | kimi-k3 档（订阅）                | 拆解、派单、汇总、裁定                                                                                                                                            |
+| **代码探索**                | glm 档（订阅）⇄ deepseek-flash 档 → sonnet 档     | kimi-k3 档（订阅）                | `Explore`，只读；glm 与 deepseek-flash 并列（便宜、1M 上下文，适合广撒网 grep/读文件）                                                                            |
+| **架构设计**                | opus 档                                           | gpt-sol 档                        | `architect`，仅 L3 / 新模块从零搭建                                                                                                                               |
+| **方案制定**                | opus 档                                           | sonnet 档（简单方案）→ kimi-k3 档 | `Plan`                                                                                                                                                            |
+| **复杂任务方案 / 疑难攻坚** | opus 档                                           | gpt-sol 档                        | 仅 L3 / 连续 2 轮无进展；Blocker 或仍卡死 → `ask_user` 批准后升 fable 档                                                                                          |
+| **前端开发**                | kimi-k3 档（订阅）→ glm 档（订阅）                | sonnet 档 → opus 档               | `frontend-dev`（内置 deveye 浏览器调试，页面 bug 派单给可访问 URL/端口）                                                                                          |
+| **方案评审**                | gpt-sol 档 ⇄ kimi-k3 档（订阅）                   | glm 档（订阅）→ sonnet 档         | `reviewer`；必须与方案模型异源；GPT 线限流/不可用或需要更便宜的评审时改 kimi-k3 档                                                                                |
+| **开发实施**                | glm 档（订阅）→ sonnet 档 ⇄ gpt-sol 档            | kimi-k3 档（订阅）→ opus 档       | `general`（`general-purpose` 仅杂项多步）；sonnet 与 gpt-sol 并列首选，多包按包分摊                                                                               |
+| **任务验收**                | glm 档（订阅；开发用了 GLM 的包禁派）→ kimi-k3 档 | deepseek-flash 档 → sonnet 档     | `verifier`；异源；GPT 系已解禁，可用 astra 档验收 GPT 系开发产物（异源即可）；验收用模型订阅将尽（≥80%）优先 deepseek-flash 档；打回后复验优先 resume 原 verifier |
 
 - 已下线/不进路由的线路（如 droid 线）以 memory 的 provider 表为准，任何阶段都不派。
 - gpt-sol 开发的包，验收改派 Claude 系（sonnet 档）。开发用了 GLM 的包，验收不派 GLM。
@@ -132,7 +132,7 @@ metadata:
         关键取舍 / 主要风险 / 已由主会话裁定项（各 1 行）+ 方案文件路径
      —— 评审轮数上限见「评审收敛规则」
 6. 并行开发：按文件域拆包，同消息派多个 dev / frontend-dev（先过冲突预检）；prompt 写明「拿不准就问父 agent」（见「子 agent 提问」）
-7‖8. dev 返回后：主会话 bash_job 后台跑全量测试 ‖ 派 verifier（只读 diff，禁 GPT 系）
+7‖8. dev 返回后：主会话 bash_job 后台跑全量测试 ‖ 派 verifier（只读 diff）
 9. 主会话汇总验收结论，报告用户
 ```
 

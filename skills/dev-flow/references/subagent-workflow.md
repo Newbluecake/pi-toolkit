@@ -69,7 +69,7 @@ workflow 的 `agent()` 超出 `maxParallel`（`min(4, concurrencyLimit − 1)`�
 
 Explore=`sonnet` 档，Plan=`opus` 档，dev=`sonnet` 档 ⇄ `gpt-sol` 档（并列首选、按包分摊），
 reviewer = `gpt-sol` 档 ⇄ `kimi-k3` 档（必须与方案模型异源）；
-verifier = `glm` 档 / `kimi-k3` 档 → `deepseek-flash` 档 → `sonnet` 档（**禁派任何 GPT 系**，且与开发模型异源），
+verifier = `glm` 档 / `kimi-k3` 档 → `deepseek-flash` 档 → `sonnet` 档（与开发模型异源），
 **具体 `provider/id` 由 memory 注入的 provider 表给出**，本文件只写能力档位；
 以 SKILL.md「阶段→模型」表与 references/models.md 为准。
 
