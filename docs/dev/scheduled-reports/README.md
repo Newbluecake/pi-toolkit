@@ -169,6 +169,45 @@ path may be added without changing ordinary transaction semantics). Integration 
 `tests/integration/` prefix. The new every/core-clock/consumer drivers use a real flock-backed writer through the test-only
 v2 seeder and are explicitly tier2 in `tests/tiers.ts`; the pure raw timer backend test remains tier1.
 
+## Tool error guidance (#83, 2026-11-09)
+
+- `schedule` update is a patch. To change only the prompt, send
+  `{"action":"update","id":"<当前id>","prompt":"<新完整提示>"}` with the current id and complete new prompt.
+  Omit unchanged `cron`/`at`/`every`/`tz` and other fields; `""`, `false`, and `0` are not omission
+  placeholders. To replace the schedule, send exactly one valid time field; `tz` must accompany
+  `cron` or `at`, never `every`. Existing interval execution-edit reanchoring remains unchanged.
+- Error guidance lives only in `src/tools/schedule-tool.ts`: original machine-readable error codes
+  and reason semantics remain, with omission rules and a copyable correction. Input summaries show
+  **only** fixed field names, types, empty-string markers and lengths; even short values are hidden
+  (no credential-pattern heuristic or value preview). Examples always use a safe placeholder id.
+  Shared diagnostics are projected onto exact input-free vocabulary or reconstructed reason templates:
+  untrusted cron tokens, tz/id/model/agent-type values and unknown diagnostic text are never passed
+  through. Cron step diagnostics retain the fixed field bound and safe examples, not the submitted step.
+  Summary / reason / entire error content have hard **80 / 512 / 2048 UTF-8 byte** caps respectively;
+  terminal control characters are removed as a final backstop. These are presentation limits, not
+  schema/input limits. Missing/invalid `id` points to `{"action":"list"}`; missing/invalid `action`
+  (including mistaken `op`) gets a concrete boundary error when host validation is bypassed.
+  Shared ops/store parsing is unchanged: no empty-value swallowing, automatic schedule rewrite,
+  or ledger migration.
+- Verified against installed pi SDK **1.5.0**: source `Type.Optional` leaves only `action` schema-required;
+  `getJsonSchemaToolParameters(tool, true)` makes optional fields required-but-nullable for strict
+  sampling; `validateToolArguments` against the original schema strips optional nulls before execute
+  but retains empty strings. Tests exercise these actual SDK functions, then execute the validated
+  arguments against a temporary real store; they do not execute raw nulls as SDK evidence.
+- This does **not** establish why a current model-facing transport shows all fields as required or
+  whether an upstream conversion lost nullable/optional information. A required-without-nullable
+  surface outside this repository remains a blocker for a minimal update until its owning transport
+  is corrected. Tool guidance is not a schema-transport fix, and no real task update is claimed.
+  An already-running agent keeps its old registered tool/schema until `/reload`; this tool-only
+  patch does not require a hub restart. Frozen fixtures are not regenerated.
+- Evidence: `tests/tools/schedule-tool.test.ts` covers final execute content (field summary + safe reason
+  - placeholder example), real-store prompt-only cron/once preservation, invalid-call ledger byte
+    equality, and separate SDK null/empty-string cases. Security regressions cover SDK-valid million-character
+    arguments, multiple huge/multibyte fields, short fake secrets (including noncredential-shaped text),
+    original cron/tz/registry diagnostics, action/id and newline/ESC injection; errors must stay bounded,
+    hide the markers and leave ledger bytes unchanged. Existing interval producer/reanchor contracts
+    remain covered by P2 tests.
+
 ## Interval P2 (2026-11-09, #76): producers, strict diagnostics and explicit v2 migration
 
 P2 supersedes P1's **no producer / no migration** restriction, not its arbitration or off/secure contracts.
