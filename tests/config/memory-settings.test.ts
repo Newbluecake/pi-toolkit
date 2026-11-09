@@ -788,7 +788,7 @@ describe("#39 default-on scopes settings", () => {
 
 // #50 P50.1: additive trigger controls, not a generate/auto-commit authorization.
 describe("memory.incremental P50.1 settings", () => {
-  it("pins all six non-live millisecond keys and defaults", () => {
+  it("pins non-live seconds keys with millisecond runtime defaults", () => {
     const expected = {
       enabled: false,
       changeThreshold: 5,
@@ -799,11 +799,12 @@ describe("memory.incremental P50.1 settings", () => {
     };
     expect(parseMemorySettings({}).incremental).toEqual(expected);
     for (const [name, value] of Object.entries(expected)) {
-      const key = `memory.incremental.${name}`;
-      expect(SETTING_SPECS[key]?.path).toBe(key);
+      const duration = name.endsWith("Ms");
+      const key = `memory.incremental.${duration ? `${name.slice(0, -2)}Sec` : name}`;
+      expect(SETTING_SPECS[key]?.path).toBe(`memory.incremental.${name}`);
       expect(SETTING_SPECS[key]?.live).toBeUndefined();
-      expect(SETTING_SPECS[key]?.time).toBeUndefined();
-      expect(defaultOf(SETTING_SPECS[key]!)).toBe(value);
+      expect(SETTING_SPECS[key]?.time).toBe(duration ? true : undefined);
+      expect(defaultOf(SETTING_SPECS[key]!)).toBe(duration ? Number(value) / 1000 : value);
     }
   });
   it("parses valid values and rejects malformed/nonfinite fields independently", () => {

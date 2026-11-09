@@ -588,8 +588,9 @@ inactive-path differential baseline; no old text or schema was shortened to meet
 在 cooldown/quiet-wait/idle-wait 均有真实释放路径。cap 保留一份证据并 dormant，无 timer 重试；
 abort/shutdown/reload 撤销 signal，旧 epoch/身份不复活，迟到结果只允许有界诊断。
 
-- **设置与 off**：新增且仅新增 `memory.incremental.{enabled,changeThreshold,quietMs,idleMs,cooldownMs,taskDoneTrigger}`，
-  默认 `false / 5 / 15000 / 2000 / 300000 / true`，均非 live，时长键直接使用毫秒（不加 seconds alias）。
+- **设置与 off**：新增且仅新增 `memory.incremental.{enabled,changeThreshold,quietSec,idleSec,cooldownSec,taskDoneTrigger}`，
+  默认 `false / 5 / 15 / 2 / 300 / true`（公开时长单位为秒），均非 live；运行时时长分别为
+  15000 / 2000 / 300000 毫秒。旧 `*Ms` 配置仍按毫秒读取，秒键优先；非整秒旧值保留精度，显式设置或重置对应秒键时移除旧键。
   有效时长经 `clampSpanMs`（最长一年）；唯一 timer 使用已有 segmented/unref systemClock，长等待不溢出。
   P50 off 不接 activity recorder，不改变现有 client/classify/工具回显；设置 corpus 只投影并显式断言新增块，
   原 corpus 不重生；setting-specs pin 仅追加六键和逐键原因，所有旧键 hash/顺序保留。
@@ -636,3 +637,5 @@ Jev 临时缺 registry 时 tool activity recorder 仍先执行，不能漏掉长
 覆盖 count=3 成对、§2.4 时间线、三条 cooldown 释放、origin 极性、scopes-off/no owner、长工具/unknown、
 无 subscribe 两个既有唤醒与一次检查非轮询、生命周期/cap/epoch、长 timer 分段 unref。测试 fake owner
 只是注入端口，**不代表生产 human-dispatch-proof 窄补丁已完成**。
+
+增量时长公开键 `quietSec` / `idleSec` / `cooldownSec` 以秒计（默认 15 / 2 / 300）；运行时仍为毫秒。旧 JSON 的 `*Ms` 保持毫秒语义，秒键同时存在时优先；整秒旧值迁移为秒，非整秒旧值保留原键和值以免丢精度。设置编辑器接受整数秒。

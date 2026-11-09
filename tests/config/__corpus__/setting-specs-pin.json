@@ -135,9 +135,9 @@
     ["memory.governance.enabled", "1e8d73d94d05a7f169a53206ed1c68dd5728b9d3a46fd74baed0facb437caf0f"],
     ["memory.incremental.enabled", "bd29068c6c89601168af5317e2e51177c1b5b0dc855ae57ca1d349bfa780391d"],
     ["memory.incremental.changeThreshold", "1356140cc7056d4c3ac267411ffa0835670151d1eba5d9a1453da8edf7dd2e40"],
-    ["memory.incremental.quietMs", "de6ef6f1daaa676d3376c25d7f45fd3f5cbb93b7421d3cfeafb80aa31bd4334e"],
-    ["memory.incremental.idleMs", "87719082c4009058a3c615ddacdfd4ea4e2064ff4ea505b5f6213dca20a8daba"],
-    ["memory.incremental.cooldownMs", "fbf3e4e6d6e71d7ba557288de677012a7cea7922c6990638898eb88716436377"],
+    ["memory.incremental.quietSec", "6dc0be326b816b1c870f7f02bd2cf18dc9ce4f4274b11f8b52fab83c4c4d05fb"],
+    ["memory.incremental.idleSec", "ca31b365677eb142d4eb7c284ba7558aaae81239ecf746b3450b909b67e730e7"],
+    ["memory.incremental.cooldownSec", "43e9bc326e87b367d04a98267ed8acb1a9d234423139d5d5fd0e8f11518fc9d5"],
     ["memory.incremental.taskDoneTrigger", "5e38bf7996c21cddb9f4bbbf2074e93ca886e74e1990c6b52dc0782d20569d6a"],
     ["memory.doctor.notifyOnStart", "69f0bc0e5d03be4a3373bc47018284da82363fb73422cb677744108247c75121"],
     ["memory.doctor.staleDays", "09cb26552cdfe6f6b19250e8eeaf401382264a637c43d50b1c993044dc298479"],
@@ -328,7 +328,7 @@
     ["reflex.autoResolve", "fa7252fca5b9d9612274c53c53b4ac0d2b8440a9574f7ddc36a4edb81bd9a726"],
     ["reflex.drafts.enabled", "424d403597834a370e6e25a0f89c9b2409242400cba7fde08de293bb5f820729"]
   ],
-  "all": "f1a9633d4145929288df1e7f21d7d2aa441096cf3ca34d7a7272d83b48fde5d4",
+  "all": "cb277ad84f1589b0aa40a0a6f0b9ca718ce28681260d5f95714200cdd0339c16",
   "declaredChanges": {
     "p50_1": [
       {
@@ -340,16 +340,16 @@
         "reason": "Default 5; count qualification OR successful TaskUpdate completed only"
       },
       {
-        "key": "memory.incremental.quietMs",
-        "reason": "Default 15000 milliseconds; each external write restarts quiet window"
+        "key": "memory.incremental.quietSec",
+        "reason": "Default 15 seconds; each external write restarts quiet window"
       },
       {
-        "key": "memory.incremental.idleMs",
-        "reason": "Default 2000 milliseconds; continuous activity-owned live host-idle gate"
+        "key": "memory.incremental.idleSec",
+        "reason": "Default 2 seconds; continuous activity-owned live host-idle gate"
       },
       {
-        "key": "memory.incremental.cooldownMs",
-        "reason": "Default 300000 milliseconds; independent release from last batch settle"
+        "key": "memory.incremental.cooldownSec",
+        "reason": "Default 300 seconds; independent release from last batch settle"
       },
       {
         "key": "memory.incremental.taskDoneTrigger",

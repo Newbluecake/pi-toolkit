@@ -168,7 +168,7 @@ export interface MemoryGovernanceSettings {
 }
 
 /** #50 P50.1; deliberately top-level memory.incremental (not governance.incremental).
- * Durations are millisecond keys, not the existing seconds aliases. */
+ * Runtime durations remain milliseconds; public settings use seconds. */
 export interface MemoryIncrementalSettings {
   enabled: boolean;
   changeThreshold: number;

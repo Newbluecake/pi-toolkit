@@ -113,26 +113,18 @@ export const MEMORY_SETTING_SPECS: Record<string, SettingSpec> = {
     ),
     max: 1000,
   } as SettingSpec,
-  "memory.incremental.quietMs": {
-    ...count("memory.incremental.quietMs", 0, "Quiet window in milliseconds; every external write resets it"),
-    max: Number.MAX_SAFE_INTEGER,
-  } as SettingSpec,
-  "memory.incremental.idleMs": {
-    ...count(
-      "memory.incremental.idleMs",
-      0,
-      "Continuous host inactivity in milliseconds; live idle and no pending messages required",
-    ),
-    max: Number.MAX_SAFE_INTEGER,
-  } as SettingSpec,
-  "memory.incremental.cooldownMs": {
-    ...count(
-      "memory.incremental.cooldownMs",
-      0,
-      "Cooldown in milliseconds from batch settlement; task-done never bypasses it",
-    ),
-    max: Number.MAX_SAFE_INTEGER,
-  } as SettingSpec,
+  "memory.incremental.quietSec": seconds("memory.incremental.quietMs", {
+    max: Math.floor(Number.MAX_SAFE_INTEGER / 1000),
+    description: "Quiet window in seconds; every external write resets it",
+  }),
+  "memory.incremental.idleSec": seconds("memory.incremental.idleMs", {
+    max: Math.floor(Number.MAX_SAFE_INTEGER / 1000),
+    description: "Continuous host inactivity in seconds; live idle and no pending messages required",
+  }),
+  "memory.incremental.cooldownSec": seconds("memory.incremental.cooldownMs", {
+    max: Math.floor(Number.MAX_SAFE_INTEGER / 1000),
+    description: "Cooldown in seconds from batch settlement; task-done never bypasses it",
+  }),
   "memory.incremental.taskDoneTrigger": bool(
     "memory.incremental.taskDoneTrigger",
     "Successful TaskUpdate completed may replace the change-count threshold only",

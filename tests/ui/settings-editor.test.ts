@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { visibleWidth } from "@earendil-works/pi-tui";
@@ -499,6 +499,82 @@ describe("createSettingsEditorComponent", () => {
  * 整数秒") without needing a terminal.
  */
 describe("editor → settings file round trip", () => {
+  it.each([
+    ["quiet", 15_000],
+    ["idle", 2_000],
+    ["cooldown", 300_000],
+  ] as const)("clears the legacy %s alias on explicit set and reset", (name, defaultMs) => {
+    for (const sequence of ["reset", "set-reset", "set-reload-reset"] as const) {
+      const path = join(mkdtempSync(join(tmpdir(), "pi-incremental-reset-")), "settings.json");
+      const legacyKey = `${name}Ms`;
+      const secondsKey = `${name}Sec`;
+      const key = `memory.incremental.${secondsKey}`;
+      writeFileSync(path, JSON.stringify({ memory: { incremental: { [legacyKey]: 1234 } } }));
+      const store = {
+        current: loadSettingsFromFile(path),
+        persist: (k: string, value: unknown) => persistSettingOverride(k, value, path),
+      };
+      expect(store.current.memory.incremental[legacyKey as "quietMs" | "idleMs" | "cooldownMs"]).toBe(1234);
+      if (sequence !== "reset") {
+        const parsed = parseSettingValue(SETTING_SPECS[key]!, "9");
+        expect(parsed.ok).toBe(true);
+        if (!parsed.ok) throw new Error(parsed.error);
+        expect(writeSetting(store, key, parsed).persistError).toBeUndefined();
+        expect(JSON.parse(readFileSync(path, "utf8")).memory.incremental).toEqual({ [secondsKey]: 9 });
+        if (sequence === "set-reload-reset") {
+          store.current = loadSettingsFromFile(path);
+          expect(store.current.memory.incremental[legacyKey as "quietMs" | "idleMs" | "cooldownMs"]).toBe(9000);
+        }
+      }
+      expect(resetSetting(store, key).persistError).toBeUndefined();
+      expect(store.current.memory.incremental[legacyKey as "quietMs" | "idleMs" | "cooldownMs"]).toBe(defaultMs);
+      expect(JSON.parse(readFileSync(path, "utf8")).memory.incremental).toEqual({});
+      expect(loadSettingsFromFile(path).memory.incremental[legacyKey as "quietMs" | "idleMs" | "cooldownMs"]).toBe(
+        defaultMs,
+      );
+    }
+  });
+
+  it("does not remove other time-setting legacy aliases on explicit writes", () => {
+    const path = join(mkdtempSync(join(tmpdir(), "pi-other-time-reset-")), "settings.json");
+    writeFileSync(path, JSON.stringify({ budget: { idleMs: 1234 } }));
+    expect(persistSettingOverride("budget.idleS", 9, path)).toBeUndefined();
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ budget: { idleMs: 1234, idleS: 9 } });
+    expect(persistSettingOverride("budget.idleS", undefined, path)).toBeUndefined();
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ budget: { idleMs: 1234 } });
+  });
+  it("round-trips incremental seconds through the editor and runtime", () => {
+    const path = join(mkdtempSync(join(tmpdir(), "pi-incremental-editor-")), "settings.json");
+    const current = JSON.parse(JSON.stringify(DEFAULT_SETTINGS)) as AgentSettings;
+    const model = new SettingsEditorModel({
+      current,
+      path,
+      persist: (key, value) => persistSettingOverride(key, value, path),
+    });
+    for (const [key, value] of [
+      ["quietSec", "7"],
+      ["idleSec", "4"],
+      ["cooldownSec", "31"],
+    ]) {
+      focus(model, `memory.incremental.${key}`);
+      model.handleInput("\r");
+      model.handleInput("\u0015");
+      for (const ch of value!) model.handleInput(ch);
+      model.handleInput("\r");
+    }
+    expect(JSON.parse(readFileSync(path, "utf8")).memory.incremental).toEqual({
+      quietSec: 7,
+      idleSec: 4,
+      cooldownSec: 31,
+    });
+    expect(loadSettingsFromFile(path).memory.incremental).toMatchObject({
+      quietMs: 7000,
+      idleMs: 4000,
+      cooldownMs: 31000,
+    });
+    expect(current.memory.incremental).toMatchObject({ quietMs: 7000, idleMs: 4000, cooldownMs: 31000 });
+  });
+
   it("persists integer seconds that reload to the edited milliseconds", () => {
     const path = join(mkdtempSync(join(tmpdir(), "pi-subagent-editor-")), "pi-subagent.json");
     const current = JSON.parse(JSON.stringify(DEFAULT_SETTINGS)) as AgentSettings;
@@ -557,7 +633,7 @@ describe("setting-specs table", () => {
       const spec = SETTING_SPECS[key]!;
       expect(key.endsWith("Ms")).toBe(false);
       if (spec.time) {
-        expect(key.endsWith("S")).toBe(true);
+        expect(key.endsWith("S") || key.endsWith("Sec")).toBe(true);
         expect(spec.path.endsWith("Ms")).toBe(true);
         expect(spec.integer).toBe(true);
       }

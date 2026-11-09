@@ -366,6 +366,9 @@ export const TIME_SETTING_MS_PATHS: readonly string[] = [
   "fabric.rootMinIntervalMs",
   // fabric-thread P0 (arch §11.1): single-steer budget stored as fabric.threads.steerTimeoutS.
   "fabric.threads.steerTimeoutMs",
+  "memory.incremental.quietMs",
+  "memory.incremental.idleMs",
+  "memory.incremental.cooldownMs",
   "memory.jev.recall.waitMs",
   // memory-predict plan §10: file keys `memory.jev.predict.model.waitS` /
   // `requestBudgetS` (integer seconds), internal millisecond fields below.
@@ -968,6 +971,11 @@ export function persistSettingOverride(dottedKey: string, value: unknown, explic
       node = next;
     }
     const leaf = segments[segments.length - 1]!;
+    // Explicit edits supersede the legacy fractional-millisecond override too;
+    // otherwise resetting the seconds key resurrects that value on reload.
+    if (/^memory\.incremental\.(quiet|idle|cooldown)Sec$/.test(dottedKey)) {
+      delete node[`${leaf.slice(0, -3)}Ms`];
+    }
     if (value === undefined) delete node[leaf];
     else node[leaf] = value;
     try {
