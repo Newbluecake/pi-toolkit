@@ -1,3 +1,4 @@
+import { isExternalWriteOrigin } from "./write-origin.js";
 /** Pi-free bounded governance runner. All state belongs to the factory. */
 import { join } from "node:path";
 import { createHash } from "node:crypto";
@@ -403,7 +404,8 @@ export function createSweepRunner(opts: SweepOptions) {
     origin?: string,
     admittedBudget?: SweepRender,
   ): Promise<SweepResult> {
-    if (origin === "sweep") return Promise.resolve({ operations: 0, archived: [], stopped: "self", suggestions: 0 });
+    if (!isExternalWriteOrigin(origin))
+      return Promise.resolve({ operations: 0, archived: [], stopped: "self", suggestions: 0 });
     if (inFlight) {
       // The trailing pass cannot accept a third pass: never return another
       // batch's successful result as evidence for this request.

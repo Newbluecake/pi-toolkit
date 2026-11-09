@@ -1,3 +1,11 @@
+import {
+  createIncrementalScheduler,
+  type IncrementalBatchHandler,
+  type IncrementalDirectory,
+  type IncrementalBatch,
+} from "./govern/incremental.js";
+import { readIncrementalCorpus } from "./govern/incremental-corpus.js";
+import { isExternalWriteOrigin } from "./govern/write-origin.js";
 import { createMemoryDispatcher } from "./unified/dispatcher.js";
 import type { MemoryScopesWiring } from "./scopes/wire.js";
 import { createScopedProjection } from "./scoped-projection.js";
@@ -30,7 +38,8 @@ import type { SystemPromptMode } from "../sysprompt/hub.js";
  * frozenBlocks map) lives in THIS closure (§5.2/§5.5: no module-scope
  * mutable state). Frozen blocks are per-session: cleared on session_start
  * (`/new` thaws; `/reload` re-activates with a fresh closure anyway), while
- * the fingerprint-keyed RenderCache survives across sessions. No timers.
+ * the fingerprint-keyed RenderCache survives across sessions. P50.1 owns at most
+ * one segmented unref timer only when explicitly enabled with a live activity owner.
  */
 
 import type { MemoryWebWritePort } from "./scopes/web-write-port.js";
@@ -77,6 +86,10 @@ import type {
 
 export interface WireMemoryOpts {
   settings: MemorySettings;
+  /** P50.2 registration point. Absent => revision-unavailable, no model/writes. */
+  incrementalBatchHandler?: IncrementalBatchHandler;
+  /** P50.2 must bind this to the existing JevClient's bounded/cost/zombie admission. */
+  incrementalAdmission?: (batch: IncrementalBatch) => boolean;
   scopes?: MemoryScopesWiring;
   systemPromptMode?: () => SystemPromptMode;
   writeGate?: MemoryWriteGate;
@@ -303,7 +316,7 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
       !opts.settings.governance.enabled ||
       opts.isChildSession ||
       opts.secureDomainKind === "locked" ||
-      origin === "sweep"
+      !isExternalWriteOrigin(origin)
     )
       return;
     const dir = memoryDirFor(cwd);
@@ -393,8 +406,109 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
     if (events.length && registry && client) runFirstReview(epoch, registry, client);
     return reason !== undefined;
   };
+  const incrementalActivity = () =>
+    opts.settings.incremental.enabled &&
+    opts.settings.enabled &&
+    opts.settings.governance.enabled &&
+    !opts.isChildSession &&
+    (opts.secureDomainKind ?? "plain") === "plain" &&
+    (opts.settings.scopes.session || opts.settings.scopes.hub)
+      ? opts.scopes?.activity?.()
+      : undefined;
+  let incremental: ReturnType<typeof createIncrementalScheduler> | undefined;
+  let incrementalClosed = false;
+  let incrementalGeneration = 0;
+  let incrementalOwnerDiagnosed = false;
+  const resetIncremental = (reason: "abort" | "shutdown" | "reload"): void => {
+    incrementalGeneration++;
+    incremental?.stop(reason);
+    incremental = undefined;
+    incrementalClosed = true;
+  };
+  const incrementalIdentity = (cwd: string): IncrementalDirectory | undefined => {
+    if (
+      !opts.settings.incremental.enabled ||
+      !opts.settings.enabled ||
+      !opts.settings.governance.enabled ||
+      opts.isChildSession ||
+      (opts.secureDomainKind ?? "plain") !== "plain" ||
+      incrementalClosed ||
+      !governanceSessionActive
+    )
+      return undefined;
+    const runtime = opts.scopes?.current();
+    if (!runtime || !incrementalActivity()) {
+      if (!incrementalOwnerDiagnosed) {
+        incrementalOwnerDiagnosed = true;
+        if (!governanceNotify) console.warn("p50: activity owner unavailable; incremental revision disabled");
+      }
+      return undefined;
+    }
+    const identity = identityFor(cwd);
+    return identity
+      ? { realpath: identity.realpath, dev: identity.dev, ino: identity.ino, sessionEpoch: runtime.owner.sessionEpoch }
+      : undefined;
+  };
+  const incrementalFor = (cwd: string) => {
+    const identity = incrementalIdentity(cwd);
+    if (!identity) return undefined;
+    const runtime = opts.scopes!.current()!;
+    if (!incremental)
+      incremental = createIncrementalScheduler({
+        settings: opts.settings.incremental,
+        activity: () => (opts.scopes?.current() === runtime ? incrementalActivity() : undefined),
+        isCurrent: (expected) => {
+          if (
+            incrementalClosed ||
+            !governanceSessionActive ||
+            migrationAbort.signal.aborted ||
+            opts.sessionSignal?.()?.aborted ||
+            opts.scopes?.current() !== runtime ||
+            runtime.owner.sessionEpoch !== expected.sessionEpoch ||
+            !gate.check(expected.realpath).ok
+          )
+            return false;
+          const canonical = canonicalDir(expected.realpath);
+          if (!canonical || canonical.real !== expected.realpath || dirFormat(canonical.real) !== "blocks")
+            return false;
+          const stat = inspectDirSecurityNoFollow(canonical.real);
+          inspectDirSecurityNoFollow(join(canonical.real, "blocks"));
+          return stat.dev === expected.dev && stat.ino === expected.ino;
+        },
+        readCorpus: readIncrementalCorpus,
+        diagnostic: (line) => {
+          if (!governanceNotify) console.warn(line);
+        },
+        ...(jevOn && opts.incrementalBatchHandler ? { handler: opts.incrementalBatchHandler } : {}),
+        ...(jevOn && opts.incrementalAdmission ? { canAttempt: opts.incrementalAdmission } : {}),
+      });
+    return { scheduler: incremental, identity };
+  };
   const onAfterWrite = (cwd: string, origin?: string): void => {
-    if (origin === "sweep") sweepInvalidation.add(cwd);
+    if (opts.settings.incremental.enabled) {
+      try {
+        incrementalActivity()?.noteMemoryWrite(Date.now());
+      } catch {
+        resetIncremental("abort");
+      }
+      if (isExternalWriteOrigin(origin)) {
+        const generation = incrementalGeneration;
+        // Detached scan never blocks the tool write path. Preserve every write count
+        // while selecting only the newest revisions visible at this opportunity.
+        queueMicrotask(() => {
+          if (generation !== incrementalGeneration) return;
+          try {
+            const target = incrementalFor(cwd);
+            if (!target) return;
+            const corpus = readIncrementalCorpus(target.identity);
+            if (corpus) target.scheduler.externalWrite(target.identity, corpus, origin);
+          } catch {
+            resetIncremental("abort");
+          }
+        });
+      }
+    }
+    if (!isExternalWriteOrigin(origin)) sweepInvalidation.add(cwd);
     else {
       sweepInvalidation.delete(cwd);
       if (jevOn) {
@@ -480,6 +594,9 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
     : undefined;
   if (opts.scopes)
     pi.on("session_tree", () => {
+      resetIncremental("abort");
+      incrementalClosed = false;
+      incrementalOwnerDiagnosed = false;
       revokeGovernance();
       projectSection?.projectSources.clear();
       frozenBlocks.clear();
@@ -493,6 +610,9 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
     lastBlocks.clear();
     revokeGovernance();
     governanceSessionActive = true;
+    resetIncremental("abort");
+    incrementalClosed = false;
+    incrementalOwnerDiagnosed = false;
     migrationAbort.abort();
     migrationAbort = new AbortController();
     sweepRunners.clear();
@@ -590,6 +710,7 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
     pi.on("session_start", reminder.check);
     pi.on("session_shutdown", (event) => {
       governanceSessionActive = false;
+      resetIncremental(event.reason === "reload" ? "reload" : "shutdown");
       revokeGovernance();
       migrationAbort.abort();
       if (event.reason === "reload") reminder.reset();
@@ -658,6 +779,12 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
         // #36 P4 修复轮：生产 writeGate 覆盖 jev 侧车写入（打标/冷却戳/
         // 建议/taxonomy —— writeIndexPatch 逐原语复检）。
         writeGate: secureGate,
+        ...(opts.settings.incremental.enabled
+          ? {
+              activity: incrementalActivity,
+              activityWake: () => incremental?.activityChanged(true),
+            }
+          : {}),
         governance: {
           capture: (cwd, id, candidate) => {
             const epoch = epochFor(cwd);
@@ -672,10 +799,18 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
           clear: () => governanceEpoch?.signals.clearCandidates(),
           mark: (cwd, signal: GovernanceSignal) => {
             const epoch = governanceEpoch;
-            if (epoch && epoch.cwd === cwd && epochCurrent(epoch))
+            if (epoch && epoch.cwd === cwd && epochCurrent(epoch)) {
               epoch.signals.markSignal(signal, { success: true, readOnly: false });
+              if (signal === "task-done" && opts.settings.incremental.enabled) {
+                const target = incrementalFor(cwd);
+                target?.scheduler.taskDone(target.identity);
+              }
+            }
           },
-          abort: revokeGovernance,
+          abort: () => {
+            resetIncremental("abort");
+            revokeGovernance();
+          },
           turnEnd: (cwd, registry, client) => {
             consumeOpportunity(cwd, false, registry, client);
           },

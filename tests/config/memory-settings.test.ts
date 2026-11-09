@@ -33,6 +33,14 @@ describe("memory settings", () => {
       migrate: { auto: true },
       residentBytes: 2048,
       governance: { enabled: true },
+      incremental: {
+        enabled: false,
+        changeThreshold: 5,
+        quietMs: 15_000,
+        idleMs: 2000,
+        cooldownMs: 300_000,
+        taskDoneTrigger: true,
+      },
       doctor: { notifyOnStart: true, staleDays: 60 },
       tidy: {
         agentType: "Plan",
@@ -923,5 +931,62 @@ describe("#39 default-on scopes settings", () => {
     const off = loadSettings({ memory: { enabled: false } });
     expect(off.memory.enabled).toBe(false);
     expect(off.memory.scopes).toEqual({ session: true, hub: true });
+  });
+});
+
+// #50 P50.1: additive trigger controls, not a generate/auto-commit authorization.
+describe("memory.incremental P50.1 settings", () => {
+  it("pins all six non-live millisecond keys and defaults", () => {
+    const expected = {
+      enabled: false,
+      changeThreshold: 5,
+      quietMs: 15000,
+      idleMs: 2000,
+      cooldownMs: 300000,
+      taskDoneTrigger: true,
+    };
+    expect(parseMemorySettings({}).incremental).toEqual(expected);
+    for (const [name, value] of Object.entries(expected)) {
+      const key = `memory.incremental.${name}`;
+      expect(SETTING_SPECS[key]?.path).toBe(key);
+      expect(SETTING_SPECS[key]?.live).toBeUndefined();
+      expect(SETTING_SPECS[key]?.time).toBeUndefined();
+      expect(defaultOf(SETTING_SPECS[key]!)).toBe(value);
+    }
+  });
+  it("parses valid values and rejects malformed/nonfinite fields independently", () => {
+    expect(
+      parseMemorySettings({
+        incremental: {
+          enabled: true,
+          changeThreshold: 3,
+          quietMs: 1234,
+          idleMs: 2345,
+          cooldownMs: 3456,
+          taskDoneTrigger: false,
+        },
+      }).incremental,
+    ).toEqual({
+      enabled: true,
+      changeThreshold: 3,
+      quietMs: 1234,
+      idleMs: 2345,
+      cooldownMs: 3456,
+      taskDoneTrigger: false,
+    });
+    expect(
+      parseMemorySettings({
+        incremental: {
+          enabled: 1,
+          changeThreshold: 0,
+          quietMs: -1,
+          idleMs: NaN,
+          cooldownMs: Infinity,
+          taskDoneTrigger: "true",
+        },
+      }).incremental,
+    ).toEqual(defaults.incremental);
+    expect(parseMemorySettings({ incremental: [] }).incremental).toEqual(defaults.incremental);
+    expect(parseMemorySettings({ incremental: { quietMs: 3_000_000_000 } }).incremental.quietMs).toBe(3_000_000_000);
   });
 });

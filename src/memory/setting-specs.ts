@@ -100,6 +100,43 @@ export const MEMORY_SETTING_SPECS: Record<string, SettingSpec> = {
     "memory.governance.enabled",
     "Governance sweep, auto-supersede and suggestions (#36); rendering-time expiry filtering stays on when off",
   ),
+  // P50.1 declared additive trigger settings; no model/auto/audit switch in this package.
+  "memory.incremental.enabled": bool(
+    "memory.incremental.enabled",
+    "P50 incremental trigger aggregation; default off, requires a live scopes activity owner",
+  ),
+  "memory.incremental.changeThreshold": {
+    ...count(
+      "memory.incremental.changeThreshold",
+      1,
+      "External writes needed for eligibility; task-done only replaces this threshold",
+    ),
+    max: 1000,
+  } as SettingSpec,
+  "memory.incremental.quietMs": {
+    ...count("memory.incremental.quietMs", 0, "Quiet window in milliseconds; every external write resets it"),
+    max: Number.MAX_SAFE_INTEGER,
+  } as SettingSpec,
+  "memory.incremental.idleMs": {
+    ...count(
+      "memory.incremental.idleMs",
+      0,
+      "Continuous host inactivity in milliseconds; live idle and no pending messages required",
+    ),
+    max: Number.MAX_SAFE_INTEGER,
+  } as SettingSpec,
+  "memory.incremental.cooldownMs": {
+    ...count(
+      "memory.incremental.cooldownMs",
+      0,
+      "Cooldown in milliseconds from batch settlement; task-done never bypasses it",
+    ),
+    max: Number.MAX_SAFE_INTEGER,
+  } as SettingSpec,
+  "memory.incremental.taskDoneTrigger": bool(
+    "memory.incremental.taskDoneTrigger",
+    "Successful TaskUpdate completed may replace the change-count threshold only",
+  ),
   "memory.doctor.notifyOnStart": bool(
     "memory.doctor.notifyOnStart",
     "Main-session startup reminder when /mem doctor would report an error (zero model cost)",

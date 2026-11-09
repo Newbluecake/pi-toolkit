@@ -305,7 +305,17 @@ function withoutFast(settings: typeof DEFAULT_SETTINGS, input?: unknown) {
     nudge: { ...settings.todo.nudge, cooldownTurns: validCooldown ? settings.todo.nudge.cooldownTurns : 8 },
   };
   const { memory } = settings;
-  const { scopes: _scopes, ...oldMemory } = memory;
+  // #50 P50.1 declared additive block. Every frozen input predates it;
+  // assert all six defaults, then project ONLY this block (never regenerate).
+  expect(memory.incremental).toEqual({
+    enabled: false,
+    changeThreshold: 5,
+    quietMs: 15000,
+    idleMs: 2000,
+    cooldownMs: 300000,
+    taskDoneTrigger: true,
+  });
+  const { scopes: _scopes, incremental: _incremental, ...oldMemory } = memory;
   // #68 adds a bounded background queue; legacy corpus inputs have no such leaf.
   // Verify it explicitly, then project it out without changing frozen hashes/inputs.
   expect(memory.jev.backgroundQueueLimit).toBe(32);

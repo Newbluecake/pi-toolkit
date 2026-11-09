@@ -75,6 +75,8 @@ export interface MemorySettings {
   /** 治理总开关（arch §4.6）：false ⇒ 不做 sweep 写盘、不自动取代、不生成治理建
    *  议、不发治理通知；渲染时的到期过滤仍然生效。Default true。P0 只解析不使用。 */
   governance: MemoryGovernanceSettings;
+  /** P50.1 trigger aggregation; off preserves all existing behavior. */
+  incremental: MemoryIncrementalSettings;
   doctor: MemoryDoctorSettings;
   tidy: MemoryTidySettings;
   /** Jev 核心 memory：jev-plan v2 §4 J3 / jev-arch §9.1. */
@@ -170,6 +172,17 @@ export interface MemoryMigrateSettings {
 export interface MemoryGovernanceSettings {
   /** Default true。 */
   enabled: boolean;
+}
+
+/** #50 P50.1; deliberately top-level memory.incremental (not governance.incremental).
+ * Durations are millisecond keys, not the existing seconds aliases. */
+export interface MemoryIncrementalSettings {
+  enabled: boolean;
+  changeThreshold: number;
+  quietMs: number;
+  idleMs: number;
+  cooldownMs: number;
+  taskDoneTrigger: boolean;
 }
 
 export type MemoryToolSurface = "v2" | "legacy";
@@ -358,6 +371,20 @@ export function parseMemorySettings(input: unknown): MemorySettings {
       : {};
   const governance: MemoryGovernanceSettings = { enabled: bool(governanceObj.enabled, defaults.governance.enabled) };
 
+  const incrementalRaw = value.incremental;
+  const incrementalObj: Record<string, unknown> =
+    incrementalRaw && typeof incrementalRaw === "object" && !Array.isArray(incrementalRaw)
+      ? (incrementalRaw as Record<string, unknown>)
+      : {};
+  const incremental: MemoryIncrementalSettings = {
+    enabled: bool(incrementalObj.enabled, defaults.incremental.enabled),
+    changeThreshold: num(incrementalObj.changeThreshold, defaults.incremental.changeThreshold, 1, 1000),
+    quietMs: num(incrementalObj.quietMs, defaults.incremental.quietMs, 0, Number.MAX_SAFE_INTEGER),
+    idleMs: num(incrementalObj.idleMs, defaults.incremental.idleMs, 0, Number.MAX_SAFE_INTEGER),
+    cooldownMs: num(incrementalObj.cooldownMs, defaults.incremental.cooldownMs, 0, Number.MAX_SAFE_INTEGER),
+    taskDoneTrigger: bool(incrementalObj.taskDoneTrigger, defaults.incremental.taskDoneTrigger),
+  };
+
   const doctorRaw = value.doctor;
   const doctorObj: Record<string, unknown> =
     doctorRaw && typeof doctorRaw === "object" && !Array.isArray(doctorRaw)
@@ -454,6 +481,7 @@ export function parseMemorySettings(input: unknown): MemorySettings {
     migrate,
     residentBytes,
     governance,
+    incremental,
     doctor,
     tidy,
     jev,
@@ -481,6 +509,14 @@ export const DEFAULT_MEMORY_SETTINGS: MemorySettings = {
   migrate: { auto: true },
   residentBytes: 2048,
   governance: { enabled: true },
+  incremental: {
+    enabled: false,
+    changeThreshold: 5,
+    quietMs: 15_000,
+    idleMs: 2000,
+    cooldownMs: 300_000,
+    taskDoneTrigger: true,
+  },
   doctor: { notifyOnStart: true, staleDays: 60 },
   tidy: {
     agentType: "Plan",

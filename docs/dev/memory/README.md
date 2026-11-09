@@ -167,7 +167,7 @@ Jev 是一个分类器驱动的核心 memory 子系统，职责三项：召回�
 
 ### 当前接线与范围边界
 
-- **#50 为 #36 子项，未启动**；当前已有的「写入时比较 + 周期 review + sweep」不等于 #50。
+- **#50 为 #36 子项**；P50.1 触发/聚合实现见文末，activity owner 窄补丁待接；当前已有的「写入时比较 + 周期 review + sweep」不等于 P50.2 生成/提交或 P50.3 审计/恢复。
 - **已接**：`wireMemory` 复用已有 `session_start` 和 `onAfterWrite` 触发 startup/write sweep；shutdown/reload abort；sweep-origin 写入只失效缓存，不自触发。显式 `supersedes=`、分类关系执行、单边恢复及永久 dismissed 已接工具/命令路径；Jev off 仍可显式取代，agent 永不取代 user。
 - **I1 已装配**：task-done/push/release 的 Jev 事件信号、turn_end 消费，以及 render 预算/索引溢出信号已接生产；复用既有 handler，不新增唤醒。详见文末「#36 I1 事件与预算装配」的保守识别、合并、重试与生命周期边界；后台 bash job 终态关联仍未接生产，复杂 shell 不推断成功。
 - **C3 已装配**：迁移后首次 user↔user review 由 `createFirstUserReviewHost` 在自然 startup 或真实治理事件的 turn_end 机会驱动；只写建议，不自动取代，完成后交由 C5 markers 持久化。下节保留核心/host 的预算与提交协议，不再将它描述为未装配。
@@ -567,3 +567,62 @@ inactive-path differential baseline; no old text or schema was shortened to meet
   authority-before-unknown-field validation in both tools, Hub group omission with diagnostics-only status and
   zero Hub reads, and close/tree registration/write behavior. The actual registered child surface is compared
   to all four canonical blocksUnifiedChild fields in tool-surface.test.ts, never the Agent golden.
+
+## #50 P50.1 增量触发与聚合（2026-11-09，fail-closed 交付）
+
+设计：[p50-design.md](../memory-governance/p50-design.md) §2/3/7。`govern/incremental.ts`
+是每 session 的唯一调度闭包，按 canonical memDir 的 `(realpath,dev,ino,sessionEpoch)` 聚合，
+实现 idle / quiet-wait / idle-wait / running / cooldown / stopped。计数或成功 TaskUpdate completed
+只赋予资格；quiet 与 host-idle 两处都检查资格，task-done 不跳 quiet、实时空闲或 cooldown。
+新外部写重置 quiet；running 只合并一个 trailing 批，settle 才起算 cooldown；cooldown-elapsed
+在 cooldown/quiet-wait/idle-wait 均有真实释放路径。cap 保留一份证据并 dormant，无 timer 重试；
+abort/shutdown/reload 撤销 signal，旧 epoch/身份不复活，迟到结果只允许有界诊断。
+
+- **设置与 off**：新增且仅新增 `memory.incremental.{enabled,changeThreshold,quietMs,idleMs,cooldownMs,taskDoneTrigger}`，
+  默认 `false / 5 / 15000 / 2000 / 300000 / true`，均非 live，时长键直接使用毫秒（不加 seconds alias）。
+  有效时长经 `clampSpanMs`（最长一年）；唯一 timer 使用已有 segmented/unref systemClock，长等待不溢出。
+  P50 off 不接 activity recorder，不改变现有 client/classify/工具回显；设置 corpus 只投影并显式断言新增块，
+  原 corpus 不重生；setting-specs pin 仅追加六键和逐键原因，所有旧键 hash/顺序保留。
+- **origin 唯一谓词**：`govern/write-origin.ts::isExternalWriteOrigin` 由 index 与 sweep 共用。
+  `sweep/revision/p50-auto` 只失效渲染/缓存，不入 sweep/P50；undefined、external 与其它值均为外部。
+  internal memory 写仍可记录 activity，但不增加计数或重置 quiet。
+- **候选非授权**：`incremental-corpus.ts` 只读 project blocks，不用会做 soft-meta 修复/旧缓存回退的 reader。
+  只选 active、本目录、非 private/secret/residue/origin/Hub 的块，按 ID 排序；输出 id/rev/topic/authority、
+  corpus 指纹、变更次数与 omittedCount，不含正文。每 session 至多 8 目录、16 待处理候选；超额低优先级
+  工作不加队列，只合并证据。批次只冻结候选元数据，**不是 §4.2 rawBefore 冻结点，也不是 §5 审计证据**；
+  不创建 before/after/audit、不推断 data-applied/finalized。P50.2 必须在首请求前另行冻结精确字节/rev，
+  提交与审计遵循 prepare → data-applied → finalized，不得拿 corpus fingerprint 冒充提交证明。
+- **P50.2 seam**：`WireMemoryOpts.incrementalBatchHandler` 与 `incrementalAdmission` 是唯一注册点；
+  缺 handler 为 revision-unavailable；批次预算准入必须先于 running/pending 消费/handler，缺 admission、抛错或拒绝均保留一次证据并 dormant，attempt 前仍独立复检。`IncrementalBatch` 包含选择键 batchId、
+  目录身份/epoch、候选/指纹/计数、taskDoneEligible、lastExternalWriteAt 与 `{generation,lastActivityAt}` lease。
+  `IncrementalAttemptContext` 提供 signal/isCurrent/leaseValid/tryStartGenerate/capReached。handler 每 await 后
+  复核 isCurrent，自动提交前还须复核 lease；返回 cap-reached 后不得继续写建议。单批 generate 请求上限 2、
+  auto 动作契约上限 2、jobCostCapUsd 默认 0；本包不调用模型，不执行 auto 动作。P50.2 仍须在唯一 JevClient
+  实现 §7 的 bounded channel queue、provider attempt/费用预留、zombie 与真实费用对账，不能只靠此计数器。
+- **窄 task-done**：只在既有 Jev governanceCandidate/governanceResult → govern/signals 的匹配成功
+  TaskUpdate completed 回调置 eligible。失败/unchanged/未知 task/普通 Agent 或 bash 完成不扩大来源。
+
+### Activity owner 阻塞项与解阻路径
+
+唯一 owner 仍必须是 `web-hub/agent/human-dispatch-proof.ts::createHumanDispatchProof` 的原闭包，
+`govern/activity.ts` 只定义 snapshot/optional subscribe/recorder 类型，**没有第二套活动状态**。
+`scopes/wire.ts::activity()` 仅转发 `current()?.proof.activity`；当前 proof 尚无该可选属性，
+所以转发实际是 undefined，**待窄补丁后生效，不是已经接通 owner**。主会话将在 tokens/s 批 2
+提交后另派该单文件窄补丁；本包不修改 `src/web-hub/agent/**`。
+
+P50 只在 plain 主会话、memory/governance/incremental 开、至少一层 scopes 开且 current runtime/activity
+存活时可用；其余 fail closed：P50 零 timer、零 client、零 revision 写。既有确定性 sweep/Jev traffic
+不因此关闭，测试用 P50-off 对照证明相同 classifier 请求与既有 index 行为。无 owner 的诊断每 epoch
+最多一次（无 UI 输出 console，UI 不新增弹窗/落盘）。timer 每次实时 snapshot，必须同时 running=false、
+toolsInFlight=0、isIdle===true、pendingMessages===false 与连续 idle 窗口齐备，unknown 一律不运行。
+
+订阅型 owner 每次自然更新通知后重算一次 timer。无 subscribe 的 owner 仍由 Jev 已有 tool_call/tool_result/
+turn_end 唤醒，且每个自然事件最多附带一个 idleMs 后的实时检查（照顾 turn_end 早于 onSettled），
+不会自重排忙宿主轮询。该回退粒度更粗：纯 onInput/onSettled 更新不能立即重排；若 onSettled 晚于那次
+单次检查，只能等下个既有自然事件；实时门依然阻止旧 lease/忙宿主运行，绝不以猜测 idle 补齐。
+Jev 临时缺 registry 时 tool activity recorder 仍先执行，不能漏掉长工具；不增加任何 hook 注册。
+
+测试：`tests/memory/govern/incremental*.test.ts`（fake clock、真实临时 blocks、实际 wireMemory/wireJev），
+覆盖 count=3 成对、§2.4 时间线、三条 cooldown 释放、origin 极性、scopes-off/no owner、长工具/unknown、
+无 subscribe 两个既有唤醒与一次检查非轮询、生命周期/cap/epoch、长 timer 分段 unref。测试 fake owner
+只是注入端口，**不代表生产 human-dispatch-proof 窄补丁已完成**。

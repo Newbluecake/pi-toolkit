@@ -1,3 +1,4 @@
+import type { MemoryActivityRecorder } from "../govern/activity.js";
 // `wireJev` — the Jev recall runtime (jev-plan §4 J6; jev-arch §5.3,
 // §6.1.1–§6.1.6, §6.2.3, §6.3.1, §8, §9.2).
 //
@@ -310,6 +311,9 @@ export interface WireJevDeps {
    *  command-port、write-port 的全部侧车写入（打标/冷却戳/建议/taxonomy）都
    *  经 writeIndexPatch/writeTaxonomyFile 的逐原语 gateCheck 复检；缺省无
    *  gate 时行为与此前逐字节相同（I9，off-golden 不变）。 */
+  readonly activity?: () => MemoryActivityRecorder | undefined;
+  /** Fallback natural wake when the owner has no subscribe (coarser than onSettled). */
+  readonly activityWake?: () => void;
   readonly governance?: {
     capture(cwd: string, id: string, candidate: GovernanceCandidate): void;
     take(cwd: string, id: string, inputFingerprint: string): GovernanceCandidate | undefined;
@@ -2965,6 +2969,8 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
   pi.on("tool_call", (event: ToolCallEvent, ctx: ExtensionContext) => {
     if (!runs) return undefined;
     try {
+      deps.activity?.()?.noteToolCall(event.toolCallId, now());
+      deps.activityWake?.();
       if (observe(ctx) === undefined) return undefined;
       governanceCandidate(event, ctx);
       fastPath(event, cwdOf(ctx));
@@ -2996,6 +3002,8 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
   pi.on("tool_result", (event: ToolResultEvent, ctx: ExtensionContext) => {
     if (!runs) return undefined;
     try {
+      deps.activity?.()?.noteToolResult(event.toolCallId, now());
+      deps.activityWake?.();
       if (observe(ctx) === undefined) return undefined;
       governanceResult(event, ctx);
       if (config.predict.enabled) {
@@ -3121,6 +3129,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
         deps.governance?.clear();
         deps.governance?.abort();
       }
+      if (!aborted) deps.activityWake?.();
       const currentRegistry = observe(ctx);
       if (currentRegistry === undefined) return undefined;
       if (!aborted) {

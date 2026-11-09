@@ -1,3 +1,4 @@
+import type { MemoryActivityOwner } from "../govern/activity.js";
 /** Early, scopes-only assembly. Child receiver does not invent SDK resume facts or human hooks. */
 import type { ScopedMemoryDispatcher } from "../unified/dispatcher.js";
 import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
@@ -21,6 +22,8 @@ export interface MemoryScopesWiring {
   current(): MemoryOwnerRuntime | undefined;
   group(): MemoryScopesGroup | undefined;
   proof: HumanDispatchBridge;
+  /** Same host-only proof owner; never construct a fallback activity tracker. */
+  activity?(): MemoryActivityOwner | undefined;
   context(ctx: ExtensionContext): void;
   /** wireMemory supplies the sole per-activation dispatcher after both surfaces are built. */
   attachDispatcher(dispatcher: ScopedMemoryDispatcher): void;
@@ -279,6 +282,8 @@ export function wireMemoryScopes(
   }
   return {
     current,
+    activity: () =>
+      (current()?.proof as (HumanDispatchBridge & { activity?: MemoryActivityOwner }) | undefined)?.activity,
     group: () => group,
     proof,
     context,

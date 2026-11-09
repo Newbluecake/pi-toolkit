@@ -40,7 +40,8 @@ it("archives and notifies, origin sweep is inert; restore uses mapping", async (
   expect(readCorpus(join(d, "blocks")).blocks).toHaveLength(0);
   expect(notices[0]).toContain("archived 1");
   expect(origins).toEqual(["sweep"]);
-  expect((await r.runSweep(d, "write", undefined, "sweep")).stopped).toBe("self");
+  for (const origin of ["sweep", "revision", "p50-auto"])
+    expect((await r.runSweep(d, "write", undefined, origin)).stopped).toBe("self");
   expect(await restoreBlock(d, b.id)).toContain("restored:");
   expect(readGovernBlock(d, b.id).meta.status).toBe("active");
   expect(readArchiveIndex(d)).toEqual({});
