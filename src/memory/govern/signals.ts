@@ -1,12 +1,16 @@
 import { createHash } from "node:crypto";
 import type { BudgetRenderStats } from "../blocks/render.js";
-import type { JevGovernanceBudgetSignal } from "../jev/contracts.js";
+import {
+  JEV_GOVERNANCE_BUDGET_SIGNALS,
+  type JevGovernanceBudgetSignal,
+  type JevGovernanceEvent,
+} from "../jev/contracts.js";
 
 // #36: epoch-local owner of event candidates, pending signals and budget
 // observations. It never schedules work or starts a turn; the host supplies
 // success evidence and settles detached budget batches.
 
-export type GovernanceSignal = "task-done" | "push" | "release";
+export type GovernanceSignal = JevGovernanceEvent;
 
 export interface SignalAdmission {
   readonly success: boolean;
@@ -97,7 +101,7 @@ export function createGovernanceSignals() {
         entries = new Map();
         budgets.set(dir, entries);
       }
-      for (const kind of ["resident-over-budget", "index-overflow"] as const) {
+      for (const kind of JEV_GOVERNANCE_BUDGET_SIGNALS) {
         const over = kind === "resident-over-budget" ? observation.stats.resident.over : observation.stats.index.over;
         if (!over) {
           entries.delete(kind);

@@ -15,7 +15,8 @@ import {
 } from "../safe-fs.js";
 import { MemoryError } from "../paths.js";
 import { recordSoftMeta, softLegacyMetadata } from "../soft-meta.js";
-import { newTidyId } from "../tidy/manifest.js";
+import { listTrashEntries, newTidyId } from "../tidy/manifest.js";
+import { withMemoryDirLock } from "../lock.js";
 import type { MemoryWriteGate } from "../contracts.js";
 import type { JevIndexV1 } from "../jev/contracts.js";
 import { entryHash } from "../jev/entries.js";
@@ -239,6 +240,37 @@ export function trashBlockLocked(
   checkWrite(realDir, opts);
   fsyncDir(join(realDir, ".trash"));
   return { trashName };
+}
+/** Restore a deleted project block using the same root lock and no-clobber
+ * primitives as deletion. The revision is over the original bytes and is not bumped. */
+export async function restoreTrashedBlock(memDir: string, id: string, opts: StoreWriteOptions = {}): Promise<string> {
+  if (opts.gate && !opts.gate.check(memDir).ok) throw new MemoryError("E_WRITE_GATE: memory write refused");
+  return withMemoryDirLock(memDir, () => {
+    const realDir = join(memDir, "blocks");
+    const check = () => {
+      if (dirFormat(memDir) !== "blocks") throw new MemoryError("E_UNMIGRATED: blocks layout required");
+      checkWrite(realDir, opts);
+    };
+    check();
+    const trashDir = join(realDir, ".trash");
+    const trash = inspectDirNoFollow(trashDir);
+    if (trash.dev !== inspectDirNoFollow(realDir).dev) throw new MemoryError("E_WRITE_GATE: trash device changed");
+    const entry = listTrashEntries(realDir).find((candidate) => candidate.id === id);
+    if (!entry || !parseBlockName(entry.name)) throw new MemoryError(`no trash entry ${id}`);
+    const before = parsed(entry.name, readRegular(trashDir, entry.fileName).text);
+    if (before.meta.storageScope === "hub") throw new MemoryError("E_BLOCK: invalid project trash block");
+    if (statRegularIfExists(realDir, entry.name))
+      throw new MemoryError(`restore conflict: ${entry.name} already exists`);
+    check();
+    const latest = parsed(entry.name, readRegular(trashDir, entry.fileName).text);
+    if (latest.rev !== before.rev) throw new MemoryError("E_CONFLICT: trash block changed");
+    renameNoClobber(realDir, `.trash/${entry.fileName}`, entry.name);
+    check();
+    fsyncDir(realDir);
+    check();
+    fsyncDir(trashDir);
+    return entry.name;
+  });
 }
 export function topicSummary(corpus: BlockCorpus, index: JevIndexV1 | undefined, topic: string): string {
   const blocks = corpus.blocks.filter((b) => b.topic === topic && b.meta.status === "active");

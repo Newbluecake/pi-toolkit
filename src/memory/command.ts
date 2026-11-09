@@ -41,7 +41,9 @@ import { readIndex } from "./jev/index-store.js";
 import { restoreBlock } from "./govern/sweep.js";
 import { handleMemReview } from "./jev/review-command.js";
 import { readMarker } from "./blocks/marker.js";
-import { dirFormat } from "./blocks/naming.js";
+import { dirFormat, parseBlockName } from "./blocks/naming.js";
+import { listTrashEntries } from "./tidy/manifest.js";
+import { restoreTrashedBlock } from "./blocks/store.js";
 import {
   runMigration,
   resumeRollback,
@@ -442,6 +444,52 @@ export function createMemCommand(deps: CreateMemCommandDeps): {
             ...(deps.scopedDoctor ? { scoped: deps.scopedDoctor } : {}),
           });
           return;
+        }
+        if (sub === "restore" && rest[0] !== "--block" && rest.includes("--trash")) {
+          const display = memoryDirFor(cwd, deps.paths);
+          const root = canonicalDir(display)?.real;
+          const format = dirFormat(display);
+          if (format === "held") throw new Error("E_UNMIGRATED: layout is held");
+          if (root && format !== "blocks" && inspectDirNoFollow(root).names.includes("blocks"))
+            throw new Error("E_UNMIGRATED: blocks layout is inaccessible or invalid");
+          if (format === "blocks" && root) {
+            if (isChildSession || !ctx.hasUI) {
+              if (ctx.hasUI) ctx.ui.notify("/mem restore is only available in the main session", "warning");
+              return;
+            }
+            if (
+              rest.length > 2 ||
+              rest.filter((arg) => arg === "--trash").length !== 1 ||
+              rest.some((arg) => arg.startsWith("--") && arg !== "--trash")
+            )
+              throw new Error("usage: /mem restore --trash [id]");
+            const gate = deps.writeGate ?? plainMemoryWriteGate;
+            if (!gate.check(root).ok) throw new Error("E_WRITE_GATE: memory write refused");
+            const blocks = join(root, "blocks");
+            const info = inspectDirNoFollow(blocks);
+            if (info.names.includes(".trash")) {
+              const trash = inspectDirNoFollow(join(blocks, ".trash"));
+              if (trash.dev !== info.dev) throw new Error("E_WRITE_GATE: trash device changed");
+            }
+            const entries = listTrashEntries(blocks).filter((entry) => parseBlockName(entry.name));
+            const id = rest.find((arg) => arg !== "--trash");
+            if (!id) {
+              ctx.ui.notify(
+                entries.length ? entries.map((entry) => `  ${entry.id} — ${entry.name}`).join("\n") : "trash is empty",
+                "info",
+              );
+              return;
+            }
+            const entry = entries.find((item) => item.id === id);
+            if (!entry) {
+              ctx.ui.notify(`no trash entry ${id}`, "warning");
+              return;
+            }
+            const name = await restoreTrashedBlock(root, id, { gate });
+            deps.onAfterWrite?.(cwd);
+            ctx.ui.notify(`restore --trash: restored ${name}`, "info");
+            return;
+          }
         }
         if (
           (sub === "restore" && rest[0] === "--block") ||
