@@ -124,7 +124,7 @@ describe("web-hub disabled ⇒ zero side effects (plan §6, §9 #7)", () => {
     writeFileSync(path, JSON.stringify(raw) + "\n", "utf8");
   }
 
-  const sessionCtx = () => ({ modelRegistry: { getAvailable: () => [], find: () => undefined } });
+  const sessionCtx = () => ({ cwd: home.home, modelRegistry: { getAvailable: () => [], find: () => undefined } });
 
   it("default settings ≡ no-op wireWebHub baseline: identical handler multisets, zero net, zero disk", async () => {
     // ① baseline: webHub "enabled" but wireWebHub is a no-op spy.

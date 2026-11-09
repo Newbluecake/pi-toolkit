@@ -192,6 +192,7 @@ describe("message_agent generation probe (regression)", () => {
   it("resolves the live generation mid-run — persist_snapshot is terminal-only, so the store must NOT be the probe source", async () => {
     const admitted: Array<{ generation?: unknown }> = [];
     const router = {
+      reportQuotaSnapshot: () => ({ used: 1, limit: 3, remaining: 2 }),
       admit: (_from: unknown, msg: { generation?: unknown }) => {
         admitted.push(msg);
         return { accepted: true };

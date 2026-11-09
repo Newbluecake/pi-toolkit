@@ -199,12 +199,20 @@ describe("W3 real stack assembly", () => {
     const h = setup();
     const driver = stubDriver();
     const stack = h.build();
+    const reserveMentionReport = vi.fn(() => ({
+      ok: true as const,
+      status: "accepted" as const,
+      key: "key",
+      seq: 1,
+      quota: { used: 1, limit: 3, remaining: 2 },
+    }));
     const channel = createMentionChannel({
       router: {
         admit: () => {
           throw new Error("legacy must resume directly");
         },
         targetState: () => "gone",
+        reserveMentionReport,
       },
       registry: { resolve: () => ({ runId: target, type: "worker", parent: "root" }) },
       query: stack.query,
@@ -215,7 +223,8 @@ describe("W3 real stack assembly", () => {
       level: stack.wake!.level,
     });
     const result = await channel.send("worker-label", "report", "legacy followup");
-    expect(result).toMatchObject({ status: "resumed" });
+    expect(reserveMentionReport).toHaveBeenCalledWith("r_SENDER01", target, 1);
+    expect(result).toMatchObject({ status: "resumed", quota: { used: 1, limit: 3, remaining: 2 } });
     if (result.status !== "resumed") throw new Error("not resumed");
     await until(() => driver.text !== undefined);
     expect(driver.text).toContain("legacy followup");

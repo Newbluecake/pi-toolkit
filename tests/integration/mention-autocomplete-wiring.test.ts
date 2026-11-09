@@ -51,6 +51,7 @@ function fakePi() {
 
 function fakeCtx(wrappers: Factory[]) {
   return {
+    cwd: fakeHome,
     hasUI: true,
     ui: {
       addAutocompleteProvider(factory: Factory) {
@@ -169,15 +170,15 @@ describe("session_start autocomplete wrapper registration (B2 reload regression)
     const { pi, emit } = fakePi();
     activate(pi as never);
     // must not throw with a bare/non-interactive ctx
-    await emit("session_start", {}, {});
-    await emit("session_start", {}, { hasUI: true, ui: {} });
+    await emit("session_start", {}, { cwd: fakeHome });
+    await emit("session_start", {}, { cwd: fakeHome, hasUI: true, ui: {} });
     await emit("session_shutdown", { reason: "quit" });
   });
 
   it("/agent status gains the Mentionable labels section", async () => {
     const { pi, commands, emit } = fakePi();
     activate(pi as never);
-    await emit("session_start", {}, {});
+    await emit("session_start", {}, { cwd: fakeHome });
     const notifications: string[] = [];
     await commands.get("agent")!.handler("status", {
       ui: { notify: (text: string) => notifications.push(text) },

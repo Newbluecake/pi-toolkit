@@ -190,24 +190,36 @@ describe("user-rule edits through the production wireMemory (#26)", () => {
     expect(h.counters.confirm).toBe(0);
     expect(h.counters.notify).toBe(0);
   });
-  it("missing or stale rev rejects without changing the block or notifying", async () => {
+  it("missing or stale rev returns errors without changing the block or notifying", async () => {
     const h = harness();
     seed("user");
     const ctx = h.ctx("tui");
     const file = join(memDir, "blocks", `${BLOCK_ID}.md`);
     const before = readFileSync(file, "utf8");
-    await expect(
-      h.tool.execute("missing", { command: "update", path: BLOCK_ID, text: "- changed" }, undefined, undefined, ctx),
-    ).rejects.toThrow("E_REV_REQUIRED");
-    await expect(
-      h.tool.execute(
-        "stale",
-        { command: "update", path: BLOCK_ID, rev: "1-000000", text: "- changed" },
-        undefined,
-        undefined,
-        ctx,
-      ),
-    ).rejects.toThrow("E_CONFLICT");
+    const missing = (await h.tool.execute(
+      "missing",
+      { command: "update", path: BLOCK_ID, text: "- changed" },
+      undefined,
+      undefined,
+      ctx,
+    )) as { content: { text: string }[] };
+    expect(JSON.parse(missing.content[0]!.text)).toMatchObject({
+      ok: false,
+      code: "E_REV_REQUIRED",
+      message: expect.stringMatching(/\S/),
+    });
+    const stale = (await h.tool.execute(
+      "stale",
+      { command: "update", path: BLOCK_ID, rev: "1-000000", text: "- changed" },
+      undefined,
+      undefined,
+      ctx,
+    )) as { content: { text: string }[] };
+    expect(JSON.parse(stale.content[0]!.text)).toMatchObject({
+      ok: false,
+      code: "E_CONFLICT",
+      message: expect.stringMatching(/\S/),
+    });
     expect(readFileSync(file, "utf8")).toBe(before);
     expect(h.counters.notify).toBe(0);
     expect(h.counters.confirm).toBe(0);
