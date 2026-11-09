@@ -6,7 +6,7 @@
 
 ## src/memory/
 
-`src/memory/` — merged armory-memory: cwd-keyed project memory under `~/.pi/agent/memory/<slug>/`, with default `layout:blocks` injection; `toolSurface:v2` remains the configured files-layout tool surface, while blocks use v3. Explicit `legacy` settings retain the byte-compatible files-layout opt-out. With blocks configured and files still on disk, effective layout falls back to tiered for injection and doctor; existing blocks take precedence over tiered/legacy configuration. The tiered renderer enforces whole-file/whole-section admission and a UTF-8 byte budget; topic index lines carry `description`/`read_when` metadata, while `/mem doctor` reports D01-D14 health and its summary is surfaced by `/mem` and `memory.view`. Slug directories are canonicalized once and may be user-trusted symlinks; file-level symlinks and non-regular files are rejected. All v2 writes, imports, tidy, and restore operations serialize under the directory lock; batch tidy calls the post-write invalidation once. Registers a `pi_project_memory` section into the shared prompt-section hub (`src/sysprompt/hub.ts`, pre-guard, created before `wireMemory` runs so fold order stays memory → agent types → models) instead of owning its own `before_agent_start` hook (sysprompt-stable M3); the hub decides snapshot vs. tail update, `src/memory/inject.ts`'s `memorySection` provider only renders the current live block (pin frontmatter, agent-source fence, tail sentinel, fingerprint-keyed render cache). The `memory` tool lists/writes/appends (child sessions read-only by default, writes carry `source: agent` provenance); `/mem` covers list/path/init/import/doctor/tidy/restore (`init` creates an agent-source `core.md` skeleton stamped `source: agent` — deleting that line locks it as user-authored — and refuses an existing, archived or pin-stand-in primary). Tidy and restore are journaled transactions (`src/memory/tidy/{txn,manifest,journal}.ts`, design `docs/dev/memory/tidy-batch-plan.md` v3.2): the run event records the full planned op list before any intent, every MOVE/CREATE/REPLACE is CAS- and owner-epoch-checked and its result carries a mandatory final observation, an interrupted run stays resumable and is recovered before new work, and manifests are strict v2 (v1 backups restore only with `--legacy`, also through the txn layer). Hard-link-less filesystems refuse txn tidy (fail closed). Directory locks follow M-T4: a lock whose holder cannot be proven dead (old-format, cross-host) is never broken by age — writers get an actionable busy error and only the TUI-only `/mem tidy --break-lock` (epoch bump BEFORE lockBreak) clears it. `/mem tidy --batch` (P3a, `batch-command.ts`) archives stale entries into `archive/` (+ `ARCHIVE.md`, index pruning) and rewrites the rest in model batches sized by the dispatch-time `SpawnRequest.inputBudget` measurement (re-splitting on `input-budget` failures), holding one run lease for the whole command, bounded by `memory.tidy.batch.*` (bounded cost cap, max model runs, activity clock excluding dialog time); `--dry-run`/`--status` are read-only and web-allowed, `--triage` (P3b) is not implemented. `paths|frontmatter|store|render` are pi-free; `index.ts` (`wireMemory`) is the only pi-facing assembly and holds all mutable state in its closure; registered pre-guard. Design: `docs/dev/memory/memory-plan.md`.
+`src/memory/` — merged armory-memory: cwd-keyed project memory under `~/.pi/agent/memory/<slug>/`, with default `layout:blocks` injection; `toolSurface:v2` remains the configured files-layout tool surface, while blocks use v3. Explicit `legacy` settings retain the byte-compatible files-layout opt-out. With blocks configured and files still on disk, effective layout falls back to tiered for injection and doctor; existing blocks take precedence over tiered/legacy configuration. The tiered renderer enforces whole-file/whole-section admission and a UTF-8 byte budget; topic index lines carry `description`/`read_when` metadata, while `/mem doctor` reports layout-specific health findings and its summary is surfaced by `/mem` and `memory.view`. Slug directories are canonicalized once and may be user-trusted symlinks; file-level symlinks and non-regular files are rejected. All v2 writes, imports, tidy, and restore operations serialize under the directory lock; batch tidy calls the post-write invalidation once. Registers a `pi_project_memory` section into the shared prompt-section hub (`src/sysprompt/hub.ts`, pre-guard, created before `wireMemory` runs so fold order stays memory → agent types → models) instead of owning its own `before_agent_start` hook (sysprompt-stable M3); the hub decides snapshot vs. tail update, `src/memory/inject.ts`'s `memorySection` provider only renders the current live block (pin frontmatter, agent-source fence, tail sentinel, fingerprint-keyed render cache). The project `memory` tool uses v3 view/create/update/delete/search in blocks layout (whole-block update with rev/CAS); explicit files layouts retain v2/legacy surfaces. Child sessions are read-only by default, and scopes-on children keep project/Hub content hard read-only even with the old write opt-in. `/mem` covers layout-specific list/path/doctor, read-only review/expired, migration and restore; init/import retain their files-oriented workflows (not block CRUD), and tidy is unavailable in blocks layout (`init` creates an agent-source `core.md` skeleton stamped `source: agent` — deleting that line locks it as user-authored — and refuses an existing, archived or pin-stand-in primary). Files-layout tidy and restore are journaled transactions (`src/memory/tidy/{txn,manifest,journal}.ts`, design `docs/dev/memory/tidy-batch-plan.md` v3.2): the run event records the full planned op list before any intent, every MOVE/CREATE/REPLACE is CAS- and owner-epoch-checked and its result carries a mandatory final observation, an interrupted run stays resumable and is recovered before new work, and manifests are strict v2 (v1 backups restore only with `--legacy`, also through the txn layer). Hard-link-less filesystems refuse txn tidy (fail closed). Directory locks follow M-T4: a lock whose holder cannot be proven dead (old-format, cross-host) is never broken by age — writers get an actionable busy error and only the TUI-only `/mem tidy --break-lock` (epoch bump BEFORE lockBreak) clears it. `/mem tidy --batch` (P3a, `batch-command.ts`) archives stale entries into `archive/` (+ `ARCHIVE.md`, index pruning) and rewrites the rest in model batches sized by the dispatch-time `SpawnRequest.inputBudget` measurement (re-splitting on `input-budget` failures), holding one run lease for the whole command, bounded by `memory.tidy.batch.*` (bounded cost cap, max model runs, activity clock excluding dialog time); `--dry-run`/`--status` are read-only and web-allowed, `--triage` (P3b) is not implemented. `paths|frontmatter|store|render` are pi-free; `index.ts` (`wireMemory`) is the only pi-facing assembly and holds all mutable state in its closure; registered pre-guard. Design: `docs/dev/memory/memory-plan.md`.
 
 ## `/mem` discovery by layout
 
@@ -144,9 +144,9 @@ Jev 是一个分类器驱动的核心 memory 子系统，职责三项：召回�
 
 **默认值、分类器列表、阈值以代码为准**：`src/memory/settings.ts`、`src/memory/setting-specs.ts`（28 个 `memory.jev.*` 键：原 14（#26 删 `confirmTimeoutS`）+ memory-predict 的 14 个 `memory.jev.predict.*`，plan §10；其中 `model.*` 7 键在 P1b 只解析不使用，P2（§11.2）接线后生效）。各包交付报告见 `docs/dev/memory/reports/J*-report.md`。
 
-## #36 blocks 治理 · P5a 开发状态（2026-11-06）
+## #36 blocks 治理 · 核心与生产装配（2026-11-09 更新）
 
-本节是当前开发状态，不表示 #36 的全部接线、默认布局翻转或真实数据迁移已经完成。治理核心位于 `src/memory/govern/{sweep-plan,sweep,supersede,review-lite}.ts`，pi-free；既有 files/tiered 行为与 golden 保持不变。
+治理核心位于 `src/memory/govern/{sweep-plan,sweep,supersede,review-lite}.ts`，pi-free；下列预算数据来自 P5a，生产装配已由后续 I1/C3 完成（见本节及文末的装配记录）。当前默认 `layout: blocks`、`migrate.auto: true`，但不代表用户真实数据已完成迁移或验收。显式 files/tiered 行为与既有 golden 保持不变。
 
 ### 预算口径与一致性
 
@@ -155,21 +155,21 @@ Jev 是一个分类器驱动的核心 memory 子系统，职责三项：召回�
 - 扫描捕获一次目录身份/列表，no-follow 读取常规块文件后复核 dev/ino，避免旧通用 reader 逐块重枚举造成的二次复杂度。快照只提供候选：写锁内仍复核 rev、authority、active、expires，移动前再次做 rev 校验；取代同样走锁内七条件与旧块单边 CAS。
 - 真实 2000 块临时目录基准：开发复跑 **371 ms / 48 写成本 / 8 归档**；独立验收 **418/419/457 ms**，同为 48/8。性能数据不替代边界检查，不承诺任意同步 I/O 都能被硬中断；生产门槛仍为 1000 ms / 50 写成本 / 500 ms 锁等待。
 
-### 已接线与待接线
+### 当前接线与范围边界
 
 - **#50 为 #36 子项，未启动**；当前已有的「写入时比较 + 周期 review + sweep」不等于 #50。
-
 - **已接**：`wireMemory` 复用已有 `session_start` 和 `onAfterWrite` 触发 startup/write sweep；shutdown/reload abort；sweep-origin 写入只失效缓存，不自触发。显式 `supersedes=`、分类关系执行、单边恢复及永久 dismissed 已接工具/命令路径；Jev off 仍可显式取代，agent 永不取代 user。
-- **P5b 待接**：task-done/push/release 的 Jev 事件信号、turn_end 消费，以及 render 预算/索引溢出信号；不能据此宣称全部治理事件已经上线。复用 `createSweepRunner(options).runSweep(memDir, reason, signal?, origin?)`，保持同目录重入合并、session abort 和 sweep-origin 屏蔽。
-- **P5b 待接**：迁移后首次 user↔user review 的 host judge 与首轮信号/执行标记。核心端口为 `firstUserReviewPass(memDir, judge, { gate?, signal? })`；judge 接收 `readonly { a: string; b: string }[]`（块 id pair），返回 `Promise<readonly { a: string; b: string; p: number }[]>`。核心过滤非 active/private/secret 用户块，锁内丢弃 rev 已变化的迟到答案，只写建议、不自动取代；host 仍须负责准入、模型预算和外发脱敏。
-- 默认布局翻转与真实数据治理不属于 P5a 完成状态；实际迁移必须继续遵守 #36 后续门禁和用户批准流程。
+- **I1 已装配**：task-done/push/release 的 Jev 事件信号、turn_end 消费，以及 render 预算/索引溢出信号已接生产；复用既有 handler，不新增唤醒。详见文末「#36 I1 事件与预算装配」的保守识别、合并、重试与生命周期边界；后台 bash job 终态关联仍未接生产，复杂 shell 不推断成功。
+- **C3 已装配**：迁移后首次 user↔user review 由 `createFirstUserReviewHost` 在自然 startup 或真实治理事件的 turn_end 机会驱动；只写建议，不自动取代，完成后交由 C5 markers 持久化。下节保留核心/host 的预算与提交协议，不再将它描述为未装配。
+- **默认值已翻转**：`memory.layout=blocks`、`memory.migrate.auto=true`（见文末 F1）。真实数据迁移仍须按 [migration-runbook](migration-runbook.md) 暂停、备份、预演和核验，不能用源码门禁替代真实数据批准流程。
 
-### P7 交接：需核对的行为缺口（未在本轮改行为）
+### P7 行为核对的当前结论
 
 - 迁移后 reload 提醒已由 C5 接入独立代际标记（下节），不再由 sweep 重复显示。
-- blocks 的 `/mem review`、`/mem expired` 当前路由到 review-lite 治理子集，尚未完整呈现非治理 Jev 建议及原 expired 四组视图。这是命令能力/需求覆盖缺口，不是文档措辞问题；P7 应逐项核对需求与实现并安排补齐或显式裁定，不能仅靠更改文档宣称完成。
+- **C4 已消除治理子集限制**（`fc3230d2` / `6ae35450`）：blocks `/mem review` 合并现有侧车建议（包括非治理类型）与即时治理建议；`/mem expired` 独立展示 active 块的 expires/until、区分权威。两者均为只读，`--run` 不启动整理；详见文末「`/mem review` 与 `/mem expired` 只读展示」。历史 P5a/P7 交接中关于“仅 review-lite 子集”的描述已不代表当前状态。
+- **删除恢复与归档/取代恢复分开**：`restore --block` 用于归档或已取代的块；已删除块在 `blocks/.trash/`，`restore --trash` 的 blocks 路由由另一包修复中，此处不承诺已完成。files 布局仍是项目根 `.trash/`。
 
-本包证据：`tests/memory/govern/{sweep-plan,sweep,supersede,review-lite}.test.ts`、`tests/integration/memory-blocks-{governance,supersede-race}.test.ts`；相邻门禁包含工具 v3/Jev、命令/tidy、pi-free、activate-trace 与既有 memory golden。
+P5a 核心证据：`tests/memory/govern/{sweep-plan,sweep,supersede,review-lite}.test.ts`、`tests/integration/memory-blocks-{governance,supersede-race}.test.ts`；相邻门禁包含工具 v3/Jev、命令/tidy、pi-free、activate-trace 与既有 memory golden。
 
 ### #36 C5 治理标记与迁移 reload 提醒（2026-11-08）
 
@@ -194,16 +194,15 @@ unavailable；缺失合法、旧代际不抑制新迁移，坏 JSON/版本/字�
   no-follow/身份复核也不宣称抵御同 uid 恶意进程在任意 syscall 间替换路径。
 
 证据：`tests/memory/govern/{markers,markers-wire}.test.ts`（真实临时文件系统 + 实际 wireMemory 接线）及
-`tests/integration/memory-blocks-governance.test.ts`（sweep 移交无两条）。不接 C3、不消费 I1 事件，默认值及
-所有 golden 保持原样。
+`tests/integration/memory-blocks-governance.test.ts`（sweep 移交无两条）。C5 owner 本身不启动 C3、不消费 I1 事件；这些生产调用由 I1 装配承担，见文末。历史 C5 单包未改变默认值或任何 golden。
 
-### #36 C3 首次 user↔user 有界 review（未装配）
+### #36 C3 首次 user↔user 有界 review（核心与 host 已装配）
 
 `govern/review-lite.ts::firstUserReviewPass` 是结构化核心：逐块扫描 project blocks，仅保留按 ID 排序前 32 个 active、非 private/secret/residue 的 user；完整合格集合按 ID 顺序以 `(id, rev, authority, status, private)` 和 `bounded-neighbours-v1` 做 SHA-256。按距离 1、2 取对（最多 61），在 judge 前剔除已 dismiss；judge 只收到本地 ID 与 `redactForJev(entry)` 摘录。锁内复核双方 live rev/authority/status/privacy/dismiss，重扫完整指纹后才合并建议；缺失、重复、未知/非法答案、CAS 丢弃、锁/写失败都不返回完整。新 core 沿用常规 Jev relation 的 0.75 建议阈值；低置信答案仍计入完整。数字接口改名 `firstUserReviewCount`，保留新增建议计数与旧阈值，但**不是完整兼容旧语义**：严格要求所有计划 pair 的答案齐全，缺答案即不完整并抛错，不返回部分新增计数。调用方需显式迁移名称。
 
 `jev/first-user-review.ts::createFirstUserReviewHost` 独立持有在飞状态，先验证迁移 markers、owner、gate、Jev、主会话及 registry；向现有 client 仅发批内 alias、两边≤400 code point 的脱敏摘录及固定 bool conflict 问句。每批≤16、最多 4 批、同时受现有 token/client 配额约束；跨批失败或取消保留已验证答案数，并报告已尝试批次数、已申请预算、已耗墙钟及 client 已报告费用（失败调用的未知费用不猜测）。6000ms 总期限贯穿扫描、请求和提交，超时或取消撤销提交权，已有建议不回滚。所有结果及建议提交成功后才请求 markers owner 写完成；marker 写失败允许未来自然机会重试。同步文件系统调用无法在单次 syscall 内被 JS 抢占，不声称跨建议和 marker 的事务性。
 
-本包不注册 hook、不主动续跑：I1 装配方必须只在已有 startup 或真实 corpus 变化/治理事件等自然机会调用 `run()`，禁止 render 或空转 turn_end 重试；提供当前 registry/client、主会话标记、gate、owner/session epoch 的 `isCurrent`、生命周期 signal，并在显式取消/shutdown/reload 调用 `cancel()` / `dispose()`。当前不是生产接线完成的声明。
+核心/host 自身不注册 hook、不主动续跑；生产 I1 装配复用已有 startup 和真实治理事件的 turn_end 自然机会调用 `run()`，不在 render 或空转 turn_end 重试。`wireMemory` 提供当前 registry/client、主会话标记、gate、owner/session epoch 的 `isCurrent` 与生命周期 signal，并在取消/shutdown/reload 撤权或 dispose。完成标记由 C5 owner 持久化；详见文末 I1 装配节。历史 C3 单包的“未装配”结论已被该生产接线覆盖，但上述同步 I/O 与非事务性限界不变。
 
 ### #36 自动取代收窄（2026-11-07 用户新裁定）
 

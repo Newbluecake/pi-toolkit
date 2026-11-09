@@ -1,6 +1,6 @@
 # 记忆迁移 runbook（TUI 主会话）
 
-适用版本：`eb105111494a1ee99308d6bfa0fa636bfdb85edc`。以下 `/mem` 和 `/reload` 是在 pi 的 TUI 输入框中输入，**不是 shell 命令**；标为 shell 的命令在普通终端运行。先读完回退段再开始。
+适用状态：以 `2f7a3658` 的 blocks 默认布局及 C4 命令实现为基准（2026-11-09 更新）；最初编写基线为 `eb105111494a1ee99308d6bfa0fa636bfdb85edc`。以下 `/mem` 和 `/reload` 是在 pi 的 TUI 输入框中输入，**不是 shell 命令**；标为 shell 的命令在普通终端运行。先读完回退段再开始。
 
 > **升级后首次启动前：先暂停自动迁移并备份。** 默认 `memory.layout=blocks` 且 `memory.migrate.auto=true`，主会话一启动就可能迁移当前项目；自动启动迁移**不要求 TUI**，RPC/print 等主会话也可能触发。先停止目标项目的旧写入者，在启动前将目标配置中的 `memory.migrate.auto` 设为 `false`，按第 2 节用同一环境完成并核对备份；若未能确认实际路径或设置，先停止，不要启动目标会话。
 >
@@ -115,7 +115,7 @@ cp -a -- "$target/." "$linkcopy/" && diff -r --no-dereference -- "$target" "$lin
   marker 的 `gen` 是提交代际；状态文件 `gen` 用于阻止并发迁移/回退的过期提交，并非块数量或配置版本。正常新提交时两者应相同，marker 的 `runId` 应与 `--status` 一致；中断或回退期间状态代际可先增加，不能只凭 gen 断定已发布。若缺 marker、状态异常、hold 存在或核对不一致，停止并调查；`/mem doctor` 还用于检查 D24 漂移和 D25 未完成回退等诊断，不要只看 marker。
 
 - `--status` 的 `dir` 为 `blocks`，查看 runId、hold 和 legacyDrift；`--report` 与预演对照，检查全部源文件、归类和异常。报告在 `blocks/.migration-report.json`，只有成功发布过迁移报告才可读取。
-- `/mem list` 的条目符合预期；`/mem review` 检查可见建议，不要未经判断批量处理。blocks 当前路由到 review-lite 治理子集，并非全部 Jev 建议都在这里显示。
+- `/mem list` 的条目符合预期；`/mem review` 只读合并现有 Jev 侧车建议（含非治理类型）与即时治理建议，并核对锚点、去重和已处理状态。查看不执行建议；`--run` 也只展示现有建议，不触发分类或 sweep。
 - 在主会话发一个与已知记忆有关的普通请求，检查会话中实际注入的记忆是否正确、重要用户令及隐私范围没有异常；不要只以模型回答正确与否代替检查注入内容。
 - 用 `/mem path` 输出的目录在文件管理器中只读检查：临时 `.blocks-staging-<runId>` 构建完成后原子发布为 `blocks/`；其中应有 `topic.NNN.md`、`archive/`、`.trash/`、`.jev/index.json`、`.migration-report.json` 和 `.layout.json`。旧根 `.md` 仍在。中断可能留下 staging 或隔离残留，先调查，不要手动删除（`src/memory/blocks/migrate.ts:186-229,437-481,485-564`）。
 
@@ -155,7 +155,8 @@ cp -a -- "$target/." "$linkcopy/" && diff -r --no-dereference -- "$target" "$lin
 
 ## 9. 迁移后
 
-- blocks 目录禁用 tidy；`/mem review` 实际是 review-lite，`/mem expired` 也路由到该子集。恢复归档块时，使用 `/mem restore --block <id or stored name>`，把占位符替换为实际 ID 或存储名。review-lite 尚不完整展示非治理 Jev 建议及旧 expired 的全部视图（`docs/dev/memory/README.md:108-131`）。
+- blocks 目录禁用 tidy。`/mem review` 只读展示现有 Jev 建议与即时治理建议，不限于治理子集；`/mem expired` 独立展示 active 块的已过期 `expires` 和所有 `until` 条件，区分 user/agent（同一块可占两行），不包含已取代或归档块。两者均不运行 sweep、分类器或交互式修改；`until` 只供核对，不能据此断言事件已发生。当前实现见 [README 的只读展示说明](README.md#mem-review-与-mem-expired-只读展示)。
+- 恢复归档或已取代的块用 `/mem restore --block <id or stored name>`，把占位符替换为实际 ID 或存储名；这不是删除恢复。已删除块保存在 `blocks/.trash/`，对应 `/mem restore --trash` 的 blocks 路由由另一包修复中，本 runbook 不承诺该路由已可用；files 布局仍使用根 `.trash/` 的原有恢复路径。
 - Jev 已有标签按条目内容 hash 匹配沿用，未匹配不会因迁移重新调用模型分类；报告里的 oversize 等是规则建议（`src/memory/blocks/migrate-plan.ts:142-145,195-215`）。
 - 旧根文件迁移后发生变化不会自动覆盖 blocks。`/mem migrate --import-legacy --dry-run` 只列出漂移文件；核对后 `/mem migrate --import-legacy` 才追加导入，以内容 hash 去重，需已是 blocks；不覆盖现有块。见 `src/memory/blocks/legacy.ts:44-56,58-124`。
 - `memory.migrate.auto=false` 表示关闭 session_start 的惰性自动迁移，只显式迁移；**不能假设当前值为 false**：此 HEAD 默认 `true`，默认 layout 是 `blocks`，启动自动迁移还要求主会话、files 目录及安全门禁通过等，不要求 TUI。以 `/mem migrate --status` 的实际值为准；若要保证试点前不自动迁移，启动目标会话前应先核实设置。证据 `src/memory/settings.ts:475-482`、`src/memory/index.ts:254-274`。
@@ -182,7 +183,8 @@ cp -a -- "$target/." "$linkcopy/" && diff -r --no-dereference -- "$target" "$lin
 
 ```json
 {
-  "base_head": "eb105111494a1ee99308d6bfa0fa636bfdb85edc",
+  "base_head": "2f7a3658",
+  "original_base_head": "eb105111494a1ee99308d6bfa0fa636bfdb85edc",
   "deliverable": "docs/dev/memory/migration-runbook.md",
   "scope": "文档；用户在 TUI 主会话手动迁移",
   "critical_correction": "HEAD 的 memory.migrate.auto 默认 true，不能按 false 描述实际默认；status 显示生效值。默认 layout 为 blocks。",
@@ -190,7 +192,7 @@ cp -a -- "$target/." "$linkcopy/" && diff -r --no-dereference -- "$target" "$lin
     "迁移规则不调用模型；迁移结果与注入须人工验收",
     "回退不会自动合并迁移后对 blocks 的更改",
     "全量中返回 aborted 继续；外层抛错可中止循环",
-    "blocks review-lite 尚不覆盖全部 Jev 建议"
+    "review/expired 为只读展示，--run 不启动整理；删除块的 restore --trash 路由由另一包修复中"
   ]
 }
 ```
