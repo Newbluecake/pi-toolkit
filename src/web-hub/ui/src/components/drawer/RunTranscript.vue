@@ -51,6 +51,7 @@ const txSource = computed<TranscriptSource | null>(() => {
     streaming: cur.streaming,
     tools: cur.tools,
     ...(cur.toolDurations !== undefined ? { toolDurations: cur.toolDurations } : {}),
+    ...(cur.generation !== undefined ? { generation: cur.generation } : {}),
     history: cur.history,
     ...(cur.historyError !== undefined ? { historyError: cur.historyError } : {}),
     hasMore: cur.hasMore,
@@ -124,6 +125,7 @@ const hasFooter = computed(
   <div class="run-tx">
     <Transcript
       v-if="txSource !== null"
+      :key="txSource.key"
       :agent="txSource"
       :following="following"
       :narrow="true"

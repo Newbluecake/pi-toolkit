@@ -17,6 +17,7 @@
  */
 import type { Ref } from "vue";
 import type { PreviewDims } from "@protocol/preview.js";
+import type { GenerationCore } from "@protocol/message-generation.js";
 import type { FleetRowWire, LoadGateWire, LoadTopWire, LoadWire, TodoTaskWire, TodoWire } from "@protocol/messages.js";
 import type { SchedulesPayloadWire } from "@protocol/schedule.js";
 import type { ForkReason, HistoryLiveWire, ProofGap } from "@protocol/session-history.js";
@@ -207,6 +208,8 @@ export interface RunTxState {
   readonly streaming: Record<string, unknown> | null;
   readonly tools: readonly LiveTool[];
   readonly toolDurations?: ReadonlyMap<string, number>;
+  /** History speed metadata indexed by assistant entry id, built by the reducer. */
+  readonly generation?: ReadonlyMap<string, GenerationCore>;
   readonly history: HistoryState;
   readonly historyError?: string;
   /** §3.6 denial reason (`not_persisted` …) — error states and disabled "load older" paging. */
