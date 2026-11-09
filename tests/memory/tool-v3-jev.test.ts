@@ -434,6 +434,26 @@ describe("v3 jev: relation verdicts (§5.4 — P5a executes)", () => {
 // ── 修复轮：checkInline 在端口开启时对服务端键保持 v3 忽略语义 ──
 
 describe("v3 jev fix-round", () => {
+  test("section repair passes the real Jev inline guard without triggering classification or relations", async () => {
+    const fx = fixture([{ id: "gen.001", section: "中".repeat(34), body: "- fact", allowOversize: true }]);
+    const tool = makeTool(fx);
+    const before = block(fx, "gen.001");
+    const reply = await exec(
+      tool,
+      {
+        command: "update",
+        path: "gen.001",
+        rev: before.rev,
+        text: '- fact <!-- mem section="short group" -->',
+      },
+      ctx(fx.cwd, { registry }),
+    );
+    expect(reply).toContain("updated gen.001");
+    expect(block(fx, "gen.001").meta.section).toBe("short group");
+    expect(block(fx, "gen.001").meta.authority).toBe(before.meta.authority);
+    expect(block(fx, "gen.001").meta.supersededBy).toBeUndefined();
+    expect(fx.asks).toHaveLength(0);
+  });
   test("server-owned keys pass checkInline under a wired port (tokens stripped, real errors kept)", async () => {
     const fx = fixture([{ id: "gen.001", authority: "agent", body: "- fact" }]);
     const tool = makeTool(fx);

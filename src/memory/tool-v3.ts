@@ -175,6 +175,8 @@ interface WriteMeta {
   clearExpires?: true;
   until?: string;
   clearUntil?: true;
+  section?: string;
+  clearSection?: true;
   tagsAdd?: readonly string[];
   tagsRemove?: readonly string[];
   isPrivate?: boolean;
@@ -199,6 +201,8 @@ function parseWriteMeta(rawText: string): { meta: WriteMeta; body: string } {
     ...(meta.clearExpires === undefined ? {} : { clearExpires: meta.clearExpires }),
     ...(meta.until === undefined ? {} : { until: meta.until }),
     ...(meta.clearUntil === undefined ? {} : { clearUntil: meta.clearUntil }),
+    ...(meta.section === undefined ? {} : { section: meta.section }),
+    ...(meta.clearSection === undefined ? {} : { clearSection: meta.clearSection }),
     ...(meta.tagsAdd === undefined ? {} : { tagsAdd: meta.tagsAdd }),
     ...(meta.tagsRemove === undefined ? {} : { tagsRemove: meta.tagsRemove }),
     ...(meta.isPrivate === undefined ? {} : { isPrivate: meta.isPrivate }),
@@ -222,7 +226,7 @@ function stripServerOwnedTokens(rawText: string, ignored: readonly string[]): st
   if (ignored.length === 0) return rawText;
   let out = rawText;
   for (const key of ignored) {
-    out = out.replace(new RegExp(`[ \t]${key}(?:="[^"]*"|=\S+)?`), "");
+    out = out.replace(new RegExp(`[ \t]${key}(?:="[^"]*"|=\\S+)?`), "");
   }
   return out;
 }
@@ -286,6 +290,7 @@ function metaForCreate(w: WriteMeta): Omit<BlockMeta, "created" | "updated" | "v
     ...(w.audience === undefined ? {} : { audience: w.audience }),
     ...(w.expires === undefined ? {} : { expires: w.expires }),
     ...(w.until === undefined ? {} : { until: w.until }),
+    ...(w.section === undefined ? {} : { section: w.section }),
     ...(tags === undefined ? {} : { tags }),
     ...(w.isPrivate === true ? { private: true as const } : {}),
     ...(w.title === undefined ? {} : { title: w.title }),
@@ -333,6 +338,9 @@ function mergeMeta(current: BlockMeta, w: WriteMeta): BlockMeta {
   delete next.until;
   const until = w.clearUntil === true ? undefined : (w.until ?? current.until);
   if (until !== undefined) next.until = until;
+  delete next.section;
+  const section = w.clearSection === true ? undefined : (w.section ?? current.section);
+  if (section !== undefined) next.section = section;
   delete next.tags;
   if (add.size > 0 || remove.size > 0) next.tags = { add: [...add], remove: [...remove] };
   return next;
@@ -802,7 +810,10 @@ export function createMemoryToolV3(deps: MemoryToolV3Deps): ToolDefinition {
         const inlineErr = deps.jev?.checkInline(
           `${topic}.md`,
           undefined,
-          stripServerOwnedTokens(normalized.text, meta.ignored),
+          stripServerOwnedTokens(normalized.text, [
+            ...meta.ignored,
+            ...(meta.section !== undefined || meta.clearSection ? ["section"] : []),
+          ]),
         );
         if (inlineErr !== undefined) throw new MemoryError(inlineErr);
         const metaObj = metaForCreate(meta);
@@ -900,7 +911,10 @@ export function createMemoryToolV3(deps: MemoryToolV3Deps): ToolDefinition {
         const inlineErr = deps.jev?.checkInline(
           `${id}.md`,
           current.raw,
-          stripServerOwnedTokens(normalized.text, meta.ignored),
+          stripServerOwnedTokens(normalized.text, [
+            ...meta.ignored,
+            ...(meta.section !== undefined || meta.clearSection ? ["section"] : []),
+          ]),
         );
         if (inlineErr !== undefined) throw new MemoryError(inlineErr);
         const updated = await withMemoryDirLock(real ?? display, () => {

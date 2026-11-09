@@ -110,6 +110,9 @@ export interface InlineMeta {
   readonly expires?: string;
   /** `until="event"` — event-type expiry; listed for confirmation only. */
   readonly until?: string;
+  /** Blocks v3 write-only section override. */
+  readonly section?: string;
+  readonly clearSection?: true;
   /** `gate` (guard once) / `gate=hold` / `nogate` — parsed for backward
    *  compatibility with memory files written before the gate feature was
    *  removed (2026-11); carrying one has no effect anymore. */

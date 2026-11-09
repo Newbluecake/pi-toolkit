@@ -156,6 +156,8 @@ export function parseInlineMeta(
     when?: string;
     clearExpires?: true;
     clearUntil?: true;
+    section?: string;
+    clearSection?: true;
   } = { present: true };
   const ignoredKeys: string[] = [];
   const seen = new Set<string>();
@@ -227,6 +229,17 @@ export function parseInlineMeta(
           break;
         }
         meta.until = value;
+        break;
+      case "section":
+        if (!opts?.lenientServerOwned) {
+          errors.push(`unknown key ${JSON.stringify(key)}`);
+        } else if (value === undefined || value === "") {
+          errors.push("section requires a value");
+        } else if (value === "none") {
+          meta.clearSection = true;
+        } else {
+          meta.section = value;
+        }
         break;
       case "gate":
         sawGate = true;

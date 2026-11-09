@@ -183,14 +183,11 @@ export function replaceBlockLocked(
     current = parsed(name, readRegular(realDir, name).text);
   if (current.rev !== expectRev) throw new MemoryError(`E_CONFLICT: current rev ${current.rev}\n${current.body}`);
   // A strict parser drops invalid scalar fields; never silently erase historical metadata on edit.
-  const invalidMeta = current.errors.find(
-    (error) => /^invalid (until|section|heading|title|when)$/.test(error) || error === "E_SECTION_TOO_LARGE",
-  );
-  if (invalidMeta)
+  const invalidMeta = current.errors.find((error) => /^invalid (until|section|heading|title|when)$/.test(error));
+  if (invalidMeta) throw new MemoryError(`E_META: ${invalidMeta}`);
+  if (current.errors.includes("E_SECTION_TOO_LARGE") && next.meta.section === current.meta.section)
     throw new MemoryError(
-      invalidMeta === "E_SECTION_TOO_LARGE"
-        ? "E_SECTION_TOO_LARGE: section exceeds 80 UTF-8 bytes"
-        : `E_META: ${invalidMeta}`,
+      "E_SECTION_TOO_LARGE: section exceeds 80 UTF-8 bytes — use section= with a shorter value or section=none to clear it",
     );
   const meta: BlockMeta = {
     ...next.meta,
