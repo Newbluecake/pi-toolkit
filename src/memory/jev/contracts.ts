@@ -394,6 +394,12 @@ export interface ClientProvenance {
   readonly requestDigest: string;
   readonly inputDigest: string;
   readonly trusted: boolean;
+  /** Revision SDK request identity, separate from verified actual provider/model. */
+  readonly requestedProvider?: string;
+  readonly requestedModel?: string;
+  /** Verified canonical identity; absent when the response cannot be bound. */
+  readonly canonicalProvider?: string;
+  readonly canonicalModel?: string;
 }
 
 export interface CanonicalClassifyRoute {
@@ -440,6 +446,188 @@ export interface ControlledClassifyTransport {
       }
     | undefined;
 }
+
+// ───────────────────────────── P50 revision transport (host opt-in, no wire) ─────────────────────────────
+
+/** Frozen local admission evidence, not an outbound DTO. Unknown privacy or
+ * parse status is refused, not defaulted. The caller must read the real block;
+ * this seam does not freeze raw files or grant permission to commit. */
+export interface RevisionBlockInput {
+  readonly id: string;
+  readonly rev: string;
+  readonly authority: "user" | "agent";
+  readonly topic: string;
+  readonly section?: string;
+  readonly body: string;
+  readonly private: boolean;
+  readonly secret: boolean;
+  readonly parseErrors: readonly string[];
+  readonly status: "active";
+  readonly storageScope?: "hub";
+  readonly residue?: true;
+  readonly origin?: unknown;
+}
+export interface RevisionOutboundBlock {
+  readonly id: string;
+  readonly rev: string;
+  readonly authority: "user" | "agent";
+  readonly topic: string;
+  readonly section?: string;
+  readonly body: string;
+}
+export type RevisionOutbound =
+  | {
+      readonly purpose: "generate";
+      readonly instruction: "rewrite-single" | "merge-survivor";
+      readonly target: RevisionOutboundBlock;
+      readonly context?: RevisionOutboundBlock;
+    }
+  | {
+      readonly purpose: "coverage";
+      readonly target: RevisionOutboundBlock;
+      readonly context?: RevisionOutboundBlock;
+      readonly candidateBody: string;
+    };
+
+/** Structural mirror of registry.complete. No direct fetch or provider lookup
+ * is allowed in the controlled adapter. Stock registry identity alone does NOT
+ * certify prompt token bounds, no retries, aliases or provider limit support. */
+export interface RevisionRegistryLike {
+  complete?(
+    model: object,
+    context: RevisionTransportContext,
+    opts: {
+      signal: AbortSignal;
+      maxTokens: number;
+      maxRetries: 0;
+      onPayload(payload: unknown): unknown;
+      onProviderStreamEvent?(event: unknown): void;
+    },
+  ): Promise<RevisionTransportResult>;
+}
+export interface RevisionTransportContext {
+  systemPrompt: string;
+  messages: { role: "user"; content: string; timestamp: number }[];
+}
+export interface RevisionTransportResult {
+  readonly stopReason: string;
+  readonly content: readonly { readonly type: string; readonly text?: string }[];
+  readonly provider: string;
+  readonly model: string;
+  /** SDK model is the requested alias, NOT necessarily the actual response model. */
+  readonly responseModel?: string;
+  readonly usage?: {
+    readonly input?: number;
+    readonly output?: number;
+    readonly cacheRead?: number;
+    readonly cacheWrite?: number;
+    readonly totalTokens?: number;
+    readonly cost?: { readonly total: number };
+  };
+}
+/** Trusted adapter observation, not fields inferred from SDK default zeros.
+ * No evidence means unknown cost (reserve) and unknown actual identity. */
+export interface RevisionResultEvidence {
+  readonly actual?: { readonly provider: string; readonly model: string };
+  readonly costUsd?: number;
+}
+export interface ControlledRevisionTransport {
+  prepare(input: {
+    readonly registry: RevisionRegistryLike;
+    readonly requestChainId: string;
+    readonly outbound: RevisionOutbound;
+    readonly maxOutputTokens: number;
+    readonly requestDigest: string;
+  }):
+    | {
+        readonly adapterId: string;
+        readonly chainVersion: string;
+        readonly bounds: ClassifyBounds;
+        dispatch(opts: { readonly signal: AbortSignal; readonly fetch?: FetchLike }): Promise<RevisionTransportResult>;
+        resultEvidence(result: RevisionTransportResult): RevisionResultEvidence;
+        resolveRoute(result: RevisionTransportResult): CanonicalClassifyRoute | undefined;
+      }
+    | undefined;
+}
+
+/** Host attestation for ONE actual registered model/adapter version. A binding
+ * is trusted code, not a setting or model-supplied assertion. quoteInput must
+ * cover the exact serialized prompt including adapter overhead; no bytes/4
+ * heuristic. maxTokensEnforced certifies the actual provider serializer and
+ * no-hidden-retry behavior, not just the presence of an SDK option. Unknown
+ * capabilities must not be bound. Production conformance is still required. */
+export interface RegistryRevisionBinding {
+  readonly registry: RevisionRegistryLike;
+  readonly requestChainId: string;
+  readonly model: object;
+  readonly adapterId: string;
+  readonly chainVersion: string;
+  readonly maxTokensEnforced: true;
+  /** Verified last-hop onPayload support for this exact provider adapter. */
+  readonly outputLimitField: "max_tokens" | "max_completion_tokens" | "max_output_tokens";
+  readonly maxOutputTokens: number;
+  /** Explicit verified observer for this adapter. The SDK mode consumes raw
+   * onProviderStreamEvent evidence, never default usage/model. A callback is
+   * only for a different host-controlled protocol with its own evidence;
+   * simply copying SDK result.usage.cost/model is NOT a valid attestation.
+   * Omitted => reserve accounting and untrusted provenance, even for zero. */
+  readonly resultEvidence?: "openai-completions" | ((result: RevisionTransportResult) => RevisionResultEvidence);
+  quoteInput(context: RevisionTransportContext):
+    | {
+        readonly maxInputTokens: number;
+        readonly priceUsdPerMillion: { readonly input: number; readonly output: number };
+      }
+    | undefined;
+  resolveRoute(result: RevisionTransportResult): CanonicalClassifyRoute | undefined;
+}
+export interface RevisionRequestBudget {
+  readonly registry: RevisionRegistryLike;
+  readonly mode: "sync" | "background";
+  readonly budgetMs: number;
+  readonly maxOutputTokens: number;
+  readonly signal?: AbortSignal;
+  readonly jobId?: string;
+  /** Missing means zero: revision is never an implicit paid opt-in. */
+  readonly jobCostCapUsd?: number;
+}
+export interface RevisionGenerateRequest extends RevisionRequestBudget {
+  readonly instruction: "rewrite-single" | "merge-survivor";
+  readonly target: RevisionBlockInput;
+  readonly context?: RevisionBlockInput;
+}
+export interface RevisionCoverageRequest extends RevisionRequestBudget {
+  readonly target: RevisionBlockInput;
+  readonly context?: RevisionBlockInput;
+  readonly candidateBody: string;
+}
+export type RevisionUnavailable = {
+  readonly kind: "unavailable";
+  readonly reason: "revision-unavailable" | "invalid-output";
+};
+export type RevisionGenerateResult =
+  | RevisionUnavailable
+  | {
+      readonly kind: "ok";
+      readonly body: string;
+      readonly outputDigest: string;
+      readonly provenance: ClientProvenance;
+      /** False means generation can only support a suggestion, not full coverage. */
+      readonly inputComplete: boolean;
+      readonly costUsd: number;
+    };
+export type RevisionCoverageResult =
+  | RevisionUnavailable
+  | {
+      readonly kind: "ok";
+      readonly verdict: "complete" | "partial" | "unknown";
+      readonly targetRev: string;
+      readonly beforeDigest: string;
+      readonly candidateDigest: string;
+      readonly promptVersion: string;
+      readonly provenance: ClientProvenance;
+      readonly inputComplete: boolean;
+      readonly costUsd: number;
+    };
 
 /** Closure-owned identity token; forged/copied tokens are not accepted. These
  * helpers are shared by ask and the future in-client generate implementation;
@@ -523,6 +711,9 @@ export interface JevClient {
   status(): JevStatus;
   /** Never rejects. */
   ask(req: JevRequest): Promise<JevOutcome>;
+  /** Optional for legacy client facades. Only the real handle implements these. */
+  generateRevision?(req: RevisionGenerateRequest): Promise<RevisionGenerateResult>;
+  judgeRevisionCoverage?(req: RevisionCoverageRequest): Promise<RevisionCoverageResult>;
   /** Forces an availability-cache refresh (review #12). */
   probe(registry: ClassifierRegistryLike, signal?: AbortSignal): Promise<JevStatus>;
 }

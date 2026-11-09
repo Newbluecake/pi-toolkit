@@ -613,13 +613,14 @@ abort/shutdown/reload 撤销 signal，旧 epoch/身份不复活，迟到结果�
 - **窄 task-done**：只在既有 Jev governanceCandidate/governanceResult → govern/signals 的匹配成功
   TaskUpdate completed 回调置 eligible。失败/unchanged/未知 task/普通 Agent 或 bash 完成不扩大来源。
 
-### Activity owner 阻塞项与解阻路径
+### Activity owner 已补齐与生产边界
 
 唯一 owner 仍必须是 `web-hub/agent/human-dispatch-proof.ts::createHumanDispatchProof` 的原闭包，
 `govern/activity.ts` 只定义 snapshot/optional subscribe/recorder 类型，**没有第二套活动状态**。
-`scopes/wire.ts::activity()` 仅转发 `current()?.proof.activity`；当前 proof 尚无该可选属性，
-所以转发实际是 undefined，**待窄补丁后生效，不是已经接通 owner**。主会话将在 tokens/s 批 2
-提交后另派该单文件窄补丁；本包不修改 `src/web-hub/agent/**`。
+`scopes/wire.ts::activity()` 仅转发 `current()?.proof.activity`；`8fa58ede` 已为同一 proof owner
+补齐 activity，且该单文件窄补丁已独立验收。完整生产 incremental handler/admission 与 revision
+binding 仍未接通；activity 可用不代表 P50 已能生成、提交或自动治理。本 B 集成不修改
+`src/web-hub/agent/**`。
 
 P50 只在 plain 主会话、memory/governance/incremental 开、至少一层 scopes 开且 current runtime/activity
 存活时可用；其余 fail closed：P50 零 timer、零 client、零 revision 写。既有确定性 sweep/Jev traffic
@@ -636,6 +637,125 @@ Jev 临时缺 registry 时 tool activity recorder 仍先执行，不能漏掉长
 测试：`tests/memory/govern/incremental*.test.ts`（fake clock、真实临时 blocks、实际 wireMemory/wireJev），
 覆盖 count=3 成对、§2.4 时间线、三条 cooldown 释放、origin 极性、scopes-off/no owner、长工具/unknown、
 无 subscribe 两个既有唤醒与一次检查非轮询、生命周期/cap/epoch、长 timer 分段 unref。测试 fake owner
-只是注入端口，**不代表生产 human-dispatch-proof 窄补丁已完成**。
+只是注入端口，**不能替代生产 proof activity 的独立窄验，也不证明完整 P50 生产接线已完成**。
 
 增量时长公开键 `quietSec` / `idleSec` / `cooldownSec` 以秒计（默认 15 / 2 / 300）；运行时仍为毫秒。旧 JSON 的 `*Ms` 保持毫秒语义，秒键同时存在时优先；整秒旧值迁移为秒，非整秒旧值保留原键和值以免丢精度。设置编辑器接受整数秒。
+
+## #50 P50.2 A+B：受控 client 内核与生成 seam（未启用生产）
+
+Q1/Q2 已获用户批准；`p50-design.md` 中早期「Q1 待批」为历史状态，不是本包阻塞。
+A（`c2b1b16e`）及本 B 包只交付 **host 显式 opt-in 的 client factory 能力**，不代表
+P50.2/P50.3 产品闭环。现有 `wireJev` 没有传入 `p50`，没有生产 revision adapter/binding、
+提案持久化、`commitAction`、审计或 revision 恢复，也没有自动提交或默认开启。
+本节只追加交付边界；集成时须保留主树已有的 tidy 文档/代码变更。
+
+### A：唯一预算与来源 owner（补 A 交付文档）
+
+`createJevClient({...,p50:{enabled:true,transport?}})` 才切换 bounded classify 通道。
+未传/false 时仍走原 `askInner/callOnce`：原无界 queue、timeout failover、calls/费用口径、
+工具回显与 off golden 不变。启用但没有受控 classify transport 时，ask 不外发；不是把
+普通 SDK classify 的可选字段假称为硬上限。stock pi 1.5 classify 没有可核输出 token cap，
+因此 A/B **均未提供默认生产 controlled-classify adapter**。
+
+A 的同一闭包拥有 `reserveClientAttempt`、sync=3/background=4 的原 semaphore、每通道 queue≤4、
+`assertDispatchAdmission` 和 `dispatchProvider<T>`。calls 在真实 dispatch 计数；排队后/每次
+failover 前复查 disposed/abort/zombie/费用；原 provider Promise 才解除 outstanding。
+高层 timeout/abort 可以归还逻辑槽，但仍保留 zombie 并阻止两个通道的新请求。
+unknown usage 先按 reserve，晚到有效 usage 只调整一次；actual 超预留如实入账并锁住后续准入，
+不裁到 reserve。`usage().budget` 是同一账本的 settled/reserved/outstanding/zombies、costSource、
+overReserved/adjustment/exhausted 观察，不是第二份账。费用只是单 client/activation 内的条件性
+估算准入限制，不是跨进程、provider 超报或晚到 usage 的绝对金额保证。
+
+### B：可执行 registry adapter、最后出站边界与共享校验
+
+- `JevClientHandle.generateRevision` 与 `judgeRevisionCoverage` 在 **同一 client** 内走
+  A 的 reservation → 原 semaphore → dispatchProvider → settle；没有第二 client/worker pool。
+  `p50.revision` 指定 `transport/models/coverageModels`，各链最多 4 档，预留整条 failover 链。
+  revision 缺省 `jobCostCapUsd=0`；报价、输入上界、正整数已核输出 token cap 或可用预算缺失
+  一律 `revision-unavailable`，不借 1024B 本地正文门估算 token。named job 复用 A 的不可变 cap。
+- `RevisionBlockInput` 是调用方本地冻结的准入证据：必须显式 private=false、secret=false、
+  parseErrors=[]、active；再检查完整未截断正文 `looksSecret`，拒绝 Hub/residue/origin、坏 id/rev/
+  authority/topic 与额外字段。rewrite 不带 context，merge 恰好两个块；不接完整 corpus/文件路径/
+  frontmatter/会话/工具输出/关系概率。此 seam 不替调用方读取或冻结真实文件，也不证明同目录授权。
+- `prepareRevisionOutbound` 在 **client 调用 adapter.prepare 的最终 payload 边界** 对双方正文及
+  section 重新 `redactForJev(...,"entry")`，只交付深冻结的字段 allowlist；不信任上游 redacted 标志。
+  原 privacy/parse 证据不进入 adapter。已准备的 dispatch 闭包只持有该 DTO，不在排队后重取原正文。
+  entry 的既有 400 code-point 截断仍生效：generation 标 `inputComplete=false` 时只能作建议；
+  coverage 若任一正文/section/candidate 经脱敏或截断改变，直接拒绝，不冒充完整原文已判定。
+- `createRegistryRevisionTransport(bindings)` 是 **实际执行的受控 adapter 工厂**：按同一 registry
+  引用与 requestChainId 绑定真实 model，恰一次 `registry.complete`，传 signal/maxTokens/
+  maxRetries=0；最后 `onPayload` 强制已核 outputLimitField 并移除冲突 token-cap alias，避免
+  model sampling 合并覆盖。原 Promise 交给 A 的 observer（包括迟到结果），不直接 fetch；
+  SDK 的 requested-alias model 与默认零 usage **不能**当实际身份/已知费用，观察契约见下。
+  binding 必须由宿主代码证明该版本 serializer 支持这个末跳、无隐藏重试、输出 cap 的语义及精确
+  prompt+adapter overhead 的输入 token 上界/价目；`maxTokensEnforced:true` 是**可信宿主证明契约**，
+  不是从设置或 SDK 方法存在性自动探测出来的事实。缺 binding/报价/能力时不可调用。
+  A 的 classifier `FetchLike` 只有 JSON response，没有 chat streaming `Response.body`：本 B 包
+  **不支持配置了 Jev proxy 的 revision**，非空 proxy 在 reservation 前拒绝，不静默直连，
+  也不把窄 fetch 强转成 SDK streaming fetch。真正的 streaming proxy binding 留待后续。
+- `govern/revision-output.ts::validateRevisionOutput(unknown)` 是唯一正文校验器：只收一个字符串，
+  UTF-8≤1024B（不是 token 门）、规范化 CRLF/首尾空白后摘要；拒绝空、frontmatter、JSON/schema/
+  操作 envelope、额外 content、tool/thinking 输出、控制符/非法 surrogate、秘密及占位符回填。
+  client 成功返回前必经；后续提案保管/提交方必须复用同一函数，不得另写较宽校验。
+  确定性机器操作格式（apply_patch、git/unified diff、YAML 列表映射/flow mapping、正文夹 JSON
+  操作 envelope）在任意位置命中均拒绝**整个结果**，不剥包装/抽取正文。正常标题、列表和不含
+  操作键的配置示例仍可通过；保守语法拒绝不是 Markdown 事实正确性或自然语言语义安全证明。
+  B3 窄补：`delete: rules.001\nreason: obsolete` 及 delete/remove/rename 等 verb-as-key
+  映射仅在值是明确 file-like scalar（块 id/路径）或结构化集合时拒绝，包含引号、列表与嵌入
+  JSON/flow 形式；不因普通正文出现 delete/remove 或 `Delete: only after confirmation.` 而拒绝。
+
+### Coverage / provenance 与仍需验证的生产能力
+
+coverage 是独立 `registry.complete` 请求，只看冻结旧文本（可含 merge context）和候选正文，
+不接 relation kind/p、生成自评或复用 cN；响应严格只有 verdict=complete/partial/unknown。
+没有可信实际来源的 complete 降为 unknown。**即使 complete 也不是自动许可**：后续提案必须用
+A 的 `independentCoverageSources`，将 relation/generation/coverage 三套 provenance 与独立从
+冻结 DTO 计算的 request/input digest 绑定，检查实际 provider/model、canonical route/alias 分离。
+revision provenance 分别保留 `requestedProvider/requestedModel`（SDK 请求身份）、
+`provider/model`（经 raw stream 观察且与 SDK responseModel 复核的实际身份）和
+`canonicalProvider/canonicalModel + routeIdentity/routeAliases`（与可信本地 route 相符时才发布）。
+unknown 不从 requested id 或 canonical 倒推；无实际身份的 complete 降 unknown。
+同实际 model、别名相交、同 route、缺来源/版本或 digest 不符都只建议；证明的是路由分离，
+不是统计独立。`prepareRevisionOutbound`、`revisionTransportContext`、`revisionRequestDigests`
+供后续调用方独立重算；不能把返回 provenance 自己复制一遍充当预期证据。
+
+`beforeDigest/candidateDigest` 只绑定此次完整 body 文本；输出 digest 只绑定校验后的规范化正文，
+都不冒充 rawBefore 文件快照、CAS/目录身份、审计屏障或提交观察。未知正文质量、权限、来源或
+存储状态不得由此抬升为自动资格。未来生产装配仍须验证真实 SDK/provider 的 maxTokens 最末跳、
+输入 tokenizer+格式开销/价目、禁重试、认证、后续 streaming proxy binding、实际返回身份（不是请求 alias 的回填）及 usage；
+还须补提案 owner、冻结文件/目录门、异源证据保管、commit/audit/恢复、生命周期和 secure/child 门。
+
+### B 返工：真实 SDK 观察与离线门（2026-11-10）
+
+binding 可显式指定 `resultEvidence:"openai-completions"`，由 factory 的每 dispatch 闭包监听
+pi 1.5 `onProviderStreamEvent`（在 SDK normalization 前），只留有界计数/型号，不存正文帧。
+必须看到完整非负整数 prompt/completion/total 且 total 一致，cache counters 合法，并与 SDK
+最终计数匹配、费用有限非负，stop/length 完整结束，才将 cost 交 A 作为 known。
+missing/null/incomplete/malformed usage、error/aborted 或没有观察能力时一律 unknown → reserve；
+SDK 初始化的 cost=0 不算证据；完整 usage 下的免费价目/显式零计数才可 known zero。
+实际响应身份由一致 raw chunk model 与 bound provider/request id、SDK responseModel（仅不同
+时存在）共同核对；缺失或矛盾都 untrusted，不能只看 SDK result.model 或补一个类型字段。
+费用/身份的证据独立：费用未知不抹掉已核实际身份，也不反向证明身份。
+
+factory 在原 Promise 上先注册一个只写 WeakMap 观察的 continuation，再把**同一个原 Promise**
+交 A；费用 ledger、outstanding/zombie、settle/late adjustment 没有新 owner。late SDK aborted
+结果仍按未知保留 reserve；原受控协议的迟到 known usage 正负 adjustment 回归仍在。
+其它 host-controlled 非 SDK 协议可注入可信 `resultEvidence(result)`；它必须有独立的实际
+身份/费用证据，不可把 SDK 默认 cost/model 照抄作为证明。省略时费用保守、来源 untrusted。
+这不是 provider 自动识别器，也不是生产 binding；不能把该 callback 当模型自证字段。
+
+本包门禁：新增 `tests/memory/jev/client-p50-sdk.test.ts` 正式执行 **真实 ModelRegistry.complete
+→ ModelRuntime → openai-completions → OpenAI SDK → fakeFetch SSE**，只有 HTTP 被离线替换。
+使用 own /tmp models/auth、synthetic key、禁止网络 refresh；实际序列化 payload 断言 cap=128、
+冲突 sampling cap 被移除。报价 4096 input / 128 output、2/3 USD/M 的 reserve=0.008576；
+同 job 仅够一 reserve 时，无 usage/坏 usage/error/incomplete stream 后第二调用零 dispatch。
+另覆盖 known/free/explicit-zero、choice.usage、alias1/alias2 同 backend、合法异源正向、
+实际成功 failover、无响应身份/冲突型号/canonical 不符的 fail-closed，以及 patch/YAML/夹 JSON
+经完整 client 链的 invalid-output。不是 mock complete 手造 AssistantMessage；不验证真实
+provider 执行 token cap、认证、网络/proxy 或 live 计费。新增 strict tsc 与原定向门一起运行。
+
+原门禁 `tests/memory/jev/client-p50-generate.test.ts` 与
+`tests/memory/govern/revision-output.test.ts`，另跑整个 `tests/memory/jev`、pi-free、tiers、
+typecheck/build/格式。合法正文正例真实经过上述工厂 → local controlled registry →
+可核 cap serializer → 原 Promise → client validator/账本；这个本地 byte-token 协议不发网络、
+不代表真实生产 provider conformance；新增真实 SDK 离线门也不冒充 LIVE 验收。fixture 未改，未 install/push，未做 commitAction/audit。
