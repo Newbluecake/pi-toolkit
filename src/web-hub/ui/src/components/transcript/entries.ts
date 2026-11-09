@@ -345,7 +345,9 @@ export function buildTxEntries(a: TranscriptSource, cmdLive?: CmdLiveContext): T
       key: `live:${t.toolCallId}`,
       view: toolView(undefined, undefined, t, idx.durations) as ToolView,
     });
-    renderKeys.push(`live:${t.toolCallId}:${t.done ? "d" : "l"}:${String(t.partial ?? "").length}`);
+    renderKeys.push(
+      `live:${t.toolCallId}:${t.done ? "d" : "l"}:${String(t.partial ?? "").length}:${t.seenAt ?? ""}:${idx.durations?.get(t.toolCallId) ?? ""}`,
+    );
     anchors.push([]);
   }
   return { entries, renderKeys, anchors };

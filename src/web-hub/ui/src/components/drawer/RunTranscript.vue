@@ -50,6 +50,7 @@ const txSource = computed<TranscriptSource | null>(() => {
     items: cur.items,
     streaming: cur.streaming,
     tools: cur.tools,
+    ...(cur.toolDurations !== undefined ? { toolDurations: cur.toolDurations } : {}),
     history: cur.history,
     ...(cur.historyError !== undefined ? { historyError: cur.historyError } : {}),
     hasMore: cur.hasMore,

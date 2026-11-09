@@ -154,6 +154,73 @@ function mountDetail(agent: unknown, hub: HubHandle) {
   return wrapper;
 }
 
+describe("subagent tool timing", () => {
+  it("renders persisted result timing and updates when the live timing map arrives", async () => {
+    const call = {
+      id: "a1",
+      parentId: null,
+      type: "message",
+      timestamp: new Date(1000).toISOString(),
+      message: {
+        role: "assistant",
+        timestamp: 1000,
+        content: [{ type: "toolCall", id: "t1", name: "read", arguments: {} }],
+      },
+    };
+    const result = {
+      id: "r1",
+      parentId: "a1",
+      type: "message",
+      timestamp: new Date(2000).toISOString(),
+      message: {
+        role: "toolResult",
+        timestamp: 2000,
+        toolCallId: "t1",
+        toolName: "read",
+        content: "ok",
+        durationMs: 367,
+      },
+    };
+    const agent = agentState({ runEntries: [call, result] });
+    const wrapper = mount(RunTranscript, { props: { agent, narrow: false, now: 10000 } });
+    mounted.push(wrapper);
+    expect(wrapper.get(".tool-dur").text()).toBe("367ms");
+    await wrapper.setProps({ agent: { ...agent, runTx: { ...agent.runTx!, toolDurations: new Map([["t1", 2400]]) } } });
+    expect(wrapper.get(".tool-dur").text()).toBe("2.4s");
+  });
+
+  it("uses only a received live start for the ticking chip, not an inflight snapshot", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(10_000);
+      const call = {
+        id: "a1",
+        parentId: null,
+        type: "message",
+        timestamp: new Date(1000).toISOString(),
+        message: {
+          role: "assistant",
+          timestamp: 1000,
+          content: [{ type: "toolCall", id: "t1", name: "read", arguments: {} }],
+        },
+      };
+      const agent = agentState({ runEntries: [call] });
+      const tool = { toolCallId: "t1", toolName: "read", args: {}, done: false };
+      const wrapper = mount(RunTranscript, {
+        props: { agent: { ...agent, runTx: { ...agent.runTx!, tools: [tool] } }, narrow: false, now: 10_000 },
+      });
+      mounted.push(wrapper);
+      expect(wrapper.find(".tool-dur").exists()).toBe(false);
+      await wrapper.setProps({ agent: { ...agent, runTx: { ...agent.runTx!, tools: [{ ...tool, seenAt: 10_000 }] } } });
+      expect(wrapper.get(".tool-dur").text()).toBe("0ms");
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(wrapper.get(".tool-dur").text()).toBe("1.0s");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("U7: 两个 Transcript 并存(§6.6/#16)", () => {
   it("DOM id 不重复;load-older 主区走 emit、抽屉走 pageRun;following 各自独立", async () => {
     const hub = fakeHub();

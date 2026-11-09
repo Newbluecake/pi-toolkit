@@ -114,7 +114,12 @@ export function toolView(call, resultMsg, live, durations) {
     if (typeof live.partial === "string" && !live.done) view.partial = live.partial;
     if (live.truncated === true) view.truncated = true;
   }
-  const dur = durations?.get(toolCallId);
+  // Prefer the tap's start-to-end measurement; newer pi versions also persist the
+  // actual execution duration on toolResult (including parallel calls). Older results
+  // have neither: leave the duration unknown rather than infer it from batch timestamps.
+  const measured = durations?.get(toolCallId);
+  const dur =
+    typeof measured === "number" && Number.isFinite(measured) && measured >= 0 ? measured : resultMsg?.durationMs;
   if (view.state !== "running" && typeof dur === "number" && Number.isFinite(dur) && dur >= 0) view.durationMs = dur;
   if (!view.truncated && /\[truncated\b/i.test(view.result ?? "")) view.truncated = true;
   return view;

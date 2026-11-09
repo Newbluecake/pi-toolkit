@@ -938,3 +938,12 @@ symbol stores a per-session fold map on the browser's hub instance: it survives 
 and session switches, but not a page refresh. No storage, setting, or wire field is added. Empty
 schedule projections do not render the section; a degraded projection still retains its existing
 chip gate. The separate detail-header schedule dialog is unchanged.
+
+## Subagent tool durations (#72)
+
+Run transcripts reuse the main transcript renderer. The drawer passes the reducer's timing map
+through to it; live `tool_execution_start` uses browser receipt time, and a snapshot taken after
+start intentionally has no running timer. Completed results prefer the tap's measured duration;
+when absent, newer pi toolResult messages carry their own per-execution `durationMs` (including
+parallel executions), projected unchanged from JSONL. Older results without either value remain
+unknown: batch timestamps are not per-tool measurements. No protocol or hub change is required.
