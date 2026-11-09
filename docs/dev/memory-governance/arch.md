@@ -710,8 +710,8 @@ scope: topic (decision record — injected when relevant). Looks like a standing
 resident: 2.3k/2.0k over budget — still injected; merge or demote to topic (suggestion queued)
 looks like a user order — if the user said it, add <!-- mem user -->
 state snapshot: run id / quota reading / progress — add expires=YYYY-MM-DD or until="…", or rewrite as a durable conclusion
-superseded: general.003 (user · global, p=0.91) — no longer injected; undo: /mem restore --block general.003
-  note: general.003 was global; this block is topic — add scope=global if it should stay always-on
+superseded: general.003 by general.004
+note: general.003 was global; new block remains topic
 not superseded: pitfalls.012 is a user rule — agent blocks never supersede user rules (conflict p=0.91; review suggested)
 conflict: pitfalls.020 (p=0.78) — below auto threshold; review suggested
 audience: looks main-session-only (dispatch) — add audience=main if so
@@ -720,15 +720,15 @@ voided user rule: …
 
 每行的出现条件：
 
-| 行                                              | 出现条件                                                            |
-| ----------------------------------------------- | ------------------------------------------------------------------- |
-| `scope:`                                        | user 块、没有显式 scope、分类器 `globalP ≥ 0.7`（§5.3）             |
-| `resident:`                                     | 写的是 global 块，或写入导致常驻区超额                              |
-| `looks like a user order`                       | 只对 agent 块（原 userLike 逻辑）                                   |
-| `state snapshot`                                | 只对 agent 块；取代 v2 的 `looks temporary`，**永不对 user 块出现** |
-| `superseded`/`note`/`not superseded`/`conflict` | §5.4                                                                |
-| `audience:`                                     | §6.1                                                                |
-| `voided user rule:`                             | #26 原有行                                                          |
+| 行                                              | 出现条件                                                                                                 |
+| ----------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `scope:`                                        | user 块、没有显式 scope、分类器 `globalP ≥ 0.7`（§5.3）                                                  |
+| `resident:`                                     | 写的是 global 块，或写入导致常驻区超额                                                                   |
+| `looks like a user order`                       | 只对 agent 块（原 userLike 逻辑）                                                                        |
+| `state snapshot`                                | 只对 agent 块；是独立的确定性提示，不取代 Jev 的 `looks temporary`（二者可并存），**永不对 user 块出现** |
+| `superseded`/`note`/`not superseded`/`conflict` | §5.4                                                                                                     |
+| `audience:`                                     | §6.1                                                                                                     |
+| `voided user rule:`                             | #26 原有行                                                                                               |
 
 v2 路径的回显保持原样（I9）。
 
@@ -1480,7 +1480,7 @@ blocks 目录下 `/mem tidy`（交互式和 `--batch`）直接返回 `not availa
 - **过滤**：子会话剔除 `main`，主会话剔除 `child`。
   - 作用于常驻区（只看 frontmatter）和 Jev 各层候选池（三条规则都用）；
   - `view/search` 不受影响。
-- 写入时如果第 2 条规则命中但没写 audience ⇒ 回显 `audience:` 提示。
+- 写入时如果没写 `audience`，且 `tool-v3.ts` 的确定性 `AUDIENCE_MAIN_HINTS` 在正文命中主会话线索（`主会话` / `dispatch`（含派单、派发）/ `ask_user` / `TUI`）⇒ 回显 `audience:` 提示；该提示不依赖第 2 条的 Jev 标签推导。
 
 ### 6.2 时效降权（`govern/decay.ts`）
 
