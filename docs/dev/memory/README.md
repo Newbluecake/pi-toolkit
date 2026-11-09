@@ -96,6 +96,8 @@ probe 的 barrier/计数仅在测试 host，生产同步 apply 不加 await；�
 
 Jev 是一个分类器驱动的核心 memory 子系统，职责三项：召回（U/A/E/B 四层注入）、写入时自动打标、周期整理（建议制，不自动执行）。**高危动作拦截（gate）已于 2026-11 彻底移除**；**用户令守卫的人工确认（TUI 确认框/Web 弹卡/超时与无 UI 拒绝）也已于 2026-11（#26）移除**——agent 改动/删除用户令直接写入：tool_call 只剩 A 层注入；`gate`/`gate=hold`/`nogate` 行内注释仅为旧记忆文件保留解析（`entries.ts`/`entry-edit.ts`），不再有任何行为；`jev/readonly.ts`、`jev/probes.ts`、`wire-gate.test.ts` 等随功能删除。设计全文见 `jev-arch.md`（架构，v2.1）与 `jev-plan.md`（实施方案，v2，J0–J9 分包）；下面只列不变式与门禁，细节以代码为准，与架构稿冲突时以代码为准并在交付报告列出。
 
+**#36 P6b U 相关性问句**：单条 bool 的正例除应遵循的规则、陷阱、流程外，也涵盖有助于正确回答或避免误解的子系统设计、边界、原理与已知限制，即便当下无需执行；只有关键词或领域相同不够。`jev/questions.ts` 与 `scripts/dev/jev-eval.mjs` 模板必须同步（`questions-eval-parity.test.ts`）。判据变更会改变分类请求和评测缓存键，也可能改变分批；阈值与名额未变。实际召回/噪声改善尚待 LIVE 验证，不能由离线测试推断。
+
 **不变式**：
 
 1. Markdown 记忆文件是唯一权威数据源；`.jev/` 是可丢弃的派生侧车，以条目内容哈希为键，Jev 从不写行内注释。

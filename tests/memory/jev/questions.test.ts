@@ -139,11 +139,40 @@ describe("recallLabel", () => {
 });
 
 describe("buildRecallQuestion / buildRecallQuestions (§6.1.1)", () => {
-  it("single-entry wording matches the architecture text verbatim", () => {
+  it("includes the candidate and current-turn question in the single-entry wording", () => {
     const q = buildRecallQuestion({ label: "rule · user rule", file: "core.md", excerpt: "发版规则" });
     expect(q.instructions).toContain("Project memory entry [rule · user rule] from core.md: 「发版规则」.");
     expect(q.instructions).toContain("Would reminding the assistant of this entry right now help");
     expect(q.type).toBe("bool");
+  });
+
+  it("constructs independent per-entry recall questions with actionable and explanatory relevance criteria", () => {
+    const batch = buildRecallQuestions({
+      userMessage: "reflex脚本是怎么工作的",
+      session: "main",
+      today: "2026-11-09",
+      candidates: [
+        { id: "e1", file: "jev-reflex.md", excerpt: "默认关闭，先 shadow；只读 port", authority: "user" },
+        { id: "e2", file: "unrelated.md", excerpt: "reflex 关键词但其他领域", authority: "agent" },
+      ],
+    });
+    expect(batch.state.user_message).toBe("reflex脚本是怎么工作的");
+    expect(Object.keys(batch.questions)).toEqual(["e1", "e2"]);
+    expect(batch.questions.e1).toEqual({
+      type: "bool",
+      instructions:
+        "Project memory entry [user rule] from jev-reflex.md: 「默认关闭，先 shadow；只读 port」. " +
+        "Would reminding the assistant of this entry right now help it handle user_message correctly or avoid a known mistake (previous_user_message is context only)?",
+      criteria: {
+        true: "Yes: this entry is relevant to the current request: it is a rule, pitfall or procedure to follow, or it explains the subsystem's design, boundaries, rationale or known limitations in a way that helps answer correctly or avoid misunderstanding, even if no action is required now",
+        false:
+          "No: it is unrelated to the current request; sharing surface keywords or the same domain alone does not help answer it correctly or avoid a misunderstanding",
+      },
+    });
+    expect(batch.questions.e2?.instructions).toContain(
+      "[assistant lesson] from unrelated.md: 「reflex 关键词但其他领域」",
+    );
+    expect(batch.questions.e2?.criteria).toEqual(batch.questions.e1?.criteria);
   });
 
   it("builds state with user_message/previous_user_message/session/today and one e<n> per candidate", () => {

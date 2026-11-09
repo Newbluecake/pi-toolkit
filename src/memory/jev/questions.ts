@@ -102,7 +102,7 @@ export interface RecallQuestionEntry {
   readonly excerpt: string;
 }
 
-/** The single e<n> question template (jev-arch §6.1.1 JSON example), VERBATIM
+/** The single e<n> question template (jev-arch §6.1.1 JSON shape), VERBATIM
  *  — mirrored literally in `scripts/dev/jev-eval.mjs`'s `buildRecallQuestion`
  *  (parity-tested). `state` is accepted but unused: the wording doesn't
  *  reference it, only the id's position in `state` does (the caller's job). */
@@ -113,8 +113,9 @@ export function buildRecallQuestion(entry: RecallQuestionEntry, _state?: JsonObj
       `Project memory entry [${entry.label}] from ${entry.file}: 「${entry.excerpt}」. ` +
       "Would reminding the assistant of this entry right now help it handle user_message correctly or avoid a known mistake (previous_user_message is context only)?",
     criteria: {
-      true: "Yes: it applies to this request — a rule, pitfall or procedure the assistant should follow here",
-      false: "No: unrelated, or only shares surface keywords without affecting how to handle this request",
+      true: "Yes: this entry is relevant to the current request: it is a rule, pitfall or procedure to follow, or it explains the subsystem's design, boundaries, rationale or known limitations in a way that helps answer correctly or avoid misunderstanding, even if no action is required now",
+      false:
+        "No: it is unrelated to the current request; sharing surface keywords or the same domain alone does not help answer it correctly or avoid a misunderstanding",
     },
   };
 }

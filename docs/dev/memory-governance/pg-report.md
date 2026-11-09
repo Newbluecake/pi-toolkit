@@ -630,3 +630,91 @@ G2 可显式传 `--recall-threshold 0.55`（接受 0.5–0.99），与 `--recall
 不是完整原始时序或正式 G2。未标注注入不能直接算成误召回，必须结合原始用户请求和记忆
 内容人工核对；该数据集没有穷尽的负标签，不能据此算真实 precision。完整表和人工审阅
 结论见 `/tmp/mem36-p6b-fix-handoff.json`。
+
+## #36 G2 · 新问句判据 A 全量正式 LIVE（2026-11-09）
+
+### 结论、变量与来源
+
+**正式 G2：PASS，退出码 0。** 37/37 配对轮、74/74 变体样本完整；新版 **26/40 = 65%**，旧版 **22/40 = 55%**。新版 ≥24/40 且不退化，两项质量门均通过。这是原时限下的正式门禁，不是时延放宽诊断；没有重试、补跑或重置预算。**G1 仍 BLOCKED，本次 G2 PASS 不等于 PG / P5b 整体通过。**
+
+- 日期：北京时间 **2026-11-09 10:03:41–10:07:00**，shell 耗时 **199.034813742 秒**。report 的 `at:2026-11-06T10:16:01.577Z` 仍是冻结 corpus 时间基座，不是运行时间。
+- 变量：P6b 候选 A 的新问句 true/false 判据，明确纳入有助于正确回答的设计、边界、原理及限制背景；主体问句不变。`questions.ts` 与 `jev-eval.mjs` parity 在 LIVE 前通过。classifier **单档 `opencode/jev-1.13`**，chat **单档 `deepseek/deepseek-flash`**，**k=3、U=0.60** 均不变，无实验覆盖参数。
+- current：HEAD **`242e8c01` + 已有未提交问句工作树**，不是干净提交。构建后复制至 `/tmp/mem36-p6b-current-dist-PfRvdQX6/dist`，manifest 明示 `gitDirty:true`；JS tree hash `dc278cb488d049011e07974f11ab276e85630beeea69385f7d5f17dce908a006`，与交接预期一致。本任务没有再改 src / 镜像 / 测试。
+- baseline：`/tmp/memory36-baseline-122de638-a1KeOc/dist`，**非本轮干净重建**；manifest commit `122de638`，JS tree hash `dda5ad08e83ab4159258c2f65659d9aac95cd7b4855e73b7f704a725b6ddf630`。沿用产物的构建来源限界保持，不冒称完整重建通过。
+- 数据：从上次正式 LIVE 复制五个输入文件，hash 不变；新目录空缓存起步（filesAtStart=0），不复用任何旧响应。新判据影响请求与分批，新版实际每轮 6 批而非原来的 5 批。
+
+### 唯一实跑命令与完整产物
+
+本节 `RUN` 为 `/home/bluecake/.pi/agent/memory-reports/eval36/runs/g2-prompt-a-20261109-rYVK2H`。
+实际启动为 `bash "$RUN/command.sh"`，脚本含 HEAD / 输入 hash / dist / baseline / 单档配置校验和独占 `live-started.txt` 防重入。核心命令：
+
+```bash
+cd /home/bluecake/ai/pi-toolkit
+set -o pipefail
+DATA=/home/bluecake/.pi/agent/memory-reports/eval36/runs/g2-prompt-a-20261109-rYVK2H
+timeout --signal=TERM --kill-after=10s 1000s env PI_TOOLKIT_MEMORY36_GATE_LIVE=1 \
+  node scripts/dev/memory36-gate.mjs g2 --candidate-audit on --data "$DATA" \
+  --dist /tmp/mem36-p6b-current-dist-PfRvdQX6/dist \
+  --current-commit 242e8c01 \
+  --baseline-dist /tmp/memory36-baseline-122de638-a1KeOc/dist \
+  --max-calls 800 --max-classifier-usd 1.50 \
+  --max-chat-calls 80 --max-chat-usd 0.28 --timeout-ms 900000 \
+  2>&1 | tee "$DATA/aggregate.log"
+RC=${PIPESTATUS[0]}
+```
+
+- **完整 stdout/stderr**：`RUN/aggregate.log`；退出码 `RUN/exit-code.txt` = **0**；精确时间 `RUN/{started-at,finished-at,elapsed-ns}.txt`。完整命令保存在 `RUN/command.sh`，没有以 tee 的状态替代模型进程状态。
+- attempt **`20261109T020344-3985277-15193bb8`**；`RUN/audit/attempt-20261109T020344-3985277-15193bb8.json` 保存预算、调用及终态。
+- 同前缀的 `-g2-details.json` 保存完整 report/runs；`-turns/` 保存 74 个逐轮变体摘要及 expected/completion；`-turns-candidate-audit/` 保存 74 个候选诊断。
+- `RUN/result-summary.json` 为机器可读聚合；`RUN/turn-comparison.json` 保存全部 37 轮新旧两版与上次的命中、增失及未标注投递对比；`RUN/preflight.json` 为只读边界的运行前 hash 证据。
+
+### 指标、完整性与费用
+
+| 项目                           | 本次结果                                                                    |
+| ------------------------------ | --------------------------------------------------------------------------- |
+| 完整配对 / 相关 pair 分母      | 37/37；40（冻结不变）                                                       |
+| 新版绝对门槛                   | 26/40 ≥24/40：**PASS**                                                      |
+| 新版不退化                     | 26/40 ≥22/40：**PASS**，+10 个百分点                                        |
+| 完整逻辑结果                   | 74/74 complete；全部 recall outcome resolved；订阅余数 0；hardFailures 为空 |
+| classifier transport           | **407 / 800**，旧 185 + 新 222；cache hits / missing / failures 均 0        |
+| chat transport / cache         | **44 / 80** 次真实调用 + 18 次缓存命中；missing 0；29 次成功、15 次失败     |
+| P2 形式证据                    | calls+hits=62；`p2Evidence.satisfied=true`                                  |
+| classifier 成功 usage 估算     | **$0.140714868**（旧 $0.061888764，新 $0.078826104）                        |
+| chat 成功 transport usage 估算 | **$0.005239704**，只算 29 个唯一成功响应                                    |
+| 已知成功 usage 合计            | **$0.145954572**；不是全额账单，失败 chat 消费未知                          |
+| 累计保守预留                   | classifier **$0.547008 / $1.50**；chat **$0.0432753 / $0.28**               |
+| 服务商实际账单                 | **Unknown**；未查询 billing，不把预留或 usage estimate 当账单               |
+
+此前约 $0.063 的估算仅覆盖一版旧分批，未含旧版空缓存对照及新判据增批；本次正式调用数/费用以上表为准。生产自身预算未重置、未改变。
+
+**15 次 chat failure 不等于评估不完整**：旧版 31 次 P2 dispatch，18 成功 / 13 `failed`；新版 31 次，29 成功 / 2 `failed`，timely 26 / 非及时 5。全部都有生产终局，无 pending / aborted / denied / sticky 控制拒绝；既有 evaluator 将生产 failed/timeout 后的规则 fallback 视为完整执行。本次没有评估总超时或缺样本，不把运行失败伪装成质量结果，也没有为本次调整此完成性规则。两版逻辑账本包含缓存/预留 fallback，不能再加进 transport 费用。
+
+### 与上次正式 LIVE 逐轮对比
+
+对照目录：`g2-live-single-20261109-dxNlqz`（上次新版 22/40、旧版 23/40），**不是**时延放宽的离线诊断目录。
+下表只列命中已标注 relevant pair 改变的轮；新增/丢失均相对于上次同一变体。
+
+| 轮次 | turn id    | 变体 | 新召回的对                      | 新丢失的对                      |
+| ---- | ---------- | ---- | ------------------------------- | ------------------------------- |
+| 6    | `b9f77b18` | 新版 | —                               | `pit/fabric-xs-activation.002`  |
+| 7    | `5d8fa4cd` | 新版 | `pit/fabric-xs-activation.001`  | —                               |
+| 10   | `da35ee49` | 新版 | `pit/fabric-xs-activation.002`  | —                               |
+| 11   | `521483b5` | 新版 | `pit/jev-reflex.001`            | —                               |
+| 20   | `63bb2970` | 新版 | `pit/schedule-auto-approve.003` | —                               |
+| 23   | `180ec94f` | 旧版 | —                               | `pit/schedule-auto-approve.002` |
+| 36   | `5f60305e` | 新版 | `pit/memory-predict.006`        | —                               |
+
+新版 **新增 5 对、丢失 1 对，净增 4 对（22→26）**；其余 31 轮新版相关 pair 命中不变。旧版 **新增 0 对、丢失 1 对（23→22）**；其余 36 轮不变。完整投递 ID 变化（含未标注项）见 `turn-comparison.json`。
+
+### 自验、边界与残留
+
+- LIVE 前：`env -u PI_TOOLKIT_MEMORY36_GATE_LIVE PI_TOOLKIT_TEST_WORKERS=2 npm run test:tier1 -- tests/memory/jev/questions-eval-parity.test.ts tests/memory/jev/questions.test.ts tests/memory/govern/gate-script.test.ts tests/memory/govern/candidate-audit.test.ts`：**PASS，实际 3 files / 89 tests**，其中 parity 4 tests。最后一个过滤路径无对应测试文件，不声称执行过独立 candidate-audit suite；候选审计相关回归在 gate-script suite 内。旧临时快照的 sourcemap 源缺失 warning 不影响结果。日志 `RUN/tests.log`。
+- `npm run typecheck`、`npm run build`：均 **PASS / exit 0**，日志 `RUN/{typecheck,build}.log`；build 仅重建仓库忽略的 dist，然后复制 current 隔离快照，不替换冻结件。
+- `node /tmp/mem36-g2-prompt-a-summarize.mjs`：只读核验、计数与逐轮指标重新计算均 **PASS**，日志 `RUN/summary-check.log`；没有调用 gate main 或模型。
+- 运行前后 `pg-candidate-v3/**`、`pg-freeze-b3900c24/**`、上次 LIVE 全部常规文件路径/hash 一致；baseline/current 快照、输入、已有 dirty 源码/测试/README、真实 auth/models/settings hash 不变。没有 install、commit/push、源代码修改、门槛或标签修改、冻结件重生。
+- `git diff --quiet HEAD -- tests/fixtures/` 通过。相对 `origin/dev` 的 fixture 检查在运行前已非零：仅已有 `tests/fixtures/scoped-memory-tool-surface.json` 分支差异；前后清单相同，本次未修改它，不将该基线差异谎报为全仓 frozen gate 通过。
+- 报告格式与 `git diff --check` 收尾结果见本次 handoff；没有运行全量 tier1/tier2/secure。本任务仅追加本报告；既有四个 dirty 文件保留原样。
+
+**证据限界**：这是单次正式门禁通过，不是统计显著性或线上全面改善证明；空缓存 LIVE 的旧版自身也波动，P2 时序与新问句分批同时变化，不能把逐轮全部差异归因为判据文本。新版未标注投递 pair 从 **48→64**（旧版 47→48）；未标注不等于负例，尚未人工穷尽判定，不能由召回通过推导 precision 或噪声无回归。隔离轮不恢复完整历史；候选审计记录 ID/概率/哈希而非完整原始 prompt DTO。baseline 非本轮干净重建、失败调用费用未知等来源限制继续保留。G1 仍 BLOCKED，不自动解锁 PG/P5b，不补跑。
+
+交接：`/tmp/mem36-g2-prompt-a-handoff.json`。

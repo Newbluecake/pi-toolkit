@@ -45,8 +45,9 @@ export function buildRecallQuestion(entry, state) {
       `Project memory entry [${entry.label}] from ${entry.file}: 「${entry.excerpt}」. ` +
       "Would reminding the assistant of this entry right now help it handle user_message correctly or avoid a known mistake (previous_user_message is context only)?",
     criteria: {
-      true: "Yes: it applies to this request — a rule, pitfall or procedure the assistant should follow here",
-      false: "No: unrelated, or only shares surface keywords without affecting how to handle this request",
+      true: "Yes: this entry is relevant to the current request: it is a rule, pitfall or procedure to follow, or it explains the subsystem's design, boundaries, rationale or known limitations in a way that helps answer correctly or avoid misunderstanding, even if no action is required now",
+      false:
+        "No: it is unrelated to the current request; sharing surface keywords or the same domain alone does not help answer it correctly or avoid a misunderstanding",
     },
   };
 }
