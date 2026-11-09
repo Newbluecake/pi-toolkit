@@ -1,4 +1,7 @@
 /** Factory-only scoped surface. Host owns all ports, lifecycle and human provenance. */
+import { inspectScopedMemory } from "../unified/read.js";
+import { appendV4Replacement, type V4Registration } from "../unified/replacement.js";
+import type { ScopedV4Port } from "../unified/types.js";
 import { withScopedMessage } from "./error-messages.js";
 import { Type } from "@sinclair/typebox";
 import { dispatchScopedMemory } from "../unified/dispatcher.js";
@@ -9,7 +12,7 @@ export { scopedReadGate, scopedView } from "./tool-surface.js";
 export { scopedFailure } from "./error-messages.js";
 export const SCOPED_MEMORY_DESCRIPTION =
   "Session and Hub memory: op=view|create|update|delete. update/delete require the actual rev returned by view (for Hub, supply id); delete confirms the full current body. Session defaults to agent; user authority and changes to user items require exact-content human approval. Child sessions accept no explicit authority, including agent. Hub is shared by ALL projects of this Hub; a write needs the user to approve it in a dialog (terminal or web). scope=global inside memory text is NOT cross-project. No human proof/remote channel means refusal, not queueing or resending. Never store secrets.";
-export function createScopedMemoryTool(deps: ScopedToolDeps) {
+export function createScopedMemoryTool(deps: ScopedToolDeps, options?: { v4Registration: () => V4Registration }) {
   const scopes = deps.child
     ? deps.enabled.session
       ? ["session"]
@@ -53,8 +56,12 @@ export function createScopedMemoryTool(deps: ScopedToolDeps) {
     },
     { additionalProperties: false },
   );
-  async function run(toolCallId: string, input: unknown, signal?: AbortSignal): Promise<unknown> {
+  async function dispatch(toolCallId: string, input: unknown, signal?: AbortSignal): Promise<unknown> {
     return withScopedMessage(await dispatchScopedMemory(deps, toolCallId, input, signal));
+  }
+  async function run(toolCallId: string, input: unknown, signal?: AbortSignal): Promise<unknown> {
+    const result = await dispatch(toolCallId, input, signal);
+    return options ? appendV4Replacement(result, input, parameters, options.v4Registration()) : result;
   }
   return {
     name: "scoped_memory",
@@ -62,6 +69,11 @@ export function createScopedMemoryTool(deps: ScopedToolDeps) {
     description: SCOPED_MEMORY_DESCRIPTION,
     parameters,
     run,
+    dispatch,
+    inspect: ((scope, call) =>
+      scope === "session"
+        ? inspectScopedMemory(deps, "session", call)
+        : inspectScopedMemory(deps, "hub", call)) as ScopedV4Port["inspect"],
     async execute(id: string, params: unknown, signal?: AbortSignal) {
       const result = await run(id, params, signal);
       return { content: [{ type: "text" as const, text: JSON.stringify(result) }], details: undefined };

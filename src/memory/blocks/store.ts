@@ -66,7 +66,7 @@ function verify(realDir: string, before: { dev: number; ino: number }): void {
 export function readCorpus(
   realDir: string,
   state?: CorpusReaderState,
-  hooks?: { afterRead?: (name: string) => void },
+  hooks?: { afterRead?: (name: string) => void; onError?: (error: unknown) => void },
 ): BlockCorpus {
   try {
     // Resolve the layout exactly once, never substitute the legacy root mid-read.
@@ -124,6 +124,8 @@ export function readCorpus(
     if (state) state.previous = result;
     return result;
   } catch (err) {
+    // v4 read-only inspection observes failures BEFORE the legacy fallback.
+    hooks?.onError?.(err);
     if (state && !state.warned) {
       state.warned = true;
       state.warn?.("memory: blocks/ changed during read (rollback or migration in progress) — using previous result");

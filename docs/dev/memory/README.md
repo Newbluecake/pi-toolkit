@@ -476,3 +476,54 @@ real start restoring writes in a new SessionManager while leaving the old branch
 `tests/memory/unified/wire.test.ts` additionally pins the production surfaces, error text, tree approval
 abort, shutdown and actual layout predicates. `tests/boundary/pi-free.test.ts` scans the unified roots
 and their shared operation/read ports, including transitive value imports.
+
+## Unified tool · phase 2 core (v4 factory; activation switch remains separate)
+
+`unified/index.ts` exports the pi-free v4 surface, closed `MemoryToolParamsV4`, normalizer, DTOs and
+UTF-8 surface measurement. `createMemoryToolV4` takes host-owned `project.run/inspect` and a fresh
+`currentScoped()` resolver; it creates no owner, approval, store, path resolver, timer or hook. This
+core package does **not** change `wireMemory`'s actual registration decision or any existing fixture.
+The follow-up assembly package must select v4 only when the actual `toolSurfaceFor` result is v3,
+and must continue using the phase-1 scoped-registration and effective child-settings predicates.
+
+- Public params require `command`; `scope` alone defaults to project. `op/storageScope` are not
+  published. Internal alias normalization is opt-in, refuses either mixed field pair even when
+  values agree, and never gives a legacy call the default-project fallback. The old alias itself
+  still runs its original validation/gate sequence, not the new normalizer.
+- All command/field preflight completes before any port resolves. `all` accepts only view with
+  command/scope or search with command/scope/nonempty query. Every write and forbidden field is
+  rejected without dispatch, storage or approval. Whitespace-only queries are rejected; accepted
+  scoped queries are otherwise used literally, without trimming/tokenizing/regex interpretation.
+- The scoped factory exposes `inspect` and undecorated `dispatch` ports alongside the original
+  `run`. v4 writes call `dispatch`, reusing the phase-1 operation path and the sole approval/enqueue
+  implementation. Only alias `run/execute` can add deprecation metadata. Scoped reads/search use
+  current visible bodies, case-insensitive substring matching, lexicographic id order and a cap
+  of 50 per scope. Entries preserve full nested items and current revisions.
+- `createProjectInspectorV4` (in tool-v3.ts, outside the pi-free root) reuses the original listing
+  renderer and project search, with an optional `readCorpus` error observer which runs before
+  the old fallback. Corpus read failures are reported as poisoned. Absent is a successful empty
+  group. Before a blocks corpus exists, the original v3 no-blocks listing (including the files
+  migration hint) is retained with absent status. No observer is passed by legacy callers: their
+  fallback/text/errors are unchanged.
+- Aggregation always reports project/session/hub statuses; only ok/empty/absent retain a group.
+  All other states omit the entire group and set partial. Status objects contain diagnostics only,
+  never item/id/rev/grant fields. A session view's poisoned bit is persistence poison; a throwing
+  getter is error/E_INTERNAL with originalMessage. Child Hub and disabled scopes never resolve
+  their read ports. Assembly must not pre-collapse getter exceptions into an absent owner before
+  the inspector can observe them (the old `wiring.current()` owner filter is not a diagnostic port).
+- Only v4 maps project exceptions: the ten declared project codes retain their code, normalized
+  message and complete originalCode/originalMessage. Other prefixed MemoryErrors become E_INTERNAL
+  with originalCode; unprefixed MemoryErrors and ordinary Errors become E_INTERNAL with the complete
+  originalMessage. The old project factory/dispatcher continues throwing the identical exception.
+- `createScopedMemoryTool` optionally takes a host-only `v4Registration()` returning active and
+  registered. Both must be true, and the call must pass the unchanged old schema, before appending
+  `{deprecation:{replacement:{tool:"memory",params}}}`. Success view replacements keep only
+  command/scope/id, dropping fields the old view ignored (e.g. session topic, forbidden in v4).
+  Other calls rename op/storageScope and retain the remaining fields, including actual rev.
+  The assembly caller is responsible for asserting these flags only for a registered blocks v4.
+
+Core tests live in the new `tests/memory/unified/v4-*.test.ts` files; `wire.test.ts` is unchanged.
+They cover full aggregate JSON, real temporary SessionManager and Hub writes through production
+approval/store kernels, executable replacements and the exact description+snippet+joined-guidelines+
+JSON-schema UTF-8 budget formula. Existing v3, alias, off-golden and phase-1 wire tests remain the
+inactive-path differential baseline; no old text or schema was shortened to meet the new budget.

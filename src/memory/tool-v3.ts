@@ -28,6 +28,8 @@
  * all mutable state lives in this factory's closure; no module state.
  */
 
+import { projectError } from "./unified/errors.js";
+import type { MemoryV4Params, ProjectReadGroup, ReadInspection } from "./unified/types.js";
 import { dirname, join } from "node:path";
 import { recordSoftMeta } from "./soft-meta.js";
 import type { ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
@@ -995,4 +997,51 @@ export function createMemoryToolV3(deps: MemoryToolV3Deps): ToolDefinition {
       return text(lines.join("\n"));
     },
   } as ToolDefinition;
+}
+
+/** v4-only, read-only inspection. Legacy execute continues using readCorpus's fallback.
+ * The host binds this alongside the original project execute port; no new owner or store.
+ */
+export function createProjectInspectorV4(deps: MemoryToolV3Deps) {
+  return (call: MemoryV4Params, ctx: ExtensionContext | undefined): ReadInspection<ProjectReadGroup> => {
+    const cwd = resolveCwd(ctx);
+    const display = memoryDirFor(cwd, deps.paths);
+    let corpusFailed = false;
+    try {
+      const format = dirFormat(display);
+      if (format !== "blocks")
+        return {
+          status: { state: "absent" },
+          group:
+            call.command === "search"
+              ? { kind: "hits", hits: [] }
+              : {
+                  kind: "listing",
+                  text: `No block memory for ${cwd} yet${format === "files" ? " — run /mem migrate to convert the legacy files" : ""}.`,
+                },
+        };
+      const realDir = join(canonicalDir(display)?.real ?? display, "blocks");
+      const corpus = readCorpus(realDir, undefined, {
+        onError(error) {
+          corpusFailed = true;
+          throw error;
+        },
+      });
+      if (call.command === "search") {
+        const blocks = corpus.blocks.filter((b) => b.meta.status === "active" && b.meta.private !== true);
+        const revs = new Map(blocks.map((b) => [`${b.id}.md`, b.rev]));
+        const hits = searchMemory(
+          blocks.map((b) => ({ name: `${b.id}.md`, body: b.body })),
+          call.query ?? "",
+        ).map((h) => ({ path: h.file.replace(/\.md$/, ""), rev: revs.get(h.file)!, line: h.line, text: h.text }));
+        return { status: { state: hits.length ? "ok" : "empty" }, group: { kind: "hits", hits } };
+      }
+      return {
+        status: { state: corpus.blocks.length ? "ok" : "empty" },
+        group: { kind: "listing", text: renderListing(cwd, corpus, deps, localToday()) },
+      };
+    } catch (error) {
+      return { status: { state: corpusFailed ? "poisoned" : "error", ...projectError(error) } };
+    }
+  };
 }
