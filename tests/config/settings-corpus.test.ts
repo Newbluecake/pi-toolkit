@@ -276,6 +276,9 @@ function stripRetired(template: unknown, retiredPaths: readonly string[]): unkno
  * and all warns/files hashes, while checking the new block for every legacy input. The
  * generator continues to use the unprojected result; no corpus/template/hash is refreshed. */
 function withoutFast(settings: typeof DEFAULT_SETTINGS, input?: unknown) {
+  // #70 declares twelve sparse notification leaves: legacy inputs contain none.
+  // Assert absence instead of injecting defaults or projecting unrelated keys / refreshing hashes.
+  expect(Object.keys(settings.feishuNotify)).toEqual(["enabled"]);
   expect(settings.fast).toEqual({ enabled: true });
   // #39 declared additive keys only: every legacy case now parses both flags as true.
   // Preserve ALL old rows/fields/order; never regenerate or filter the frozen inputs.

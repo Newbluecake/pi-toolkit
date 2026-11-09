@@ -1,12 +1,15 @@
-import { rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { feishuSign } from "../../src/feishu-notify/core.js";
+import { detectFeishuNotifyCoexistence } from "../../src/web-hub/agent/feishu-admin.js";
 import { publishBackgroundStatus } from "../../src/service/background-status.js";
 
+const unifiedDirs: string[] = [];
 const TEST_CONFIG_PATH = join(tmpdir(), `feishu-notify-test-${process.pid}.json`);
 
 // ---------------------------------------------------------------------------
@@ -137,6 +140,8 @@ afterEach(async () => {
   releaseBackgroundStatus?.();
   releaseBackgroundStatus = undefined;
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
+  for (const dir of unifiedDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
   vi.useRealTimers();
   delete process.env.FEISHU_WEBHOOK_URL;
   delete process.env.FEISHU_NOTIFY_CONFIG_PATH;
@@ -1096,5 +1101,64 @@ describe("27. watchDefault config", () => {
     await emit("agent_start", {}, ctx);
     await emit("agent_settled", {}, ctx);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+// #70: real extension wiring consumes the very same resolver as the status diagnostic.
+describe("unified notification configuration end-to-end", () => {
+  function writeUnified(config: Record<string, unknown>) {
+    const dir = mkdtempSync(join(tmpdir(), "notify-unified-extension-"));
+    unifiedDirs.push(dir);
+    vi.stubEnv("PI_CODING_AGENT_DIR", dir);
+    writeFileSync(join(dir, "pi-toolkit.json"), JSON.stringify({ feishuNotify: config }));
+  }
+
+  it("new-only configuration sends a signed test card without env or old-file credentials", async () => {
+    delete process.env.FEISHU_WEBHOOK_URL;
+    const signing = ["synthetic", "unified-signing", "value"].join("-");
+    const webhook = "https://example.invalid/unified-only";
+    writeUnified({ webhookUrl: webhook, secret: signing, watchDefault: true });
+    const { calls } = installFetchMock();
+    const { emit, commands } = setup();
+    const ctx = makeCtx();
+    await emit("session_start", {}, ctx);
+    expect(detectFeishuNotifyCoexistence()).toEqual({ configured: true, watchDefault: true });
+    await commands.get("feishu-test").handler("", ctx);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toBe(webhook);
+    expect(calls[0]!.body.sign).toBe(feishuSign(calls[0]!.body.timestamp, signing));
+    expect(JSON.stringify(calls[0]!.body)).not.toContain(signing);
+    expect(JSON.stringify((ctx.ui.notify as ReturnType<typeof vi.fn>).mock.calls)).not.toContain(signing);
+  });
+
+  it("mixed configuration applies unified false/0 while inheriting the old webhook and signing key", async () => {
+    const signing = ["synthetic", "legacy-signing", "value"].join("-");
+    writeTestConfigFile({ secret: signing, watchDefault: true, heartbeatIntervalSec: 1, idleNotifyTimeoutSec: 1 });
+    writeUnified({ watchDefault: false, heartbeatIntervalSec: 0, idleNotifyTimeoutSec: 0 });
+    const { calls } = installFetchMock();
+    const { emit, commands } = setup();
+    const ctx = makeCtx();
+    await emit("session_start", {}, ctx);
+    expect(detectFeishuNotifyCoexistence()).toEqual({ configured: true, watchDefault: false });
+    await emit("input", { type: "input", text: "plain task", source: "interactive" }, ctx);
+    await emit("agent_start", {}, ctx);
+    await vi.advanceTimersByTimeAsync(3_000);
+    await emit("agent_settled", {}, ctx);
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(calls).toHaveLength(0);
+    await commands.get("feishu-test").handler("", ctx);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toBe("https://example.com/hook");
+    expect(calls[0]!.body.sign).toBe(feishuSign(calls[0]!.body.timestamp, signing));
+  });
+
+  it("unified enabled:false leaves the extension inert despite a configured old file and env", () => {
+    writeTestConfigFile({ watchDefault: true });
+    writeUnified({ enabled: false });
+    const fake = createFakePi();
+    extensionModule.default(fake.pi);
+    expect(fake.commands.size).toBe(0);
+    expect(fake.handlers.size).toBe(0);
+    expect(detectFeishuNotifyCoexistence()).toEqual({ configured: false, watchDefault: false });
   });
 });

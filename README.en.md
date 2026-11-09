@@ -143,6 +143,18 @@ Top-level enable switches (defaults in the comments):
 
 `web_search` provider credentials live elsewhere; see the [tools guide](docs/guide/tools.md#web_search) (Chinese).
 
+### Feishu webhook notification settings
+
+Top-level `feishuNotify` in `pi-toolkit.json` now accepts every notification field, including
+`webhookUrl` / `secret`. Per-field priority: valid unified value → legacy
+`~/.pi/agent/feishu-notify.json` → existing environment variables → built-in default.
+The old file is kept; no automatic migration/deletion. Credentials are JSON-only, never ordinary
+settings UI/list/set values; protect plaintext files with mode 0600. Missing/null values inherit,
+false/0 remain explicit; an empty URL stops sending, an empty secret disables signing.
+`FEISHU_NOTIFY_CONFIG_PATH` selects only the legacy fallback file (empty disables its read).
+Secure/locked domains stay off without fallback. Reload after changes.
+[Full field/default/compatibility reference](docs/dev/ask-user-feishu-merge/feishu-notify.md) (Chinese).
+
 ### Feishu bot settings (optional)
 
 These are **top-level** `feishuBot.*` keys in the settings file (`pi-toolkit.json`), not `webHub.feishuBot`. Changes require `/reload` then `/webhub restart`. Requires `webHub.enabled:true` and control enabled. [Setup, commands and security](docs/dev/feishu-bot/README.md) · [real-tenant checklist](docs/dev/feishu-bot/acceptance.md) (Chinese). **One app connects to one hub**; concurrent connections split events.

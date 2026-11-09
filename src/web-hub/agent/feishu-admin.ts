@@ -20,9 +20,7 @@
  * lines. Token lines are English-only per the AGENTS.md UI-text split; Chinese is reserved
  * for the prose hint/warning blocks.
  */
-import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { resolveNotifyConfig } from "../../feishu-notify/config.js";
 import type {
   FsbReqFrame,
   FsbResData,
@@ -339,46 +337,22 @@ export interface FeishuNotifyCoexistence {
   watchDefault: boolean;
 }
 
-/**
- * Whether `src/feishu-notify` (Q4: untouched, coexists) is configured: `FEISHU_WEBHOOK_URL` set,
- * or `feishu-notify.json` carries a non-empty `webhookUrl`. The config path override
- * (`FEISHU_NOTIFY_CONFIG_PATH`) mirrors feishu-notify's own, for test isolation.
- */
+/** Same resolver as the sender, with injectable reads for diagnostics tests. */
 export function readFeishuNotifyCoexistence(
   env: Record<string, string | undefined>,
   readConfigFile: (path: string) => string | undefined,
   configPath: string,
+  unified: unknown = { enabled: true },
+  secure = false,
 ): FeishuNotifyCoexistence {
-  let fileWebhook: unknown;
-  let watchDefault = false;
-  const text = readConfigFile(configPath);
-  if (text !== undefined) {
-    try {
-      const parsed: unknown = JSON.parse(text);
-      if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
-        const r = parsed as Record<string, unknown>;
-        fileWebhook = r.webhookUrl;
-        watchDefault = r.watchDefault === true;
-      }
-    } catch {
-      /* unparseable config is feishu-notify's own problem, not a coexistence signal */
-    }
-  }
-  const envUrl = env.FEISHU_WEBHOOK_URL;
-  const configured = (typeof envUrl === "string" && envUrl !== "") || typeof fileWebhook === "string";
-  return { configured, watchDefault };
+  const config = resolveNotifyConfig({ env, readFile: readConfigFile, legacyPath: configPath, unified, secure });
+  return { configured: config.enabled && !!config.webhookUrl, watchDefault: config.watchDefault === true };
 }
 
-/** Production wrapper: reads the real env + `~/.pi/agent/feishu-notify.json`. */
+/** Read-only production wrapper; no credentials escape into FsbInfoData or status text. */
 export function detectFeishuNotifyCoexistence(env: NodeJS.ProcessEnv = process.env): FeishuNotifyCoexistence {
-  const path = env.FEISHU_NOTIFY_CONFIG_PATH ?? join(homedir(), ".pi", "agent", "feishu-notify.json");
-  let text: string | undefined;
-  try {
-    text = readFileSync(path, "utf8");
-  } catch {
-    /* absent or unreadable: not configured via file */
-  }
-  return readFeishuNotifyCoexistence(env, () => text, path);
+  const config = resolveNotifyConfig({ env });
+  return { configured: config.enabled && !!config.webhookUrl, watchDefault: config.watchDefault === true };
 }
 
 /** §8 coexistence warning lines (Chinese prose; empty when feishu-notify is not configured). */
@@ -386,7 +360,7 @@ export function coexistenceWarningLines(c: FeishuNotifyCoexistence): string[] {
   if (!c.configured) return [];
   const lines = [
     "检测到 feishu-notify（webhook 通知插件）已配置：两者可共存，但同一次运行可能各发一条通知。",
-    '建议在 ~/.pi/agent/feishu-notify.json 中设置 "watchDefault": false，减少重复的完成类通知。',
+    '建议在 pi-toolkit.json 的 feishuNotify 中设置 "watchDefault": false，减少重复的完成类通知。',
   ];
   if (c.watchDefault) lines.push("当前 watchDefault:true——新会话默认开启 /watch，重复通知会更明显，建议改为 false。");
   return lines;

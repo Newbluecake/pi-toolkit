@@ -971,3 +971,14 @@ start intentionally has no running timer. Completed results prefer the tap's mea
 when absent, newer pi toolResult messages carry their own per-execution `durationMs` (including
 parallel executions), projected unchanged from JSONL. Older results without either value remain
 unknown: batch timestamps are not per-tool measurements. No protocol or hub change is required.
+
+## Feishu webhook 共存诊断（#70）
+
+agent 侧 `feishu-admin.ts` 的通知共存检查与发送端复用
+`feishu-notify/config.ts::resolveNotifyConfig`，读取统一 `feishuNotify` 覆盖、旧文件、环境和默认。
+不再独立判断「env 或旧文件有 URL」：统一显式空 URL、enabled:false、secure/locked 都不能被旧文件
+或环境重新打开。只向状态渲染输出 `configured` / `watchDefault` 两个布尔值；无凭据/wire/PROTO 改动。
+建议用户编辑 `pi-toolkit.json` 的 `feishuNotify.watchDefault`，旧文件仍保留为回退。
+字段优先级/空值/路径覆盖语义见 [plugin-merge README](../plugin-merge/README.md#70-统一通知设置与敏感面)。
+门禁：`tests/web-hub/agent/feishu-admin.test.ts` + `tests/feishu-notify/extension.test.ts` 的发送/诊断一致性；
+`feishu-spawn-http-golden.json` 等冻结件字节不变。

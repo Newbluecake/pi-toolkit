@@ -101,6 +101,7 @@ export type {
   ExternalProtocolCheck,
 } from "../external-agent/settings.js";
 import { parseEnabledGroup } from "./enabled-group.js";
+import { parseFeishuNotifySettings, type FeishuNotifySettings } from "../feishu-notify/settings.js";
 import type { EnabledGroup } from "./enabled-group.js";
 export type { EnabledGroup } from "./enabled-group.js";
 import { DEFAULT_ASK_USER_SETTINGS, parseAskUserSettings } from "../ask-user/settings.js";
@@ -223,7 +224,7 @@ export interface AgentSettings {
   /** ask_user interactive question tool (main session only — child subagent sessions never see it). Default on. */
   askUser: AskUserSettings;
   /** Feishu notification cards (main-session singleton). Default on. */
-  feishuNotify: EnabledGroup;
+  feishuNotify: FeishuNotifySettings;
   /** Session navigation enhancements (/resume-recent, /clear, bare exit, resume-list titles). Main-session TUI only. Default on. */
   sessionNav: EnabledGroup;
   /** Merged plugins: cwd-keyed project memory (injection + memory tool + /mem). Pre-guard, child sessions included. Default on. */
@@ -572,7 +573,7 @@ function parseSettingsSource(source: unknown): AgentSettings {
     date: parseEnabledGroup(value.date, DEFAULT_SETTINGS.date),
     todo: parseTodoSettings(value.todo),
     askUser: parseAskUserSettings(value.askUser),
-    feishuNotify: parseEnabledGroup(value.feishuNotify, DEFAULT_SETTINGS.feishuNotify),
+    feishuNotify: parseFeishuNotifySettings(value.feishuNotify),
     sessionNav: parseEnabledGroup(value.sessionNav, DEFAULT_SETTINGS.sessionNav),
     memory: parseMemorySettings(value.memory),
     fast: parseEnabledGroup(value.fast, DEFAULT_SETTINGS.fast),
@@ -760,10 +761,9 @@ export function loadSettingsFromFile(path: string = defaultSettingsPath()): Agen
       );
     }
     return loadSettings(cache.value);
-  } catch (error) {
-    console.warn(
-      `[pi-subagent] failed to parse ${path}: ${error instanceof Error ? error.message : String(error)}; using defaults.`,
-    );
+  } catch {
+    // JSON parser errors can quote credential-bearing file contents. Never echo them.
+    console.warn(`[pi-subagent] failed to parse ${path}: invalid or unreadable settings; using defaults.`);
     return loadSettings(undefined);
   }
 }
@@ -953,8 +953,8 @@ export function persistSettingOverride(dottedKey: string, value: unknown, explic
           return `${path}: top-level value is not an object; not modifying it`;
         raw = parsed as Record<string, unknown>;
       }
-    } catch (error) {
-      return `${path}: ${error instanceof Error ? error.message : String(error)}`;
+    } catch {
+      return `${path}: invalid or unreadable settings; not modifying it`;
     }
     const segments = dottedKey.split(".");
     let node: Record<string, unknown> = raw;

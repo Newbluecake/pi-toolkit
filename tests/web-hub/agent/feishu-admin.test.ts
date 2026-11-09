@@ -285,6 +285,35 @@ describe("feishu-notify coexistence (§8)", () => {
     expect(detectFeishuNotifyCoexistence(env)).toEqual({ configured: false, watchDefault: false });
   });
 
+  it("uses unified priority, explicit empties/null, disabled and secure gates exactly like the sender", () => {
+    const read = vi.fn(() => JSON.stringify({ webhookUrl: "https://example.invalid/old", watchDefault: true }));
+    const env = { FEISHU_WEBHOOK_URL: "https://example.invalid/env" };
+    expect(
+      readFeishuNotifyCoexistence(env, read, "/cfg", {
+        webhookUrl: "https://example.invalid/new",
+        watchDefault: false,
+      }),
+    ).toEqual({ configured: true, watchDefault: false });
+    expect(readFeishuNotifyCoexistence(env, read, "/cfg", { webhookUrl: "", watchDefault: false })).toEqual({
+      configured: false,
+      watchDefault: false,
+    });
+    expect(readFeishuNotifyCoexistence(env, read, "/cfg", { webhookUrl: null, watchDefault: null })).toEqual({
+      configured: true,
+      watchDefault: true,
+    });
+    read.mockClear();
+    expect(readFeishuNotifyCoexistence(env, read, "/cfg", { enabled: false })).toEqual({
+      configured: false,
+      watchDefault: false,
+    });
+    expect(readFeishuNotifyCoexistence(env, read, "/cfg", { enabled: true }, true)).toEqual({
+      configured: false,
+      watchDefault: false,
+    });
+    expect(read).not.toHaveBeenCalled();
+  });
+
   it("coexistenceWarningLines: empty when unconfigured, watchDefault line only when true", () => {
     expect(coexistenceWarningLines({ configured: false, watchDefault: false })).toEqual([]);
     const w = coexistenceWarningLines({ configured: true, watchDefault: false });

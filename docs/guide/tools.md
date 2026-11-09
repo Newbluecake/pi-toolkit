@@ -43,9 +43,9 @@
 
 - `@notify` 关键词；`/watch` 标记本会话每次任务结束都通知；`/feishu-test` 发测试卡片。
 - 结果 / 汇总 / 心跳 / 等待输入卡片。
-- 完成类通知默认等后台 subagent 与后台 bash 全部空闲才发，忙时抑制不补发（`feishu-notify.json` 里 `requireBackgroundIdle: false` 可关）。
+- 完成类通知默认等后台 subagent 与后台 bash 全部空闲才发，忙时抑制不补发（统一 `feishuNotify.requireBackgroundIdle: false` 可关）。
 
-配置文件 `~/.pi/agent/feishu-notify.json`。
+配置在 `pi-toolkit.json` 顶层 `feishuNotify`；逐字段优先于旧 `~/.pi/agent/feishu-notify.json`，后者仍兼容保留，最后回退既有环境变量和默认值。凭据 JSON-only，不进入普通设置 UI；完整字段/安全与空值语义见 [通知配置指南](../dev/ask-user-feishu-merge/feishu-notify.md)。
 
 ## 会话导航
 

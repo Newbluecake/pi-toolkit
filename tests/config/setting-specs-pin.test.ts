@@ -42,6 +42,15 @@ if (process.env.GOV_SPECS_GENERATE === "1") {
   // remain pinned.
   const declaredAdditions = [
     "budget.minTotalS",
+    // #70: only the seven safe new notification leaves; credentials remain JSON-only.
+    "feishuNotify.waitNotifyTimeoutSec",
+    "feishuNotify.heartbeatIntervalSec",
+    "feishuNotify.idleNotifyTimeoutSec",
+    "feishuNotify.subagentSummaryEnabled",
+    "feishuNotify.subagentForegroundSummary",
+    "feishuNotify.requireBackgroundIdle",
+    "feishuNotify.watchDefault",
+
     "memory.jev.backgroundQueueLimit",
     "memory.scopes.session",
     "memory.scopes.hub",
@@ -62,6 +71,8 @@ if (process.env.GOV_SPECS_GENERATE === "1") {
       const oldKeys = pin.specs.map(([key]) => key);
       const minAnchor = oldKeys.indexOf("budget.totalS");
       expect(Object.keys(SETTING_SPECS).filter((key) => !oldKeys.includes(key))).toEqual(declaredAdditions);
+      const notifyAnchor = oldKeys.indexOf("feishuNotify.enabled");
+      const notifyKeys = declaredAdditions.filter((key) => key.startsWith("feishuNotify."));
       const queueAnchor = oldKeys.indexOf("memory.jev.maxCalls");
       expect(queueAnchor).toBeGreaterThan(0);
       const anchor = oldKeys.indexOf("memory.jev.predict.cacheTtlMin");
@@ -71,7 +82,9 @@ if (process.env.GOV_SPECS_GENERATE === "1") {
       expect(Object.keys(SETTING_SPECS)).toEqual([
         ...oldKeys.slice(0, minAnchor + 1),
         "budget.minTotalS",
-        ...oldKeys.slice(minAnchor + 1, queueAnchor + 1),
+        ...oldKeys.slice(minAnchor + 1, notifyAnchor + 1),
+        ...notifyKeys,
+        ...oldKeys.slice(notifyAnchor + 1, queueAnchor + 1),
         "memory.jev.backgroundQueueLimit",
         ...oldKeys.slice(queueAnchor + 1, anchor + 1),
         "memory.scopes.session",

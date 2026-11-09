@@ -136,6 +136,8 @@ const SYSLOAD_FILE_CLOSURE: Record<string, string[]> = {
     "../secure/domain.js",
     // data-encryption P1 review #5: cross-process settings-file lock (flock child, pi-free).
     "../secure/settings-lock.js",
+    // #70 sparse notification parser is pi-free, with no runtime imports (pinned below).
+    "../feishu-notify/settings.js",
     "./enabled-group.js",
     "./time-units.js",
   ],
@@ -153,6 +155,7 @@ const SYSLOAD_FILE_CLOSURE: Record<string, string[]> = {
   "src/secure/config.ts": ["node:path"],
   "src/secure/env.ts": [],
   "src/config/model-hint.ts": [],
+  "src/feishu-notify/settings.ts": [],
   "src/fabric/xs/channel.ts": ["../../web-hub/protocol/xs.js"],
   // #56 ⑧: fabric block settings — channel-plan CH0 pure channel-name rules + the pure receive/session-id rules.
   // fabric-thread P0 (arch §11.1): + the SHARED window clamp from web-hub/protocol/thread.js (typebox-only,

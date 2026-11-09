@@ -38,3 +38,11 @@
 - **agentDir-in-vault fail-closed**：`PI_CODING_AGENT_DIR` 与任一已登记保险库的 `dir`/`mnt` 相互嵌套 ⇒ domain 判 locked、`status` 打印 `!` 行、`run`/`unlock`/`init` 退出码 78（登记表不能藏进它自己描述的保险库）。
 
 另：`/secure status` 探测 PATH 上过旧的 pi-secure（realpath 后在它的 helper.mjs 里找新名标记），旧版且已迁移时给出改指本检出的 `ln -sf` 命令；pi-secure 与插件同版发布，安装链接必须指向同一检出。
+
+## #70 通知统一配置的 D8 门禁
+
+`feishuNotify` 的凭据/行为字段可放统一设置；两条 settings loader 仍强制 `enabled:false`。
+发送端与 Web Hub 共存诊断共用的 resolver 在读取任何旧独立文件/环境回退前检查冻结 secure/locked
+verdict，并直接返回 disabled；显式统一 enabled:true、旧文件或环境均不能重新启用，直接调用通知注册
+入口亦不注册 hooks/commands。本包不迁移用户真实文件，不删除旧凭据，也不在 vault 外建立凭据副本。
+字段和错误暴露审计见 [plugin-merge README](../plugin-merge/README.md#70-统一通知设置与敏感面)。

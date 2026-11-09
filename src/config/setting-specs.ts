@@ -3,6 +3,7 @@ import { bool, choice, count, seconds, type SettingSpec } from "./spec-helpers.j
 export type { SettingSpec, SettingSpecBase } from "./spec-helpers.js";
 import { COMPACT_SETTING_SPECS } from "../compact-hint/setting-specs.js";
 import { WEBHUB_SETTING_SPECS, FEISHU_BOT_SETTING_SPECS } from "../web-hub/agent/setting-specs.js";
+import { FEISHU_NOTIFY_SETTING_SPECS } from "../feishu-notify/setting-specs.js";
 import { TODO_SETTING_SPECS } from "../todo/setting-specs.js";
 import { ASK_USER_SETTING_SPECS } from "../ask-user/setting-specs.js";
 import { TITLE_SETTING_SPECS } from "../title/setting-specs.js";
@@ -134,6 +135,7 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
   ...TODO_SETTING_SPECS,
   ...ASK_USER_SETTING_SPECS,
   "feishuNotify.enabled": bool("feishuNotify.enabled", "Feishu notification cards (main session only)"),
+  ...FEISHU_NOTIFY_SETTING_SPECS,
   "sessionNav.enabled": bool(
     "sessionNav.enabled",
     "Session navigation: /resume-recent 48h window, /clear, bare exit, resume-list titles",

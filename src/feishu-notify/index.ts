@@ -14,13 +14,12 @@
  *   1. 任务描述里带 @notify 关键词
  *   2. /watch 命令（会话级关注；配置 watchDefault:true 可让新会话默认开启）
  *
- * 配置（二选一）：
- *   1. 配置文件 ~/.pi/agent/feishu-notify.json
- *   2. 环境变量 FEISHU_WEBHOOK_URL / FEISHU_WEBHOOK_SECRET
+ * 配置（逐字段优先）：pi-toolkit.json 的 feishuNotify → 旧 feishu-notify.json
+ * → FEISHU_WEBHOOK_URL / FEISHU_WEBHOOK_SECRET → 默认值。解析器见 config.ts。
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, sep } from "node:path";
 import {
@@ -32,12 +31,12 @@ import {
   buildSubagentSummaryText,
   extractSummary,
   formatDuration,
-  parseConfig,
   parseSubagentLifecycle,
   sendToFeishu,
   truncate,
   isBackgroundIdle,
 } from "./core.js";
+import { resolveNotifyConfig } from "./config.js";
 import { getGitBranch } from "./git.js";
 import { readBackgroundStatus } from "../service/background-status.js";
 import { readBeforeAgentStartTrigger } from "../adapters/pi-compat.js";
@@ -63,24 +62,12 @@ function ownPackageRoot(): string {
 const CONFIG_DIR = join(homedir(), ".pi", "agent");
 const LOG_PATH = join(CONFIG_DIR, "feishu-notify.log");
 
-/** 配置文件路径：默认 ~/.pi/agent/feishu-notify.json；可用 FEISHU_NOTIFY_CONFIG_PATH 覆盖（测试隔离用） */
-function configPath(): string {
-  return process.env.FEISHU_NOTIFY_CONFIG_PATH ?? join(CONFIG_DIR, "feishu-notify.json");
-}
-
 /** 任务描述中的通知触发词 */
 const NOTIFY_KEYWORDS = ["@notify", "#notify"];
 
 function loadConfig(): Config {
-  let fileConfig: Config = {};
-  if (existsSync(configPath())) {
-    try {
-      fileConfig = JSON.parse(readFileSync(configPath(), "utf-8"));
-    } catch (err) {
-      log(`config parse error: ${err}`);
-    }
-  }
-  return parseConfig(fileConfig, process.env);
+  const resolved = resolveNotifyConfig();
+  return resolved.enabled ? resolved : {};
 }
 
 function log(message: string): void {
@@ -96,10 +83,12 @@ export default function (pi: ExtensionAPI) {
   const hostKey = Symbol.for("pi-subagent:feishu-notify:host");
   const global = globalThis as Record<symbol, unknown>;
   if (global[hostKey]) return;
+  const initialConfig = resolveNotifyConfig();
+  if (!initialConfig.enabled) return;
   const claim = { activatedAt: Date.now() };
   global[hostKey] = claim;
   let conflictInert = false;
-  let config = loadConfig();
+  let config: Config = initialConfig;
 
   // ---- 任务级状态（一个「用户任务」生命周期，可跨多次 agent_start/settled 中的 run 内续跑） ----
   let taskPrompt = "";
@@ -637,7 +626,10 @@ export default function (pi: ExtensionAPI) {
       }
       config = loadConfig();
       if (!config.webhookUrl) {
-        ctx.ui.notify(`未配置 webhook，请编辑 ${configPath()} 或设置 FEISHU_WEBHOOK_URL`, "error");
+        ctx.ui.notify(
+          "未配置 webhook，请编辑 pi-toolkit.json 的 feishuNotify.webhookUrl（兼容旧 feishu-notify.json）或设置 FEISHU_WEBHOOK_URL",
+          "error",
+        );
         return;
       }
       const card = buildCard({

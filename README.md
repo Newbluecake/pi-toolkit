@@ -153,6 +153,15 @@ pi install .
 
 `web_search` 的供应商凭证在另一处，见 [tools 指南](docs/guide/tools.md#web_search)。
 
+### 飞书 webhook 通知配置
+
+`pi-toolkit.json` 的顶层 `feishuNotify` 可配置全部通知字段（含 `webhookUrl` / `secret`）。
+逐字段优先：统一有效值 → 旧 `~/.pi/agent/feishu-notify.json` → 既有环境变量 → 默认；
+旧文件保留，不自动迁移或删除。凭据 JSON-only，不进入普通设置 UI/list/set；文件明文建议 0600。
+省略/null 继续回退，false/0 保留；空 URL 停止发送、空 secret 关闭签名。
+`FEISHU_NOTIFY_CONFIG_PATH` 只指定旧文件回退（空串不读）；secure/locked 强制关闭不回退。
+改后 `/reload`；[全部字段、默认值与兼容语义](docs/dev/ask-user-feishu-merge/feishu-notify.md)。
+
 ### 飞书机器人设置（可选）
 
 以下为设置文件（`pi-toolkit.json`）的**顶层** `feishuBot.*`（不是 `webHub.feishuBot`）；改动后 `/reload` → `/webhub restart`，还需 `webHub.enabled:true` 与控制面开启。[配置/命令/安全说明](docs/dev/feishu-bot/README.md) · [真租户验收](docs/dev/feishu-bot/acceptance.md)。**一个应用只连接一个 hub**，双连接会分流事件。

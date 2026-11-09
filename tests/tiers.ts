@@ -41,6 +41,8 @@ export const TIER2_DIRS: readonly string[] = ["tests/integration/", "tests/confo
 /** Tier 2 files outside TIER2_DIRS (plan D2): real private lock / plain child processes /
  * build-artifact-dependent suites. Not real-mount — those are SECURE_MOUNT_FILES. */
 export const TIER2_FILES: readonly string[] = [
+  // #70 credential-safe persistence tests use the real settings flock, no real vault.
+  "tests/config/feishu-notify-settings.test.ts",
   // Interval P1: these drivers use the real single-file writer/flock through fixtures (hidden
   // from lexical proc scanning). Pure raw timer arithmetic remains tier1; contention/activate
   // end-to-end tests are already covered by the integration/ prefix above.
