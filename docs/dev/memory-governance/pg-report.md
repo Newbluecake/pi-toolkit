@@ -586,3 +586,47 @@ P2 的逐版逻辑结果：old 31 次 dispatch，18 成功/及时、13 `failed`/
 `pg-candidate-v3/**` 与 `pg-freeze-b3900c24/**` 全部常规文件的前后路径/hash 清单一致，baseline JS tree 不变；`auth.json`、`models.json`、`pi-toolkit.json` 前后 hash 一致。未改真实记忆、未 install、未 commit/push；未运行全量 tier1/tier2/secure。本轮只有本报告追加版本化内容，运行产物留在私有 RUN，交接为 `/tmp/mem36-g2-live-handoff.json`。
 
 残留：G2 两项召回门均失败，后续如要定位或修复应另立任务；本次不补跑、不调 cap/阈值、不改标签。baseline 完整构建来源限界和服务商实际账单未知如上。集合仍仅覆盖 19/34 个 topic 用户令，独立轮重放不恢复完整历史工具/todo/冷却状态，不能外推成全面线上召回率。G1 仍 BLOCKED，PG 不通过。
+
+### G2 可选候选审计（诊断，不改变门禁）
+
+`--candidate-audit on` 在原逐轮审计之外写入同级
+`attempt-<id>-turns-candidate-audit/`，按原 identity 独占文件；省略时不创建该目录。
+它在现有 `turnClient` 请求／回答和 `onRender` 回调处只保留引用，在轮结束后匹配生产
+question 的文件及生产脱敏摘录，输出 labelId、实际 blockId/rev（旧 files 均为 null）、
+长度和 SHA-256、临时 alias、布尔概率、实际 U/P 投递层及概率、P2 DTO 字节数和可用的 renderer 预算统计；
+不写正文、请求文本或凭证。相同摘录冲突显式标 ambiguous，不能猜选某个块。
+
+限制：当前接口没有暴露实际选择阶段的排除明细、P 候选及 commit 原因，未出现在 U 问句
+的块一律记 `unknown`，`residentAtRender` 仅是渲染时观察，不等于后续 ledger 决定。
+legacy renderer 没有 blocks 预算统计时记 null；`outboundLimitBytes` 约束的是 P2 DTO，
+不是 U 候选池。不要把 unknown 解释成任何给定原因，也不能保证每次漏召回都可归因。
+诊断写入失败只输出固定错误，不改变评测结果；分析前需核对 74 个变体文件及 unique 映射。
+
+### P6b U top-k 对照（离线诊断，不是正式 G2）
+
+生产已有 `memory.jev.recall.maxEntries`（默认 3，允许 1–10）；P 层使用独立的
+`memory.jev.predict.maxEntries`（默认 2）。`--recall-top-k N` 只覆盖 G2 新版 U 层配置，
+旧版和省略参数时沿用原配置，不改变分类问题、阈值或生产默认值；报告追加实验值与新版配置 hash。
+
+严格按原缓存时延的重放在 `fa1d8080` 新版第三批返回 all-failed：精确缓存命中且校验通过，
+测得延迟 2382.94ms 超过生产单档 2000ms；同类本地缓存测试在关闭审计时仍可复现。
+LIVE 中为何能成功不能仅据缓存断言。为探索方向，隔离副本仅把这一条缓存延迟改为 1000ms，
+请求哈希和答案均保持原样；其余缓存字节不变。这个时延放宽实验**不能作为正式 G2 门禁结果**。
+其 k=3 逐轮 old/new 注入 ID 与上次 LIVE 全部一致；k=3/4/5 在该批数据上新版召回分别为
+22/40、23/40、23/40，后两档均找回 `63bb2970` 的唯一旧中新漏对，均未改善共同漏掉的 17 对。
+新增未标注条目分别为 0、12、20 对；未标注不代表负例，不能称作已证实误召回。
+第 18 轮新版 P2 在 k=3 记录 late、k=4/5 记录 timely，三档注入 ID 相同；因时序差异不能将所有
+观测严格解释为只改变 k 的反事实。
+详见 `/tmp/mem36-p6b-fix-handoff.json` 和隔离实验目录；不据此声称新阈值达标。
+
+### P6b U threshold 实验参数（仅诊断）
+
+G2 可显式传 `--recall-threshold 0.55`（接受 0.5–0.99），与 `--recall-top-k` 组合；
+仅覆盖新版 U 的实验 config，旧版沿用现有设置。不传时保留原配置及生产默认；G2 的
+60%／不退化门槛不变。报告中的 `experimentalRecallThreshold` 与
+`experimentalNewConfigHash` 标识实验，不改变旧版 config hash 或请求缓存键。
+
+使用上节已说明的单条**时延放宽**缓存副本及原 LIVE 答案进行离线对照；这是探索性重放，
+不是完整原始时序或正式 G2。未标注注入不能直接算成误召回，必须结合原始用户请求和记忆
+内容人工核对；该数据集没有穷尽的负标签，不能据此算真实 precision。完整表和人工审阅
+结论见 `/tmp/mem36-p6b-fix-handoff.json`。
