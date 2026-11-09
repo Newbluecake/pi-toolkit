@@ -53,7 +53,7 @@ metadata:
 过时优先 `update` 改写，只有整条事实彻底无效才考虑删除，用户令仍须用户决定。区分三种恢复对象：
 
 - 已取代或归档的块：用 `/mem restore --block <id or stored name>`，单块恢复不递归恢复它曾取代的其他块。
-- **已删除的块**：软删保存在 `blocks/.trash/`；blocks 布局下用 `/mem restore --trash` 找回已删除的块，**另一包正在修该命令的 blocks 路由，本次不承诺路由已可用**。
+- **已删除的块**：软删保存在 `blocks/.trash/`；blocks 布局下用 `/mem restore --trash` 列出并找回（`e0993f03` 起路由已按磁盘实际布局分派，恢复仍走块存储的锁/写入门/rev/同名冲突拒绝）。files 布局仍用项目根 `.trash/`，两种布局互不读取对方的回收站。
 - files 布局的删除快照仍在项目根 `.trash/`，使用其原有 `/mem restore --trash`；不要与 blocks 的归档/取代恢复混淆。
 
 ## 降级

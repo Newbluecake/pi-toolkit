@@ -167,7 +167,7 @@ Jev 是一个分类器驱动的核心 memory 子系统，职责三项：召回�
 
 - 迁移后 reload 提醒已由 C5 接入独立代际标记（下节），不再由 sweep 重复显示。
 - **C4 已消除治理子集限制**（`fc3230d2` / `6ae35450`）：blocks `/mem review` 合并现有侧车建议（包括非治理类型）与即时治理建议；`/mem expired` 独立展示 active 块的 expires/until、区分权威。两者均为只读，`--run` 不启动整理；详见文末「`/mem review` 与 `/mem expired` 只读展示」。历史 P5a/P7 交接中关于“仅 review-lite 子集”的描述已不代表当前状态。
-- **删除恢复与归档/取代恢复分开**：`restore --block` 用于归档或已取代的块；已删除块在 `blocks/.trash/`，`restore --trash` 的 blocks 路由由另一包修复中，此处不承诺已完成。files 布局仍是项目根 `.trash/`。
+- **删除恢复与归档/取代恢复分开**：`restore --block` 用于归档或已取代的块；已删除块在 `blocks/.trash/`，`restore --trash` 自 `e0993f03` 起按磁盘实际布局分派（blocks 读 `blocks/.trash`、files 读根 `.trash`，互不混合；恢复走块存储入口，保留锁/写入门/rev 复核与同名冲突拒绝）。真实 command 链路（create→delete→列出→按 id 恢复→校验正文/rev）由 `tests/memory/blocks/trash-command.test.ts` 覆盖。
 
 P5a 核心证据：`tests/memory/govern/{sweep-plan,sweep,supersede,review-lite}.test.ts`、`tests/integration/memory-blocks-{governance,supersede-race}.test.ts`；相邻门禁包含工具 v3/Jev、命令/tidy、pi-free、activate-trace 与既有 memory golden。
 

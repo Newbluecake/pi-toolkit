@@ -156,7 +156,7 @@ cp -a -- "$target/." "$linkcopy/" && diff -r --no-dereference -- "$target" "$lin
 ## 9. 迁移后
 
 - blocks 目录禁用 tidy。`/mem review` 只读展示现有 Jev 建议与即时治理建议，不限于治理子集；`/mem expired` 独立展示 active 块的已过期 `expires` 和所有 `until` 条件，区分 user/agent（同一块可占两行），不包含已取代或归档块。两者均不运行 sweep、分类器或交互式修改；`until` 只供核对，不能据此断言事件已发生。当前实现见 [README 的只读展示说明](README.md#mem-review-与-mem-expired-只读展示)。
-- 恢复归档或已取代的块用 `/mem restore --block <id or stored name>`，把占位符替换为实际 ID 或存储名；这不是删除恢复。已删除块保存在 `blocks/.trash/`，对应 `/mem restore --trash` 的 blocks 路由由另一包修复中，本 runbook 不承诺该路由已可用；files 布局仍使用根 `.trash/` 的原有恢复路径。
+- 恢复归档或已取代的块用 `/mem restore --block <id or stored name>`，把占位符替换为实际 ID 或存储名；这不是删除恢复。已删除块保存在 `blocks/.trash/`，`restore --trash` 自 `e0993f03` 起在 blocks 布局下列出并恢复该目录（files 布局仍用根 `.trash/`，两者互不混合）。
 - Jev 已有标签按条目内容 hash 匹配沿用，未匹配不会因迁移重新调用模型分类；报告里的 oversize 等是规则建议（`src/memory/blocks/migrate-plan.ts:142-145,195-215`）。
 - 旧根文件迁移后发生变化不会自动覆盖 blocks。`/mem migrate --import-legacy --dry-run` 只列出漂移文件；核对后 `/mem migrate --import-legacy` 才追加导入，以内容 hash 去重，需已是 blocks；不覆盖现有块。见 `src/memory/blocks/legacy.ts:44-56,58-124`。
 - `memory.migrate.auto=false` 表示关闭 session_start 的惰性自动迁移，只显式迁移；**不能假设当前值为 false**：此 HEAD 默认 `true`，默认 layout 是 `blocks`，启动自动迁移还要求主会话、files 目录及安全门禁通过等，不要求 TUI。以 `/mem migrate --status` 的实际值为准；若要保证试点前不自动迁移，启动目标会话前应先核实设置。证据 `src/memory/settings.ts:475-482`、`src/memory/index.ts:254-274`。
@@ -192,7 +192,7 @@ cp -a -- "$target/." "$linkcopy/" && diff -r --no-dereference -- "$target" "$lin
     "迁移规则不调用模型；迁移结果与注入须人工验收",
     "回退不会自动合并迁移后对 blocks 的更改",
     "全量中返回 aborted 继续；外层抛错可中止循环",
-    "review/expired 为只读展示，--run 不启动整理；删除块的 restore --trash 路由由另一包修复中"
+    "review/expired 为只读展示，--run 不启动整理；删除块的 restore --trash 已在 e0993f03 按实际布局分派（blocks→blocks/.trash）"
   ]
 }
 ```

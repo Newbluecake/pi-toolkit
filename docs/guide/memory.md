@@ -95,7 +95,7 @@ v3 提供以下五种操作，具体参数以工具描述为准：
 - **review**：合并现有 Jev 侧车建议（包括非治理类型）与即时治理建议，核对锚点并去重。不是只看 review-lite 治理子集；查看不会运行 sweep/分类器，不会交互式改写。
 - **expired**：展示 active 块的已过期 expires 和所有 until，区分 user/agent；同一块可占两行。已取代/归档的块不参与；命令本身不延期、不删除。
 - **restore --block**：恢复已取代或归档的单块。恢复不会递归恢复它曾取代的其他块，删除取代者也不会自动撤销其关系。
-- **删除恢复另走 trash**：已删除块在 `blocks/.trash/`，对应 `/mem restore --trash` 的 blocks 路由由另一包修复中，本文不承诺路由已可用。files 布局仍是项目根 `.trash/`；不要把两种布局的 trash 或 `--block` 混用。
+- **删除恢复另走 trash**：已删除块在 `blocks/.trash/`，`/mem restore --trash` 自 `e0993f03` 起按实际布局分派（blocks 读 `blocks/.trash`、files 读根 `.trash`，互不混合）。不要把两种布局的 trash 或 `--block` 混用。
 - **tidy 在 blocks 禁用**：不能用旧 `/mem tidy`（含 batch）整理 blocks；改用 review 建议与治理。
 - **doctor**：不再仅 D01–D14；包含 blocks 漂移、悬空取代、迁移/回退等诊断。启动提示受 `memory.doctor.notifyOnStart` 控制；历史软元数据超限在 doctor 按需展示，不在启动刷警告。
 
