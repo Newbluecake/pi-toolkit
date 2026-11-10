@@ -33,6 +33,7 @@ import type {
   RevisionAuditDeps,
   RevisionAuditPort,
   RevisionProposal,
+  RetireSourceHintScan,
   RevisionRecoveryDiagnostic,
   RestoreRevisionRaw,
   RestoreRevisionRawLocked,
@@ -891,6 +892,40 @@ class Kernel {
     this.check();
     return result;
   }
+  sourceHints(): RetireSourceHintScan {
+    try {
+      const refs: Extract<RetireSourceHintScan, { kind: "ok" }>["refs"][number][] = [];
+      for (const { batchId, actionId } of this.enumerate().sort((a, b) =>
+        a.batchId < b.batchId ? -1 : a.batchId > b.batchId ? 1 : a.actionId < b.actionId ? -1 : 1,
+      )) {
+        const r = this.read(batchId, actionId);
+        if (r.kind !== "ok") throw new Error("source scan incomplete");
+        const a = r.audit;
+        if (a.action !== "merge-survivor" || a.state !== "committed" || Object.hasOwn(a, "restoreAttempt")) continue;
+        if (
+          !a.contextId ||
+          !a.contextExpectedRev ||
+          r.expectedAfter?.kind !== "file" ||
+          a.commitObservation?.kind !== "applied" ||
+          a.commitObservation.expectedAfter.kind !== "file" ||
+          a.commitObservation.expectedAfter.digest !== r.expectedAfter.digest ||
+          a.commitObservation.expectedAfter.rev !== r.expectedAfter.rev
+        )
+          throw new Error("source observation");
+        refs.push({
+          source: { batchId, actionId, proposalDigest: a.proposalDigest },
+          oldId: a.contextId,
+          oldRev: a.contextExpectedRev,
+          survivorId: a.targetId,
+          survivorAfterRev: r.expectedAfter.rev,
+        });
+      }
+      this.check();
+      return { kind: "ok", refs };
+    } catch {
+      return { kind: "unavailable", reason: "retire source scan incomplete/unavailable" };
+    }
+  }
   scan(): readonly RevisionRecoveryDiagnostic[] {
     try {
       return this.enumerate().map(({ batchId, actionId }): RevisionRecoveryDiagnostic => {
@@ -940,6 +975,13 @@ export function createRevisionAuditPort(memDir: string, deps: RevisionAuditDeps)
     reason: e instanceof Refusal ? e.reason : "audit-unavailable",
   });
   return {
+    listRetireSourceHintsLocked() {
+      try {
+        return get().sourceHints();
+      } catch {
+        return { kind: "unavailable", reason: "retire source scan unavailable" };
+      }
+    },
     readActionLocked(batchId, actionId) {
       try {
         return get().read(batchId, actionId);

@@ -1063,3 +1063,105 @@ rev/hash 已改变后，换行、C++/A+B、歧义候选及跨目录拒绝；真�
 beforeSyscall 均有真实 producer 反例；测试同时证明 raw review 与 sanitize 完全一致，不能借
 另一个 fail-closed 门假装共享谓词生效。R1 不改 action-v2、既有 key/schema bytes、持久化
 producer、迁移、fixtures 或任何 host/adapter/wire。
+
+## #50 F bounded selector/source/host 内核包（factory-only，2026-11-10）
+
+S0 已提交后的下一包实现了真实可执行内核，**不是生产 F 完成**：新增
+`govern/revision-selector.ts` 与 `govern/revision-host.ts`，由未来既有 wireJev activation owner
+**恰一次**构造 host，注入其唯一 `JevClientHandle` 与稳定 binding 引用；不另建 client、费用账、
+activity owner、hook、timer、确认入口或权限。现 wire/settings/root/adapter/restore slash 未改。
+
+**最新用户决定覆盖此前“默认保持关闭”的最终目标**：后续实际 wire 串行包接线完成时总开关
+默认开启，沿用建议模式；auto 正文提交仍 false。不得因为尚未真实付费验收而保持总开关默认关。
+本内核包不抢改 settings（当前生产默认仍是原值）；正预算、可信 binding/路由、独立来源、D8、
+plain-main/owner/epoch 等门不撤。用户没有授权真实付费验收或任何金额/模型路由；离线正向不提供
+生产 tokenizer/模板开销、cap、auth、usage 或代理证明。
+
+### 有界发现与建议语义
+
+- 锁内只严格读 batch 原前16的精确 id/rev/raw，复用 `revisionBlockFromRaw` 与 raw 上限；不补第17块。
+  tags 用当前严格块适配器、当前 body hash 且 file 相同的 sidecar + inline +/-，不触发 tagging/soft-meta。
+  旧 hint 只接受严格本地 anchor、当前 hash，revision 行另核双方 rev/方向；旧 supersedes a 是 survivor，
+  revision a 是 target，旧 p 不作为 fresh。无旧 review 的同 topic、同正文、共享 tag、跨 topic 正分
+  lexical Jaccard top2 都可发现，最多本地120 pair；无词法/tag/topic交集的语义关系不承诺召回。
+- 固定页最多4 ordinary +2 source，先过滤 source user-old/agent-survivor 再占配额；每 old 对不同
+  survivor 的歧义源整项拒绝并诊断，同映射按 opaque source tuple 稳定去重。普通同 authority pair
+  预声明 merge +双向 retire（mixed 无 agent 取代 user 方向）；最大14动作，入口/D都硬拒>16。
+  同 authority 较小 ID、mixed agent 只是 merge 建议载体，不是覆盖真值或自动权限。
+- 全菜单在首模型前 D freeze，同一完整菜单取得同 D batchId/action-v2。普通双向 DTO 复用新纯
+  `revisionRelationContextForBlocks`；原 `revisionRelationContext` 输出字节不变。每向 dispatch 前
+  独立算 request/input expected，核唯一问题/唯一 source/完整 missing、可信实际身份和精确 digest；
+  互换、错 digest、缺身份不生成正文，失败终止该 job 剩余工作。不会把返回 digest 复制为 expected。
+- 双向 fresh 唯一 supersedes 仅建议 retire；conflict 仅 merge 建议；双向 covers/无向 duplicate
+  仅 bodyless merge，不能按 ID 授权删一侧。普通 retire 无 source 永不 auto，merge 第一阶段永不 auto；
+  不生产 pair rewrite、expires 或 delete，不抢原 sweep/archive owner。
+
+### C 唯一只读 seam 与 host 状态门
+
+`RevisionAuditPort.listRetireSourceHintsLocked?()` 是 append-only optional seam，真实 C 工厂复用
+Kernel enumerate/read/check 的128 batch/256 total action 硬界、权限/no-follow/raw完整性守卫，
+按 `(batchId,actionId)` 返回 committed merge、无任何 restoreAttempt、真实 file expected-after/
+commit observation 的 metadata/ref；不返回正文/path/LIVE。旧无 spec 可列举，但只有 D 可判为
+legacy-no-evidence，历史提示不含本次 relation/coverage，绝不冒称 fresh。显式坏源或不同 policy
+在 D freeze 拒绝，不降无 source。扫描权限/损坏/截断返回 unavailable，不当空；host 保守暂停
+整个机会并保留 pending/dormant，不 freeze/claim/模型工作。首次扫描成功前不建立稳定发现池，
+只保留有界待扫描目录标记；下一真正自然机会可在 raw/epoch 不变时重新枚举。待扫描目录与
+完整 snapshot 合计最多8项，不轮询、不在本批另造 job；诊断对该待扫描状态有界一次。
+
+- host 每 client/activation 至多8目录当前 snapshot；key 只由 identity/epoch、前16 id/rev/rawDigest
+  与固定 policy 决定。tags/hints/source 池首次捕获后不随自己写 review/时间戳重排；最新 suppression
+  每次实时检查，仍由原共享 `revisionSemanticSuppression`、review 锁内与 E 末 syscall 最终裁决。
+  稳定输入下固定队列不重复、页只在下一真正自然机会取；不在当前 handle 内续页、开新 job 追扫。
+  公平只在 owner存活、输入稳定、未来自然机会/预算可用、guard容量未满时成立（ordinary最多30页、
+  source最多128页）；前16外/无限变化/容量耗尽不承诺公平。
+- claim 前临时 admission/gate/锁忙保持 pending，使用原 scheduler `cap-reached` 结果保留证据并 dormant，
+  不新增定时器/重试；输入变化另标 invalidated。空页终止本机会，零 freeze/claim/模型，不自动补下页。
+  确定性 source/policy/action freeze 拒绝整页 `blocked-freeze`，合法同行不冒称已分类，不重造子菜单。
+- full freeze 后同步 claim 同 D job。128项不可淘汰 execution map 不计费，只防重入与扣 G 槽；
+  所有终态不可重发。claim 后任何失败（含 reservation/零 dispatch）将未完成项 `blocked-job`，
+  同 job 不退款/重放/换 cap；临时全局预算与容量满闭锁进入 dormant，不能 LRU/TTL 腾额。
+  `reset(abort|tree|session)` 撤在飞/清页但保留原 client 的 guard；`dispose` 先 dispose 原 client，
+  再释放 fences。guard 是单 client/activation 保证，非跨进程持久生成账；原 A 仍独占所有费用/calls。
+- 静态最多2个 generation，进入 prepare 前查 lease/共享 suppression/剩余槽；lease 已失效走 bodyless
+  planner，零 G。同步 wrapper 再查后调用原 `tryStartGenerate`，成功立即扣不可返还槽；suppression await
+  到扣槽间的竞态拒绝保守停，绝不试探第三 G。source 直接复用 D 内部 fresh R/C，不先重发 relation。
+  4 ordinary +2 source 的真实离线正例为10 R、2 G、4 C，共16高层调用（不是 provider attempt 上限）。
+- 严格全部 discovery→全部 prepare→全部 review/C save→最后 E。save 后锁内读取最终 proposal digest，
+  保管原 D frozen，再交 E；不拿保存前 auto hint/JSON 当能力。首次 committed/effect-unknown 即调用
+  原 `onAfterWrite(...,"p50-auto")` 并停止本页，之后零模型、零第二自动写；unknown 不盲重试。
+  E 持久<=2实际动作门保持（本 host 更保守最多一次效果）。
+
+`IncrementalBatch.limits.jobCostCapUsd` 从 literal0 扩成 number；scheduler 工厂新增可选
+`IncrementalDeps.jobCostCapUsd`，只消费宿主显式解析的有限正预算并冻结入 batch，缺省/非法仍0。
+没有新增设置、默认路由或生产预算旁路；现生产装配仍未传该 seam。后续 wire 必须将显式已解析
+预算冻结进 batch，而非让 host 绕读另一个值；effective-off 不能关闭原 Jev legacy traffic。policy 默认固定组合
+`p50-selection-v1/selector-v1/action-v2`，factory 可显式注入既有受支持 policy，不能用时间/nonce/页号
+更换 job。source policy 严格相等，不迁移/重签旧源。
+
+### 独验 r_4CG185MQ 返工：scheduler ownership 与首次 unavailable
+
+原自验未覆盖真实 scheduler 的 attempt 回查：`tryStartGenerate` 会再次调用同一 admission，
+原 host 的 `!running` 导致初始 true、运行后 false，真实普通生成始终零 G。现在 `canAttempt`
+明确区分两条路：新批只在 host 非 running 时准入；运行中只允许**引用相同的已拥有 batch**
+执行只读重查，且须已 claim、execution running、epoch/registry/binding/预算/gate/lease 当前有效。
+`handle` 仍全程互斥，同 batch 再调用或另一新 batch 均不能并发进入，不能把 recheck 当新授权。
+
+首次 C scan unavailable 曾被 `sources=[]` 固化进稳定 snapshot，使修复权限后同 raw/epoch 永久
+漏源；现在未完整枚举的目录只占 pending 标记，不创建固定池或 job。真实 committed 源的
+`audit.json` 0644→0600 后，下一个自然机会可发现原引用并走 fresh R/C→C/review→E；无自动重试。
+
+新增 `revision-host-scheduler.test.ts` 使用真实 `createIncrementalScheduler` + `FakeClock`、
+显式正 cap seam、原唯一 client/D/C/review/E，不手写 attempt context：普通生成真实 admission
+`[true,true]` 后 G/C/审计建议成功；真实预算变化 `[true,false]` 保持 2R、零G/slot0、blocked-job
+与 dormant；exact-owned recheck 不接纳并发、epoch/lease 失效仍拒绝。另覆盖 scheduler 的 source
+实际 E 效果、首次 unavailable 无 timer/claim/模型，以及同 raw/epoch 在下一外部机会恢复。
+原全量绿不能替代这两项反例；本次返工仍需独立复验，不自称原独验已 PASS。
+
+独立新增测试为 `revision-{selector,source-discovery,host-selector}.test.ts` 与 own-temp 离线 helper：
+真实注入唯一 client→D→C/review→E 正向及 raw restore，14菜单/16调用、cold跨 topic、方向/权限、
+legacy/source坏证据、30页120 pair公平、128 guard满、8目录满、零dispatch blocked、同 job G槽重入、
+lease/registry/epoch/restore竞争、全保存先于E与首效果后停止。断言精确 raw/C barrier/最终提案，不以
+“不抛异常”充数。原 govern/jev/off、SDK离线、S0、E两进程门仍须通过，fixtures不刷新。
+这不是实际 settings→wireMemory/wireJev 正向、生产可信 adapter、native恢复命令或 LIVE 认证；
+独立验收后由下一串行装配包完成这些门并统一默认开启。同步 syscall不可抢占、恶意同uid跨 syscall
+竞争、fsync非绝对掉电保证、原client晚费用结算等既有限界不变。

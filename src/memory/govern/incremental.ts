@@ -44,7 +44,7 @@ export interface IncrementalBatch {
   readonly taskDoneEligible: boolean;
   readonly lastExternalWriteAt: number;
   readonly activityLease: MemoryIdleLease;
-  readonly limits: { readonly autoActions: 2; readonly generateRequests: 2; readonly jobCostCapUsd: 0 };
+  readonly limits: { readonly autoActions: 2; readonly generateRequests: 2; readonly jobCostCapUsd: number };
 }
 export interface IncrementalAttemptContext {
   readonly signal: AbortSignal;
@@ -85,6 +85,9 @@ interface DirectoryState {
 }
 export interface IncrementalDeps {
   readonly settings: MemoryIncrementalSettings;
+  /** Host-resolved explicit batch budget. Absent/invalid is 0 (no paid opt-in).
+   * Frozen into each batch; not a setting, route or bypass of client admission. */
+  readonly jobCostCapUsd?: number;
   /** Undefined owner => stopped, zero timer, zero handler/client/write. */
   activity(): MemoryActivityPort | undefined;
   isCurrent(directory: IncrementalDirectory): boolean;
@@ -256,7 +259,11 @@ export function createIncrementalScheduler(deps: IncrementalDeps) {
       taskDoneEligible: p.taskDoneEligible,
       lastExternalWriteAt: p.lastExternalWriteAt,
       activityLease: Object.freeze({ generation: snapshot.generation, lastActivityAt: snapshot.lastActivityAt }),
-      limits: Object.freeze({ autoActions: 2, generateRequests: 2, jobCostCapUsd: 0 }),
+      limits: Object.freeze({
+        autoActions: 2,
+        generateRequests: 2,
+        jobCostCapUsd: Number.isFinite(deps.jobCostCapUsd) && deps.jobCostCapUsd! > 0 ? deps.jobCostCapUsd! : 0,
+      }),
     });
     // §2.2(4): batch admission MUST precede pending consumption, running and
     // handler dispatch. Denial retains one change evidence, dormant (no retry loop).

@@ -955,7 +955,22 @@ export type AuditReadResult =
     }
   | { readonly kind: "missing" | "corrupted" | "unavailable"; readonly reason?: string };
 
+export type RetireSourceHintScan =
+  | {
+      readonly kind: "ok";
+      readonly refs: readonly {
+        readonly source: RetireEvidence["source"];
+        readonly oldId: string;
+        readonly oldRev: string;
+        readonly survivorId: string;
+        readonly survivorAfterRev: string;
+      }[];
+    }
+  | { readonly kind: "unavailable"; readonly reason: string };
+
 export interface RevisionAuditPort {
+  /** Optional, read-only C-owned bounded enumeration. Missing/incomplete is NOT an empty lane. */
+  listRetireSourceHintsLocked?(): RetireSourceHintScan;
   // All Locked calls are synchronous; caller already owns the memDir lock.
   readActionLocked(batchId: string, actionId: string): AuditReadResult;
   persistPreparedBarrierLocked(input: {

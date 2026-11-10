@@ -989,6 +989,13 @@ export function planRevisionActions(input: RevisionPlanInput): readonly Revision
  * returned provenance. This D grammar is used by the host when asking the
  * existing client, so split/multi-source results can be checked exactly. */
 export function revisionRelationContext(input: FrozenRevisionInput): ClassifyContext {
+  return revisionRelationContextForBlocks(input.target, input.context);
+}
+/** Pure allowlist only; reversing a DTO grants no frozen action or LIVE permission. */
+export function revisionRelationContextForBlocks(
+  target: FrozenRevisionBlock,
+  context?: FrozenRevisionBlock,
+): ClassifyContext {
   const outbound = (b: FrozenRevisionBlock) => ({
     id: b.id,
     rev: b.rev,
@@ -998,7 +1005,7 @@ export function revisionRelationContext(input: FrozenRevisionInput): ClassifyCon
     ...(b.block.section === undefined ? {} : { section: redactForJev(b.block.section, "entry") }),
   });
   return deepFreeze({
-    state: { target: outbound(input.target), ...(input.context ? { context: outbound(input.context) } : {}) },
+    state: { target: outbound(target), ...(context ? { context: outbound(context) } : {}) },
     questions: {
       revisionRelation: {
         type: "choice",
