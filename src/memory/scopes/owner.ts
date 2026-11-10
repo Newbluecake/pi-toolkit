@@ -1,7 +1,23 @@
 /** One actual-manager owner. All authority/closures are activation-local; poison alone is shared. */
-import { createCommandConfirmKernel, type CommandConfirmKernel } from "../command-confirm.js";
+import { randomBytes } from "node:crypto";
+import { clampSpanMs } from "../../core/deadline.js";
+import { createDialogRace, type AskUserRemoteSession } from "../../ask-user/remote.js";
+import { startCommandFlow, type CommandFlowDomain, type CommandFlowChoice } from "../command-flow.js";
+import {
+  COMMAND_CONFIRM_TIMEOUT_MS,
+  createCommandConfirmKernel,
+  type CommandConfirmKernel,
+  type MemoryWebCall,
+} from "../command-confirm.js";
 import { executeConfirmedMemoryWrite } from "../command.js";
-import type { MemoryWebDispatchRequest, MemoryWriteTask, WriteOutcome } from "./web-write-port.js";
+import type {
+  MemoryWebCapabilities,
+  MemorySessionWebDispatchRequest,
+  MemoryRevisionWebDispatchRequest,
+  MemoryWebOutcome,
+  MemoryWriteTask,
+  WriteOutcome,
+} from "./web-write-port.js";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AskUserRemotePort } from "../../ask-user/remote.js";
 import { createHumanDispatchProof, createHumanOpApproval } from "../../web-hub/agent/human-dispatch-proof.js";
@@ -99,7 +115,7 @@ export function createMemoryOwner(deps: MemoryOwnerDeps) {
     },
   });
   let webKernel: CommandConfirmKernel | undefined;
-  let webTasks: Set<MemoryWriteTask> | undefined;
+  let webTasks: Set<MemoryWriteTask<MemoryWebOutcome>> | undefined;
   const poison = deps.enabled.session ? sharedSessionPoisonRegistry() : undefined;
   const recovery = poison?.recoveryAuthority();
   const session = deps.enabled.session
@@ -178,8 +194,32 @@ export function createMemoryOwner(deps: MemoryOwnerDeps) {
     },
   });
   const doctor = createScopedMemoryDoctor(common);
+  // Queries never create a kernel, read branch/body, acquire a lock or adopt an
+  // owner. This projection is not admission: start/commit independently recheck.
+  function webCapabilities(actualCtx: unknown, revisionAvailable: boolean): MemoryWebCapabilities {
+    const off = { sessionAdd: false, revisionReview: false } as const;
+    try {
+      const ctx = actualCtx as ExtensionContext | undefined;
+      if (
+        deps.child ||
+        (!deps.enabled.session && !deps.enabled.hub) ||
+        !ctx ||
+        !current() ||
+        capability() !== "ok" ||
+        abort.signal.aborted ||
+        ctx.sessionManager !== manager ||
+        deps.context()?.sessionManager !== manager
+      )
+        return off;
+      const gate = deps.gate.check(owner);
+      if (!gate.ok || !current() || disposed || abort.signal.aborted) return off;
+      return { sessionAdd: deps.enabled.session && !!session, revisionReview: revisionAvailable };
+    } catch {
+      return off;
+    }
+  }
   // Lazy: native/model use and Web-off sessions never construct a Web kernel.
-  function startWebWrite(request: MemoryWebDispatchRequest, actualCtx: ExtensionContext) {
+  function startWebWrite(request: MemorySessionWebDispatchRequest, actualCtx: ExtensionContext) {
     const failure = (code: "E_MEM_CONFIRM_STALE" | "E_MEM_BUSY" | "E_MEM_CONFIRM_UNAVAILABLE"): WriteOutcome => ({
       ok: false,
       effect: "none",
@@ -294,11 +334,205 @@ export function createMemoryOwner(deps: MemoryOwnerDeps) {
     return { accepted: true as const, task };
   }
 
+  /** Pure navigation uses the authenticated dialog bridge's nonce/epoch/option
+   * checks, then rechecks this NEW call's lease. It never mints a receipt. */
+  function chooseWeb(
+    call: MemoryWebCall,
+    kernel: CommandConfirmKernel,
+    request: CommandFlowChoice,
+    signal: AbortSignal,
+  ) {
+    return new Promise<string | undefined>((resolve) => {
+      const race = createDialogRace();
+      let remote: AskUserRemoteSession | undefined;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const lease = kernel.lease(call);
+      const valid = () => !signal.aborted && lease?.check() === true && !lease.signal.aborted;
+      const finish = (value?: string, web = false) => {
+        if (!race.claim(web ? "web" : "abort")) return false;
+        if (timer) clearTimeout(timer);
+        signal.removeEventListener("abort", abortNavigation);
+        try {
+          if (!web) remote?.close("abort", "aborted");
+        } catch {
+          /* delivery is not authority */
+        }
+        resolve(value);
+        return true;
+      };
+      const abortNavigation = () => {
+        finish();
+      };
+      if (!valid()) {
+        finish();
+        return;
+      }
+      signal.addEventListener("abort", abortNavigation, { once: true });
+      timer = setTimeout(abortNavigation, clampSpanMs(COMMAND_CONFIRM_TIMEOUT_MS)!);
+      timer.unref();
+      try {
+        remote = deps.remote()?.open({
+          toolCallId: `memnav:${randomBytes(16).toString("hex")}`,
+          questions: [
+            {
+              header: "MEMNAV",
+              question: request.presentation,
+              options: request.options.map((label) => ({ label })),
+              allowOther: false,
+            },
+          ],
+          allowCancel: true,
+        });
+        if (!remote || !valid()) {
+          finish();
+          return;
+        }
+        remote.setOnRemote((outcome) => {
+          if (outcome.originKind !== "loopback" && outcome.originKind !== "lan") return false;
+          if (!valid()) {
+            finish();
+            return false;
+          }
+          if (outcome.kind === "cancel") return finish(undefined, true);
+          const keys = Object.keys(outcome.answers);
+          const value = outcome.answers.MEMNAV;
+          if (
+            keys.length !== 1 ||
+            keys[0] !== "MEMNAV" ||
+            typeof value !== "string" ||
+            !request.options.includes(value)
+          )
+            return false;
+          return valid() && finish(value, true);
+        });
+      } catch {
+        finish();
+      }
+    });
+  }
+  function startWebReview(
+    request: MemoryRevisionWebDispatchRequest,
+    actualCtx: ExtensionContext,
+    domain: (kernel: CommandConfirmKernel, call: MemoryWebCall, live: () => boolean) => CommandFlowDomain,
+  ) {
+    const failure = (code: "E_MEM_CONFIRM_STALE" | "E_MEM_BUSY" | "E_MEM_CONFIRM_UNAVAILABLE"): WriteOutcome => ({
+      ok: false,
+      effect: "none",
+      code,
+      retryable: false,
+      message: `${code}: 本步未执行。`,
+    });
+    // Capture the ORIGINAL proof owner's activity lease, not ctx.isIdle() or a
+    // second tracker. A same-millisecond tool/input/write revokes generation.
+    const activity = proof.activity;
+    const captured = activity?.snapshot(Date.now());
+    const activityCurrent = () => {
+      if (
+        !activity ||
+        !captured ||
+        !Number.isSafeInteger(captured.generation) ||
+        !Number.isFinite(captured.lastActivityAt)
+      )
+        return false;
+      const now = activity.snapshot(Date.now());
+      return (
+        now.generation === captured.generation &&
+        now.lastActivityAt === captured.lastActivityAt &&
+        now.running === false &&
+        now.toolsInFlight === 0 &&
+        now.liveIdle === true &&
+        now.hasPendingMessages === false
+      );
+    };
+    const live = () => {
+      try {
+        const valid =
+          webCapabilities(actualCtx, true).revisionReview &&
+          !request.signal.aborted &&
+          request.current() &&
+          activityCurrent();
+        return valid && !disposed && !abort.signal.aborted && !request.signal.aborted;
+      } catch {
+        return false;
+      }
+    };
+    if (!live()) return { accepted: false as const, outcome: failure("E_MEM_CONFIRM_STALE") };
+    if (webTasks?.size) return { accepted: false as const, outcome: failure("E_MEM_BUSY") };
+    if (!deps.remote()) return { accepted: false as const, outcome: failure("E_MEM_CONFIRM_UNAVAILABLE") };
+    webKernel ??= createCommandConfirmKernel({
+      channel: { kind: "web", remote: { open: (req) => deps.remote()?.open(req) } },
+      isOwnerCurrent: () => !deps.child && current() && capability() === "ok",
+    });
+    const kernel = webKernel;
+    const call = kernel.start(request.write.rawArgs, {
+      cmdId: request.cmdId,
+      commandOwner: request.commandOwner,
+      operationGeneration: request.operationGeneration,
+      deadline: request.deadline,
+      signal: request.signal,
+      current: live,
+      owner,
+      manager,
+    });
+    if (!call) return { accepted: false as const, outcome: failure("E_MEM_CONFIRM_STALE") };
+    let unsubscribe: (() => void) | undefined;
+    try {
+      unsubscribe = activity?.subscribe?.(() => {
+        if (!live()) kernel.close(call);
+      });
+      // Construct/read the real domain ONLY from R4's first microtask snapshot,
+      // after bridge/commands has attached cancellation and release controls.
+      let created: CommandFlowDomain | undefined;
+      const actualDomain = () => (created ??= domain(kernel, call, live));
+      const flow = startCommandFlow({
+        kernel,
+        call,
+        domain: {
+          snapshot: () => actualDomain().snapshot(),
+          view: (target) => actualDomain().view(target),
+          prepare: (target, operation, step) => actualDomain().prepare(target, operation, step),
+        },
+        choose: (choice, signal) => chooseWeb(call, kernel, choice, signal),
+        listOnly: request.write.listOnly,
+      });
+      let released = false;
+      const task: MemoryWriteTask<MemoryWebOutcome> = {
+        done: flow.done.then((result) => {
+          unsubscribe?.();
+          unsubscribe = undefined;
+          return { kind: "revision.review" as const, result };
+        }),
+        cancel(reason) {
+          const result = flow.cancel(reason);
+          unsubscribe?.();
+          unsubscribe = undefined;
+          return { kind: "revision.review", result };
+        },
+        release() {
+          if (released) return;
+          released = true;
+          unsubscribe?.();
+          unsubscribe = undefined;
+          flow.release();
+          webTasks?.delete(task);
+        },
+      };
+      (webTasks ??= new Set()).add(task);
+      return { accepted: true as const, task };
+    } catch {
+      unsubscribe?.();
+      kernel.close(call);
+      return { accepted: false as const, outcome: failure("E_MEM_CONFIRM_UNAVAILABLE") };
+    }
+  }
+
   return {
     owner,
     manager,
     session,
+    webCapabilities,
     startWebWrite,
+    startWebReview,
     hub,
     proof,
     approval,

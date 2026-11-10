@@ -458,9 +458,9 @@ reject before execute, so this does not promise closed-window precedence at that
 `tests/tools/structured-output-tool.test.ts` and
 `tests/service/runtime-adapter-structured-repair.test.ts` cover both checks and late submissions.
 
-## Run-control failure surfaces (#84, implementation under independent verification)
+## Run-control failure surfaces (#84, independently verified and committed df3a0218)
 
-The current uncommitted implementation retains the holder's original `no active session yet` phrase
+The implementation retains the holder's original `no active session yet` phrase
 with a fixed `no_active_session` code and effect facts. Blocking Agent admission retains classified
 kind/reason/retryability instead of turning it into a generic dispatch failure. Nested failure guidance
 only suggests resume conditionally when a persisted session exists and after checking outcome/partial
@@ -471,5 +471,5 @@ empty results or invented terminal states. Known `model_changed` and `deadline_e
 preserved when later observation fails; unknown effects must not be blindly retried. The existing
 `steerRun` await remains unbounded, so this work does not claim a complete zero-hang fix.
 Evidence boundaries are in `tests/service/owner-errors84.test.ts`,
-`tests/tools/owner-errors84.test.ts` and adjacent query/tool tests; independent verification is
-pending, not a PASS or evidence that an already-running session loaded these changes.
+`tests/tools/owner-errors84.test.ts` and adjacent query/tool tests; independent verification passed
+and the changes are committed as `df3a0218`, but have not been reloaded or LIVE-validated in an already-running session.

@@ -1,4 +1,4 @@
-import { createRevisionHost } from "../govern/revision-host.js";
+import { createRevisionHost, type RevisionHostCustody } from "../govern/revision-host.js";
 import type { IncrementalBatch } from "../govern/incremental.js";
 import { resolveNativeP50Binding, type P50BindingResolver, type P50SdkBinding } from "./p50-binding.js";
 import type { MemoryActivityRecorder } from "../govern/activity.js";
@@ -331,6 +331,8 @@ export interface WireJevDeps {
     readonly resolveBinding?: P50BindingResolver;
     available(ctx: unknown): boolean;
     isCurrent(batch: IncrementalBatch, ctx: unknown): boolean;
+    /** Original actual scopes-owner lifetime, independent of the generation attempt. */
+    custody?(batch: IncrementalBatch, actualCtx: unknown): RevisionHostCustody | undefined;
     onAfterWrite(memDir: string, origin: "p50-auto"): void;
     invalidate(): void;
   };
@@ -345,6 +347,8 @@ export interface WireJevResult {
     ready(): boolean;
     readonly handle: ReturnType<typeof createRevisionHost>["handle"];
     readonly canAttempt: ReturnType<typeof createRevisionHost>["canAttempt"];
+    /** The ORIGINAL host closure, restricted to read-only locked custody lookup. */
+    readonly webReview: { readonly actionLocked: ReturnType<typeof createRevisionHost>["actionLocked"] };
     reset(reason: "abort" | "tree" | "session"): void;
   };
   /** memory-predict plan §11.1: late-bound W-signal ports (bashJobs/fleet) —
@@ -935,6 +939,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
           );
         },
         autoEnabled: () => deps.settings.incremental.auto === true,
+        ...(deps.p50?.custody ? { custody: (batch: IncrementalBatch) => deps.p50!.custody!(batch, p50Context) } : {}),
         ...(deps.writeGate === undefined ? {} : { gate: deps.writeGate }),
         now: () => new Date(now()),
         onAfterWrite: (dir, origin) => deps.p50!.onAfterWrite(dir, origin),
@@ -3510,6 +3515,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
             ready: () => currentP50Binding() !== undefined,
             handle: revisionHost.handle,
             canAttempt: revisionHost.canAttempt,
+            webReview: Object.freeze({ actionLocked: revisionHost.actionLocked }),
             reset: (reason: "abort" | "tree" | "session") => revisionHost.reset(reason),
           },
         }

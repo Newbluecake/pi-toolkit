@@ -1,3 +1,4 @@
+import { runRevisionStartupDiagnostics } from "./govern/revision-startup-diagnostics.js";
 import {
   createIncrementalScheduler,
   type IncrementalBatchHandler,
@@ -38,7 +39,15 @@ import type { SystemPromptMode } from "../sysprompt/hub.js";
  * one segmented unref timer only when explicitly enabled with a live activity owner.
  */
 
-import type { MemoryWebWritePort } from "./scopes/web-write-port.js";
+import type {
+  MemoryWebWritePort,
+  MemoryRevisionWebDispatchRequest,
+  MemoryWebOutcome,
+} from "./scopes/web-write-port.js";
+import type { MemoryOwnerRuntime } from "./scopes/owner.js";
+import type { RevisionWebCommandDeps } from "./govern/revision-web-command.js";
+import { createRevisionWebCommand } from "./govern/revision-web-command.js";
+import { REVISION_HOST_POLICY_VERSION } from "./govern/revision-host.js";
 import type { ExtensionContext, ExtensionToolContext, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { MemorySettings } from "../config/settings.js";
 import type { PromptSectionHub } from "../sysprompt/hub.js";
@@ -658,6 +667,8 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
     const controller = migrationAbort;
     const hostSignal = opts.sessionSignal?.();
     const signal = hostSignal ? AbortSignal.any([controller.signal, hostSignal]) : controller.signal;
+    const cwd = resolveWorktreeOrigin(ctx.cwd) ?? ctx.cwd;
+    const dir = memoryDirFor(cwd);
     const current = (): boolean =>
       migrationAbort === controller &&
       !signal.aborted &&
@@ -666,11 +677,26 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
     governanceNotify =
       ctx.hasUI && typeof ctx.ui?.notify === "function" ? (message) => ctx.ui.notify(message, "warning") : undefined;
     const notify = governanceNotify;
+    // One read-only operational scan at this existing natural opportunity. The
+    // helper checks the ACTUAL native context/scopes owner before discovery;
+    // neither Jev/provider readiness nor auto/budget can authorize or suppress it.
+    if (opts.scopes && opts.settings.enabled && !opts.isChildSession && (opts.secureDomainKind ?? "plain") === "plain")
+      await runRevisionStartupDiagnostics({
+        memoryDir: dir,
+        actualContext: ctx,
+        settings: opts.settings,
+        domain: opts.secureDomainKind ?? "plain",
+        isChildSession: opts.isChildSession,
+        ...(opts.scopes ? { scopes: opts.scopes } : {}),
+        gate,
+        signal,
+        isCurrent: current,
+        ...(notify ? { warn: notify } : {}),
+      });
+    if (!current()) return;
     // Child/off/locked paths do not probe disk. Reminder admission uses the
     // ACTUAL layout; changing the configured renderer cannot reset migration.
     if (!opts.settings.enabled || opts.isChildSession || opts.secureDomainKind === "locked") return;
-    const cwd = resolveWorktreeOrigin(ctx.cwd) ?? ctx.cwd;
-    const dir = memoryDirFor(cwd);
     if (!gate.check(dir).ok || !canonicalDir(dir)) return;
     if (opts.settings.layout !== "blocks" && dirFormat(dir) !== "blocks") return;
     try {
@@ -853,6 +879,52 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
                     !opts.sessionSignal?.()?.aborted &&
                     gate.check(identity.realpath).ok
                   );
+                },
+                custody: (batch: IncrementalBatch, actualCtx: unknown) => {
+                  const runtime = opts.scopes?.current();
+                  const ctx = actualCtx as Partial<ExtensionContext> | undefined;
+                  if (!runtime || !ctx || ctx.sessionManager !== runtime.manager || runtime.capability() !== "ok")
+                    return undefined;
+                  const owner = runtime.owner,
+                    controller = migrationAbort,
+                    hostSignal = opts.sessionSignal?.();
+                  if (owner.sessionEpoch !== batch.directory.sessionEpoch) return undefined;
+                  const isCurrent = () => {
+                    if (
+                      !opts.settings.enabled ||
+                      !opts.settings.governance.enabled ||
+                      !opts.settings.incremental.enabled ||
+                      opts.scopes?.current() !== runtime ||
+                      runtime.owner !== owner ||
+                      !runtime.current() ||
+                      runtime.capability() !== "ok" ||
+                      ctx.sessionManager !== runtime.manager ||
+                      migrationAbort !== controller ||
+                      controller.signal.aborted ||
+                      hostSignal?.aborted ||
+                      runtime.signal.aborted ||
+                      typeof ctx.cwd !== "string"
+                    )
+                      return false;
+                    const directory = canonicalDir(memoryDirFor(resolveWorktreeOrigin(ctx.cwd) ?? ctx.cwd));
+                    const identity = directory ? inspectDirSecurityNoFollow(directory.real) : undefined;
+                    const allowed =
+                      directory?.real === batch.directory.realpath &&
+                      identity?.dev === batch.directory.dev &&
+                      identity.ino === batch.directory.ino &&
+                      gate.check(batch.directory.realpath).ok;
+                    return allowed && !runtime.signal.aborted && !controller.signal.aborted && !hostSignal?.aborted;
+                  };
+                  // R2 compares signal by reference on each custody read. This is
+                  // the ORIGINAL owner's stable signal, never a fresh any() or
+                  // an attempt/execution/running-derived lifetime.
+                  return {
+                    owner,
+                    manager: runtime.manager,
+                    epoch: owner.sessionEpoch,
+                    signal: runtime.signal,
+                    isCurrent,
+                  };
                 },
                 onAfterWrite: (dir: string, origin: "p50-auto") => {
                   const cwd =
@@ -1046,19 +1118,142 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
       ...(jev === undefined ? {} : { jev: jev.commandPort }),
     }),
   );
+  function startRevisionReview(
+    runtime: MemoryOwnerRuntime,
+    request: MemoryRevisionWebDispatchRequest,
+    ctx: ExtensionContext,
+    host: RevisionWebCommandDeps["host"],
+  ) {
+    const owner = runtime.owner;
+    const controller = migrationAbort;
+    const hostSignal = opts.sessionSignal?.();
+    const signal = AbortSignal.any([
+      request.signal,
+      runtime.signal,
+      controller.signal,
+      ...(hostSignal ? [hostSignal] : []),
+    ]);
+    const cwd = resolveWorktreeOrigin(ctx.cwd) ?? ctx.cwd;
+    const current = () =>
+      opts.settings.enabled &&
+      opts.settings.governance.enabled &&
+      opts.settings.incremental.enabled &&
+      !opts.isChildSession &&
+      (opts.secureDomainKind ?? "plain") === "plain" &&
+      opts.scopes?.current() === runtime &&
+      runtime.owner === owner &&
+      runtime.current() &&
+      runtime.capability() === "ok" &&
+      ctx.sessionManager === runtime.manager &&
+      (resolveWorktreeOrigin(ctx.cwd) ?? ctx.cwd) === cwd &&
+      migrationAbort === controller &&
+      !signal.aborted;
+    const started = runtime.startWebReview(
+      { ...request, signal, current: () => request.current() && current() },
+      ctx,
+      (kernel, call, commandCurrent) => {
+        // Owner/actual-context gates precede even this canonical directory read.
+        if (!current() || !commandCurrent()) throw Error("E_MEM_CONFIRM_STALE");
+        const dir = canonicalDir(memoryDirFor(cwd))?.real;
+        if (!dir || dirFormat(dir) !== "blocks") throw Error("E_MEM_CONFIRM_UNAVAILABLE");
+        return createRevisionWebCommand({
+          memDir: dir,
+          contextDir: ctx.cwd,
+          rawArgs: request.write.rawArgs,
+          call,
+          kernel,
+          host,
+          gate,
+          isCurrent: () => current() && commandCurrent(),
+          runtime: () => ({
+            plainMain: !opts.isChildSession && (opts.secureDomainKind ?? "plain") === "plain",
+            enabled: opts.settings.enabled && opts.settings.governance.enabled && opts.settings.incremental.enabled,
+            autoEnabled: opts.settings.incremental.auto,
+            sessionEpoch: owner.sessionEpoch,
+            policyVersion: REVISION_HOST_POLICY_VERSION,
+            dateRuleVersion: "",
+          }),
+          now: () => new Date(),
+        });
+      },
+    );
+    if (!started.accepted) return started;
+    // Observe before commands settles its ONE ledger, and release only in its
+    // finally. Cancellation cannot erase a real applied/unknown observation.
+    let invalidated = false;
+    const observe = (outcome: MemoryWebOutcome): MemoryWebOutcome => {
+      if (
+        !invalidated &&
+        "kind" in outcome &&
+        (outcome.result.facts.rows.some(
+          (row) =>
+            row.data === "applied" || row.data === "unknown" || row.review === "changed" || row.review === "unknown",
+        ) ||
+          (outcome.result.facts.effect === "unknown" && outcome.result.facts.omitted === null))
+      ) {
+        invalidated = true;
+        try {
+          onAfterWrite(cwd, "revision");
+        } catch {
+          /* actual effect still wins over an observer failure */
+        }
+      }
+      return outcome;
+    };
+    return {
+      accepted: true as const,
+      task: {
+        done: started.task.done.then(observe),
+        cancel: (reason: import("./scopes/web-write-port.js").MemoryCancelReason) =>
+          observe(started.task.cancel(reason)),
+        release: () => started.task.release(),
+      },
+    };
+  }
   const webWrite: MemoryWebWritePort | undefined =
     !opts.isChildSession &&
     (opts.secureDomainKind ?? "plain") === "plain" &&
     opts.settings.enabled &&
-    opts.settings.scopes.session &&
+    (opts.settings.scopes.session || opts.settings.scopes.hub) &&
     opts.scopes
       ? {
+          capabilities(actualCtx) {
+            try {
+              if (
+                !opts.settings.enabled ||
+                opts.isChildSession ||
+                (opts.secureDomainKind ?? "plain") !== "plain" ||
+                (!opts.settings.scopes.session && !opts.settings.scopes.hub)
+              )
+                return { sessionAdd: false, revisionReview: false };
+              const runtime = opts.scopes!.current();
+              return (
+                runtime?.webCapabilities(
+                  actualCtx,
+                  jev?.p50?.webReview !== undefined &&
+                    opts.settings.governance.enabled &&
+                    opts.settings.incremental.enabled,
+                ) ?? {
+                  sessionAdd: false,
+                  revisionReview: false,
+                }
+              );
+            } catch {
+              return { sessionAdd: false, revisionReview: false };
+            }
+          },
           start(request, actualCtx) {
             try {
               const runtime = opts.scopes!.current();
               const ctx = actualCtx as ExtensionContext;
-              if (runtime && ctx?.sessionManager === runtime.manager && runtime.current())
-                return runtime.startWebWrite(request, ctx);
+              if (runtime && ctx?.sessionManager === runtime.manager && runtime.current()) {
+                const capabilities = webWrite?.capabilities(ctx);
+                if (request.write.kind === "session.add" && capabilities?.sessionAdd)
+                  return runtime.startWebWrite({ ...request, write: request.write }, ctx);
+                const host = jev?.p50?.webReview;
+                if (request.write.kind === "revision.review" && host && capabilities?.revisionReview)
+                  return startRevisionReview(runtime, { ...request, write: request.write }, ctx, host);
+              }
             } catch {
               /* Missing/stale actual context is never replaced with a fabricated one. */
             }

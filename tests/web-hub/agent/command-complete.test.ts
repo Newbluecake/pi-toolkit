@@ -475,7 +475,7 @@ describe("#65 completion write-port projection", () => {
         tui: () => undefined,
         mode: "toolkit",
         memoryScopes: true,
-        memorySessionAdd: true,
+        memoryCapabilities: () => ({ sessionAdd: true, revisionReview: false }),
         overrides,
       });
     const allowed = make({ mem: "allow" });

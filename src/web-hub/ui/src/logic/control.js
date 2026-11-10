@@ -1,3 +1,5 @@
+import { parseMemoryCommandFacts } from "@protocol/memory-command-facts.ts";
+
 /**
  * Control-plane pure helpers (control-plan v2.1 §7.2/§7.7, package C4 — takes over C0's stub).
  * No DOM, no I/O: every function here runs unchanged under vitest (node) and in the browser.
@@ -381,8 +383,54 @@ export function memoryOwnerMatches(key, agentKey, agent) {
 }
 
 /** Keep only the display fields, at most 32KiB of pure JSON. No callbacks/caps/second ledger. */
-function memoryResult(body) {
+function memoryResult(body, cmdId) {
   const data = body?.data;
+  const text =
+    body?.ok === false
+      ? body.message
+      : data?.output?.entries?.length === 1 && data.output.entries[0]?.kind === "text"
+        ? data.output.entries[0].text
+        : undefined;
+  if (typeof text === "string") {
+    const parsed = parseMemoryCommandFacts(text, cmdId);
+    if (parsed.kind === "invalid")
+      return {
+        phase: "unknown",
+        effect: "unknown",
+        error: "E_BAD_RESPONSE",
+        message: "记忆效果事实不完整或身份不符；可能已写入，勿盲重试。",
+      };
+    if (parsed.kind === "facts") {
+      const effect = parsed.facts.effect;
+      if (
+        (body.ok === true && (effect === "partial" || effect === "unknown")) ||
+        (body.ok === false && (effect === "completed" || (body.effect === "none" && effect !== "none")))
+      )
+        return { phase: "unknown", effect: "unknown", error: "E_BAD_RESPONSE" };
+      // Display only: retain the one parsed projection + human summary, NEVER
+      // the full encoded message/output as another copy of the same facts.
+      const result = {
+        phase:
+          effect === "partial"
+            ? "partial"
+            : effect === "unknown"
+              ? "unknown"
+              : body.ok === true
+                ? "completed"
+                : "rejected",
+        effect,
+        facts: parsed.facts,
+        message: parsed.summary,
+        ...(body.ok === false ? { error: body.code ?? body.error ?? "E_COMMAND_DENIED" } : {}),
+      };
+      try {
+        if (new TextEncoder().encode(JSON.stringify(result)).length <= 24 * 1024) return result;
+      } catch {
+        /* bounded below */
+      }
+      return { phase: "unknown", effect: "unknown", error: "E_RESULT_TOO_LARGE" };
+    }
+  }
   let result;
   if (body?.ok === true && data?.completion === "sync" && data?.captured === true && data?.output) {
     const facts = data.memoryWrite;
@@ -436,11 +484,11 @@ function memoryTransition(item, event) {
       state: "unknown",
       memoryQueryInFlight: false,
       lateQuery: false,
-      memoryResult: memoryResult({ ...outcome, ok: false, effect: "unknown" }),
+      memoryResult: memoryResult({ ...outcome, ok: false, effect: "unknown" }, item.id),
       retryable: false,
     });
   const settle = (body) => {
-    const result = memoryResult(body);
+    const result = memoryResult(body, item.id);
     return patchItem(item, {
       state: result.phase === "completed" ? "done" : result.phase === "rejected" ? "failed" : "unknown",
       memoryResult: result,
@@ -487,7 +535,12 @@ function memoryTransition(item, event) {
       if (o?.ok === true && o.data?.completion === "async")
         return patchItem(item, { state: "running", memoryResult: { phase: "running" } });
       if (o?.ok === true && o.data?.completion === "unknown") return unknown({ error: "E_COMMAND_UNKNOWN" });
-      if (o?.ok === true || o?.effect === "none") return settle(o);
+      if (
+        o?.ok === true ||
+        o?.effect === "none" ||
+        (typeof o?.message === "string" && parseMemoryCommandFacts(o.message, item.id).kind !== "legacy")
+      )
+        return settle(o);
       return unknown(o);
     }
     case "offline":

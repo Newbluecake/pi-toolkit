@@ -211,7 +211,7 @@ async function runMemory(name: string, args: string, confirm: boolean, id = newC
     owner: Object.freeze({ ...owner, epoch: owner.epoch }),
     operationGeneration: ++memoryGeneration,
   });
-  memoryTask.value = { key, write: /^session\s+add(?:\s|$)/.test(args.trim()) };
+  memoryTask.value = { key, write: /^session\s+add(?:\s|$)/.test(args.trim()) || args.trim() === "review" };
   memoryDisplayKey.value = key;
   memoryAbortPending.value = null;
   memoryAbortNote.value = "";
@@ -1114,6 +1114,40 @@ onUnmounted(() => {
           :message="memoryResult.message"
           @dismiss="dismissMemory"
         />
+        <section
+          v-if="memoryResult.facts"
+          class="memory-flow-facts"
+          aria-label="Memory revision effects"
+          :data-memory-flow-effect="memoryResult.facts.effect"
+        >
+          <p v-if="memoryResult.facts.effect === 'partial'" role="status">
+            部分成功：已完成的效果不会回滚；后续被拒绝或跳过。勿整体重试。
+          </p>
+          <p v-if="memoryResult.facts.effect === 'unknown'" role="status">
+            效果不确定：目标可能已改变；请先检查原 C 审计，勿盲重试。恢复须重新检查并另行确认。
+          </p>
+          <ol>
+            <li
+              v-for="row in memoryResult.facts.rows"
+              :key="row.step"
+              :data-memory-step="row.step"
+              :data-action-id="row.actionId"
+              :data-memory-outcome="row.outcome"
+            >
+              <span translate="no"
+                >{{ row.step }} · {{ row.targetId ?? row.actionId ?? "unknown" }} · {{ row.operation }} ·
+                {{ row.outcome }}</span
+              >
+              <span translate="no">
+                · receipt={{ row.receipt }} · stage={{ row.stage }} · data={{ row.data }} · audit={{ row.audit }} ·
+                review={{ row.review }}</span
+              >
+              <code v-if="row.code"> · {{ row.code }}</code>
+            </li>
+          </ol>
+          <p v-if="memoryResult.facts.omitted === null">未处理项数量未知；观测不完整。</p>
+          <p v-else-if="memoryResult.facts.omitted > 0">另有 {{ memoryResult.facts.omitted }} 项未展示/处理。</p>
+        </section>
         <p
           v-if="memoryResult.phase === 'completed' && memoryResult.memoryWrite"
           class="fleet-actions-note"
@@ -1131,7 +1165,7 @@ onUnmounted(() => {
         >
           Revision 不可得：宿主未提供版本标识，未生成推测值。
         </p>
-        <p class="fleet-actions-note" role="status">
+        <p v-if="memoryResult.phase !== 'partial'" class="fleet-actions-note" role="status">
           {{
             t(
               memoryResult.phase === "running"

@@ -398,13 +398,14 @@ export interface MemoryUiKey {
 
 /** A bounded, pure-data projection of the ONE command/query result in pendingCtl. */
 export interface MemoryUiResult {
+  readonly facts?: import("@protocol/memory-command-facts.js").MemoryCommandFacts;
   readonly memoryWrite?: {
     readonly id: string;
     readonly rev?: string;
     readonly persistence: "appended" | "memory-only";
   };
-  readonly phase: "running" | "rejected" | "completed" | "unknown";
-  readonly effect?: "none" | "completed" | "unknown";
+  readonly phase: "running" | "rejected" | "completed" | "partial" | "unknown";
+  readonly effect?: "none" | "completed" | "partial" | "unknown";
   readonly output?: import("@protocol/messages.js").CommandOutputWire;
   readonly error?: string;
   readonly message?: string;

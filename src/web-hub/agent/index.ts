@@ -924,7 +924,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   const commandComplete: CommandCompleteService | undefined = cmdCompleteOn
     ? createCommandComplete({
         ...(deps.memoryProof ? { memoryScopes: true } : {}),
-        ...(deps.memoryWrite ? { memorySessionAdd: true } : {}),
+        ...(deps.memoryWrite ? { memoryCapabilities: () => deps.memoryWrite!.capabilities(ctx) } : {}),
         commands: pi,
         own: () => deps.argCompleters ?? EMPTY_COMPLETERS,
         tui: () => tuiProviderRef.current,
@@ -991,7 +991,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   const builtinBridge = createBuiltinBridge({
     ...(deps.memoryRead ? { memoryRead: deps.memoryRead } : {}),
     ...(deps.memoryWrite
-      ? { memoryWrite: () => (attached && remoteAskUserEnabled() ? deps.memoryWrite : undefined) }
+      ? { memoryWrite: () => (attached && bridgeLate.current && remoteAskUserEnabled() ? deps.memoryWrite : undefined) }
       : {}),
     ...(deps.memoryProof ? { memoryScopes: true } : {}),
     pi,

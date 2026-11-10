@@ -102,7 +102,7 @@ describe("createCommandHandler — control disabled", () => {
 });
 
 describe("createCommandHandler — prompt (§4.2/§4.3/D4/D5/D13/D21)", () => {
-  it.each(["/mem", "/mem init", "  /mem session add x", "/mem\nhub rm x"])(
+  it.each(["/mem", "/mem init", "  /mem session add x", "/mem\nhub rm x", "/mem:1 review", "/mem:2 session add x"])(
     "refuses memory prompts before routing or SDK dispatch: %s",
     (text) => {
       const h = makeHarness();
@@ -1187,6 +1187,7 @@ describe("#65 B2 real handler → bridge → kernel/store admission", () => {
         getCtx: () => h.deps.getCtx(),
         getSessionId: () => h.ctxState.sessionId,
         memoryWrite: () => ({
+          capabilities: () => ({ sessionAdd: true, revisionReview: false }),
           start(req) {
             liveCurrent = req.current;
             capturedOwner = req.commandOwner;
@@ -1261,7 +1262,7 @@ describe("#65 M2 independent memory owner", () => {
     h.deps.builtinBridge = createBuiltinBridge({
       getCtx: () => h.deps.getCtx(),
       getSessionId: () => h.ctxState.sessionId,
-      memoryWrite: () => ({ start }),
+      memoryWrite: () => ({ capabilities: () => ({ sessionAdd: true, revisionReview: false }), start }),
     });
     const handler = createCommandHandler(h.deps);
     handler.handle(frame("no-memory-owner", { op: "command", name: "mem", args: "session add note" }));

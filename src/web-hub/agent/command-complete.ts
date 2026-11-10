@@ -64,8 +64,8 @@ export interface AutocompleteProviderLike {
 
 export interface CommandCompleteDeps {
   memoryScopes?: boolean;
-  /** Internal port-presence projection, not an authorization or wire capability. */
-  memorySessionAdd?: boolean;
+  /** Read-only actual-context projection, refreshed after completer awaits too. */
+  memoryCapabilities?: () => import("../../memory/scopes/web-write-port.js").MemoryWebCapabilities;
   commands: CommandsPort | undefined;
   /** The shared `argCompleters` Map `wrapCommandApi` fills (§4.4) — by reference, same
    *  pattern as `ownedCommandNames`; unset ⇒ no S-own source. */
@@ -162,6 +162,7 @@ function normalize(
   overrides: Record<string, CommandPolicy> | undefined,
   memoryScopes?: boolean,
   memorySessionAdd?: boolean,
+  memoryRevisionReview?: boolean,
 ): { items: OkItems; truncated: boolean } {
   const list = Array.isArray(rawItems) ? rawItems : [];
   const out: OkItems = [];
@@ -195,6 +196,7 @@ function normalize(
       kind,
       ...(memoryScopes ? { memoryScopes: true } : {}),
       ...(memorySessionAdd ? { memorySessionAdd: true } : {}),
+      ...(memoryRevisionReview ? { memoryRevisionReview: true } : {}),
       ...(overrides !== undefined ? { overrides } : {}),
     });
     if (effectivePolicy(decision, false) === "deny") continue;
@@ -235,6 +237,14 @@ export function createCommandComplete(deps: CommandCompleteDeps): CommandComplet
     });
   let inflight = 0;
   let disposed = false;
+  const memoryCapabilities = () => {
+    try {
+      const caps = deps.memoryCapabilities?.();
+      return { sessionAdd: caps?.sessionAdd === true, revisionReview: caps?.revisionReview === true };
+    } catch {
+      return { sessionAdd: false, revisionReview: false };
+    }
+  };
 
   /** One guarded completer call: hard-timeout race (§4.3 #4). `null` = the completer
    *  itself answered "no completions" (legal); `TIMEOUT` = raced past
@@ -275,12 +285,14 @@ export function createCommandComplete(deps: CommandCompleteDeps): CommandComplet
     if (classified === undefined) return errReply(rid, "E_UNKNOWN_COMMAND", false);
     // §4.3 #2 — base policy on the bare name (idle, no args): a deny command never
     // completes (its very argument surface must not leak, §4.6).
+    const capabilities = memoryCapabilities();
     const base = resolveCommandPolicy({
       name: frame.name,
       args: "",
       kind: classified.kind,
       ...(deps.memoryScopes ? { memoryScopes: true } : {}),
-      ...(deps.memorySessionAdd ? { memorySessionAdd: true } : {}),
+      ...(capabilities.sessionAdd ? { memorySessionAdd: true } : {}),
+      ...(capabilities.revisionReview ? { memoryRevisionReview: true } : {}),
       ...(deps.overrides !== undefined ? { overrides: deps.overrides } : {}),
     });
     if (effectivePolicy(base, false) === "deny") return errReply(rid, "E_COMMAND_DENIED", false);
@@ -325,13 +337,15 @@ export function createCommandComplete(deps: CommandCompleteDeps): CommandComplet
       }
       if (timedOut) return errReply(rid, "E_DEADLINE", true);
       if (disposed) return errReply(rid, "E_UNSUPPORTED", false);
+      const fresh = memoryCapabilities();
       const { items, truncated } = normalize(
         frame.name,
         classified.kind,
         raw,
         deps.overrides,
         deps.memoryScopes,
-        deps.memorySessionAdd,
+        fresh.sessionAdd,
+        fresh.revisionReview,
       );
       return okReply(rid, items, useTui ? "tui" : "own", truncated);
     } finally {

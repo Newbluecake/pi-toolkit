@@ -1,21 +1,27 @@
-/**
- * Seam types for the Web session-memory write path (package 2 → package 4).
- *
- * This module is pi-free and holds ONLY opaque contracts. The production facade
- * (`MemoryWebWritePort`) and the per-owner Web controller that backs `MemoryWriteTask`
- * belong to the sole integrator (package 4) and live in `memory/index.ts` /
- * `scopes/owner.ts`; the bridge and command dispatcher (package 2) consume these
- * types and are proven against a test double, never against a fake of the real store.
+/** Pi-free opaque contracts for the production Web session-add/revision paths.
+ * memory/index owns the per-call facade; scopes/owner owns the SAME lazy kernel,
+ * actual owner and activity lease. The bridge consumes only these closed kinds.
+ * Integration/probe tests exercise the real SDK/store/E/C paths; JSON DTOs and
+ * these read-only display capabilities are never execution authority.
  */
+import type { CommandFlowResult } from "../command-flow.js";
 import type { MemoryCancelReason, SessionWebAddRequest, SessionWebOutcome } from "./session-store.js";
 
 /** Domain write result (alias for the store's bounded outcome). */
 export type WriteOutcome = SessionWebOutcome;
 export type { MemoryCancelReason };
 
-/** The single parsed write the bridge may dispatch; nothing else reaches the write port. */
-export interface MemoryWebDispatchRequest {
-  readonly write: SessionWebAddRequest;
+export interface MemoryRevisionReviewRequest {
+  readonly kind: "revision.review";
+  readonly rawArgs: string;
+  readonly listOnly: boolean;
+}
+export interface MemoryRevisionOutcome {
+  readonly kind: "revision.review";
+  readonly result: CommandFlowResult;
+}
+export type MemoryWebOutcome = WriteOutcome | MemoryRevisionOutcome;
+interface MemoryWebDispatchBinding {
   readonly cmdId: string;
   readonly commandOwner: string;
   readonly operationGeneration: number;
@@ -23,6 +29,15 @@ export interface MemoryWebDispatchRequest {
   readonly signal: AbortSignal;
   readonly current: () => boolean;
 }
+/** Closed grammar: the old session-add payload is unchanged. No caller-supplied
+ * effect/class/host or JSON LIVE capability can reach either controller. */
+export type MemorySessionWebDispatchRequest = MemoryWebDispatchBinding & { readonly write: SessionWebAddRequest };
+export type MemoryRevisionWebDispatchRequest = MemoryWebDispatchBinding & {
+  readonly write: MemoryRevisionReviewRequest;
+};
+export type MemoryWebDispatchRequest = MemoryWebDispatchBinding & {
+  readonly write: SessionWebAddRequest | MemoryRevisionReviewRequest;
+};
 
 /**
  * The controller's handle on one accepted write. `done` is the only completion
@@ -31,10 +46,16 @@ export interface MemoryWebDispatchRequest {
  * idempotent — the command dispatcher calls it only AFTER the ledger has copied
  * the final result out (observe-before-release).
  */
-export interface MemoryWriteTask {
-  readonly done: Promise<WriteOutcome>;
-  cancel(reason: MemoryCancelReason): WriteOutcome;
+export interface MemoryWriteTask<Outcome = WriteOutcome> {
+  readonly done: Promise<Outcome>;
+  cancel(reason: MemoryCancelReason): Outcome;
   release(): void;
+}
+
+/** Read-only, actual-context projection. Missing/unknown is all false, never authority. */
+export interface MemoryWebCapabilities {
+  readonly sessionAdd: boolean;
+  readonly revisionReview: boolean;
 }
 
 /**
@@ -44,8 +65,9 @@ export interface MemoryWriteTask {
  * after it returns, so the caller's cancel/release handles are registered first.
  */
 export interface MemoryWebWritePort {
+  capabilities(ctx: unknown): MemoryWebCapabilities;
   start(
     request: MemoryWebDispatchRequest,
     ctx: unknown,
-  ): { accepted: true; task: MemoryWriteTask } | { accepted: false; outcome: WriteOutcome };
+  ): { accepted: true; task: MemoryWriteTask<MemoryWebOutcome> } | { accepted: false; outcome: MemoryWebOutcome };
 }

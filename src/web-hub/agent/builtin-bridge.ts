@@ -37,12 +37,14 @@ import type { CommandRecorder } from "./command-record.js";
 import type { CmdRecordNotice, CmdRecordState } from "../protocol/cmd-record.js";
 import { isFeishuCmdOrigin, type CmdOrigin } from "../protocol/messages.js";
 import type { LedgerResult } from "./ledger.js";
+import { parseRevisionFlowCommand } from "../../memory/command-flow.js";
 import { parseMemoryWriteRequest, type MemoryWriteRequest } from "../../memory/command-policy.js";
 import type {
   MemoryCancelReason,
+  MemoryRevisionReviewRequest,
+  MemoryWebOutcome,
   MemoryWebWritePort,
   MemoryWriteTask,
-  WriteOutcome,
 } from "../../memory/scopes/web-write-port.js";
 
 export interface BuiltinBridge {
@@ -50,8 +52,8 @@ export interface BuiltinBridge {
    *  other op stays a plain synchronous result (pinned by commands.test.ts; R4). The caller
    *  (`commands.ts handleCommand`) races a thenable against the frame deadline.
    *
-   *  `admission` is only present for an authenticated Web `mem session add` write (package 2);
-   *  its absence means the mem branch stays read-only and byte-identical to before. */
+   *  `admission` is present only for authenticated closed session-add/revision
+   *  flow dispatch. Without it, these routes refuse rather than use SDK/native. */
   execute(frame: CmdFrame, admission?: MemoryBridgeAdmission): CmdResultBody | Promise<CmdResultBody>;
   /** Quiet for resume __list and internal xs actions: no origin notify/model input.
    * Resume lists additionally have data.sessions stripped from the ledger. */
@@ -86,8 +88,8 @@ export interface MemoryBridgeAdmission {
 
 export interface BuiltinBridgeDeps {
   memoryRead?: import("../../memory/index.js").MemoryReadPort;
-  /** Late-bound Web session-add write facade (package 4). Absent ⇒ every write is refused
-   *  with no fallback to native/SDK dispatch. */
+  /** Late-bound facade with actual-context per-operation capabilities. Absent ⇒
+   * every effect/flow refuses, with no native/SDK dispatch fallback. */
   memoryWrite?(): MemoryWebWritePort | undefined;
   memoryScopes?: boolean;
   pi?: ExtensionAPI & CommandsPort;
@@ -202,7 +204,30 @@ function wireMemFailureCode(code: string): CmdErrorCode {
 }
 
 /** §4.6 wire mapping: a domain write outcome becomes a ledger result (effect none/unknown). */
-function mapWriteOutcome(outcome: WriteOutcome): LedgerResult {
+function mapWriteOutcome(outcome: MemoryWebOutcome): LedgerResult {
+  if ("kind" in outcome) {
+    const result = outcome.result;
+    if (result.ok)
+      return {
+        ok: true,
+        data: {
+          op: "command",
+          kind: "extension",
+          completion: "sync",
+          captured: true,
+          // R4 already enforces the complete terminal <=24KiB bound. Never clip an
+          // appendix (or duplicate its parsed facts in a second wire field).
+          output: { entries: [{ kind: "text", text: result.message }] },
+        },
+      };
+    return {
+      ok: false,
+      code: result.code ?? "E_COMMAND_DENIED",
+      retryable: false,
+      effect: result.facts.effect === "none" ? "none" : "unknown",
+      message: result.message,
+    };
+  }
   if (outcome.ok) {
     // command data is an open wire slot. Keep facts separate from localized/clipped prose;
     // old clients retain their text output and new clients render these fields directly.
@@ -718,7 +743,7 @@ export function createBuiltinBridge(deps: BuiltinBridgeDeps = {}): BuiltinBridge
   function dispatchMemoryWrite(
     frame: CmdFrame,
     cmd: CmdArgs & { op: "command" },
-    request: MemoryWriteRequest,
+    request: MemoryWriteRequest | MemoryRevisionReviewRequest,
     admission: MemoryBridgeAdmission | undefined,
   ): CmdResultBody | Promise<CmdResultBody> {
     const origin: unknown = frame.origin;
@@ -740,6 +765,9 @@ export function createBuiltinBridge(deps: BuiltinBridgeDeps = {}): BuiltinBridge
     if (!admission.commandOwner || !admission.current()) return errResult("E_STALE_CTX", false, "none");
     const ctx = deps.getCtx?.();
     if (!ctx || !ctx.cwd) return errResult("E_STALE_CTX", false, "none");
+    const capabilities = writePort.capabilities(ctx);
+    if (request.kind === "session.add" ? capabilities.sessionAdd !== true : capabilities.revisionReview !== true)
+      return errResult("E_UNSUPPORTED", false, "none", "E_MEM_CONFIRM_UNAVAILABLE: memory capability unavailable");
     const sessionId = deps.getSessionId?.();
     if (!sessionId || (cmd.expect?.sessionId !== undefined && cmd.expect.sessionId !== sessionId))
       return errResult("E_SESSION_CHANGED", false, "none");
@@ -747,7 +775,8 @@ export function createBuiltinBridge(deps: BuiltinBridgeDeps = {}): BuiltinBridge
     if (override === "deny") return errResult("E_COMMAND_DENIED", false, "none");
     if (override === "confirm" && cmd.confirm !== true)
       return errResult("E_CONFIRM_REQUIRED", false, "none", confirmMessage(cmd.name, cmd.args, "extension"));
-    let started: { accepted: true; task: MemoryWriteTask } | { accepted: false; outcome: WriteOutcome };
+    let started:
+      { accepted: true; task: MemoryWriteTask<MemoryWebOutcome> } | { accepted: false; outcome: MemoryWebOutcome };
     try {
       started = writePort.start(
         {
@@ -809,12 +838,39 @@ export function createBuiltinBridge(deps: BuiltinBridgeDeps = {}): BuiltinBridge
       if (!/^[A-Za-z0-9:_.-]{1,64}$/.test(cmd.name))
         return errResult("E_BAD_REQUEST", false, "none", "bad command name");
       if (byteLen(cmd.args) > ARGS_MAX_BYTES) return errResult("E_BAD_REQUEST", true, "none", "args too long");
+      // SDK duplicate-command names still resolve to the ORIGINAL native mem
+      // handler. Never let a qualified alias escape into generic slash/capture.
+      if (/^mem:[1-9][0-9]*$/.test(cmd.name))
+        return errResult(
+          "E_UNSUPPORTED",
+          false,
+          "none",
+          "E_MEM_CONFIRM_UNAVAILABLE: qualified memory command unsupported",
+        );
       // The direct, read-only capability is closure-injected by the host, never
       // obtained from frame fields or capture tickets. No SDK/native fallback.
       if (cmd.name === "mem") {
         // §4.1/§5.2: a strict Web write is routed to the separate write seam (no native/SDK
         // fallback); an empty `session add` is a usage error; everything else — reads and
         // unsupported writes — stays on the read-only path below.
+        const review = parseRevisionFlowCommand(cmd.args);
+        if (review) {
+          try {
+            return dispatchMemoryWrite(
+              frame,
+              cmd,
+              { kind: "revision.review", rawArgs: cmd.args, listOnly: review.listOnly },
+              admission,
+            );
+          } catch {
+            return errResult(
+              "E_UNSUPPORTED",
+              false,
+              "none",
+              "E_MEM_CONFIRM_UNAVAILABLE: memory review channel unavailable",
+            );
+          }
+        }
         const write = parseMemoryWriteRequest(cmd.args);
         if (write.ok) {
           try {

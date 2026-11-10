@@ -307,8 +307,9 @@ function tokenize(args: string): string[] {
 
 export interface ResolvePolicyOptions {
   memoryScopes?: boolean;
-  /** Internal projection of the write port's presence; never a wire capability. */
+  /** Internal actual-context capability projection; never a wire capability. */
   memorySessionAdd?: boolean;
+  memoryRevisionReview?: boolean;
   name: string;
   args: string;
   kind: CommandKind;
@@ -318,6 +319,9 @@ export interface ResolvePolicyOptions {
 /** Main entry point (§4.6/§4.9): resolves the base decision for a classified command, before
  *  the busy/idle split (`effectivePolicy`) and before the caller checks `cmd.confirm`. */
 export function resolveCommandPolicy(opts: ResolvePolicyOptions): PolicyDecision {
+  if (/^mem:[1-9][0-9]*$/.test(opts.name)) return { policy: "deny" };
+  if (opts.name === "mem" && (opts.args.trim() === "review" || opts.args.trim() === "review --list"))
+    return { policy: opts.memoryRevisionReview === true ? (opts.overrides?.mem ?? "allow") : "deny" };
   if (opts.memoryScopes && opts.name === "mem") {
     const scoped = scopedMemoryCommandPolicy(opts.args);
     if (scoped) {

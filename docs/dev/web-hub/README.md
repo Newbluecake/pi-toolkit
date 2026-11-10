@@ -1000,3 +1000,46 @@ agent 侧 `feishu-admin.ts` 的通知共存检查与发送端复用
 字段优先级/空值/路径覆盖语义见 [plugin-merge README](../plugin-merge/README.md#70-统一通知设置与敏感面)。
 门禁：`tests/web-hub/agent/feishu-admin.test.ts` + `tests/feishu-notify/extension.test.ts` 的发送/诊断一致性；
 `feishu-spawn-http-golden.json` 等冻结件字节不变。
+
+## #50 Web revision：实际 same-owner capability / R1 facts / R4 闭环（2026-11-10）
+
+I1 将原 memory facade 扩为独立的 sessionAdd / revisionReview 能力，**不是 facade 存在即 session
+可写**。Web index/completion 每次从 actual ctx 查询原 scopes owner；hub-only 仍可 review，但无
+sessionAdd；all-off、无实际 owner、错误 manager、unknown、child/secure/locked 均拒绝。query
+不创建 owner/kernel/锁或读正文；异步 completion 后重读，start/commit 再核。根原 plain 装配未改，
+无新 setting、cap、PROTO、失败 data 字段或第二控制面账本。
+
+- 只新增闭合 `mem review` / `mem review --list`。所有 bare mem 先走独立 bridge；SDK 重名别名
+  `mem:n`、prompt/held mem 也不能进入 generic slash/capture。没有端口/能力或抛错都就地拒绝，
+  不 fallback。旧 session.add 的原 store/gate/result bytes 保持；旧 tidy/model effects 不开放。
+- R2 原 host 通过冻结只读 actionLocked 端口提供 ORIGINAL LIVE custody；R4 只消费它，不重新
+  freeze/rebind/从 JSON 制造 owner。新 command 使用实际 MemoryWebCallBinding、原 owner kernel、
+  原 proof.activity lease（非 ctx.isIdle-only）。纯导航仍验证原 dialog nonce/id/epoch/精确选项与
+  loopback/lan origin，但不产 receipt。只有当前 same-owner LIVE 有 apply；历史只有 view/keep，
+  keep 自己仍有全文确认和原 review CAS，不借旧模型 effect。
+- commands 原 32 槽/29min once ledger 保持唯一终态源，observe/cancel → settle → release；已 applied
+  或 unknown 不因取消变 none，迟到 callback 不覆写。实际数据/review 观察经原 memory invalidator
+  回到 caches/activity，internal revision 不再排一次 P50。
+- partial/unknown 使用 R1 完整 message appendix，经原 success output / failure message 运输。
+  reducer 按 exact cmdId 统一解析 direct/late/queryOnly；坏 marker、冲突、截断或错 id 整份 unknown。
+  UI 仅保留 human summary+parsed facts（不同时留整份编码 message/output），终态≤24KiB，原进度界≤8KiB。
+  DetailDock 展示部分成功、每步 receipt/stage/data/audit/review、原领域码及无全局回滚/勿盲重试/
+  需另行确认恢复提示；历史结果本身没有 apply 按钮。ctl/late 只是通知，失败也读原 ledger；网络丢 ACK
+  仅有界 queryOnly，不换 id 重执行，不以 record 成功作为效果证据。
+
+实际离线门：`tests/integration/memory-revision-web-i1.test.ts`、原 session-add/conformance 与
+`node --import tsx scripts/web-hub/memory-revision-confirm-probe.ts`。新 feature probe 的 13 组使用
+own temp 真实 SDK/production bridge/controller/kernel/E/C+HTTP/SSE+AskUserForm+reducer/DetailDock；
+同一 real partial/unknown 在 direct duplicate、两种 ctl/late 乱序/重复和 queryOnly 得到相同 DOM。
+包括 history on/off、实际旁路 recorder I/O fault、实际 >30s 等待确认和已观察 E 后 ledger 前的
+测试宿主 completion barrier、29min、取消迟到批准、真实 SDK tree/reload/new-session 后历史 view/keep；
+每态 `data-cmd-id` 对真实 ledger.get(id).id。不是把终态字符串直接喂 UI，也不使用响应成功 stub。
+浏览器 unavailable exit2 不算 PASS；可选离线二进制/包路径只读现有资产，不下载/安装。
+
+这是隔离 SDK/组件与原控制链证据，**不是实际 Hub daemon 认证/部署、物理真人来源或生产 provider
+认证**。mem direct route 的结果独立于 recorder；history off 没有 recorder，on 下 recorder 的真实
+旁路 I/O 故障不改变 mem 领域事实，不声称 mem record 已持久。I2 streaming 的 conditional certified
+capability、末跳 pure-witness trusted-CODE 边界及 stock tokenizer/template/routes/cap/prices BLOCKED
+详见 memory README；synthetic 本地协议和 loopback TLS 不可当生产证书。旧客户端仍读人类摘要，
+不承诺旧 UI 新的结构化展示。同步 syscall 不可抢占、同 uid 竞态、无全局回滚、unknown 不重试及
+不保证 elsewhere SDK flush/fsync 的既有限界保持；未连接真实 Hub/用户数据或执行运行中 reload。

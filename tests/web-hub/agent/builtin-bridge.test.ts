@@ -121,6 +121,28 @@ function baseDeps(over: Partial<BuiltinBridgeDeps> = {}): BuiltinBridgeDeps {
 }
 
 describe("execute — validation and classification", () => {
+  it("SDK duplicate mem:n aliases cannot escape into generic slash/capture even on allow", () => {
+    const p = fakePi({
+      commands: [
+        { name: "mem:1", source: "extension" },
+        { name: "mem:2", source: "extension" },
+      ],
+    });
+    const capture = fakeCapture();
+    const arm = vi.spyOn(capture, "arm");
+    const bridge = createBuiltinBridge(
+      baseDeps({ pi: p.pi, capture: () => capture, overrides: () => ({ "mem:1": "allow", "mem:2": "allow" }) }),
+    );
+    for (const name of ["mem:1", "mem:2"])
+      expect(bridge.execute(frame(name, "session add must not reach native", {}, true))).toMatchObject({
+        ok: false,
+        code: "E_UNSUPPORTED",
+        effect: "none",
+        retryable: false,
+      });
+    expect(p.sent).toEqual([]);
+    expect(arm).not.toHaveBeenCalled();
+  });
   it("rejects a non-command op with E_UNSUPPORTED", () => {
     const bridge = createBuiltinBridge();
     const f: CmdFrame = {
@@ -1166,6 +1188,7 @@ describe("#65 memory write seam (package 2)", () => {
 
   it("maps an accepted:false outcome to the wire body", () => {
     const port: MemoryWebWritePort = {
+      capabilities: () => ({ sessionAdd: true, revisionReview: false }),
       start: () => ({ accepted: false, outcome: completedOutcome }),
     };
     const bridge = createBuiltinBridge(baseDeps({ memoryWrite: () => port }));
@@ -1181,6 +1204,7 @@ describe("#65 memory write seam (package 2)", () => {
       },
     });
     const failing: MemoryWebWritePort = {
+      capabilities: () => ({ sessionAdd: true, revisionReview: false }),
       start: () => ({
         accepted: false,
         outcome: { ok: false, effect: "none", code: "E_MEM_BUSY", message: "busy", retryable: false },
@@ -1200,6 +1224,7 @@ describe("#65 memory write seam (package 2)", () => {
     const bridge = createBuiltinBridge(
       baseDeps({
         memoryWrite: () => ({
+          capabilities: () => ({ sessionAdd: true, revisionReview: false }),
           start: () => ({
             accepted: false,
             outcome: { ...withoutRevision, id: "n42", persistence: "appended", message: "plain localized prose" },
@@ -1230,7 +1255,10 @@ describe("#65 memory write seam (package 2)", () => {
       cancel: () => completedOutcome,
       release: () => {},
     };
-    const port: MemoryWebWritePort = { start: () => ({ accepted: true, task }) };
+    const port: MemoryWebWritePort = {
+      capabilities: () => ({ sessionAdd: true, revisionReview: false }),
+      start: () => ({ accepted: true, task }),
+    };
     const bridge = createBuiltinBridge(baseDeps({ memoryWrite: () => port }));
     const admission = writeAdmission({
       attach: (control) => {
@@ -1275,7 +1303,10 @@ describe("#65 memory write seam (package 2)", () => {
         releases++;
       },
     };
-    const port: MemoryWebWritePort = { start: () => ({ accepted: true, task }) };
+    const port: MemoryWebWritePort = {
+      capabilities: () => ({ sessionAdd: true, revisionReview: false }),
+      start: () => ({ accepted: true, task }),
+    };
     const bridge = createBuiltinBridge(baseDeps({ memoryWrite: () => port }));
     const body = bridge.execute(frame("mem", "session add hello"), writeAdmission({ attach: () => false }));
     expect(body).toMatchObject({ ok: false, code: "E_STALE_CTX" });
@@ -1303,6 +1334,7 @@ describe("#65 M1/M3 real bridge and confirmation kernel", () => {
         baseDeps({
           overrides: () => ({ mem: policy }),
           memoryWrite: () => ({
+            capabilities: () => ({ sessionAdd: true, revisionReview: false }),
             start(req) {
               kernel.start(req.write.rawArgs);
               return {
@@ -1345,6 +1377,7 @@ describe("#65 M1/M3 real bridge and confirmation kernel", () => {
       baseDeps({
         overrides: () => ({ mem: "confirm" }),
         memoryWrite: () => ({
+          capabilities: () => ({ sessionAdd: true, revisionReview: false }),
           start(req) {
             const call = kernel.start(req.write.rawArgs)!;
             const done = kernel

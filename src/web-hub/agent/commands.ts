@@ -60,6 +60,7 @@ import type {
   CmdResultFrame,
 } from "../protocol/messages.js";
 import { isFeishuCmdOrigin } from "../protocol/messages.js";
+import { parseRevisionFlowCommand } from "../../memory/command-flow.js";
 import { parseMemoryWriteRequest } from "../../memory/command-policy.js";
 import type { MemoryBridgeAdmission, MemoryBridgeTaskControl } from "./builtin-bridge.js";
 import type { MemoryCancelReason } from "../../memory/scopes/web-write-port.js";
@@ -485,7 +486,7 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
     }
     // Slash-shaped memory prompts must not bypass the direct command channel, including
     // queued/held delivery. The guard is independent of SDK command discovery and policy.
-    if (/^\s*\/mem(?:\s|$)/.test(cmd.text)) {
+    if (/^\s*\/mem(?::[1-9][0-9]*)?(?:\s|$)/.test(cmd.text)) {
       return settleAndReply(frame, errResult("E_COMMAND_DENIED", false, "none", "Send /mem as a command"));
     }
     // LAN security: never let a browser smuggle local auth administration through prompt.
@@ -823,7 +824,7 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
     origin: CmdOrigin;
   }): DispatchOutcome {
     // Items held by an older activation may predate the prompt admission guard.
-    if (/^\s*\/mem(?:\s|$)/.test(item.text)) return "refused";
+    if (/^\s*\/mem(?::[1-9][0-9]*)?(?:\s|$)/.test(item.text)) return "refused";
     try {
       const ctx = deps.getCtx();
       if (ctx === undefined) return "refused";
@@ -1274,7 +1275,8 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
     // pre-registered waiter/timer BEFORE the bridge runs, so the bridge's `admission.attach` can
     // bind the task's cancel/release synchronously.
     const writeRequest = cmd.name === "mem" ? parseMemoryWriteRequest(cmd.args) : undefined;
-    const isMemWrite = writeRequest?.ok === true;
+    const isMemWrite =
+      writeRequest?.ok === true || (cmd.name === "mem" && parseRevisionFlowCommand(cmd.args) !== undefined);
     if (isMemWrite && !deps.memoryOwner) {
       finishMemory(frame, errResult("E_UNSUPPORTED", false, "none", "memory owner unavailable"), false);
       return;

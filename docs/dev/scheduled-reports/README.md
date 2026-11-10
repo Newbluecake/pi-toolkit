@@ -342,8 +342,7 @@ P2 supersedes P1's **no producer / no migration** restriction, not its arbitrati
   stdin-only shape inspector. Input contains `observations` (each with source/evidence, API/evidence,
   optional strict and schema) and optional `compare` indices; labels are self-declared, not provenance proof.
   It reports only allowlisted schedule field presence, required/type/nullability and shape counts;
-  `strict` distinguishes absent, true, false, explicit-null and unknown. Unknown or unsupported
-  evidence cannot prove equivalence: comparison is `different`, `equivalent` or `inconclusive`.
+  `strict` distinguishes absent, true, false, explicit-null and unknown. Unknown or unsupported shape information cannot prove shape equivalence; provenance/API labels do not participate in shape equality and never certify live transport. Comparison is `different`, `equivalent` or `inconclusive`.
   Limits are 256 KiB input, 4096 nodes, depth 32 and 32 KiB output. It does not collect schemas,
   read session/config/ledger, access network or install hooks, and cannot fix or identify the live
   transport root cause. `tests/tools/schedule-schema-shape.test.ts` and

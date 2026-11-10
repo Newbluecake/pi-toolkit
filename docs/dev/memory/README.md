@@ -1371,3 +1371,79 @@ is true. The child should hand the proposed change to the main session rather th
 `tests/memory/scopes/{hub-store,hub-commit-approval,tool}.test.ts` and
 `tests/memory/{tool,tool-v2,wire}.test.ts` cover the relevant failure surfaces. Source/offline evidence
 does not establish that an existing session has loaded the changes.
+
+## #50 I1：实际 Web revision / custody / startup 装配（2026-11-10）
+
+本节覆盖前述 factory 包与 native 恢复包中「Web 未接线 / startup 诊断未接 / streaming 后移」
+的历史边界。生产 source 已形成 `wireMemory → wireJev 原 revisionHost → 原 scopes owner →
+Web bridge/commands → R4 → 原 E/C` 闭环；不是 stock provider、生产 Hub 部署或付费 LIVE 认证。
+`incremental.enabled=true / auto=false / jobCostCapUsd=0` 不变；没有第二 client、费用账、activity
+owner、建议库、命令账本、hook、setting 或 wire 字段。根 `src/index.ts` 原 plain 透传已足够，本次未改。
+
+- **能力不是 facade 存在性**：可选 `webWrite` 在 plain/main/memory-on 且任一 scopes 开时构造，
+  `capabilities(actualCtx)` 每次只读取现有 current owner/manager/capability/write gate；不造 owner、
+  kernel、锁或读取 branch/正文。session-only 返回 sessionAdd，hub-only 不返回 sessionAdd；两者仅在
+  原 host 窄端口存在时返回 revisionReview。all-off、无 actual owner、错误 manager、unknown、child、
+  secure/locked 均 false。completion 在异步 completer 返回后再读；start 与每次提交仍独立复核。
+  旧 `session.add` store/原 gate/结果结构未改，不能把 hub-only facade 当成 session 写权限。
+- **唯一 custody 与 NEW command lease**：`WireJevDeps.p50.custody` 只转发 actual scopes owner、SDK
+  manager、epoch、原 owner 的稳定 signal 与原 migration/session lifetime/current；不捕获 attempt 或
+  execution.running。R2 原 host 仍保管 ORIGINAL 首冻引用，仅经原 C/review 屏障与回读后发布。
+  `p50.webReview` 是冻结的只读 `actionLocked` 原闭包，不暴露 reset/dispose，不从历史 JSON 重建 LIVE。
+  Web 每次另取真实 MemoryWebCallBinding；同一个惰性 owner kernel、原 proof.activity 的 generation /
+  lastActivityAt lease 与自然活动订阅共同撤权，绝不拿 ctx.isIdle 或恒 true 代替该 lease。
+- **封闭 Web grammar**：只接 `review` / `review --list`。导航只走认证 Web remote 的 nonce/id/epoch、
+  确切选项与 loopback/lan origin，再核 call lease，不 mint receipt、不借 TUI/RPC 或模型人类回合。
+  当前同 owner LIVE 才显示 apply；history 仅 view/keep，keep 仍须完整原文确认和原 review CAS。
+  `tidy`、旧模型 effect、`review --run`、rebind 均不开放。所有 bare mem 都在 generic SDK slash/capture
+  前截获；SDK 重名的 `mem:n` 别名明确拒绝，prompt/held 最终边界也拒绝这些别名，不能逃回 native。
+- **效果先于清理**：R4 每步继续用原 receipt/E/C，取消或 finalization 故障不能抹去已 applied /
+  unknown。index 在观察到 data/review changed 或 unknown 后恰一次调用原 `onAfterWrite(cwd,"revision")`，
+  清原 render/Jev caches 并记录原 activity；内部 origin 不自触发 P50。commands 仍是唯一 32 槽 /
+  29min once ledger，顺序是 observe/cancel → ledger settle → finally release；重复 id / queryOnly /
+  late / ctl 乱序均不新执行。partial/unknown 在失败 message 的原 R1 codec 中传输，绝不塞 failure data。
+- **P1 已接自然 startup**：原 session_start 中，在实际 native TUI/main/plain/enabled/current owner、
+  epoch、write gate 通过后，对当前 cwd（含 worktree-origin）的 actual blocks 调一次原 C 锁内扫描。
+  无 provider/budget/auto 依赖；仅既有 warning 通道、有问题才发有界 counts/actionId samples。
+  锁忙跳过无重试，不创建缺目录，不跨项目、修复、finalize、restore 或写诊断侧车。
+
+### I2 streaming 的条件支持与纯见证边界
+
+已验收的 I2 `84d69e83` 仅在 trusted CODE 提供精确 registry/version/proxy 的标准 streaming
+capability 时解除 P50 proxy gate；classifier 仍用原 buffered fetch。revision 走实际 SDK
+request-time auth → onPayload 的真实 cap/payload recount → raw SSE observer → 原 Promise/费用账；
+不清 proxy、不直连、不缓存凭据、无额外重试。末跳先执行可重入的 current/stream/provider 观察，再由
+factory-private binding 与 client-private terminalCurrent 纯见证检查原 data descriptors、SDK public
+raw provider/config Map 读口、模型源快照、方法引用、原 epoch/signal/配置，最后立即调用捕获的标准
+fetch；不再插入另一个可重入 callback。缺能力、accessor/不匹配/换代均拒绝，不装恒真 witness。
+
+信任的是该已审计 SDK 的 captured public raw readers、native signal accessors 与未被篡改的 JS
+intrinsics；任意 custom registry 需履行同一 trusted-CODE pure-reader 契约。恶意 Proxy reflection、
+伪 raw reader、SDK 私有对象图/全局 intrinsic 篡改不在保证内；provider 私有可变 catalog 闭包须由
+provider 自身认证稳定发布纪律，公开 API 不能替其证明。token/header/queue 资源界不是 heap/tokenizer
+认证。**stock tokenizer/template overhead/canonical routes/classifier hard-cap/prices 仍 BLOCKED**；
+synthetic byte-token/loopback TLS SDK 门不是生产 provider、认证或付费语义证明。
+
+### I1 离线生产链证据与限界
+
+`tests/integration/memory-i1-startup.test.ts` 直接触发实际 wireMemory 的自然 startup，覆盖原 SDK
+scopes、worktree、C 锁扫描、bytes/inodes 与生命周期反例；不再只测 test-owned consumer。
+`tests/integration/memory-revision-web-i1.test.ts` 使用 own temp 的真实 SDK/scopes/wire/client/host/D/C/E，
+验证能力矩阵、首个真 E 成功后第二拒绝/opaque rename unknown、原缓存失效、internal 不自触发、
+实际 activity lease（即便 ctx.isIdle=true）、29min、observe→ledger→release，以及真实 SDK
+树导航/reload/new-session 后历史仅 view/keep。新测试均由 integration 目录规则归 tier2。
+
+`node --import tsx scripts/web-hub/memory-revision-confirm-probe.ts` 是独立离线 feature probe：真实
+HTTP/SSE、AskUserForm/dialog bridge、生产 reducer/useControl/DetailDock 与上述 SDK/E/C。13 组覆盖
+同一 real partial/unknown 样本 direct duplicate / late / queryOnly 的一致 DOM、ctl 乱序/重复、
+history on/off、实际旁路 recorder I/O 故障、实际 >30s 确认，以及真实 E 已观察但 ledger 前的
+测试宿主 completion barrier >30s、29min、取消后迟到批准、owner/tree/reload 历史边界。barrier 只在
+测试宿主，不给生产同步 applier 加 await；不宣称同步 syscall 可抢占或模拟 provider 长执行。
+每态 DOM data-cmd-id 与真实 ledger.get(id).id 比较。UI 只存 summary+parsed facts，不双存完整 appendix。
+Web mem 独立结果从不依赖 recorder：history off 不构造 recorder；on 的真实 record fault 仅旁路观测，
+不伪称 mem record 已保存，也不改变领域效果。浏览器可显式选已存在的离线资产；不可用退出 2，绝非 PASS。
+产物在 `/tmp/pi-toolkit-i1-browser-results.json` 及 `/tmp/pi-toolkit-i1-*.{png,html}`。
+
+未对真实 Hub、用户数据/配置或运行中会话 reload；不做 LIVE/付费、安装、commit/push。
+未知不重试，无全局回滚；同步 I/O 不可抢占、同 uid syscall 间竞态、fsync 非掉电事务、SDK elsewhere
+flush 与单 activation 非绝对费用上限等既有限界保持。离线源码/组件闭环不能证明已部署。
