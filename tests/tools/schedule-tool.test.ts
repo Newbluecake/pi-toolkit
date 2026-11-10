@@ -5,13 +5,16 @@ import { getJsonSchemaToolParameters } from "@earendil-works/pi-ai/api/constrain
 import { manualClaim } from "../../src/schedule/core/claim.js";
 import { finishRun } from "../../src/schedule/core/writer.js";
 import { addTask, approve, makeTask, readOk } from "../schedule/core/fixtures.js";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createScheduleTool, SCHEDULE_TOOL_DESCRIPTION } from "../../src/tools/schedule-tool.js";
 import { createScheduleAgent } from "../../src/schedule/agent/wire.js";
 import { a3Env, stripApproval, type A3Env } from "../schedule/agent/a3-helpers.js";
 
 let env: A3Env;
-afterEach(() => env?.cleanup());
+afterEach(() => {
+  vi.restoreAllMocks();
+  env?.cleanup();
+});
 
 function tool(e: A3Env) {
   return createScheduleTool({ agent: () => e.agent, ports: () => e.ports, now: () => e.fake.now() });
@@ -392,7 +395,7 @@ describe("schedule tool — actionable errors at the execute boundary (#83)", ()
     expect(r.text).toContain(reason);
     expect(r.text).toContain('{"action":"list"}');
     expect(promptExample(r.text)).toEqual({ action: "update", id: "<当前id>", prompt: "<新完整提示>" });
-    if ("op" in params || params.action !== "update") expect(r.text).toContain("use action, not op");
+    if (!("action" in params) || params.action !== "update") expect(r.text).toContain("use action, not op");
     expect(ledgerBytes(env)).toEqual(bytes);
   });
 
@@ -456,8 +459,8 @@ describe("schedule tool — pinned SDK optional/null vs empty-string contract", 
       expect(t.parameters.properties[key].description).toContain("Empty string is not omission");
     }
     const strict = getJsonSchemaToolParameters(t as never, true);
-    expect(strict.required).toEqual(Object.keys(t.parameters.properties));
-    const properties = strict.properties as Record<string, { anyOf?: unknown[] }>;
+    expect(strict).toHaveProperty("required", Object.keys(t.parameters.properties));
+    const properties = (strict as { properties: Record<string, { anyOf?: unknown[] }> }).properties;
     for (const key of Object.keys(t.parameters.properties).filter((k) => k !== "action")) {
       expect(properties[key]!.anyOf).toEqual(expect.arrayContaining([{ type: "null" }]));
     }
@@ -470,7 +473,7 @@ describe("schedule tool — pinned SDK optional/null vs empty-string contract", 
     const id = c.details.id as string;
     const before = structuredClone(readOk(env.agent.store()!).tasks[0]!);
     // Simulate the required-but-nullable strict response, then pass it through the actual SDK validator.
-    const input = {
+    const input: Record<string, unknown> = {
       ...Object.fromEntries(Object.keys(tool(env).parameters.properties).map((key) => [key, null])),
       action: "update",
       id,
@@ -672,5 +675,102 @@ describe("schedule tool — bounded, value-free error presentation (#83 blocker)
     assertBoundedPrivateError(r, [privateValue, id]);
     expect(r.text).toContain("cron: minute: bad value (value hidden)");
     expect(ledgerBytes(env)).toEqual(bytes);
+  });
+});
+
+describe("#84 authoritative uncertainty and safe degraded guidance", () => {
+  it.each(["E_DEGRADED", "E_BUSY"] as const)(
+    "%s with uncertain=true takes priority over diagnostics and parameter correction",
+    async (code) => {
+      env = a3Env();
+      const store = env.agent.ensureStore();
+      vi.spyOn(store, "transact").mockResolvedValue({
+        ok: false,
+        code,
+        detail: "short-secret-秘密\n\u001b[31m".repeat(100_000),
+        uncertain: true,
+      });
+      const r = await call(env, { action: "create", ...DAILY });
+      expect(r.details).toEqual({ ok: false, code, uncertain: true });
+      expect(r.text).toContain("may already have taken effect");
+      expect(r.text).toContain("Do not blindly retry or run the task again");
+      expect(r.text).toContain("read-only action=list/get/history");
+      expect(r.text).not.toMatch(/short-secret|秘密|\u001b|Create example|Prompt-only|\/schedule repair/);
+      expect(Buffer.byteLength(r.text)).toBeLessThanOrEqual(2048);
+      expect(Buffer.byteLength(r.text.slice(code.length + 2))).toBeLessThanOrEqual(512);
+      expect(env.agent.readState().kind).toBe("absent");
+    },
+  );
+
+  it.each([undefined, false])(
+    "detail text cannot infer uncertain=%s; an explicit false survives",
+    async (uncertain) => {
+      env = a3Env();
+      vi.spyOn(env.agent.ensureStore(), "transact").mockResolvedValue({
+        ok: false,
+        code: "E_DEGRADED",
+        detail: "commit uncertain: directory fsync failed (EIO)",
+        ...(uncertain === undefined ? {} : { uncertain }),
+      });
+      const r = await call(env, { action: "create", ...DAILY });
+      expect(r.details).toEqual({ ok: false, code: "E_DEGRADED", ...(uncertain === undefined ? {} : { uncertain }) });
+      expect(r.text).not.toContain("may already have taken effect");
+      expect(r.text).not.toContain("/schedule repair");
+      expect(r.text).toContain("read-only");
+    },
+  );
+
+  it("run_now preserves uncertain in details and bounded content without a repeat-run instruction", async () => {
+    env = a3Env();
+    vi.spyOn(env.agent, "runNow").mockResolvedValue({
+      kind: "refused",
+      code: "E_DEGRADED",
+      detail: "hidden-secret".repeat(100_000),
+      uncertain: true,
+    });
+    const r = await call(env, { action: "run_now", id: "s_aaaaaaaa" });
+    expect(r.details).toEqual({ ok: false, code: "E_DEGRADED", uncertain: true });
+    expect(r.text).toContain("may already have taken effect");
+    expect(r.text).toContain("read-only action=list/get/history");
+    expect(r.text).not.toMatch(/hidden-secret|\/schedule repair|run_now|Run started/);
+    expect(Buffer.byteLength(r.text)).toBeLessThanOrEqual(2048);
+  });
+
+  const refusals = [
+    ["schema", "state.v: unsupported version"],
+    ["schema", "state.sessionId"],
+    ["sid-mismatch", "state.sessionId does not belong to this directory"],
+    ["owner", "short-owner-secret"],
+    ["mode", "short-mode-secret"],
+    ["symlink", "short-symlink-secret"],
+    ["not-file", "short-type-secret"],
+    ["io", "short-io-secret"],
+    ["schema", "unclassified schema failure"],
+  ] as const;
+  for (const action of ["list", "get", "history"] as const) {
+    it.each(refusals)(
+      `${action} %s refuses without generic repair advice or detail leakage`,
+      async (reason, detail) => {
+        env = a3Env();
+        vi.spyOn(env.agent, "readState").mockReturnValue({ kind: "degraded", reason, detail });
+        const r = await call(env, { action, id: "s_aaaaaaaa" });
+        expect(r.details).toEqual({ ok: false, code: "E_DEGRADED" });
+        expect(r.text).toContain("read-only");
+        expect(r.text).not.toContain("/schedule repair");
+        expect(r.text).not.toContain(detail);
+        expect(Buffer.byteLength(r.text)).toBeLessThanOrEqual(2048);
+      },
+    );
+  }
+
+  it("only proven JSON corruption offers local inspect + backup + quarantine/reset guidance", async () => {
+    env = a3Env();
+    vi.spyOn(env.agent, "readState").mockReturnValue({ kind: "degraded", reason: "json", detail: "hidden" });
+    const r = await call(env, { action: "list" });
+    expect(r.details).toEqual({ ok: false, code: "E_DEGRADED" });
+    expect(r.text).toContain("after local inspection and backup");
+    expect(r.text).toContain("/schedule repair");
+    expect(r.text).toContain("quarantines and resets");
+    expect(r.text).not.toContain("hidden");
   });
 });

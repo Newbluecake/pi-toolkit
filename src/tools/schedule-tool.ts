@@ -174,6 +174,9 @@ function fieldSummary(key: "cron" | "at" | "every" | "tz" | "action" | "id", val
 
 /** Deny-by-default projection of shared diagnostics: matching a reason never permits echoing its payload. */
 function operationReason(f: OpFail): string {
+  // Only the writer/claim's authoritative flag establishes commit uncertainty, never detail text.
+  if (f.uncertain === true)
+    return "The operation may already have taken effect; commit durability is uncertain. Do not blindly retry or run the task again. First verify with read-only action=list/get/history and inspect the ledger locally; do not repair or mutate it before verification.";
   const detail = f.detail;
   // These prefixes have untrusted suffixes (tz, cron tokens, id, model, registry names or runtime errors).
   if (detail.startsWith("when.tz: unsupported time zone ")) return "when.tz: unsupported time zone (value hidden)";
@@ -258,7 +261,8 @@ function operationReason(f: OpFail): string {
     E_DISABLED: "scheduled tasks are disabled",
     E_UNAPPROVED: "legacy task approval is unavailable",
     E_INVALID: "invalid schedule parameters",
-    E_DEGRADED: "schedule ledger unavailable or unreadable; inspect it locally or run /schedule repair",
+    E_DEGRADED:
+      "schedule ledger unavailable or refused; inspect it locally with read-only checks; do not automatically repair or retry",
     E_SECURE: "secure/locked domain refuses scheduled tasks",
     E_NOT_OWNER: "this session is not the schedule owner",
     E_MODE: "this mode does not allow the schedule operation",
@@ -295,7 +299,8 @@ function createExample(params: ScheduleToolParams): string {
 /** Presentation only: retain the shared code/reason semantics and never normalize a supplied value. */
 function failOp(f: OpFail, params?: ScheduleToolParams) {
   const reason = boundedErrorText(operationReason(f), ERROR_REASON_MAX_BYTES);
-  if (f.code !== "E_INVALID" || params === undefined) return failure(f.code, reason);
+  const extra = f.uncertain === undefined ? {} : { uncertain: f.uncertain };
+  if (f.uncertain === true || f.code !== "E_INVALID" || params === undefined) return failure(f.code, reason, extra);
   const fields = (["cron", "at", "every", "tz"] as const)
     .filter((key) => params[key] !== undefined)
     .map((key) => fieldSummary(key, params[key]));
@@ -316,7 +321,7 @@ function failOp(f: OpFail, params?: ScheduleToolParams) {
       `Create example (replace name/prompt): ${createExample(params)}. Omit unrelated fields, not placeholders.${params.form === "message" ? " For form=message omit agentType/model/thinking/timeoutS/handoff/isolation, even default or false values; these are background-only options." : ""}`,
     );
   }
-  return failure(f.code, `${reason}\n${hints.join("\n")}`);
+  return failure(f.code, `${reason}\n${hints.join("\n")}`, extra);
 }
 
 function readOf(
@@ -325,9 +330,13 @@ function readOf(
   const r = agent.readState();
   if (r.kind === "ok") return { state: r.state };
   if (r.kind === "absent") return { state: undefined };
-  return {
-    error: failure("E_DEGRADED", `the schedule ledger is unreadable (${r.reason}); the user can run /schedule repair`),
-  };
+  // A JSON parse failure is a proven repairable corruption. Other refusals (including unknown
+  // versions, identity/owner/mode/symlink and unclassified schema failures) need manual inspection.
+  const guidance =
+    r.reason === "json"
+      ? "the ledger has invalid JSON; after local inspection and backup the user may run /schedule repair (quarantines and resets the ledger)"
+      : "the ledger is unavailable or refused; inspect it locally with read-only checks; do not automatically repair or retry";
+  return { error: failure("E_DEGRADED", guidance) };
 }
 
 function flatToRaw(p: ScheduleToolParams): RawFields | OpFail {
@@ -517,13 +526,19 @@ export function createScheduleTool(deps: ScheduleToolDeps): ToolDefinition<typeo
           if (bad) return bad;
           const res = await agent.runNow({ taskId: taskId!, reqId: randomBytes(12).toString("base64url") });
           if (res.kind === "refused") {
-            const hint = res.code === "E_OVERLAP" ? " A run of this task is already in progress." : "";
-            const reason = operationReason({
+            const f: OpFail = {
               ok: false,
               code: res.code as ScheduleErrorCode,
               detail: res.detail ?? "refused",
-            });
-            return failure(res.code as ScheduleErrorCode, `${reason}${hint}`);
+              ...(res.uncertain === undefined ? {} : { uncertain: res.uncertain }),
+            };
+            if (f.uncertain === true) return failOp(f);
+            const hint = res.code === "E_OVERLAP" ? " A run of this task is already in progress." : "";
+            return failure(
+              f.code,
+              `${operationReason(f)}${hint}`,
+              f.uncertain === undefined ? {} : { uncertain: f.uncertain },
+            );
           }
           return out(
             `Run started (${res.runKey}). The result will appear as a message in this session when it finishes.`,

@@ -1,6 +1,6 @@
 /** P2 production entry → real single-file writer / strict validation / legacy reader. */
-import { afterEach, describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createScheduleTool } from "../../src/tools/schedule-tool.js";
 import { createTask, updateTask, setTaskEnabled, deleteTask } from "../../src/schedule/agent/ops.js";
@@ -290,5 +290,193 @@ describe("P2 actionable validation and historical compatibility", () => {
     expect((await call({ action: "update", id, every: "90m", tz: "UTC" })).details.code).toBe("E_INVALID");
     expect(JSON.stringify(state())).toBe(before);
     expect(parseCron("0-5/59 * * * *", { strictSteps: true }).ok).toBe(true);
+  });
+});
+
+// Exercise the production writer, including its real atomic rename. The only substitution is
+// supplying its existing fault hook when opening THIS test's temporary root; no claim/ops mock.
+const durabilityFault = vi.hoisted(() => ({
+  root: "",
+  point: undefined as "file-fsync" | "dir-fsync" | undefined,
+  seen: [] as string[],
+}));
+vi.mock("../../src/schedule/core/writer.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../src/schedule/core/writer.js")>();
+  return {
+    ...actual,
+    openSessionStore: (opts: Parameters<typeof actual.openSessionStore>[0]) =>
+      actual.openSessionStore({
+        ...opts,
+        faults: (point) => {
+          opts.faults?.(point);
+          if (opts.root.real !== durabilityFault.root || durabilityFault.point === undefined) return;
+          durabilityFault.seen.push(point);
+          if (point === durabilityFault.point) throw Object.assign(new Error("injected EIO"), { code: "EIO" });
+        },
+      }),
+  };
+});
+afterEach(() => {
+  durabilityFault.root = "";
+  durabilityFault.point = undefined;
+  durabilityFault.seen = [];
+  vi.restoreAllMocks();
+});
+
+describe("#84 real writer durability → ops/claim → agent → tool", () => {
+  const actions = ["create", "update", "pause", "resume", "delete"] as const;
+  async function seed(action: (typeof actions)[number] | "run_now") {
+    const env = setup();
+    const made = await createTask(env.ports, basicRaw(), AI);
+    if (!made.ok) throw Error(made.detail);
+    if (action === "resume")
+      expect((await setTaskEnabled(env.agent.ensureStore(), made.value.id, false)).ok).toBe(true);
+    const dispatch = vi.fn();
+    env.agent.setExecutor("background", { dispatch });
+    env.agent.setExecutor("message", { dispatch });
+    const store = env.agent.ensureStore();
+    return { env, id: made.value.id, store, dispatch, file: join(store.root.real, store.dirName, "state.json") };
+  }
+  function inject(root: string, point: "file-fsync" | "dir-fsync") {
+    durabilityFault.root = root;
+    durabilityFault.point = point;
+    durabilityFault.seen = [];
+  }
+  function expectBoundary(point: "file-fsync" | "dir-fsync") {
+    expect(durabilityFault.seen).toContain(point);
+    if (point === "dir-fsync") {
+      expect(durabilityFault.seen.indexOf("renamed")).toBeGreaterThan(-1);
+      expect(durabilityFault.seen.indexOf("renamed")).toBeLessThan(durabilityFault.seen.indexOf("dir-fsync"));
+    } else expect(durabilityFault.seen).not.toContain("renamed");
+    // A failed/uncertain mutation must not schedule a second write or queued-run cleanup.
+    expect(durabilityFault.seen.filter((p) => p === point)).toHaveLength(1);
+  }
+  for (const point of ["file-fsync", "dir-fsync"] as const) {
+    for (const route of ["ops", "tool"] as const) {
+      it.each(actions)(`${route} %s at ${point}: authority flag and on-disk outcome survive`, async (action) => {
+        const { env, id, store, dispatch, file } = await seed(action);
+        const before = readFileSync(file);
+        const rev = state().rev;
+        const changes = env.changed.n;
+        const notify = vi.fn();
+        inject(store.root.real, point);
+        const result =
+          route === "tool"
+            ? await createScheduleTool({ agent: () => env.agent, ports: () => env.ports }).execute(
+                "fault",
+                {
+                  action,
+                  ...(action === "create" ? { name: "another", cron: "0 8 * * *", prompt: "dummy" } : { id }),
+                  ...(action === "update" ? { prompt: "changed" } : {}),
+                } as never,
+                undefined,
+                undefined,
+                { ui: { notify } } as never,
+              )
+            : action === "create"
+              ? await createTask(env.ports, basicRaw({ name: "another" }), AI)
+              : action === "update"
+                ? await updateTask(env.ports, id, { prompt: "changed" })
+                : action === "delete"
+                  ? await deleteTask(store, id)
+                  : await setTaskEnabled(store, id, action === "resume");
+        const failure = "details" in result ? result.details : result;
+        expect(failure).toMatchObject({ ok: false, code: "E_DEGRADED" });
+        if (point === "dir-fsync") expect(failure).toHaveProperty("uncertain", true);
+        else expect(failure).not.toHaveProperty("uncertain");
+        if ("content" in result) {
+          const text = (result.content[0] as { text: string }).text;
+          expect(text).not.toContain("/schedule repair");
+          if (point === "dir-fsync") {
+            expect(text).toContain("may already have taken effect");
+            expect(text).toContain("Do not blindly retry");
+            expect(text).toContain("read-only action=list/get/history");
+          } else expect(text).not.toContain("commit durability is uncertain");
+        }
+        expectBoundary(point);
+        expect(notify).not.toHaveBeenCalled();
+        expect(env.changed.n).toBe(changes);
+        expect(dispatch).not.toHaveBeenCalled();
+        const after = state(); // read only, no fake-clock advance / clock.start / recovery
+        expect(after.runs).toHaveLength(0);
+        if (point === "file-fsync") expect(readFileSync(file)).toEqual(before);
+        else {
+          expect(after.rev).toBe(rev + 1);
+          if (action === "create") expect(after.tasks).toHaveLength(2);
+          else if (action === "delete") expect(after.tasks).toHaveLength(0);
+          else if (action === "update") expect(after.tasks[0]!.prompt).toBe("changed");
+          else expect(after.tasks[0]!.enabled).toBe(action === "resume");
+        }
+      });
+    }
+    it.each(["agent", "tool"] as const)(`manual claim via %s at ${point} never dispatches`, async (route) => {
+      const { env, id, store, dispatch, file } = await seed("run_now");
+      const before = readFileSync(file),
+        rev = state().rev;
+      const runNow = vi.spyOn(env.agent, "runNow"); // observe, never replace the real claim
+      inject(store.root.real, point);
+      const result =
+        route === "agent"
+          ? await env.agent.runNow({ taskId: id, reqId: "fault-request-00000001" })
+          : await call({ action: "run_now", id });
+      const claimed = await runNow.mock.results[0]!.value;
+      expect(claimed).toMatchObject({ kind: "refused", code: "E_DEGRADED" });
+      if (point === "dir-fsync") expect(claimed).toHaveProperty("uncertain", true);
+      else expect(claimed).not.toHaveProperty("uncertain");
+      if ("details" in result) {
+        expect(result.details).toMatchObject({ ok: false, code: "E_DEGRADED" });
+        if (point === "dir-fsync") {
+          expect(result.details).toHaveProperty("uncertain", true);
+          expect(result.text).toContain("may already have taken effect");
+          expect(result.text).toContain("Do not blindly retry or run the task again");
+          expect(result.text).toContain("read-only action=list/get/history");
+        } else expect(result.details).not.toHaveProperty("uncertain");
+        expect(result.text).not.toContain("/schedule repair");
+        expect(result.text).not.toMatch(/Run started|send.*run_now|retry.*run_now/);
+      }
+      expectBoundary(point);
+      expect(dispatch).not.toHaveBeenCalled();
+      const after = state();
+      if (point === "file-fsync") {
+        expect(readFileSync(file)).toEqual(before);
+        expect(after.runs).toHaveLength(0);
+      } else {
+        expect(after.rev).toBe(rev + 1);
+        expect(after.runs).toHaveLength(1);
+        expect(after.runs[0]).toMatchObject({ taskId: id, state: "dispatching" });
+        expect(after.manualTotal[id]).toBe(1);
+      }
+    });
+  }
+});
+
+describe("#84 real degraded safety refusals", () => {
+  it.each(["version", "sid"] as const)("%s mismatch never suggests repair or writes bytes", async (bad) => {
+    const env = setup();
+    const made = await createTask(env.ports, basicRaw(), AI);
+    if (!made.ok) throw Error(made.detail);
+    const store = env.agent.ensureStore();
+    const file = join(store.root.real, store.dirName, "state.json");
+    const raw = JSON.parse(readFileSync(file, "utf8"));
+    if (bad === "version") raw.v = 999;
+    else raw.sessionId = "another-session";
+    writeFileSync(file, JSON.stringify(raw));
+    const before = readFileSync(file);
+    const dispatch = vi.fn();
+    env.agent.setExecutor("background", { dispatch });
+    for (const action of ["list", "get", "history", "create", "update", "pause", "resume", "delete", "run_now"]) {
+      const result = await call({
+        action,
+        id: made.value.id,
+        ...(action === "create" ? { id: undefined, name: "dummy", cron: "0 8 * * *", prompt: "dummy" } : {}),
+        ...(action === "update" ? { prompt: "dummy change" } : {}),
+      });
+      expect(result.details).toEqual({ ok: false, code: "E_DEGRADED" });
+      expect(result.text).not.toContain("/schedule repair");
+      expect(result.text).not.toContain("commit durability is uncertain");
+      expect(result.text).toContain("read-only");
+      expect(readFileSync(file)).toEqual(before);
+    }
+    expect(dispatch).not.toHaveBeenCalled();
   });
 });

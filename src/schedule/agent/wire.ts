@@ -155,7 +155,8 @@ export interface ScheduleExecutor {
 }
 
 export type ScheduleRunNowResult =
-  { kind: "started"; runKey: string; replay: boolean } | { kind: "refused"; code: string; detail?: string };
+  | { kind: "started"; runKey: string; replay: boolean }
+  | { kind: "refused"; code: string; detail?: string; uncertain?: boolean };
 
 export interface ScheduleAgent {
   readonly mode: ScheduleModeVerdict;
@@ -577,7 +578,12 @@ export function createScheduleAgent(deps: ScheduleAgentDeps): ScheduleAgent {
           if (!r.replay) changed();
           return { kind: "refused", code: r.code };
         case "error":
-          return { kind: "refused", code: r.code, detail: r.detail };
+          return {
+            kind: "refused",
+            code: r.code,
+            detail: r.detail,
+            ...(r.uncertain === undefined ? {} : { uncertain: r.uncertain }),
+          };
       }
     },
     changed() {

@@ -34,11 +34,16 @@ import type { XsHostCapabilityState } from "../../fabric/xs/host-cap.js";
 import type { ScheduleRefusal } from "./mode.js";
 import type { ScheduleAgent } from "./wire.js";
 
-export type OpFail = { ok: false; code: ScheduleErrorCode; detail: string };
+export type OpFail = { ok: false; code: ScheduleErrorCode; detail: string; uncertain?: boolean };
 export type OpOk<T> = { ok: true; value: T };
 export type OpResult<T> = OpOk<T> | OpFail;
 
-const fail = (code: ScheduleErrorCode, detail: string): OpFail => ({ ok: false, code, detail });
+const fail = (code: ScheduleErrorCode, detail: string, uncertain?: boolean): OpFail => ({
+  ok: false,
+  code,
+  detail,
+  ...(uncertain === undefined ? {} : { uncertain }),
+});
 
 export interface OpOrigin {
   by: "user" | "agent";
@@ -354,7 +359,7 @@ function fromChange(c: TaskChange): OpResult<ScheduleTask> {
     case "refused":
       return fail(c.code, c.detail ?? "refused");
     case "error":
-      return fail(c.code, c.detail);
+      return fail(c.code, c.detail, c.uncertain);
   }
 }
 
@@ -386,7 +391,7 @@ export async function createTask(ports: OpsPorts, raw: RawFields, origin: OpOrig
       ...(task.when.kind === "every" ? { upgradeToV2: true as const } : {}),
     };
   });
-  if (!r.ok) return fail(r.code, r.detail);
+  if (!r.ok) return fail(r.code, r.detail, r.uncertain);
   if (r.value === "limit") return fail("E_LIMIT", `at most ${SCHED_MAX_TASKS_PER_SESSION} tasks per session`);
   ports.agent.changed();
   return { ok: true, value: r.value };
@@ -488,7 +493,7 @@ export async function deleteTask(
     const removed = removeTask(draft, id);
     return { value: removed, write: removed };
   });
-  if (!r.ok) return fail(r.code, r.detail);
+  if (!r.ok) return fail(r.code, r.detail, r.uncertain);
   if (!r.value) return fail("E_INVALID", `no such task ${id}`);
   opts.revoke?.(id);
   await dropQueuedRuns(store, id);
