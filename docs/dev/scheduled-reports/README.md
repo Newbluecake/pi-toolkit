@@ -187,8 +187,8 @@ v2 seeder and are explicitly tier2 in `tests/tiers.ts`; the pure raw timer backe
   terminal control characters are removed as a final backstop. These are presentation limits, not
   schema/input limits. Missing/invalid `id` points to `{"action":"list"}`; missing/invalid `action`
   (including mistaken `op`) gets a concrete boundary error when host validation is bypassed.
-  Shared ops/store parsing is unchanged: no empty-value swallowing, automatic schedule rewrite,
-  or ledger migration.
+  Shared ops/store parsing is unchanged: time and background empty-value validation, automatic schedule rewrite,
+  and ledger migration are not relaxed. The narrow create-id placeholder exception is documented below.
 - Verified against installed pi SDK **1.5.0**: source `Type.Optional` leaves only `action` schema-required;
   `getJsonSchemaToolParameters(tool, true)` makes optional fields required-but-nullable for strict
   sampling; `validateToolArguments` against the original schema strips optional nulls before execute
@@ -207,6 +207,62 @@ v2 seeder and are explicitly tier2 in `tests/tiers.ts`; the pure raw timer backe
     original cron/tz/registry diagnostics, action/id and newline/ESC injection; errors must stay bounded,
     hide the markers and leave ledger bytes unchanged. Existing interval producer/reanchor contracts
     remain covered by P2 tests.
+
+### Fresh-process id placeholder and schema investigation (2026-11-10)
+
+- **Reproduced on a fresh registration, not attributed to an old process or an invented caller error.**
+  The reported complete create shape was replayed with a safe dummy prompt: `id:""`, `cron:""`, `at:""`,
+  `every:"20m"`, `tz:""`, `form:"message"`, `model:""`, plus background defaults/options. The original
+  SDK validator preserves all those empty strings/false/default values. The tool's reserved-field loop
+  rejected `id !== undefined` **before** `flatToRaw`; `id` never enters `RawFields`. `createTask` assigns
+  the id inside its writer transaction; update uses its id solely as the task selector.
+- **Narrow compatibility fix, not a schema-transport fix:** only on create, `id:""` or a defensive
+  direct-execute `id:null` means unassigned. Normal SDK validation already removes optional nulls.
+  Nonempty ids (including whitespace) still fail before store IO; no trimming or user id assignment.
+  Empty/null ids on update still fail with `action:list` guidance. Other reserved fields, cron/at/every
+  exclusivity (including supplied empty strings), interval/tz validation and message/background separation
+  are unchanged. Omitted update fields remain a patch; `model:""` on a background edit keeps the existing
+  explicit clear-override meaning rather than being swallowed as an omission.
+- The full reported shape consequently still fails, now with the **real next error**: remove empty
+  cron/at, then remove tz for every, then remove **all** background-only fields
+  (`agentType/model/thinking/timeoutS/handoff/isolation`) for message, even when false/default/empty.
+  In message mode the first layer's final `content` includes this instruction and a copyable safe example:
+  `{"action":"create","name":"message","form":"message","every":"20m","prompt":"<完整提示>","feishu":false}`.
+  No real task was created or modified by the investigation; tests create temporary dummy definitions
+  with an unadvanced fake clock and no attached executor.
+- **SDK/schema evidence (installed 1.5.0):** production `activate` registration and a real SDK registry
+  preserve `required:["action"]`. A separate real jiti source import also exercises pi's
+  `@sinclair/typebox` → host `typebox` alias with the same JSON schema. `toToolDeclaration` performs a
+  JSON round-trip, not a Zod conversion; original Optional semantics remain in `required`. The SDK wrapper
+  forwards the schema unchanged; agent-core validates before execute. The validator removes optional nulls
+  but neither adds omitted fields nor converts them to empty strings.
+- **Actual SDK HTTP-boundary control experiment:** OpenAI Responses adapter runs with a dummy credential
+  and an entirely in-memory fetch (no network or real model). With the source tool's unset
+  `constrainedSampling`, outbound schema is `strict:false`, only action required. An explicitly opted-in
+  strict control produces all fields required **and** a null arm on every original optional field.
+  Source schemas are not mutated. `convertResponsesTools`/`getJsonSchemaToolParameters` have matching
+  assertions. The Codex adapter also delegates to `convertResponsesTools` (default `strict:null`), and
+  completions delegates to `getJsonSchemaToolParameters`; no all-required/nonnullable rewrite was found
+  in these inspected paths. Only the Responses HTTP-boundary control was executed here.
+- **Unresolved transport mismatch:** the reported main-session model tool surface is all-required and
+  nonnullable, and the screenshot says “Filling the required schema”. This supports a required-schema
+  pressure hypothesis, **not proof of automatic field filling by code**. The fresh local SDK evidence
+  above does not reproduce that lossy surface or identify whether the user's actual provider/gateway,
+  a separate harness schema bridge, or its tool-description renderer changed it. The investigation did
+  not inspect session text, credentials or whole provider payloads and made no SDK/provider/global
+  changes. Next evidence needed: actual affected request's **schedule schema structure only**
+  (required list, each property's type/anyOf/null allowance), the corresponding post-bridge structure,
+  and provider/model API family + runtime SDK version. No headers, keys, user prompt or transcript needed.
+  If that bridge really requires all fields without nullable slots, minimal omission cannot be expressed
+  there; this patch deliberately does not claim that surface has been repaired.
+- Regression gates: `tests/integration/schedule-tool-sdk.test.ts` exercises real SDK registration →
+  validation → wrapper → production execute/ops/temporary writer, fresh jiti loading and HTTP-boundary
+  schema controls; `tests/integration/schedule-surface-wiring.test.ts` checks freshly activated production
+  registration plus SDK-validated empty create id. `tests/tools/schedule-tool.test.ts` retains value-free,
+  bounded error checks and tests the narrow direct-execute exception + all other reserved-field denials.
+  Existing P2 tests guard valid time exclusivity, interval migration/reanchoring and patch semantics.
+  No fixtures are regenerated. Installing source updates does not mutate already registered tools;
+  no reload/restart was performed as part of this investigation.
 
 ## Interval P2 (2026-11-09, #76): producers, strict diagnostics and explicit v2 migration
 

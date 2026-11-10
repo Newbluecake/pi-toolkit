@@ -147,6 +147,39 @@ describe("schedule tool — create / approval semantics", () => {
     expect((await call(env, { action: "create", name: "x", prompt: "p", tz: "UTC" })).details.code).toBe("E_INVALID");
   });
 
+  it.each(["", null])("schema-bypassed create id=%j is unassigned, without mutating the input", async (id) => {
+    env = a3Env();
+    const params = { action: "create", ...DAILY, id };
+    const r = await call(env, params);
+    expect(params.id).toBe(id);
+    expect(r.details).toEqual({ ok: true, id: expect.stringMatching(/^s_[a-z2-7]{8}$/) });
+    expect(readOk(env.agent.store()!).tasks[0]!.id).toBe(r.details.id);
+  });
+
+  it("empty/null create id is the only forbidden-field exception; other reserved fields remain rejected", async () => {
+    env = a3Env();
+    const c = await call(env, { action: "create", ...DAILY });
+    expect(c.details.ok).toBe(true);
+    const before = ledgerBytes(env);
+    for (const field of [
+      "approval",
+      "createdBy",
+      "createdVia",
+      "createdAt",
+      "ownerCwd",
+      "everyMs",
+      "intervalMs",
+      "anchorAt",
+    ]) {
+      for (const value of ["", null]) {
+        const r = await call(env, { action: "create", ...DAILY, id: "", [field]: value });
+        expect(r.details).toEqual({ ok: false, code: "E_INVALID" });
+        expect(r.text).toContain(`\`${field}\` cannot be set through this tool`);
+        expect(ledgerBytes(env)).toEqual(before);
+      }
+    }
+  });
+
   it("delete removes; list/get/history read the ledger", async () => {
     env = a3Env();
     const c = await call(env, { action: "create", ...DAILY });

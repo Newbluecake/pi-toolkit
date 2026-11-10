@@ -54,7 +54,10 @@ export const ScheduleToolParams = Type.Object(
       },
     ),
     id: Type.Optional(
-      Type.String({ description: "Task id (s_xxxxxxxx). Required for get/update/pause/resume/delete/run_now." }),
+      Type.String({
+        description:
+          "Task id (s_xxxxxxxx). Required for get/update/pause/resume/delete/run_now. On create omit id: ids are assigned; only an empty string/null placeholder is treated as unassigned, never a nonempty id.",
+      }),
     ),
     name: Type.Optional(Type.String({ description: "Short single-line task name, at most 40 characters." })),
     form: Type.Optional(
@@ -280,6 +283,15 @@ function promptUpdateExample(): string {
   return JSON.stringify({ action: "update", id: "<当前id>", prompt: "<新完整提示>" });
 }
 
+/** Fixed examples only; never reflect task names, prompts or other submitted values. */
+function createExample(params: ScheduleToolParams): string {
+  return JSON.stringify(
+    params.form === "message"
+      ? { action: "create", name: "message", form: "message", every: "20m", prompt: "<完整提示>", feishu: false }
+      : { action: "create", name: "daily", cron: "0 8 * * *", prompt: "<完整提示>" },
+  );
+}
+
 /** Presentation only: retain the shared code/reason semantics and never normalize a supplied value. */
 function failOp(f: OpFail, params?: ScheduleToolParams) {
   const reason = boundedErrorText(operationReason(f), ERROR_REASON_MAX_BYTES);
@@ -301,7 +313,7 @@ function failOp(f: OpFail, params?: ScheduleToolParams) {
     );
   } else {
     hints.push(
-      'Create example (replace name/prompt): {"action":"create","name":"daily","cron":"0 8 * * *","prompt":"<完整提示>"}. Omit unrelated fields, not placeholders.',
+      `Create example (replace name/prompt): ${createExample(params)}. Omit unrelated fields, not placeholders.${params.form === "message" ? " For form=message omit agentType/model/thinking/timeoutS/handoff/isolation, even default or false values; these are background-only options." : ""}`,
     );
   }
   return failure(f.code, `${reason}\n${hints.join("\n")}`);
@@ -373,11 +385,20 @@ export function createScheduleTool(deps: ScheduleToolDeps): ToolDefinition<typeo
       // Fields the AI may never write — also rejected here in case the host does not enforce the schema.
       const rawParams = params as Record<string, unknown>;
       for (const key of [...SCHED_UPDATE_FORBIDDEN_FIELDS, "everyMs", "intervalMs", "anchorAt"]) {
-        if (key === "id" && action !== "create") continue;
+        if (key === "id") {
+          if (action !== "create") continue; // A selector, never an update field.
+          // Strict SDK responses use null for absent optionals (normally stripped before execute).
+          // Some bridges/models send "" instead. On CREATE ONLY these cannot specify an id:
+          // flatToRaw never forwards id; createTask always assigns one. Do not trim nonempty ids
+          // or extend this exception to time, bg, boolean or patch fields.
+          if (rawParams.id === "" || rawParams.id === null) continue;
+        }
         if (rawParams[key] !== undefined)
           return failure(
             "E_INVALID",
-            `\`${key}\` cannot be set through this tool${key === "id" ? " (ids are assigned)" : ""}`,
+            key === "id"
+              ? `\`id\` cannot be set through this tool (ids are assigned). Omit id on create; only an empty string/null placeholder means unassigned. ${fieldSummary("id", rawParams.id)}. Create example (replace name/prompt): ${createExample(params)}`
+              : `\`${key}\` cannot be set through this tool`,
           );
       }
       const ports = (): OpsPorts => deps.ports(agent, ctx);
