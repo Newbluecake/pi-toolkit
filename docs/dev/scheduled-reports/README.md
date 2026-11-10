@@ -326,3 +326,26 @@ P2 supersedes P1's **no producer / no migration** restriction, not its arbitrati
 - Frozen A fixtures are not regenerated. `schedule-off-golden.json`, `reflex-off-golden.json`,
   `thread-rebind-off-golden.json` are unchanged by this package; any concurrently changed activation
   trace belongs to the separate child-message-speed registration package, not schedule P2.
+
+## Uncertain writes and offline schema diagnostics (#84 / #83)
+
+- Writer/claim `uncertain` is propagated through ops or agent `runNow` to the tool result; only
+  that authoritative flag establishes uncertainty, not matching error text. A claim with uncertain
+  durability is not dispatched to an executor. Do not blindly retry a mutation or run: inspect
+  `list`/`get`/`history` and the local ledger read-only first. Generic degraded/refused storage
+  requires inspection, not automatic repair. Only a definite JSON parse failure offers local
+  inspection and backup followed by the user's optional `/schedule repair` (quarantine and reset);
+  unknown versions, permissions, identity and other refusals are not classified as JSON corruption.
+  `tests/integration/schedule-p2-producer.test.ts` and `tests/tools/schedule-tool.test.ts` cover
+  the actual writer/claim and tool boundaries.
+- `node --import tsx scripts/dev/schedule-schema-diagnostic.ts < synthetic.json` is an offline,
+  stdin-only shape inspector. Input contains `observations` (each with source/evidence, API/evidence,
+  optional strict and schema) and optional `compare` indices; labels are self-declared, not provenance proof.
+  It reports only allowlisted schedule field presence, required/type/nullability and shape counts;
+  `strict` distinguishes absent, true, false, explicit-null and unknown. Unknown or unsupported
+  evidence cannot prove equivalence: comparison is `different`, `equivalent` or `inconclusive`.
+  Limits are 256 KiB input, 4096 nodes, depth 32 and 32 KiB output. It does not collect schemas,
+  read session/config/ledger, access network or install hooks, and cannot fix or identify the live
+  transport root cause. `tests/tools/schedule-schema-shape.test.ts` and
+  `tests/integration/schedule-schema-diagnostic.test.ts` exercise the pure and CLI boundaries.
+  Offline evidence and source changes do not establish deployment or live-provider behavior.

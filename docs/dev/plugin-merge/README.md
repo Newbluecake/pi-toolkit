@@ -89,3 +89,13 @@ identifiers never move) — two tools, both registered pre-guard by the single e
 
 Credentials from env or `~/.config/pi/web-search.env`: `CODEX_SEARCH_API_KEY` +
 `CODEX_SEARCH_BASE_URL`, `SERPAPI_API_KEY`, `DEEPSEEK_API_KEY`, `BOCHA_API_KEY`, `TAVILY_API_KEY`.
+
+### Web tool diagnostic boundary (#84)
+
+Search/fetch progress names the provider without echoing the query or URL. Public failures use a
+fixed allowlist: structured HTTP 401/403 → auth, 402/429 → quota, 408/425/5xx → transient,
+others → unknown; only valid structured HTTP status is exposed. Exception text, response bodies,
+URLs and queries do not enter failure/progress messages, and no reset time is inferred. Internal
+retry/failover classification remains unchanged; successful provider data remains unchanged and
+may naturally contain source content. `tests/web-tools/{resilience,tool}.test.ts` cover these
+boundaries; offline tests do not certify a live provider or deployment.

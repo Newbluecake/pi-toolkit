@@ -749,3 +749,14 @@ startup. No new compaction fence or lifecycle observation hook is introduced or 
 ## Retired objective-loop owner (2026-11-09)
 
 No live goal fence port or root-wake goal policy remains. Historical `goal` fence/downgrade wire tokens and wakeOnly consumer handling remain for old-peer compatibility (append-only wire), not as producers or a hidden objective loop. Session lifecycle reasons are local literal types, independent of the deleted subsystem.
+
+## Refusal guidance (#84)
+
+Message and session-list tools add reason-specific next steps without changing admission or granting
+permissions. Permission and quota refusals must not be bypassed via another route or target; no retry
+time is invented without authoritative evidence. For a `replyTo` rejection, retain the original
+request/target identity and do not fabricate a credential or resend the final reply as an ordinary
+message. An unknown or partial effect is not proof of non-delivery: inspect the existing receipt
+and never blindly resend a body. `tests/tools/{message-agent,message-session,message-channel,list-sessions}-tool.test.ts`
+and `tests/tools/xs-tool-cancel.test.ts` exercise refusal and cancellation surfaces; these source
+changes do not establish live deployment.

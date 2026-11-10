@@ -1357,3 +1357,17 @@ namespace 替换及最后 syscall 竞争、unknown fence。测试在 `tests/inte
 限界沿用 C：同步 syscall 不可抢占，路径/摘要检查不是抵御恶意同 uid writer 任意 syscall 间
 替换的文件系统事务，fsync 非绝对掉电保证；native popup 的内容断言不替代真实终端滚动/裁切验收。
 本包不读改用户数据/配置，不 install/reload/commit/push，不发送真实模型或网络请求。
+
+## Hub capacity and scopes-on child guidance (#84)
+
+Hub capacity is fixed, not a setting: 32 active items, 4096 UTF-8 body bytes total and 1024 bytes
+per item. Only the three exact known local capacity failures receive specific item-count, total-body
+or per-item guidance; arbitrary error text is not echoed and uncertain persistence is not overwritten
+with a capacity diagnosis. Inspect current Hub items and use actual id/rev and the required human
+approval for any authorized cleanup; do not treat guidance as permission.
+
+With scopes on, child project/Hub content remains hard read-only even if the legacy child write opt-in
+is true. The child should hand the proposed change to the main session rather than bypassing that gate.
+`tests/memory/scopes/{hub-store,hub-commit-approval,tool}.test.ts` and
+`tests/memory/{tool,tool-v2,wire}.test.ts` cover the relevant failure surfaces. Source/offline evidence
+does not establish that an existing session has loaded the changes.

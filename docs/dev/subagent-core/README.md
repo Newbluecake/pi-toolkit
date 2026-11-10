@@ -447,3 +447,29 @@ fully isolated from live settings changes: settings edits mutate that watchdog b
 subsequent ticks, even though the run's merged budget was captured at admission. Source changes require
 loading the new code in a new activation; existing running processes do not automatically acquire it.
 No settings, timers, grace behavior, or frozen fixtures are migrated by this change.
+
+## Structured submission window (#84)
+
+For calls reaching `StructuredOutput.execute`, a host-only synchronous preflight checks the capture
+window before local semantic validation; `onSubmit` checks the same window again before schema
+validation/capture, including synchronous re-entry. A closed window returns `window_closed` and
+instructs the caller to stop submitting, not to fix and retry the payload. SDK schema validation can
+reject before execute, so this does not promise closed-window precedence at that earlier boundary.
+`tests/tools/structured-output-tool.test.ts` and
+`tests/service/runtime-adapter-structured-repair.test.ts` cover both checks and late submissions.
+
+## Run-control failure surfaces (#84, implementation under independent verification)
+
+The current uncommitted implementation retains the holder's original `no active session yet` phrase
+with a fixed `no_active_session` code and effect facts. Blocking Agent admission retains classified
+kind/reason/retryability instead of turning it into a generic dispatch failure. Nested failure guidance
+only suggests resume conditionally when a persisted session exists and after checking outcome/partial
+effects; retryable does not establish effect-free execution. Unknown `set_model` effects do not by
+themselves establish a reload/stale binding; only the recognized stale-host condition gets that advice.
+`stop_failed` and an L4 escalation do not prove a process was killed. Query/read failures are not
+empty results or invented terminal states. Known `model_changed` and `deadline_extended` effects are
+preserved when later observation fails; unknown effects must not be blindly retried. The existing
+`steerRun` await remains unbounded, so this work does not claim a complete zero-hang fix.
+Evidence boundaries are in `tests/service/owner-errors84.test.ts`,
+`tests/tools/owner-errors84.test.ts` and adjacent query/tool tests; independent verification is
+pending, not a PASS or evidence that an already-running session loaded these changes.

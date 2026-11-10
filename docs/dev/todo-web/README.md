@@ -77,3 +77,14 @@ the silent interval is eligible to fire, so persistent candidates fire 4 / 7 / 1
 ## Objective-loop removal (2026-11-09)
 
 Idle recovery no longer lists or probes a goal owner. The remaining busy sources still fail closed on unknown. Generic unknown-source tests now use `otherRoot`; production recovery remains effective-off as above.
+
+## Mutation persistence uncertainty (#84)
+
+Todo mutations apply to in-memory state before persistence. Only an exception from `persist()` is
+reported as `memoryApplied:true, persistence:"unknown"`; validation, formatting and UI errors are
+not reclassified. An append may have landed before throwing: do not repeat the mutation or recreate
+the task. `TaskGet` / `TaskList(includeCompleted:true)` inspect current memory only, not disk
+persistence; a missing deleted task is not proof of a durable deletion. Successful individual
+appends advance their own baseline; the failure path does not roll back or retry.
+`tests/todo/tools.test.ts` exercises these distinctions. Source implementation is not evidence that
+an already-running session has loaded it.
