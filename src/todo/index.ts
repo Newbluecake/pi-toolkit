@@ -153,6 +153,10 @@ type ToolDetails = {
   changed?: boolean | undefined;
   error?: string | undefined;
   unblocked?: Task[] | undefined;
+  taskId?: string | undefined;
+  operation?: Action | undefined;
+  memoryApplied?: true | undefined;
+  persistence?: "unknown" | undefined;
 };
 
 /** Opt-in wiring for the main-session todo staleness nudge (L1 feature). Defaults keep `wireTodo(pi)` a no-op addition. */
@@ -443,6 +447,44 @@ export function wireTodo(pi: ExtensionAPI, deps: TodoNudgeDeps = {}): TodoWireRe
     details: { action, ...extra },
   });
 
+  // Tool mutations commit memory before persistence. An append may throw either before OR
+  // after recording an entry, so its outcome is unknown: never roll back, retry, or advance
+  // a baseline on that throw. persist() still advances each successful pre/live/post append
+  // immediately. Catch ONLY persist here; validation, formatting and UI failures are not
+  // evidence of a persistence failure and must retain their normal error behavior.
+  const persistMutation = (operation: Action, extra: Partial<ToolDetails>) => {
+    try {
+      persist();
+    } catch {
+      const taskId = extra.task ? String(extra.task.id) : undefined;
+      const error = "Mutation applied in memory; persistence unknown.";
+      const inspection = taskId
+        ? `Inspect the known task with TaskGet(taskId:"${taskId}") or TaskList(includeCompleted:true).`
+        : "Inspect tasks with TaskList(includeCompleted:true).";
+      const deletion =
+        operation === "delete" ? " TaskGet not-found after deletion is not proof that the deletion reached disk." : "";
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text" as const,
+            text: `Task${taskId ? ` #${taskId}` : ""} operation=${operation}: ${error} Do not repeat the mutation or recreate the task.\n${inspection} These reads inspect only current memory and cannot prove disk persistence.${deletion}`,
+          },
+        ],
+        details: {
+          action: operation,
+          ...extra,
+          error,
+          taskId,
+          operation,
+          memoryApplied: true as const,
+          persistence: "unknown" as const,
+        },
+      };
+    }
+    return undefined;
+  };
+
   const registerMutation = <T extends object>(
     name: string,
     label: string,
@@ -473,7 +515,10 @@ export function wireTodo(pi: ExtensionAPI, deps: TodoNudgeDeps = {}): TodoWireRe
       async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
         return enqueue(() => {
           const result = handler(params as T, ctx);
-          if (persistState && result.changed !== false) persist();
+          if (persistState && result.changed !== false) {
+            const failure = persistMutation(action, result);
+            if (failure) return failure;
+          }
           refreshWidget();
           const baseText = result.text ?? formatToolText(action, state, result.task, result.changed);
           const text = appendUnblockedNotice(baseText, result.unblocked);
@@ -515,7 +560,8 @@ export function wireTodo(pi: ExtensionAPI, deps: TodoNudgeDeps = {}): TodoWireRe
       return enqueue(() => {
         const result = createTask(state, params as TaskInput);
         commit(result.state);
-        persist();
+        const failure = persistMutation("create", { task: result.task });
+        if (failure) return failure;
         refreshWidget();
         return successfulResult("create", { task: result.task });
       });
