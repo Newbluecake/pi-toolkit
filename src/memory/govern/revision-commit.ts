@@ -14,7 +14,7 @@ import type {
   ApplyObservation,
 } from "../jev/contracts.js";
 import { independentCoverageSources, prepareRevisionOutbound, revisionRequestDigests } from "../jev/client.js";
-import { readIndex, mergeReview, suggestionKey } from "../jev/index-store.js";
+import { readIndex, revisionSemanticSuppression } from "../jev/index-store.js";
 import { parseBlockFile, isExpired } from "../blocks/format.js";
 import { withMemoryDirLock } from "../lock.js";
 import { canonicalDir, listRevisionNamesBounded, readRegularBytes } from "../safe-fs.js";
@@ -141,12 +141,13 @@ function checkReview(mem: string, p: RevisionProposal): void {
   const row = review.suggestions.find((s) => s.id === `revision:${p.actionId}`);
   if (!row?.revision || row.revision.proposalDigest !== p.proposalDigest || canonical(row.revision) !== canonical(p))
     refuse("stale");
-  const key = suggestionKey(row);
   if (
-    review.resolved?.includes(key) ||
-    !mergeReview(review, { lastRunAt: "", corpusFp: "", suggestions: [row], dismissed: [] }).suggestions.some(
-      (s) => s.id === row.id && s.revision?.proposalDigest === p.proposalDigest,
-    )
+    revisionSemanticSuppression(result.index, {
+      action: p.action,
+      reason: p.reason,
+      target: { id: p.targetId, hash: row.a.hash },
+      ...(p.contextId && row.b ? { context: { id: p.contextId, hash: row.b.hash } } : {}),
+    })
   )
     refuse("stale");
 }

@@ -357,11 +357,11 @@ export function validateRevisionProposal(value: unknown): RevisionProposal | und
     )
       return undefined;
     const { proposalDigest, ...payload } = v;
-    if (
-      revisionProposalDigest(payload as unknown as RevisionProposalDigestInput) !== proposalDigest ||
-      digest([v.batchId, v.action, v.targetId, v.expectedRev]) !== v.actionId
-    )
-      return undefined;
+    // IDs are opaque persisted references. New factories bind the full raw
+    // directed row, which a proposal alone cannot reconstruct. Legacy IDs and
+    // source references must remain readable without migration or re-signing;
+    // live execution still requires the privately frozen input identity.
+    if (revisionProposalDigest(payload as unknown as RevisionProposalDigestInput) !== proposalDigest) return undefined;
     const p = v as unknown as RevisionProposal;
     // Body actions claiming eligibility must carry verifiable independent evidence.
     if (
@@ -401,6 +401,9 @@ function completeIndependentEvidence(p: RevisionProposal): boolean {
     })
   );
 }
+
+/** Freeze identity domain; future F policy must pin this together with selector rules. */
+export const REVISION_ACTION_ID_VERSION = "p50-action-v2";
 
 export interface RevisionFreezeAction {
   readonly action: RevisionProposal["action"];
@@ -583,7 +586,17 @@ export function freezeRevisionInputsLocked(
       selectionBatchId: spec.selectionBatchId,
       batchId,
       policyVersion: spec.policyVersion,
-      actionId: digest([batchId, selected.action, selected.target.id, selected.target.rev]),
+      // New identities bind the complete directed row. Persisted C references
+      // remain opaque: readers/restorers never recompute an old actionId.
+      actionId: digest([
+        REVISION_ACTION_ID_VERSION,
+        batchId,
+        [
+          selected.action,
+          [selected.target.id, selected.target.rev, selected.target.rawDigest],
+          selected.context ? [selected.context.id, selected.context.rev, selected.context.rawDigest] : null,
+        ],
+      ]),
       ...selected,
     };
     Object.defineProperty(input, LIVE, { value: live });
@@ -1009,7 +1022,10 @@ export interface RevisionPrepareDeps {
   readonly requestBudget?: RevisionRequestBudget;
   readonly attempt: IncrementalAttemptContext;
   /** Host checks the stable review key under the existing directory lock. */
-  isSuppressed(input: FrozenRevisionInput): Promise<"dismissed" | "resolved" | false>;
+  isSuppressed(
+    input: FrozenRevisionInput,
+    reason: RevisionProposal["reason"],
+  ): Promise<"dismissed" | "resolved" | false>;
   readonly relation?: RevisionRelationResult;
   readonly reason: RevisionProposal["reason"];
   readonly autoEnabled: boolean;
@@ -1045,7 +1061,7 @@ export async function prepareRevisionProposal(
   try {
     if (!current()) return { kind: "stale" };
     if (!Object.hasOwn(input, LIVE)) return { kind: "unavailable" };
-    const suppressed = await deps.isSuppressed(input);
+    const suppressed = await deps.isSuppressed(input, deps.reason);
     if (!current()) return { kind: "stale" };
     if (suppressed) return { kind: suppressed };
     if (input.action === "retire") return await prepareRetireProposal(input, deps, current);

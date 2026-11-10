@@ -37,6 +37,7 @@ import {
   type IndexPatch,
   type JevIndexV1,
   type ReviewSuggestionKind,
+  type RevisionProposal,
   type ReviewState,
   type ReviewSuggestion,
   type TaxonomyFileV1,
@@ -331,6 +332,100 @@ export function normalizeSuggestionKey(key: string): string {
   return key;
 }
 
+/** Read-only P50 semantic projection. `reason` is absent before fresh
+ * classification: only revision-action and kindless legacy tombstones apply.
+ * IDs may be bare block IDs or strict legacy block anchors; never paths. */
+export interface RevisionSuppressionSubject {
+  readonly action: RevisionProposal["action"];
+  readonly reason?: RevisionProposal["reason"];
+  readonly target: { readonly id: string; readonly hash: string };
+  readonly context?: { readonly id: string; readonly hash: string };
+}
+/** Comparison only. Never rewrite persisted anchors/keys or infer a basename.
+ * blockAnchor's section/head are unescaped payload, not identity: normalizeBody
+ * preserves newlines and '+', and the head may itself contain '|'. */
+function suppressionBlockId(anchor: string): string | undefined {
+  const blockId = /^([a-z0-9][a-z0-9-]{0,47}\.[0-9]{3,6})/.exec(anchor)?.[1];
+  if (!blockId) return undefined;
+  const suffix = anchor.slice(blockId.length);
+  return suffix === "" || suffix === ".md" || (suffix.startsWith(".md|") && suffix.indexOf("|", 4) >= 0)
+    ? blockId
+    : undefined;
+}
+function suppressionIdentities(anchors: readonly string[]): string {
+  return JSON.stringify(anchors.map((a) => suppressionBlockId(a) ?? a).sort());
+}
+/** Legacy pair keys join UNESCAPED anchors with '+'. Try complete strict block
+ * boundaries, not split('+') on body text (e.g. C++). If multiple parses are
+ * possible, suppress only a matching complete subject pair, never all pairs or
+ * other typed semantics. Hash arity distinguishes a singleton from a pair;
+ * entryHash itself cannot contain '+'. Exact legacy fallbacks precede this. */
+function suppressionAnchorKeyMatches(key: string, hashKey: string, anchors: readonly string[]): boolean {
+  const ids = anchors.map(suppressionBlockId);
+  if (ids.some((id) => id === undefined) || hashKey.split("+").length !== ids.length) return false;
+  if (ids.length === 1) return suppressionBlockId(key) === ids[0];
+  if (ids.length !== 2) return false;
+  for (let at = key.indexOf("+"); at >= 0; at = key.indexOf("+", at + 1)) {
+    const right = suppressionBlockId(key.slice(at + 1));
+    if (right !== ids[0] && right !== ids[1]) continue;
+    const left = suppressionBlockId(key.slice(0, at));
+    if ((left === ids[0] && right === ids[1]) || (left === ids[1] && right === ids[0])) return true;
+  }
+  return false;
+}
+/** Sole revision suppression predicate shared by review, E and future host.
+ * Keyed tombstones keep their action/kind semantics; a duplicate dismissal
+ * cannot blanket-ban a later supersedes action. Unknown anchors retain exact
+ * fallback comparison rather than being discarded or guessed across paths. */
+export function revisionSemanticSuppression(
+  index: Pick<JevIndexV1, "review">,
+  subject: RevisionSuppressionSubject,
+): false | "dismissed" | "resolved" {
+  const review = index.review;
+  if (!review) return false;
+  const sides = [subject.target, ...(subject.context ? [subject.context] : [])];
+  const anchors = sides.map((s) => s.id);
+  const identities = suppressionIdentities(anchors);
+  const kind =
+    subject.reason === "expired" ? "expired-user" : subject.reason === "budget" ? "oversize" : subject.reason;
+  const matchesKey = (key: string): boolean => {
+    try {
+      const parts: unknown = JSON.parse(normalizeSuggestionKey(key));
+      if (!Array.isArray(parts) || !parts.every((p) => typeof p === "string")) return false;
+      if (parts[0] === "revision")
+        return (
+          parts[1] === subject.action &&
+          parts.length === sides.length + 2 &&
+          suppressionIdentities(parts.slice(2)) === identities
+        );
+      return (
+        kind !== undefined &&
+        parts[0] === kind &&
+        parts.length === sides.length + 1 &&
+        suppressionIdentities(parts.slice(1)) === identities
+      );
+    } catch {
+      return false;
+    }
+  };
+  if (review.resolved?.some(matchesKey)) return "resolved";
+  const hashKey = sides
+    .map((s) => s.hash)
+    .sort()
+    .join("+");
+  const anchorKey = anchors.slice().sort().join("+");
+  if (
+    review.dismissed.some((d) => {
+      if (d.suggestionKey !== undefined) return matchesKey(d.suggestionKey);
+      if (d.kind !== undefined && d.kind !== kind) return false;
+      if (d.hashKey === hashKey || d.anchorKey === anchorKey) return true;
+      return suppressionAnchorKeyMatches(d.anchorKey, d.hashKey, anchors);
+    })
+  )
+    return "dismissed";
+  return false;
+}
+
 /** Pairwise governance decisions suppress subsequent automatic relation work.
  * Use the same suggestionKey as storage; legacy block anchors can still yield
  * stable block identities, even if their recorded bodies have since changed. */
@@ -407,8 +502,18 @@ export function mergeReview(
     ...current,
     lastRunAt: incoming.lastRunAt > current.lastRunAt ? incoming.lastRunAt : current.lastRunAt,
     corpusFp: incoming.lastRunAt >= current.lastRunAt ? incoming.corpusFp : current.corpusFp,
-    suggestions: [...items.values()].filter(
-      (s) => !dismissedSuggestion(s, dismissed) && !resolved.includes(suggestionKey(s)),
+    suggestions: [...items.values()].filter((s) =>
+      s.revision
+        ? !revisionSemanticSuppression(
+            { review: { lastRunAt: "", corpusFp: "", suggestions: [], dismissed, resolved } },
+            {
+              action: s.revision.action,
+              reason: s.revision.reason,
+              target: { id: s.revision.targetId, hash: s.a.hash },
+              ...(s.revision.contextId && s.b ? { context: { id: s.revision.contextId, hash: s.b.hash } } : {}),
+            },
+          )
+        : !dismissedSuggestion(s, dismissed) && !resolved.includes(suggestionKey(s)),
     ),
     dismissed,
     ...(resolved.length ? { resolved } : {}),

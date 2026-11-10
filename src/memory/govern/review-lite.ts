@@ -11,8 +11,15 @@ import type {
   ReviewSuggestionKind,
   RevisionAuditPort,
   FrozenRevisionInput,
+  RevisionProposal,
 } from "../jev/contracts.js";
-import { isDismissedRelation, mergeReview, readIndex, suggestionKey } from "../jev/index-store.js";
+import {
+  isDismissedRelation,
+  mergeReview,
+  readIndex,
+  suggestionKey,
+  revisionSemanticSuppression,
+} from "../jev/index-store.js";
 import { entryHash } from "../jev/entries.js";
 import { readCorpus, trashBlockLocked } from "../blocks/store.js";
 import { parseBlockFile, type ParsedBlock } from "../blocks/format.js";
@@ -494,41 +501,25 @@ function revisionSuggestion(input: RevisionReviewInput, at: string): ReviewSugge
     revision: p,
   };
 }
-function suppressedRevision(
-  index: ReturnType<typeof readIndex>["index"],
-  row: ReviewSuggestion,
-): "dismissed" | "resolved" | false {
-  const review = index.review;
-  if (review?.resolved?.includes(suggestionKey(row))) return "resolved";
-  if (
-    !mergeReview(review, { lastRunAt: "", corpusFp: "", suggestions: [row], dismissed: [] }).suggestions.some(
-      (s) => suggestionKey(s) === suggestionKey(row),
-    )
-  )
-    return "dismissed";
-  return false;
-}
 /** Host can use this before generation; the authoritative repeat is always in
  * upsert's lock. Stable identity intentionally excludes hash/rev/batch. */
 export async function revisionSuggestionSuppressed(
   memDir: string,
   frozen: FrozenRevisionInput,
   deps: Pick<RevisionReviewDeps, "isCurrent" | "signal">,
+  reason?: RevisionProposal["reason"],
 ): Promise<"dismissed" | "resolved" | false> {
   if (deps.signal?.aborted || !deps.isCurrent()) return false;
   return withMemoryDirLock(
     memDir,
     () => {
       if (deps.signal?.aborted || !deps.isCurrent()) return false;
-      const key = JSON.stringify([
-        "revision",
-        frozen.action,
-        ...[frozen.target.id, ...(frozen.context ? [frozen.context.id] : [])].sort(),
-      ]);
-      const review = readIndex(memDir).index.review;
-      if (review?.resolved?.includes(key)) return "resolved" as const;
-      if (review?.dismissed.some((d) => d.suggestionKey === key)) return "dismissed" as const;
-      return false;
+      return revisionSemanticSuppression(readIndex(memDir).index, {
+        action: frozen.action,
+        ...(reason === undefined ? {} : { reason }),
+        target: { id: frozen.target.id, hash: entryHash(frozen.target.block.body) },
+        ...(frozen.context ? { context: { id: frozen.context.id, hash: entryHash(frozen.context.block.body) } } : {}),
+      });
     },
     { timeoutMs: 0, log: () => {} },
   );
@@ -575,7 +566,12 @@ export async function upsertRevisionSuggestion(
         }
         const index = readIndex(memDir).index;
         const row = revisionSuggestion({ ...input, proposal: proposal! }, deps.now().toISOString());
-        const suppression = suppressedRevision(index, row);
+        const suppression = revisionSemanticSuppression(index, {
+          action: proposal!.action,
+          reason: proposal!.reason,
+          target: { id: input.frozen.target.id, hash: row.a.hash },
+          ...(input.frozen.context && row.b ? { context: { id: input.frozen.context.id, hash: row.b.hash } } : {}),
+        });
         if (suppression) return suppression;
         const existing = index.review?.suggestions.find((s) => suggestionKey(s) === suggestionKey(row));
         // A live newer/different proposal is not replaced by an in-flight result.

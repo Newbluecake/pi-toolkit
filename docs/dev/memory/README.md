@@ -983,3 +983,83 @@ CAS/源恢复竞争与两个确定锁序。successor 在 retire/恢复动作自�
 helper/validator、引入 provider/client/ledger 或修改 fixtures。同步 syscall 不可抢占、恶意同 uid
 跨 syscall 竞争、fsync 非绝对掉电保证及生产 tokenizer/cap/认证/usage/proxy conformance 等既有
 限界仍在；本包不能被解释成 F 已上线或自动治理默认开启。
+
+## #50 F S0：有向身份与共享 suppression 基础包（factory-only）
+
+本节只记录最小共享契约，**不是完整 F/selector 上线**。incremental 默认 false、auto 未接线、
+job cap 仍默认 0；没有生产 adapter/binding、settings、wire、hook、模型路由或日期 producer 变更。
+仅代码/own temporary data 离线验证，不授权真实请求/费用，也不推导 expires。
+
+- D 新 freeze 的 actionId 固定为 SHA256(canonical JSON
+  `["p50-action-v2", batchId, [action, [targetId,targetRev,targetRawDigest], contextTripleOrNull]]`)；
+  `REVISION_ACTION_ID_VERSION` 导出这个固定域，供后包组合固定 selector policy，不能用时间/页号/nonce
+  换 policy 或 job 绕过额度。完整 action set 的 batch 计算与规范排序不变。AB/AC 可相交，反向与
+  context 缺省有独立身份；相同有向 row 不允许靠不同 source 复制成两项。
+- proposal codec 仍核完整 proposalDigest/封闭 schema/64hex ID，但不再从缺少 raw 的 proposal 重算
+  旧 actionId 公式。历史 audit/actionId/proposalDigest/source 引用是 **opaque 原引用**：不迁移路径、
+  不重签、不补 generation spec；读取/恢复不采用新公式。可读不授 LIVE，执行仍须匹配 D 私有冻结输入。
+  source 的 policy 必须严格等于当前 policy；跨代/非法源明确拒绝，不能降为无 source/plain 建议。
+- `jev/index-store.ts::revisionSemanticSuppression(index, subject)` 是原 owner 的唯一只读语义谓词。
+  subject 为 `{action, reason?, target:{id,hash}, context?:{id,hash}}`；返回
+  `false | "dismissed" | "resolved"`。无 fresh reason 时只核 revision-action key 与 kindless legacy；
+  有 reason 时兼容现 legacy keyed/resolved（含 semantic/governance 前缀）、kind/hash/anchor。
+  expired→expired-user、budget→oversize，其余按真实 reason；不能为绕 dismiss 改 reason。
+  比较副本严格规范裸 block ID、`id.md`、`id.md|section|head`，不猜 basename/跨目录；无法规范者
+  保留原严格 hash/anchor/key fallback。head 是生产者未经转义的正文片段，合法换行、`+`、`|`
+  不参与 block 身份校验；不能用单行正则或 `split("+")` 拆正文。持久 suggestionKey/anchor/schema 字节不改，无迁移/新表。
+  revision dismissal 仅对应 action；typed legacy dismissal 仅对应 fresh kind，duplicate 不全禁后续
+  supersedes/retire，kindless 仍保留原跨 kind 语义。普通非 revision 的 mergeReview 分支不变。
+- 现 `revisionSuggestionSuppressed` 在原锁中消费同谓词，新增可选第 4 参数 reason；
+  D `RevisionPrepareDeps.isSuppressed(input, reason)` 传递本次已声明真实 reason，后包 host 必须转发，
+  而非只用 frozen key。现 upsert 锁内、C prepared **之前**重复检查；index merge 的 revision 分支
+  同样消费该谓词。E `checkReview` 的入口及最终 beforeSyscall 都重读 live index 并消费同谓词；
+  E 原 raw JSON vs sanitize 一致性、LIVE/CAS/权限/来源/lease 门完整保留。
+
+### 留后包的固定状态契约（本包未实现）
+
+原 r2 S0 列出的 selector/DTO helper、C source 枚举 optional seam、contracts 扫描字段、wire/host
+job guard、8 目录固定页生命周期、incremental cap 类型、adapter/settings/生产 wire **全部后移**。
+不得提交空壳实现后称其完成。selector 的 bounded pool/menu/reducer 接口沿 r2；状态由同一现有
+activation/client owner 私有持有，不新建费用 ledger。后包必须满足以下两项实施硬条件：
+
+1. **claim 前后分界**：临时 admission 拒绝保留 pending/dormant，不消费页。claim 成功后任何失败
+   （包括零 dispatch、reservation 拒绝）都令该 job 未完成项 blocked-job、不可重入；后续固定页只可
+   下一个自然机会推进。全局预算/128 容量阻断 dormant，不能循环 claim、换菜单或淘汰 guard 腾额。
+2. **空页与 freeze 分型**：全页 suppressed/无动作立即结束，零 freeze/claim/请求，本次不续页。
+   确定性 source/policy/action 拒绝整页 freeze-rejected，合法同行为 blocked、不是已分类；不删失败项
+   重造 job。临时锁等待保留同页 pending；输入变化则旧 snapshot invalidated、重建新输入，二者不能
+   混成确定性拒绝或复活旧 claim。页/job 状态和 LIVE 不持久化成执行凭据。
+
+后包接口/测试交接见 `/tmp/p50-f-s0.json` 与 selector r2 §13 状态表。后包须真实断言上述调用计数、
+状态终态和下一自然机会边界；本包没有伪造 host 测试。现基础证据为
+`tests/memory/govern/revision-s0.test.ts`（真实 D→C→review、相交 merge/retire/source、旧公式 source
+读取/精确 raw restore、跨 policy 拒绝、generation 等待中新 legacy tombstone 阻止 prepared/save、
+E 入口/末 syscall 拦截与不同真实语义正向）以及 `tests/memory/jev/revision-suppression.test.ts`
+（纯比较/不改输入 bytes/key、跨 rev/hash/方向、legacy kindless/keyed/resolved/前缀、严格 anchor）。
+既有 incremental off 请求/index 差分、Jev off/tool golden 门仍须通过，fixtures 不刷新。
+
+限界不变：测试是 synthetic 离线协议，不是 LIVE provider/生产 F 或物理人类确认验收；同步 syscall
+不可抢占、跨 syscall 的恶意同 uid writer 竞争、fsync 非绝对掉电保证。本包不新增定时器、后台追扫、
+确认入口或实际数据治理开关；完整 host 公平遍历、job 栅栏与真实 adapter 能力仍未认证。
+
+### S0 R1：真实 legacy anchor 生产者兼容返工
+
+独验 `r_0Y6D89ZX` 的 R1 反例成立：原比较正则误拒 head 换行，且复合 anchorKey 的
+`split("+")` 误拆 C++ 等正文。前者是相对旧 `isDismissedRelation` 的回归；后者旧 owner 也
+不支持，但本共享契约必须覆盖实际 producer。此前绿测未覆盖该输入，不能作为兼容性证明。
+
+修复只在原 index-store 共享谓词的比较解析：严格解析从字符串起点开始的 block ID/file 前缀，
+要求 legacy anchor 的两个 `|`，其余 section/head 当未转义 payload（保留换行/加号/竖线）。
+复合 pair 在每个可能的 `+` 边界尝试两个完整严格 block 身份，而不是按所有加号切词。原格式
+无法唯一表达正文中形似另一 anchor 的内容；有多个合法解析时，仅保守阻断与其中一个完整候选
+pair 相符的 subject，仍受原 typed kind/reason 门约束，不全局禁其它 pair/action。kindless 保留
+原跨 kind 语义。比较用原 hashKey 的 arity（entryHash 不含 `+`）区分 singleton/pair，
+不会因整个复合串像一个长 head 就禁止该单块所有动作，也不把单块 head 中形似 anchor 的文字
+当成 pair 禁令。未知 key 的原精确 fallback 不变。
+
+新增测试通过实际 `parseBlockFile`、`blockAnchor`、`entryHash` 生成历史 tombstone，验证双方
+rev/hash 已改变后，换行、C++/A+B、歧义候选及跨目录拒绝；真实锁内 upsert 在 C prepared 前
+拦截，generation await 中新增的真实 tombstone 不发布建议。E 入口和 safe-fs 最后
+beforeSyscall 均有真实 producer 反例；测试同时证明 raw review 与 sanitize 完全一致，不能借
+另一个 fail-closed 门假装共享谓词生效。R1 不改 action-v2、既有 key/schema bytes、持久化
+producer、迁移、fixtures 或任何 host/adapter/wire。
