@@ -13,11 +13,16 @@
 // identical output twice cannot distinguish a cache hit from a re-render.
 
 import { MEMORY_TOOL_V2_TEXT, MEMORY_TOOL_V2_TEXT_JEV } from "../../src/memory/tool-surface.js";
-import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type {
+  ExtensionAPI,
+  ExtensionContext,
+  ExtensionToolContext,
+  ToolDefinition,
+} from "@earendil-works/pi-coding-agent";
 import { DEFAULT_SETTINGS, type MemorySettings } from "../../src/config/settings.js";
 import { createPromptSectionHub, type PromptSectionHub } from "../../src/sysprompt/hub.js";
 
@@ -38,6 +43,9 @@ vi.mock("../../src/memory/render.js", async (importOriginal) => {
   };
 });
 
+import { wireMemoryScopes } from "../../src/memory/scopes/wire.js";
+import { createMemoryTool } from "../../src/memory/tool.js";
+import { createMemoryToolV2 } from "../../src/memory/tool-v2.js";
 import { wireMemory } from "../../src/memory/index.js";
 
 interface Host {
@@ -388,4 +396,91 @@ describe("wireMemory — toolSurface routing (todo #22 optimize-plan §14.1 L gr
     const tool = host.tools.get("memory")!;
     expect(tool.description).toBe(MEMORY_TOOL_V2_TEXT.description);
   });
+});
+
+describe.each(["legacy", "v2"] as const)("%s registered child readonly reason", (surface) => {
+  test.each([
+    [true, true],
+    [true, false],
+    [false, true],
+    [false, false],
+  ])(
+    "scopes=%s allow=%s preserves the actual write gate and accurate advice",
+    async (scopesOn, allowWriteInChildSessions) => {
+      const host = fakePi();
+      // A child scopes shell must not need a bound session/Hub owner to enforce project readonly.
+      Object.assign(host.pi, { events: { on: () => () => {}, emit() {} } });
+      const settings: MemorySettings = {
+        ...DEFAULT_SETTINGS.memory,
+        layout: surface === "legacy" ? "legacy" : "tiered",
+        toolSurface: surface,
+        allowWriteInChildSessions,
+        scopes: { session: scopesOn, hub: scopesOn },
+        jev: { ...DEFAULT_SETTINGS.memory.jev, enabled: false },
+        migrate: { ...DEFAULT_SETTINGS.memory.migrate, auto: false },
+      };
+      const scopes = wireMemoryScopes(host.pi, {
+        settings,
+        child: true,
+        domain: "plain",
+        gate: { check: () => ({ ok: true }) },
+        locked: () => false,
+        remote: () => undefined,
+        hubPaths: () => undefined,
+      });
+      expect(!!scopes).toBe(scopesOn);
+      wireMemory(host.pi, { settings, isChildSession: true, sections: host.hub, ...(scopes ? { scopes } : {}) });
+      const tool = host.tools.get("memory")!;
+      const original = (surface === "legacy" ? createMemoryTool : createMemoryToolV2)({
+        settings,
+        isChildSession: true,
+        onAfterWrite() {},
+      });
+      for (const key of ["description", "promptSnippet", "promptGuidelines", "parameters"] as const)
+        expect(tool[key]).toEqual(original[key]);
+      seedMemoryFile("a.md", "---\nsource: agent\n---\ninitial body\n");
+      const slug = cwd.replace(/\/+$/, "").replace(/\//g, "-");
+      const dir = join(memRoot, slug);
+      const before = readFileSync(join(dir, "a.md"), "utf8");
+      const ctx = fakeCtx(cwd).ctx as ExtensionToolContext;
+      const params =
+        surface === "legacy"
+          ? { action: "append", name: "a.md", content: "new body" }
+          : { command: "insert", path: "a.md", insert_line: 4, insert_text: "new body" };
+      if (!scopesOn && allowWriteInChildSessions) {
+        await tool.execute("w", params, undefined, undefined, ctx);
+        expect(readFileSync(join(dir, "a.md"), "utf8")).toContain("new body");
+      } else {
+        const expected = scopesOn
+          ? "child project memory is read-only while memory scopes are enabled; hand off the intended change to the main session for review and writing"
+          : "child sessions are read-only for memory by default; enable memory.allowWriteInChildSessions to allow writes";
+        const error = await tool.execute("w", params, undefined, undefined, ctx).then(
+          () => undefined,
+          (e) => e,
+        );
+        expect(error).toBeInstanceOf(Error);
+        expect(error.message).toBe(expected);
+        if (scopesOn) expect(error.message).not.toContain("enable memory.allowWriteInChildSessions");
+        expect(readFileSync(join(dir, "a.md"), "utf8")).toBe(before);
+      }
+      expect(readdirSync(dir)).toEqual(["a.md"]);
+      const read = await tool.execute(
+        "r",
+        surface === "legacy" ? { action: "list" } : { command: "view" },
+        undefined,
+        undefined,
+        ctx,
+      );
+      expect(
+        read.content
+          .filter((part) => part.type === "text")
+          .map((part) => part.text)
+          .join("\n"),
+      ).toContain("a.md");
+      // The original settings stay intact; only effective tool settings are forced readonly.
+      expect(settings.allowWriteInChildSessions).toBe(allowWriteInChildSessions);
+      scopes?.dispose();
+      await Promise.all(emit(host, "session_shutdown", {}));
+    },
+  );
 });

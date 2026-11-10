@@ -636,7 +636,14 @@ export function createBashJobTool(deps: BashJobToolDeps): ToolDefinition<typeof 
         try {
           outcome = await manager.extend(jobId, Math.round(extendSeconds * 1000), reason || undefined);
         } catch (error) {
-          // R8: a disposed manager throws `stale bash job manager` — surface it.
+          // Match only the manager's exact stale token. This says nothing about
+          // the process or extension effect, and must never retry the mutation.
+          if (error instanceof Error && error.message === "stale bash job manager") {
+            throw new Error(
+              "stale bash job manager; check bash_job status or list in the current session before deciding what to do next. " +
+                "The job's process and the extension effect are not established by this error; do not automatically retry extend or kill.",
+            );
+          }
           throw error instanceof Error ? error : new Error(String(error));
         }
         if (!outcome.ok) throw new Error(extendRefusal(jobId, outcome.reason, before));

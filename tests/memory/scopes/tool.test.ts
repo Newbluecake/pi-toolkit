@@ -535,3 +535,36 @@ it("adds guidance to failures returned by the underlying management port", async
     message: expect.any(String),
   });
 });
+
+it.each([
+  { count: 32, body: "small", expected: "all 32 item slots" },
+  { count: 4, body: "x".repeat(1024), expected: "total body budget" },
+])("tool preserves specific fixed capacity guidance ($count existing items)", async ({ count, body, expected }) => {
+  const f = fixture();
+  for (let n = 0; n < count; n++) {
+    f.tracker.noteInteractive(f.owner());
+    expect(
+      await f.tool.run(`create-${n}`, { storageScope: "hub", op: "create", topic: "limits", text: body }),
+    ).toMatchObject({ ok: true });
+  }
+  const before = f.hub.view();
+  f.tracker.noteInteractive(f.owner());
+  const response = await f.tool.execute(
+    "over",
+    { storageScope: "hub", op: "create", topic: "limits", text: "x" },
+    undefined,
+  );
+  const result = JSON.parse(
+    response.content
+      .filter((c) => c.type === "text")
+      .map((c) => c.text)
+      .join("\n"),
+  );
+  expect(result).toMatchObject({ ok: false, code: "E_FULL" });
+  expect(result.message).toContain("32 items / 4096 UTF-8 body bytes");
+  expect(result.message).toContain(expected);
+  expect(result.message).toContain("no capacity setting");
+  expect(result.message).not.toContain("编号");
+  expect(f.dialogs()).toBe(count + 1);
+  expect(f.hub.view()).toEqual(before);
+});

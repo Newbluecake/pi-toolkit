@@ -1270,3 +1270,61 @@ describe("bash_job — T16 child-session D budgets (§3.6)", () => {
     expect((await pending).details).toMatchObject({ waitedMs: 60_000 });
   });
 });
+
+describe("exact stale manager extension guidance", () => {
+  it("retains the token, directs current-session inspection, and never retries extend/kill", async () => {
+    const old = fakeDeadlineManager();
+    const jobId = "b_STAL0001";
+    const record = makeRecord({ jobId, backgroundedAt: NOW - 30_000, deadline: makeDeadline() });
+    old.put(record);
+    const fresh = fakeDeadlineManager();
+    fresh.put(record);
+    let manager = old;
+    const extend = vi.spyOn(old, "extend").mockImplementation(async () => {
+      manager = fresh;
+      throw new Error("stale bash job manager");
+    });
+    const oldKill = vi.spyOn(old, "kill");
+    const newExtend = vi.spyOn(fresh, "extend");
+    const newKill = vi.spyOn(fresh, "kill");
+    const tool = createBashJobTool({ manager: () => manager, now: () => NOW, deadline: () => POLICY });
+    const error = await tool
+      .execute("tc", { action: "extend", job_id: jobId, extend_s: 60 }, undefined, undefined, {} as never)
+      .then(
+        () => undefined,
+        (e) => e,
+      );
+    expect(error).toBeInstanceOf(Error);
+    expect(error.message).toContain("stale bash job manager;");
+    expect(error.message).toContain("status or list in the current session");
+    expect(error.message).toContain("not established by this error");
+    expect(error.message).toContain("do not automatically retry extend or kill");
+    expect(error.message).not.toMatch(/was stopped|was killed|no effect|nothing changed/);
+    expect(extend).toHaveBeenCalledTimes(1);
+    expect(oldKill).not.toHaveBeenCalled();
+    expect(newExtend).not.toHaveBeenCalled();
+    expect(newKill).not.toHaveBeenCalled();
+    expect(fresh.calls).toEqual([]);
+    const status = await tool.execute("check", { action: "status", job_id: jobId }, undefined, undefined, {} as never);
+    expect(status.details).toMatchObject({ jobId, status: "running" });
+    expect(fresh.calls.some((c) => c.startsWith("load:"))).toBe(true);
+  });
+
+  it.each(["stale bash job manager: extra", "prefix stale bash job manager", "other manager failure"])(
+    "does not rewrite a different Error: %s",
+    async (message) => {
+      const manager = fakeDeadlineManager();
+      const jobId = "b_STAL0002";
+      manager.put(makeRecord({ jobId }));
+      const original = new Error(message);
+      const extend = vi.spyOn(manager, "extend").mockRejectedValue(original);
+      const kill = vi.spyOn(manager, "kill");
+      const tool = createBashJobTool({ manager: () => manager, deadline: () => POLICY });
+      await expect(
+        tool.execute("tc", { action: "extend", job_id: jobId, extend_s: 60 }, undefined, undefined, {} as never),
+      ).rejects.toBe(original);
+      expect(extend).toHaveBeenCalledTimes(1);
+      expect(kill).not.toHaveBeenCalled();
+    },
+  );
+});

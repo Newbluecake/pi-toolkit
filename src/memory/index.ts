@@ -940,6 +940,7 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
   const toolCommon = {
     settings: opts.settings,
     isChildSession: opts.isChildSession,
+    ...(opts.scopes && opts.isChildSession ? { childReadonlyReason: "scopes" as const } : {}),
     onAfterWrite,
     ...(opts.scopes ? { writeGate: gate } : {}),
     ...(opts.sessionSignal === undefined ? {} : { sessionSignal: opts.sessionSignal }),
@@ -965,6 +966,7 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
         : createMemoryTool({
             settings: opts.settings,
             isChildSession: opts.isChildSession,
+            ...(opts.scopes && opts.isChildSession ? { childReadonlyReason: "scopes" as const } : {}),
             onAfterWrite,
             ...(opts.scopes ? { writeGate: gate } : {}),
           });

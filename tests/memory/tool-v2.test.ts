@@ -897,3 +897,35 @@ describe("I12: onAfterWrite", () => {
     expect(onAfterWrite).toHaveBeenCalledTimes(1);
   });
 });
+
+test.each([true, false])(
+  "scopes child reason rejects every v2 mutation even with allow=%s",
+  async (allowWriteInChildSessions) => {
+    const fx = fixture();
+    const onAfterWrite = vi.fn();
+    const tool = createMemoryToolV2({
+      settings: { ...DEFAULT_SETTINGS.memory, allowWriteInChildSessions },
+      isChildSession: true,
+      childReadonlyReason: "scopes",
+      paths: fx.paths,
+      onAfterWrite,
+    });
+    const calls = [
+      { command: "create", path: "a.md", file_text: "x" },
+      { command: "str_replace", path: "a.md", old_str: "x", new_str: "y" },
+      { command: "insert", path: "a.md", insert_line: 0, insert_text: "y" },
+      { command: "delete", path: "a.md" },
+      { command: "rename", old_path: "a.md", new_path: "b.md" },
+      { action: "append", name: "a.md", content: "x" },
+      { action: "write", name: "a.md", content: "x" },
+    ];
+    for (const call of calls) {
+      await expect(exec(tool, call, fakeCtx(fx.cwd))).rejects.toThrow(
+        "child project memory is read-only while memory scopes are enabled; hand off the intended change to the main session for review and writing",
+      );
+    }
+    expect(existsSync(fx.memDir)).toBe(false);
+    expect(onAfterWrite).not.toHaveBeenCalled();
+    expect(textOf(await exec(tool, { command: "view" }, fakeCtx(fx.cwd)))).toContain("No memory");
+  },
+);
