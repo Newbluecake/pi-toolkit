@@ -430,3 +430,20 @@ P4c 续包实际 SDK 反例：`SessionManager.newSession()` 可让同一个实�
 ## `/goal` removal (2026-11-09)
 
 The objective loop, settings, hook teardown and Stack member are removed. Unknown custom session entries (including `subagent:goal`) are ignored: no payload read, migration, status badge or continuation. Regression: `tests/integration/retired-goal-entries.test.ts`. Three off goldens have a user-approved declared removal of the command and two hooks; all other frozen surfaces remain untouched. The nested Agent parameter description removes only the retired verifier example in the same approved declaration. The budget-factor setting description also drops that retired example in the approved single-key pin update; all other setting-spec hashes are unchanged.
+
+## Model progress defaults (#87)
+
+`budget.idleS` and `budget.modelTurnS` now default to 1200s (formerly 240s and 900s,
+respectively). In `model_turn`, the earlier of last event + idle and phase entry + model-turn
+cap wins; a steady stream can therefore still hit the hard cap. Zero disables the corresponding
+constraint. The shared idle setting also governs `retry_backoff` (plus retry delay and slack),
+so that default wait increases too. Tool, total and grace defaults are unchanged; total and other
+phase deadlines can still end a run sooner. The error's observed duration is not itself a configured default.
+
+Settings file seconds and legacy milliseconds are normalized as before; explicit values, including
+600s, override the defaults and are not rewritten to 1200. Admission merges host, type and request
+budgets for each run; the session watchdog separately uses the session settings budget. A run is not
+fully isolated from live settings changes: settings edits mutate that watchdog budget, affecting its
+subsequent ticks, even though the run's merged budget was captured at admission. Source changes require
+loading the new code in a new activation; existing running processes do not automatically acquire it.
+No settings, timers, grace behavior, or frozen fixtures are migrated by this change.

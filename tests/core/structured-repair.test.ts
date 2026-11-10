@@ -99,22 +99,22 @@ describe("core/structured-repair: structuredRepairWindow", () => {
     expect(r).toEqual({ skip: "skipped_budget" });
   });
 
-  it("default budget, model_turn already consumed 850s of 900s → window is exactly the remaining 45s", () => {
+  it("default budget, model_turn already consumed 1150s of 1200s → window is exactly the remaining 45s", () => {
     const now = 1_000_000;
-    const d = diag({ phaseEnteredAt: now - 850_000, lastEventAt: now });
+    const d = diag({ phaseEnteredAt: now - 1_150_000, lastEventAt: now });
     const r = structuredRepairWindow({
       now,
       deadlines: deadlines({ deadlineAt: now + 600_000 }),
       phaseDue: phaseDueAt("model_turn", d, [DEFAULT_BUDGET]),
       limits,
     });
-    // phaseDue = min(now+240s, entered+900s = now+50s) = now+50s; 50s − 5s tail = 45s.
+    // phaseDue = min(now+1200s, entered+1200s = now+50s) = now+50s; 50s − 5s tail = 45s.
     expect(r).toEqual({ dueAt: now + 45_000 });
   });
 
-  it("default budget, model_turn already consumed 890s → only 5s left (< 15s) — skipped_budget", () => {
+  it("default budget, model_turn already consumed 1190s → only 5s left (< 15s) — skipped_budget", () => {
     const now = 1_000_000;
-    const d = diag({ phaseEnteredAt: now - 890_000, lastEventAt: now });
+    const d = diag({ phaseEnteredAt: now - 1_190_000, lastEventAt: now });
     const r = structuredRepairWindow({
       now,
       deadlines: deadlines({ deadlineAt: now + 600_000 }),

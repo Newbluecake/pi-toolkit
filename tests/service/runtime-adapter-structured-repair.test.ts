@@ -511,7 +511,7 @@ describe("runtime-adapter structured repair: sub-phase clocks (review #2)", () =
     }
   }
 
-  it("#10 default modelTurnMs nearly exhausted (850s of 900s): local close at +45s — failed(schema), NOT timed_out, watchdog silent", async () => {
+  it("#10 default modelTurnMs nearly exhausted (1150s of 1200s): local close at +45s — failed(schema), NOT timed_out, watchdog silent", async () => {
     const h = startRun({
       request: { schema: objSchema },
       first: { mode: "hang" },
@@ -519,8 +519,8 @@ describe("runtime-adapter structured repair: sub-phase clocks (review #2)", () =
     });
     await untilPrompts(h, 1);
     const start = h.clock.now();
-    await consumeModelTurn(h, 850_000);
-    expect(h.clock.now()).toBe(start + 850_000);
+    await consumeModelTurn(h, 1_150_000);
+    expect(h.clock.now()).toBe(start + 1_150_000);
     h.releasePending();
     await untilPrompts(h, 2); // planning ran, repair prompt pending
     h.clock.advance(45_000); // exactly the 45s window: local close fires
@@ -533,15 +533,15 @@ describe("runtime-adapter structured repair: sub-phase clocks (review #2)", () =
     expect(h.deadlineFired()).toBe(0);
   });
 
-  it("#11 not enough left (890s consumed): skipped_budget suffix, one prompt", async () => {
+  it("#11 not enough left (1190s consumed): skipped_budget suffix, one prompt", async () => {
     const h = startRun({
       request: { schema: objSchema },
       first: { mode: "hang" },
     });
     await untilPrompts(h, 1);
     const start = h.clock.now();
-    await consumeModelTurn(h, 890_000);
-    expect(h.clock.now()).toBe(start + 890_000);
+    await consumeModelTurn(h, 1_190_000);
+    expect(h.clock.now()).toBe(start + 1_190_000);
     h.releasePending();
     const outcome = await driveToSettle(h, 500, 30_000);
     expect(outcome.status).toBe("failed");

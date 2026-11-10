@@ -81,6 +81,14 @@ describe("settings file time-unit migration", () => {
     expect(warnings()).toContain("memory.incremental.cooldownMs and memory.incremental.cooldownSec are both set");
   });
 
+  it("preserves explicit progress overrides in seconds without rewriting the file", () => {
+    const raw = { budget: { idleS: 600, modelTurnS: 1800 } };
+    write(raw);
+    expect(loadSettingsFromFile(path).budget).toMatchObject({ idleMs: 600_000, modelTurnMs: 1_800_000 });
+    expect(readBack()).toEqual(raw);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
   it("reads the new second-valued keys and converts them to internal milliseconds", () => {
     write({
       budget: { idleS: 600, totalS: 1800, startupRetries: 4 },

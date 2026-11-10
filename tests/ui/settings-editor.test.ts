@@ -117,8 +117,8 @@ describe("SettingsEditorModel navigation", () => {
   it("lists every settable key in seconds, with second-valued defaults", () => {
     const rows = new SettingsEditorModel(store()).snapshot().rows;
     const byKey = new Map(rows.map((r) => [r.key, r]));
-    expect(byKey.get("budget.idleS")?.value).toBe("240");
-    expect(byKey.get("budget.idleS")?.def).toBe("240");
+    expect(byKey.get("budget.idleS")?.value).toBe("1200");
+    expect(byKey.get("budget.idleS")?.def).toBe("1200");
     expect(byKey.has("budget.idleMs")).toBe(false);
     expect(byKey.get("budget.startupRetries")?.value).toBe("2");
     expect(byKey.has("foregroundAutoBackgroundS")).toBe(false); // removed with the foreground Agent mode
@@ -183,7 +183,7 @@ describe("SettingsEditorModel editing (seconds in, milliseconds live, seconds pe
     focus(model, "budget.idleS");
     model.apply({ type: "activate" });
     expect(model.snapshot().mode).toBe("edit");
-    expect(model.snapshot().draft).toBe("240"); // prefilled with the current seconds
+    expect(model.snapshot().draft).toBe("1200"); // prefilled with the current seconds
     model.apply({ type: "clear" });
     type(model, "600");
     expect(model.snapshot().error).toBeUndefined();
@@ -191,7 +191,7 @@ describe("SettingsEditorModel editing (seconds in, milliseconds live, seconds pe
     expect(model.snapshot().mode).toBe("browse");
     expect(s.current.budget.idleMs).toBe(600_000);
     expect(s.persisted).toEqual([["budget.idleS", 600]]);
-    expect(model.snapshot().status).toContain("budget.idleS: 240s → 600s");
+    expect(model.snapshot().status).toContain("budget.idleS: 1200s → 600s");
     expect(model.snapshot().status).toContain("applies to new runs immediately");
   });
 
@@ -296,7 +296,7 @@ describe("SettingsEditorModel editing (seconds in, milliseconds live, seconds pe
     model.apply({ type: "reset" });
     expect(s.current.budget.idleMs).toBe(DEFAULT_BUDGET.idleMs);
     expect(s.persisted).toEqual([["budget.idleS", undefined]]);
-    expect(model.snapshot().status).toContain("budget.idleS reset to default 240s");
+    expect(model.snapshot().status).toContain("budget.idleS reset to default 1200s");
     expect(model.snapshot().rows[model.snapshot().index]?.overridden).toBe(false);
   });
 
@@ -370,7 +370,7 @@ describe("renderSettingsEditor", () => {
     const text = renderSettingsEditor(model.snapshot(), { width: 100, maxVisible: 6 }).join("\n");
     expect(text).toContain("Extension settings — /tmp/pi-subagent.json");
     expect(text).toContain("Durations in seconds");
-    expect(text).toMatch(/›\s+budget\.idleS\s+600s\s+\(default 240s\)/);
+    expect(text).toMatch(/›\s+budget\.idleS\s+600s\s+\(default 1200s\)/);
     expect(text).toContain("↑↓ move · enter edit/toggle · space toggle · r reset · esc close");
     expect(text).toContain(`(${model.snapshot().index + 1}/${model.snapshot().rows.length})`);
   });
@@ -418,7 +418,7 @@ describe("renderSettingsEditor", () => {
     // 窗口以焦点行为中心；budget 块随新键增加而变长（含 minTotalS），窗口必须足够大才能同时看到 idleS。
     const text = renderSettingsEditor(model.snapshot(), { width: 120, maxVisible: 34 }).join("\n");
     expect(text).toContain("Max silence between session events");
-    expect(text).toMatch(/budget\.idleS\s+240s/);
+    expect(text).toMatch(/budget\.idleS\s+1200s/);
     // non-time values carry no unit
     expect(text).toMatch(/concurrencyLimit\s+6\s/);
     expect(text).not.toContain("6s ");
@@ -436,7 +436,7 @@ describe("renderSettingsEditor", () => {
     const rows = new SettingsEditorModel(store()).snapshot().rows;
     const byKey = new Map(rows.map((r) => [r.key, r]));
     expect(describeRow(byKey.get("budget.idleS")!)).toBe(
-      "seconds >= 0 · default 240 · applies to new runs immediately",
+      "seconds >= 0 · default 1200 · applies to new runs immediately",
     );
     expect(describeRow(byKey.get("coalesceWindowS")!)).toBe(
       "seconds 0..5 · default 0 · 0 disables coalescing; max 5s · takes effect after /reload",
@@ -645,7 +645,7 @@ describe("setting-specs table", () => {
     expect(parseSettingValue(spec, "600")).toEqual({ ok: true, stored: 600, live: 600_000 });
     expect(parseSettingValue(spec, " 600 ")).toEqual({ ok: true, stored: 600, live: 600_000 });
     expect(parseSettingValue(spec, "")).toEqual({ ok: false, error: "expected an integer >= 0 seconds" });
-    expect(defaultOf(spec)).toBe(240);
+    expect(defaultOf(spec)).toBe(1200);
     const current = JSON.parse(JSON.stringify(DEFAULT_SETTINGS)) as AgentSettings;
     current.budget.idleMs = 90_000;
     expect(currentOf(current, spec)).toBe(90);

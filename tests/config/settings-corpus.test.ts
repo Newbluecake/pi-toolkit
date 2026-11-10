@@ -291,10 +291,17 @@ function withoutFast(settings: typeof DEFAULT_SETTINGS, input?: unknown) {
   const { minTotalMs: _minTotal, ...oldBudget } = settings.budget;
   const normalizedInput =
     input !== null && typeof input === "object"
-      ? normalizeTimeUnits(input as Record<string, unknown>, ["budget.totalGraceMs"])
+      ? normalizeTimeUnits(input as Record<string, unknown>, [
+          "budget.totalGraceMs",
+          "budget.idleMs",
+          "budget.modelTurnMs",
+        ])
       : {};
   // Preserve explicit historical overrides (including 0); only the fallback default was 90s.
   if (getPath(normalizedInput, "budget.totalGraceMs") === undefined) oldBudget.totalGraceMs = 90_000;
+  // #87 changes only fallback defaults; keep every valid explicit historical override.
+  if (getPath(normalizedInput, "budget.idleMs") === undefined) oldBudget.idleMs = 240_000;
+  if (getPath(normalizedInput, "budget.modelTurnMs") === undefined) oldBudget.modelTurnMs = 900_000;
   // Count-only archive adds exactly one parsed leaf; dedicated settings tests pin
   // legacy alias and explicit-boolean precedence for the new behavior.
   expect(typeof settings.webHub.archiveEnabled).toBe("boolean");

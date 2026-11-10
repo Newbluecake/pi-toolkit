@@ -495,7 +495,7 @@ describe("/agent settings subcommand", () => {
     const out = run(d, "settings");
     expect(out).toContain("budget.idleS");
     expect(out).not.toContain("budget.idleMs");
-    expect(out).toContain("600 (default 240)");
+    expect(out).toContain("600 (default 1200)");
     expect(out).toContain("concurrencyLimit");
     expect(out).toContain("worktree.enabled");
     expect(out).toContain("workflow.runawayPolicy");
@@ -531,7 +531,7 @@ describe("/agent settings subcommand", () => {
     const out = run(d, "settings set budget.idleS 600");
     expect(current.budget.idleMs).toBe(600_000);
     expect(persisted).toEqual([["budget.idleS", 600]]);
-    expect(out).toContain("240 → 600");
+    expect(out).toContain("1200 → 600");
     expect(out).toContain("applies to new runs immediately");
   });
 
@@ -572,7 +572,7 @@ describe("/agent settings subcommand", () => {
     const out = run(d, "settings reset budget.idleS");
     expect(current.budget.idleMs).toBe(DEFAULT_BUDGET.idleMs);
     expect(persisted).toEqual([["budget.idleS", undefined]]);
-    expect(out).toContain("reset to default 240");
+    expect(out).toContain("reset to default 1200");
   });
 
   it("rejects unknown keys and bad values without touching state", () => {
@@ -707,7 +707,7 @@ describe("/agent settings subcommand", () => {
     const items = cmd.getArgumentCompletions?.("settings set budget.idle", 0) as
       Array<{ value: string; label: string; description: string }> | undefined;
     expect(items?.map((i) => i.label)).toEqual(["budget.idleS"]);
-    expect(items?.[0]?.description).toBe("default 240");
+    expect(items?.[0]?.description).toBe("default 1200");
     // applyCompletion replaces the whole argument prefix with value: the value must carry
     // the already-typed tokens so applying it yields the full `/agent settings set …` text.
     expect(items?.[0]?.value).toBe("settings set budget.idleS");
