@@ -1,3 +1,4 @@
+import { NoActiveSessionError } from "../holder.js";
 import { Type, type Static } from "@sinclair/typebox";
 import { Text } from "@earendil-works/pi-tui";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
@@ -171,10 +172,7 @@ function workflowRejectionMessage(
     case "unknown_workflow":
       return `unknown workflow: ${workflowId}. Background workflows are tracked per session; list them with /agent status.`;
     case "unsupported":
-      return (
-        `this build cannot extend ${name}${result.detail ? ` (${result.detail})` : ""}. Let it finish within its ` +
-        `current budget, ${workflowRestartHint}.`
-      );
+      return `this build cannot extend ${name}. Let it finish within its ` + `current budget, ${workflowRestartHint}.`;
     case "already_terminal":
       return (
         `${name} already finished${view && view.status !== "running" ? ` (${view.status})` : " (its terminal decision is made)"}. ` +
@@ -224,6 +222,18 @@ function workflowRejectionMessage(
   }
 }
 
+class ExtendToolError extends Error {}
+function extendFailure(reason: string, text: string, effect: "none" | "unknown" | "deadline_extended" = "none"): Error {
+  return new ExtendToolError(
+    `${text} [code=extend_${reason} reason=${reason} retryable=false effect=${effect}]. ` +
+      (effect === "unknown"
+        ? "The deadline may have changed. Verify its current value before further action; do not automatically repeat the extension."
+        : effect === "deadline_extended"
+          ? "The extension was applied, but its display/readback failed. Read the current deadline; do not automatically repeat the extension."
+          : ""),
+  );
+}
+
 export function createExtendTimeoutTool(deps: {
   query: Pick<QueryService, "extendTimeout" | "get">;
   resolveRun?: (handle: string) => ResolveRunResult;
@@ -255,78 +265,131 @@ export function createExtendTimeoutTool(deps: {
       return text;
     },
     async execute(_toolCallId, params) {
-      const target = resolveToolTarget(params.run_id, deps.resolveRun, deps.workflows);
-      if (target.kind === "workflow") {
-        const workflowId = target.workflowId;
-        // Synchronous by design, like the run path: check → extend → re-arm
-        // WT8 happen inside the orchestrator with no await (D-9 analogue).
-        const result: WorkflowExtendOutcome = deps.workflows?.extend
-          ? deps.workflows.extend(workflowId, params.extend_s * 1000, {
-              ...(params.reason === undefined ? {} : { reason: params.reason }),
-            })
-          : { ok: false, reason: "unsupported" };
-        const at = now();
-        if (!result.ok)
-          throw new Error(workflowRejectionMessage(workflowId, result, deps.workflows?.get(workflowId), at));
+      let invoked = false;
+      let applied = false;
+      try {
+        let target;
+        try {
+          target = resolveToolTarget(params.run_id, deps.resolveRun, deps.workflows);
+        } catch (error) {
+          if (error instanceof NoActiveSessionError) throw error;
+          throw extendFailure("target_resolution", "Target resolution failed (unknown or ambiguous handle).");
+        }
+        if (target.kind === "workflow") {
+          const workflowId = target.workflowId;
+          // Synchronous by design, like the run path: check → extend → re-arm
+          // WT8 happen inside the orchestrator with no await (D-9 analogue).
+          invoked = deps.workflows?.extend !== undefined;
+          const result: WorkflowExtendOutcome = deps.workflows?.extend
+            ? deps.workflows.extend(workflowId, params.extend_s * 1000, {
+                ...(params.reason === undefined ? {} : { reason: params.reason }),
+              })
+            : { ok: false, reason: "unsupported" };
+          applied = result.ok;
+          // Refusals are authoritative too: a broken presentation clock must not replace them.
+          let at: Millis;
+          try {
+            at = now();
+          } catch (error) {
+            if (result.ok) throw error;
+            throw extendFailure(result.reason, "Deadline extension was refused; its display clock is unavailable.");
+          }
+          if (!result.ok) {
+            let view;
+            try {
+              view = deps.workflows?.get(workflowId);
+            } catch {
+              /* preserve the authoritative refusal */
+            }
+            throw extendFailure(result.reason, workflowRejectionMessage(workflowId, result, view, at));
+          }
+          const total = result.extensionsUsed + result.extensionsRemaining;
+          let text =
+            `Extended workflow ${workflowId} by ${formatDuration(result.grantedMs)} ` +
+            `(requested ${formatDuration(result.requestedMs)}${result.clamped ? ", clamped by its hard ceiling" : ""}). ` +
+            `New deadline in ${formatDuration(Math.max(0, result.deadlineAt - at))}. ` +
+            `${result.extensionsRemaining} of ${total} extensions left; ` +
+            `at most ${formatDuration(Math.max(0, result.hardDeadlineAt - result.deadlineAt))} more available.`;
+          if (result.rescuedFromGrace)
+            text += " The workflow was inside its timeout grace window and is now back to normal execution.";
+          if (result.clamped)
+            text +=
+              " The request was clamped (per-call cap budget.extendStepS and the workflow's hard ceiling); ask again if you still need more time.";
+          return { content: [{ type: "text" as const, text }], details: result };
+        }
+        const runId = target.runId;
+        // workflow-agent-queue §0′ #1: a workflow's children are pinned to the
+        // workflow's hard ceiling (explicit budget ⇒ never extendable anyway);
+        // point the model at the owner, which is what actually moves the kill point.
+        const parent = deps.query.get(runId)?.parentRunId;
+        if (parent !== undefined && parent.startsWith(WORKFLOW_ID_PREFIX)) {
+          throw extendFailure(
+            "workflow_child",
+            `run ${short(runId)} is a child of workflow ${parent}; a workflow's children run under the workflow's own ` +
+              `deadline and cannot be extended one by one. Extend the workflow instead: ` +
+              `extend_subagent_timeout(run_id: "${parent}", extend_s: ${params.extend_s}).`,
+          );
+        }
+        // Synchronous by design (D-9 / arch §4.6): check → dispatch → re-read
+        // happen with no await inside the runner, closing the TOCTOU window
+        // against the watchdog tick.
+        invoked = true;
+        const result = deps.query.extendTimeout(runId, params.extend_s * 1000, {
+          source: "tool",
+          ...(params.reason === undefined ? {} : { reason: params.reason }),
+        });
+        applied = result.ok;
+        let at: Millis;
+        try {
+          at = now();
+        } catch (error) {
+          if (result.ok) throw error;
+          throw extendFailure(result.reason, "Deadline extension was refused; its display clock is unavailable.");
+        }
+        if (!result.ok) {
+          let snapshot;
+          try {
+            snapshot = deps.query.get(runId);
+          } catch {
+            /* preserve the authoritative refusal */
+          }
+          throw extendFailure(result.reason, rejectionMessage(result, snapshot, at));
+        }
         const total = result.extensionsUsed + result.extensionsRemaining;
         let text =
-          `Extended workflow ${workflowId} by ${formatDuration(result.grantedMs)} ` +
+          `Extended ${shortRef(runId, labelOfRun(deps.query, runId))} by ${formatDuration(result.grantedMs)} ` +
           `(requested ${formatDuration(result.requestedMs)}${result.clamped ? ", clamped by its hard ceiling" : ""}). ` +
           `New deadline in ${formatDuration(Math.max(0, result.deadlineAt - at))}. ` +
           `${result.extensionsRemaining} of ${total} extensions left; ` +
           `at most ${formatDuration(Math.max(0, result.hardDeadlineAt - result.deadlineAt))} more available.`;
         if (result.rescuedFromGrace)
-          text += " The workflow was inside its timeout grace window and is now back to normal execution.";
+          text += " The run was inside its timeout grace window and is now back to normal execution.";
         if (result.clamped)
           text +=
-            " The request was clamped (per-call cap budget.extendStepS and the workflow's hard ceiling); ask again if you still need more time.";
-        return { content: [{ type: "text" as const, text }], details: result };
-      }
-      const runId = target.runId;
-      // workflow-agent-queue §0′ #1: a workflow's children are pinned to the
-      // workflow's hard ceiling (explicit budget ⇒ never extendable anyway);
-      // point the model at the owner, which is what actually moves the kill point.
-      const parent = deps.query.get(runId)?.parentRunId;
-      if (parent !== undefined && parent.startsWith(WORKFLOW_ID_PREFIX)) {
-        throw new Error(
-          `run ${short(runId)} is a child of workflow ${parent}; a workflow's children run under the workflow's own ` +
-            `deadline and cannot be extended one by one. Extend the workflow instead: ` +
-            `extend_subagent_timeout(run_id: "${parent}", extend_s: ${params.extend_s}).`,
+            " The request was clamped (per-call cap budget.extendStepS and the run's hard ceiling); ask again if you still need more time.";
+        // Defensive: extendability rejects queue_wait with not_started, so this
+        // is unreachable through the real runner — keep the truthful note for
+        // any custom Runner implementation that lets a queued run through.
+        if (deps.query.get(runId)?.status === "queued")
+          text += " Note: this run has not started yet; its queue-wait timeout is unaffected.";
+        return {
+          content: [{ type: "text" as const, text }],
+          details:
+            labelOfRun(deps.query, runId) === undefined
+              ? result
+              : { ...result, ...runRefDetails(runId, labelOfRun(deps.query, runId)) },
+        };
+      } catch (error) {
+        if (error instanceof ExtendToolError) throw error;
+        if (error instanceof NoActiveSessionError && !applied) throw error;
+        throw extendFailure(
+          applied ? "read_failed" : invoked ? "unknown" : "read_failed",
+          applied
+            ? "The deadline was extended, but its readback failed."
+            : "Deadline extension failed; the current deadline is unverified.",
+          applied ? "deadline_extended" : invoked ? "unknown" : "none",
         );
       }
-      // Synchronous by design (D-9 / arch §4.6): check → dispatch → re-read
-      // happen with no await inside the runner, closing the TOCTOU window
-      // against the watchdog tick.
-      const result = deps.query.extendTimeout(runId, params.extend_s * 1000, {
-        source: "tool",
-        ...(params.reason === undefined ? {} : { reason: params.reason }),
-      });
-      const at = now();
-      if (!result.ok) throw new Error(rejectionMessage(result, deps.query.get(runId), at));
-      const total = result.extensionsUsed + result.extensionsRemaining;
-      let text =
-        `Extended ${shortRef(runId, labelOfRun(deps.query, runId))} by ${formatDuration(result.grantedMs)} ` +
-        `(requested ${formatDuration(result.requestedMs)}${result.clamped ? ", clamped by its hard ceiling" : ""}). ` +
-        `New deadline in ${formatDuration(Math.max(0, result.deadlineAt - at))}. ` +
-        `${result.extensionsRemaining} of ${total} extensions left; ` +
-        `at most ${formatDuration(Math.max(0, result.hardDeadlineAt - result.deadlineAt))} more available.`;
-      if (result.rescuedFromGrace)
-        text += " The run was inside its timeout grace window and is now back to normal execution.";
-      if (result.clamped)
-        text +=
-          " The request was clamped (per-call cap budget.extendStepS and the run's hard ceiling); ask again if you still need more time.";
-      // Defensive: extendability rejects queue_wait with not_started, so this
-      // is unreachable through the real runner — keep the truthful note for
-      // any custom Runner implementation that lets a queued run through.
-      if (deps.query.get(runId)?.status === "queued")
-        text += " Note: this run has not started yet; its queue-wait timeout is unaffected.";
-      return {
-        content: [{ type: "text" as const, text }],
-        details:
-          labelOfRun(deps.query, runId) === undefined
-            ? result
-            : { ...result, ...runRefDetails(runId, labelOfRun(deps.query, runId)) },
-      };
     },
   } satisfies ToolDefinition<typeof ExtendTimeoutParams>;
 }

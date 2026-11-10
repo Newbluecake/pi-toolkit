@@ -41,7 +41,12 @@ function make(status: RunSnapshot["status"], abort?: Runner["abort"], get = () =
 
 describe("QueryService.stop", () => {
   it("distinguishes unknown, terminal, missing abort, and success", async () => {
-    expect(await make("running").stop("run-1")).toEqual({ ok: false, reason: "stop_failed", escalatedTo: "L4" });
+    expect(await make("running").stop("run-1")).toEqual({
+      ok: false,
+      reason: "stop_failed",
+      escalatedTo: "L4",
+      effect: "none",
+    });
     expect(
       await createQueryService({
         registry: { get: () => undefined, list: () => [] },

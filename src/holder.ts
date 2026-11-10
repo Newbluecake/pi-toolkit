@@ -6,6 +6,7 @@ import type { BashJobManager } from "./bash/manager.js";
 import type { WorkflowToolDeps } from "./tools/workflow-tool.js";
 import type { WorkflowQueryPort } from "./tools/workflow-target.js";
 import type { Stack } from "./stack.js";
+import type { ResumeCandidate } from "./service/resolve-target.js";
 
 /**
  * Holder-routed forwarders (moved out of index.ts, #56 batch 2 step 5).
@@ -16,8 +17,17 @@ import type { Stack } from "./stack.js";
  */
 export type StackHolder = { current?: Stack };
 
+/** A lifecycle refusal, not a transient transport error or permission to replay a call. */
+export class NoActiveSessionError extends Error {
+  constructor() {
+    super(
+      "pi-toolkit: no active session yet [code=no_active_session reason=no_active_session retryable=false effect=none]. " +
+        "Wait for a real session_start before using session tools; if this session is stopping or closed, stop issuing calls to it. Do not retry in a loop.",
+    );
+  }
+}
 export function requireStack(holder: StackHolder): Stack {
-  if (!holder.current) throw new Error("pi-toolkit: no active session yet");
+  if (!holder.current) throw new NoActiveSessionError();
   return holder.current;
 }
 export function forwardSpawn(holder: StackHolder): SpawnService {
@@ -129,4 +139,24 @@ export function forwardNotifier(holder: StackHolder): Notifier {
       return requireStack(holder).notifier.ackedSuppressions;
     },
   };
+}
+
+/** Resolver error text is an untrusted port field. Project only explicit candidate data. */
+export function safeRunCandidates(candidates: readonly ResumeCandidate[]): string {
+  const rows = candidates.slice(0, 10).map((candidate) => {
+    const line = (text: string) =>
+      text
+        .replace(/[\u0000-\u001f\u007f]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 80);
+    const status = ["queued", "running", "completed", "failed", "timed_out", "aborted", "terminal"].includes(
+      candidate.status,
+    )
+      ? candidate.status
+      : "unknown";
+    const age = Number.isFinite(candidate.ageMinutes) ? Math.max(0, Math.floor(candidate.ageMinutes)) : "unknown";
+    return `${line(candidate.label)} → ${line(candidate.runId)} (${status}, ${age}m ago)`;
+  });
+  return `Target resolution failed (unknown or ambiguous handle). Candidates: [${rows.join(", ") || "none"}]`;
 }

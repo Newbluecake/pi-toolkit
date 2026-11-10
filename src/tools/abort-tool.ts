@@ -1,3 +1,4 @@
+import { NoActiveSessionError } from "../holder.js";
 import { Type, type Static } from "@sinclair/typebox";
 import { Text } from "@earendil-works/pi-tui";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
@@ -44,6 +45,16 @@ function workflowStopText(view: BackgroundWorkflowView, settled: boolean): strin
   );
 }
 
+class AbortToolError extends Error {}
+function abortFailure(reason: string, text: string, effect: "none" | "unknown" = "none"): Error {
+  return new AbortToolError(
+    `${text} [code=abort_${reason} reason=${reason} retryable=false effect=${effect}]. ` +
+      (effect === "unknown"
+        ? "Stopping is unverified. Read the run's terminal state before further action; do not automatically send another abort. Escalation fallback values do not prove a completed kill."
+        : ""),
+  );
+}
+
 export function createAbortTool(deps: {
   query: QueryService;
   resolveRun?: (handle: string) => ResolveRunResult;
@@ -72,69 +83,115 @@ export function createAbortTool(deps: {
       return text;
     },
     async execute(_toolCallId, params) {
-      const target = resolveToolTarget(params.run_id, deps.resolveRun, deps.workflows);
-      if (target.kind === "workflow") {
-        const workflowId = target.workflowId;
-        const stopped = await deps.workflows!.stop(workflowId, "user_stop");
-        const reason = previewReason(params.reason);
-        if (stopped.ok) {
-          return {
-            content: [{ type: "text" as const, text: workflowStopText(stopped.view, stopped.settled) }],
-            details: {
-              workflowId,
-              ok: true,
-              settled: stopped.settled,
-              status: stopped.view.status,
-              ...(reason ? { reason } : {}),
-            },
-          };
+      let invoked = false;
+      let stoppingRun: string | undefined;
+      try {
+        let target;
+        try {
+          target = resolveToolTarget(params.run_id, deps.resolveRun, deps.workflows);
+        } catch (error) {
+          if (error instanceof NoActiveSessionError) throw error;
+          throw abortFailure("target_resolution", "Target resolution failed (unknown or ambiguous handle).");
         }
-        if (stopped.reason === "already_terminal") {
+        if (target.kind === "workflow") {
+          const workflowId = target.workflowId;
+          invoked = true;
+          const stopped = await deps.workflows!.stop(workflowId, "user_stop");
+          const reason = previewReason(params.reason);
+          if (stopped.ok) {
+            return {
+              content: [{ type: "text" as const, text: workflowStopText(stopped.view, stopped.settled) }],
+              details: {
+                workflowId,
+                ok: true,
+                settled: stopped.settled,
+                status: stopped.view.status,
+                ...(reason ? { reason } : {}),
+              },
+            };
+          }
+          if (stopped.reason === "already_terminal") {
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: `workflow ${workflowId} has already reached a terminal state ("${stopped.view.status}"); nothing to abort`,
+                },
+              ],
+              details: { workflowId, alreadyTerminal: true, status: stopped.view.status },
+            };
+          }
+          throw abortFailure("unknown_workflow", `unknown workflow id: ${params.run_id}`);
+        }
+        const runId = target.runId;
+        const label = labelOfRun(deps.query, runId);
+        const who = runRefText(runId, label);
+        stoppingRun = runId;
+        invoked = true;
+        const result = await deps.query.stop(runId, "user_stop");
+        if (result.ok) {
           return {
             content: [
               {
                 type: "text" as const,
-                text: `workflow ${workflowId} has already reached a terminal state ("${stopped.view.status}"); nothing to abort`,
+                text: `Abort requested for ${who} (escalation: ${result.escalatedTo}). Use ${RESULT_TOOL_NAME}(run_id: "${runId}", wait: true) to wait for its terminal state.`,
               },
             ],
-            details: { workflowId, alreadyTerminal: true, status: stopped.view.status },
+            details: {
+              ...runRefDetails(runId, label),
+              ok: true,
+              escalatedTo: result.escalatedTo,
+              ...(previewReason(params.reason) ? { reason: previewReason(params.reason) } : {}),
+            },
           };
         }
-        throw new Error(`unknown workflow id: ${params.run_id}`);
+        if (result.reason === "already_terminal") {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `${who} has already reached a terminal state ("${result.status}"); nothing to abort`,
+              },
+            ],
+            details: { ...runRefDetails(runId, label), alreadyTerminal: true, status: result.status },
+          };
+        }
+        if (result.reason === "unknown_run") throw abortFailure("unknown_run", `unknown run_id: ${params.run_id}`);
+        throw abortFailure(
+          "stop_failed",
+          `failed to abort ${who}; no terminal state was confirmed`,
+          result.effect ?? "unknown",
+        );
+      } catch (error) {
+        if (error instanceof AbortToolError || error instanceof NoActiveSessionError) throw error;
+        if (stoppingRun !== undefined) {
+          try {
+            const after = deps.query.get(stoppingRun);
+            if (after && ["completed", "failed", "timed_out", "aborted"].includes(after.status)) {
+              return {
+                content: [
+                  {
+                    type: "text" as const,
+                    text: `run ${stoppingRun} has already reached a terminal state ("${after.status}"); no further abort was sent`,
+                  },
+                ],
+                details: {
+                  ...runRefDetails(stoppingRun, labelOfRun(deps.query, stoppingRun)),
+                  alreadyTerminal: true,
+                  status: after.status,
+                },
+              };
+            }
+          } catch {
+            /* Unreadable is not terminal evidence. */
+          }
+        }
+        throw abortFailure(
+          invoked ? "stop_failed" : "read_failed",
+          "Abort failed; no stop confirmation is available.",
+          invoked ? "unknown" : "none",
+        );
       }
-      const runId = target.runId;
-      const label = labelOfRun(deps.query, runId);
-      const who = runRefText(runId, label);
-      const result = await deps.query.stop(runId, "user_stop");
-      if (result.ok) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Abort requested for ${who} (escalation: ${result.escalatedTo}). Use ${RESULT_TOOL_NAME}(run_id: "${runId}", wait: true) to wait for its terminal state.`,
-            },
-          ],
-          details: {
-            ...runRefDetails(runId, label),
-            ok: true,
-            escalatedTo: result.escalatedTo,
-            ...(previewReason(params.reason) ? { reason: previewReason(params.reason) } : {}),
-          },
-        };
-      }
-      if (result.reason === "already_terminal") {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `${who} has already reached a terminal state ("${result.status}"); nothing to abort`,
-            },
-          ],
-          details: { ...runRefDetails(runId, label), alreadyTerminal: true, status: result.status },
-        };
-      }
-      if (result.reason === "unknown_run") throw new Error(`unknown run_id: ${params.run_id}`);
-      throw new Error(`failed to abort ${who} (escalation: ${result.escalatedTo})`);
     },
   } satisfies ToolDefinition<typeof AbortToolParams>;
 }

@@ -1,3 +1,4 @@
+import { NoActiveSessionError, safeRunCandidates } from "../holder.js";
 import { Type, type Static } from "@sinclair/typebox";
 import { Text } from "@earendil-works/pi-tui";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
@@ -59,6 +60,16 @@ export const SteerToolParams = Type.Object({
 });
 export type SteerToolParams = Static<typeof SteerToolParams>;
 
+class SteerToolError extends Error {}
+function steerFailure(reason: string, text: string, effect: "none" | "unknown" = "none"): Error {
+  return new SteerToolError(
+    `${text} [code=steer_${reason} reason=${reason} retryable=false effect=${effect}]. ` +
+      (effect === "unknown"
+        ? "Delivery may have taken effect; check the run before further action. Do not automatically resend."
+        : ""),
+  );
+}
+
 export function createSteerTool(deps: {
   query: QueryService;
   resolveRun?: (handle: string) => ResolveRunResult;
@@ -91,69 +102,89 @@ export function createSteerTool(deps: {
       return text;
     },
     async execute(_toolCallId, params) {
-      const resolved = deps.resolveRun?.(params.run_id);
-      if (resolved && !resolved.ok) throw new Error(resolved.error);
-      const runId = resolved?.ok ? resolved.runId : params.run_id;
-      const reply = params.reply ?? "none";
-      // reply≠none wraps the text so the child answers via message_agent
-      // (kind "report" ⇒ the orchestrator's context, see frameSteerReply).
-      // Degrade to verbatim — mirroring the @mention fabric-off path — when
-      // the child cannot have the tool: fabric disabled, or an external
-      // (droid) run which never gets message_agent injected
-      // (runtime-adapter's `deps.fabric && !readonlyDomain && !isExternal`).
-      let framed = false;
-      let degradedReason: string | undefined;
-      let text = params.text;
-      if (reply !== "none") {
-        if (!deps.fabricEnabled?.()) {
-          degradedReason = "reply 不可用：fabric 未启用";
-        } else if (deps.query.get(runId)?.diag.external) {
-          degradedReason = "reply 不可用：目标为外部 agent run（无 message_agent）";
-        } else if (deps.query.get(runId)?.parentRunId !== undefined) {
-          // A nested run (grandchild of the main session) replying `to: "root"`
-          // is an "ancestor" relation, which the default can_message ["parent"]
-          // rejects at fabric admission — the reply would be dropped.
-          degradedReason = "reply 不可用：目标不是主会话的直接子 agent（回复会被消息路由拒绝）";
-        } else {
-          framed = true;
-          text = frameSteerReply(params.text, reply);
+      let invoked = false;
+      try {
+        const resolved = deps.resolveRun?.(params.run_id);
+        if (resolved && !resolved.ok) throw steerFailure("target_resolution", safeRunCandidates(resolved.candidates));
+        const runId = resolved?.ok ? resolved.runId : params.run_id;
+        const reply = params.reply ?? "none";
+        // reply≠none wraps the text so the child answers via message_agent
+        // (kind "report" ⇒ the orchestrator's context, see frameSteerReply).
+        // Degrade to verbatim — mirroring the @mention fabric-off path — when
+        // the child cannot have the tool: fabric disabled, or an external
+        // (droid) run which never gets message_agent injected
+        // (runtime-adapter's `deps.fabric && !readonlyDomain && !isExternal`).
+        let framed = false;
+        let degradedReason: string | undefined;
+        let text = params.text;
+        if (reply !== "none") {
+          if (!deps.fabricEnabled?.()) {
+            degradedReason = "reply 不可用：fabric 未启用";
+          } else if (deps.query.get(runId)?.diag.external) {
+            degradedReason = "reply 不可用：目标为外部 agent run（无 message_agent）";
+          } else if (deps.query.get(runId)?.parentRunId !== undefined) {
+            // A nested run (grandchild of the main session) replying `to: "root"`
+            // is an "ancestor" relation, which the default can_message ["parent"]
+            // rejects at fabric admission — the reply would be dropped.
+            degradedReason = "reply 不可用：目标不是主会话的直接子 agent（回复会被消息路由拒绝）";
+          } else {
+            framed = true;
+            text = frameSteerReply(params.text, reply);
+          }
         }
+        const label = labelOfRun(deps.query, runId);
+        invoked = true;
+        const result = await deps.query.steer(runId, text);
+        const who = label === undefined ? `run ${params.run_id}` : runRefText(runId, label);
+        if (!result.ok) {
+          // A TERMINAL run is the common not_running case a caller can actually
+          // act on: keep today's error shape, but point at the resume path
+          // (Agent({ resume }) accepts label or run_id) instead of leaving the
+          // orchestrator to retry a steer that can never land. No auto-resume.
+          let status;
+          if (result.reason === "not_running") {
+            try {
+              status = deps.query.get(runId)?.status;
+            } catch {
+              /* retain the known refusal */
+            }
+          }
+          const reason =
+            result.reason === "not_running"
+              ? status !== undefined && TERMINAL_STATUSES.has(status)
+                ? `${who} is not currently running (status: ${status}); ` +
+                  `it has finished and cannot be steered — use Agent({ resume: "${params.run_id}" }) to continue its session in a new run instead`
+                : `${who} is not currently running`
+              : result.reason === "steer_timeout"
+                ? `steer to ${who} timed out`
+                : `${who} rejected the steer; delivery is unverified`;
+          throw steerFailure(result.reason, reason, result.reason === "not_running" ? "none" : "unknown");
+        }
+        const base = `Sent follow-up instruction to ${runRefText(runId, label)}.`;
+        const resultText = framed
+          ? `${base} reply=${reply}: the subagent will send ONE message_agent reply (to "root", kind "report") after its next turn — ` +
+            `it arrives in your context as a subagent:fabric message and wakes you, so end your turn now instead of waiting or polling.`
+          : degradedReason
+            ? `${base} ${degradedReason}，已按普通 steer 送达（文本原样转发，不会收到回复消息）。`
+            : base;
+        return {
+          content: [{ type: "text" as const, text: resultText }],
+          details: framed
+            ? { ok: true, ...runRefDetails(runId, label), reply, replyFramed: true }
+            : reply !== "none"
+              ? { ok: true, ...runRefDetails(runId, label), reply, replyFramed: false }
+              : { ok: true, ...runRefDetails(runId, label) },
+        };
+      } catch (error) {
+        if (error instanceof SteerToolError || error instanceof NoActiveSessionError) throw error;
+        const code = typeof error === "object" && error !== null ? (error as { code?: unknown }).code : undefined;
+        const reason = invoked && code === "ETIMEDOUT" ? "steer_timeout" : invoked ? "steer_rejected" : "read_failed";
+        throw steerFailure(
+          reason,
+          "Steer failed; no delivery confirmation is available.",
+          invoked ? "unknown" : "none",
+        );
       }
-      const label = labelOfRun(deps.query, runId);
-      const result = await deps.query.steer(runId, text);
-      const who = label === undefined ? `run ${params.run_id}` : runRefText(runId, label);
-      if (!result.ok) {
-        // A TERMINAL run is the common not_running case a caller can actually
-        // act on: keep today's error shape, but point at the resume path
-        // (Agent({ resume }) accepts label or run_id) instead of leaving the
-        // orchestrator to retry a steer that can never land. No auto-resume.
-        const status = result.reason === "not_running" ? deps.query.get(runId)?.status : undefined;
-        const reason =
-          result.reason === "not_running"
-            ? status !== undefined && TERMINAL_STATUSES.has(status)
-              ? `${who} is not currently running (status: ${status}); ` +
-                `it has finished and cannot be steered — use Agent({ resume: "${params.run_id}" }) to continue its session in a new run instead`
-              : `${who} is not currently running`
-            : result.reason === "steer_timeout"
-              ? `steer to ${who} timed out`
-              : `${who} rejected the steer: ${result.detail ?? "unknown reason"}`;
-        throw new Error(reason);
-      }
-      const base = `Sent follow-up instruction to ${runRefText(runId, label)}.`;
-      const resultText = framed
-        ? `${base} reply=${reply}: the subagent will send ONE message_agent reply (to "root", kind "report") after its next turn — ` +
-          `it arrives in your context as a subagent:fabric message and wakes you, so end your turn now instead of waiting or polling.`
-        : degradedReason
-          ? `${base} ${degradedReason}，已按普通 steer 送达（文本原样转发，不会收到回复消息）。`
-          : base;
-      return {
-        content: [{ type: "text" as const, text: resultText }],
-        details: framed
-          ? { ok: true, ...runRefDetails(runId, label), reply, replyFramed: true }
-          : reply !== "none"
-            ? { ok: true, ...runRefDetails(runId, label), reply, replyFramed: false }
-            : { ok: true, ...runRefDetails(runId, label) },
-      };
     },
   } satisfies ToolDefinition<typeof SteerToolParams>;
 }

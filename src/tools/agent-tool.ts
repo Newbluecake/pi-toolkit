@@ -1,3 +1,4 @@
+import { NoActiveSessionError } from "../holder.js";
 import { Type, type Static } from "@sinclair/typebox";
 import { Container, Markdown, Text, type MarkdownTheme } from "@earendil-works/pi-tui";
 import type { ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
@@ -405,8 +406,9 @@ function prepareSpawn(
   params: AgentToolParams,
 ): { baseRequest: SpawnRequest; notices: Array<{ type: "text"; text: string }> } {
   if (deps.allowedTypes !== undefined && !deps.allowedTypes.includes(params.subagent_type)) {
-    throw new Error(
-      `nested delegation is not permitted: this agent may only spawn [${deps.allowedTypes.join(", ")}], not "${params.subagent_type}"`,
+    throw new AgentToolError(
+      `nested delegation is not permitted: this agent may only spawn [${deps.allowedTypes.join(", ")}], not "${params.subagent_type}" ` +
+        "[code=agent_validation_failed reason=policy retryable=false effect=none]",
     );
   }
   // Normalize before anything is admitted: a string/non-object schema would
@@ -428,7 +430,10 @@ function prepareSpawn(
       schemaPreset = preset.id;
     } else {
       const normalized = normalizeSchemaInput(params.schema);
-      if (!normalized.ok) throw new Error(normalized.error);
+      if (!normalized.ok)
+        throw new AgentToolError(
+          `${normalized.error} [code=agent_validation_failed reason=schema retryable=false effect=none]`,
+        );
       schema = normalized.schema;
     }
   }
@@ -441,7 +446,10 @@ function prepareSpawn(
   // validated the same way — a side effect, not a capability promise (the
   // nested schema does not declare `meta`; same footing as the preset above).
   const parsedMeta = parseDispatchMeta(params.meta);
-  if (!parsedMeta.ok) throw new Error(parsedMeta.error);
+  if (!parsedMeta.ok)
+    throw new AgentToolError(
+      `${parsedMeta.error} [code=agent_validation_failed reason=meta retryable=false effect=none]`,
+    );
   const dispatchMeta = parsedMeta.meta;
   const modelOverride = parseModel(params.model);
   // #40: `experts` is no longer part of the schema. pi's validator lets the
@@ -501,6 +509,86 @@ function prepareSpawn(
   return { baseRequest, notices };
 }
 
+/** A per-execute fact ledger: never infer effect-free execution from a later display failure. */
+class AgentToolError extends Error {}
+interface AgentEffect {
+  effect: "none" | "unknown" | "run_started" | "child_completed";
+  runId?: string;
+}
+function agentException(error: unknown, facts: AgentEffect): Error {
+  if (error instanceof AgentToolError) return error;
+  if (error instanceof NoActiveSessionError && (facts.effect === "none" || facts.effect === "unknown")) return error;
+  return new AgentToolError(
+    `Agent ${facts.effect === "none" ? "preparation" : "dispatch/result display"} failed ` +
+      `[code=agent_dispatch_failed reason=unknown retryable=false effect=${facts.effect}]` +
+      (facts.runId === undefined ? ". " : ` (run_id: ${facts.runId}). `) +
+      "Check existing runs and partial effects before further action; do not automatically retry, resume or resubmit the prompt.",
+  );
+}
+
+/** Admission DTOs are authoritative; their free-form message is not safe to echo to a model. */
+function admissionFailure(error: Pick<ErrorInfo, "kind" | "reason" | "retryable">): Error {
+  const kind = ["config", "auth", "startup_transient", "model", "timeout", "aborted", "internal", "schema"].includes(
+    error.kind,
+  )
+    ? error.kind
+    : "unknown";
+  const reason = [
+    "pool_full",
+    "load",
+    "quota",
+    "resume_locked",
+    "session_closing",
+    "target_running",
+    "stack_closed",
+    "unknown_type",
+    "external_unavailable",
+    "inbox_persist_failed",
+    "config",
+  ].includes(error.reason ?? "")
+    ? error.reason
+    : "unknown";
+  return new AgentToolError(
+    `Agent admission rejected [code=agent_admission_rejected kind=${kind} reason=${reason} retryable=${error.retryable === true} effect=none]. ` +
+      "Check the admission policy, model/type configuration and current capacity before another dispatch. " +
+      "Retryable is not proof that a prior attempt had no effects; do not automatically resubmit the prompt.",
+  );
+}
+function blockingAdmissionFailure(error: unknown): Error | undefined {
+  if (!(error instanceof Error)) return undefined;
+  const facts = error as Error & Partial<ErrorInfo> & { code?: unknown; effect?: unknown };
+  if (facts.code !== "agent_admission_rejected" || facts.effect !== "none" || typeof facts.retryable !== "boolean")
+    return undefined;
+  if (
+    !["config", "auth", "startup_transient", "model", "timeout", "aborted", "internal", "schema"].includes(
+      facts.kind ?? "",
+    )
+  )
+    return undefined;
+  if (
+    facts.reason !== undefined &&
+    ![
+      "pool_full",
+      "load",
+      "quota",
+      "resume_locked",
+      "session_closing",
+      "target_running",
+      "stack_closed",
+      "unknown_type",
+      "external_unavailable",
+      "inbox_persist_failed",
+      "config",
+    ].includes(facts.reason)
+  )
+    return undefined;
+  return admissionFailure({
+    kind: facts.kind!,
+    retryable: facts.retryable,
+    ...(facts.reason === undefined ? {} : { reason: facts.reason }),
+  });
+}
+
 /**
  * Background spawn: returns the run_id immediately. detachSignalOnStart:
  * background runs are fire-and-forget — the external turn signal only gates
@@ -514,13 +602,26 @@ async function spawnInBackground(
   params: AgentToolParams,
   prepared: ReturnType<typeof prepareSpawn>,
   signal: AbortSignal | undefined,
+  facts: AgentEffect,
 ) {
-  const spawned = await spawnPort.spawn({
-    ...prepared.baseRequest,
-    detachSignalOnStart: true,
-    ...(signal ? { signal } : {}),
-  });
-  if ("error" in spawned) throw new Error(spawned.error.message);
+  let spawned;
+  facts.effect = "unknown";
+  try {
+    spawned = await spawnPort.spawn({
+      ...prepared.baseRequest,
+      detachSignalOnStart: true,
+      ...(signal ? { signal } : {}),
+    });
+  } catch (error) {
+    if (error instanceof NoActiveSessionError) throw error;
+    throw new AgentToolError(
+      "Agent dispatch failed [code=agent_dispatch_failed reason=unknown retryable=false effect=unknown]. " +
+        "Check existing runs and partial effects before any further action; do not automatically retry or resubmit the prompt.",
+    );
+  }
+  if ("error" in spawned) throw admissionFailure(spawned.error);
+  facts.effect = "run_started";
+  facts.runId = spawned.runId;
   const effectiveLabel = spawned.label ?? params.description;
   // L1 (agent-tool pool-full plan §2): agent.queueWhenFull=true restores
   // queueing instead of the default immediate reject — make that visible in
@@ -559,6 +660,7 @@ async function spawnAndCollect(
   params: NestedAgentToolParams,
   prepared: ReturnType<typeof prepareSpawn>,
   signal: AbortSignal | undefined,
+  facts: AgentEffect,
 ) {
   const req = { ...prepared.baseRequest, ...(signal ? { signal } : {}) };
   // P1 fix (todo #16 review): the blocking path used to have no way to show
@@ -567,25 +669,56 @@ async function spawnAndCollect(
   // the dispatch moment, not of the finished run). spawnAndWaitWithSlots is
   // the same wait, plus the slots/queued snapshot spawn() already computed;
   // fall back to plain spawnAndWait (no slots line) for older test doubles.
-  const { outcome, slots } = deps.spawn.spawnAndWaitWithSlots
-    ? await deps.spawn.spawnAndWaitWithSlots(req)
-    : { outcome: await deps.spawn.spawnAndWait(req), slots: undefined as SlotsInfo | undefined };
+  let collected;
+  facts.effect = "unknown";
+  try {
+    collected = deps.spawn.spawnAndWaitWithSlots
+      ? await deps.spawn.spawnAndWaitWithSlots(req)
+      : { outcome: await deps.spawn.spawnAndWait(req), slots: undefined as SlotsInfo | undefined };
+  } catch (error) {
+    if (error instanceof NoActiveSessionError) throw error;
+    const admission = blockingAdmissionFailure(error);
+    if (admission) throw admission;
+    throw new AgentToolError(
+      "Agent blocking dispatch failed [code=agent_dispatch_failed reason=unknown retryable=false effect=unknown]. " +
+        "Check existing runs and partial effects first; do not automatically resume or resubmit the prompt.",
+    );
+  }
+  const { outcome, slots } = collected;
+  facts.runId = outcome.runId;
+  facts.effect = outcome.status === "completed" ? "child_completed" : "unknown";
   if (outcome.status !== "completed") {
-    const reason = outcome.error?.message ?? outcome.timeoutReason ?? outcome.status;
+    const reason = outcome.error?.kind ?? outcome.timeoutReason ?? outcome.status;
     const tail = outcome.text?.trim();
     const excerpt = tail ? (tail.length > 500 ? `…${tail.slice(-500)}` : tail) : undefined;
     const effectiveLabel = outcome.diag.label ?? params.description;
     const parts = [
       `Subagent "${effectiveLabel}" (run_id: ${outcome.runId}, label: "${effectiveLabel}") did not complete successfully: ${reason}.`,
     ];
-    if (outcome.diag.sessionFile) {
-      parts.push(`A persisted session may be resumable — retry with resume: "${outcome.runId}".`);
+    const error = outcome.error;
+    parts.push(
+      `[code=agent_run_failed kind=${error?.kind ?? "unknown"} reason=${error?.reason ?? outcome.timeoutReason ?? error?.kind ?? outcome.status} retryable=${error?.retryable ?? false} effect=unknown].`,
+    );
+    if (!outcome.diag.sessionFile) {
+      parts.push("No persisted session was recorded; there is nothing to resume.");
+    } else if (
+      error?.retryable === true &&
+      (error.kind === "startup_transient" || error.kind === "timeout") &&
+      outcome.status !== "aborted"
+    ) {
+      parts.push(
+        `A persisted session may be resumable with resume: "${outcome.runId}", but only after checking its outcome and partial effects. ` +
+          "Retryable does not mean effect-free; do not automatically resume or resubmit the prompt.",
+      );
     } else {
-      parts.push("The run failed before a session was created; there is nothing to resume.");
+      parts.push(
+        "A persisted session was recorded, but its existence does not authorize a retry. " +
+          "Check the failure and partial effects first; auth, policy, cancellation and unknown failures must not be automatically resumed or resubmitted.",
+      );
     }
     if (excerpt) parts.push(`Partial output (tail): ${excerpt}`);
     if (slots) parts.push(formatSlots(slots));
-    throw new Error(parts.join(" "));
+    throw new AgentToolError(parts.join(" "));
   }
   const effectiveLabel = outcome.diag.label ?? params.description;
   // consult A/B instrumentation plan P2 (§4): a verdict/v1 run's structured
@@ -725,10 +858,14 @@ function createTopLevelAgentTool(deps: TopLevelAgentToolDeps): ToolDefinition<ty
       return renderAgentCall(shown, theme, context.lastComponent);
     },
     async execute(_toolCallId, params, signal) {
-      if (deps.isReloadPending?.()) return reloadPendingResult();
-      // Every call is a background spawn — a legacy `run_in_background`
-      // field (even `false`) is accepted by validation and ignored here.
-      return spawnInBackground(deps.spawn, params, prepareSpawn(deps, params), signal);
+      const facts: AgentEffect = { effect: "none" };
+      try {
+        if (deps.isReloadPending?.()) return reloadPendingResult();
+        // Every call is background; legacy run_in_background is ignored.
+        return await spawnInBackground(deps.spawn, params, prepareSpawn(deps, params), signal, facts);
+      } catch (error) {
+        throw agentException(error, facts);
+      }
     },
     renderResult(result, options, theme, context) {
       return renderAgentResult(deps, result, options, theme, context.lastComponent);
@@ -748,9 +885,14 @@ function createNestedAgentTool(deps: NestedAgentToolDeps): ToolDefinition<typeof
       return renderAgentCall(args, theme, context.lastComponent);
     },
     async execute(_toolCallId, params, signal) {
-      const prepared = prepareSpawn(deps, params);
-      if (params.run_in_background) return spawnInBackground(deps.spawn, params, prepared, signal);
-      return spawnAndCollect(deps, params, prepared, signal);
+      const facts: AgentEffect = { effect: "none" };
+      try {
+        const prepared = prepareSpawn(deps, params);
+        if (params.run_in_background) return await spawnInBackground(deps.spawn, params, prepared, signal, facts);
+        return await spawnAndCollect(deps, params, prepared, signal, facts);
+      } catch (error) {
+        throw agentException(error, facts);
+      }
     },
     renderResult(result, options, theme, context) {
       return renderAgentResult(deps, result, options, theme, context.lastComponent);

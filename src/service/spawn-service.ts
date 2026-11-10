@@ -1248,7 +1248,16 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
     },
     async spawnAndWait(req) {
       const started = await service.spawn({ ...req, expectAck: true });
-      if ("error" in started) throw new Error(started.error.message);
+      if ("error" in started) {
+        const { kind, reason, retryable } = started.error;
+        // Preserve authoritative admission facts, not arbitrary internal exception text/credentials.
+        throw Object.assign(
+          new Error(
+            `Agent admission rejected [code=agent_admission_rejected kind=${kind} reason=${reason ?? "unknown"} retryable=${retryable} effect=none]`,
+          ),
+          { code: "agent_admission_rejected", kind, reason, retryable, effect: "none" as const },
+        );
+      }
       const result = await new Promise<RunOutcome>((resolve) => {
         const done = outcomes.get(started.runId);
         if (done) resolve(done);
@@ -1278,7 +1287,16 @@ export function createSpawnService(deps: SpawnServiceDeps): SpawnService & { sna
     // etc.) whose return type (`Promise<RunOutcome>`) must not change.
     async spawnAndWaitWithSlots(req) {
       const started = await service.spawn({ ...req, expectAck: true });
-      if ("error" in started) throw new Error(started.error.message);
+      if ("error" in started) {
+        const { kind, reason, retryable } = started.error;
+        // Preserve authoritative admission facts, not arbitrary internal exception text/credentials.
+        throw Object.assign(
+          new Error(
+            `Agent admission rejected [code=agent_admission_rejected kind=${kind} reason=${reason ?? "unknown"} retryable=${retryable} effect=none]`,
+          ),
+          { code: "agent_admission_rejected", kind, reason, retryable, effect: "none" as const },
+        );
+      }
       const result = await new Promise<RunOutcome>((resolve) => {
         const done = outcomes.get(started.runId);
         if (done) resolve(done);

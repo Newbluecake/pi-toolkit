@@ -1,3 +1,4 @@
+import { NoActiveSessionError } from "../holder.js";
 import { formatTokens } from "../hud/format.js";
 import { LEGACY_RESULT_TOOL_NAME, RESULT_TOOL_NAME } from "../core/tool-names.js";
 import { Type, type Static } from "@sinclair/typebox";
@@ -124,6 +125,11 @@ export function legacyResultToolRenderer(tool: { renderCall?: unknown; renderRes
       : next();
 }
 
+class ResultReadError extends Error {}
+function resultFailure(reason: string, text: string): Error {
+  return new ResultReadError(`${text} [code=result_${reason} reason=${reason} retryable=false effect=none]`);
+}
+
 export function createResultTool(deps: {
   query: QueryService;
   resolveRun?: (handle: string) => ResolveRunResult;
@@ -187,13 +193,11 @@ export function createResultTool(deps: {
   const workflowUsageOnce = (view: BackgroundWorkflowView, outcome: WorkflowOutcome) => {
     const runIds = liveChildRunIds(outcome);
     if (usageReported.has(view.workflowId)) return { runIds, total: undefined as UsageDelta | undefined };
-    usageReported.add(view.workflowId);
     const unreported = runIds.filter((id) => !usageReported.has(id));
     const live = deps.workflows?.usageOf ? unreported.map((id) => deps.workflows!.usageOf!(id)) : [];
     const resolvedAny = live.some((u) => u !== undefined);
     let total = sumUsage(live);
     if (!resolvedAny && unreported.length === runIds.length && view.usage) total = sumUsage([view.usage]);
-    for (const id of runIds) usageReported.add(id);
     return { runIds, total };
   };
   const workflowTerminal = (view: BackgroundWorkflowView, outcome: WorkflowOutcome, maxChars: number) => {
@@ -204,6 +208,9 @@ export function createResultTool(deps: {
       (deps.workflows?.usageOf ? sumUsage(runIds.map((id) => deps.workflows!.usageOf!(id))) : undefined) ??
       view.usage;
     const rendered = formatWorkflowResultText(outcome, displayUsage, maxChars);
+    // Commit usage-once only after all reads/formatting succeeded; a failed read reports no usage.
+    usageReported.add(view.workflowId);
+    for (const id of runIds) usageReported.add(id);
     return {
       text: rendered.text,
       ...(total ? { usage: toPiToolUsage(total) } : {}),
@@ -235,7 +242,7 @@ export function createResultTool(deps: {
       const pollWarning = pollGuard.record(workflowId);
       const withWarning = (text: string) => (pollWarning ? `${pollWarning}\n\n${text}` : text);
       const view = workflows.get(workflowId);
-      if (!view) throw new Error(`unknown workflow id: ${params.run_id}`);
+      if (!view) throw resultFailure("unknown_workflow", `unknown workflow id: ${params.run_id}`);
       if (view.status === "running" || !view.outcome) {
         const text = [
           `Workflow ${workflowId} ("${view.name}") is still running.`,
@@ -265,20 +272,39 @@ export function createResultTool(deps: {
       ];
       onUpdate({ content: [{ type: "text", text: lines.join("\n") }], details: { workflowId, progress: lines } });
     };
-    const timer = onUpdate ? setInterval(push, 1000) : undefined;
+    let rejectProgress: (error: unknown) => void = () => undefined;
+    const progressFailed = new Promise<never>((_, reject) => {
+      rejectProgress = reject;
+    });
+    const timer = onUpdate
+      ? setInterval(() => {
+          try {
+            push();
+          } catch (error) {
+            rejectProgress(error);
+          }
+        }, 1000)
+      : undefined;
     (timer as { unref?: () => void } | undefined)?.unref?.();
-    push();
     let waited;
     try {
-      waited = await workflows.wait(workflowId, { waitMs, ...(signal ? { signal } : {}) });
+      push();
+      waited = await Promise.race([
+        workflows.wait(workflowId, { waitMs, ...(signal ? { signal } : {}) }),
+        progressFailed,
+      ]);
     } finally {
       if (timer) clearInterval(timer);
     }
     if (!waited.ok) {
       if (waited.reason === "wait_timeout") {
-        throw new Error(waitTimeoutMessage(workflowId, waitMs, waitStreak.timeout(workflowId, waitMs), "workflow"));
+        throw resultFailure(
+          "wait_timeout",
+          waitTimeoutMessage(workflowId, waitMs, waitStreak.timeout(workflowId, waitMs), "workflow"),
+        );
       }
-      throw new Error(
+      throw resultFailure(
+        waited.reason,
         waited.reason === "unknown_workflow" ? `unknown workflow id: ${params.run_id}` : "wait was aborted",
       );
     }
@@ -401,120 +427,168 @@ export function createResultTool(deps: {
     // §2.7: the pi harness may invoke execute() with signal === undefined; the
     // wait path below tolerates that (QueryService.wait's opts.signal is optional).
     async execute(_toolCallId, params, signal, onUpdate) {
-      const target = resolveToolTarget(params.run_id, deps.resolveRun, deps.workflows);
-      if (target.kind === "workflow") {
-        return executeWorkflow(target.workflowId, params, signal, onUpdate as never);
-      }
-      const runId = target.runId;
-      if (!params.wait) {
-        // The frequency guard covers only this non-blocking read path; the
-        // wait path below is guarded by the consecutive-timeout streak.
-        const pollWarning = pollGuard.record(runId);
-        const withWarning = (text: string) => (pollWarning ? `${pollWarning}\n\n${text}` : text);
-        const snapshot = deps.query.get(runId);
-        if (!snapshot) throw new Error(`unknown run_id: ${params.run_id}`);
-        const maxChars = deps.resultMaxChars?.() ?? 0;
-        const text = snapshot.outcome
-          ? formatOutcome(snapshot.outcome, maxChars, wakeLine(runId, snapshot.diag))
-          : [
-              `${labelOfSnapshot(snapshot) === undefined ? `Run ${runId}` : runRefText(runId, snapshot.diag.label)} is still ${snapshot.status} (phase: ${snapshot.phase}).`,
-              ...[wakeLine(runId, snapshot.diag)].filter((line): line is string => line !== undefined),
-              ...buildProgressLines(snapshot, Date.now()),
-            ].join("\n");
-        if (snapshot.outcome) {
-          waitStreak.reset(runId);
-          tryAck(runId, snapshot.generation, snapshot.outcome);
+      try {
+        let target;
+        try {
+          target = resolveToolTarget(params.run_id, deps.resolveRun, deps.workflows);
+        } catch (error) {
+          if (error instanceof NoActiveSessionError) throw error;
+          throw resultFailure(
+            params.run_id.startsWith("wf_") ? "unknown_workflow" : "target_resolution",
+            params.run_id.startsWith("wf_")
+              ? `unknown workflow id: ${params.run_id}`
+              : "Target resolution failed (unknown or ambiguous handle).",
+          );
         }
+        if (target.kind === "workflow") {
+          return await executeWorkflow(target.workflowId, params, signal, onUpdate as never);
+        }
+        const runId = target.runId;
+        if (!params.wait) {
+          // The frequency guard covers only this non-blocking read path; the
+          // wait path below is guarded by the consecutive-timeout streak.
+          const pollWarning = pollGuard.record(runId);
+          const withWarning = (text: string) => (pollWarning ? `${pollWarning}\n\n${text}` : text);
+          const snapshot = deps.query.get(runId);
+          if (!snapshot) throw resultFailure("unknown_run", `unknown run_id: ${params.run_id}`);
+          const maxChars = deps.resultMaxChars?.() ?? 0;
+          const text = snapshot.outcome
+            ? formatOutcome(snapshot.outcome, maxChars, wakeLine(runId, snapshot.diag))
+            : [
+                `${labelOfSnapshot(snapshot) === undefined ? `Run ${runId}` : runRefText(runId, snapshot.diag.label)} is still ${snapshot.status} (phase: ${snapshot.phase}).`,
+                ...[wakeLine(runId, snapshot.diag)].filter((line): line is string => line !== undefined),
+                ...buildProgressLines(snapshot, Date.now()),
+              ].join("\n");
+          if (snapshot.outcome) {
+            waitStreak.reset(runId);
+            tryAck(runId, snapshot.generation, snapshot.outcome);
+          }
+          return {
+            content: [{ type: "text" as const, text: withWarning(text) }],
+            ...(snapshot.outcome ? usageOnce(runId, snapshot.outcome.usage) : {}),
+            details: {
+              runId,
+              status: snapshot.status,
+              usage: snapshot.diag.usage,
+              ...(snapshot.diag.label !== undefined ? { label: snapshot.diag.label } : {}),
+              ...(snapshot.outcome
+                ? {
+                    durationMs: snapshot.outcome.durationMs,
+                    // Presentation stats for renderResult + history replay (M-D).
+                    summary: formatOutcomeSummary(snapshot.outcome),
+                  }
+                : {}),
+              ...(snapshot.outcome ? truncationDetails(snapshot.outcome, maxChars) : {}),
+              ...(snapshot.outcome?.structuredResult !== undefined
+                ? { structuredResult: snapshot.outcome.structuredResult }
+                : {}),
+            },
+          };
+        }
+        // Live visibility while the (bounded) wait blocks: a 1 Hz partial-
+        // update side channel (buildProgressLines, shared with workflow) — header with
+        // elapsed/budget plus the awaited run's own progress snapshot. Purely a
+        // read-only display concern; the wait semantics are unchanged.
+        const startedAt = Date.now();
+        const push = () => {
+          if (!onUpdate) return;
+          const now = Date.now();
+          const budget = formatDuration(params.wait_ms ?? DEFAULT_WAIT_MS);
+          const snap = deps.query.get(runId);
+          const lines = [
+            `⏳ waiting for ${labelOfSnapshot(snap) === undefined ? runId : runRefText(runId, snap?.diag.label)} · ${formatDuration(now - startedAt)} / ${budget}`,
+            ...(snap && !snap.outcome ? buildProgressLines(snap, now) : []),
+          ];
+          onUpdate({
+            content: [{ type: "text", text: lines.join("\n") }],
+            details: { runId, progress: lines },
+          });
+        };
+        let rejectProgress: (error: unknown) => void = () => undefined;
+        const progressFailed = new Promise<never>((_, reject) => {
+          rejectProgress = reject;
+        });
+        const timer = onUpdate
+          ? setInterval(() => {
+              try {
+                push();
+              } catch (error) {
+                rejectProgress(error);
+              }
+            }, 1000)
+          : undefined;
+        (timer as { unref?: () => void } | undefined)?.unref?.();
+        // try/finally rather than .finally(): a synchronous throw from a
+        // non-async QueryService stub would otherwise skip cleanup entirely
+        // (the rejection would surface before the .finally chain existed).
+        const waitMs = params.wait_ms ?? DEFAULT_WAIT_MS;
+        let waited;
+        try {
+          push();
+          waited = await Promise.race([
+            deps.query.wait(runId, {
+              waitMs,
+              ...(signal ? { signal } : {}),
+            }),
+            progressFailed,
+          ]);
+        } finally {
+          if (timer) clearInterval(timer);
+        }
+        if (!waited.ok) {
+          if (waited.reason === "wait_timeout") {
+            throw resultFailure(
+              "wait_timeout",
+              waitTimeoutMessage(
+                runId,
+                waitMs,
+                waitStreak.timeout(runId, waitMs),
+                "run",
+                labelOfRun(deps.query, runId),
+              ),
+            );
+          }
+          throw resultFailure(
+            waited.reason,
+            waited.reason === "unknown_run" ? `unknown run_id: ${params.run_id}` : "wait was aborted",
+          );
+        }
+        waitStreak.reset(runId);
+        const maxChars = deps.resultMaxChars?.() ?? 0;
+        const outcomeText = formatOutcome(waited.outcome, maxChars, wakeLine(runId, waited.outcome.diag));
+        tryAck(runId, waited.outcome.diag.generation, waited.outcome);
         return {
-          content: [{ type: "text" as const, text: withWarning(text) }],
-          ...(snapshot.outcome ? usageOnce(runId, snapshot.outcome.usage) : {}),
+          content: [
+            {
+              type: "text" as const,
+              text: outcomeText,
+            },
+          ],
+          ...usageOnce(runId, waited.outcome.usage),
           details: {
             runId,
-            status: snapshot.status,
-            usage: snapshot.diag.usage,
-            ...(snapshot.diag.label !== undefined ? { label: snapshot.diag.label } : {}),
-            ...(snapshot.outcome
-              ? {
-                  durationMs: snapshot.outcome.durationMs,
-                  // Presentation stats for renderResult + history replay (M-D).
-                  summary: formatOutcomeSummary(snapshot.outcome),
-                }
-              : {}),
-            ...(snapshot.outcome ? truncationDetails(snapshot.outcome, maxChars) : {}),
-            ...(snapshot.outcome?.structuredResult !== undefined
-              ? { structuredResult: snapshot.outcome.structuredResult }
+            status: waited.outcome.status,
+            durationMs: waited.outcome.durationMs,
+            // Presentation stats for renderResult + history replay (M-D).
+            summary: formatOutcomeSummary(waited.outcome),
+            ...(waited.outcome.diag.label !== undefined ? { label: waited.outcome.diag.label } : {}),
+            usage: waited.outcome.usage,
+            ...truncationDetails(waited.outcome, maxChars),
+            ...(waited.outcome.structuredResult !== undefined
+              ? { structuredResult: waited.outcome.structuredResult }
               : {}),
           },
         };
+      } catch (error) {
+        if (error instanceof ResultReadError || error instanceof NoActiveSessionError) throw error;
+        const code = typeof error === "object" && error !== null ? (error as { code?: unknown }).code : undefined;
+        const reason =
+          typeof code === "string" && ["ETIMEDOUT", "ECONNRESET", "EPIPE"].includes(code) ? code : "unknown";
+        throw resultFailure(
+          "read_failed",
+          `Run result read failed (cause=${reason}); no terminal outcome was established.`,
+        );
       }
-      // Live visibility while the (bounded) wait blocks: a 1 Hz partial-
-      // update side channel (buildProgressLines, shared with workflow) — header with
-      // elapsed/budget plus the awaited run's own progress snapshot. Purely a
-      // read-only display concern; the wait semantics are unchanged.
-      const startedAt = Date.now();
-      const push = () => {
-        if (!onUpdate) return;
-        const now = Date.now();
-        const budget = formatDuration(params.wait_ms ?? DEFAULT_WAIT_MS);
-        const snap = deps.query.get(runId);
-        const lines = [
-          `⏳ waiting for ${labelOfSnapshot(snap) === undefined ? runId : runRefText(runId, snap?.diag.label)} · ${formatDuration(now - startedAt)} / ${budget}`,
-          ...(snap && !snap.outcome ? buildProgressLines(snap, now) : []),
-        ];
-        onUpdate({
-          content: [{ type: "text", text: lines.join("\n") }],
-          details: { runId, progress: lines },
-        });
-      };
-      const timer = onUpdate ? setInterval(push, 1000) : undefined;
-      (timer as { unref?: () => void } | undefined)?.unref?.();
-      push();
-      // try/finally rather than .finally(): a synchronous throw from a
-      // non-async QueryService stub would otherwise skip cleanup entirely
-      // (the rejection would surface before the .finally chain existed).
-      const waitMs = params.wait_ms ?? DEFAULT_WAIT_MS;
-      let waited;
-      try {
-        waited = await deps.query.wait(runId, {
-          waitMs,
-          ...(signal ? { signal } : {}),
-        });
-      } finally {
-        if (timer) clearInterval(timer);
-      }
-      if (!waited.ok) {
-        if (waited.reason === "wait_timeout") {
-          throw new Error(
-            waitTimeoutMessage(runId, waitMs, waitStreak.timeout(runId, waitMs), "run", labelOfRun(deps.query, runId)),
-          );
-        }
-        throw new Error(waited.reason === "unknown_run" ? `unknown run_id: ${params.run_id}` : "wait was aborted");
-      }
-      waitStreak.reset(runId);
-      tryAck(runId, waited.outcome.diag.generation, waited.outcome);
-      const maxChars = deps.resultMaxChars?.() ?? 0;
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: formatOutcome(waited.outcome, maxChars, wakeLine(runId, waited.outcome.diag)),
-          },
-        ],
-        ...usageOnce(runId, waited.outcome.usage),
-        details: {
-          runId,
-          status: waited.outcome.status,
-          durationMs: waited.outcome.durationMs,
-          // Presentation stats for renderResult + history replay (M-D).
-          summary: formatOutcomeSummary(waited.outcome),
-          ...(waited.outcome.diag.label !== undefined ? { label: waited.outcome.diag.label } : {}),
-          usage: waited.outcome.usage,
-          ...truncationDetails(waited.outcome, maxChars),
-          ...(waited.outcome.structuredResult !== undefined
-            ? { structuredResult: waited.outcome.structuredResult }
-            : {}),
-        },
-      };
     },
   } satisfies ToolDefinition<typeof ResultToolParams>;
 }

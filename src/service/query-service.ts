@@ -19,7 +19,7 @@ export type StopResult =
   | { ok: true; escalatedTo: "L2" | "L3" | "L4" }
   | { ok: false; reason: "unknown_run" }
   | { ok: false; reason: "already_terminal"; status: RunStatus }
-  | { ok: false; reason: "stop_failed"; escalatedTo: "L2" | "L3" | "L4" };
+  | { ok: false; reason: "stop_failed"; escalatedTo: "L2" | "L3" | "L4"; effect?: "none" | "unknown" };
 
 export interface QueryService {
   get(runId: RunId): RunSnapshot | undefined;
@@ -97,6 +97,28 @@ export interface QueryServiceDeps {
    */
   steerThread?: (runId: RunId, text: string, capMs: number) => Promise<string>;
 }
+/** Only bounded protocol/errno tokens cross the service boundary; never driver exception text. */
+function failureReason(error: unknown): string {
+  if (typeof error !== "object" || error === null) return "unknown";
+  const fields = error as { code?: unknown; reason?: unknown };
+  const allowed = new Set([
+    "ETIMEDOUT",
+    "ECONNRESET",
+    "EPIPE",
+    "ABORT_ERR",
+    "ERR_CANCELED",
+    "timeout",
+    "steer_timeout",
+    "rejected",
+    "unsupported",
+    "not_running",
+  ]);
+  for (const value of [fields.reason, fields.code]) {
+    if (typeof value === "string" && allowed.has(value)) return value;
+  }
+  return "unknown";
+}
+
 const terminal = (status: RunStatus) =>
   status === "completed" || status === "failed" || status === "timed_out" || status === "aborted";
 /**
@@ -139,11 +161,19 @@ export function createQueryService(deps: QueryServiceDeps): QueryService {
           : snapshot.deadlines.deadlineAt;
       const remaining = basis !== undefined ? Math.max(0, basis - clock.now()) + WAIT_SETTLEMENT_GRACE_MS : undefined;
       const waitMs = opts.waitMs ?? remaining ?? deps.defaultWaitMs ?? 1_800_000;
-      const waiter = new Promise<RunOutcome>((resolve) => {
+      const waiter = new Promise<RunOutcome>((resolve, reject) => {
         const poll = () => {
-          const current = deps.registry.get(id);
-          if (current?.outcome && terminal(current.status)) resolve(current.outcome);
-          else clock.setTimer(10, poll);
+          try {
+            const current = deps.registry.get(id);
+            if (current?.outcome && terminal(current.status)) resolve(current.outcome);
+            else clock.setTimer(10, poll);
+          } catch (error) {
+            reject(
+              new Error(
+                `Run read failed [code=result_read_failed reason=${failureReason(error)} retryable=false effect=none]. No terminal outcome was established.`,
+              ),
+            );
+          }
         };
         poll();
       });
@@ -154,7 +184,8 @@ export function createQueryService(deps: QueryServiceDeps): QueryService {
       const result = await withDeadline(Promise.race([waiter, cancelled]), waitMs, clock, "wait");
       if (result.ok) return { ok: true, outcome: result.value };
       if (result.reason === "error" && opts.signal?.aborted) return { ok: false, reason: "aborted" };
-      return { ok: false, reason: result.reason === "error" ? "wait_timeout" : "wait_timeout" };
+      if (result.reason === "error") throw new Error(result.error.message);
+      return { ok: false, reason: "wait_timeout" };
     },
     async waitAll(opts = {}) {
       const ids =
@@ -183,7 +214,12 @@ export function createQueryService(deps: QueryServiceDeps): QueryService {
         }
         return { ok: true };
       } catch (error) {
-        return { ok: false, reason: "steer_rejected", detail: error instanceof Error ? error.message : String(error) };
+        const detail = failureReason(error);
+        return {
+          ok: false,
+          reason: ["ETIMEDOUT", "timeout", "steer_timeout"].includes(detail) ? "steer_timeout" : "steer_rejected",
+          detail,
+        };
       }
     },
     async steerThread(id, text, capMs) {
@@ -209,14 +245,14 @@ export function createQueryService(deps: QueryServiceDeps): QueryService {
         // this layer deliberately does not re-time it.
         return await deps.runner.setModel(id, model, opts);
       } catch (error) {
-        return { ok: false, reason: "rejected", detail: error instanceof Error ? error.message : String(error) };
+        return { ok: false, reason: "rejected", detail: failureReason(error) };
       }
     },
     async stop(id, cause = "user_stop") {
       const snapshot = deps.registry.get(id);
       if (!snapshot) return { ok: false, reason: "unknown_run" };
       if (terminal(snapshot.status)) return { ok: false, reason: "already_terminal", status: snapshot.status };
-      if (!deps.runner.abort) return { ok: false, reason: "stop_failed", escalatedTo: "L4" };
+      if (!deps.runner.abort) return { ok: false, reason: "stop_failed", escalatedTo: "L4", effect: "none" };
       try {
         const result = await deps.runner.abort(id, cause);
         if (result.ok) return { ok: true, escalatedTo: result.escalatedTo };
@@ -224,6 +260,14 @@ export function createQueryService(deps: QueryServiceDeps): QueryService {
         if (after && terminal(after.status)) return { ok: false, reason: "already_terminal", status: after.status };
         return { ok: false, reason: "stop_failed", escalatedTo: result.escalatedTo };
       } catch {
+        // Abort may have taken effect before rejecting. Read only; never send a second abort.
+        try {
+          const after = deps.registry.get(id);
+          if (after && terminal(after.status)) return { ok: false, reason: "already_terminal", status: after.status };
+        } catch {
+          // An unreadable state is not evidence of a terminal run.
+        }
+        // L4 is the legacy fallback value, NOT evidence that a kill completed.
         return { ok: false, reason: "stop_failed", escalatedTo: "L4" };
       }
     },

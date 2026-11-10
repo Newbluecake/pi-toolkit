@@ -637,7 +637,7 @@ describe("TUI visibility: renderCall + wait-path partial updates", () => {
       const tool = createResultTool({ query: q });
       await expect(
         tool.execute("tc1", { run_id: "r1", wait: true }, undefined, (() => undefined) as never, {} as never),
-      ).rejects.toThrow("boom");
+      ).rejects.toThrow("code=result_read_failed");
       expect(vi.getTimerCount()).toBe(0); // no leaked 1Hz interval
     } finally {
       vi.useRealTimers();

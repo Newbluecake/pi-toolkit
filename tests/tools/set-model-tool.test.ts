@@ -121,11 +121,13 @@ describe("tools/set-model-tool", () => {
     );
   });
 
-  it("⑦ resolveRun failure is passed through verbatim (E7)", async () => {
+  it("⑦ resolveRun failure projects safe candidates, not free-form error (E7)", async () => {
     const deps = makeDeps({
       resolveRun: () => ({ ok: false, error: "run target not found: nope. Candidates: [none]", candidates: [] }),
     });
-    await expect(runTool(deps, { model: "haiku", run_id: "nope" })).rejects.toThrow("run target not found: nope");
+    await expect(runTool(deps, { model: "haiku", run_id: "nope" })).rejects.toThrow(
+      "Target resolution failed (unknown or ambiguous handle). Candidates: [none]",
+    );
   });
 
   it("⑧ run form rejects a foreign run_id (E8)", async () => {
@@ -165,7 +167,7 @@ describe("tools/set-model-tool", () => {
     const patterns = [
       /timed out after 5s.*previous model/,
       /cannot switch models mid-run/,
-      /refused the model switch: No API key/,
+      /refused the model switch.*effect=unknown/,
     ];
     for (const [i, outcome] of outcomes.entries()) {
       const deps = makeDeps({ runs: { setModel: async () => outcome } });
