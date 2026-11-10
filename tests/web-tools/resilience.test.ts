@@ -6,6 +6,7 @@ import {
   isRetryableError,
   sleep,
   withRequestTimeout,
+  webToolErrorSummary,
 } from "../../src/web-tools/resilience.js";
 import { redactSecrets } from "../../src/core/redact.js";
 
@@ -177,5 +178,79 @@ describe("withRequestTimeout", () => {
     );
     parent.abort();
     await expect(pending).rejects.toThrow("aborted by parent");
+  });
+});
+
+const AUTH_GUIDANCE = "Check the provider API credentials and permissions.";
+const QUOTA_GUIDANCE = "Check the provider quota or billing; try another configured provider.";
+const TRANSIENT_GUIDANCE = "Try again later or use another configured provider.";
+const UNKNOWN_GUIDANCE = "Check provider availability and request settings; try another configured provider.";
+
+describe("webToolErrorSummary public boundary", () => {
+  it.each([
+    [401, "auth", AUTH_GUIDANCE],
+    [403, "auth", AUTH_GUIDANCE],
+    [402, "quota", QUOTA_GUIDANCE],
+    [429, "quota", QUOTA_GUIDANCE],
+    [408, "transient", TRANSIENT_GUIDANCE],
+    [425, "transient", TRANSIENT_GUIDANCE],
+    [500, "transient", TRANSIENT_GUIDANCE],
+    [501, "transient", TRANSIENT_GUIDANCE],
+    [502, "transient", TRANSIENT_GUIDANCE],
+    [503, "transient", TRANSIENT_GUIDANCE],
+    [504, "transient", TRANSIENT_GUIDANCE],
+    [599, "transient", TRANSIENT_GUIDANCE],
+    [200, "unknown", UNKNOWN_GUIDANCE],
+    [400, "unknown", UNKNOWN_GUIDANCE],
+    [404, "unknown", UNKNOWN_GUIDANCE],
+    [422, "unknown", UNKNOWN_GUIDANCE],
+  ])("uses structured HTTP %i, not body or message hints", (status, category, guidance) => {
+    const poison = "https://user:password@invalid.test/?ticket=secret auth quota exceeded reset tomorrow z8Q";
+    const error = new HttpError(poison, Number(status), poison);
+    expect(webToolErrorSummary(error)).toBe(`${category} (HTTP ${status}): ${guidance}`);
+    // Keep the original body available for retry decisions, not public diagnostics.
+    expect(error.responseBody).toBe(poison);
+  });
+
+  it.each([undefined, NaN, Infinity, -1, 99, 600, 401.5])("rejects invalid/missing status %s", (status) => {
+    expect(webToolErrorSummary(new HttpError("401 unauthorized", status, "quota exceeded"))).toBe(
+      `unknown: ${UNKNOWN_GUIDANCE}`,
+    );
+  });
+
+  it("does not infer status from strings, object fields, or exception text", () => {
+    for (const error of [
+      new Error("HTTP 401 quota exceeded network request failed"),
+      "HTTP 429",
+      { status: 403, message: "Unauthorized" },
+      {
+        toString: () => {
+          throw new Error("must not stringify arbitrary input");
+        },
+      },
+      null,
+      undefined,
+    ]) {
+      expect(webToolErrorSummary(error)).toBe(`unknown: ${UNKNOWN_GUIDANCE}`);
+    }
+  });
+
+  it("drops short sentinels and arbitrarily long multibyte/control-character payloads entirely", () => {
+    for (const payload of ["z8Q", "界🙂\u0000\u001b[31m\r\n\t".repeat(20_000)]) {
+      const summary = webToolErrorSummary(new HttpError(payload, 429, payload));
+      expect(summary).toBe(`quota (HTTP 429): ${QUOTA_GUIDANCE}`);
+      expect(Buffer.byteLength(summary)).toBeLessThan(150);
+      expect(summary).not.toMatch(/[\u0000-\u001f\u007f]/);
+    }
+  });
+
+  it("leaves quota-body retry policy separate from the identical public category", () => {
+    const exhausted = new HttpError("untrusted", 429, "quota exceeded z8Q");
+    const limited = new HttpError("untrusted", 429, "z8Q");
+    expect(webToolErrorSummary(exhausted)).toBe(webToolErrorSummary(limited));
+    expect(isRetryableError(exhausted, exhausted.status, exhausted.responseBody)).toBe(false);
+    expect(isRetryableError(limited, limited.status, limited.responseBody)).toBe(true);
+    // All 5xx classify as transient, but the existing narrower retry allowlist is unchanged.
+    expect(isRetryableError(new HttpError("untrusted", 501), 501, undefined)).toBe(false);
   });
 });
