@@ -54,7 +54,7 @@ import {
 import type { Watchdog } from "../runtime/watchdog.js";
 import { threadThroughRequestFields } from "./request-threading.js";
 import { createAgentTool, type NestedSpawnPort } from "../tools/agent-tool.js";
-import { createStructuredOutputTool } from "../tools/structured-output-tool.js";
+import { createStructuredOutputTool, type StructuredOutputSubmissionResult } from "../tools/structured-output-tool.js";
 import { createMessageAgentTool } from "../tools/message-agent-tool.js";
 import { createSetModelTool } from "../tools/set-model-tool.js";
 import { createThreadChildTool } from "../tools/thread-child-tool.js";
@@ -770,15 +770,24 @@ export function createRuntimeRunnerAdapter(deps: RuntimeAdapterDeps): Runner {
         // (handled after H2, below).
         if (!isExternal && spec.request.schema !== undefined) {
           const schema = spec.request.schema;
+          // Both gates read the same host-owned flag. Preflight takes precedence
+          // over payload/semantic errors; onSubmit remains the final authority if
+          // the window closes after preflight (including synchronous re-entry).
+          const checkSubmissionWindow = (): StructuredOutputSubmissionResult =>
+            captureOpen
+              ? { ok: true, errors: [] }
+              : {
+                  ok: false,
+                  code: "window_closed",
+                  errors: ["the result window for this run has closed; this submission was not accepted"],
+                };
           const structuredOutputTool = createStructuredOutputTool({
             schema,
             ...(spec.request.schemaPreset === undefined ? {} : { schemaPreset: spec.request.schemaPreset }),
+            preflight: checkSubmissionWindow,
             onSubmit: (value) => {
-              if (!captureOpen)
-                return {
-                  ok: false,
-                  errors: ["the result window for this run has closed; this submission was not accepted"],
-                };
+              const window = checkSubmissionWindow();
+              if (!window.ok) return window;
               const result = validateAgainstSchema(schema, value);
               if (result.ok) structured.value = value;
               return result;
