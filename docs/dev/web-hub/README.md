@@ -879,7 +879,9 @@ Design, compiled-App evidence and manual physical-device/AT limits:
 实现状态：P1 backend/protocol 与 P2 UI 已实现、合入并各自独立验收；**尚未部署，未做
 真实服务/收费模型速度验证**。UI 通过 `entries.ts` 的唯一解析点和 production reducer
 消费 core / 精确 mid 历史 map，在 `TxAssistant.vue` 以独立 span 显示费用和固定一位小数的
-`20.0 tokens/s`，streaming 始终隐藏。设计定稿见
+`20.0 tokens/s`，streaming 始终隐藏。assistant 的 `renderKeys` 包含已经解析的 generation
+标量，因而同一 item ID 的 metadata 新增、替换或删除会使 `v-memo` 更新该 DOM，而不影响
+其他未变化条目的缓存；这不改变 metadata 的来源或测速证明门。设计定稿见
 `docs/dev/web-hub-tokens-speed/plan.md`（r3.1 Root gate）。
 
 > P2 补充：Responses 在有效 turn 内可由 raw `response.created` 建立单一候选，先到的

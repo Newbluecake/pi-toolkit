@@ -15,6 +15,8 @@
 import { mount, type VueWrapper } from "@vue/test-utils";
 import { beforeEach, describe, expect, it } from "vitest";
 import { initialState, reduce } from "../../../src/web-hub/ui/src/logic/state.js";
+import { projectSessionEntry } from "../../../src/web-hub/protocol/keys.js";
+import { WEB_MESSAGE_SPEED_ENTRY_TYPE } from "../../../src/web-hub/protocol/message-generation.js";
 import Transcript from "../../../src/web-hub/ui/src/components/transcript/Transcript.vue";
 import { resetLangForTests, setLangOverride } from "../../../src/web-hub/ui/src/composables/useI18n.js";
 import type { AgentState } from "../../../src/web-hub/ui/src/types.js";
@@ -145,6 +147,49 @@ describe("Transcript.vue — v-memo render keys (2026-11-03 全量重渲染修�
 
     expect(updatedOf("TxAssistant")).toBeGreaterThan(0); // digest `t1=p` ⇒ `t1=r` — memo miss
     expect(wrapper.text()).toContain("paired result");
+  });
+
+  it("refreshes the same assistant DOM when only history generation metadata is added, changed or removed", async () => {
+    const message = {
+      id: "a1",
+      parentId: null,
+      type: "message",
+      timestamp: new Date(1_000).toISOString(),
+      message: { role: "assistant", content: [{ type: "text", text: "stable answer" }], timestamp: 1_000 },
+    };
+    const other = assistantToolCallEntry("a2", 2_000, "t2");
+    const history = (tokens?: number): AgentState => {
+      const metadata =
+        tokens === undefined
+          ? []
+          : [
+              {
+                id: "meta1",
+                parentId: "a1",
+                type: "custom",
+                timestamp: new Date(1_500).toISOString(),
+                customType: WEB_MESSAGE_SPEED_ENTRY_TYPE,
+                data: { piToolkitGeneration: { v: 1, mid: "a1", tokens, genMs: 500, deltaCount: 2 } },
+              },
+            ];
+      return agentWith([message, ...metadata, other].map((entry) => projectSessionEntry(entry)!));
+    };
+    const wrapper = await mountTx(history());
+    expect(wrapper.text()).toContain("stable answer");
+    expect(wrapper.text()).not.toContain("tokens/s");
+    await wrapper.setProps({ agent: history(10) });
+    expect(wrapper.text()).toContain("20.0 tokens/s");
+    expect(updatedOf("TxAssistant")).toBe(1);
+    updateCounts.clear();
+    await wrapper.setProps({ agent: history(15) });
+    expect(wrapper.text()).toContain("30.0 tokens/s");
+    expect(wrapper.text()).not.toContain("20.0 tokens/s");
+    expect(updatedOf("TxAssistant")).toBe(1);
+    updateCounts.clear();
+    await wrapper.setProps({ agent: history() });
+    expect(wrapper.text()).not.toContain("tokens/s");
+    expect(updatedOf("TxAssistant")).toBe(1);
+    wrapper.unmount();
   });
 
   it("the streaming tail entry always re-renders despite its constant renderKey", async () => {
