@@ -81,6 +81,7 @@ describe("message_agent wake execution", () => {
     for (const to of ["root", "@builder"]) {
       const result = await tool.execute("c", { to, kind: "progress", text: "x", wake: true } as never);
       expect(result.details).toEqual({ ok: false, status: "invalid_wake", reason: "progress_never_wakes" });
+      expect((result.content[0] as { text: string }).text).toContain("不要改 kind 绕过限制");
     }
     expect(admit).not.toHaveBeenCalled();
     expect(send).not.toHaveBeenCalled();

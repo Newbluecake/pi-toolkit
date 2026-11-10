@@ -1,6 +1,11 @@
+import type { ExtensionToolContext } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 import { createListSessionsTool, formatXsSessionRows } from "../../src/tools/list-sessions-tool.js";
-import { createMessageSessionTool, XS_UNKNOWN_HINT } from "../../src/tools/message-session-tool.js";
+import {
+  createMessageSessionTool,
+  XS_UNKNOWN_HINT,
+  type MessageSessionParams,
+} from "../../src/tools/message-session-tool.js";
 import {
   xsTargetFormallyRejected,
   type XsListOutcome,
@@ -14,6 +19,8 @@ import type { XsSessionRowWire } from "../../src/web-hub/protocol/xs.js";
  * omitted wake, the `scope` parameter, result shapes and the S3 unknown hint. The sender core is
  * faked (its own behaviour is pinned by tests/fabric/xs-sender.test.ts).
  */
+
+const testToolContext = {} as ExtensionToolContext;
 
 function fakeSender() {
   const message = vi.fn(async (args: { to: string }): Promise<XsSendOutcome> =>
@@ -99,7 +106,6 @@ describe("tools/message_session", () => {
   it.each([
     { status: "sent", effect: "applied" },
     { status: "unanswered", effect: "unknown", reason: "client_deadline" },
-    { status: "sent", effect: "none", reason: "rejected" },
   ] satisfies XsSendOutcome[])("preserves text for other outcomes: $status/$effect", async (outcome) => {
     const h = fakeSender();
     h.message.mockResolvedValueOnce(outcome);
@@ -270,7 +276,7 @@ describe("tools/list_sessions", () => {
     h.list.mockResolvedValueOnce({ status: "bad_channel", reason: "bad_channel" });
     const other = await tool.execute("c", { channel: "other" });
     expect((other.content[0] as { text: string }).text).toContain(
-      "channel 无效或不在本链路（需要先加入该通道）；不需要过滤请省略该参数",
+      "channel 无效或不在本链路；核对频道名，不需要过滤请省略该参数",
     );
     expect(h.list).toHaveBeenLastCalledWith({ channel: "other" });
     await tool.execute("c", { channel: "#team" });
@@ -646,5 +652,353 @@ describe("message_session #20 — final content / frozen gate (fake sender)", ()
     expect(result.content).toEqual([
       { type: "text", text: renderPre20(o, false, false, false) + "\n" + XS_IDLE_NO_WAKE_HINT },
     ]);
+  });
+});
+
+// #84 D2 — use the shipped sender and ledger, never a real hub/network.
+import { createXsSender, type XsSenderDeps, type XsPortReply, type XsHubPort } from "../../src/fabric/xs/sender.js";
+import { XsReplyLedger } from "../../src/fabric/xs/reply-ledger.js";
+import type { XsResFrame } from "../../src/web-hub/protocol/xs.js";
+
+const xsRes = (res: Partial<XsResFrame> & { ok: boolean }): XsPortReply => ({
+  kind: "res",
+  res: { t: "xs_res", rid: "test", ...res },
+});
+function boundarySender(over: Partial<XsSenderDeps> = {}) {
+  const port = {
+    list: vi.fn(async () => xsRes({ ok: true, rows: [] })),
+    resolve: vi.fn(async () => xsRes({ ok: true, target: { ref: "target123456", sessionId: "session-target" } })),
+    send: vi.fn(async () => xsRes({ ok: true, effect: "applied" })),
+    replyCapable: () => true,
+  } satisfies XsHubPort;
+  const sender = createXsSender({
+    port,
+    origin: { current: () => ({ sessionId: "session-source", epoch: 1 }) },
+    ...over,
+  });
+  return { port, sender, tool: createMessageSessionTool({ sender, reply: true, alias: true }) };
+}
+const boundaryText = (r: { content: unknown }) => (r.content as { text: string }[])[0]!.text;
+const boundaryArgs = { to: "target123456", text: "body-never-real-sent" };
+
+function replyDeps(ledger = new XsReplyLedger()): NonNullable<XsSenderDeps["reply"]> {
+  return {
+    ledger,
+    defaultTimeoutS: 60,
+    maxTimeoutS: 3600,
+    lateGraceS: 60,
+    maxPending: 2,
+    maxPendingPerTarget: 1,
+    receivable: () => "ok",
+    inbound: () => undefined,
+  };
+}
+
+describe("message_session boundary guidance through real sender (#84 D2)", () => {
+  it.each([
+    ["E_XS_NO_TARGET", "no_target", "list_sessions"],
+    ["E_XS_AMBIGUOUS", "ambiguous", "list_sessions"],
+    ["E_XS_STALE_ORIGIN", "stale_origin", "重新确认发送意图"],
+    ["E_XS_OFF", "off", "/fabric status"],
+    ["E_XS_TOO_LARGE", "too_large", "缩短正文"],
+    ["E_XS_BAD_FRAME", "bad_frame", "核对工具参数"],
+    ["E_XS_REPLY_UNSUPPORTED", "reply_unsupported", "不要编造 replyTo"],
+    ["E_XS_ALIAS_UNAVAILABLE", "alias_unavailable", "list_sessions 给出的 ref"],
+  ])("resolve refusal %s preserves code/effect and sends nothing", async (code, status, hint) => {
+    const h = boundarySender();
+    h.port.resolve.mockResolvedValueOnce(xsRes({ ok: false, code }));
+    const result = await h.tool.execute("c", boundaryArgs, undefined, undefined, testToolContext);
+    expect(result.details).toEqual({ status, effect: "none", code });
+    expect(boundaryText(result)).toContain(hint);
+    expect(h.port.resolve).toHaveBeenCalledTimes(1);
+    expect(h.port.send).not.toHaveBeenCalled();
+    expect(h.port.list).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["rejected", "接收方策略拒收"],
+    ["inbox_full", "接收容量受限"],
+    ["dedup_full", "接收容量受限"],
+    ["fenced:compaction", "操作边界保护"],
+    ["fenced:switch", "操作边界保护"],
+    ["fenced:tree", "操作边界保护"],
+    ["fenced:web_exec", "操作边界保护"],
+    ["fenced:topic_switch", "操作边界保护"],
+    ["session_changed", "目标会话已变化"],
+    ["expired", "投递已过期"],
+    ["host_rejected", "接收端未完成投递"],
+    ["receiver_error", "接收端未完成投递"],
+    ["rate_in_flight", "没有权威 retryAfter"],
+    ["rate_sends_min", "没有权威 retryAfter"],
+    ["rate_sends_hour", "没有权威 retryAfter"],
+    ["rate_hub", "没有权威 retryAfter"],
+    ["rate_pair_interval", "没有权威 retryAfter"],
+    ["inbound_rate", "没有权威 retryAfter"],
+  ])("none/%s adds safe advice without a second body or invented retry time", async (reason, advice) => {
+    const h = boundarySender();
+    h.port.send.mockResolvedValueOnce(xsRes({ ok: true, effect: "none", reason }));
+    const result = await h.tool.execute("c", boundaryArgs, undefined, undefined, testToolContext);
+    expect(result.details).toMatchObject({ status: "sent", effect: "none", reason });
+    expect(boundaryText(result)).toContain(advice);
+    expect(boundaryText(result)).not.toMatch(/\d+\s*(秒|分钟|小时).*重试/);
+    expect(h.port.send).toHaveBeenCalledTimes(1);
+    expect(h.port.send.mock.calls[0]).toEqual([
+      { origin: { sessionId: "session-source", epoch: 1 }, to: boundaryArgs.to, text: boundaryArgs.text },
+    ]);
+    expect(h.port.resolve).toHaveBeenCalledTimes(1);
+    expect(h.port.list).not.toHaveBeenCalled();
+  });
+
+  it.each(["deadline", "link_lost", "off"] as const)(
+    "pre-send %s does not become a delivery claim or retry loop",
+    async (kind) => {
+      const h = boundarySender();
+      h.port.resolve.mockResolvedValueOnce({ kind });
+      const result = await h.tool.execute("c", boundaryArgs, undefined, undefined, testToolContext);
+      expect(result.details).toMatchObject({ effect: "none", status: kind === "off" ? "off" : "error" });
+      expect(boundaryText(result)).toContain("本次正文未送达");
+      expect(h.port.send).not.toHaveBeenCalled();
+      expect(h.port.resolve).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(["deadline", "link_lost"] as const)(
+    "post-send %s remains unknown with unchanged do-not-resend bytes",
+    async (kind) => {
+      const h = boundarySender();
+      h.port.send.mockResolvedValueOnce({ kind });
+      const result = await h.tool.execute("c", boundaryArgs, undefined, undefined, testToolContext);
+      expect(result.details).toEqual({
+        status: "unanswered",
+        effect: "unknown",
+        reason: kind === "deadline" ? "client_deadline" : "link_lost",
+      });
+      expect(boundaryText(result)).toBe(JSON.stringify(result.details) + "\n" + XS_UNKNOWN_HINT);
+      expect(h.port.send).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("unknown remote error retains code/reason/effect without guessing a cause or resending", async () => {
+    const h = boundarySender();
+    h.port.send.mockResolvedValueOnce(xsRes({ ok: false, code: "E_XS_INTERNAL", reason: "unverified" }));
+    const result = await h.tool.execute("c", boundaryArgs, undefined, undefined, testToolContext);
+    expect(result.details).toMatchObject({
+      status: "error",
+      code: "E_XS_INTERNAL",
+      reason: "unverified",
+      effect: "unknown",
+    });
+    expect(boundaryText(result)).toBe(JSON.stringify(result.details) + "\n" + XS_UNKNOWN_HINT);
+    expect(h.port.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("plain applied success remains JSON-only and sends exactly once", async () => {
+    const h = boundarySender();
+    const result = await h.tool.execute("c", boundaryArgs, undefined, undefined, testToolContext);
+    expect(boundaryText(result)).toBe(JSON.stringify(result.details));
+    expect(result.details).toEqual({ status: "sent", effect: "applied", to: { ref: "target123456" } });
+    expect(h.port.send).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["receive_off", "blocked", "not_joined"] as const)(
+    "unreceivable/%s never issues a credential or sends",
+    async (unreceivable) => {
+      const reply = replyDeps();
+      reply.receivable = () => unreceivable;
+      const h = boundarySender({ reply });
+      const result = await h.tool.execute(
+        "c",
+        { ...boundaryArgs, expectReply: {} } as MessageSessionParams,
+        undefined,
+        undefined,
+        testToolContext,
+      );
+      expect(result.details).toEqual({
+        status: "reply_unreceivable",
+        effect: "none",
+        reason: "reply_unreceivable",
+        unreceivable,
+      });
+      expect(boundaryText(result)).toContain("不要自行 join、改 policy 或去掉 expectReply 绕过");
+      expect(reply.ledger).toHaveProperty("size", 0);
+      expect(h.port.send).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["reply_quota", "reply_ledger_full"] as const)(
+    "%s uses real pending ledger capacity, without new issues/refunds/retries",
+    async (status) => {
+      const ledger = new XsReplyLedger({ capacity: status === "reply_ledger_full" ? 1 : 64 });
+      const reply = replyDeps(ledger);
+      if (status === "reply_ledger_full") reply.maxPendingPerTarget = 2;
+      const h = boundarySender({ reply });
+      const first = await h.tool.execute(
+        "c",
+        { ...boundaryArgs, expectReply: {} } as MessageSessionParams,
+        undefined,
+        undefined,
+        testToolContext,
+      );
+      expect(first.details).toMatchObject({ effect: "applied", reply: { state: "pending" } });
+      const recordSend = vi.spyOn(ledger, "recordSend");
+      const result = await h.tool.execute(
+        "c2",
+        { ...boundaryArgs, expectReply: {} } as MessageSessionParams,
+        undefined,
+        undefined,
+        testToolContext,
+      );
+      expect(result.details).toMatchObject({ status, effect: "none" });
+      expect(boundaryText(result)).toContain("不要换目标、去掉 expectReply 或重启来绕过");
+      expect(ledger.size).toBe(1);
+      expect(recordSend).not.toHaveBeenCalled();
+      expect(h.port.send).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("replyTo mismatch stays none and does not suggest dropping the one-use credential", async () => {
+    const reply = replyDeps();
+    reply.inbound = () => ({ fromSessionId: "different-session" });
+    const h = boundarySender({ reply });
+    const result = await h.tool.execute(
+      "c",
+      { ...boundaryArgs, replyTo: "q111111111111111111" } as MessageSessionParams,
+      undefined,
+      undefined,
+      testToolContext,
+    );
+    expect(result.details).toEqual({
+      status: "reply_target_mismatch",
+      effect: "none",
+      reason: "reply_target_mismatch",
+    });
+    expect(boundaryText(result)).toContain("不要编造凭证或改成普通消息重发最终回复");
+    expect(h.port.send).not.toHaveBeenCalled();
+  });
+
+  it("unknown request keeps its real one-use ticket pending and never reissues or refunds", async () => {
+    const ledger = new XsReplyLedger();
+    const h = boundarySender({ reply: replyDeps(ledger) });
+    const recordSend = vi.spyOn(ledger, "recordSend");
+    h.port.send.mockRejectedValueOnce(new Error("SECRET_send_failure"));
+    const result = await h.tool.execute(
+      "c",
+      { ...boundaryArgs, expectReply: {} } as MessageSessionParams,
+      undefined,
+      undefined,
+      testToolContext,
+    );
+    const outcome = result.details as XsSendOutcome;
+    expect(outcome).toMatchObject({ status: "unanswered", effect: "unknown", reply: { state: "pending" } });
+    expect(recordSend).toHaveBeenCalledTimes(1);
+    expect(recordSend).toHaveBeenCalledWith(outcome.reply!.requestId, "unknown");
+    expect(ledger.classify(outcome.reply!.requestId, "session-target", "session-source").kind).toBe("reply");
+    expect(boundaryText(result)).toContain(XS_UNKNOWN_HINT);
+    expect(JSON.stringify(result)).not.toContain("SECRET");
+    expect(h.port.send).toHaveBeenCalledTimes(1);
+    expect(ledger.size).toBe(1);
+  });
+
+  it("replyTo unknown/rejected keep the original one-use guidance and one body attempt", async () => {
+    for (const unknown of [true, false]) {
+      const h = boundarySender({ reply: replyDeps() });
+      h.port.send.mockResolvedValueOnce(
+        unknown ? { kind: "deadline" } : xsRes({ ok: true, effect: "none", reason: "rejected" }),
+      );
+      const result = await h.tool.execute(
+        "c",
+        { ...boundaryArgs, replyTo: "q111111111111111111" } as MessageSessionParams,
+        undefined,
+        undefined,
+        testToolContext,
+      );
+      expect(result.details).toMatchObject({
+        effect: unknown ? "unknown" : "none",
+        replyTo: { requestId: "q111111111111111111", accepted: false },
+      });
+      expect(boundaryText(result)).toBe(
+        JSON.stringify(result.details) + "\n" + (unknown ? XS_REPLY_TO_UNKNOWN_HINT : XS_REPLY_TO_REJECTED_HINT),
+      );
+      expect(h.port.send).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it.each([new Error("SECRET_resolve_failure"), "SECRET_non_error"])(
+    "unhandled sender-port exception becomes a sanitized failure, not invented none",
+    async (error) => {
+      const h = boundarySender();
+      h.port.resolve.mockRejectedValueOnce(error);
+      const failure = await h.tool.execute("c", boundaryArgs, undefined, undefined, testToolContext).then(
+        () => {
+          throw new Error("expected failure");
+        },
+        (cause: unknown) => cause,
+      );
+      expect(failure).toBeInstanceOf(Error);
+      expect((failure as Error).message).toContain(
+        "message_session: unexpected failure — 无法确认发送效果；不要重发正文",
+      );
+      expect((failure as Error).message).not.toContain("SECRET");
+      expect((failure as Error).cause).toBeUndefined();
+      expect(h.port.resolve).toHaveBeenCalledTimes(1);
+      expect(h.port.send).not.toHaveBeenCalled();
+    },
+  );
+});
+
+describe("message_session local refusals through real sender (#84 D2)", () => {
+  it("bad_args does not issue, resolve or send and keeps the original mutually-exclusive guidance", async () => {
+    const ledger = new XsReplyLedger();
+    const h = boundarySender({ reply: replyDeps(ledger) });
+    const result = await h.tool.execute(
+      "c",
+      { ...boundaryArgs, expectReply: {}, replyTo: "q111111111111111111" } as MessageSessionParams,
+      undefined,
+      undefined,
+      testToolContext,
+    );
+    expect(result.details).toEqual({ status: "bad_args", effect: "none", reason: "expect_and_reply_to" });
+    expect(boundaryText(result)).toContain("两条路径互斥");
+    expect(ledger.size).toBe(0);
+    expect(h.port.resolve).not.toHaveBeenCalled();
+    expect(h.port.send).not.toHaveBeenCalled();
+  });
+
+  it.each(["root", "system", "main", "r_ABCD0001", "@builder", "wf_123456"])(
+    "reserved %s never reaches discovery or send",
+    async (to) => {
+      const h = boundarySender();
+      const result = await h.tool.execute("c", { ...boundaryArgs, to }, undefined, undefined, testToolContext);
+      expect(result.details).toEqual({ status: "bad_target", effect: "none", reason: "bad_target" });
+      expect(boundaryText(result)).toContain("list_sessions");
+      expect(h.port.resolve).not.toHaveBeenCalled();
+      expect(h.port.send).not.toHaveBeenCalled();
+    },
+  );
+
+  it("not_joined does not try to join or resolve", async () => {
+    const h = boundarySender({
+      channels: { pref: () => [], effective: () => [], link: () => [], linkJoined: () => false },
+    });
+    const result = await h.tool.execute("c", boundaryArgs, undefined, undefined, testToolContext);
+    expect(result.details).toEqual({ status: "not_joined", effect: "none", reason: "not_joined" });
+    expect(boundaryText(result)).toContain("不要自行执行 join、改策略或换路由绕过");
+    expect(h.port.resolve).not.toHaveBeenCalled();
+    expect(h.port.send).not.toHaveBeenCalled();
+  });
+
+  it("oversize UTF-8 frame stays too_large/none and does not send", async () => {
+    const h = boundarySender({ maxChars: 16_384 });
+    const result = await h.tool.execute(
+      "c",
+      { ...boundaryArgs, text: "x".repeat(16_384) },
+      undefined,
+      undefined,
+      testToolContext,
+    );
+    expect(result.details).toEqual({ status: "too_large", effect: "none", reason: "too_large" });
+    expect(boundaryText(result)).toContain("缩短正文后再发送");
+    expect(h.port.resolve).toHaveBeenCalledTimes(1);
+    expect(h.port.send).not.toHaveBeenCalled();
   });
 });

@@ -1,3 +1,4 @@
+import type { ExtensionToolContext } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 import {
   createMessageAgentTool,
@@ -9,7 +10,9 @@ import { MemoryOutboxStore } from "../../src/core/store.js";
 import { createDeliveryEngine } from "../../src/delivery/engine.js";
 import { FabricTree } from "../../src/fabric/tree.js";
 import { FabricThrottle } from "../../src/fabric/throttle.js";
-import { FabricRouter } from "../../src/fabric/router.js";
+import { FabricRouter, type FabricRouterConfig } from "../../src/fabric/router.js";
+
+const testToolContext = {} as ExtensionToolContext;
 
 const generation = () => 3;
 const reportQuotaSnapshot = () => ({ used: 0, limit: 3, remaining: 3 });
@@ -105,7 +108,7 @@ describe("tools/message-agent", () => {
 });
 
 /** Real in-memory fabric (engine+tree+router), so the authorization shapes below are the shipped ones, not mocks. */
-function makeFabric(edges: readonly (readonly [NodeRef, NodeRef])[]) {
+function makeFabric(edges: readonly (readonly [NodeRef, NodeRef])[], config: Partial<FabricRouterConfig> = {}) {
   const engine = createDeliveryEngine<FabricRecord, FabricRecord["state"]>({
     store: new MemoryOutboxStore<FabricRecord>(),
     allowed: {
@@ -138,6 +141,7 @@ function makeFabric(edges: readonly (readonly [NodeRef, NodeRef])[]) {
       reconcileTtlMs: 100,
       rootInboxCap: 4,
       progressChannel: "display" as const,
+      ...config,
     },
     () => 1,
   );
@@ -184,7 +188,8 @@ describe("tools/message-agent kind guidance (#33)", () => {
     const message = await errorMessage(tool.execute("call", { to: "root", kind: "directive", text: "do x" }));
     expect(message.startsWith("message not authorized")).toBe(true);
     expect(message).toContain('kind "directive" may only be sent by a parent');
-    expect(message).toContain('use kind:"report" instead');
+    expect(message).toContain("do not switch kind or address to bypass authorization");
+    expect(message).not.toContain('use kind:"report" instead');
     expect(message).toContain("the model never sees it");
   });
 
@@ -232,7 +237,7 @@ describe("tools/message-agent kind guidance (#33)", () => {
         generation,
       });
       const message = await errorMessage(tool.execute("call", { to, kind: LEGACY_KIND as never, text: "x" }));
-      expect(message.startsWith(`message_agent: unknown kind "${LEGACY_KIND}"`)).toBe(true);
+      expect(message.startsWith("message_agent: unknown kind — valid kinds:")).toBe(true);
       expect(message).not.toContain("message not authorized");
       for (const kind of ['"report"', '"progress"', '"directive"']) expect(message).toContain(kind);
     }
@@ -248,7 +253,7 @@ describe("tools/message-agent kind guidance (#33)", () => {
     const wakeMessage = await errorMessage(
       wakeTool.execute("call", { to: "root", kind: LEGACY_KIND as never, text: "x", wake: true } as never),
     );
-    expect(wakeMessage.startsWith(`message_agent: unknown kind "${LEGACY_KIND}"`)).toBe(true);
+    expect(wakeMessage.startsWith("message_agent: unknown kind — valid kinds:")).toBe(true);
     expect(admit).not.toHaveBeenCalled();
   });
 });
@@ -330,9 +335,11 @@ describe("report quota on all exits", () => {
         status: "resume_failed",
         quota: { used: 1, limit: 2, remaining: 1 },
       });
-      expect(message).toContain(
-        failure === "post-reservation level failure" ? "level failed" : "spawn rejected unexpectedly",
-      );
+      expect(message).toContain("message_agent: resume failed");
+      expect(JSON.stringify(result)).not.toContain("spawn rejected unexpectedly");
+      expect(JSON.stringify(result)).not.toContain("level failed");
+      expect(message).toContain("不能据此证明没有副作用");
+      expect(message).toContain("额度不退款");
       expect(message).toContain("report 1/2 已用，剩 1 次");
       const next = await tool.execute("call", { to: "root", kind: "report", text: "x" });
       expect(next.details).toMatchObject({ quota: { used: 2, limit: 2, remaining: 0 } });
@@ -360,7 +367,11 @@ describe("report quota on all exits", () => {
     const mention = { send: async () => rejection } as never;
     const tool = createMessageAgentTool({ router, mention, from: "r_ABCD0001", generation });
     const result = await tool.execute("call", { to: "@x", kind: "report", text: "x" });
-    expect(result.details).toMatchObject({ ...rejection, reportQuota: { used: 0, limit: 2, remaining: 2 } });
+    expect(result.details).toMatchObject({
+      ...rejection,
+      ...(rejection.status === "resume_failed" ? { error: "message_agent: resume failed" } : {}),
+      reportQuota: { used: 0, limit: 2, remaining: 2 },
+    });
     expect((result.content[0] as { text: string }).text).toContain("report 0/2 已用，剩 2 次");
     expect(router.reportQuotaSnapshot("r_ABCD0001")).toEqual({ used: 0, limit: 2, remaining: 2 });
   });
@@ -406,5 +417,236 @@ describe("report quota on all exits", () => {
       expect(r.details).not.toHaveProperty("quota");
       expect((r.content[0] as { text: string }).text).not.toContain("report 0/2");
     }
+  });
+});
+
+// #84 D1 — real admission/mention implementations, controlled ports only; no host delivery.
+describe("message_agent admission-only boundary advice (#84 D1)", () => {
+  const text = (r: { content: unknown }) => (r.content as { text: string }[])[0]!.text;
+
+  it.each(["progress", "report", "directive"] as const)(
+    "does not spend a denied %s or teach kind switching",
+    async (kind) => {
+      const router = makeFabric([
+        ["root", "r_PARENT01"],
+        ["r_PARENT01", "r_ABCD0001"],
+      ]);
+      const admit = vi.spyOn(router, "admit");
+      const tool = createMessageAgentTool({ router, from: "r_ABCD0001", generation });
+      const message = await errorMessage(
+        tool.execute("c", { to: "root", kind, text: "question" }, undefined, undefined, testToolContext),
+      );
+      expect(message).toContain("message not authorized");
+      expect(message).toContain("do not switch kind or address to bypass authorization");
+      expect(message).not.toContain('use kind:"report" instead');
+      expect(admit).toHaveBeenCalledTimes(1);
+      expect(router.rootInbox()).toBe(0);
+      expect(router.reportQuotaSnapshot("r_ABCD0001").used).toBe(0);
+    },
+  );
+
+  it.each(["progress", "report", "directive"] as const)(
+    "exhausted %s stops retries without another admission",
+    async (kind) => {
+      const router = makeFabric([["root", "r_ABCD0001"]]);
+      const from = kind === "directive" ? "root" : "r_ABCD0001";
+      const to = kind === "directive" ? "r_ABCD0001" : "root";
+      const tool = createMessageAgentTool({ router, from, generation });
+      for (let i = 0; i < 2; i++)
+        expect(
+          (await tool.execute("c", { to, kind, text: "x" }, undefined, undefined, testToolContext)).details,
+        ).toMatchObject({ ok: true });
+      const admit = vi.spyOn(router, "admit");
+      const exhausted = await tool.execute("c", { to, kind, text: "x" }, undefined, undefined, testToolContext);
+      expect(exhausted.details).toMatchObject({ ok: false, status: "quota_exhausted", kind, used: 2, quota: 2 });
+      expect(text(exhausted)).toContain("不要换 kind、目标或省略 wake 绕过额度");
+      expect(admit).toHaveBeenCalledTimes(1);
+      expect(router.reportQuotaSnapshot(from).used).toBe(kind === "report" ? 2 : 0);
+    },
+  );
+
+  it("capacity failure keeps retryAfterMs=0, no guessed delay and no quota charge", async () => {
+    const router = makeFabric([["root", "r_ABCD0001"]], { rootInboxCap: 0 });
+    const admit = vi.spyOn(router, "admit");
+    const result = await createMessageAgentTool({ router, from: "r_ABCD0001", generation }).execute(
+      "c",
+      {
+        to: "root",
+        kind: "report",
+        text: "x",
+      },
+      undefined,
+      undefined,
+      testToolContext,
+    );
+    expect(result.details).toMatchObject({
+      status: "target_backpressure",
+      retryAfterMs: 0,
+      reportQuota: { used: 0, remaining: 2 },
+    });
+    expect(text(result)).toContain("等待目标消费已有消息");
+    expect(text(result)).not.toMatch(/\d+\s*(秒|分钟|ms|s 后)/);
+    expect(admit).toHaveBeenCalledTimes(1);
+    expect(router.rootInbox()).toBe(0);
+    expect(router.reportQuotaSnapshot("r_ABCD0001").used).toBe(0);
+  });
+
+  it("not_wakeable preserves the exclusion and never wakes or spends", async () => {
+    const router = makeFabric([["root", "r_ABCD0001"]], {
+      wakePolicy: {
+        levelOf: () => 0,
+        hopAllowed: () => true,
+        perRunQuota: 2,
+        reviveGate: () => ({ refuse: "user_aborted" }),
+      },
+    });
+    router.onRunSettled("r_ABCD0001");
+    const admit = vi.spyOn(router, "admit");
+    const result = await createMessageAgentTool({ router, from: "root", generation, wakeOn: true }).execute(
+      "c",
+      {
+        to: "r_ABCD0001",
+        kind: "directive",
+        text: "x",
+        wake: true,
+      } as never,
+      undefined,
+      undefined,
+      testToolContext,
+    );
+    expect(result.details).toEqual({ ok: false, status: "not_wakeable", reason: "user_aborted" });
+    expect(text(result)).toContain("不要改 wake 或路由绕过");
+    expect(admit).toHaveBeenCalledTimes(1);
+    expect(router.wakeUsed("root")).toBe(0);
+  });
+
+  it.each(["unknown_label", "not_root_child", "not_authorized", "target_not_ready"] as const)(
+    "real mention %s has safe next steps and no spawn/admission",
+    async (status) => {
+      const { createMentionChannel } = await import("../../src/fabric/mention.js");
+      const router = makeFabric([
+        ["root", "r_ABCD0001"],
+        ["root", "r_TARGET01"],
+      ]);
+      const admit = vi.spyOn(router, "admit");
+      const spawn = vi.fn();
+      const mention = createMentionChannel({
+        router,
+        registry: {
+          resolve: () =>
+            status === "unknown_label"
+              ? undefined
+              : { runId: "r_TARGET01", type: "worker", parent: status === "not_root_child" ? "r_ABCD0001" : "root" },
+        },
+        query: { get: () => ({ status: "pending_start" }) as never },
+        spawn: { spawn },
+        from: "r_ABCD0001",
+        generation,
+        canMessage: status === "not_authorized" ? [] : ["mention"],
+      });
+      const result = await createMessageAgentTool({ router, mention, from: "r_ABCD0001", generation }).execute(
+        "c",
+        {
+          to: "@builder",
+          kind: "report",
+          text: "x",
+        },
+        undefined,
+        undefined,
+        testToolContext,
+      );
+      expect(result.details).toMatchObject({ ok: false, status, reportQuota: { used: 0, limit: 2, remaining: 2 } });
+      expect(text(result).split("\n")[1]).toBeTruthy();
+      expect(text(result)).toMatch(/确认/);
+      expect(admit).not.toHaveBeenCalled();
+      expect(spawn).not.toHaveBeenCalled();
+      expect(router.reportQuotaSnapshot("r_ABCD0001").used).toBe(0);
+    },
+  );
+
+  it("lifecycle errors are whitelisted and remain failures without retries", async () => {
+    for (const frozen of [false, true]) {
+      const router = makeFabric([["root", "r_ABCD0001"]]);
+      if (frozen) router.freeze();
+      else router.onRunSettled("r_ABCD0001");
+      const admit = vi.spyOn(router, "admit");
+      const message = await errorMessage(
+        createMessageAgentTool({ router, from: "r_ABCD0001", generation }).execute(
+          "c",
+          {
+            to: "root",
+            kind: "report",
+            text: "x",
+          },
+          undefined,
+          undefined,
+          testToolContext,
+        ),
+      );
+      expect(message).toContain(frozen ? "shutting down" : "sender is not running");
+      expect(message).toContain("停止重试");
+      expect(admit).toHaveBeenCalledTimes(1);
+      expect(router.reportQuotaSnapshot("r_ABCD0001").used).toBe(0);
+    }
+  });
+
+  it.each([new Error("SECRET_provider_token"), "SECRET_non_error"])(
+    "does not leak arbitrary port exceptions or their cause",
+    async (failure) => {
+      const { createMentionChannel } = await import("../../src/fabric/mention.js");
+      const router = makeFabric([["root", "r_ABCD0001"]]);
+      const resolve = vi.fn(() => {
+        throw failure;
+      });
+      const spawn = vi.fn();
+      const mention = createMentionChannel({
+        router,
+        registry: { resolve },
+        query: { get: vi.fn() },
+        spawn: { spawn },
+        from: "r_ABCD0001",
+        generation,
+      });
+      const message = await errorMessage(
+        createMessageAgentTool({ router, mention, from: "r_ABCD0001", generation }).execute(
+          "c",
+          {
+            to: "@builder",
+            kind: "report",
+            text: "x",
+          },
+          undefined,
+          undefined,
+          testToolContext,
+        ),
+      );
+      expect(message).toContain("unexpected failure");
+      expect(message).toContain("不要自动重发正文");
+      expect(message).not.toContain("SECRET");
+      expect(resolve).toHaveBeenCalledTimes(1);
+      expect(spawn).not.toHaveBeenCalled();
+      expect(router.reportQuotaSnapshot("r_ABCD0001").used).toBe(0);
+    },
+  );
+
+  it("unknown kind never reflects arbitrary input or reaches admission", async () => {
+    const router = makeFabric([["root", "r_ABCD0001"]]);
+    const admit = vi.spyOn(router, "admit");
+    const message = await errorMessage(
+      createMessageAgentTool({ router, from: "r_ABCD0001", generation }).execute(
+        "c",
+        {
+          to: "root",
+          kind: "SECRET_kind" as never,
+          text: "x",
+        },
+        undefined,
+        undefined,
+        testToolContext,
+      ),
+    );
+    expect(message).toContain("unknown kind");
+    expect(message).not.toContain("SECRET");
+    expect(admit).not.toHaveBeenCalled();
   });
 });

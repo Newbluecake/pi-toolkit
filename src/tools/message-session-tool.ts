@@ -150,6 +150,71 @@ const REPLY_DESCRIPTION =
   "boundary; do NOT blindly resend a request (a replyTo resend is idempotent but may be refused). " +
   "While working on a request that carried reply_to, send any intermediate question to its requester as a NEW message with expectReply (wake:true) — never the original replyTo (it accepts exactly one reply: your final result) — and do not block on ask_user: the requester cannot see your local dialog (the host redirects ask_user for you when it can).";
 
+/** #84 D2: advice uses only the sender's existing none verdict, never infers delivery from a reason.
+ * Unknown/applied keep their established receipt/activation guidance and bytes. No retry time is invented.
+ */
+export function xsNoneFailureHint(outcome: { status: string; effect: string; reason?: string }): string {
+  if (outcome.effect !== "none") return "";
+  switch (outcome.reason) {
+    case "rate_in_flight":
+    case "rate_sends_min":
+    case "rate_sends_hour":
+    case "rate_hub":
+    case "rate_pair_interval":
+    case "rate_broadcast_hour":
+    case "rate_broadcast_interval":
+    case "inbound_rate":
+      return "本次正文未送达：发送频率或在途容量受限。停止连续重试；没有权威 retryAfter，不能推算恢复时间，不要换目标或路由绕过配额。";
+    case "inbox_full":
+    case "dedup_full":
+      return "本次正文未送达：接收容量受限。等待已有消息被消费/容量释放后再决定是否重试，不要连续重试或换路由绕过。";
+    case "fenced:compaction":
+    case "fenced:tree":
+    case "fenced:switch":
+    case "fenced:web_exec":
+    case "fenced:topic_switch":
+    case "fenced:goal":
+      return "本次正文未送达：目标处于操作边界保护中。等待该操作结束后再确认目标，不要自行重置 fence 或换路由绕过。";
+    case "session_changed":
+    case "changed":
+      return "本次正文未送达：目标会话已变化；用 list_sessions 重新确认精确 ref，不要将原请求自动转发给其他会话。";
+    case "expired":
+      return "本次正文未送达：投递已过期；先确认目标和请求是否仍有效，再决定是否重新发送，不要连续重试。";
+    case "rejected":
+      return "本次正文未送达：接收方策略拒收，不能据此区分具体原因。停止重试并请用户确认；不要自行加入频道、改接收策略或换路由绕过。";
+    case "host_rejected":
+    case "receiver_error":
+      return "本次正文未送达：接收端未完成投递；请用户核对目标状态，修复后再决定是否重试。";
+  }
+  switch (outcome.status) {
+    case "origin_changed":
+    case "stale_origin":
+      return "本次正文未送达：发送来源已取消或变化。停止本次操作，在当前会话重新确认发送意图和目标后再决定是否发送。";
+    case "not_joined":
+      return "本次正文未送达：当前会话不具备本链路成员资格。请用户确认参与意图；不要自行执行 join、改策略或换路由绕过。";
+    case "off":
+    case "channel_unsupported":
+      return "本次正文未送达：当前链路功能关闭或不支持。请用户核对 /fabric status 与 /webhub status；不要自行启用设置或改变成员资格。";
+    case "too_large":
+      return "本次正文未送达：消息超过帧大小限制；缩短正文后再发送，不要连续重试相同正文。";
+    case "bad_frame":
+      return "本次正文未送达：请求格式不被支持；核对工具参数，仍失败则请用户检查宿主版本，不要重复原调用。";
+    case "reply_unsupported":
+      return "本次正文未送达：当前链路不支持所需回复凭证或缺少精确会话身份。请用户核对能力/版本；不要编造 replyTo 或去掉回复约束绕过。";
+    case "reply_unreceivable":
+      return "本次正文未送达：当前会话无法接收该目标的回复。请用户确认成员资格、接收策略及阻止规则；不要自行 join、改 policy 或去掉 expectReply 绕过。";
+    case "reply_quota":
+    case "reply_ledger_full":
+      return "本次正文未送达：未决回复额度或凭证账本容量已满。等待已有请求完成/过期后再决定是否发送，不要换目标、去掉 expectReply 或重启来绕过。";
+    case "reply_target_mismatch":
+      return "本次正文未送达：replyTo 与目标不匹配。核对原请求头中的 reply_to 和发送者精确 ref；不要编造凭证或改成普通消息重发最终回复。";
+    case "error":
+      return "本次正文未送达，但无法确定具体故障原因。请用户核对宿主状态后再决定是否重试；不要猜测网络或权限问题。";
+    default:
+      return "";
+  }
+}
+
 export function createMessageSessionTool(
   deps: MessageSessionToolDeps,
 ): ToolDefinition<typeof MessageSessionParamsLegacy> {
@@ -186,16 +251,24 @@ export function createMessageSessionTool(
         .digest("hex");
       if (streak?.digest !== digest) streak = { digest, failures: 0 };
       const current = streak;
-      const invocation = deps.activation === true ? deps.invocation?.(toolCallId) : undefined;
-      const outcome: XsSendOutcome = await deps.sender.message({
-        ...(invocation ? { invocation } : {}),
-        ...(signal !== undefined ? { signal } : {}),
-        to: params.to,
-        text: params.text,
-        ...(params.wake !== undefined ? { wake: params.wake } : {}),
-        ...(expectReply !== undefined ? { expectReply } : {}),
-        ...(replyTo !== undefined ? { replyTo } : {}),
-      });
+      let outcome: XsSendOutcome;
+      try {
+        const invocation = deps.activation === true ? deps.invocation?.(toolCallId) : undefined;
+        outcome = await deps.sender.message({
+          ...(invocation ? { invocation } : {}),
+          ...(signal !== undefined ? { signal } : {}),
+          to: params.to,
+          text: params.text,
+          ...(params.wake !== undefined ? { wake: params.wake } : {}),
+          ...(expectReply !== undefined ? { expectReply } : {}),
+          ...(replyTo !== undefined ? { replyTo } : {}),
+        });
+      } catch {
+        // A throw is not evidence of none (the port may have acted). Do not invent a sender outcome.
+        throw new Error(
+          "message_session: unexpected failure — 无法确认发送效果；不要重发正文，请用户核对状态；如已有原 receipt，仅查询该 receipt。",
+        );
+      }
       // An older in-flight call must not change the streak for newer parameters.
       if (streak === current) {
         current.failures = outcome.status === "bad_args" ? Math.min(current.failures + 1, 5) : 0;
@@ -214,9 +287,16 @@ export function createMessageSessionTool(
           else if (outcome.effect === "none" && outcome.reason === "rejected") hint += `\n${XS_REPLY_TO_REJECTED_HINT}`;
         } else if (outcome.effect === "unknown") hint += `\n${XS_UNKNOWN_HINT}`;
       } else if (outcome.effect === "unknown") hint = `\n${XS_UNKNOWN_HINT}`;
-      if (outcome.status === "bad_target" || outcome.status === "no_target" || outcome.status === "ambiguous")
+      if (
+        outcome.effect === "none" &&
+        (outcome.status === "bad_target" || outcome.status === "no_target" || outcome.status === "ambiguous")
+      )
         hint +=
           "\n`to` 只接受 `list_sessions` 给出的 ref、完整 session id 或精确会话名；先用 `list_sessions` 确认目标再发送。";
+      // replyTo's once-only rejection explanation takes precedence over generic policy advice.
+      const failureHint =
+        outcome.replyTo !== undefined && outcome.reason === "rejected" ? "" : xsNoneFailureHint(outcome);
+      if (failureHint) hint += `\n${failureHint}`;
       if (deps.alias === true && outcome.status === "alias_unavailable") hint += `\n${XS_ALIAS_UNAVAILABLE_HINT}`;
       if (deps.activation === true && outcome.wakeDowngraded)
         hint += `\n${xsWakeDowngradedHint(outcome.wakeDowngraded, outcome.effect)}`;

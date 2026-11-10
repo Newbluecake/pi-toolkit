@@ -57,34 +57,74 @@ export interface MessageAgentToolDeps {
   wakeOn?: boolean;
 }
 
-/**
- * Self-correction guidance appended (after the verbatim router text) when admission fails with `message not authorized`.
- * Mirrors `authorize()` in `src/core/message.ts` by kind — directive needs the sender to be the target's parent,
- * progress/report need the target's relation to the sender inside her `can_message` set. The router's tree is not
- * visible here, so the branches are kind-driven (that is exactly what the model got wrong in #33: `directive` up,
- * `progress` to root, or a grandchild's `report` straight to root).
- */
+/** Admission-only advice: a denied kind/relation is not permission to switch kind or route. */
 export function messageAgentKindHint(input: { to: string; kind: string; canMessage?: readonly CanMessage[] }): string {
-  if (input.to.startsWith("@")) {
-    return (
-      'the @label route requires can_message: mention and only carries kind "report" (or "progress"); ' +
-      'kind "directive" is parent-to-child only.'
-    );
-  }
-  if (input.kind === "directive") {
-    return (
-      'kind "directive" may only be sent by a parent to its own child run. To make the target session\'s model ' +
-      'actually see your message, use kind:"report" instead; kind:"progress" only renders in the TUI display and ' +
-      "the model never sees it; task results are reported via run completion, not this tool."
-    );
-  }
-  const allowed = effectiveCanMessage(input.canMessage).join("|");
+  const boundary = input.to.startsWith("@")
+    ? 'the @label route requires can_message: mention and only carries kind "report" (or "progress"); kind "directive" is parent-to-child only.'
+    : input.kind === "directive"
+      ? 'kind "directive" may only be sent by a parent to its own child run.'
+      : `report/progress require an authorized target relation in your can_message set (${effectiveCanMessage(input.canMessage).join("|")}; default: direct parent only).`;
   return (
-    `kind "${input.kind}" to ${input.to} requires the target's relation to you to be in your can_message set ` +
-    `(${allowed}; default: direct parent only). Send it to your direct parent run id instead — or report a finished ` +
-    'task via run completion (the "result" channel, child→parent); kind:"directive" is parent-to-child only, and ' +
-    'kind:"progress" to root only renders in the TUI display, so the model never sees it.'
+    boundary +
+    " Verify the intended kind and target with your parent; do not switch kind or address to bypass authorization. " +
+    'Use your authorized direct parent for questions/reports, or the "result" channel via run completion for final results. ' +
+    'kind:"progress" to root only renders in the TUI display; the model never sees it.'
   );
+}
+
+/** #84 D1: pure formatting over the existing receipt; never re-admit, reserve or refund. */
+function admissionHint(result: AdmissionResult | MentionSendResult): string {
+  if (result.ok) return "";
+  switch (result.status) {
+    case "invalid_wake":
+      return "progress 不会唤醒模型；若确实只需展示进度，省略 wake 或设为 false。不要改 kind 绕过限制。";
+    case "quota_exhausted":
+      return "本 run 的该 kind 额度已耗尽，请停止重试，在最终结果/完成汇报中提供信息；不要换 kind、目标或省略 wake 绕过额度。";
+    case "target_backpressure":
+      return "目标收件容量已满，本次未获准投递；等待目标消费已有消息后再决定是否重试，不要连续重试或换路由绕过容量。";
+    case "unknown_label":
+      return "未找到已注册的顶层 @label；向父会话确认精确 label 或获授权的 run id，不要猜测目标。";
+    case "not_root_child":
+      return "@label 只能指向已注册的顶层 run；向父会话确认获授权的目标，不要换地址绕过关系限制。";
+    case "not_authorized":
+      return "@label 需要 can_message: mention，且不能指向自己或承载 directive；请向父会话确认授权，不要换 kind/地址绕过。";
+    case "target_not_ready":
+      return "目标尚未就绪或当前不能接收此请求；等待父会话确认目标状态，不要通过省略 wake 或换 kind 强行启动。";
+    case "not_wakeable":
+      return "目标不允许被本请求唤醒；停止自动重试，交由父会话/用户确认后续安排，不要改 wake 或路由绕过。";
+    case "resume_failed":
+      return "恢复请求失败，不能据此证明没有副作用；不要自动重发正文。向父会话报告并核对 run 状态，已预留的 report 额度不退款。";
+  }
+}
+
+/** Only exact, locally owned error tokens may cross the tool boundary. No arbitrary Error/cause text. */
+function messageAgentError(
+  error: unknown,
+  params: MessageAgentParams,
+  canMessage: readonly CanMessage[] | undefined,
+): string {
+  const token = error instanceof Error ? error.message : undefined;
+  switch (token) {
+    case "message not authorized":
+      return `${token} — ${messageAgentKindHint({ ...params, ...(canMessage === undefined ? {} : { canMessage }) })}`;
+    case "sender is not running":
+    case "shutting down":
+      return `${token} — 当前发送方生命周期不允许发送；停止重试，交由父会话/用户确认，不要借其他身份发送。`;
+    case "invalid message key node":
+      return `${token} — to 应为精确 run id、root 或已注册 @label；向父会话确认目标，不要猜测。`;
+    case "message_agent: wake must be a boolean":
+      return `${token} — wake 只接受 true/false 或省略；保留原发送意图，不要用参数变化绕过限制。`;
+    case "message_agent: cannot determine generation":
+    case "invalid message key generation":
+    case "invalid message key sequence":
+    case "mention route target mismatch":
+    case "mention target is not a root child":
+    case "mention target is gone":
+    case "cannot persist mention report reservation":
+      return `${token} — 无法安全完成当前发送；停止重试并向父会话报告，由宿主核对状态。`;
+    default:
+      return "message_agent: unexpected failure — 发送效果无法确认；不要自动重发正文，向父会话/用户报告并核对状态。";
+  }
 }
 
 /** The kinds a caller may send (#34 E1; schema order). A retired kind is not sendable any more. */
@@ -109,14 +149,14 @@ export function createMessageAgentTool(deps: MessageAgentToolDeps): ToolDefiniti
       // misleading for a retired kind). Synchronous throw: no seq, no quota, no record.
       if (!SENDABLE_KINDS.includes(params.kind))
         throw new Error(
-          `message_agent: unknown kind "${params.kind}" — valid kinds: "report" (enters the target session's model ` +
+          `message_agent: unknown kind — valid kinds: "report" (enters the target session's model ` +
             'context; use it to ask or report back), "progress" (to:"root" only renders in the TUI display), ' +
             '"directive" (parent to its own child run only)',
         );
       try {
         const wake = wakeOn ? (params as { wake?: unknown }).wake : undefined;
         if (wake !== undefined && typeof wake !== "boolean") throw new Error("message_agent: wake must be a boolean");
-        const result: AdmissionResult | MentionSendResult =
+        const admitted: AdmissionResult | MentionSendResult =
           wake === true && params.kind === "progress"
             ? { ok: false, status: "invalid_wake", reason: "progress_never_wakes" }
             : params.to.startsWith("@")
@@ -128,7 +168,7 @@ export function createMessageAgentTool(deps: MessageAgentToolDeps): ToolDefiniti
               : (() => {
                   const generation = deps.generation();
                   if (generation === undefined || !Number.isInteger(generation) || generation < 1)
-                    throw new Error(`message_agent: cannot determine generation for ${deps.from}`);
+                    throw new Error("message_agent: cannot determine generation");
                   return deps.router.admit(deps.from, {
                     to: params.to as NodeRef,
                     kind: params.kind as MessageKind,
@@ -138,6 +178,12 @@ export function createMessageAgentTool(deps: MessageAgentToolDeps): ToolDefiniti
                     ...(deps.canMessage === undefined ? {} : { canMessage: deps.canMessage }),
                   });
                 })();
+        // Mention resume failures may contain arbitrary spawn/provider exceptions. Keep the receipt and quota,
+        // but never expose that raw error through either content or details.
+        const result =
+          !admitted.ok && admitted.status === "resume_failed"
+            ? { ...admitted, error: "message_agent: resume failed" }
+            : admitted;
         // Do not overwrite the legacy numeric `quota` in quota_exhausted. Success/resume receipts
         // retain their admission-time snapshot even if another concurrent send has since completed.
         const reportQuota =
@@ -155,30 +201,18 @@ export function createMessageAgentTool(deps: MessageAgentToolDeps): ToolDefiniti
               : "")
           : "";
         return {
-          content: [{ type: "text", text: JSON.stringify(decorated) + hint }],
+          content: [
+            { type: "text", text: JSON.stringify(decorated) + hint + (result.ok ? "" : `\n${admissionHint(result)}`) },
+          ],
           details: decorated,
         };
       } catch (error) {
-        // #33: the router's throw text is frozen byte-for-byte; keep it as the prefix and append kind guidance so the
-        // model can self-correct (a bare "message not authorized" sent it guessing across 6+ sessions).
-        const guidance =
-          error instanceof Error && error.message === "message not authorized"
-            ? ` — ${messageAgentKindHint({
-                to: params.to,
-                kind: params.kind,
-                ...(deps.canMessage === undefined ? {} : { canMessage: deps.canMessage }),
-              })}`
-            : "";
+        const message = messageAgentError(error, params, deps.canMessage);
         if (params.kind === "report") {
           const quota = deps.router.reportQuotaSnapshot(deps.from);
-          const message = error instanceof Error ? error.message : String(error);
-          throw new Error(
-            `${message}${guidance}（report ${quota.used}/${quota.limit} 已用，剩 ${quota.remaining} 次）`,
-            { cause: error },
-          );
+          throw new Error(`${message}（report ${quota.used}/${quota.limit} 已用，剩 ${quota.remaining} 次）`);
         }
-        if (guidance && error instanceof Error) throw new Error(`${error.message}${guidance}`, { cause: error });
-        throw error;
+        throw new Error(message);
       }
     },
   };
