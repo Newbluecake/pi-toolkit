@@ -14,6 +14,7 @@
 // pi-ai's classifier API (jev-arch §5.1) so the jev directory never has to
 // import pi. No module-scope mutable state (I4).
 
+import type { ProxyStreamFetch } from "./proxy-stream-fetch.js";
 import type { MemoryWriteGate } from "../contracts.js";
 import type { IncrementalDirectory } from "../govern/incremental.js";
 
@@ -513,6 +514,8 @@ export interface RevisionRegistryLike {
       signal: AbortSignal;
       maxTokens: number;
       maxRetries: 0;
+      /** Standard streaming fetch, never the classifier JSON-only FetchLike. */
+      fetch?: ProxyStreamFetch;
       onPayload(payload: unknown): unknown;
       onProviderStreamEvent?(event: unknown): void;
     },
@@ -544,7 +547,18 @@ export interface RevisionResultEvidence {
   readonly actual?: { readonly provider: string; readonly model: string };
   readonly costUsd?: number;
 }
+/** Trusted CODE capability for this exact registry/serializer version/proxy.
+ * No auth snapshot: the SDK still resolves credentials at request time.
+ * A missing/changed capability cannot authorize direct transport. */
+export interface RevisionStreamProxyCapability {
+  readonly registry: RevisionRegistryLike;
+  readonly chainVersion: string;
+  readonly proxy: string;
+  readonly fetch: ProxyStreamFetch;
+  isCurrent(): boolean;
+}
 export interface ControlledRevisionTransport {
+  readonly streamingProxy?: RevisionStreamProxyCapability;
   prepare(input: {
     readonly registry: RevisionRegistryLike;
     readonly requestChainId: string;
@@ -556,7 +570,18 @@ export interface ControlledRevisionTransport {
         readonly adapterId: string;
         readonly chainVersion: string;
         readonly bounds: ClassifyBounds;
-        dispatch(opts: { readonly signal: AbortSignal; readonly fetch?: FetchLike }): Promise<RevisionTransportResult>;
+        readonly streamingProxy?: RevisionStreamProxyCapability;
+        dispatch(opts: {
+          readonly signal: AbortSignal;
+          readonly fetch?: ProxyStreamFetch;
+          /** Original client dynamic authority, rechecked after payload/auth callbacks
+           * and at the last HTTP hop. Run before the adapter's terminal pure checks. */
+          readonly isCurrent?: () => boolean;
+          /** Internal client-owned PURE witness. Unlike isCurrent this must only
+           * read closure state/data descriptors: no host callbacks or getters.
+           * Called after the factory's provider witness, just before HTTP. */
+          readonly terminalCurrent?: () => boolean;
+        }): Promise<RevisionTransportResult>;
         resultEvidence(result: RevisionTransportResult): RevisionResultEvidence;
         resolveRoute(result: RevisionTransportResult): CanonicalClassifyRoute | undefined;
       }
@@ -570,6 +595,7 @@ export interface ControlledRevisionTransport {
  * no-hidden-retry behavior, not just the presence of an SDK option. Unknown
  * capabilities must not be bound. Production conformance is still required. */
 export interface RegistryRevisionBinding {
+  readonly streamingProxy?: RevisionStreamProxyCapability;
   readonly registry: RevisionRegistryLike;
   readonly requestChainId: string;
   readonly model: object;

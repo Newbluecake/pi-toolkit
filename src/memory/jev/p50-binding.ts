@@ -12,9 +12,11 @@ import type {
   ControlledClassifyTransport,
   RevisionRegistryLike,
   RevisionResultEvidence,
+  RevisionStreamProxyCapability,
   RevisionTransportContext,
 } from "./contracts.js";
 import { createRegistryRevisionTransport, type P50ClientCapabilities } from "./client.js";
+import { createProxyStreamFetch, type ProxyStreamFetchOptions } from "./proxy-stream-fetch.js";
 import type { RevisionHostBinding } from "../govern/revision-host.js";
 
 /** Native provider implementation port, not a string property accepted from JSON.
@@ -91,6 +93,9 @@ export interface SdkP50BindingSpec {
     RevisionRegistryLike & {
       find?(provider: string, id: string): object | undefined;
       getProvider?(provider: string): object | undefined;
+      /** SDK public raw extension-config Map reader; same PURE-read contract
+       * as getProvider. Only model fields are witnessed, never credentials. */
+      getRegisteredProviderConfig?(provider: string): object | undefined;
     };
   /** Certified SystemOne extension: max_output_tokens is enforced by the
    * authenticated server; raw JSON p50.provider/model is backend identity.
@@ -99,6 +104,10 @@ export interface SdkP50BindingSpec {
   /** Certified openai-completions with last onPayload + raw SSE observation. */
   readonly generation: readonly SdkRoute<RevisionTransportContext>[];
   readonly coverage: readonly SdkRoute<RevisionTransportContext>[];
+  /** Trusted transport contract for this exact binding. Never inferred from
+   * settings or models.json. Options only scope verification to an owned CA;
+   * no global TLS changes, credentials, retry or direct-transport escape. */
+  readonly streamingProxy?: { readonly proxy: string; readonly options?: ProxyStreamFetchOptions };
   readonly adapterVersion: string;
   readonly maxOutputTokens: number;
   readonly classifyMaxOutputTokens: number;
@@ -162,6 +171,46 @@ function payloadFits<T>(r: SdkRoute<T>, payload: Readonly<Record<string, unknown
   return payload.model === modelIdentity(r.model).id && positiveInt(n) && n <= b.maxInputTokens;
 }
 
+/** Pure data witness for already materialized SDK descriptors. Unlike
+ * JSON.stringify(model), this never runs getters/toJSON. Accessors, functions,
+ * cycles, symbols and non-data prototypes are unsupported, not silently read.
+ * Trusted SDK/host objects must not be Proxies: JS has no trap-free Proxy read. */
+function modelDataSignature(model: object): string | undefined {
+  let remaining = 4096;
+  const active = new Set<object>();
+  const visit = (v: unknown, depth: number): unknown => {
+    if (--remaining < 0 || depth > 32) throw Error("model witness bounds");
+    if (v === undefined) return ["undefined"];
+    if (v === null || typeof v === "string" || typeof v === "boolean") return [typeof v, v];
+    if (typeof v === "number" && Number.isFinite(v)) return ["number", v];
+    if (typeof v !== "object" || v === null || active.has(v)) throw Error("model witness data");
+    const array = Array.isArray(v);
+    if (Object.getPrototypeOf(v) !== (array ? Array.prototype : Object.prototype))
+      throw Error("model witness prototype");
+    active.add(v);
+    const entries = Reflect.ownKeys(v).map((key) => {
+      if (typeof key !== "string") throw Error("model witness symbol");
+      const d = Object.getOwnPropertyDescriptor(v, key)!;
+      if (!("value" in d)) throw Error("model witness accessor");
+      return [key, visit(d.value, depth + 1)];
+    });
+    active.delete(v);
+    return [array ? "array" : "object", entries];
+  };
+  try {
+    return JSON.stringify(visit(model, 0));
+  } catch {
+    return undefined;
+  }
+}
+function dataField(value: object, key: PropertyKey): unknown {
+  for (let at: object | null = value; at !== null; at = Object.getPrototypeOf(at) as object | null) {
+    const d = Object.getOwnPropertyDescriptor(at, key);
+    if (d !== undefined) return "value" in d ? d.value : d;
+  }
+  return undefined;
+}
+
 /** Concrete implementation, not an unavailable transport. All requests pass
  * through the current SDK registry/auth. Caller certifies server semantics and
  * tokenizer; this factory enforces/recounts the last payload and observes raw
@@ -200,10 +249,73 @@ export function createSdkP50Binding(spec: SdkP50BindingSpec): P50SdkBinding | un
   const routes = [...classifiers, ...generation, ...coverage];
   const models = routes.map((r) => ({ model: r.model, signature: modelSignature(r.model) }));
   const getProvider = registry.getProvider;
+  const getRegisteredProviderConfig = registry.getRegisteredProviderConfig;
+  const rawApply = Reflect.apply;
+  const modelConfigSignature = (config: object) =>
+    modelDataSignature({
+      api: dataField(config, "api"),
+      baseUrl: dataField(config, "baseUrl"),
+      models: dataField(config, "models"),
+    });
   const providers = [...new Set(routes.map((r) => String(modelIdentity(r.model).provider)))].map((id) => ({
     id,
     value: getProvider?.call(registry, id),
   }));
+  // A configured streaming capability needs a real raw provider witness. The
+  // optional registry surface remains compatible for non-streaming callers.
+  if (spec.streamingProxy !== undefined && (getProvider === undefined || providers.some((p) => p.value === undefined)))
+    return undefined;
+  const modelSources = providers.map((p) => {
+    const value = getRegisteredProviderConfig?.call(registry, p.id);
+    return { id: p.id, value, signature: value === undefined ? undefined : modelConfigSignature(value) };
+  });
+  if (modelSources.some((s) => s.value !== undefined && s.signature === undefined)) return undefined;
+  const modelWitnesses = models.map((m) => ({ model: m.model, signature: modelDataSignature(m.model) }));
+  // Public pi 1.5 getProvider -> ModelRuntime.getProvider -> Models.getProvider
+  // is a raw Map.get, NOT provider.getModels/getAllModels. Only that audited
+  // SDK accessor is trusted pure here; custom registry implementations must
+  // honor the same contract. No registry monkey-patch or invented generation.
+  // find/getModelOfType and all host callbacks remain in isCurrent, NEVER here.
+  if (modelWitnesses.some((m) => m.signature === undefined)) return undefined;
+  const providerWitnesses = providers.map((p) => ({
+    ...p,
+    fields:
+      p.value === undefined ? [] : Reflect.ownKeys(p.value).map((key) => ({ key, value: dataField(p.value!, key) })),
+  }));
+  const terminalBindingCurrent = (): boolean => {
+    try {
+      return (
+        dataField(registry, "classify") === classify &&
+        dataField(registry, "complete") === complete &&
+        dataField(registry, "find") === find &&
+        dataField(registry, "getModelOfType") === get &&
+        dataField(registry, "getProvider") === getProvider &&
+        dataField(registry, "getRegisteredProviderConfig") === getRegisteredProviderConfig &&
+        modelWitnesses.every((m) => modelDataSignature(m.model) === m.signature) &&
+        // SDK lookups can materialize clones. Also witness the public raw
+        // registered model source, so an in-place source edit cannot hide
+        // behind an unchanged provider object and old materialized clone.
+        modelSources.every((s) => s.value === undefined || modelConfigSignature(s.value) === s.signature) &&
+        providerWitnesses.every(
+          (p) =>
+            p.value === undefined ||
+            (Reflect.ownKeys(p.value).length === p.fields.length &&
+              p.fields.every((f) => {
+                const d = Object.getOwnPropertyDescriptor(p.value!, f.key);
+                return d !== undefined && "value" in d && d.value === f.value;
+              })),
+        ) &&
+        modelSources.every(
+          (s) =>
+            getRegisteredProviderConfig === undefined ||
+            rawApply(getRegisteredProviderConfig, registry, [s.id]) === s.value,
+        ) &&
+        providers.every((p) => getProvider === undefined || rawApply(getProvider, registry, [p.id]) === p.value)
+      );
+    } catch {
+      return false;
+    }
+  };
   const isCurrent = (): boolean => {
     try {
       return (
@@ -230,6 +342,14 @@ export function createSdkP50Binding(spec: SdkP50BindingSpec): P50SdkBinding | un
       return false;
     }
   };
+  const proxy = spec.streamingProxy;
+  const streamFetch = proxy === undefined ? undefined : createProxyStreamFetch(proxy.proxy, proxy.options);
+  // R3 returns undefined for invalid URLs: that is refusal, NOT native fetch.
+  if (proxy !== undefined && streamFetch === undefined) return undefined;
+  const streamingProxy: RevisionStreamProxyCapability | undefined =
+    proxy === undefined || streamFetch === undefined
+      ? undefined
+      : Object.freeze({ registry, chainVersion: adapterVersion, proxy: proxy.proxy, fetch: streamFetch, isCurrent });
   const transport: ControlledClassifyTransport = {
     prepare(input) {
       if (input.registry !== registry || !isCurrent()) return undefined;
@@ -336,6 +456,7 @@ export function createSdkP50Binding(spec: SdkP50BindingSpec): P50SdkBinding | un
   const revision = createRegistryRevisionTransport(
     [...new Map([...generation, ...coverage].map((r) => [r.requestChainId, r])).values()].map((r) => ({
       registry,
+      ...(streamingProxy === undefined ? {} : { streamingProxy }),
       model: r.model,
       requestChainId: r.requestChainId,
       adapterId: "p50-sdk-openai-completions-v1",
@@ -357,11 +478,13 @@ export function createSdkP50Binding(spec: SdkP50BindingSpec): P50SdkBinding | un
         return (
           isCurrent() &&
           JSON.stringify(payload.messages) === JSON.stringify(expected) &&
-          payloadFits(r, payload, bounds)
+          payloadFits(r, payload, bounds) &&
+          isCurrent()
         );
       },
       resolveRoute: () => r.route,
     })),
+    terminalBindingCurrent,
   );
   return Object.freeze({
     registry,

@@ -865,7 +865,6 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
       if (!(Number.isFinite(deps.settings.incremental.jobCostCapUsd) && deps.settings.incremental.jobCostCapUsd > 0))
         reason = "job-budget-zero";
       else if (!deps.p50!.available(p50Context)) reason = "activity-owner-unavailable";
-      else if (config.proxy !== "") reason = "streaming-proxy-contract-missing";
       else if (!r) reason = "current-registry-missing";
       else {
         const result = (deps.p50?.resolveBinding ?? resolveNativeP50Binding)(r, config.classifiers);
@@ -875,9 +874,20 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
           result.binding.isCurrent() &&
           result.binding.classifiers.length === config.classifiers.length &&
           result.binding.classifiers.every((id, i) => id === config.classifiers[i])
-        )
-          next = result.binding;
-        else reason = result.kind === "unsupported" ? result.reason : "binding-invalid";
+        ) {
+          const stream = result.binding.revision.transport.streamingProxy;
+          if (
+            (config.proxy !== "" || stream !== undefined) &&
+            (stream === undefined ||
+              stream.registry !== r ||
+              stream.proxy !== config.proxy ||
+              typeof stream.fetch !== "function" ||
+              !stream.chainVersion ||
+              !stream.isCurrent())
+          )
+            reason = "streaming-proxy-contract-missing";
+          else next = result.binding;
+        } else reason = result.kind === "unsupported" ? result.reason : "binding-invalid";
       }
     } catch {
       reason = "binding-invalid";

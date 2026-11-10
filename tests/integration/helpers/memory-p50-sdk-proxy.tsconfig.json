@@ -1,0 +1,19 @@
+{
+  "extends": "../../../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "declaration": false,
+    "sourceMap": false
+  },
+  "include": [
+    "../memory-p50-sdk-proxy.test.ts",
+    "memory-p50-sdk-proxy.ts",
+    "memory-proxy-stream.ts",
+    "../../memory/jev/client-p50-budget.test.ts",
+    "../../memory/jev/client-p50-fallback.test.ts",
+    "../../memory/jev/client-p50-generate.test.ts",
+    "../../memory/jev/client-p50-provenance.test.ts",
+    "../../memory/jev/client-p50-sdk.test.ts"
+  ],
+  "exclude": []
+}

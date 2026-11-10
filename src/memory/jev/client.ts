@@ -413,6 +413,8 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
   }
 
   function assertDispatchAdmission(state: ReservationState, cost: number, signal?: AbortSignal): boolean {
+    const maxCalls = deps.config.maxCalls;
+    const maxCostUsd = deps.config.maxCostUsd;
     return (
       !disposed &&
       signal?.aborted !== true &&
@@ -421,8 +423,8 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
       reservations.get(state.token) === state &&
       state.calls > 0 &&
       state.cost + 1e-12 >= cost &&
-      (deps.config.maxCalls <= 0 || usageCalls < deps.config.maxCalls) &&
-      (deps.config.maxCostUsd <= 0 || usageCostUsd + reservedCostUsd <= deps.config.maxCostUsd + 1e-12) &&
+      (maxCalls <= 0 || usageCalls < maxCalls) &&
+      (maxCostUsd <= 0 || usageCostUsd + reservedCostUsd <= maxCostUsd + 1e-12) &&
       (state.job === undefined || state.job.spent + state.job.reserved <= state.job.cap + 1e-12)
     );
   }
@@ -894,7 +896,9 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
   async function dispatchProvider<T>(
     state: ReservationState,
     cost: number,
-    dispatch: (opts: { signal: AbortSignal; fetch?: FetchLike }) => Promise<T>,
+    // Host callbacks/fetch selection run BEFORE final admission, never between
+    // registering an attempt and invoking its captured dispatch.
+    prepareDispatch: (signal: AbortSignal) => (() => Promise<T>) | undefined,
     actualCostUsd: (result: T) => unknown,
     timeoutMs: number,
     signal: AbortSignal,
@@ -906,15 +910,18 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
     let timedOut = false;
     const onAbort = (): void => controller.abort();
     signal.addEventListener("abort", onAbort, { once: true });
-    // Set up anything that can call host code BEFORE the final admission check.
-    let fetchFn: FetchLike | undefined;
+    let dispatch: (() => Promise<T>) | undefined;
     try {
-      fetchFn = deps.config.proxy === "" ? undefined : makeFetch(deps.config.proxy);
+      dispatch = prepareDispatch(controller.signal);
     } catch {
       signal.removeEventListener("abort", onAbort);
-      return { ok: false, grade: "unavailable", errorMessage: "proxy unavailable" };
+      return { ok: false, grade: "unavailable", errorMessage: "transport unavailable" };
     }
-    if (!assertDispatchAdmission(state, cost, signal)) {
+    if (dispatch === undefined) {
+      signal.removeEventListener("abort", onAbort);
+      return { ok: false, grade: "unavailable", errorMessage: "transport revoked" };
+    }
+    if (!assertDispatchAdmission(state, cost, signal) || controller.signal.aborted) {
       signal.removeEventListener("abort", onAbort);
       return {
         ok: false,
@@ -932,10 +939,7 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
     outstanding++;
     let pending: Promise<T>;
     try {
-      pending = dispatch({
-        signal: controller.signal,
-        ...(fetchFn === undefined ? {} : { fetch: fetchFn }),
-      });
+      pending = dispatch();
     } catch (err) {
       pending = Promise.reject(err);
     }
@@ -1010,7 +1014,10 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
     const attempt = await dispatchProvider(
       state,
       plan.cost,
-      (opts) => plan.prepared.dispatch(opts),
+      (signal) => {
+        const fetchFn = deps.config.proxy === "" ? undefined : makeFetch(deps.config.proxy);
+        return () => plan.prepared.dispatch({ signal, ...(fetchFn === undefined ? {} : { fetch: fetchFn }) });
+      },
       (result) =>
         plan.prepared.resultEvidence === undefined
           ? result.usage?.cost?.total
@@ -1167,14 +1174,50 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
   ): Promise<RevisionGenerateResult | RevisionCoverageResult> {
     const unavailable = { kind: "unavailable", reason: "revision-unavailable" } as const;
     const invalid = { kind: "unavailable", reason: "invalid-output" } as const;
-    const revision =
-      deps.p50?.current === undefined ? deps.p50?.revision : dynamicSnapshot(req.registry).capability?.revision;
-    // The legacy classifier FetchLike does not provide streaming Response.body.
-    // Never silently drop a configured proxy or pretend it is a chat fetch.
+    let snapshot: DynamicSnapshot | undefined;
+    // Keep the original ordinary SDK/config objects; the terminal witness must
+    // not reread potentially replaced request/dependency accessors.
+    let registry: RevisionGenerateRequest["registry"];
+    let config: CreateJevClientDeps["config"];
+    let proxy: string;
+    try {
+      registry = req.registry;
+      config = deps.config;
+      snapshot = deps.p50?.current === undefined ? undefined : dynamicSnapshot(registry);
+      proxy = config.proxy;
+    } catch {
+      return unavailable;
+    }
+    const revision = snapshot === undefined ? deps.p50?.revision : snapshot.capability?.revision;
+    const streaming = revision?.transport.streamingProxy;
+    const transport = revision?.transport;
+    const streamFetch = streaming?.fetch;
+    const streamVersion = streaming?.chainVersion;
+    const streamCheck = streaming?.isCurrent;
+    const streamCurrent = (): boolean => {
+      try {
+        return (
+          (proxy === "" && streaming === undefined) ||
+          (streaming !== undefined &&
+            streamCheck?.call(streaming) === true &&
+            streaming.registry === req.registry &&
+            streaming.proxy === proxy &&
+            nonempty(streamVersion) &&
+            streaming.chainVersion === streamVersion &&
+            streaming.isCurrent === streamCheck &&
+            typeof streamFetch === "function" &&
+            streaming.fetch === streamFetch)
+        );
+      } catch {
+        return false;
+      }
+    };
+    // Only a matching trusted standard-fetch capability can lift proxy refusal.
+    // Never clear the configured proxy or adapt the old JSON-only FetchLike.
     if (
       !p50 ||
       revision === undefined ||
-      deps.config.proxy !== "" ||
+      !streamCurrent() ||
       disposed ||
       req.signal?.aborted ||
       zombies > 0 ||
@@ -1216,6 +1259,8 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
         if (
           !nonempty(prepared.adapterId) ||
           !nonempty(prepared.chainVersion) ||
+          (proxy !== "" &&
+            (prepared.streamingProxy !== streaming || prepared.chainVersion !== streaming?.chainVersion)) ||
           !Number.isSafeInteger(b.maxInputTokens) ||
           b.maxInputTokens < 1 ||
           b.maxOutputTokens !== req.maxOutputTokens ||
@@ -1231,6 +1276,52 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
     } catch {
       return unavailable;
     }
+    const revisionCurrent = (signal?: AbortSignal): boolean => {
+      try {
+        // The stream/provider check may itself revoke the original client
+        // capability. Sample that dynamic authority AFTER the stream callback,
+        // then read config; finish with pure epoch/signal/identity checks only.
+        const validStream = streamCurrent();
+        const current = snapshot === undefined ? undefined : dynamicSnapshot(req.registry);
+        const configuredProxy = deps.config.proxy;
+        const sameStream = revision.transport.streamingProxy === streaming;
+        return (
+          validStream &&
+          configuredProxy === proxy &&
+          sameStream &&
+          (snapshot === undefined ||
+            (current?.epoch === snapshot.epoch &&
+              current.capability === snapshot.capability &&
+              current.capability?.revision === revision &&
+              dynamicEpoch === snapshot.epoch)) &&
+          !disposed &&
+          !combined.signal.aborted &&
+          !signal?.aborted
+        );
+      } catch {
+        return false;
+      }
+    };
+    // No current()/stream check/config getter here. This witness is private to
+    // this client attempt; adapter runs it AFTER its pure provider witness.
+    // Accessor-backed authority is not a pure witness and cannot authorize HTTP.
+    const terminalCurrent = (signal?: AbortSignal): boolean =>
+      revisionDataField(config, "proxy") === proxy &&
+      revisionDataField(revision, "transport") === transport &&
+      revisionDataField(transport, "streamingProxy") === streaming &&
+      (streaming === undefined ||
+        (revisionDataField(streaming, "fetch") === streamFetch &&
+          revisionDataField(streaming, "isCurrent") === streamCheck &&
+          revisionDataField(streaming, "registry") === registry &&
+          revisionDataField(streaming, "proxy") === proxy &&
+          revisionDataField(streaming, "chainVersion") === streamVersion)) &&
+      (snapshot === undefined ||
+        (dynamicCapability === snapshot.capability &&
+          revisionDataField(snapshot.capability, "revision") === revision &&
+          dynamicEpoch === snapshot.epoch)) &&
+      !disposed &&
+      !combined.signal.aborted &&
+      !signal?.aborted;
     const reservation = reserveClientAttempt({
       mode: req.mode,
       maxProviderCalls: plans.length,
@@ -1263,7 +1354,20 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
         const attempt = await dispatchProvider(
           state,
           plan.cost,
-          (opts) => plan.prepared.dispatch(opts),
+          (signal) => {
+            // current(), config getters and capability checks may synchronously
+            // revoke/dispose/reenter. The engine's final pure admission follows
+            // ALL these callbacks and rechecks the attempt signal as well.
+            if (!revisionCurrent(signal)) return undefined;
+            const fetch = proxy === "" ? undefined : streamFetch;
+            return () =>
+              plan.prepared.dispatch({
+                signal,
+                ...(fetch === undefined ? {} : { fetch }),
+                isCurrent: () => revisionCurrent(signal),
+                terminalCurrent: () => terminalCurrent(signal),
+              });
+          },
           (r) => plan.prepared.resultEvidence(r).costUsd,
           Math.min(remaining, Math.max(1, Math.ceil(totalBudgetMs / 2))),
           combined.signal,
@@ -1272,7 +1376,9 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
           if (attempt.grade === "budget" || attempt.grade === "aborted" || zombies > 0) return unavailable;
           continue;
         }
-        if (disposed || combined.signal.aborted) return unavailable;
+        // Lost authority never becomes a successful body/provenance or unlocks
+        // failover. Original-promise fees have already settled in A.
+        if (!revisionCurrent() || disposed || combined.signal.aborted) return unavailable;
         const result = attempt.value;
         if (result.stopReason !== "stop") continue;
         const text = revisionResponseText(result);
@@ -1766,15 +1872,38 @@ export function revisionRequestDigests(
   };
 }
 
+/** Descriptor-only read; never evaluate an accessor while checking authority.
+ * Objects on this trusted CODE boundary must be ordinary SDK/host objects, not
+ * Proxies (reflection itself can trap on a Proxy). No SDK private fields read. */
+function revisionDataField(value: object | undefined, key: string): unknown {
+  for (
+    let at = value;
+    at !== undefined && at !== null;
+    at = (Object.getPrototypeOf(at) as object | null) ?? undefined
+  ) {
+    const d = Object.getOwnPropertyDescriptor(at, key);
+    if (d !== undefined) return "value" in d ? d.value : d;
+  }
+  return undefined;
+}
+
 /** Executable registry adapter, deliberately NOT a stock capability detector.
  * Only host-certified bindings are admitted. Exactly one registry.complete,
  * maxRetries=0, original promise/usage preserved (including late failures).
  * No direct HTTP implementation, authentication copy or alternate client. */
 export function createRegistryRevisionTransport(
   bindings: readonly RegistryRevisionBinding[],
+  // Factory-owned PURE witness, not another isCurrent callback. The SDK binding
+  // supplies descriptor checks + its audited public raw provider Map reader.
+  // No provider model listing, host callbacks, host-object serialization/toJSON
+  // or awaits (the model witness only encodes freshly constructed data).
+  terminalBindingCurrent?: () => boolean,
 ): ControlledRevisionTransport {
   const routes = bindings.map((b) => Object.freeze({ ...b }));
+  const streaming = routes[0]?.streamingProxy;
+  const sharedStreaming = streaming !== undefined && routes.every((b) => b.streamingProxy === streaming);
   return {
+    ...(sharedStreaming ? { streamingProxy: streaming } : {}),
     prepare(input) {
       const matching = routes.filter((b) => b.registry === input.registry && b.requestChainId === input.requestChainId);
       if (matching.length !== 1) return undefined;
@@ -1783,6 +1912,13 @@ export function createRegistryRevisionTransport(
       if (
         complete === undefined ||
         b.maxTokensEnforced !== true ||
+        (b.streamingProxy !== undefined &&
+          (!sharedStreaming ||
+            b.streamingProxy.registry !== input.registry ||
+            b.streamingProxy.chainVersion !== b.chainVersion ||
+            !nonempty(b.streamingProxy.proxy) ||
+            typeof b.streamingProxy.fetch !== "function" ||
+            !b.streamingProxy.isCurrent())) ||
         !nonempty(b.adapterId) ||
         !nonempty(b.chainVersion) ||
         !["max_tokens", "max_completion_tokens", "max_output_tokens"].includes(b.outputLimitField) ||
@@ -1813,14 +1949,54 @@ export function createRegistryRevisionTransport(
         chainVersion: b.chainVersion,
         bounds,
         resultEvidence: (result) => evidence.get(result) ?? {},
+        ...(sharedStreaming ? { streamingProxy: streaming } : {}),
         dispatch(opts) {
-          if (opts.fetch !== undefined)
-            throw new Error("revision registry adapter requires a verified streaming proxy binding");
+          // Client ran pre-dispatch admission; keep its original authority live
+          // through SDK payload/request-time auth and the last HTTP boundary.
+          // Configured streaming routes cannot fall back to an omitted fetch.
+          if (opts.signal.aborted || input.registry.complete !== complete || opts.fetch !== b.streamingProxy?.fetch)
+            throw new Error("revision registry adapter streaming capability revoked");
           const sdk = b.resultEvidence === "openai-completions" ? openAIRevisionObserver(b.model) : undefined;
+          let requests = 0;
+          let payloadVerified = false;
+          const stream = b.streamingProxy;
+          const streamFetch = opts.fetch;
+          const streamProxy = stream?.proxy;
+          const streamCheck = stream?.isCurrent;
+          const guardedFetch: typeof streamFetch =
+            streamFetch === undefined
+              ? undefined
+              : (request, init) => {
+                  // ALL reentrant callbacks precede the terminal pure guard.
+                  // In particular, never call streamCheck again after client
+                  // current(): it can revoke dynamic proxy/cap authority too.
+                  const streamLive = streamCheck?.call(stream) === true;
+                  const clientLive = opts.isCurrent === undefined || opts.isCurrent() === true;
+                  const bindingLive = terminalBindingCurrent === undefined || terminalBindingCurrent() === true;
+                  const clientTerminal = opts.terminalCurrent === undefined || opts.terminalCurrent() === true;
+                  if (
+                    ++requests !== 1 ||
+                    !payloadVerified ||
+                    !streamLive ||
+                    !clientLive ||
+                    !bindingLive ||
+                    !clientTerminal ||
+                    opts.signal.aborted ||
+                    revisionDataField(input.registry, "complete") !== complete ||
+                    revisionDataField(stream, "fetch") !== streamFetch ||
+                    revisionDataField(stream, "proxy") !== streamProxy ||
+                    revisionDataField(stream, "isCurrent") !== streamCheck ||
+                    revisionDataField(stream, "registry") !== input.registry ||
+                    revisionDataField(stream, "chainVersion") !== b.chainVersion
+                  )
+                    throw new Error("revision streaming request revoked or retried");
+                  return streamFetch(request, init);
+                };
           const pending = complete.call(input.registry, b.model, context, {
             signal: opts.signal,
             maxTokens,
             maxRetries: 0,
+            ...(guardedFetch === undefined ? {} : { fetch: guardedFetch }),
             ...(sdk === undefined ? {} : { onProviderStreamEvent: sdk.event }),
             onPayload(payload) {
               if (
@@ -1837,6 +2013,10 @@ export function createRegistryRevisionTransport(
               copy[b.outputLimitField] = maxTokens;
               if (b.verifyPayload !== undefined && !b.verifyPayload(copy, bounds, context))
                 throw new Error("revision last payload exceeds certified quote or route");
+              const clientLive = opts.isCurrent === undefined || opts.isCurrent() === true;
+              if (!clientLive || opts.signal.aborted || input.registry.complete !== complete)
+                throw new Error("revision payload admission revoked");
+              payloadVerified = true;
               return copy;
             },
           });
