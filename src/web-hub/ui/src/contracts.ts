@@ -346,6 +346,9 @@ export interface FleetSummaryBarProps {
   readonly panel?: "agent" | "bash";
   /** Main-session bash rows; #41 keeps their badge separate from agent activity. */
   readonly bashJobs?: BashJobsWire | undefined;
+  /** Rows omitted by the bounded fleet projection. Positive counts keep the agent entry
+   *  reachable even when no rows were received; labels still describe only received rows. */
+  readonly omitted?: FleetOmittedWire | undefined;
 }
 export interface FleetSummaryBarEmits {
   toggle: [];

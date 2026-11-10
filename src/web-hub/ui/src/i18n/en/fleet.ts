@@ -10,6 +10,9 @@ const fleet = {
   panelTitle: "Agents",
   running: "{n} running",
   totalCost: "{n} total · {cost}",
+  listedCost: "{n} listed · listed cost {cost}",
+  omittedActive: "{n} more active not listed",
+  omittedTerminal: "{n} more terminal not listed",
   showFinished: "Show {n} Finished Runs",
   treeLabel: "Agents",
   // web-hub archive plan (docs/dev/web-hub/archive-report.md). `archivedFold`/`archivedToast`

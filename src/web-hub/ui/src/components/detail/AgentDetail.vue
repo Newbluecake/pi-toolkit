@@ -529,7 +529,13 @@ const dockCtlProps = computed(() => ({
 
 const drawerMode = useFleetDrawerMode(window).mode;
 const { open: persistedOpen } = useFleetDrawerOpen(drawerMode);
-const hasFleet = computed(() => props.agent.fleet.length > 0);
+const hasFleetOmitted = computed(() => {
+  const omitted = props.agent.fleetOmitted;
+  return (omitted?.active ?? 0) > 0 || (omitted?.terminal ?? 0) > 0;
+});
+// A byte-bounded frame can contain no rows while still reporting omissions. Keep both the
+// summary entry and drawer mounted so those counts remain visible and the empty tree is reachable.
+const hasFleet = computed(() => props.agent.fleet.length > 0 || hasFleetOmitted.value);
 // 2026-10-15 bash→fleet 迁移:后台 bash 任务住在抽屉树视图的「bash」分组里 —— 无子 agent
 // 但有 bash 任务时抽屉同样挂载(否则分组不可达)。
 const hasBashJobs = computed(() => bashJobsOf(props.agent) !== undefined);
@@ -659,6 +665,7 @@ function onCloseDrawer(): void {
           <FleetSummaryBar
             :rows="agent.fleet as unknown as readonly FleetRowWire[]"
             :bash-jobs="bashJobs"
+            :omitted="agent.fleetOmitted"
             :open="drawerOpen"
             :panel="drawerPanel"
             @toggle-panel="rail.toggle"
@@ -666,7 +673,7 @@ function onCloseDrawer(): void {
         </Teleport>
       </div>
       <!-- §6.1: 抽屉在 CONTROL_CTX 的 provide 作用域内(原为树上的行内动作,2026-10-17 已移除);
-           v-if 按方案冻结:有 fleet 行或有选中 run 才挂载;`id="fleet-drawer"` 在
+           有 fleet 行、正数 omitted 或有选中 run 才挂载;`id="fleet-drawer"` 在
            FleetDrawer 根元素上(§6.1 的锚点,FleetSummaryBar 的 aria-controls 指它)。 -->
       <FleetDrawer
         v-if="hasFleet || hasBashJobs || selectedRunId !== null"

@@ -6,6 +6,7 @@ import { mount } from "@vue/test-utils";
 import { effectScope, nextTick, ref } from "vue";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useActivityRail } from "../../../src/web-hub/ui/src/composables/useActivityRail.js";
+import { resetLangForTests, setLangOverride } from "../../../src/web-hub/ui/src/composables/useI18n.js";
 import FleetSummaryBar from "../../../src/web-hub/ui/src/components/fleet/FleetSummaryBar.vue";
 import AgentDetail from "../../../src/web-hub/ui/src/components/detail/AgentDetail.vue";
 import FleetDrawer from "../../../src/web-hub/ui/src/components/drawer/FleetDrawer.vue";
@@ -18,6 +19,7 @@ afterEach(() => {
   for (const fn of cleanups.splice(0)) fn();
   vi.useRealTimers();
   vi.unstubAllGlobals();
+  resetLangForTests();
   localStorage.clear();
   document.body.textContent = "";
 });
@@ -214,6 +216,60 @@ describe("real components (not mock HTML)", () => {
     expect(w.get('[data-panel="agent"] .num').text()).toBe("99+");
     expect(w.get('[data-panel="agent"]').attributes("aria-label")).toContain("101 running");
     expect(w.get('[data-panel="bash"] .num').text()).toBe("1");
+  });
+  it("keeps the legacy no-omission label and DOM semantics", async () => {
+    const w = mount(FleetSummaryBar, { props: { rows: [row] as never[], open: false } });
+    cleanups.push(() => w.unmount());
+    const button = w.get('[data-panel="agent"]');
+    expect(button.attributes("aria-label")).toBe("Agents · 1 running · 1 total · $0");
+    expect(button.get(".num").text()).toBe("1");
+    const legacyHtml = w.html();
+    await w.setProps({ omitted: { active: 0, terminal: 0 } });
+    expect(w.html()).toBe(legacyHtml);
+    await w.setProps({ rows: [], omitted: undefined });
+    expect(w.find(".activity-rail").exists()).toBe(false);
+  });
+  it("keeps an omitted-only agent entry usable and labels active/terminal omissions honestly", async () => {
+    const w = mount(FleetSummaryBar, {
+      props: { rows: [] as never[], omitted: { active: 2, terminal: 3 }, open: false },
+    });
+    cleanups.push(() => w.unmount());
+    const button = w.get('[data-panel="agent"]');
+    const label = button.attributes("aria-label") ?? "";
+    expect(label).toContain("0 listed · listed cost $0");
+    expect(label).toContain("2 more active not listed");
+    expect(label).toContain("3 more terminal not listed");
+    expect(label).not.toContain("2 running");
+    expect(button.find(".fab-count").exists()).toBe(false);
+    await button.trigger("click", { detail: 0 });
+    expect(w.emitted("toggle-panel")?.[0]?.[0]).toBe("agent");
+  });
+  it("uses the symmetric Chinese listed/omitted summary copy", () => {
+    setLangOverride("zh");
+    const w = mount(FleetSummaryBar, {
+      props: { rows: [] as never[], omitted: { active: 2, terminal: 3 }, open: false },
+    });
+    cleanups.push(() => w.unmount());
+    const label = w.get('[data-panel="agent"]').attributes("aria-label") ?? "";
+    expect(label).toContain("已列出 0 个 · 已列出成本 $0");
+    expect(label).toContain("另有 2 个活跃项未列出");
+    expect(label).toContain("另有 3 个终态项未列出");
+  });
+  it("with omissions, summary totals and cost describe only received rows", () => {
+    const received = [
+      { ...row, runId: "done-1", status: "completed", terminal: true, costUsd: 0.25 },
+      { ...row, runId: "done-2", status: "failed", terminal: true, costUsd: 1 },
+    ];
+    const w = mount(FleetSummaryBar, {
+      props: { rows: received as never[], omitted: { active: 7, terminal: 12 }, open: false },
+    });
+    cleanups.push(() => w.unmount());
+    const label = w.get('[data-panel="agent"]').attributes("aria-label") ?? "";
+    expect(label).toContain("2 listed · listed cost $1.25");
+    expect(label).toContain("7 more active not listed");
+    expect(label).toContain("12 more terminal not listed");
+    expect(label).not.toContain("21 total");
+    expect(label).not.toContain("14 total");
   });
   it("production passes explicit panel, rail and drawer share split, pointer opens do not focus close", async () => {
     const { w } = detail();

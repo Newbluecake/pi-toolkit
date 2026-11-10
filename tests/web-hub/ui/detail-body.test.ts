@@ -1,8 +1,11 @@
 // @vitest-environment happy-dom
 import { mount } from "@vue/test-utils";
-import { describe, expect, it } from "vitest";
+import { ref } from "vue";
+import { describe, expect, it, vi } from "vitest";
 import { initialState, reduce } from "../../../src/web-hub/ui/src/logic/state.js";
 import DetailBody from "../../../src/web-hub/ui/src/components/body/DetailBody.vue";
+import AgentDetail from "../../../src/web-hub/ui/src/components/detail/AgentDetail.vue";
+import { HUB_CTX } from "../../../src/web-hub/ui/src/components/control/controlContext.js";
 import type { AgentState } from "../../../src/web-hub/ui/src/types.js";
 
 /**
@@ -31,7 +34,11 @@ function card(agentKey: string): Record<string, unknown> {
   };
 }
 
-function agentWith(entries: Record<string, unknown>[], fleet: Record<string, unknown>[] = []): AgentState {
+function agentWith(
+  entries: Record<string, unknown>[],
+  fleet: Record<string, unknown>[] = [],
+  omitted?: { active: number; terminal: number },
+): AgentState {
   const s = run([
     { event: "hello", data: { clientId: "c1" } },
     { event: "agents", data: [card("agent-a")] },
@@ -40,7 +47,10 @@ function agentWith(entries: Record<string, unknown>[], fleet: Record<string, unk
       event: "history",
       data: { agentKey: "agent-a", entries, tailMessages: [], fromSeq: entries.length, hasMore: false },
     },
-    { event: "fleet", data: { agentKey: "agent-a", runs: fleet } },
+    {
+      event: "fleet",
+      data: { agentKey: "agent-a", runs: fleet, ...(omitted === undefined ? {} : { omitted }) },
+    },
   ]);
   return s.agents.get("agent-a") as unknown as AgentState;
 }
@@ -110,5 +120,42 @@ describe("DetailBody.vue (P0→P4 seam)", () => {
     const agent = agentWith([]);
     const wrapper = mount(DetailBody, { props: { agent, now: 0, following: true, narrow: false } });
     expect(wrapper.findComponent({ name: "Transcript" }).props("memoryKey")).toBe("agent-a");
+  });
+
+  it("reducer → AgentDetail: omitted-only rows keep the rail and drawer reachable, then empty clears both", async () => {
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      matches: false,
+      media: query,
+      addEventListener() {},
+      removeEventListener() {},
+    }));
+    const wrapper = mount(AgentDetail, {
+      props: { agent: agentWith([], [], { active: 2, terminal: 3 }), now: 1000, narrow: false },
+      attachTo: document.body,
+      global: {
+        provide: {
+          [HUB_CTX as symbol]: { state: ref({ control: false }), selectRun: vi.fn(), control: undefined },
+        },
+      },
+    });
+    try {
+      const button = wrapper.get('[data-panel="agent"].fleet-summary-bar');
+      expect(button.attributes("aria-expanded")).toBe("false");
+      expect(wrapper.get("#fleet-drawer").attributes("data-open")).toBeUndefined();
+      await button.trigger("click", { detail: 1 });
+      expect(wrapper.attributes("data-drawer-open")).toBeDefined();
+      const hints = wrapper.findAll("#fleet-drawer .fleet-omitted");
+      expect(hints).toHaveLength(2);
+      expect(hints[0]!.text()).toContain("2");
+      expect(hints[1]!.text()).toContain("3");
+
+      await wrapper.setProps({ agent: agentWith([]) });
+      expect(wrapper.find(".activity-rail").exists()).toBe(false);
+      expect(wrapper.find("#fleet-drawer").exists()).toBe(false);
+    } finally {
+      wrapper.unmount();
+      vi.unstubAllGlobals();
+      document.body.textContent = "";
+    }
   });
 });
