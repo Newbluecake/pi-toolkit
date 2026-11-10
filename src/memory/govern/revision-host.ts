@@ -32,6 +32,9 @@ import {
   revisionCanonicalJson,
   revisionFrozenRelationDigest,
   revisionProposalMatchesInput,
+  revisionInputRetainedBytes,
+  validateRevisionProposal,
+  type RevisionCustodyLifetime,
   revisionRelationContextForBlocks,
   type RevisionFreezeAction,
 } from "./revision.js";
@@ -59,6 +62,18 @@ export interface RevisionHostBinding {
   readonly budgetMs: number;
   readonly maxOutputTokens: number;
 }
+/** Supplied by the existing actual owner, never by an attempt or JSON. */
+export interface RevisionHostCustody extends RevisionCustodyLifetime {
+  readonly owner: object;
+  readonly manager: object;
+  readonly epoch: number;
+}
+export const REVISION_HOST_CUSTODY_LIMITS = Object.freeze({
+  actions: 16,
+  directories: 8,
+  actionBytes: 128 * 1024,
+  totalBytes: 2 * 1024 * 1024,
+});
 export interface RevisionHostDeps {
   /** Existing unique client, not a factory. Guard lifetime MUST match it. */
   readonly client: JevClientHandle;
@@ -69,6 +84,9 @@ export interface RevisionHostDeps {
   /** Existing client budget/capability admission, synchronous/read-only. */
   canAttempt(batch: IncrementalBatch): boolean;
   autoEnabled(): boolean;
+  /** Optional actual-owner lifetime, captured BEFORE the first D freeze. I1
+   * supplies this from the original scopes owner/manager, not running/lease. */
+  custody?(batch: IncrementalBatch): RevisionHostCustody | undefined;
   readonly policyVersion?: string;
   readonly gate?: MemoryWriteGate;
   now(): Date;
@@ -189,6 +207,58 @@ export function createRevisionHost(deps: RevisionHostDeps) {
   const pendingSourceDirectories = new Set<string>();
   // Non-evictable, non-fee execution fence. Reset never clears this live-client map.
   const jobs = new Map<string, JobExecution>();
+  const retained = new Map<string, { mem: string; owned: OwnedRevisionAction; current(): boolean; bytes: number }>();
+  const reservations = new Set<{ mem: string }>();
+  // Separate scope from handle: this lifetime cannot retain an attempt or its
+  // execution state. A host reset and actual-owner change both revoke it.
+  function captureCustody(batch: IncrementalBatch): RevisionCustodyLifetime | undefined {
+    const c = deps.custody?.(batch),
+      generation = epoch;
+    if (
+      !c ||
+      !c.owner ||
+      !c.manager ||
+      !["object", "function"].includes(typeof c.owner) ||
+      !["object", "function"].includes(typeof c.manager) ||
+      !(c.signal instanceof AbortSignal) ||
+      !Number.isSafeInteger(c.epoch) ||
+      c.epoch !== batch.directory.sessionEpoch
+    )
+      return undefined;
+    const owner = c.owner,
+      manager = c.manager,
+      ownerEpoch = c.epoch,
+      signal = c.signal;
+    let revoked = false;
+    const isCurrent = () => {
+      if (revoked) return false;
+      try {
+        const now = deps.custody?.(batch);
+        const valid =
+          !closed &&
+          epoch === generation &&
+          !signal.aborted &&
+          c.isCurrent() === true &&
+          now?.owner === owner &&
+          now.manager === manager &&
+          now.epoch === ownerEpoch &&
+          now.signal === signal &&
+          now.isCurrent() === true &&
+          !signal.aborted &&
+          !closed &&
+          epoch === generation;
+        revoked = !valid;
+        return valid;
+      } catch {
+        revoked = true;
+        return false;
+      }
+    };
+    return Object.freeze({ signal, isCurrent });
+  }
+  function discardRevoked(): void {
+    for (const [id, r] of retained) if (!r.current()) retained.delete(id);
+  }
   const policyVersion = deps.policyVersion ?? REVISION_HOST_POLICY_VERSION;
   let epoch = 0,
     running = false,
@@ -316,6 +386,9 @@ export function createRevisionHost(deps: RevisionHostDeps) {
     // a new/equal-looking batch must not inherit its ownership.
     ownedAdmission = { batch, recheck: () => execution !== undefined && isCurrent() && leaseValid() && budget(batch) };
     const mem = batch.directory.realpath;
+    let custody: RevisionCustodyLifetime | undefined;
+    const reserved: { mem: string }[] = [];
+    const specSizes = new Map<string, number>();
     const audit = createRevisionAuditPort(mem, {
       ...(deps.gate ? { gate: deps.gate } : {}),
       signal: attempt.signal,
@@ -399,21 +472,40 @@ export function createRevisionHost(deps: RevisionHostDeps) {
           }
           if (!budget(batch)) return "pending" as const;
           if (jobs.size >= 128) return "capacity" as const;
+          discardRevoked();
+          const limits = REVISION_HOST_CUSTODY_LIMITS;
+          const dirs = new Set([...retained.values(), ...reservations].map((r) => r.mem));
+          if (
+            retained.size + reservations.size + plan.actions.length > limits.actions ||
+            (!dirs.has(mem) && dirs.size >= limits.directories)
+          )
+            return "capacity" as const;
+          custody = captureCustody(batch);
+          if (deps.custody && (!custody || !custody.isCurrent())) return "pending" as const;
+          // Full fixed-size slots are reserved before ANY freeze/generation.
+          for (const _a of plan.actions) {
+            const r = { mem };
+            reserved.push(r);
+            reservations.add(r);
+          }
           const frozen = new Map<string, FrozenRevisionInput>();
           for (const a of plan.actions) {
             const source = plan.sourceRetires.find((s) => rowKey(s.action) === rowKey(a));
-            const f = freezeRevisionInputsLocked(
-              mem,
-              {
-                ...a,
-                directory: batch.directory,
-                selectionBatchId: batch.batchId,
-                policyVersion,
-                actions: plan.actions,
-                ...(source ? { retireSource: source.source } : {}),
-              },
-              { audit, signal: attempt.signal, isCurrent, ...(deps.gate ? { gate: deps.gate } : {}) },
-            );
+            const spec = {
+              ...a,
+              directory: batch.directory,
+              selectionBatchId: batch.batchId,
+              policyVersion,
+              actions: plan.actions,
+              ...(source ? { retireSource: source.source } : {}),
+            };
+            const f = freezeRevisionInputsLocked(mem, spec, {
+              audit,
+              signal: attempt.signal,
+              isCurrent,
+              ...(custody ? { custody } : {}),
+              ...(deps.gate ? { gate: deps.gate } : {}),
+            });
             if ("kind" in f) {
               if (f.reason === "stale") {
                 snapshots.delete(mem);
@@ -422,6 +514,12 @@ export function createRevisionHost(deps: RevisionHostDeps) {
               mark("blocked-freeze");
               return "freeze-rejected" as const;
             }
+            const specBytes = Buffer.byteLength(revisionCanonicalJson(spec));
+            if (revisionInputRetainedBytes(f) + specBytes > limits.actionBytes) {
+              mark("blocked-freeze");
+              return "freeze-rejected" as const;
+            }
+            specSizes.set(f.actionId, specBytes);
             frozen.set(rowKey(a), f);
           }
           if (frozen.size !== plan.actions.length || new Set([...frozen.values()].map((f) => f.batchId)).size !== 1) {
@@ -669,16 +767,43 @@ export function createRevisionHost(deps: RevisionHostDeps) {
         const final = await withMemoryDirLock(
           mem,
           () =>
-            readIndex(mem).index.review?.suggestions.find((s) => s.id === `revision:${p.frozen.actionId}`)?.revision,
+            validateRevisionProposal(
+              readIndex(mem).index.review?.suggestions.find((s) => s.id === `revision:${p.frozen.actionId}`)?.revision,
+            ),
           { timeoutMs: 0, log: () => {} },
         );
-        if (!isCurrent() || !final || !revisionProposalMatchesInput(final, p.frozen))
+        if (
+          !isCurrent() ||
+          !final ||
+          !validateRevisionProposal(final) ||
+          !revisionProposalMatchesInput(final, p.frozen)
+        )
           throw new Error("final proposal unavailable");
-        owned.set(final.actionId, {
+        const action: OwnedRevisionAction = Object.freeze({
           frozen: p.frozen,
           proposal: final,
           coverageMaxOutputTokens: maxOutputTokens,
         });
+        owned.set(final.actionId, action);
+        const bytes =
+          revisionInputRetainedBytes(p.frozen) +
+          (specSizes.get(final.actionId) ?? 0) +
+          Buffer.byteLength(revisionCanonicalJson(final));
+        if (bytes > REVISION_HOST_CUSTODY_LIMITS.actionBytes) throw new Error("custody size");
+        // Readback must match the C barrier's final digest, not just the action
+        // tuple. The review owner may legitimately demote autoEligible.
+        const proof = await withMemoryDirLock(mem, () => audit.readActionLocked(final.batchId, final.actionId), {
+          timeoutMs: 0,
+          log: () => {},
+        });
+        if (!isCurrent() || proof.kind !== "ok" || proof.audit.proposalDigest !== final.proposalDigest)
+          throw new Error("custody readback digest");
+        if (custody && custody.isCurrent()) {
+          retained.set(final.actionId, { mem, owned: action, current: custody.isCurrent, bytes });
+          const reservation = reserved.pop();
+          if (!reservation) throw new Error("missing custody reservation");
+          reservations.delete(reservation);
+        }
         states.set(p.key, "suggested");
         saved++;
         if (p.source) {
@@ -746,12 +871,25 @@ export function createRevisionHost(deps: RevisionHostDeps) {
       diagnostic("p50: host input unavailable");
       return unavailable("input-invalidated");
     } finally {
+      for (const r of reserved) reservations.delete(r);
       ownedAdmission = undefined;
       running = false;
     }
   }
   return {
     handle,
+    /** Caller holds the original directory lock. Returns ONLY the original D
+     * object after C+review readback. Not authority to commit: E still requires
+     * the caller's fresh command lease, exact receipt and all current guards. */
+    actionLocked(memDir: string, actionId: string): OwnedRevisionAction | undefined {
+      const r = retained.get(actionId);
+      if (!r || r.mem !== memDir) return undefined;
+      if (!r.current()) {
+        retained.delete(actionId);
+        return undefined;
+      }
+      return r.owned;
+    },
     canAttempt(batch: IncrementalBatch): boolean {
       try {
         if (running) return ownedAdmission?.batch === batch && ownedAdmission.recheck();
@@ -763,6 +901,12 @@ export function createRevisionHost(deps: RevisionHostDeps) {
     /** No LIVE/job authority is serialized by these metadata-only observations. */
     inspect() {
       return {
+        custody: {
+          actions: retained.size,
+          reservedActions: reservations.size,
+          retainedBytes: [...retained.values()].reduce((n, r) => n + r.bytes, 0),
+          reservedBytes: reservations.size * REVISION_HOST_CUSTODY_LIMITS.actionBytes,
+        },
         jobs: [...jobs].map(([id, j]) => ({ id, state: j.state, generateClaims: j.generateClaims })),
         pendingSources: [...pendingSourceDirectories],
         directories: [...snapshots].map(([directory, s]) => ({
@@ -777,6 +921,8 @@ export function createRevisionHost(deps: RevisionHostDeps) {
       epoch++;
       ownedAdmission = undefined;
       snapshots.clear();
+      retained.clear();
+      reservations.clear();
       pendingSourceDirectories.clear();
       for (const j of jobs.values()) if (j.state === "running") j.state = "aborted";
     },
@@ -788,6 +934,8 @@ export function createRevisionHost(deps: RevisionHostDeps) {
       deps.client.dispose();
       ownedAdmission = undefined;
       snapshots.clear();
+      retained.clear();
+      reservations.clear();
       pendingSourceDirectories.clear();
       jobs.clear();
     },

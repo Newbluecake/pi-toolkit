@@ -185,6 +185,8 @@ it.each(["prepared-file", "expected-file", "expected-dir"] as const)(
       fileSync = safeFs.fsyncRevisionFile,
       sync = safeFs.fsyncDir,
       replace = safeFs.replaceRevisionObserved;
+    const auditPath = join(actionDir, "audit.json"),
+      auditBefore = fs.readFileSync(auditPath);
     let after = false,
       dataCalls = 0;
     vi.spyOn(safeFs, "replaceRevisionObserved").mockImplementation((...args) => {
@@ -192,21 +194,48 @@ it.each(["prepared-file", "expected-file", "expected-dir"] as const)(
       if (args[0] === h.blocks) dataCalls++;
       return replace(...args);
     });
-    vi.spyOn(safeFs, "fsyncRevisionFile").mockImplementation((...args) => {
+    const fileSyncSpy = vi.spyOn(safeFs, "fsyncRevisionFile").mockImplementation((...args) => {
       if (args[0] === actionDir && ((phase === "prepared-file" && !after) || (phase === "expected-file" && after)))
         throw Error("source evidence file fault");
       fileSync(...args);
     });
-    vi.spyOn(safeFs, "fsyncDir").mockImplementation((dir) => {
+    const dirSyncSpy = vi.spyOn(safeFs, "fsyncDir").mockImplementation((dir) => {
       if (phase === "expected-dir" && after && dir === actionDir) throw Error("source expected directory fault");
       sync(dir);
     });
-    expect((await x.commit("web-b3")).kind).toBe("skipped");
+    expect(await x.commit("web-b3")).toMatchObject({ kind: "effect-unknown", dataApplied: false });
+    expect(x.confirm).toHaveBeenCalledTimes(1);
     expect(dataCalls).toBe(0);
     expect(fs.readFileSync(h.targetPath)).toEqual(frozen.target.rawBefore);
     expect(fs.readFileSync(h.contextPath)).toEqual(frozen.context!.rawBefore);
     const a = JSON.parse(fs.readFileSync(join(actionDir, "audit.json"), "utf8"));
     expect(a.state).not.toBe("committed");
     expect(a.generationRequest).toEqual(prepared.proposal.generationRequest);
+    // A replay fsync failure can leave identical prepared bytes, whereas the
+    // later failures really HAVE written after.md + proposed audit evidence.
+    // None proves durable completion, and neither path rolls its evidence back.
+    const auditAfter = fs.readFileSync(auditPath);
+    if (phase === "prepared-file") {
+      expect(a.state).toBe("prepared");
+      expect(auditAfter).toEqual(auditBefore);
+      expect(fs.existsSync(join(actionDir, "after.md"))).toBe(false);
+    } else {
+      expect(a.state).toBe("proposed");
+      expect(a.commitOrigin).toBe("web-b3");
+      expect(auditAfter.equals(auditBefore)).toBe(false);
+      expect(fs.readFileSync(join(actionDir, "after.md"), "utf8")).toContain(prepared.proposal.generatedBody);
+    }
+    expect(fs.readFileSync(join(actionDir, "before.md"))).toEqual(frozen.target.rawBefore);
+    const syncCounts = [fileSyncSpy.mock.calls.length, dirSyncSpy.mock.calls.length];
+    // A fresh committer (x.commit constructs it each time) cannot consume the
+    // receipt again. Proposed is also a durable fence. Never a blind retry of
+    // the failed barrier or data operation, even though no data syscall ran.
+    expect((await x.commit("web-b3")).kind).not.toBe("committed");
+    expect(x.confirm).toHaveBeenCalledTimes(phase === "prepared-file" ? 2 : 1);
+    expect([fileSyncSpy.mock.calls.length, dirSyncSpy.mock.calls.length]).toEqual(syncCounts);
+    expect(dataCalls).toBe(0);
+    expect(fs.readFileSync(auditPath)).toEqual(auditAfter);
+    expect(fs.readFileSync(h.targetPath)).toEqual(frozen.target.rawBefore);
+    expect(fs.readFileSync(h.contextPath)).toEqual(frozen.context!.rawBefore);
   },
 );

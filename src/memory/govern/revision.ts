@@ -46,6 +46,7 @@ const REV = /^[1-9][0-9]*-[a-f0-9]{6}$/;
 // BOM + frontmatter + body + delimiters. Never use the 64MiB reader default.
 const RAW_LIMIT = MAX_FRONTMATTER_BYTES + BLOCK_BODY_MAX_BYTES + 32;
 const LIVE = Symbol("p50-d-frozen-live-check");
+const RETAINED_BYTES = Symbol("p50-d-retained-bytes");
 const RETIRE_SOURCE = Symbol("p50-d-retire-source");
 const sha = (value: string | Buffer): string => createHash("sha256").update(value).digest("hex");
 
@@ -423,6 +424,13 @@ export interface RevisionFreezeDeps {
   readonly gate?: MemoryWriteGate;
   readonly signal?: AbortSignal;
   isCurrent(): boolean;
+  /** Optional first-freeze owner lifetime, distinct from this attempt. Never
+   * grants commit/lease authority. Without it LIVE retains legacy semantics. */
+  readonly custody?: RevisionCustodyLifetime;
+}
+export interface RevisionCustodyLifetime {
+  readonly signal: AbortSignal;
+  isCurrent(): boolean;
 }
 export type RevisionRefusal = { readonly kind: "refused"; readonly reason: "stale" | "permission" | "unavailable" };
 export function revisionDirectoryIdentityDigest(d: Pick<IncrementalDirectory, "realpath" | "dev" | "ino">): string {
@@ -430,7 +438,12 @@ export function revisionDirectoryIdentityDigest(d: Pick<IncrementalDirectory, "r
 }
 function allowed(deps: RevisionFreezeDeps, dir: string): boolean {
   return (
-    !deps.signal?.aborted && deps.isCurrent() === true && (deps.gate === undefined || deps.gate.check(dir).ok === true)
+    !deps.signal?.aborted &&
+    deps.isCurrent() === true &&
+    (!deps.custody || (!deps.custody.signal.aborted && deps.custody.isCurrent() === true)) &&
+    (deps.gate === undefined || deps.gate.check(dir).ok === true) &&
+    !deps.signal?.aborted &&
+    !deps.custody?.signal.aborted
   );
 }
 function readBlock(dir: string, selected: { readonly id: string; readonly rev: string }): FrozenRevisionBlock {
@@ -536,6 +549,7 @@ export function freezeRevisionInputsLocked(
         a.context?.id === a.target.id
       )
         throw new Error("action");
+      if (!allowed(deps, memDir)) throw new Error("freeze revoked");
       return {
         action: a.action,
         target: readBlock(memDir, a.target),
@@ -561,22 +575,19 @@ export function freezeRevisionInputsLocked(
       throw new Error("set");
     const identity = revisionDirectoryIdentityDigest(directory);
     const batchId = digest([directory.sessionEpoch, identity, rows, spec.policyVersion]);
-    const live = () => {
-      if (dirFormat(memDir) !== "blocks" || !allowed(deps, memDir) || canonicalDir(memDir)?.real !== directory.realpath)
-        return false;
-      const r = inspectDirNoFollow(memDir),
-        b = inspectDirNoFollow(join(memDir, "blocks"));
-      return (
-        r.dev === root.dev &&
-        r.ino === root.ino &&
-        b.dev === blocks.dev &&
-        b.ino === blocks.ino &&
-        [selected.target, ...(selected.context ? [selected.context] : [])].every((s) => {
-          const current = readBlock(memDir, s);
-          return current.rawDigest === s.rawDigest && current.block.authority === s.block.authority;
-        })
-      );
-    };
+    // Construct in a separate scope: custody LIVE never captures deps, the
+    // generation attempt or its execution.running closure (even indirectly).
+    const live = createRevisionLiveCheck(
+      memDir,
+      directory,
+      { dev: root.dev, ino: root.ino },
+      { dev: blocks.dev, ino: blocks.ino },
+      selected,
+      deps.gate,
+      deps.custody?.signal ?? deps.signal,
+      deps.custody ? deps.custody.isCurrent.bind(deps.custody) : deps.isCurrent.bind(deps),
+      deps.custody !== undefined,
+    );
     if (!live()) return { kind: "refused", reason: "stale" };
     // D-private closure guard, nonenumerable and never part of persisted data.
     const input = {
@@ -614,10 +625,80 @@ export function freezeRevisionInputsLocked(
       if (decision.kind === "invalid-unavailable") return { kind: "refused", reason: "unavailable" };
       Object.defineProperty(input, RETIRE_SOURCE, { value: decision });
     }
+    const source = retireCustody(input);
+    const retained = [
+      selected.target,
+      ...(selected.context ? [selected.context] : []),
+      ...(source ? [source.before, source.after] : []),
+    ];
+    Object.defineProperty(input, RETAINED_BYTES, {
+      value:
+        retained.reduce((n, b) => n + b.rawBefore.byteLength + Buffer.byteLength(revisionCanonicalJson(b.block)), 0) +
+        (source ? Buffer.byteLength(revisionCanonicalJson(source.base)) : 0),
+    });
+    // LIVE deliberately follows only owner custody after publication. During
+    // this first freeze its final raw/gate/current callbacks can still revoke
+    // the original attempt, so check that attempt AFTER live(), not just before
+    // it. The attempt-current callback can itself synchronously abort either
+    // lifetime: finish with signal reads only, never another gate/LIVE callback.
+    if (
+      !allowed(deps, memDir) ||
+      !live() ||
+      deps.signal?.aborted ||
+      deps.isCurrent() !== true ||
+      deps.signal?.aborted ||
+      deps.custody?.signal.aborted
+    )
+      return { kind: "refused", reason: "stale" };
     return Object.freeze(input);
   } catch {
     return { kind: "refused", reason: "permission" };
   }
+}
+/** Scalar accounting only; no raw bytes or authority are exported. */
+export function revisionInputRetainedBytes(input: FrozenRevisionInput): number {
+  return (input as FrozenRevisionInput & { [RETAINED_BYTES]?: number })[RETAINED_BYTES] ?? 0;
+}
+function createRevisionLiveCheck(
+  memDir: string,
+  directory: FrozenRevisionInput["directory"],
+  root: { readonly dev: number; readonly ino: number },
+  blocks: { readonly dev: number; readonly ino: number },
+  selected: Pick<FrozenRevisionInput, "target" | "context">,
+  gate: MemoryWriteGate | undefined,
+  signal: AbortSignal | undefined,
+  isCurrent: () => boolean,
+  custody: boolean,
+): () => boolean {
+  let revoked = false;
+  const allowedNow = () => {
+    if (custody && revoked) return false;
+    const valid =
+      !signal?.aborted &&
+      isCurrent() === true &&
+      (gate === undefined || gate.check(memDir).ok === true) &&
+      (!custody || isCurrent() === true) &&
+      !signal?.aborted;
+    if (custody && !valid) revoked = true;
+    return valid;
+  };
+  return () => {
+    if (dirFormat(memDir) !== "blocks" || !allowedNow() || canonicalDir(memDir)?.real !== directory.realpath)
+      return false;
+    const r = inspectDirNoFollow(memDir),
+      b = inspectDirNoFollow(join(memDir, "blocks"));
+    return (
+      r.dev === root.dev &&
+      r.ino === root.ino &&
+      b.dev === blocks.dev &&
+      b.ino === blocks.ino &&
+      [selected.target, ...(selected.context ? [selected.context] : [])].every((s) => {
+        const current = readBlock(memDir, s);
+        return current.rawDigest === s.rawDigest && current.block.authority === s.block.authority;
+      }) &&
+      (!custody || allowedNow())
+    );
+  };
 }
 export function revisionInputIsLiveLocked(input: FrozenRevisionInput): boolean {
   try {

@@ -56,6 +56,15 @@ export interface RevisionCommitRuntime {
   readonly policyVersion: string;
   readonly dateRuleVersion: string;
 }
+/** Synchronous display-only observation, never authority, raw text or paths.
+ * io-possible is set BEFORE a C call: even replay fsync failure is uncertain. */
+export interface RevisionCommitObservation {
+  readonly stage: "authorization" | "prepared" | "expected-after" | "data" | "finalize";
+  readonly receipt: "not-consumed" | "consumed";
+  readonly audit: "not-entered" | "io-possible" | "barrier-observed";
+  readonly data: "not-called" | "not-applied" | "applied" | "unknown";
+  readonly result?: CommitActionResult["kind"];
+}
 export interface RevisionCommitDeps {
   readonly gate?: MemoryWriteGate;
   readonly signal?: AbortSignal;
@@ -69,6 +78,9 @@ export interface RevisionCommitDeps {
    * factory neither creates a dialog nor treats origin/web strings as proof.
    * Missing port refuses; check/consume must be synchronous and one attempt. */
   consumeConfirmedLocked?(request: Readonly<CommitActionRequest>, proposal: RevisionProposal): boolean;
+  /** web-b3 only, post-consume. Must be synchronous; reentrant revocation is
+   * checked after every callback before the next effect. Never an async hook. */
+  observeConfirmedLocked?(observation: Readonly<RevisionCommitObservation>): void;
 }
 const hash = (v: string | Buffer): string => createHash("sha256").update(v).digest("hex");
 const canonical = revisionCanonicalJson;
@@ -207,12 +219,74 @@ export async function commitAction(
   if (!req) return skipped("digest");
   let attemptStarted = false;
   let expectedAfterRev: string | undefined;
+  let receipt: RevisionCommitObservation["receipt"] = "not-consumed";
+  const receiptConsumed = () => receipt === "consumed";
+  let auditState: RevisionCommitObservation["audit"] = "not-entered";
+  let dataState: RevisionCommitObservation["data"] = "not-called";
+  let lastStage: RevisionCommitObservation["stage"] = "authorization";
+  let barrierEntered = false,
+    applierEntered = false;
+  const observe = (stage: RevisionCommitObservation["stage"], result?: CommitActionResult["kind"]) => {
+    lastStage = stage;
+    if (req.origin !== "web-b3" || receipt !== "consumed") return;
+    const returned: unknown = deps.observeConfirmedLocked?.(
+      Object.freeze({ stage, receipt, audit: auditState, data: dataState, ...(result ? { result } : {}) }),
+    );
+    if (
+      returned &&
+      (typeof returned === "object" || typeof returned === "function") &&
+      typeof (returned as { then?: unknown }).then === "function"
+    ) {
+      void Promise.resolve(returned).catch(() => {});
+      throw new Error("asynchronous observer");
+    }
+  };
+  const terminal = (result: CommitActionResult): CommitActionResult => {
+    // Nothing follows this callback. It cannot revoke an already observed
+    // effect; downstream ledgers must latch their own terminal unknown.
+    try {
+      observe(lastStage, result.kind);
+    } catch {
+      /* observation is not authority */
+    }
+    return result;
+  };
+  const uncertain = (): CommitActionResult => ({
+    kind: "effect-unknown",
+    actionId,
+    dataApplied:
+      dataState === "applied" ? true : dataState === "not-called" || dataState === "not-applied" ? false : "unknown",
+    reason: "finalization-failure",
+    ...(expectedAfterRev ? { expectedAfterRev } : {}),
+  });
+  const failed = (error: unknown): CommitActionResult => {
+    if (!applierEntered) dataState = "not-called";
+    if (!barrierEntered) auditState = "not-entered";
+    if (req.origin === "web-b3" && receiptConsumed() && (auditState !== "not-entered" || attemptStarted))
+      return terminal(uncertain());
+    if (attemptStarted)
+      return {
+        kind: "effect-unknown",
+        actionId,
+        dataApplied: "unknown",
+        reason: "post-apply-failure",
+        ...(expectedAfterRev ? { expectedAfterRev } : {}),
+      };
+    return terminal(skipped(error instanceof Refused ? error.reason : "unavailable"));
+  };
+  const observedLocked = (run: () => CommitActionResult) => () => {
+    try {
+      return terminal(run());
+    } catch (error) {
+      return failed(error);
+    }
+  };
   try {
     // Never create/follow/adopt an absent or alias root on the write path.
     if (canonicalDir(memDir)?.real !== memDir) return skipped("stale");
-    return await withMemoryDirLock(
+    const completed = await withMemoryDirLock<CommitActionResult>(
       memDir,
-      () => {
+      observedLocked(() => {
         const owned = deps.actionLocked(req.actionId);
         if (!owned) return skipped("unavailable");
         const p = validateRevisionProposal(owned.proposal),
@@ -240,6 +314,15 @@ export async function commitAction(
           if (p.action === "expires" && r.dateRuleVersion !== p.expiry.dateRuleVersion) refuse("stale");
           governanceGate(memDir, deps.gate, req.signal ?? deps.signal);
           if (live && !revisionInputIsLiveLocked(f)) refuse("stale");
+          if (
+            req.origin === "web-b3" &&
+            (deps.signal?.aborted ||
+              req.signal?.aborted ||
+              deps.isCurrent() !== true ||
+              deps.signal?.aborted ||
+              req.signal?.aborted)
+          )
+            refuse("gate");
         };
         guard(false);
         // User deletion is a hard domain prohibition, not a confirmation
@@ -323,12 +406,18 @@ export async function commitAction(
               return skipped("permission");
           } else return skipped("permission"); // merge first step remains suggestion-only.
         } else if (!deps.consumeConfirmedLocked) return skipped("unavailable");
-        const prepared = audit.persistPreparedBarrierLocked({
-          frozen: f,
-          proposal: p,
-          origin: disk.kind === "ok" ? disk.audit.origin : req.origin,
-        });
-        if (prepared.kind !== "ok" || prepared.audit.state !== "prepared") return skipped("unavailable");
+        // Preserve p50-auto's existing order and behavior. Web validation and
+        // pure serialization must ALL finish before its single receipt consume.
+        const prepareBarrier = () =>
+          audit.persistPreparedBarrierLocked({
+            frozen: f,
+            proposal: p,
+            origin: disk.kind === "ok" ? disk.audit.origin : req.origin,
+          });
+        if (req.origin === "p50-auto") {
+          const prepared = prepareBarrier();
+          if (prepared.kind !== "ok" || prepared.audit.state !== "prepared") return skipped("unavailable");
+        }
         if (batchAttempts(memDir, p, audit) >= AUTO_PER_WRITE_MAX) return skipped("permission");
         const application = prepareRevisionApplicationLocked(memDir, f, p, now);
         const check = () => {
@@ -341,8 +430,27 @@ export async function commitAction(
           if (!revisionGenerationRequestMatchesInput(p, f)) refuse("digest");
         };
         check();
-        if (req.origin === "web-b3" && deps.consumeConfirmedLocked!(req, p) !== true) return skipped("permission");
+        if (req.origin === "web-b3") {
+          if (deps.consumeConfirmedLocked!(req, p) !== true) return skipped("permission");
+          receipt = "consumed";
+          observe("authorization");
+          check();
+          auditState = "io-possible";
+          observe("prepared");
+          check();
+          barrierEntered = true;
+          const prepared = prepareBarrier();
+          if (prepared.kind !== "ok" || prepared.audit.state !== "prepared") return uncertain();
+          auditState = "barrier-observed";
+          observe("prepared");
+        }
         check();
+        if (req.origin === "web-b3") {
+          auditState = "io-possible";
+          observe("expected-after");
+          check();
+        }
+        barrierEntered = true;
         const barrier = audit.persistExpectedAfterBarrierLocked({
           batchId: p.batchId,
           actionId,
@@ -350,13 +458,32 @@ export async function commitAction(
           commitOrigin: req.origin,
           expected: application.expected,
         });
-        if (barrier.kind !== "ok" || barrier.audit.state !== "proposed") return skipped("unavailable");
+        if (barrier.kind !== "ok" || barrier.audit.state !== "proposed")
+          return req.origin === "web-b3" ? uncertain() : skipped("unavailable");
+        if (req.origin === "web-b3") {
+          auditState = "barrier-observed";
+          observe("expected-after");
+          check();
+        }
         // The durable proposed marker is an attempt fence. Re-entry can only
         // diagnose unknown/committed, never run this application a second time.
         attemptStarted = true;
         const expected = application.expected;
         expectedAfterRev = expected.kind === "file" ? expected.rev : undefined;
+        if (req.origin === "web-b3") {
+          dataState = "unknown";
+          observe("data");
+          check();
+        }
+        applierEntered = true;
         const result = application.applyLocked(check);
+        dataState =
+          result.observation.kind === "applied"
+            ? "applied"
+            : result.observation.kind === "not-applied"
+              ? "not-applied"
+              : "unknown";
+        observe("data");
         let observation: ApplyObservation = result.observation;
         if (result.error && observation.kind === "applied")
           observation = {
@@ -364,6 +491,14 @@ export async function commitAction(
             reason: `post-apply-failure:${result.error}`.slice(0, 900),
             ...(observation.paths ? { paths: observation.paths } : {}),
           };
+        if (req.origin === "web-b3") {
+          // LIVE raw is expected to have changed now. Check only owner/lease,
+          // not old raw/review, before the next mutating audit effect.
+          guard(false);
+          auditState = "io-possible";
+          observe("finalize");
+          guard(false);
+        }
         const finalized = audit.finalizeCommitLocked({
           batchId: p.batchId,
           actionId,
@@ -371,22 +506,19 @@ export async function commitAction(
           observation,
           dataDirectories: result.dataDirectories,
         });
+        if (req.origin === "web-b3") {
+          if (finalized.kind === "committed") auditState = "barrier-observed";
+          observe("finalize");
+        }
         if (result.observation.kind === "applied" && finalized.kind === "effect-unknown")
           return { ...finalized, dataApplied: true };
         return finalized;
-      },
+      }),
       { timeoutMs: 500, log: () => {} },
     );
+    return completed;
   } catch (error) {
-    if (attemptStarted)
-      return {
-        kind: "effect-unknown",
-        actionId,
-        dataApplied: "unknown",
-        reason: "post-apply-failure",
-        ...(expectedAfterRev ? { expectedAfterRev } : {}),
-      };
-    return skipped(error instanceof Refused ? error.reason : "unavailable");
+    return failed(error);
   }
 }
 /** Factory ONLY. No timer/hook/settings/UI/store owner or default is created. */
