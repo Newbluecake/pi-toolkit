@@ -8,7 +8,7 @@ import { THINKING_LEVELS, type SetModelOutcome } from "../core/types.js";
 import { parseStrictModelRef } from "../config/model-hint.js";
 import { MSG_SET_MODEL_ON_EXTERNAL, MSG_SET_MODEL_TO_EXTERNAL } from "../external-agent/messages.js";
 import type { ResolveRunResult } from "../service/resolve-target.js";
-import { cleanLabel, runRefDetails, titleForHandle } from "./run-ref.js";
+import { cleanLabel, runRefDetails, runRefText, titleForHandle } from "./run-ref.js";
 
 /**
  * "set_model" — switch the model used from the next LLM call onward, either
@@ -366,7 +366,25 @@ export function createSetModelTool(deps: SetModelToolDeps): ToolDefinition<typeo
         const outcome = await deps.runs!.setModel(runId, ref, opts);
         if (outcome.ok) effect = "model_changed";
         // Classify the authoritative refusal before any optional display lookup.
-        if (!outcome.ok) return mapRunOutcome(rawTarget!, runId, outcome, thinking, deps.externalOwns !== undefined);
+        if (!outcome.ok) {
+          if (outcome.reason === "not_running") {
+            let label: string | undefined;
+            try {
+              label = cleanLabel(deps.labelOf?.(runId));
+            } catch {
+              // Display lookup must not mask the authoritative refusal.
+            }
+            return mapRunOutcome(
+              label === undefined ? rawTarget! : runRefText(runId, label),
+              runId,
+              outcome,
+              thinking,
+              deps.externalOwns !== undefined,
+              label,
+            );
+          }
+          return mapRunOutcome(rawTarget!, runId, outcome, thinking, deps.externalOwns !== undefined);
+        }
         let label: string | undefined;
         try {
           label = cleanLabel(deps.labelOf?.(runId));
