@@ -7,7 +7,10 @@
  * subset; `fleetFingerprint` strips per-second jitter (elapsed/phase ages and
  * the in-flight tool's live duration) so the 1Hz tick only sends on real change.
  */
+import { Buffer } from "node:buffer";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { RunArchiveDisplayView } from "../../archive/control.js";
+import { isTerminalStatus } from "../../core/status.js";
 import type { RunSnapshot } from "../../core/types.js";
 import { buildFleetViewModel, phaseLabel } from "../../ui/fleet-panel.js";
 import type {
@@ -35,6 +38,13 @@ export const FLEET_THINKING_MAX = 32;
 /** Web rows: more than the TUI widget, still bounded. */
 const WEB_MAX_ACTIVE_ROWS = 64;
 const WEB_RECENT_TERMINAL = 8;
+const WEB_ARCHIVED_TERMINAL = 256;
+
+/** Exact UTF-8 budgets for `{t:"fleet",runs,omitted?}` + LF and each serialized row. */
+export const WEB_FLEET_FRAME_BYTES = 512 * 1024;
+export const WEB_FLEET_ROW_BYTES = 4 * 1024;
+const FLEET_OMITTED_RESERVE_BYTES = 256;
+const FLEET_DISPLAY_FIELD_BYTES = 512;
 
 export function readStatus(
   ctx: ExtensionContext,
@@ -179,15 +189,40 @@ export function projectFleet(
   snaps: readonly RunSnapshot[],
   now: number,
   typeOf?: (id: string) => string | undefined,
+  archiveView?: RunArchiveDisplayView,
 ): FleetProjection {
+  const terminal = snaps.filter((s) => isTerminalStatus(s.status)).sort((a, b) => b.updatedAt - a.updatedAt);
+  let retained: Set<string> | undefined;
+  let terminalPriority: readonly RunSnapshot[] | undefined;
+  if (archiveView !== undefined) {
+    const ordinary: RunSnapshot[] = [];
+    const archived: RunSnapshot[] = [];
+    const horizon = archiveView.horizon ?? -Infinity;
+    for (const snap of terminal) {
+      // Explicit metadata wins; a hold beats the horizon. Non-terminal rows never enter
+      // either list, even if stale/corrupt metadata happens to name their runId.
+      if (archiveView.archived.has(snap.runId)) archived.push(snap);
+      else if (archiveView.held.has(snap.runId)) ordinary.push(snap);
+      else if ((snap.diag.settledAt ?? snap.updatedAt) <= horizon)
+        continue; // implicit H
+      else ordinary.push(snap);
+    }
+    const ordinaryKept = ordinary.slice(0, WEB_RECENT_TERMINAL);
+    const archivedKept = archived.slice(0, WEB_ARCHIVED_TERMINAL);
+    terminalPriority = [...ordinaryKept, ...archivedKept];
+    retained = new Set(terminalPriority.map((s) => s.runId));
+  }
   const vm = buildFleetViewModel(snaps, {
     now,
     maxActiveRows: WEB_MAX_ACTIVE_ROWS,
-    recentTerminal: WEB_RECENT_TERMINAL,
+    // Archive mode keeps the independent U8 ∪ E256 set through the shared VM's
+    // retain hook. Legacy mode deliberately keeps the original recent-8 call.
+    recentTerminal: archiveView === undefined ? WEB_RECENT_TERMINAL : 0,
+    ...(archiveView !== undefined ? { retainTerminal: (s: RunSnapshot) => retained?.has(s.runId) === true } : {}),
     ...(typeOf !== undefined ? { typeOf } : {}),
   });
   const byId = new Map(snaps.map((s) => [s.runId, s]));
-  const rows = vm.rows.map((r) => {
+  const projected = vm.rows.map((r) => {
     const row: FleetRowWire = {
       runId: r.runId,
       status: r.status,
@@ -236,13 +271,128 @@ export function projectFleet(
       row.ctx = { tokens: ctxUsage.tokens, contextWindow: ctxUsage.contextWindow, percent: ctxUsage.percent };
     }
     return row;
-  }) as FleetProjection;
-  // fleet-drawer §4.4/#12: rows the 64-active/8-terminal caps dropped, so the browser can
-  // render "N more not listed". Absent when nothing was omitted.
-  const omittedActive = vm.activeCount - vm.shownActiveCount;
-  const omittedTerminal = vm.totalCount - vm.activeCount - (vm.rows.length - vm.shownActiveCount);
-  if (omittedActive > 0 || omittedTerminal > 0) rows.omitted = { active: omittedActive, terminal: omittedTerminal };
-  return rows;
+  });
+  return boundFleetProjection(projected, vm.activeCount, vm.totalCount - vm.activeCount, terminalPriority);
+}
+
+const FLEET_TRUNCATE_FIELDS = ["title", "label", "toolTrail", "streamLine", "model", "type"] as const;
+const FLEET_REMOVE_FIELDS = [
+  "streamLine",
+  "toolTrail",
+  "title",
+  "label",
+  "model",
+  "type",
+  "thinking",
+  "cacheMark",
+  "consultCache",
+  "consult",
+  "ctx",
+  "costUsd",
+  "startedAt",
+  "endedAt",
+] as const;
+
+/** Keep normal rows byte-identical. Only an over-4-KiB row pays for a display-only clone;
+ * runId/parentRunId are never truncated or removed, so an oversized identity skips the row. */
+function fitFleetRow(row: FleetRowWire): FleetRowWire | undefined {
+  if (Buffer.byteLength(JSON.stringify(row)) <= WEB_FLEET_ROW_BYTES) return row;
+  const degraded: FleetRowWire = { ...row };
+  for (const field of FLEET_TRUNCATE_FIELDS) {
+    const value = degraded[field];
+    if (typeof value === "string" && Buffer.byteLength(value) > FLEET_DISPLAY_FIELD_BYTES) {
+      degraded[field] = truncateUtf8(value, FLEET_DISPLAY_FIELD_BYTES);
+    }
+  }
+  for (const field of FLEET_REMOVE_FIELDS) {
+    if (Buffer.byteLength(JSON.stringify(degraded)) <= WEB_FLEET_ROW_BYTES) return degraded;
+    delete degraded[field];
+  }
+  return Buffer.byteLength(JSON.stringify(degraded)) <= WEB_FLEET_ROW_BYTES ? degraded : undefined;
+}
+
+function truncateUtf8(value: string, maxBytes: number): string {
+  if (Buffer.byteLength(value) <= maxBytes) return value;
+  const contentBudget = maxBytes - Buffer.byteLength("…");
+  let out = "";
+  let bytes = 0;
+  for (const char of value) {
+    const next = Buffer.byteLength(char);
+    if (bytes + next > contentBudget) break;
+    out += char;
+    bytes += next;
+  }
+  return `${out}…`;
+}
+
+/** Priority admission is active → ordinary U8 → explicit archive newest-first. A row that
+ * cannot fit is skipped without blocking smaller later rows; final output returns to VM order.
+ * Every omission is recomputed AFTER row and frame clipping, including implicit-horizon rows. */
+function boundFleetProjection(
+  rows: readonly FleetRowWire[],
+  originalActive: number,
+  originalTerminal: number,
+  terminalPriority: readonly RunSnapshot[] | undefined,
+): FleetProjection {
+  const fitted = new Map<FleetRowWire, FleetRowWire | undefined>();
+  for (const row of rows) fitted.set(row, fitFleetRow(row));
+  const byId = new Map(rows.map((row) => [row.runId, row]));
+  const priority: FleetRowWire[] = rows.filter((row) => !row.terminal);
+  if (terminalPriority === undefined) priority.push(...rows.filter((row) => row.terminal));
+  else {
+    for (const snap of terminalPriority) {
+      const row = byId.get(snap.runId);
+      if (row !== undefined) priority.push(row);
+    }
+  }
+  // Defensive only (duplicate runIds are outside QueryService's contract): never lose a
+  // projected row merely because the id-keyed priority list could not name it uniquely.
+  for (const row of rows) if (!priority.includes(row)) priority.push(row);
+
+  const emptyBytes = Buffer.byteLength('{"t":"fleet","runs":[]}\n');
+  let used = emptyBytes + FLEET_OMITTED_RESERVE_BYTES;
+  const admitted = new Set<FleetRowWire>();
+  const admittedPriority: FleetRowWire[] = [];
+  for (const original of priority) {
+    const row = fitted.get(original);
+    if (row === undefined) continue;
+    const rowBytes = Buffer.byteLength(JSON.stringify(row));
+    const next = used + (admittedPriority.length === 0 ? 0 : 1) + rowBytes;
+    if (next > WEB_FLEET_FRAME_BYTES) continue;
+    used = next;
+    admitted.add(row);
+    admittedPriority.push(row);
+  }
+
+  const finalize = (): FleetProjection => {
+    const out = rows.flatMap((original) => {
+      const row = fitted.get(original);
+      return row !== undefined && admitted.has(row) ? [row] : [];
+    }) as FleetProjection;
+    let emittedActive = 0;
+    for (const row of out) if (!row.terminal) emittedActive += 1;
+    const omitted = {
+      active: Math.max(0, originalActive - emittedActive),
+      terminal: Math.max(0, originalTerminal - (out.length - emittedActive)),
+    };
+    if (omitted.active > 0 || omitted.terminal > 0) out.omitted = omitted;
+    return out;
+  };
+
+  let out = finalize();
+  // The 256-byte omitted reserve makes this exceptionally rare (normally impossible),
+  // but the exact final serialized frame remains the authority at every digit boundary.
+  while (fleetFrameBytes(out) > WEB_FLEET_FRAME_BYTES && admittedPriority.length > 0) {
+    const victim = admittedPriority.pop();
+    if (victim !== undefined) admitted.delete(victim);
+    out = finalize();
+  }
+  return out;
+}
+
+function fleetFrameBytes(rows: FleetProjection): number {
+  const frame = { t: "fleet", runs: rows, ...(rows.omitted !== undefined ? { omitted: rows.omitted } : {}) };
+  return Buffer.byteLength(`${JSON.stringify(frame)}\n`);
 }
 
 /** `projectFleet`'s return: the wire rows plus the optional §3.2/#12 omission counts. */

@@ -264,6 +264,74 @@ describe("ArchiveControl: restore", () => {
   });
 });
 
+describe("ArchiveControl: runDisplayView (#9 read-only fleet retention seam)", () => {
+  it("returns same-version run archive/held/horizon facts without changing legacy views or persistence", () => {
+    vi.useFakeTimers();
+    try {
+      const h = makeControl();
+      h.control.restore([
+        branchEntry({
+          entries: [
+            { kind: "run", id: "r-archived", at: 1, auto: true },
+            { kind: "bash", id: "b-archived", at: 2 },
+          ],
+          held: [
+            { kind: "run", id: "r-held", at: 3 },
+            { kind: "bash", id: "b-held", at: 4 },
+          ],
+          horizon: { run: 500, bash: 600 },
+        }),
+      ]);
+      const legacyView = JSON.stringify(h.control.view());
+      const legacyWire = JSON.stringify(h.control.wire());
+      h.control.start(false);
+
+      const view = h.control.runDisplayView();
+      expect([...view.archived]).toEqual(["r-archived"]);
+      expect([...view.held]).toEqual(["r-held"]);
+      expect(view.horizon).toBe(500);
+      expect(JSON.stringify(h.control.view())).toBe(legacyView);
+      expect(JSON.stringify(h.control.wire())).toBe(legacyWire);
+      expect(h.control.currentRev()).toBe(1);
+      expect(h.appended).toHaveLength(0);
+      expect(vi.getTimerCount()).toBe(0);
+
+      // Each call is detached from the immutable state (and from prior callers).
+      (view.archived as Set<string>).delete("r-archived");
+      (view.held as Set<string>).add("r-forged");
+      expect([...h.control.runDisplayView().archived]).toEqual(["r-archived"]);
+      expect(h.control.runDisplayView().held.has("r-forged")).toBe(false);
+      expect(h.appended).toHaveLength(0);
+      h.control.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("omits an absent horizon and never reads run/bash candidates", () => {
+    let candidateReads = 0;
+    const control = new ArchiveControl(
+      {
+        runs: () => {
+          candidateReads += 1;
+          return [];
+        },
+        bashJobs: () => {
+          candidateReads += 1;
+          return [];
+        },
+      },
+      { appendEntry: () => undefined, now: () => 1 },
+    );
+    const view = control.runDisplayView();
+    expect(view.archived.size).toBe(0);
+    expect(view.held.size).toBe(0);
+    expect("horizon" in view).toBe(false);
+    expect(candidateReads).toBe(0);
+    control.dispose();
+  });
+});
+
 describe("ArchiveControl: auto sweep above the 256-entry archive cap (flip-flop regression)", () => {
   // Field evidence: a session whose fleet held 687 terminal runs committed a full 256-entry
   // snapshot EVERY sweep (4882 `subagent:archive` entries in 3.5 days), alternating between two

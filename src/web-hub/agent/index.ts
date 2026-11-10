@@ -832,6 +832,17 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     }
   };
 
+  /** #9 fleet retention: the original archive control's same-version, read-only run view.
+   * Missing/detached/throwing sources degrade to the legacy projection; snapshot_reply below
+   * deliberately does not consume this expanded display window. */
+  const archiveRunDisplayView = (): ReturnType<ArchiveControl["runDisplayView"]> | undefined => {
+    try {
+      return deps.archive?.()?.runDisplayView();
+    } catch {
+      return undefined;
+    }
+  };
+
   // ── web-hub-steer-recall plan §4.7 (A6): hold wiring — the gate/buffer/cap probes and the
   // `status.held` projection live in hold-wire.ts (source-governance batch2 ⑨-H1, pure
   // extraction; conn/ctx threaded as call-time getters, same as the captured closure vars).
@@ -1278,7 +1289,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       /* stale ctx */
     }
     commandHandler.releaseSettledSteerLocks();
-    const rows = projectFleet(readFleet(), now(), deps.fleetTypeOf);
+    const rows = projectFleet(readFleet(), now(), deps.fleetTypeOf, archiveRunDisplayView());
     const fp = fleetFingerprint(rows);
     if (fp !== lastFleetFp) {
       lastFleetFp = fp;

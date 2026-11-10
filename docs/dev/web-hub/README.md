@@ -350,10 +350,11 @@ leaves the explicit set only via gone (not a candidate), horizon (never selectab
 auto-selected) — no resurrect flip-flop, by construction. Writes stay bounded: a stable fleet
 converges to zero writes, every arrival settles in one write, the post-upgrade first sweep over a
 legacy full-cap snapshot is exactly one horizon-only write; `sameArchiveState`/`semanticKey` treat
-the horizon as semantic state. The horizon never rides the wire (I10) — implicit rows sit at the
-256 depth, beyond every display window (two honest boundaries, plan §5 R1: mass-gone can float
-implicit rows into view, and bash `(+N more)` eviction within retention does not converge).
-Manual paths share the trim: `setArchived` protects its own id; `setArchivedMany` protects the batch
+the horizon as semantic state. The horizon never rides `StatusInfo` or any other wire surface (I10):
+`ArchiveControl.runDisplayView()` exposes it only to the agent-internal fleet projection, which
+does not synthesize implicit-history rows. The archive write/cap rules and the bash `(+N more)`
+eviction-within-retention non-convergence boundary remain unchanged. Manual paths share the trim:
+`setArchived` protects its own id; `setArchivedMany` protects the batch
 (P4 keeps a >cap batch's newest rows). Tests: `tests/archive/{state,sweep,control}.test.ts`
 (T1–T6), `tests/archive/write-rate.test.ts` (S5–S7, CF3). Design: `docs/dev/archive-full/plan.md`.
 Write-dedup safety net (#89 A1): `commit()` compares the next snapshot against the per-instance
@@ -363,6 +364,32 @@ when the content already matches, retrying on the next real change after a failu
 itself is pinned by `tests/archive/write-rate.test.ts` (24 h sweep simulation; red against both the
 998dce27 at-rewrite and the 43d892fd id-flip forms, replayed as in-file counterfactuals):
 docs/dev/web-hub/refresh-slow/archive-dedup-plan.md.
+
+**Bounded fleet retention (#9 P1/P4)**: the 1 Hz tick passes the original control's safe
+`runDisplayView()` to `projectFleet(snaps, now, typeOf?, archiveView?)`; a missing/detached/throwing
+getter degrades to legacy projection, and `snapshot_reply` deliberately keeps the legacy 8-terminal
+array. With a view, terminal classification is explicit archive E → held/ordinary U → implicit H
+(non-terminal is always active, regardless of stale metadata): active keeps its original 64-row
+severity/elapsed window, U keeps an INDEPENDENT newest 8, and E keeps up to 256 real snapshots,
+newest-first. H is omitted rather than resurrected or turned into a metadata-only placeholder;
+resume identity remains runId-keyed. The shared VM is unchanged — archive mode alone calls it with
+`recentTerminal:0` plus the selected-id retain hook, so U/E do not consume each other's quota and
+final output stays in VM order. `runDisplayView()` rebuilds detached run sets from the current
+immutable state; it reads no candidates and performs no append, rev bump or timer arm.
+
+Fleet rows/frames have exact UTF-8 producer budgets: 4 KiB per JSON row and 512 KiB for the actual
+`{t:"fleet",runs,omitted?}` JSON plus LF. Only oversized rows clone and degrade display fields
+(UTF-8-safe `…` truncation, then optional-field removal); runId/parentRunId are never truncated,
+and an identity-only oversized row is skipped. Admission is active → U8 → E newest-first, skipping
+an over-budget row without blocking smaller later rows; final omission counts are recomputed AFTER
+all row/frame drops (`original active/terminal − actually emitted`), included in the fingerprint,
+and the exact serialized frame is authoritative. Snapshots are never mutated. Thus history remains
+honestly bounded: implicit H, ordinary/held rows beyond U8, and byte-pressure losers among original
+RunSnapshots are reported as omitted; metadata without a live snapshot neither synthesizes a row
+nor counts as omitted, so the fleet is not presented as complete history. Pure/wiring
+gates: `tests/archive/control.test.ts` and `tests/web-hub/agent/fleet-retention.test.ts` (64/58,
+256/horizon/held, 70 active, Unicode/identity degradation, 4-KiB ±1 and final-frame ±1, real NDJSON
+and SSE serialization, legacy snapshot/tick fallback).
 
 ## Cache keepalive panel
 

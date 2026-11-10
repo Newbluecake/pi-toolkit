@@ -40,6 +40,16 @@ export interface FleetArchiveView {
   bash: ReadonlySet<string>;
 }
 
+/** Agent-internal, read-only run retention facts. Unlike `view()`, this also exposes the
+ * horizon/held classification needed by the bounded web fleet projection; none of it rides
+ * StatusInfo or any other wire surface. Sets are rebuilt from the current immutable state. */
+export interface RunArchiveDisplayView {
+  archived: ReadonlySet<string>;
+  held: ReadonlySet<string>;
+  /** Finite run settled-at watermark; absent ⇔ −∞. */
+  horizon?: number;
+}
+
 export interface ArchiveCandidates {
   /** Live run snapshots (the stack's QueryService list). */
   runs(): readonly RunSnapshot[];
@@ -120,6 +130,22 @@ export class ArchiveControl {
     const bash = new Set<string>();
     for (const e of this.state.entries) (e.kind === "run" ? runs : bash).add(e.id);
     return { runs, bash };
+  }
+
+  /** Same-version run display facts for `projectFleet`: pure in-memory reads only — no
+   * candidate access, append, rev bump or timer arming. Explicit entries and holds are
+   * deliberately independent sets; the projection applies their terminal-only precedence. */
+  runDisplayView(): RunArchiveDisplayView {
+    const archived = new Set<string>();
+    const held = new Set<string>();
+    for (const e of this.state.entries) if (e.kind === "run") archived.add(e.id);
+    for (const h of this.state.held) if (h.kind === "run") held.add(h.id);
+    const horizon = this.state.horizon?.run;
+    return {
+      archived,
+      held,
+      ...(horizon !== undefined && Number.isFinite(horizon) ? { horizon } : {}),
+    };
   }
 
   /**
