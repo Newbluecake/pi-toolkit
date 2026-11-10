@@ -311,7 +311,9 @@ function withoutFast(settings: typeof DEFAULT_SETTINGS, input?: unknown) {
   // #50 P50.1 declared additive block. Every frozen input predates it;
   // assert all six defaults, then project ONLY this block (never regenerate).
   expect(memory.incremental).toEqual({
-    enabled: false,
+    enabled: true,
+    auto: false,
+    jobCostCapUsd: 0,
     changeThreshold: 5,
     quietMs: 15000,
     idleMs: 2000,

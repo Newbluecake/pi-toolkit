@@ -103,8 +103,19 @@ export const MEMORY_SETTING_SPECS: Record<string, SettingSpec> = {
   // P50.1 declared additive trigger settings; no model/auto/audit switch in this package.
   "memory.incremental.enabled": bool(
     "memory.incremental.enabled",
-    "P50 incremental trigger aggregation; default off, requires a live scopes activity owner",
+    "P50 incremental suggestions; default on, requires explicit positive job budget and trusted provider binding",
   ),
+  "memory.incremental.auto": bool(
+    "memory.incremental.auto",
+    "P50 automatic commits; default false, existing E permission and provenance gates still required",
+  ),
+  "memory.incremental.jobCostCapUsd": {
+    kind: "number",
+    path: "memory.incremental.jobCostCapUsd",
+    min: 0,
+    description:
+      "Explicit finite per-job USD cap shared by relation/generation/coverage; default 0 authorizes no paid work",
+  },
   "memory.incremental.changeThreshold": {
     ...count(
       "memory.incremental.changeThreshold",

@@ -1,3 +1,6 @@
+import { createRevisionHost } from "../govern/revision-host.js";
+import type { IncrementalBatch } from "../govern/incremental.js";
+import { resolveNativeP50Binding, type P50BindingResolver, type P50SdkBinding } from "./p50-binding.js";
 import type { MemoryActivityRecorder } from "../govern/activity.js";
 // `wireJev` — the Jev recall runtime (jev-plan §4 J6; jev-arch §5.3,
 // §6.1.1–§6.1.6, §6.2.3, §6.3.1, §8, §9.2).
@@ -323,6 +326,14 @@ export interface WireJevDeps {
     turnEnd(cwd: string, registry: ClassifierRegistryLike, client: JevClient): void;
   };
   readonly writeGate?: MemoryWriteGate;
+  /** Main/plain assembly only. Provider/binding seam is trusted CODE, never settings. */
+  readonly p50?: {
+    readonly resolveBinding?: P50BindingResolver;
+    available(ctx: unknown): boolean;
+    isCurrent(batch: IncrementalBatch, ctx: unknown): boolean;
+    onAfterWrite(memDir: string, origin: "p50-auto"): void;
+    invalidate(): void;
+  };
 }
 
 export interface WireJevResult {
@@ -330,6 +341,12 @@ export interface WireJevResult {
   makeWritePort(): JevWritePort;
   readonly doctorPort: JevDoctorPort;
   readonly client: JevClient;
+  readonly p50?: {
+    ready(): boolean;
+    readonly handle: ReturnType<typeof createRevisionHost>["handle"];
+    readonly canAttempt: ReturnType<typeof createRevisionHost>["canAttempt"];
+    reset(reason: "abort" | "tree" | "session"): void;
+  };
   /** memory-predict plan §11.1: late-bound W-signal ports (bashJobs/fleet) —
    *  `src/index.ts` attaches these post-guard, after `activeSubagentRunCount`
    *  exists; unattached ⇒ P1b sees empty bashJobs / 0 activeSubagents. */
@@ -822,9 +839,100 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     });
   const isChild = deps.isChildSession;
   const config = deps.config;
+  const p50Wired =
+    !isChild && deps.settings.incremental.enabled && deps.settings.governance.enabled && deps.p50 !== undefined;
+  let p50Context: unknown;
+  let p50Closed = false;
+  let p50Binding: P50SdkBinding | undefined;
+  const p50Diagnostics = new Set<string>();
+  // P50 diagnostics NEVER use the existing persistent Jev log sink. No new
+  // sidecar/popup/turn; fixed reason set, once per reason per natural session.
+  const p50Diagnostic = (reason: string): void => {
+    if (p50Diagnostics.has(reason) || p50Diagnostics.size >= 12) return;
+    p50Diagnostics.add(reason);
+    const line = `p50: ${reason}; incremental unavailable, legacy Jev retained`;
+    if (ui !== undefined) {
+      errorLog.push({ at: now(), line });
+      if (errorLog.length > JEV_ERROR_LOG_MAX) errorLog.shift();
+    } else console.warn(line);
+  };
+  const currentP50Binding = (): P50SdkBinding | undefined => {
+    if (!p50Wired || p50Closed || p50Context === undefined) return undefined;
+    let next: P50SdkBinding | undefined;
+    let reason: string | undefined;
+    const r = registryOf(p50Context);
+    try {
+      if (!(Number.isFinite(deps.settings.incremental.jobCostCapUsd) && deps.settings.incremental.jobCostCapUsd > 0))
+        reason = "job-budget-zero";
+      else if (!deps.p50!.available(p50Context)) reason = "activity-owner-unavailable";
+      else if (config.proxy !== "") reason = "streaming-proxy-contract-missing";
+      else if (!r) reason = "current-registry-missing";
+      else {
+        const result = (deps.p50?.resolveBinding ?? resolveNativeP50Binding)(r, config.classifiers);
+        if (
+          result.kind === "ready" &&
+          result.binding.registry === r &&
+          result.binding.isCurrent() &&
+          result.binding.classifiers.length === config.classifiers.length &&
+          result.binding.classifiers.every((id, i) => id === config.classifiers[i])
+        )
+          next = result.binding;
+        else reason = result.kind === "unsupported" ? result.reason : "binding-invalid";
+      }
+    } catch {
+      reason = "binding-invalid";
+    }
+    if (p50Binding !== undefined && next !== p50Binding) {
+      p50Binding = undefined;
+      revisionHost?.reset("abort");
+      deps.p50?.invalidate(); // abort scheduler signal before any old late result
+    }
+    p50Binding = next;
+    if (reason) p50Diagnostic(reason);
+    return next;
+  };
   const client: JevClientHandle =
     deps.client ??
-    createJevClient({ config, isChild, now, log: (line) => log(line.replace(/^\[pi-subagent\] jev: /, "")) });
+    createJevClient({
+      config,
+      isChild,
+      now,
+      log: (line) => log(line.replace(/^\[pi-subagent\] jev: /, "")),
+      ...(p50Wired && deps.settings.incremental.jobCostCapUsd > 0
+        ? {
+            p50: {
+              enabled: true,
+              onUnavailable: p50Diagnostic,
+              current: (expected) => {
+                const b = currentP50Binding();
+                return b?.registry === expected ? b : undefined;
+              },
+            },
+          }
+        : {}),
+    });
+  const revisionHost = p50Wired
+    ? createRevisionHost({
+        client,
+        binding: currentP50Binding,
+        isCurrent: (batch) => !p50Closed && deps.p50!.isCurrent(batch, p50Context) && currentP50Binding() !== undefined,
+        canAttempt: () => {
+          if (!currentP50Binding()) return false;
+          const u = client.usage();
+          return (
+            (config.maxCalls <= 0 || u.calls + (u.budget?.reservedCalls ?? 0) < config.maxCalls) &&
+            (config.maxCostUsd <= 0 || u.costUsd + (u.budget?.reservedCostUsd ?? 0) < config.maxCostUsd)
+          );
+        },
+        autoEnabled: () => deps.settings.incremental.auto === true,
+        ...(deps.writeGate === undefined ? {} : { gate: deps.writeGate }),
+        now: () => new Date(now()),
+        onAfterWrite: (dir, origin) => deps.p50!.onAfterWrite(dir, origin),
+        // The host already bounds its per-directory diagnostics; retain a fixed
+        // aggregate code here rather than leaking parser/provider error strings.
+        diagnostic: () => p50Diagnostic("revision-host-unavailable"),
+      })
+    : undefined;
   const entryIndex = deps.entryIndex ?? new EntryIndex();
   const segment: SegmentState = createSegmentState();
   const platform = deps.platform ?? process.platform;
@@ -1059,7 +1167,9 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
   const effectiveStatus = (): JevStatus => (registryOk === true ? client.status() : { kind: "off", reason: "pi-api" });
 
   const observe = (ctx: unknown): ClassifierRegistryLike | undefined => {
+    if (p50Wired) p50Context = ctx;
     const r = registryOf(ctx);
+    if (p50Binding !== undefined) currentP50Binding();
     registryOk = r !== undefined;
     if (r !== undefined) registry = r;
     return r;
@@ -3080,6 +3190,10 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     pi.on("session_start", (_event: unknown, ctx: ExtensionContext) => {
       if (!runs) return;
       try {
+        if (p50Wired) {
+          p50Diagnostics.clear();
+          revisionHost?.reset("session");
+        }
         const reg = observe(ctx);
         generation += 1;
         deps.governance?.clear();
@@ -3102,6 +3216,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
         } catch {
           ui = undefined;
         }
+        if (p50Wired) currentP50Binding();
         refreshInactive(cwd);
         void probeOnce();
       } catch (err) {
@@ -3155,6 +3270,12 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
       recallAbort?.abort();
       bgAbort.abort();
       client.abortBackground();
+      if (revisionHost) {
+        p50Closed = true;
+        p50Context = undefined;
+        revisionHost.dispose();
+        p50Binding = undefined;
+      }
       // memory-predict plan §8.2: abort the in-flight predict request, clear
       // its timers, and mark the P2 model state disposed — late settles then
       // produce no side effects (no cache writes, no call records).
@@ -3373,6 +3494,16 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     },
     doctorPort,
     client,
+    ...(revisionHost
+      ? {
+          p50: {
+            ready: () => currentP50Binding() !== undefined,
+            handle: revisionHost.handle,
+            canAttempt: revisionHost.canAttempt,
+            reset: (reason: "abort" | "tree" | "session") => revisionHost.reset(reason),
+          },
+        }
+      : {}),
     attachPredictPorts(ports) {
       predictBashJobs = ports.bashJobs;
       predictFleet = ports.fleet;

@@ -51,6 +51,8 @@ if (process.env.GOV_SPECS_GENERATE === "1") {
     "feishuNotify.requireBackgroundIdle",
     "feishuNotify.watchDefault",
 
+    "memory.incremental.auto",
+    "memory.incremental.jobCostCapUsd",
     "memory.jev.backgroundQueueLimit",
     "memory.scopes.session",
     "memory.scopes.hub",
@@ -64,7 +66,17 @@ if (process.env.GOV_SPECS_GENERATE === "1") {
   const legacySpecs = Object.fromEntries(
     Object.entries(SETTING_SPECS)
       .filter(([key]) => !declaredAdditions.includes(key))
-      .map(([key, spec]) => [key, key === "memory.layout" ? { ...spec, description: oldLayoutDescription } : spec]),
+      .map(([key, spec]) => [
+        key,
+        key === "memory.layout"
+          ? { ...spec, description: oldLayoutDescription }
+          : key === "memory.incremental.enabled"
+            ? {
+                ...spec,
+                description: "P50 incremental trigger aggregation; default off, requires a live scopes activity owner",
+              }
+            : spec,
+      ]),
   );
   describe("SETTING_SPECS pin (order + content)", () => {
     it("adds exactly declared Fast/scopes/decision keys with non-live defaults and keeps old ordering", () => {
@@ -73,6 +85,7 @@ if (process.env.GOV_SPECS_GENERATE === "1") {
       expect(Object.keys(SETTING_SPECS).filter((key) => !oldKeys.includes(key))).toEqual(declaredAdditions);
       const notifyAnchor = oldKeys.indexOf("feishuNotify.enabled");
       const notifyKeys = declaredAdditions.filter((key) => key.startsWith("feishuNotify."));
+      const incAnchor = oldKeys.indexOf("memory.incremental.enabled");
       const queueAnchor = oldKeys.indexOf("memory.jev.maxCalls");
       expect(queueAnchor).toBeGreaterThan(0);
       const anchor = oldKeys.indexOf("memory.jev.predict.cacheTtlMin");
@@ -84,7 +97,10 @@ if (process.env.GOV_SPECS_GENERATE === "1") {
         "budget.minTotalS",
         ...oldKeys.slice(minAnchor + 1, notifyAnchor + 1),
         ...notifyKeys,
-        ...oldKeys.slice(notifyAnchor + 1, queueAnchor + 1),
+        ...oldKeys.slice(notifyAnchor + 1, incAnchor + 1),
+        "memory.incremental.auto",
+        "memory.incremental.jobCostCapUsd",
+        ...oldKeys.slice(incAnchor + 1, queueAnchor + 1),
         "memory.jev.backgroundQueueLimit",
         ...oldKeys.slice(queueAnchor + 1, anchor + 1),
         "memory.scopes.session",
@@ -122,6 +138,13 @@ if (process.env.GOV_SPECS_GENERATE === "1") {
       });
       expect(SETTING_SPECS["fabric.wake.decisionRequests"]?.live).toBeUndefined();
       expect(defaultOf(SETTING_SPECS["fabric.wake.decisionRequests"]!)).toBe(true);
+    });
+    it("declares F incremental default-on and only two paid/auto controls", () => {
+      expect(defaultOf(SETTING_SPECS["memory.incremental.enabled"]!)).toBe(true);
+      expect(defaultOf(SETTING_SPECS["memory.incremental.auto"]!)).toBe(false);
+      expect(defaultOf(SETTING_SPECS["memory.incremental.jobCostCapUsd"]!)).toBe(0);
+      expect(SETTING_SPECS["memory.incremental.jobCostCapUsd"]).toMatchObject({ kind: "number", min: 0 });
+      expect(SETTING_SPECS["memory.incremental.jobCostCapUsd"]).not.toHaveProperty("integer");
     });
     it("declares the F1 layout description and default", () => {
       expect(SETTING_SPECS["memory.layout"]?.description).toBe(

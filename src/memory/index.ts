@@ -4,6 +4,7 @@ import {
   type IncrementalDirectory,
   type IncrementalBatch,
 } from "./govern/incremental.js";
+import type { P50BindingResolver } from "./jev/p50-binding.js";
 import { readIncrementalCorpus } from "./govern/incremental-corpus.js";
 import { isExternalWriteOrigin } from "./govern/write-origin.js";
 import { createMemoryDispatcher } from "./unified/dispatcher.js";
@@ -80,7 +81,9 @@ import type {
 
 export interface WireMemoryOpts {
   settings: MemorySettings;
-  /** P50.2 registration point. Absent => revision-unavailable, no model/writes. */
+  /** Trusted native provider integration only; never a config/model-controlled flag. */
+  p50BindingResolver?: P50BindingResolver;
+  /** Optional explicit external handler; absent uses the production wireJev host. */
   incrementalBatchHandler?: IncrementalBatchHandler;
   /** P50.2 must bind this to the existing JevClient's bounded/cost/zombie admission. */
   incrementalAdmission?: (batch: IncrementalBatch) => boolean;
@@ -405,11 +408,47 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
   let incrementalClosed = false;
   let incrementalGeneration = 0;
   let incrementalOwnerDiagnosed = false;
+  const incrementalCwds = new Map<string, string>(); // same eight-directory scheduler lifetime
+  let incrementalRuntime: ReturnType<MemoryScopesWiring["current"]>;
+  // At most the host's ONE active handle. Retain its original cwd across reset
+  // until finally: a real/unknown E effect must invalidate caches even if an
+  // abort/tree/session event revoked execution and cleared scheduler mappings.
+  // This reference grants no execution authority and is not a second ledger.
+  let incrementalEffectCwd: { readonly directory: string; readonly cwd: string } | undefined;
+  const handleIncremental: IncrementalBatchHandler = async (batch, attempt) => {
+    const handler = jev?.p50?.handle;
+    if (!handler) return { kind: "revision-unavailable" };
+    // Match the host mutex through the wrapper's own finally/microtask boundary.
+    // No queue or job claim on this temporary denial; scheduler keeps evidence.
+    if (incrementalEffectCwd) return { kind: "cap-reached" };
+    const cwd = incrementalCwds.get(batch.directory.realpath);
+    if (!cwd) return { kind: "cap-reached" };
+    const own = { directory: batch.directory.realpath, cwd };
+    incrementalEffectCwd = own;
+    try {
+      return await handler(batch, attempt);
+    } finally {
+      if (incrementalEffectCwd === own) incrementalEffectCwd = undefined;
+    }
+  };
   const resetIncremental = (reason: "abort" | "shutdown" | "reload"): void => {
     incrementalGeneration++;
+    jev?.p50?.reset("abort");
+    incrementalRuntime = undefined;
+    incrementalCwds.clear();
     incremental?.stop(reason);
     incremental = undefined;
     incrementalClosed = true;
+  };
+  const refreshIncrementalOwner = (): void => {
+    // SDK manager-context replacement can rebuild scopes without session_start
+    // or tree. Retire the scheduler bound to the old actual runtime, retaining
+    // the SAME host/client fences. Do this synchronously before capturing write
+    // microtask generations so a burst of new-owner writes is not lost.
+    if (incremental && !incrementalClosed && opts.scopes?.current() !== incrementalRuntime) {
+      resetIncremental("abort");
+      incrementalClosed = false;
+    }
   };
   const incrementalIdentity = (cwd: string): IncrementalDirectory | undefined => {
     if (
@@ -436,12 +475,20 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
       : undefined;
   };
   const incrementalFor = (cwd: string) => {
+    refreshIncrementalOwner();
     const identity = incrementalIdentity(cwd);
     if (!identity) return undefined;
     const runtime = opts.scopes!.current()!;
-    if (!incremental)
+    // Missing capabilities/zero paid opt-in must not even arm a production timer.
+    // Existing explicit handler/admission seams retain their old test/integration behavior.
+    if (!opts.incrementalBatchHandler && !jev?.p50?.ready()) return undefined;
+    if (!incrementalCwds.has(identity.realpath) && incrementalCwds.size >= 8) return undefined;
+    incrementalCwds.set(identity.realpath, cwd);
+    if (!incremental) {
+      incrementalRuntime = runtime;
       incremental = createIncrementalScheduler({
         settings: opts.settings.incremental,
+        jobCostCapUsd: opts.settings.incremental.jobCostCapUsd,
         activity: () => (opts.scopes?.current() === runtime ? incrementalActivity() : undefined),
         isCurrent: (expected) => {
           if (
@@ -465,13 +512,19 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
         diagnostic: (line) => {
           if (!governanceNotify) console.warn(line);
         },
-        ...(jevOn && opts.incrementalBatchHandler ? { handler: opts.incrementalBatchHandler } : {}),
-        ...(jevOn && opts.incrementalAdmission ? { canAttempt: opts.incrementalAdmission } : {}),
+        ...(jevOn && (opts.incrementalBatchHandler ?? jev?.p50?.handle)
+          ? { handler: opts.incrementalBatchHandler ?? handleIncremental }
+          : {}),
+        ...(jevOn && (opts.incrementalAdmission ?? jev?.p50?.canAttempt)
+          ? { canAttempt: opts.incrementalAdmission ?? jev!.p50!.canAttempt }
+          : {}),
       });
+    }
     return { scheduler: incremental, identity };
   };
   const onAfterWrite = (cwd: string, origin?: string): void => {
     if (opts.settings.incremental.enabled) {
+      refreshIncrementalOwner();
       try {
         incrementalActivity()?.noteMemoryWrite(Date.now());
       } catch {
@@ -765,6 +818,61 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
         // #36 P4 修复轮：生产 writeGate 覆盖 jev 侧车写入（打标/冷却戳/
         // 建议/taxonomy —— writeIndexPatch 逐原语复检）。
         writeGate: secureGate,
+        ...(opts.settings.incremental.enabled &&
+        opts.settings.governance.enabled &&
+        !opts.incrementalBatchHandler &&
+        !opts.incrementalAdmission &&
+        !opts.isChildSession &&
+        (opts.settings.scopes.session || opts.settings.scopes.hub) &&
+        (opts.secureDomainKind ?? "plain") === "plain"
+          ? {
+              p50: {
+                ...(opts.p50BindingResolver ? { resolveBinding: opts.p50BindingResolver } : {}),
+                available: (ctx: unknown) =>
+                  !!opts.scopes?.current() &&
+                  (ctx as Partial<ExtensionContext> | undefined)?.sessionManager === opts.scopes?.current()?.manager &&
+                  !!incrementalActivity() &&
+                  governanceSessionActive &&
+                  !incrementalClosed &&
+                  !migrationAbort.signal.aborted &&
+                  !opts.sessionSignal?.()?.aborted,
+                isCurrent: (batch: IncrementalBatch, ctx: unknown) => {
+                  const runtime = opts.scopes?.current();
+                  const cwd = incrementalCwds.get(batch.directory.realpath);
+                  const identity = cwd === undefined ? undefined : incrementalIdentity(cwd);
+                  return (
+                    !!runtime &&
+                    runtime === incrementalRuntime &&
+                    (ctx as Partial<ExtensionContext> | undefined)?.sessionManager === runtime.manager &&
+                    !!identity &&
+                    identity.realpath === batch.directory.realpath &&
+                    identity.dev === batch.directory.dev &&
+                    identity.ino === batch.directory.ino &&
+                    identity.sessionEpoch === batch.directory.sessionEpoch &&
+                    !migrationAbort.signal.aborted &&
+                    !opts.sessionSignal?.()?.aborted &&
+                    gate.check(identity.realpath).ok
+                  );
+                },
+                onAfterWrite: (dir: string, origin: "p50-auto") => {
+                  const cwd =
+                    incrementalEffectCwd?.directory === dir ? incrementalEffectCwd.cwd : incrementalCwds.get(dir);
+                  if (cwd !== undefined) onAfterWrite(cwd, origin);
+                },
+                invalidate: () => {
+                  // Registry refresh can reopen at the NEXT natural opportunity;
+                  // it must never undo a prior user abort/shutdown/session gate.
+                  const reopen =
+                    !incrementalClosed &&
+                    governanceSessionActive &&
+                    !migrationAbort.signal.aborted &&
+                    !opts.sessionSignal?.()?.aborted;
+                  resetIncremental("abort");
+                  incrementalClosed = !reopen;
+                },
+              },
+            }
+          : {}),
         ...(opts.settings.incremental.enabled
           ? {
               activity: incrementalActivity,

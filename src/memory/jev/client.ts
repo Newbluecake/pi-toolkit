@@ -171,6 +171,15 @@ function capCp(text: string, max: number): string {
   return chars.length <= max ? text : chars.slice(0, max).join("");
 }
 
+export interface P50ClientCapabilities {
+  readonly transport: ControlledClassifyTransport;
+  readonly revision: {
+    readonly transport: ControlledRevisionTransport;
+    readonly models: readonly string[];
+    readonly coverageModels: readonly string[];
+  };
+}
+
 export interface CreateJevClientDeps {
   readonly config: JevConfig;
   readonly isChild: boolean;
@@ -179,9 +188,17 @@ export interface CreateJevClientDeps {
   readonly bucket?: TokenBucket;
   readonly makeFetch?: (proxy: string) => FetchLike | undefined;
   readonly log?: (line: string) => void;
-  /** Explicit host-only opt-in; no settings or production handler wiring. */
+  /** Explicit host-only controlled accounting opt-in, static or dynamically bound. */
   readonly p50?: {
     readonly enabled: boolean;
+    /** Bounded host diagnostics; no raw provider/model data. */
+    readonly onUnavailable?: (
+      reason: "classify-quote-or-bounds-unavailable" | "revision-quote-or-bounds-unavailable",
+    ) => void;
+    /** Dynamic gate. Undefined preserves ordinary legacy asks, never named P50 jobs. */
+    readonly current?: (
+      registry: ClassifierRegistryLike | import("./contracts.js").RevisionRegistryLike,
+    ) => P50ClientCapabilities | undefined;
     readonly transport?: ControlledClassifyTransport;
     readonly revision?: {
       readonly transport: ControlledRevisionTransport;
@@ -234,6 +251,27 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
   // slices; a high-level race may only estimate them, never release them.
   let disposed = false;
   const lifecycle = new AbortController();
+  // One observed dynamic-capability epoch, not a model/fee registry. Queued
+  // fallback work cannot survive an observed off/on/off or registry change.
+  let dynamicSeen = false;
+  let dynamicRegistry: object | undefined;
+  let dynamicCapability: P50ClientCapabilities | undefined;
+  let dynamicEpoch = 0;
+  let dynamicQueueAbort = new AbortController();
+  function dynamicSnapshot(registry: ClassifierRegistryLike | import("./contracts.js").RevisionRegistryLike) {
+    const capability = deps.p50?.current?.(registry);
+    if (!dynamicSeen || registry !== dynamicRegistry || capability !== dynamicCapability) {
+      dynamicQueueAbort.abort();
+      dynamicQueueAbort = new AbortController();
+      dynamicSeen = true;
+      dynamicRegistry = registry;
+      dynamicCapability = capability;
+      dynamicEpoch++;
+    }
+    return { capability, epoch: dynamicEpoch, queueSignal: dynamicQueueAbort.signal };
+  }
+  type DynamicSnapshot = ReturnType<typeof dynamicSnapshot>;
+  type LegacyDispatchGuard = { current(): boolean; check(): "aborted" | "budget" | undefined };
   let sequence = 0;
   let reservedCostUsd = 0;
   let reservedCalls = 0;
@@ -506,9 +544,10 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
     questions: JevRequest["questions"],
     timeoutMs: number,
     outerSignal: AbortSignal | undefined,
+    guard?: LegacyDispatchGuard,
   ): Promise<
     | { ok: true; answers: Record<string, JevAnswer>; costUsd: number }
-    | { ok: false; grade: "unavailable" | "transient" | "context" | "aborted"; errorMessage: string }
+    | { ok: false; grade: "unavailable" | "transient" | "context" | "aborted" | "budget"; errorMessage: string }
   > {
     const { provider, model: modelId } = splitId(id);
     const model = registry.getModelOfType?.("classifier", provider, modelId);
@@ -535,11 +574,42 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
 
     try {
       const fetchFn = deps.config.proxy === "" ? undefined : makeFetch(deps.config.proxy);
-      const pending = registry.classify(
+      // Capture host/proxy callbacks BEFORE the final check. Dynamic fallback
+      // has no quote and no named-job rights, but cannot bypass A capacity or
+      // dispatch an old queued request after lifecycle/capability revocation.
+      const classify = registry.classify;
+      const denied = guard?.check();
+      if (denied !== undefined)
+        return { ok: false, grade: denied, errorMessage: "fallback dispatch admission revoked" };
+      if (guard !== undefined && controller.signal.aborted)
+        return {
+          ok: false,
+          grade: timedOut && !outerAborted() ? "transient" : "aborted",
+          errorMessage: "fallback attempt revoked",
+        };
+      if (guard !== undefined) usageCalls++; // actual dispatch, not a later successful result
+      const pending = classify.call(
+        registry,
         model,
         { state, questions },
         { signal: controller.signal, ...(fetchFn === undefined ? {} : { fetch: fetchFn }) },
       );
+      if (guard !== undefined) {
+        // Unquoted compatibility traffic still reports legacy estimates, not
+        // certified raw usage. Observe the ORIGINAL promise exactly once so a
+        // caller/epoch/dispose race cannot erase reported spending from the
+        // SAME client counter. Never mark this as controlled provenance/quote.
+        void pending.then(
+          (value) => {
+            const cost = value.usage?.cost?.total;
+            if (!finiteNonnegative(cost)) return;
+            usageCostUsd += cost;
+            if (deps.config.maxCostUsd > 0 && usageCostUsd + reservedCostUsd > deps.config.maxCostUsd)
+              budgetExhausted = true;
+          },
+          () => {},
+        );
+      }
       const result = await new Promise<Awaited<typeof pending> | undefined>((resolve, reject) => {
         const onAbort = (): void => resolve(undefined);
         controller.signal.addEventListener("abort", onAbort, { once: true });
@@ -560,7 +630,9 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
           ? { ok: false, grade: "transient", errorMessage: `timeout after ${String(timeoutMs)}ms` }
           : { ok: false, grade: "aborted", errorMessage: "aborted" };
       }
-      usageCalls += 1;
+      if (guard !== undefined && !guard.current())
+        return { ok: false, grade: "aborted", errorMessage: "fallback lifecycle revoked" };
+      if (guard === undefined) usageCalls += 1;
       if (result.stopReason === "aborted" || (result.stopReason === "error" && timedOut)) {
         if (timedOut && !outerAborted()) {
           return { ok: false, grade: "transient", errorMessage: `timeout after ${String(timeoutMs)}ms` };
@@ -570,7 +642,7 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
       if (result.stopReason === "error") {
         return { ok: false, grade: classifyError(result.errorMessage ?? ""), errorMessage: result.errorMessage ?? "" };
       }
-      usageCostUsd += result.usage?.cost?.total ?? 0;
+      if (guard === undefined) usageCostUsd += result.usage?.cost?.total ?? 0;
       return { ok: true, answers: result.answers, costUsd: result.usage?.cost?.total ?? 0 };
     } catch (err) {
       // `classify()` must never reject (docs/extensions.md) — defensive only.
@@ -590,6 +662,7 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
     questions: JevRequest["questions"],
     timeoutMs: number,
     signal: AbortSignal | undefined,
+    guard?: LegacyDispatchGuard,
   ): Promise<{ answers: Record<string, JevAnswer>; costUsd: number }> {
     const entries = Object.entries(questions);
     const mid = Math.ceil(entries.length / 2);
@@ -597,7 +670,7 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
     const answers: Record<string, JevAnswer> = {};
     let costUsd = 0;
     for (const half of halves) {
-      const r = await callOnce(registry, id, state, Object.fromEntries(half), timeoutMs, signal);
+      const r = await callOnce(registry, id, state, Object.fromEntries(half), timeoutMs, signal, guard);
       if (r.ok) {
         Object.assign(answers, r.answers);
         costUsd += r.costUsd;
@@ -607,7 +680,7 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
     return { answers, costUsd };
   }
 
-  async function askInner(req: JevRequest): Promise<JevOutcome> {
+  async function askInner(req: JevRequest, guard?: LegacyDispatchGuard): Promise<JevOutcome> {
     if (deps.config.classifiers.length === 0) return fail("off", "no classifiers configured");
     if (budgetExhausted) return fail("budget", "per-activation cost/call cap reached");
     if (
@@ -637,7 +710,7 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
       if (remaining <= 0) break;
       const perTryTimeoutMs = Math.min(remaining, Math.max(1_000, Math.ceil(totalBudgetMs / 2)));
 
-      const attempt = await callOnce(req.registry, id, req.state, req.questions, perTryTimeoutMs, req.signal);
+      const attempt = await callOnce(req.registry, id, req.state, req.questions, perTryTimeoutMs, req.signal, guard);
       if (attempt.ok) {
         everSucceeded = true;
         lastModel = id;
@@ -653,7 +726,7 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
           latencyMs: deps.now() - startedAt,
         };
       }
-      if (attempt.grade === "aborted") return fail("aborted", attempt.errorMessage);
+      if (attempt.grade === "aborted" || attempt.grade === "budget") return fail(attempt.grade, attempt.errorMessage);
       if (attempt.grade === "context") {
         const retried = await splitContextRetry(
           req.registry,
@@ -662,6 +735,7 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
           req.questions,
           perTryTimeoutMs,
           req.signal,
+          guard,
         );
         if (Object.keys(retried.answers).length > 0) {
           everSucceeded = true;
@@ -694,8 +768,10 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
   type Prepared = NonNullable<ReturnType<ControlledClassifyTransport["prepare"]>>;
   type Planned = { prepared: Prepared; context: ClassifyContext; digest: string; cost: number; id: string };
 
-  function planClassify(req: JevRequest): Map<string, Planned[]> | undefined {
-    const transport = deps.p50?.transport;
+  function planClassify(
+    req: JevRequest,
+    transport: ControlledClassifyTransport | undefined,
+  ): Map<string, Planned[]> | undefined {
     if (transport === undefined) return undefined;
     const plans = new Map<string, Planned[]>();
     for (const id of deps.config.classifiers) {
@@ -745,7 +821,14 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
   }
 
   function provenanceFor(plan: Planned, result: ClassifyResult): ClientProvenance {
-    return resultProvenance(plan.prepared, plan.id, plan.digest, sha256(canonicalJson(plan.context.state)), result);
+    return resultProvenance(
+      plan.prepared,
+      plan.id,
+      plan.digest,
+      sha256(canonicalJson(plan.context.state)),
+      result,
+      plan.prepared.resultEvidence?.(result),
+    );
   }
 
   function resultProvenance<T extends { provider: string; model: string }>(
@@ -928,7 +1011,10 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
       state,
       plan.cost,
       (opts) => plan.prepared.dispatch(opts),
-      (result) => result.usage?.cost?.total,
+      (result) =>
+        plan.prepared.resultEvidence === undefined
+          ? result.usage?.cost?.total
+          : plan.prepared.resultEvidence(result).costUsd,
       timeoutMs,
       signal,
     );
@@ -943,18 +1029,25 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
     return { ok: true, result, provenance: provenanceFor(plan, result), costUsd: attempt.costUsd };
   }
 
-  async function askBudgeted(req: JevRequest): Promise<JevOutcome> {
+  async function askBudgeted(
+    req: JevRequest,
+    transport: ControlledClassifyTransport | undefined,
+    fallback?: DynamicSnapshot,
+  ): Promise<JevOutcome> {
     if (disposed || req.signal?.aborted === true) return fail("aborted", "client disposed or request aborted");
     if (zombies > 0 || budgetExhausted) return fail("budget", "outstanding zombie or exhausted budget");
     if (deps.config.classifiers.length === 0) return fail("off", "no classifiers configured");
     let plans: ReturnType<typeof planClassify>;
     try {
-      plans = planClassify(req);
+      plans = planClassify(req, transport);
     } catch {
       plans = undefined;
     }
-    if (plans === undefined || plans.size === 0)
+    if (plans === undefined || plans.size === 0) {
+      deps.p50?.onUnavailable?.("classify-quote-or-bounds-unavailable");
+      if (fallback !== undefined && req.jobId === undefined) return askDynamicFallback(req, fallback);
       return fail("unavailable", "revision-unavailable: controlled classify bounds/quote unavailable");
+    }
     const all = [...plans.values()].flat();
     const reservation = reserveClientAttempt({
       mode: req.mode,
@@ -1074,7 +1167,8 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
   ): Promise<RevisionGenerateResult | RevisionCoverageResult> {
     const unavailable = { kind: "unavailable", reason: "revision-unavailable" } as const;
     const invalid = { kind: "unavailable", reason: "invalid-output" } as const;
-    const revision = deps.p50?.revision;
+    const revision =
+      deps.p50?.current === undefined ? deps.p50?.revision : dynamicSnapshot(req.registry).capability?.revision;
     // The legacy classifier FetchLike does not provide streaming Response.body.
     // Never silently drop a configured proxy or pretend it is a chat fetch.
     if (
@@ -1114,7 +1208,10 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
           maxOutputTokens: req.maxOutputTokens,
           requestDigest: digests.requestDigest,
         });
-        if (prepared === undefined) return unavailable;
+        if (prepared === undefined) {
+          deps.p50?.onUnavailable?.("revision-quote-or-bounds-unavailable");
+          return unavailable;
+        }
         const b = prepared.bounds;
         if (
           !nonempty(prepared.adapterId) ||
@@ -1227,6 +1324,110 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
     }
   }
 
+  async function askDynamicFallback(req: JevRequest, expected: DynamicSnapshot): Promise<JevOutcome> {
+    if (req.jobId !== undefined) return fail("unavailable", "named jobs cannot use legacy fallback");
+    const background = req.mode === "background" ? new AbortController() : undefined;
+    if (background !== undefined) backgroundAborts.add(background);
+    const deadline = new AbortController();
+    let elapsed = false;
+    const active = linkedSignals([
+      lifecycle.signal,
+      deadline.signal,
+      ...(req.signal === undefined ? [] : [req.signal]),
+      ...(background === undefined ? [] : [background.signal]),
+    ]);
+    // Capability transitions cancel WAITERS immediately; already dispatched
+    // legacy work remains bounded by its caller/lifecycle/deadline and cannot
+    // succeed or dispatch failover after its observed epoch changes.
+    const queue = linkedSignals([active.signal, expected.queueSignal]);
+    const started = deps.now();
+    const budgetMs = clampSpanMs(req.budgetMs) ?? DEFAULT_BUDGET_MS;
+    const timer = systemClock.setTimer(budgetMs, () => {
+      elapsed = true;
+      deadline.abort();
+    });
+    // Pure reads only. Never use a pre-callback observation as final authority:
+    // current()/config host getters may synchronously dispose, abort or reenter.
+    const revoked = (): boolean => disposed || active.signal.aborted || dynamicEpoch !== expected.epoch;
+    const guard: LegacyDispatchGuard = {
+      current() {
+        if (revoked()) return false;
+        try {
+          const snapshot = dynamicSnapshot(req.registry);
+          return !revoked() && snapshot.epoch === expected.epoch;
+        } catch {
+          return false;
+        }
+      },
+      check() {
+        if (!guard.current()) return "aborted";
+        const maxCalls = deps.config.maxCalls;
+        const maxCostUsd = deps.config.maxCostUsd;
+        if (revoked()) return "aborted";
+        return zombies > 0 ||
+          budgetExhausted ||
+          reservedCalls > 0 ||
+          reservedCostUsd > 0 ||
+          reservations.size > 0 ||
+          outstanding > 0 ||
+          (maxCalls > 0 && usageCalls + reservedCalls >= maxCalls) ||
+          (maxCostUsd > 0 && usageCostUsd + reservedCostUsd >= maxCostUsd)
+          ? "budget"
+          : undefined;
+      },
+    };
+    const failure = (reason: "aborted" | "budget"): JevOutcome =>
+      fail(elapsed ? "timeout" : reason, "dynamic fallback admission revoked");
+    let release: (() => void) | undefined;
+    try {
+      const denied = guard.check();
+      if (denied !== undefined) return failure(denied);
+      release = await (req.mode === "background" ? backgroundSem : syncSem).acquire(4, queue.signal);
+      if (release === undefined) return failure(queue.signal.aborted ? "aborted" : "budget");
+      const afterQueue = guard.check();
+      if (afterQueue !== undefined) return failure(afterQueue);
+      const remaining = budgetMs - (deps.now() - started);
+      if (remaining <= 0) {
+        elapsed = true;
+        return failure("aborted");
+      }
+      const result = await askInner({ ...req, budgetMs: remaining, signal: active.signal }, guard);
+      return guard.current() ? result : failure("aborted");
+    } catch (err) {
+      return guard.current() ? fail("all-failed", String((err as Error)?.message ?? err)) : failure("aborted");
+    } finally {
+      systemClock.clearTimer(timer);
+      queue.dispose();
+      active.dispose();
+      if (background !== undefined) backgroundAborts.delete(background);
+      release?.();
+    }
+  }
+
+  async function askLegacy(req: JevRequest): Promise<JevOutcome> {
+    // P50 completely OFF: retain its original unlimited queue/disposal/usage
+    // behavior byte-for-byte. Only the dynamic production fallback is bounded.
+    const sem = req.mode === "background" ? backgroundSem : syncSem;
+    const release = await sem.acquire();
+    if (release === undefined) return fail("budget", "queue full");
+    const abortController = req.mode === "background" ? new AbortController() : undefined;
+    if (abortController !== undefined) backgroundAborts.add(abortController);
+    try {
+      const signal =
+        abortController === undefined
+          ? req.signal
+          : req.signal === undefined
+            ? abortController.signal
+            : combineSignals(req.signal, abortController.signal);
+      return await askInner({ ...req, ...(signal === undefined ? {} : { signal }) });
+    } catch (err) {
+      return fail("all-failed", String((err as Error)?.message ?? err));
+    } finally {
+      if (abortController !== undefined) backgroundAborts.delete(abortController);
+      release();
+    }
+  }
+
   return {
     status: () => currentStatus(),
     generateRevision: (req) => runRevision(req, "generate") as Promise<RevisionGenerateResult>,
@@ -1244,26 +1445,17 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
     },
 
     async ask(req: JevRequest): Promise<JevOutcome> {
-      const sem = req.mode === "background" ? backgroundSem : syncSem;
-      if (p50) return askBudgeted(req);
-      const release = await sem.acquire();
-      if (release === undefined) return fail("budget", "queue full");
-      const abortController = req.mode === "background" ? new AbortController() : undefined;
-      if (abortController !== undefined) backgroundAborts.add(abortController);
-      try {
-        const signal =
-          abortController === undefined
-            ? req.signal
-            : req.signal === undefined
-              ? abortController.signal
-              : combineSignals(req.signal, abortController.signal);
-        return await askInner({ ...req, ...(signal === undefined ? {} : { signal }) });
-      } catch (err) {
-        return fail("all-failed", String((err as Error)?.message ?? err));
-      } finally {
-        if (abortController !== undefined) backgroundAborts.delete(abortController);
-        release();
+      if (p50) {
+        if (disposed || req.signal?.aborted) return fail("aborted", "client disposed or request aborted");
+        if (zombies > 0 || budgetExhausted) return fail("budget", "outstanding zombie or exhausted budget");
+        if (deps.p50?.current === undefined) return askBudgeted(req, deps.p50?.transport);
+        const snapshot = dynamicSnapshot(req.registry);
+        if (snapshot.capability) return askBudgeted(req, snapshot.capability.transport, snapshot);
+        // A P50 job must never escape the bounded accounting/transport path.
+        if (req.jobId !== undefined) return fail("unavailable", "revision-unavailable: trusted binding missing");
+        return askDynamicFallback(req, snapshot);
       }
+      return askLegacy(req);
     },
 
     async probe(registry: ClassifierRegistryLike, signal?: AbortSignal): Promise<JevStatus> {
@@ -1643,6 +1835,8 @@ export function createRegistryRevisionTransport(
               // cannot silently override the verified serializer field.
               for (const key of ["max_tokens", "max_completion_tokens", "max_output_tokens"]) delete copy[key];
               copy[b.outputLimitField] = maxTokens;
+              if (b.verifyPayload !== undefined && !b.verifyPayload(copy, bounds, context))
+                throw new Error("revision last payload exceeds certified quote or route");
               return copy;
             },
           });

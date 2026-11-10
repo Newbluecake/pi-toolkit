@@ -371,7 +371,12 @@ export interface ClassifierRegistryLike {
   classify?(
     model: object,
     ctx: { state: JsonObject; questions: Record<string, JevQuestion> },
-    opts?: { signal?: AbortSignal; fetch?: FetchLike },
+    opts?: {
+      signal?: AbortSignal;
+      fetch?: FetchLike;
+      maxRetries?: 0;
+      onPayload?(payload: unknown): unknown;
+    },
   ): Promise<{
     stopReason: "stop" | "error" | "aborted";
     answers: Record<string, JevAnswer>;
@@ -448,6 +453,8 @@ export interface ControlledClassifyTransport {
         readonly chainVersion: string;
         readonly bounds: ClassifyBounds;
         dispatch(opts: { readonly signal: AbortSignal; readonly fetch?: FetchLike }): Promise<ClassifyResult>;
+        /** When supplied, raw evidence replaces SDK default identity/usage. */
+        resultEvidence?(result: ClassifyResult): RevisionResultEvidence;
         resolveRoute(result: ClassifyResult): CanonicalClassifyRoute | undefined;
       }
     | undefined;
@@ -584,6 +591,12 @@ export interface RegistryRevisionBinding {
         readonly priceUsdPerMillion: { readonly input: number; readonly output: number };
       }
     | undefined;
+  /** Last SDK payload check against the already reserved exact quote. Throw before HTTP on mismatch. */
+  verifyPayload?(
+    payload: Readonly<Record<string, unknown>>,
+    bounds: ClassifyBounds,
+    context: RevisionTransportContext,
+  ): boolean;
   resolveRoute(result: RevisionTransportResult): CanonicalClassifyRoute | undefined;
 }
 export interface RevisionRequestBudget {

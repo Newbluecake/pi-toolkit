@@ -457,6 +457,7 @@ function applySecureDomainOverrides(settings: AgentSettings): AgentSettings {
       ...settings.memory,
       scopes: { ...settings.memory.scopes, hub: false },
       jev: { ...settings.memory.jev, enabled: false },
+      incremental: { ...settings.memory.incremental, enabled: false, auto: false, jobCostCapUsd: 0 },
     },
     // jev-reflex arch §4.1（I11/D8）：加密/锁定域强制关闭 R 层（wireReflex 另有 secureDomainKind 守卫）；
     // #25 BA §4.6：drafts 同属 D8 强制关闭面（离线脚本永不进入加密域）。

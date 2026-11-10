@@ -1165,3 +1165,142 @@ lease/registry/epoch/restore竞争、全保存先于E与首效果后停止。断
 这不是实际 settings→wireMemory/wireJev 正向、生产可信 adapter、native恢复命令或 LIVE 认证；
 独立验收后由下一串行装配包完成这些门并统一默认开启。同步 syscall不可抢占、恶意同uid跨 syscall
 竞争、fsync非绝对掉电保证、原client晚费用结算等既有限界不变。
+
+## #50 F 实际 settings → wireMemory → wireJev 装配（2026-11-10）
+
+本节覆盖前述 factory 包的“尚未接 wire/settings”历史状态；**不是完整 F/LIVE/provider 认证**。
+现有 `wireMemory` 已默认装配 scheduler 的真实 handler/admission，`wireJev` 同 activation 恰一次
+构造 `createRevisionHost`，只传它原来创建的唯一 `JevClientHandle`。根 `src/index.ts` 无业务变化，
+没有增加 hook、client、费用账、activity owner、建议库或确认 UI。显式旧 handler/admission seam
+保留，但生产不依赖它们。native `restore --revision` 入口仍留独立包，本包没有该命令或确认接线。
+
+### 设置、预算和 effective-off
+
+- 最新用户令明确 **`memory.incremental.enabled=true` 默认建议模式**，不以缺 LIVE 阻止翻转；
+  **`auto=false`、`jobCostCapUsd=0`**。cap 是显式有限非负 number，保留小数、不整数化、不向上夹取；
+  缺省/字符串/负数/NaN/Infinity 一律0。没有新增默认 generation/coverage 路由或金额。
+- scheduler 消费已解析 cap 冻结到原 batch.limits；host 所有 R/G/C 使用 D 的同一个 batchId 和
+  同 cap，仍只有 A 的不可变 named job 预算。不足预算、queue/zombie/exhausted 不走 legacy 逃逸。
+  HC-1/HC-2、host 同client128 job/G fences 和原 E/C 屏障不变。
+- plain main、memory/governance/incremental、scopes 实际 runtime/activity/current ctx registry、
+  session epoch/gate/signal 和可信 binding 都齐备才生产准入。缺预算/binding 不启动 P50 timer，
+  不创建 revision 证据，不把所有旧 ask 卡死。缺 exact quote 的普通 Jev ask 在 **尚未 reservation**
+  时可回原 legacy；带 jobId 的 P50 ask 永不这么回退。仍有 controlled reservation/outstanding/
+  zombie/exhausted/disposed 时不借 effective-off 绕过共享容量。P50 完全 off 仍走原 client 分支。
+- 两个 settings loader 的 D8 同时强制 `incremental.enabled=false / auto=false / jobCostCapUsd=0`；
+  wire 另有 independent plain/main gate，child/secure/locked 不构造本 host。显式设置不能绕过。
+- 诊断用有限 reason 集、每 session epoch 每 reason 一次：job-budget-zero、activity-owner-unavailable、
+  current-registry-missing、provider-contract-missing/binding-invalid/binding-ambiguous、
+  streaming-proxy-contract-missing、classify/revision-quote-or-bounds-unavailable 等。没有正文/凭据/模型
+  猜测；TUI 只进已有内存 errors/report，非UI main warning。P50 诊断不走现有持久 diag sink、
+  不弹窗/写盘/发消息/唤醒/轮询。观察前尚无真实 ctx 的暂态不谎报 registry 缺失。
+
+### 可执行 SDK binding 与真实硬阻塞
+
+`jev/p50-binding.ts::createSdkP50Binding` 是实际执行的窄协议适配器，不是恒 unavailable scaffold。
+默认 resolver 只查询当前 SDK `getRegisteredNativeProvider()` 上的
+`Symbol.for("pi-subagent:memory-p50-sdk-binding-v1")` 函数；native provider 的 trusted CODE 返回
+为**该精确 registry**创建的稳定 binding。`models.json` 的字符串/boolean/自签 trusted 字段均不
+作为能力证据。主宿主代码可通过 `WireMemoryOpts.p50BindingResolver` 注入同边界；测试不 mock handler。
+
+构造前 trusted provider 集成必须提供真实、有出处的协议/tokenizer/template contract、纯有界
+`quoteInput` 和最终 `countPayload`、有限已核价目、完整 canonical alias 集和具体可执行的
+classifier/generation/coverage model 描述。没有隐式 model ID、bytes/2 等启发式或测试4096报价。
+SDK 的 model.contextWindow/maxTokens 或方法存在不是这些能力的证明，填写 evidence 字符串本身也
+不是证明；只有审计过该 server/serializer/tokenizer 的宿主代码能提供这个 port。
+
+- classifier 支持**经认证的 bounded SystemOne 扩展协议**：在最后 `onPayload` 强制
+  `max_output_tokens`、去除冲突 cap、逐字核 state/questions（bool→noul）和 allowlist，再重算 exact
+  payload token 上界。恰一次 `registry.classify`、maxRetries=0，保持 SDK request-time auth；
+  fetch observer 在 SDK normalization 前读 raw `p50:{provider,model}` 与合法整数 usage。
+  raw身份与费用独立；SDK请求model/默认usage0不补证。未知usage按reserve；已核raw counters和已核
+  SDK价目/usage一致才known。适配器把同一个原 SDK Promise 交回 A，晚结算仍是原 ledger owner。
+- revision 复用原 `createRegistryRevisionTransport`，只追加 optional 最后 payload verifier；本窄
+  binding 必须核 exact system/user messages、model、cap 和报价，支持的末跳是已核
+  openai-completions/max_tokens。原 raw SSE observer 保持实际身份/unknown usage 的独立判据。
+  不通过 SDK 默认 response.model 或 cost0 自证；不增加 auth、retry 或直接 HTTP complete 旁路。
+- 实读 SDK 1.5：composed providers 每次 lookup 可生成新的 model 对象。因此绑定检查是
+  **registry/provider/method 精确引用 + 完整 model 描述快照**，不是不可能成立的 model 对象引用。
+  同registry重映射、描述/价目/serializer变更、provider换代均撤销；不能因新对象相同字段就另造client。
+- **stock SDK/SystemOne 不提供上述扩展硬输出 cap、raw实际身份、可信 tokenizer/模板开销或完整
+  canonical route 契约。当前没有任何 stock provider 被本包认证。** 缺这些真实能力时生产 P50
+  明确 unsupported，旧 Jev 照常工作；这是真正的生产硬阻塞，不是离线测试能消除的条件。
+- 非空 Jev proxy 在没有可信 streaming binding 时继续 P50 effective-off。旧 classifier 仍用其
+  原 proxy，不清空、不静默直连、不把窄 FetchLike 强转成 streaming fetch。完整 streaming proxy
+  adapter/conformance 是独立包；这里不声称 proxy 正向 revision 已上线。
+
+### 生命周期和离线证据
+
+当前真实 ctx 在 Jev 原 observe 路径更新；每次 admission/dispatch/await 都消费实际 registry、
+原 scopes runtime/owner epoch、实际 ctx.sessionManager 引用和 gate/signal，不缓存旧 owner 作为授权。
+仅 registry 刷新可在下一自然机会重新准入，binding-loss 观察不能重开已被用户 abort 的 scheduler。session/tree/abort 重置
+原 host/page，保留同client job/G fences。真实 scopes owner在manager-context替换时可无session/tree事件重建；
+原owner signal/activity先撤在飞，新owner的下一自然机会重建其scheduler，写入burst在捕获microtask代际前
+同步辨别owner以免丢计数，仍不重建client/host或清job fences。registry/model/provider变化撤销 scheduler signal 和
+在飞 host，late结果零review/正文提交。shutdown/reload 由同 owner 先 dispose 原 client，再清 host
+fences，A 的原 Promise 仍结算 outstanding/zombie/晚费用；P50-off 保持原 abortBackground 语义。
+internal p50-auto effect 回到原 onAfterWrite 的 cwd/cache/activity/origin 路径，撤lease且不自入队。
+原handle的有界单槽只保管callback cwd至其finally，不授执行权、不计费；即使实际E效果后发生
+同步abort而清了scheduler目录映射，committed/effect-unknown仍失效原cwd缓存，不能漏报真实效果。
+
+证据：`tests/memory/govern/revision-wire.test.ts`（实际 wireMemory/wireJev + 实际 scopes/proof +
+SDK ModelRegistry/ModelRuntime + 原scheduler/D/C/review/E），以及
+`tests/integration/memory-revision-wire.test.ts` 的实际根 activate。只有 provider/HTTP 边界离线：
+local byte-token协议是明确的 synthetic contract，不认证生产 tokenizer 或server付费/cap能力。
+正 cap来自真实 parser，实际自然写→quiet→scheduler→唯一client；真实D/E先提交source，再自然批次
+fresh R/C→C/review→E retire，零再次G、successor原字节不变、internal write不自触发。
+同时验证 cap0/不足cap/缺binding/缺quote/child/scopes-off/secure/locked/off、exact last payload拒绝/
+SDK无隐藏重试、registry remap/tree/abort/shutdown/reload的late结果、raw身份和usage独立、原proxy
+仍消费所有legacy请求。缺binding与P50-off在同cwd/隔离存储的真实请求、tool回显、index文件和hook/
+tool surface逐字节差分；原 frozen fixtures 不改。D8门用fake domain，不冒称真实mount验收。
+
+未完成范围：native revision恢复命令/精确确认预览、生产provider认证/真实tokenizer与价目/路由来源、
+streaming proxy、LIVE付费及物理UI。没有实际用户数据/设置变更、install/reload/commit/push。
+单client/activation预算不是跨进程绝对费用上限；同uid syscall竞态、不可抢占同步I/O和非绝对掉电
+保证等既有限界保持。总开关默认翻转并不授权付费或默认自动改正文。
+
+### F wire 独验 R1：dynamic effective-off 不得绕过 A 的队列与撤权
+
+独验 `r_KJ90J4G4` 的两条反例均真实复现：原 dynamic fallback 只在入队前查一次状态，
+`sem.acquire()` 无上限/取消，9 个 sync ask 产生 active3+queued6；dispose 后 queued 请求仍可
+发模型并成功。另有 effective-off 排队→controlled named background 在飞→off+abort 形成
+A zombie 后，旧 queued fallback 仍 dispatch 的绕过。原自验未覆盖，不能由此前 daily 绿否定。
+
+返工只在原唯一 client 中分开 dynamic fallback 与**完全 P50-off** legacy：
+
+- dynamic fallback 仍用原 sync3/background4 semaphore，每通道最多4个 waiter，第5个立即 budget
+  拒绝；无新 pool、费用账或 named-job 旁路。缺 binding/quote 的普通 legacy classifier 仍能运行。
+- 入队前即接 lifecycle、caller/epoch、background abort 和同请求总期限；queue 时间计入预算，
+  queued 取消立即移除 waiter。原 client 内只保留一个观察到的 registry/capability epoch，
+  off/on/off、registry 或 binding 引用变化撤销旧 waiter；未观察到的外部变化不靠猜测补证。
+- 出队后和**每个 legacy failover/context-split provider dispatch 前**重新检查该 epoch、signal、
+  disposed、A reservations/reservedCalls/reservedCost/outstanding/zombie/exhausted 与 calls/cost
+  余额。registry/model/proxy host callbacks在最终检查之前，检查到实际调用之间不插 await。
+  dynamic fallback 的 calls 在真实 dispatch 扣减，不再等成功返回才计数，不能用并发在飞绕过 cap。
+  legacy 已报告的有限费用由原 Promise 一次观察写回同一usage counter；epoch/caller/dispose撤权
+  不能抹掉晚到费用，超全局cap闭锁新准入。它仍只是legacy报告估算，不冒充受认证raw usage。
+- dispose/caller/background abort 后的旧结果不能成功；capability 已换代的在飞 legacy 结果只允许
+  有界结束，不能再 failover、续发或变成新的 controlled-job 权利。无 quote 的兼容调用仍不是
+  受认证 token/cost proof；保留既有 legacy response-usage 口径，不伪造未知 token/usage 为0的证明。
+- 完全 `p50` 未传/false 时保留原 legacy unlimited queue、dispose 和输出/usage 字节契约；
+  不用修复 dynamic fallback 的名义改变原 off 行为。新用例与原 off golden/请求差分共同证明。
+
+`tests/memory/jev/client-p50-fallback.test.ts` 直接运行真实 client 与原 semaphore/A reservation，
+仅 provider original Promise 可控；复现前为6失败/1通过，覆盖上述两个反例、queued4/第5拒绝、
+正常 fallback、caller/epoch/background/dispose、实际 A reservation 的 dequeue 拦截、registry
+callback 后最后 guard、并发 maxCalls、queue deadline 和完全off parity。未改旧30ms probing测试
+阈值、fixtures、C/D/E或任何生产provider认证条件；不将 stock unsupported 改成 ready。
+
+### F wire 窄验 R2：current 同步重入后的最终复检
+
+`r_JR9DPET1` 确认 R1 queue/dispose/zombie 两反例关闭，但指出最后 guard 的真实重入缺口：
+`deps.p50.current` 可同步 dispose/abort，仍返回原 capability（包括 undefined）；只比较 epoch
+会继续发出 `disposed=true / signal.aborted=true` 的请求。新增真实client用例先复现了这三个
+非法 dispatch（dispose/caller abort/background abort），不以 mock guard 替代 provider 边界。
+
+现 `guard.current` 在宿主 callback **返回后**再读 disposed/active.signal/epoch；`guard.check`
+读取可能重入的设置值后，再执行一次纯撤权读取，并用最新原 A 余额检查。callOnce 在计 calls
+及调用已捕获的 provider 方法前还复核本 attempt signal（包括 callback 同步触发 per-try deadline）。
+最后这些读取不再调用宿主 callback，不使用 callback 前的状态作为放行依据。无新授权/账本/pool，
+完全off旧链不改。相同cap且无撤权的正常fallback、callback新增A reservation及旧R1反例仍通过。
+本轮只跑窄门与strict/types/build/format，不重跑全daily；stock能力和native恢复的未完成边界不变。

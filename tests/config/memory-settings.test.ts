@@ -33,7 +33,9 @@ describe("memory settings", () => {
       residentBytes: 2048,
       governance: { enabled: true },
       incremental: {
-        enabled: false,
+        enabled: true,
+        auto: false,
+        jobCostCapUsd: 0,
         changeThreshold: 5,
         quietMs: 15_000,
         idleMs: 2000,
@@ -790,7 +792,9 @@ describe("#39 default-on scopes settings", () => {
 describe("memory.incremental P50.1 settings", () => {
   it("pins non-live seconds keys with millisecond runtime defaults", () => {
     const expected = {
-      enabled: false,
+      enabled: true,
+      auto: false,
+      jobCostCapUsd: 0,
       changeThreshold: 5,
       quietMs: 15000,
       idleMs: 2000,
@@ -821,6 +825,8 @@ describe("memory.incremental P50.1 settings", () => {
       }).incremental,
     ).toEqual({
       enabled: true,
+      auto: false,
+      jobCostCapUsd: 0,
       changeThreshold: 3,
       quietMs: 1234,
       idleMs: 2345,
@@ -842,4 +848,17 @@ describe("memory.incremental P50.1 settings", () => {
     expect(parseMemorySettings({ incremental: [] }).incremental).toEqual(defaults.incremental);
     expect(parseMemorySettings({ incremental: { quietMs: 3_000_000_000 } }).incremental.quietMs).toBe(3_000_000_000);
   });
+});
+
+// F: decimal cap is paid opt-in, never integer-rounded or defaulted upward.
+it("P50 explicit cap and suggestion defaults", () => {
+  for (const cap of [0, 0.000123, 2, Number.MAX_VALUE]) {
+    const parsed = parseMemorySettings({ incremental: { jobCostCapUsd: cap } });
+    expect(parsed.incremental).toMatchObject({ enabled: true, auto: false, jobCostCapUsd: cap });
+  }
+  for (const cap of [-1, NaN, Infinity, -Infinity, "1", null])
+    expect(parseMemorySettings({ incremental: { jobCostCapUsd: cap } }).incremental.jobCostCapUsd).toBe(0);
+  expect(
+    parseMemorySettings({ incremental: { enabled: false, auto: true, jobCostCapUsd: 0.12 } }).incremental,
+  ).toMatchObject({ enabled: false, auto: true, jobCostCapUsd: 0.12 });
 });

@@ -171,6 +171,10 @@ export interface MemoryGovernanceSettings {
  * Runtime durations remain milliseconds; public settings use seconds. */
 export interface MemoryIncrementalSettings {
   enabled: boolean;
+  /** Explicit paid job authorization; zero never authorizes paid P50 work. */
+  jobCostCapUsd: number;
+  /** Suggestions only unless explicitly enabled; E still owns permission. */
+  auto: boolean;
   changeThreshold: number;
   quietMs: number;
   idleMs: number;
@@ -342,6 +346,13 @@ export function parseMemorySettings(input: unknown): MemorySettings {
       : {};
   const incremental: MemoryIncrementalSettings = {
     enabled: bool(incrementalObj.enabled, defaults.incremental.enabled),
+    auto: bool(incrementalObj.auto, false),
+    jobCostCapUsd:
+      typeof incrementalObj.jobCostCapUsd === "number" &&
+      Number.isFinite(incrementalObj.jobCostCapUsd) &&
+      incrementalObj.jobCostCapUsd >= 0
+        ? incrementalObj.jobCostCapUsd
+        : 0,
     changeThreshold: num(incrementalObj.changeThreshold, defaults.incremental.changeThreshold, 1, 1000),
     quietMs: num(incrementalObj.quietMs, defaults.incremental.quietMs, 0, Number.MAX_SAFE_INTEGER),
     idleMs: num(incrementalObj.idleMs, defaults.incremental.idleMs, 0, Number.MAX_SAFE_INTEGER),
@@ -455,7 +466,9 @@ export const DEFAULT_MEMORY_SETTINGS: MemorySettings = {
   residentBytes: 2048,
   governance: { enabled: true },
   incremental: {
-    enabled: false,
+    enabled: true,
+    auto: false,
+    jobCostCapUsd: 0,
     changeThreshold: 5,
     quietMs: 15_000,
     idleMs: 2000,
