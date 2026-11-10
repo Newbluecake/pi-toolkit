@@ -1,4 +1,4 @@
-/** P50 factory-only raw audit/recovery kernel. No production wiring, model,
+/** P50 raw audit/recovery kernel (native recovery caller in command.ts). No model,
  * proposal owner, commitAction or body applier. Locked methods are synchronous
  * and require the existing canonical memory-directory lock (never nested).
  * Path checks narrow races; they are not a transaction against hostile same-uid
@@ -37,6 +37,7 @@ import type {
   RevisionRecoveryDiagnostic,
   RestoreRevisionRaw,
   RestoreRevisionRawLocked,
+  RestoreRevisionResult,
   CommitActionResult,
 } from "../jev/contracts.js";
 
@@ -892,6 +893,77 @@ class Kernel {
     this.check();
     return result;
   }
+  /** One bounded actionId lookup for both preview and raw recovery. No second
+   * scanner, review index or inferred action-v2 identity participates. */
+  recovery(actionId: string) {
+    if (!digest(actionId)) fail("corrupted");
+    this.check();
+    const matches = this.enumerate().filter((a) => a.actionId === actionId);
+    if (matches.length > 1) return { kind: "refused", reason: "ambiguous" } as const;
+    if (!matches.length) return { kind: "refused", reason: "unavailable" } as const;
+    const found = matches[0]!;
+    const r = this.read(found.batchId, found.actionId);
+    if (r.kind !== "ok")
+      return {
+        kind: "refused",
+        reason:
+          r.kind === "corrupted"
+            ? "corrupted"
+            : r.reason === "permission"
+              ? "permission"
+              : r.reason === "gate"
+                ? "gate"
+                : "unavailable",
+      } as const;
+    const a = r.audit;
+    if (a.state !== "committed" || Object.hasOwn(a, "restoreAttempt"))
+      return { kind: "refused", reason: "state" } as const;
+    if (a.action === "delete" && block(r.before, a.targetId).meta.authority === "user")
+      return { kind: "refused", reason: "permission" } as const;
+    if (!r.expectedAfter) return { kind: "refused", reason: "corrupted" } as const;
+    return { kind: "ready", evidence: r, expected: r.expectedAfter } as const;
+  }
+  /** Exact confirmation additionally requires the full observed commit proof.
+   * Bind raw audit bytes AND the namespace/file identities, not only parsed JSON:
+   * even a byte-identical replacement during the popup invalidates the preview. */
+  recoveryDigest(r: Extract<AuditReadResult, { kind: "ok" }>): string {
+    const a = r.audit,
+      expected = r.expectedAfter,
+      o = a.commitObservation;
+    if (
+      !expected ||
+      o?.kind !== "applied" ||
+      o.expectedAfter.kind !== expected.kind ||
+      (expected.kind === "file" &&
+        (o.expectedAfter.kind !== "file" ||
+          o.expectedAfter.digest !== expected.digest ||
+          o.expectedAfter.rev !== expected.rev))
+    )
+      fail("corrupted");
+    const p = this.path(a.batchId, a.actionId);
+    const raw = this.bytes(p, "audit.json", REVISION_AUDIT_MAX_BYTES);
+    if (canonical(JSON.parse(raw.toString("utf8"))) !== canonical(a)) fail("stale");
+    const namespace = [...this.identities]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([path, s]) => [path, s.dev, s.ino, s.uid]);
+    const files = ["audit.json", "before.md", ...(expected.kind === "file" ? ["after.md"] : [])].map((name) => {
+      const s = inspectRevisionFileSecurity(p, name);
+      return [name, s.dev, s.ino, s.uid, s.mode];
+    });
+    this.check();
+    return hash(
+      canonical([
+        "native-revision-preview-v1",
+        this.identityDigest,
+        [this.data.dev, this.data.ino, this.data.uid],
+        namespace,
+        files,
+        hash(raw),
+        hash(r.before),
+        expected.kind === "file" ? hash(expected.raw) : "missing",
+      ]),
+    );
+  }
   sourceHints(): RetireSourceHintScan {
     try {
       const refs: Extract<RetireSourceHintScan, { kind: "ok" }>["refs"][number][] = [];
@@ -1027,6 +1099,70 @@ export function createRevisionAuditPort(memDir: string, deps: RevisionAuditDeps)
   };
 }
 
+/** Immutable strings/scalars only: no mutable Buffer escapes to the UI. */
+export interface RevisionRestorePreview {
+  readonly memoryDir: string;
+  readonly directoryIdentityDigest: string;
+  readonly actionId: string;
+  readonly batchId: string;
+  readonly targetId: string;
+  readonly action: RevisionAudit["action"];
+  readonly expectedRev: string;
+  readonly expectedAfter: Readonly<NonNullable<RevisionAudit["expectedAfter"]>>;
+  readonly beforeDigest: string;
+  readonly beforeBytes: number;
+  readonly rawBefore: string;
+  readonly auditDigest: string;
+}
+export type RevisionRestorePreviewResult =
+  | { readonly kind: "ready"; readonly preview: RevisionRestorePreview }
+  | Extract<RestoreRevisionResult, { kind: "refused" }>;
+
+/** Read-only C port. Does not mkdir, take a lock, repair or settle any journal.
+ * Callers MUST perform native/plain/current-owner admission before invoking it. */
+export function previewRevisionRestore(
+  memDir: string,
+  actionId: string,
+  deps: RevisionAuditDeps,
+): RevisionRestorePreviewResult {
+  try {
+    const k = new Kernel(memDir, deps);
+    const found = k.recovery(actionId);
+    if (found.kind === "refused") return found;
+    const r = found.evidence,
+      a = r.audit,
+      expected = found.expected;
+    const auditDigest = k.recoveryDigest(r);
+    const current = k.current(a.targetId);
+    if (
+      expected.kind === "missing"
+        ? current !== undefined
+        : !current || hash(current) !== expected.digest || block(current, a.targetId).rev !== expected.rev
+    )
+      return { kind: "refused", reason: "stale" };
+    k.check();
+    return {
+      kind: "ready",
+      preview: Object.freeze({
+        memoryDir: k.mem,
+        directoryIdentityDigest: k.identityDigest,
+        actionId: a.actionId,
+        batchId: a.batchId,
+        targetId: a.targetId,
+        action: a.action,
+        expectedRev: a.expectedRev,
+        expectedAfter: Object.freeze({ ...a.expectedAfter! }),
+        beforeDigest: a.beforeDigest,
+        beforeBytes: r.before.length,
+        rawBefore: r.before.toString("utf8"),
+        auditDigest,
+      }),
+    };
+  } catch (e) {
+    return { kind: "refused", reason: e instanceof Refusal ? e.reason : "unavailable" };
+  }
+}
+
 export const restoreRevisionRawLocked: RestoreRevisionRawLocked = (memDir, request, deps) => {
   let k: Kernel;
   let audit: RevisionAudit | undefined;
@@ -1040,30 +1176,17 @@ export const restoreRevisionRawLocked: RestoreRevisionRawLocked = (memDir, reque
       k.check(true);
     };
     check();
-    const matches = k.enumerate().filter((a) => a.actionId === request.actionId);
-    if (matches.length > 1) return { kind: "refused", reason: "ambiguous" };
-    if (!matches.length) return { kind: "refused", reason: "unavailable" };
-    const found = matches[0]!;
-    const r = k.read(found.batchId, found.actionId);
-    if (r.kind !== "ok")
-      return {
-        kind: "refused",
-        reason:
-          r.kind === "corrupted"
-            ? "corrupted"
-            : r.reason === "permission"
-              ? "permission"
-              : r.reason === "gate"
-                ? "gate"
-                : "unavailable",
-      };
+    const found = k.recovery(request.actionId);
+    if (found.kind === "refused") return found;
+    const r = found.evidence;
     audit = r.audit;
     const a = audit;
-    if (a.state !== "committed" || a.restoreAttempt) return { kind: "refused", reason: "state" };
-    if (a.action === "delete" && block(r.before, a.targetId).meta.authority === "user")
-      return { kind: "refused", reason: "permission" };
-    const expected = r.expectedAfter;
-    if (!expected) return { kind: "refused", reason: "corrupted" };
+    const expected = found.expected;
+    if (
+      request.expectedAuditDigest !== undefined &&
+      (!digest(request.expectedAuditDigest) || k.recoveryDigest(r) !== request.expectedAuditDigest)
+    )
+      return { kind: "refused", reason: "stale" };
     const cas = (): void => {
       check();
       const current = k.current(a.targetId);

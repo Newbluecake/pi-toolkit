@@ -1014,6 +1014,8 @@ export interface RevisionAuditPort {
 export type CreateRevisionAuditPort = (memDir: string, deps: RevisionAuditDeps) => RevisionAuditPort;
 export interface RestoreRevisionRequest {
   readonly actionId: string;
+  /** Optional native exact-confirmation binding. Omitted preserves the original raw protocol. */
+  readonly expectedAuditDigest?: string;
   readonly signal?: AbortSignal;
 }
 export type RestoreRevisionRaw = (

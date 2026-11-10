@@ -28,6 +28,12 @@ export function executeMemoryRead(
 ): MemoryReadResult {
   const args = rawArgs.trim();
   const [head, mode] = args.split(/\s+/);
+  if (head === "restore" && args.split(/\s+/).includes("--revision"))
+    return {
+      ok: false,
+      code: "E_MEM_WEB_UNSUPPORTED",
+      message: "restore --revision 仅支持当前原生 TUI 主会话的一次精确确认；Web 不支持 revision 恢复。",
+    };
   // Recognize only the retired backup surface to give actionable errors; this
   // does not grant a read exemption or execute native restore on the Web path.
   if (head === "restore" && mode !== "--trash" && mode !== "--block")

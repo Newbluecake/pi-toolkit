@@ -38,6 +38,8 @@ import { deleteEntry as fsDeleteEntry, setInlineMeta as fsSetInlineMeta } from "
 import { blockReviewDisplay, blockExpiredDisplay, fileExpiredDisplay } from "./govern/display.js";
 import { readIndex } from "./jev/index-store.js";
 import { restoreBlock } from "./govern/sweep.js";
+import { previewRevisionRestore, restoreRevisionRaw, type RevisionRestorePreview } from "./govern/revision-audit.js";
+import { clampSpanMs } from "../core/deadline.js";
 import { handleMemReview } from "./jev/review-command.js";
 import { readMarker } from "./blocks/marker.js";
 import { dirFormat, parseBlockName } from "./blocks/naming.js";
@@ -91,7 +93,16 @@ function resolveCwd(ctx: ExtensionCommandContext): string {
   return resolveWorktreeOrigin(raw) ?? raw;
 }
 
+/** Existing host owner lifetime, not a new authorization/approval owner. The
+ * assembly must bind actual manager/owner/epoch and plain domain, never provider. */
+export interface NativeRevisionRecoveryLifetime {
+  readonly signal: AbortSignal;
+  isCurrent(): boolean;
+}
+
 export interface CreateMemCommandDeps {
+  /** Absent => fail closed BEFORE audit discovery. Only plain main hosts supply it. */
+  revisionRecovery?: (ctx: ExtensionCommandContext) => NativeRevisionRecoveryLifetime | undefined;
   scopedRouter?: (args: string, ctx: ExtensionCommandContext) => Promise<{ handled: boolean; result?: unknown }>;
   scopedDoctor?: () => readonly import("./scopes/doctor.js").ScopedDoctorFinding[];
   contentReadonly?: boolean;
@@ -103,7 +114,7 @@ export interface CreateMemCommandDeps {
   /** Activate-time memory settings used by doctor. */
   settings?: MemorySettings;
   renderBlock?: RenderTieredPort;
-  onAfterWrite?: (cwd: string) => void;
+  onAfterWrite?: (cwd: string, origin?: string) => void;
   /** Jev command port (`/mem jev`, `/mem tags`; jev-plan J4). `undefined` ⇔
    *  jev is not wired: every new branch below is skipped, the completion
    *  table and DESCRIPTION stay byte-identical (I9, jev-off-golden). */
@@ -423,6 +434,14 @@ export function createMemCommand(deps: CreateMemCommandDeps): {
           });
           return;
         }
+        // Exact native revision grammar is dispatched before every legacy/trash/
+        // block branch, including malformed mixed forms. No discovery on failure.
+        if (sub === "restore" && rest.includes("--revision")) {
+          if (rest.length !== 2 || rest[0] !== "--revision" || !/^[a-f0-9]{64}$/.test(rest[1]!))
+            throw new Error("usage: /mem restore --revision <64-lowercase-hex actionId>");
+          await restoreNativeRevision(rest[1]!, cwd, ctx, deps);
+          return;
+        }
         if (sub === "restore" && rest[0] !== "--block" && rest.includes("--trash")) {
           const display = memoryDirFor(cwd, deps.paths);
           const root = canonicalDir(display)?.real;
@@ -583,6 +602,119 @@ export function createMemCommand(deps: CreateMemCommandDeps): {
       }
     },
   };
+}
+
+/** One existing native dialog, outside the C lock. Abort/timeout races even
+ * an uncooperative UI; a late true cannot revive the continuation. */
+async function confirmNativeRevision(
+  ctx: ExtensionCommandContext,
+  preview: RevisionRestorePreview,
+  signal: AbortSignal,
+): Promise<boolean> {
+  if (signal.aborted) return false;
+  const local = new AbortController();
+  const abort = () => local.abort();
+  let settleAbort: (() => void) | undefined;
+  const cancelled = new Promise<false>((resolve) => {
+    settleAbort = () => resolve(false);
+    local.signal.addEventListener("abort", settleAbort, { once: true });
+  });
+  signal.addEventListener("abort", abort, { once: true });
+  const timer = setTimeout(abort, clampSpanMs(120_000) ?? 120_000);
+  timer.unref();
+  try {
+    const { rawBefore, auditDigest, ...metadata } = preview;
+    return (
+      (await Promise.race([
+        ctx.ui.confirm(
+          "恢复指定 revision（仅此目标）",
+          [
+            JSON.stringify(metadata, null, 2),
+            `审计/命名空间摘要：${auditDigest}`,
+            `精确效果：${preview.expectedAfter.kind === "missing" ? "仅当目标仍缺失时创建" : "仅替换仍与 expectedAfter 完全匹配的"} ${preview.memoryDir}/blocks/${preview.targetId}.md；写回 before.md 的 ${preview.beforeBytes} 原始字节。`,
+            "不重新序列化、不增加 version、不修改 context/successor 或回收副本。BOM/CRLF 以审计原始字节为准。",
+            "—— 将恢复的完整原文（显示不替代上述字节摘要） ——",
+            rawBefore,
+          ].join("\n"),
+          { signal: local.signal },
+        ),
+        cancelled,
+      ])) === true && !local.signal.aborted
+    );
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+    signal.removeEventListener("abort", abort);
+    if (settleAbort) local.signal.removeEventListener("abort", settleAbort);
+    local.abort();
+  }
+}
+
+async function restoreNativeRevision(
+  actionId: string,
+  cwd: string,
+  ctx: ExtensionCommandContext,
+  deps: CreateMemCommandDeps,
+): Promise<void> {
+  const confirm = ctx.ui?.confirm;
+  const native = () =>
+    !deps.isChildSession &&
+    deps.settings?.enabled === true &&
+    !deps.contentReadonly &&
+    isInteractive(ctx) &&
+    typeof confirm === "function" &&
+    ctx.ui?.confirm === confirm;
+  if (!native()) throw new Error("restore --revision: requires actual native TUI main with confirmation");
+  const lifetime = deps.revisionRecovery?.(ctx);
+  if (!lifetime) throw new Error("restore --revision: current plain memory owner unavailable");
+  const current = () => {
+    const valid = lifetime.isCurrent();
+    return valid && !lifetime.signal.aborted && native() && resolveCwd(ctx) === cwd;
+  };
+  if (!current()) throw new Error("restore --revision: owner/epoch unavailable");
+  const display = memoryDirFor(cwd, deps.paths);
+  const gate = deps.writeGate;
+  if (!gate || !gate.check(display).ok || deps.contentWriteGate?.check(display).ok === false || !current())
+    throw new Error("restore --revision: write gate refused");
+  const dir = canonicalDir(display)?.real;
+  if (!dir || dirFormat(dir) !== "blocks") throw new Error("restore --revision: actual blocks directory required");
+  const auditDeps = {
+    gate,
+    signal: lifetime.signal,
+    isCurrent: () => current() && deps.contentWriteGate?.check(dir).ok !== false,
+    now: () => new Date(),
+  };
+  const result = previewRevisionRestore(dir, actionId, auditDeps);
+  if (result.kind !== "ready") throw new Error(`restore --revision refused: ${result.reason}`);
+  if (!current()) throw new Error("restore --revision: owner/epoch changed");
+  if (!(await confirmNativeRevision(ctx, result.preview, lifetime.signal))) {
+    ctx.ui.notify("restore --revision: cancelled; no recovery writes", "info");
+    return;
+  }
+  if (!current()) throw new Error("restore --revision: owner/epoch changed after confirmation");
+  const restored = await restoreRevisionRaw(
+    dir,
+    {
+      actionId,
+      expectedAuditDigest: result.preview.auditDigest,
+      signal: lifetime.signal,
+    },
+    auditDeps,
+  );
+  if (restored.kind === "restored" || restored.kind === "effect-unknown") {
+    try {
+      deps.onAfterWrite?.(cwd, "revision");
+    } catch {
+      /* do not misreport an observed effect as rejected */
+    }
+    ctx.ui.notify(
+      restored.kind === "restored"
+        ? `restore --revision: restored ${result.preview.targetId} (${actionId})`
+        : "restore --revision: effect-unknown; 目标可能已改变。禁止盲目重试，请人工检查目标和审计恢复 intent。",
+      restored.kind === "restored" ? "info" : "warning",
+    );
+  } else throw new Error(`restore --revision refused: ${restored.reason}`);
 }
 
 // ───────────────────────────── jev subcommands (J4) ─────────────────────────────

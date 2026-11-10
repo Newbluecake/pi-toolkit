@@ -26,6 +26,10 @@ export function classifyMemoryCommand(rawArgs: string): MemoryCommandClass {
     return f.has("--dry-run") || f.has("--report") || f.has("--status") ? "read" : "destructive";
   }
   if (head === "restore") {
+    if (tail.includes("--revision"))
+      return tail.length === 2 && tail[0] === "--revision" && /^[a-f0-9]{64}$/.test(tail[1]!)
+        ? "destructive"
+        : "unknown";
     if (tail.length === 0 || exact("--trash")) return "read";
     const flags = tail.filter((x) => x.startsWith("-"));
     if (

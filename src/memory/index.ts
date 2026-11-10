@@ -1000,6 +1000,34 @@ export function wireMemory(pi: ExtensionAPI, opts: WireMemoryOpts): WireMemoryRe
   pi.registerCommand(
     "mem",
     createMemCommand({
+      // Recovery is independent of Jev/provider/budget/auto admission. Reuse the
+      // actual scopes owner and existing lifecycle, never mint a recovery owner.
+      ...(!opts.isChildSession && opts.settings.enabled && (opts.secureDomainKind ?? "plain") === "plain" && opts.scopes
+        ? {
+            revisionRecovery: (ctx) => {
+              const runtime = opts.scopes!.current();
+              if (!runtime || ctx.sessionManager !== runtime.manager || runtime.capability() !== "ok") return undefined;
+              const owner = runtime.owner;
+              const hostSignal = opts.sessionSignal?.();
+              const signal = AbortSignal.any([
+                runtime.signal,
+                migrationAbort.signal,
+                ...(hostSignal ? [hostSignal] : []),
+              ]);
+              return {
+                signal,
+                isCurrent: () =>
+                  opts.settings.enabled &&
+                  opts.scopes!.current() === runtime &&
+                  runtime.owner === owner &&
+                  ctx.sessionManager === runtime.manager &&
+                  runtime.current() &&
+                  runtime.capability() === "ok" &&
+                  !signal.aborted,
+              };
+            },
+          }
+        : {}),
       isChildSession: opts.isChildSession,
       ...(opts.scopes
         ? {

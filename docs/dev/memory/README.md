@@ -1304,3 +1304,56 @@ callback 后最后 guard、并发 maxCalls、queue deadline 和完全off parity�
 最后这些读取不再调用宿主 callback，不使用 callback 前的状态作为放行依据。无新授权/账本/pool，
 完全off旧链不改。相同cap且无撤权的正常fallback、callback新增A reservation及旧R1反例仍通过。
 本轮只跑窄门与strict/types/build/format，不重跑全daily；stock能力和native恢复的未完成边界不变。
+
+## #50 F native 精确 revision 恢复（2026-11-10，离线包）
+
+前述 F wire 的“没有 native revision 恢复”历史限界由本包覆盖；不覆盖生产 provider 认证、
+streaming proxy、LIVE 付费或物理 TUI viewport 验收。命令实际注册链为
+`wireMemory → createMemCommand → pi.registerCommand("mem", …)`（没有名为
+`registerMemoryCommand` 的函数）。只接受 `restore --revision <64-lowercase-hex actionId>`，
+在 legacy backup 拒绝及 block/trash 路径之前分派；混合/重复 flag、额外参数一律拒绝。
+不新增工具、completion/help 文案、Web read allowlist、owner、审计库或确认系统。
+
+- **真实宿主门先于发现**：`command.ts::restoreNativeRevision` 要求 memory enabled、main、
+  `ctx.mode=tui`、hasUI、实际 `ctx.ui.confirm` 且非 Web、actual blocks、write gate。
+  `index.ts` 只在既有命令构造处提供可选 `revisionRecovery`，绑定原 scopes/current runtime、
+  实际 manager、owner/epoch 与原 lifecycle signal，且只在 plain main/enabled 下提供。
+  无 seam/owner、RPC 即使 hasUI=true、child、secure/locked 均在 C preview 前拒绝。
+  不从配置 layout 字符串或 provider/budget/auto 状态推导恢复权限；scopes-off 没有 owner 时拒绝。
+- **C 唯一只读 preview**：`revision-audit.ts::previewRevisionRestore` 与原 raw 恢复共用
+  `Kernel.recovery` 的 bounded enumerate/read；不另写 scanner、不取锁、不创建/修复目录。
+  preview 要求 committed、无任何 restoreAttempt、唯一 actionId、完整 before/after/audit 与真实
+  applied commit observation，校验当前 exact expected-after；user delete 历史记录仍硬拒。
+  返回冻结的字符串/scalar 和冻结 expectedAfter，没有 mutable Buffer。摘要绑定 canonical memory
+  identity、blocks/private namespace 的 dev/ino/uid、证据文件身份/权限、原 audit 字节及 raw digest。
+- **仅一次原生确认**：展示 canonical memory dir、actionId/batch/target/action、原 expectedRev、
+  精确 expectedAfter、before SHA256/字节数与完整原文，明确单目标 raw restoration、不 bump version。
+  不持锁等确认；120s clamped/unref timer 与原 signal 竞速不合作 popup，取消/缺失/抛错/超时零恢复写。
+  晚到 true 不复活 continuation；这不是物理真人来源证明或新的 B3/Web 授权流。
+- **原 C 锁内提交**：确认后重查实际宿主，调用且仅调用原 `restoreRevisionRaw`。
+  `RestoreRevisionRequest.expectedAuditDigest?` 是 append-only 的可选 native binding；在原锁内重新
+  发现并核对相同证据/命名空间摘要，然后沿用原 raw CAS、durable intent、单次 data syscall 和 final
+  marker。省略此字段的原 raw 协议不变；不迁移/重签历史 actionId，不 serialize 原字节。
+  同内容 audit inode 或 namespace 替换也使 native 确认过期。retire 只恢复 old，merge 只恢复 survivor。
+- **效果与禁重试**：restored/effect-unknown 恰一次回到原 `onAfterWrite(cwd,"revision")`，失效原
+  render/Jev/activity 缓存且 internal origin 不自入队；拒绝不报成功、不触发该 callback。
+  unknown 明示目标可能已改变、禁止盲重试，C intent/fence 留存，无补偿/force/repair/retry 按钮。
+  Web `--revision`（含混合形式）返回专用 `E_MEM_WEB_UNSUPPORTED`，不再误报旧 tidy backup 指引；
+  command-policy 仅将精确有效语法标 destructive，其余 unknown，绝不标 read。
+
+证据：`tests/integration/memory-revision-native.test.ts` 通过实际生产注册链及真实 SDK
+SessionManager/scopes owner，以原 D/C/E 临时文件生成 committed rewrite/merge/retire/delete，
+恢复 BOM/CRLF/非 ASCII/version7 的精确 Buffer，检查单边效果、原 C intent/锁/CAS、原 render/Jev/
+activity invalidator；另测 provider/registry 不可用、无 seam、RPC/Web/child/secure、全部语法与
+状态拒绝、取消/异常/abort/timeout/late popup、owner/manager/sid/tree/gate 变化、audit 字节/inode/
+namespace 替换及最后 syscall 竞争、unknown fence。测试在 `tests/integration/`，按
+`tests/tiers.ts::TIER2_DIRS` 显式目录规则归 tier2；另跑 dedicated strict tsc，不改 manifest 或 fixture。
+
+**可选 startup pending-audit 诊断本轮未接**（用户明确保留）：后续若批准，在原自然
+`session_start` 内 native/plain/main/enabled/current owner/epoch/gate 检查后，仅对当前 blocks
+在原目录锁中调用 C `scanPendingLocked`，输出有界只读 pending/unknown 诊断；绝不跨项目扫描、
+自动 finalize/repair/restore 或另加 hook/timer。source discovery 不冒充此 operational scan。
+
+限界沿用 C：同步 syscall 不可抢占，路径/摘要检查不是抵御恶意同 uid writer 任意 syscall 间
+替换的文件系统事务，fsync 非绝对掉电保证；native popup 的内容断言不替代真实终端滚动/裁切验收。
+本包不读改用户数据/配置，不 install/reload/commit/push，不发送真实模型或网络请求。
