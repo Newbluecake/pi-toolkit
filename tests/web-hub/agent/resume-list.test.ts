@@ -5,6 +5,7 @@
  * determinism; file layouts are real tmpdirs in the `<agent>/sessions/<dir>` shape.
  */
 import { describe, expect, it, onTestFinished } from "vitest";
+import { statSync } from "node:fs";
 import type { FileHandle } from "node:fs/promises";
 import {
   createResumeList,
@@ -166,9 +167,16 @@ describe("resume-list — build and row filter (§2.4)", () => {
   it("drops subagent sessions entirely (self-marker and provenance hit) — D1", async () => {
     let provPaths: string[] = [];
     const h = makeList({ provPaths: () => provPaths });
-    writeSession(h.layout.sessionDir, "c.jsonl", { id: "child1", cwd: CWD, child: true });
-    const legacyPath = writeSession(h.layout.sessionDir, "l.jsonl", { id: "legacy", cwd: CWD });
-    writeSession(h.layout.sessionDir, "m.jsonl", { id: "main", cwd: CWD });
+    // Equal mtimes establish the sorting precondition; this is not a wait for rendering.
+    const mtime = new Date(Math.floor(h.clock.now() / 1_000) * 1_000 - 60_000);
+    const childPath = writeSession(h.layout.sessionDir, "c.jsonl", { id: "child1", cwd: CWD, child: true, mtime });
+    const legacyPath = writeSession(h.layout.sessionDir, "l.jsonl", { id: "legacy", cwd: CWD, mtime });
+    const mainPath = writeSession(h.layout.sessionDir, "m.jsonl", { id: "main", cwd: CWD, mtime });
+    expect([childPath, legacyPath, mainPath].map((path) => statSync(path).mtimeMs)).toEqual([
+      mtime.getTime(),
+      mtime.getTime(),
+      mtime.getTime(),
+    ]);
     // first pass: only the self-marker child is hidden (empty provenance index)
     const w1 = await listOk(h, { scope: "all" });
     expect(ids(w1)).toEqual(["legacy", "main"]);
