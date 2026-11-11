@@ -9,6 +9,7 @@ import type { CmdFrame, CmdResultFrame } from "../../../../src/web-hub/protocol/
 import { createFsAdmitter, denyCtxOf } from "../../../../src/web-hub/hub/preview/admit.js";
 import { createPreviewIoTracker } from "../../../../src/web-hub/hub/preview/fs.js";
 import { createSecurityEventBus } from "../../../../src/web-hub/hub/security-events.js";
+import * as sessionCardModule from "../../../../src/web-hub/hub/feishu/session-card.js";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -16,10 +17,49 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 async function rig(...args: Parameters<typeof f8Rig>) {
-  const r = await f8Rig(...args);
+  type ListOutcome = { ok: true } | { ok: false; error: unknown };
+  const lists = new Map<string, ListOutcome>();
+  const create = sessionCardModule.createFeishuSessionCard;
+  // Observe the REAL handler, not send/ACK/PATCH initiation: nonce rename precedes the
+  // commit continuation, which can still purge the card if dispose wins that race.
+  const spy = vi.spyOn(sessionCardModule, "createFeishuSessionCard").mockImplementation((deps) => {
+    const card = create(deps);
+    return {
+      ...card,
+      async sendList(input) {
+        try {
+          await card.sendList(input);
+          lists.set(input.message.messageId, { ok: true });
+        } catch (error) {
+          lists.set(input.message.messageId, { ok: false, error });
+          throw error; // preserve the work pool's real rejection/error path
+        }
+      },
+    };
+  });
+  let r: Awaited<ReturnType<typeof f8Rig>>;
+  try {
+    r = await f8Rig(...args);
+  } finally {
+    spy.mockRestore(); // installed only during this rig's construction
+  }
   cleanups.push(() => r.close());
   await r.ready();
-  return r;
+  const waitForList = async (id: string, ms = 6_000) => {
+    await eventually(() => {
+      if (!lists.has(id)) throw new Error(`list handler not settled: ${id}`);
+    }, ms);
+    const outcome = lists.get(id)!;
+    if (!outcome.ok) throw outcome.error;
+  };
+  return {
+    ...r,
+    waitForList,
+    async list(id: string) {
+      r.send(messageEnvelope(id, "/list"));
+      await waitForList(id);
+    },
+  };
 }
 const prompt = (r: Awaited<ReturnType<typeof f8Rig>>) =>
   r.request.mock.calls.find(([f]) => f.cmd.op === "prompt" && !f.queryOnly)?.[0];
@@ -27,7 +67,7 @@ const prompt = (r: Awaited<ReturnType<typeof f8Rig>>) =>
 describe("F8 in-process service composition", () => {
   it("a persisted legacy sched-ok nonce is redeemed but silently ignored", async () => {
     const r = await rig();
-    r.send(messageEnvelope("legacy-list", "/list"));
+    await r.list("legacy-list");
     await eventually(async () =>
       expect(Object.values((await r.disk())["nonces"]).some((n: any) => n.action === "session-pick")).toBe(true),
     );
@@ -662,8 +702,157 @@ describe("F8 registration lifecycle", () => {
 });
 
 describe("F8 /list session-switch card (session-card-plan r3)", () => {
+  // Hold an actual atomic-write continuation AFTER rename (the old file predicate
+  // already passes), without replacing fsync, commit, PATCH results, or card behavior.
+  function listCommitGate() {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let armed = false,
+      entered = false;
+    const fs = {
+      ...realFeishuFs,
+      async fsyncDir(dir: string) {
+        await realFeishuFs.fsyncDir(dir);
+        if (!armed) return;
+        const doc = JSON.parse(await readFile(join(dir, "state.json"), "utf8"));
+        if (!Object.values<any>(doc.nonces).some((n) => n.action === "session-pick")) return;
+        armed = false;
+        entered = true;
+        await held;
+      },
+    };
+    return {
+      fs,
+      arm: () => {
+        armed = true;
+      },
+      entered: () => entered,
+      release,
+    };
+  }
   const diskNonces = async (r: Awaited<ReturnType<typeof rig>>, action: string) =>
     Object.values((await r.disk())["nonces"] as Record<string, any>).filter((n) => n.action === action);
+
+  it("counterfactual: nonce visible before sendList settles + early dispose really purges the card", async () => {
+    const gate = listCommitGate();
+    const r = await rig({ fs: gate.fs });
+    try {
+      gate.arm();
+      r.send(messageEnvelope("early-list", "/list"));
+      // Exactly the old synchronization condition, not an artificial success callback.
+      await eventually(async () => expect(await diskNonces(r, "session-pick")).toHaveLength(1));
+      const pick = (await diskNonces(r, "session-pick"))[0]!;
+      await eventually(() => expect(gate.entered()).toBe(true));
+      expect(r.fake.sent.some((s) => s.body["msg_type"] === "interactive")).toBe(true);
+      await expect(r.waitForList("early-list", 40)).rejects.toThrow("list handler not settled");
+      const stopping = r.service.dispose(); // sets disposed before the held barrier returns
+      gate.release();
+      await stopping;
+      await r.waitForList("early-list");
+      // CI's undefined legacy nonce and G2's obsolete saved pick share this window.
+      expect((await r.disk())["nonces"][pick.nonce]).toBeUndefined();
+      expect(await diskNonces(r, "session-pick")).toHaveLength(0);
+      expect(await diskNonces(r, "session-card")).toHaveLength(0);
+      expect(r.fake.callsTo("PATCH", /messages/)).toHaveLength(0);
+    } finally {
+      gate.release();
+    }
+  });
+
+  it.each(["fsyncDir", "PATCH"] as const)(
+    "list completion waits through controlled %s; persisted old card still switches after restart",
+    async (phase) => {
+      const gate = listCommitGate();
+      const r = await rig(phase === "fsyncDir" ? { fs: gate.fs } : {});
+      let patchEntered = false;
+      if (phase === "PATCH")
+        r.fake.on("PATCH", /messages/, async () => {
+          patchEntered = true;
+          await new Promise<void>((resolve) => {
+            releasePatch = resolve;
+          });
+          return undefined; // fall through to the REAL fake transport's default response
+        });
+      let releasePatch: (() => void) | undefined;
+      try {
+        if (phase === "fsyncDir") gate.arm();
+        r.send(messageEnvelope("slow-list", "/list"));
+        await eventually(() => expect(phase === "fsyncDir" ? gate.entered() : patchEntered).toBe(true));
+        expect(await diskNonces(r, "session-pick")).toHaveLength(1);
+        expect(await diskNonces(r, "session-card")).toHaveLength(1);
+        // Neither a delivered card nor a PATCH call nor readable nonces means settled.
+        expect(r.fake.sent.some((s) => s.body["msg_type"] === "interactive")).toBe(true);
+        await expect(r.waitForList("slow-list", 40)).rejects.toThrow("list handler not settled");
+        gate.release();
+        releasePatch?.();
+        await r.waitForList("slow-list");
+        const pick = (await diskNonces(r, "session-pick"))[0]!;
+        const patch = r.fake.callsTo("PATCH", /messages/).at(-1)!;
+        expect(JSON.stringify(patch.json)).toContain(pick.nonce);
+        expect(r.service.snapshot().caps.cards).toBe("ok");
+        await r.service.dispose();
+        expect((await r.disk())["nonces"][pick.nonce]).toBeDefined();
+        const restarted = await f8Rig({ stateDir: r.stateDir });
+        cleanups.push(() => restarted.service.dispose());
+        await restarted.ready(); // actual adoption precedes connector start
+        restarted.send(
+          callbackEnvelope(pick.nonce, {
+            id: "slow-pick-restart",
+            chatId: pick.chatId,
+            messageId: pick.messageId,
+          }),
+        );
+        await eventually(() => expect(sentContent(restarted)).toContain("已绑定"));
+        expect((await restarted.disk())["bindings"]["p2p:chat"].sessionId).toBe("session-1");
+        expect(restarted.request).not.toHaveBeenCalled();
+      } finally {
+        gate.release();
+        releasePatch?.();
+      }
+    },
+  );
+
+  it("list completion preserves a real sendList rejection instead of reporting success", async () => {
+    const gate = listCommitGate();
+    const failure = new Error("controlled session inventory failure");
+    let fail = false;
+    const r = await rig({
+      fs: gate.fs,
+      sessions: {
+        views: () => {
+          if (fail) throw failure;
+          return [
+            {
+              sessionId: "session-1",
+              agentKey: "agent-1",
+              cwd: "/fixture",
+              name: "One",
+              mode: "tui",
+              live: true,
+              state: "idle",
+            },
+          ];
+        },
+        managed: () => [],
+      },
+    });
+    try {
+      gate.arm();
+      r.send(messageEnvelope("reject-list", "/list"));
+      await eventually(() => expect(gate.entered()).toBe(true));
+      fail = true; // real sendList reads rows again after its commit barrier
+      gate.release();
+      await expect(r.waitForList("reject-list")).rejects.toBe(failure);
+      fail = false; // snapshot also consults the same inventory; only the handler is under test
+      await eventually(() => expect(r.logs).toContainEqual({ event: "health", reason: "background-failed" }));
+      expect(r.fake.callsTo("PATCH", /messages/)).toHaveLength(0);
+    } finally {
+      fail = false;
+      gate.release();
+    }
+  });
 
   it("/list sends a button card; a click binds end-to-end, re-issues one nonce, sets cardCallback ok", async () => {
     const r = await rig();
@@ -676,7 +865,7 @@ describe("F8 /list session-switch card (session-card-plan r3)", () => {
       live: true,
       state: "idle",
     });
-    r.send(messageEnvelope("list-1", "/list"));
+    await r.list("list-1");
     await eventually(async () => {
       expect(await diskNonces(r, "session-card")).toHaveLength(1); // the anchor
       expect(await diskNonces(r, "session-pick")).toHaveLength(2); // one per online session
@@ -714,11 +903,11 @@ describe("F8 /list session-switch card (session-card-plan r3)", () => {
     r.fake.on("PATCH", /\/open-apis\/im\/v1\/messages\//, () => ({
       json: { code: 230027, msg: "card scope denied" },
     }));
-    r.send(messageEnvelope("list-1", "/list"));
+    await r.list("list-1");
     await eventually(() => expect(r.service.snapshot().caps.cards).toBe("denied"));
     const cards = () => r.fake.sent.filter((s) => s.body["msg_type"] === "interactive").length;
     const before = cards();
-    r.send(messageEnvelope("list-2", "/list"));
+    await r.list("list-2");
     await eventually(() => expect(sentContent(r).replaceAll("\u200b", "")).toContain("1. One [idle/tui]"));
     expect(cards()).toBe(before); // no new card after the denial
     expect(r.request).not.toHaveBeenCalled();
@@ -726,7 +915,7 @@ describe("F8 /list session-switch card (session-card-plan r3)", () => {
 
   it("G2: restart adopts the open card before the connector starts; the old card still switches", async () => {
     const r = await rig();
-    r.send(messageEnvelope("list-1", "/list"));
+    await r.list("list-1");
     await eventually(async () => expect(await diskNonces(r, "session-pick")).toHaveLength(1));
     const pick = (await diskNonces(r, "session-pick"))[0]!;
     await r.service.dispose(); // keep stateDir — anchors stay on disk
@@ -741,7 +930,7 @@ describe("F8 /list session-switch card (session-card-plan r3)", () => {
   });
   it("G2 bound: a stuck card adoption never blocks the connector (timeout path logged, bot keeps serving)", async () => {
     const r = await rig();
-    r.send(messageEnvelope("list-1", "/list"));
+    await r.list("list-1");
     await eventually(async () => expect(await diskNonces(r, "session-pick")).toHaveLength(1));
     const pick = (await diskNonces(r, "session-pick"))[0]!;
     await r.service.dispose();
