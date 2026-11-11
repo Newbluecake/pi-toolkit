@@ -505,19 +505,23 @@ describe("nested Agent timeout_s (N1-N3, real injected tool)", () => {
     // T+G (≈3s): timed_out, the nested call resolves to the timeout result,
     // the parent run itself is untouched and still running.
     await until(() => outcome.state === "rejected", 12_000);
-    expect(outcome.error?.message).toContain("total budget exceeded after grace"); // diag.overtime ⇒ graced
-    expect(outcome.error?.message).not.toContain("fixed deadline");
+    expect(outcome.error?.message).toMatch(
+      /\[code=agent_run_failed kind=timeout reason=total retryable=false effect=unknown\]/,
+    );
+    expect(outcome.error?.message).toMatch(/Check the failure and partial effects first;/);
+    expect(outcome.error?.message).toMatch(/must not be automatically resumed or resubmitted\./);
     const grandchildRead = await host.call("get_run_result", { run_id: grandchildId });
     expect(grandchildRead.details.status).toBe("timed_out");
-    // Plan §7 N1 ★: the persisted terminal snapshot proves exactly one grace was
-    // taken (the error-text inference above is only indirect evidence).
+    // Plan §7 N1 ★: the persisted terminal snapshot, not sanitized error prose,
+    // proves exactly one grace was taken and the admitted policy stayed extendable.
     const gcEntry = branch.find(
       (e) =>
         (e as { customType?: string }).customType === "subagent:run" &&
         (e as { data?: { runId?: string; status?: string } }).data?.runId === grandchildId &&
         (e as { data?: { status?: string } }).data?.status === "timed_out",
-    ) as { data?: { diag?: { overtime?: { graces?: number } } } } | undefined;
+    ) as { data?: { diag?: { timeoutPolicy?: string; overtime?: { graces?: number } } } } | undefined;
     expect(gcEntry?.data?.diag?.overtime?.graces).toBe(1);
+    expect(gcEntry?.data?.diag?.timeoutPolicy).toBe("extendable");
     expect(timeoutNotices(host.sent)).toHaveLength(0); // still silent end to end
     // The parent run itself is untouched and still live.
     expect(TERMINAL.has(await readStatus(host, parentRunId))).toBe(false);
