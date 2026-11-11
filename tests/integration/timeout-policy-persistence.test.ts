@@ -341,35 +341,72 @@ describe("timeoutPolicy persistence across resume paths (R1-R6)", () => {
     });
     await until(() => completions(host.sent, captureOf(captured, "fixed-src")?.req.runId ?? "").length > 0);
     const fixedId = captureOf(captured, "fixed-src")!.req.runId;
-    await host.emit("input", { text: "@fixed-src continue the work" });
-    await until(() => captured.some((c) => c.req.displayMeta?.taskPrompt === "continue the work"));
-    const mentionResume = captured.find((c) => c.req.displayMeta?.taskPrompt === "continue the work")!;
-    expect(mentionResume.req.timeoutPolicy).toBe("fixed"); // ② inherited, not ③
-    expect(mentionResume.budget.maxTotalFactor).toBe(1); // ⇒ H === D0 for the new run
+    // Hold only this fake driver's prompt, not the runtime clocks. This makes
+    // the overlapping resume deterministic without adding any timing allowance.
+    let releaseMention!: () => void;
+    const mentionDone = new Promise<void>((resolve) => {
+      releaseMention = resolve;
+    });
+    let mentionPromptStarted = false;
+    const resumeDriver = vi.mocked(PiSessionDriver.prototype.resume);
+    resumeDriver.mockImplementationOnce(
+      async () =>
+        ({
+          ...makeHandle(scratch, false),
+          prompt: () => {
+            mentionPromptStarted = true;
+            return mentionDone;
+          },
+        }) as never,
+    );
+    const resumeLocked =
+      /^Agent admission rejected \[code=agent_admission_rejected kind=config reason=resume_locked retryable=false effect=none\]\./;
+    const rescue = () =>
+      host.call("Agent", {
+        description: "fixed-rescue",
+        prompt: "widen it back",
+        subagent_type: "worker",
+        resume: fixedId,
+        timeout_s: 20,
+      });
+    try {
+      await host.emit("input", { text: "@fixed-src continue the work" });
+      await until(() => mentionPromptStarted);
+      const mentionResume = captured.find((c) => c.req.displayMeta?.taskPrompt === "continue the work")!;
+      expect(mentionResume.req.timeoutPolicy).toBe("fixed"); // ② inherited, not ③
+      expect(mentionResume.budget.maxTotalFactor).toBe(1); // ⇒ H === D0 for the new run
+      const admitted = captured.length;
+      const resumed = resumeDriver.mock.calls.length;
+      await expect(rescue()).rejects.toThrow(resumeLocked);
+      expect(captured).toHaveLength(admitted);
+      expect(resumeDriver).toHaveBeenCalledTimes(resumed);
+      expect(captureOf(captured, "fixed-rescue")).toBeUndefined();
+      expect(completions(host.sent, mentionResume.req.runId)).toHaveLength(0);
+    } finally {
+      // Always release the controlled prompt even when a contract assertion fails.
+      releaseMention();
+    }
 
-    // (c) the same fixed original with an explicit timeout_s ⇒ ① wins.
-    // The mention dispatches fire-and-forget: `captured` flips at admission, but the resume lock
-    // is only released once that run settles, so a resume issued right away can legitimately be
-    // refused ("already has a resume in progress") — retry until the mention's run has settled
-    // (a dispatch-time readiness signal raced the lock whenever input-handler scheduling shifted).
+    // (c) once the original resume lock releases, explicit timeout_s ⇒ ① wins.
+    // Only this precise, effect-free admission refusal may wait for settlement;
+    // all other failures propagate, never become an implicit prompt replay.
+    const admitted = captured.length;
+    const resumed = resumeDriver.mock.calls.length;
     await until(async () => {
       try {
-        await host.call("Agent", {
-          description: "fixed-rescue",
-          prompt: "widen it back",
-          subagent_type: "worker",
-          resume: fixedId,
-          timeout_s: 20,
-        });
+        await rescue();
         return true;
       } catch (e) {
-        if (/already has a resume in progress/.test(String(e))) return false;
-        throw e;
+        if (!(e instanceof Error) || !resumeLocked.test(e.message)) throw e;
+        expect(captured).toHaveLength(admitted);
+        expect(resumeDriver).toHaveBeenCalledTimes(resumed);
+        return false;
       }
     });
     await until(() => captureOf(captured, "fixed-rescue") !== undefined);
     expect(captureOf(captured, "fixed-rescue")!.req.timeoutPolicy).toBe("extendable");
     expect(captureOf(captured, "fixed-rescue")!.budget.totalMs).toBe(20_000);
+    expect(captured.filter((c) => c.req.displayMeta?.label === "fixed-rescue")).toHaveLength(1);
     await host.emit("session_shutdown", { reason: "quit" });
   }, 30_000);
 

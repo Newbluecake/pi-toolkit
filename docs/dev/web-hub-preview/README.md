@@ -41,6 +41,25 @@ identical to `off` on LAN) while loopback keeps previewing. Design + real-device
 **#49 probe-link flip — PathText local retention (2026-11-07)**: the probe store is a
 CROSS-SCOPE LRU (cap `PROBE_LRU_CAP` = 256 across ALL scopes); a high-churn sibling transcript (an open subagent run settling batches of fresh absolute paths — round4 evidence: >256 distinct candidates, `~333 ms` ref→plain→ref flips, bbox unchanged, only the link style flickers) evicts an already-rendered message's `"confirmed"` entries, and an already-mounted `PathText` never re-`ensure()`s on its own — so the link degraded to plain text until some other re-render. Fix (component-local ONLY — `PathText.vue`; the store's semantics, cap and eviction are untouched): each mounted `PathText` keeps a reactive local set of its OWN candidates it has observed `stateOf(path) === "confirmed"` for under the CURRENT authority (probe instance + `scopeKeyOf(scope)` + non-plain). `clickable()` keeps the link while the current probe reports `pending` or `undefined` (LRU-evicted — a memory event, not file evidence) for such a path; an explicit `missing`/`failed` always wins (plain, local positive revoked). The set is cleared synchronously (sync watcher) on any authority change — scope/capability flip (`scopeKeyOf` already folds agent|session|cwd|abs|dir|tilde|file|html, so a dirs/files cap change IS a scope change), probe replacement, plain suppression (noRefs/suspended/no-ctx/no-scope) — pruned to the current candidate set (bounded, no history) and cleared on unmount; no retry timer, no IO, no kindOf change (an evicted kind hint degrades to the existing safe hub re-check fallback). No cross-context carryover: an old-scope settle writes only the old LRU partition. Authority changes compare SEMANTICALLY — probe identity + the scopeKey STRING + the plain flag, never a per-evaluation wrapper object: the App-level scope ref is rebuilt with identical fields on ordinary upstream status refreshes, and such same-value rebuilds must NOT clear anything (round4 rework regression: a wrapper-object comparison flashed ALL main links to plain on every refresh — churn 14 / quiescent 10-13 flips; the semantic comparison measures 0/0 across two full 620-path harness runs). Regression: `tests/web-hub/ui/path-text-probe-stability.test.ts` (real component × real `usePreviewProbe` × real cap-256 store, mocked transport only).
 
+## Path recognition performance (`findPathRefs`)
+
+`ui/src/logic/preview.js` keeps the dir-plan §2.5.2 run/candidate algorithm and its
+recognition rules unchanged. Run metadata uses O(1) scalar storage: each encountered slash
+closes the preceding segment, and a `spanP` sentinel closes the final segment (the sentinel
+is NOT a slash). `lastBad` is still the greatest slash starting an empty/`.`/`..` segment;
+`lastNul` and the last two actual slash positions give the same validation summary without
+collecting an O(#slashes) array or traversing it again. Scan accounting still includes the
+whole metadata window and the same short-segment character checks.
+
+The absolute route rejects overlong/`fastOk`-invalid candidates BEFORE evaluating the
+unchanged, pure start-context predicate. It still visits later slash positions, so an
+invalid long prefix cannot hide a valid nested candidate. Tilde → absolute → relative
+priority, relative's once-per-run attempt, unified end/trailing-slash/line:col rules,
+UTF-8 cap, URL/character/boundary definitions and CJK alternatives are unchanged; this is
+not a Unicode/path-recognition expansion. The original 24-case operation-count matrix,
+`[8,24]` growth gate and 5 s wall-clock sentinel remain intact (including the repeated
+matrix). Local offline throughput comparisons do not guarantee a CI runner's wall time.
+
 ## Preview multi-windows
 
 **Preview multi-windows** (preview-windows plan r2, W1–W4 merged): on ≥768px that dialog becomes MODELESS floating
