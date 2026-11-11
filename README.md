@@ -102,28 +102,28 @@ pi install .
 
 兼容拼写仍可用：`/clear`、`/agent budget`、`/agent <id>`、`/fast reset`、`/mem session|hub list`；推荐分别使用 `/new`、`/agent settings`、`/agent status <id>`、`/fast inherit`、`/mem session|hub status`。这些分层是文档导航，不代表隐藏顶层命令。工具名、skills、飞书命令与内部 trampoline 不属于本表。
 
-| Command           | Description                                            |
-| ----------------- | ------------------------------------------------------ |
-| `/agent`          | 运行状态、费用与设置；推荐 `status <id>` 和 `settings` |
-| `/cache-ttl`      | 缓存 TTL、`probe`、`measure` 和 keepalive              |
-| `/clear`          | 兼容入口：开新会话                                     |
-| `/fabric`         | 跨会话消息与恢复（按功能开关）                         |
-| `/fast`           | 服务层级；推荐 `inherit`                               |
-| `/feishu-test`    | 发送飞书测试卡片                                       |
-| `/mem`            | 项目与 scoped 记忆                                     |
-| `/pi-hud-refresh` | 刷新 HUD                                               |
-| `/record`         | 流量录制（需启用）                                     |
-| `/reflex`         | 自省诊断（需启用）                                     |
-| `/resume-recent`  | 最近会话恢复入口                                       |
-| `/schedule`       | 会话定时任务（需启用）                                 |
-| `/secure`         | 加密会话状态（需配置）                                 |
-| `/task`           | 启动后台 subagent                                      |
-| `/tasklist`       | 任务面板                                               |
-| `/thread`         | 线程订阅（需启用）                                     |
-| `/title`          | 自动标题                                               |
-| `/topic-switch`   | 主题切换与请求找回                                     |
-| `/watch`          | 任务完成飞书通知                                       |
-| `/webhub`         | Web Hub 管理（需启用）                                 |
+| Command           | Description                                                                              |
+| ----------------- | ---------------------------------------------------------------------------------------- |
+| `/agent`          | 运行状态、费用与设置；推荐 `status <id>` 和 `settings`                                   |
+| `/cache-ttl`      | 缓存 TTL、`probe`、`measure` 和 keepalive                                                |
+| `/clear`          | 兼容入口：开新会话                                                                       |
+| `/fabric`         | 跨会话消息与恢复（按功能开关）                                                           |
+| `/fast`           | 服务层级；推荐 `inherit`                                                                 |
+| `/feishu-test`    | 发送飞书测试卡片                                                                         |
+| `/mem`            | 项目与 scoped 记忆；`restore --trash` 恢复删除项，`restore --block` 恢复归档或已取代的块 |
+| `/pi-hud-refresh` | 刷新 HUD                                                                                 |
+| `/record`         | 流量录制（需启用）                                                                       |
+| `/reflex`         | 自省诊断（需启用）                                                                       |
+| `/resume-recent`  | 最近会话恢复入口                                                                         |
+| `/schedule`       | 会话定时任务（需启用）                                                                   |
+| `/secure`         | 加密会话状态（需配置）                                                                   |
+| `/task`           | 启动后台 subagent                                                                        |
+| `/tasklist`       | 任务面板                                                                                 |
+| `/thread`         | 线程订阅（需启用）                                                                       |
+| `/title`          | 自动标题                                                                                 |
+| `/topic-switch`   | 主题切换与请求找回                                                                       |
+| `/watch`          | 任务完成飞书通知                                                                         |
+| `/webhub`         | Web Hub 管理（需启用）                                                                   |
 
 ## 配置
 

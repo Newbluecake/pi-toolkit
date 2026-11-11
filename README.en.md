@@ -94,28 +94,28 @@ Advanced: `/agent costs`, memory `doctor` / `review` / `expired`, `/title`, `/re
 
 Compatibility spellings remain accepted: `/clear`, `/agent budget`, `/agent <id>`, `/fast reset`, and `/mem session|hub list`; prefer `/new`, `/agent settings`, `/agent status <id>`, `/fast inherit`, and `/mem session|hub status` respectively. These groups are documentation, not hidden commands. Tool names, skills, Feishu commands and internal trampolines are not in this table.
 
-| Command           | Description                                                     |
-| ----------------- | --------------------------------------------------------------- |
-| `/agent`          | Status, costs and settings; prefer `status <id>` and `settings` |
-| `/cache-ttl`      | Cache TTL, `probe`, `measure` and keepalive                     |
-| `/clear`          | Compatibility entry for a new session                           |
-| `/fabric`         | Cross-session messaging and recovery (feature-gated)            |
-| `/fast`           | Service tier; prefer `inherit`                                  |
-| `/feishu-test`    | Send a Feishu test card                                         |
-| `/mem`            | Project and scoped memory                                       |
-| `/pi-hud-refresh` | Refresh HUD                                                     |
-| `/record`         | Traffic recording (when enabled)                                |
-| `/reflex`         | Introspection diagnostics (when enabled)                        |
-| `/resume-recent`  | Resume recent sessions                                          |
-| `/schedule`       | Session-owned scheduled tasks (when enabled)                    |
-| `/secure`         | Encrypted-session status (when configured)                      |
-| `/task`           | Start a background subagent                                     |
-| `/tasklist`       | Task panel                                                      |
-| `/thread`         | Thread subscriptions (when enabled)                             |
-| `/title`          | Automatic titles                                                |
-| `/topic-switch`   | Topic switching and request recovery                            |
-| `/watch`          | Feishu task-completion notifications                            |
-| `/webhub`         | Web Hub management (when enabled)                               |
+| Command           | Description                                                                                                                   |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `/agent`          | Status, costs and settings; prefer `status <id>` and `settings`                                                               |
+| `/cache-ttl`      | Cache TTL, `probe`, `measure` and keepalive                                                                                   |
+| `/clear`          | Compatibility entry for a new session                                                                                         |
+| `/fabric`         | Cross-session messaging and recovery (feature-gated)                                                                          |
+| `/fast`           | Service tier; prefer `inherit`                                                                                                |
+| `/feishu-test`    | Send a Feishu test card                                                                                                       |
+| `/mem`            | Project and scoped memory; `restore --trash` restores deleted items, `restore --block` restores archived or superseded blocks |
+| `/pi-hud-refresh` | Refresh HUD                                                                                                                   |
+| `/record`         | Traffic recording (when enabled)                                                                                              |
+| `/reflex`         | Introspection diagnostics (when enabled)                                                                                      |
+| `/resume-recent`  | Resume recent sessions                                                                                                        |
+| `/schedule`       | Session-owned scheduled tasks (when enabled)                                                                                  |
+| `/secure`         | Encrypted-session status (when configured)                                                                                    |
+| `/task`           | Start a background subagent                                                                                                   |
+| `/tasklist`       | Task panel                                                                                                                    |
+| `/thread`         | Thread subscriptions (when enabled)                                                                                           |
+| `/title`          | Automatic titles                                                                                                              |
+| `/topic-switch`   | Topic switching and request recovery                                                                                          |
+| `/watch`          | Feishu task-completion notifications                                                                                          |
+| `/webhub`         | Web Hub management (when enabled)                                                                                             |
 
 ## Configuration
 
