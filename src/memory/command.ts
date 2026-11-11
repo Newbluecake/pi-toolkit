@@ -140,8 +140,8 @@ const MEM_SECOND_LEVEL: Record<string, ReadonlyArray<{ value: string; descriptio
 const MEM_JEV_SUBCOMMANDS: ReadonlyArray<{ value: string; description: string }> = [
   { value: "jev", description: "Jev 分类引擎状态 [probe|retag]；维护：reset-index" },
   { value: "tags", description: "场景标签管理 [list|add|rm|disable|enable]" },
-  { value: "review", description: "整理建议逐条确认 [--list|--run]" },
-  { value: "expired", description: "到期条目处理" },
+  { value: "review", description: "只读展示当前建议；可用 --list" },
+  { value: "expired", description: "只读列出到期日期与待核对条件" },
 ];
 const MEM_JEV_SECOND_LEVEL: Record<string, ReadonlyArray<{ value: string; description: string }>> = {
   jev: [
@@ -157,10 +157,7 @@ const MEM_JEV_SECOND_LEVEL: Record<string, ReadonlyArray<{ value: string; descri
     { value: "tags disable", description: "停用预置标签" },
     { value: "tags enable", description: "启用预置标签" },
   ],
-  review: [
-    { value: "review --list", description: "只读列出当前建议" },
-    { value: "review --run", description: "立即跑一轮整理并生成建议" },
-  ],
+  review: [{ value: "review --list", description: "只读列出当前建议" }],
 };
 
 export function createMemCommand(deps: CreateMemCommandDeps): {
@@ -214,6 +211,12 @@ export function createMemCommand(deps: CreateMemCommandDeps): {
     getArgumentCompletions: (argumentPrefix: string) => {
       try {
         const a = (argumentPrefix ?? "").trimStart();
+        if (jev !== undefined && /^review(?:\s|$)/.test(a) && a !== "review") {
+          if (argumentPrefix.length > 1024 || /[\x00-\x08\x0a-\x1f\x7f]/.test(argumentPrefix)) return [];
+          const match = /^review[ \t]+([^ \t]*)$/.exec(a);
+          if (!match || !"--list".startsWith(match[1] ?? "")) return [];
+          return [{ value: "review --list", label: "--list", description: "只读列出当前建议" }];
+        }
         const tokens = a.split(/\s+/).filter(Boolean);
         const partial = a.endsWith(" ") || a === "" ? "" : (tokens[tokens.length - 1] ?? "");
         const head = tokens.length > 1 || (tokens.length === 1 && a.endsWith(" ")) ? tokens[0] : undefined;

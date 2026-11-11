@@ -70,7 +70,7 @@ pi install .
 | Subagent 工具             | `Agent` / `get_run_result` / `steer_subagent` / `abort_subagent` / `extend_subagent_timeout` / `set_model`，后台运行、可延长超时、可 worktree 隔离。                                                                                                                                                                                                                                                       | [subagents](docs/guide/subagents.md#工具)                        |
 | Agent tree                | 编辑器上方的实时 subagent 树：相位、工具轨迹、费用、超时高亮。                                                                                                                                                                                                                                                                                                                                             | [subagents](docs/guide/subagents.md#agent-tree)                  |
 | SubagentWorkflow          | 沙箱化 JS 编排（`agent()` / `parallel()` / `pipeline()`），后台运行，带 journal 回放。默认关闭。                                                                                                                                                                                                                                                                                                           | [subagents](docs/guide/subagents.md#subagentworkflow)            |
-| 定时任务（`schedule`）    | 归属会话的 cron / 一次性任务：后台 subagent 出报告或定时消息；AI 建的任务须你批准；报告可推飞书。默认关闭。                                                                                                                                                                                                                                                                                                | 本文 [定时任务](#定时任务schedule)                               |
+| 定时任务（`schedule`）    | 归属会话的 cron / 一次性 / 间隔任务：后台 subagent 出报告或定时消息；创建和修改立即生效；报告可推飞书。默认关闭。                                                                                                                                                                                                                                                                                          | 本文 [定时任务](#定时任务schedule)                               |
 | 防卡死架构                | 分相 deadline、升级阶梯、orphan 登记、持久化通知投递。                                                                                                                                                                                                                                                                                                                                                     | [subagents](docs/guide/subagents.md#防卡死架构)                  |
 | Message fabric            | subagent 间沿 agent tree 的 fire-and-forget 消息（`message_agent`）。默认关闭。                                                                                                                                                                                                                                                                                                                            | [subagents](docs/guide/subagents.md#message-fabric)              |
 | 外部 droid agent          | 把 Factory droid 当作 `droid/<model>` 虚拟 provider 派发，带模型白名单与额度闸门。默认关闭。                                                                                                                                                                                                                                                                                                               | [subagents](docs/guide/subagents.md#外部-droid-agent)            |
@@ -96,23 +96,34 @@ pi install .
 
 ## 命令
 
-| 命令                                                                      | 内容                                                                                                                                                                    |
-| ------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `/agent`（`status [runId]` / `costs` / `settings` / `budget` / `reload`） | 运行诊断、费用明细、设置编辑器、延迟 reload                                                                                                                             |
-| `/task <描述>`                                                            | 启动一个后台 general-purpose subagent                                                                                                                                   |
-| `/mem`                                                                    | 项目记忆：`list` / `init` / `path` / `import` / `doctor` / `review` / `expired` / `migrate` / `restore --trash` / `restore --block`                                     |
-| `/tasklist`                                                               | 任务面板（`clear` 清空）                                                                                                                                                |
-| `/cache-ttl`                                                              | `on` / `off` / `auto` / `save` / `keepalive on\|off\|reset` / `status` / `probe`                                                                                        |
-| `/topic-switch`                                                           | 查看状态（`status`），`last [--send]` 取回上次截留的请求                                                                                                                |
-| `/webhub`                                                                 | `status` / `open` / `restart` / `stop` / `start` / `token rotate` / `passwd` / `unlock` / `2fa` / `user` / `feishu`                                                     |
-| `/schedule`                                                               | 定时任务（需 `schedule.enabled`）：`list` / `add` / `edit` / `show` / `log` / `approve` / `reject` / `pause` / `resume` / `rm` / `run` / `repair`，`--all` 管理其他会话 |
-| `/watch`                                                                  | 本会话每次任务结束都通知飞书                                                                                                                                            |
-| `/feishu-test`                                                            | 发送飞书测试卡片                                                                                                                                                        |
-| `/pi-hud-refresh`                                                         | `git fetch` 并刷新 HUD                                                                                                                                                  |
-| `/resume-recent`                                                          | 恢复最近 48 小时的会话（`--all` 全量）                                                                                                                                  |
-| `/secure status`                                                          | 加密会话判定与挂载状态（配置过 `secure` 段才注册）                                                                                                                      |
-| `/record`                                                                 | 流量录制：`on` / `off` / `status`（需 `traffic.enabled`，Node ≥22.13；网页端 `on` 需确认）                                                                              |
-| `/clear`                                                                  | 开新会话                                                                                                                                                                |
+常用：Pi 内置 `/new`、`/resume`；toolkit 的 `/agent status <id>`、`/agent settings`、`/task`、`/mem`、`/tasklist`、`/fast`。Pi `/settings` 与 toolkit `/agent settings` 是不同设置入口。
+
+高级：`/agent costs`、memory 的 `doctor` / `review` / `expired`、`/title`、`/reflex`、`/thread`、`/fabric` 和 `/cache-ttl probe` / `measure`。probe 与 measure start 会产生费用；measure status / estimate 不发送测量请求。恢复：`/agent reload now|cancel`、`/topic-switch last --send`、memory restore、`/schedule repair`、`/fabric fence reset`、`/webhub` 管理恢复、`/cache-ttl measure cancel` / `keepalive reset` / `off`、`/record off`。
+
+兼容拼写仍可用：`/clear`、`/agent budget`、`/agent <id>`、`/fast reset`、`/mem session|hub list`；推荐分别使用 `/new`、`/agent settings`、`/agent status <id>`、`/fast inherit`、`/mem session|hub status`。这些分层是文档导航，不代表隐藏顶层命令。工具名、skills、飞书命令与内部 trampoline 不属于本表。
+
+| Command           | Description                                            |
+| ----------------- | ------------------------------------------------------ |
+| `/agent`          | 运行状态、费用与设置；推荐 `status <id>` 和 `settings` |
+| `/cache-ttl`      | 缓存 TTL、`probe`、`measure` 和 keepalive              |
+| `/clear`          | 兼容入口：开新会话                                     |
+| `/fabric`         | 跨会话消息与恢复（按功能开关）                         |
+| `/fast`           | 服务层级；推荐 `inherit`                               |
+| `/feishu-test`    | 发送飞书测试卡片                                       |
+| `/mem`            | 项目与 scoped 记忆                                     |
+| `/pi-hud-refresh` | 刷新 HUD                                               |
+| `/record`         | 流量录制（需启用）                                     |
+| `/reflex`         | 自省诊断（需启用）                                     |
+| `/resume-recent`  | 最近会话恢复入口                                       |
+| `/schedule`       | 会话定时任务（需启用）                                 |
+| `/secure`         | 加密会话状态（需配置）                                 |
+| `/task`           | 启动后台 subagent                                      |
+| `/tasklist`       | 任务面板                                               |
+| `/thread`         | 线程订阅（需启用）                                     |
+| `/title`          | 自动标题                                               |
+| `/topic-switch`   | 主题切换与请求找回                                     |
+| `/watch`          | 任务完成飞书通知                                       |
+| `/webhub`         | Web Hub 管理（需启用）                                 |
 
 ## 配置
 
@@ -208,7 +219,7 @@ pi 的 agent 目录可以用 `PI_CODING_AGENT_DIR` 改变（默认 `~/.pi/agent`
 
 ## 定时任务（schedule）
 
-给当前会话挂 cron 或一次性任务：到点派一个后台 subagent 在干净上下文里跑，最后一条回复就是报告；也可以到点给会话自己发一条消息。默认关闭（`schedule.enabled`，非 live，改完 `/reload`）。关闭时没有 `schedule` 工具、没有 `/schedule` 命令、system prompt 与状态栏都不变。设计见 [scheduled-reports 方案](docs/dev/scheduled-reports/plan.md)。
+给当前会话挂 cron、一次性或间隔任务：到点派一个后台 subagent 在干净上下文里跑，最后一条回复就是报告；也可以到点给会话自己发一条消息。默认关闭（`schedule.enabled`，非 live，改完 `/reload`）。关闭时没有 `schedule` 工具、没有 `/schedule` 命令、system prompt 与状态栏都不变。设计见 [scheduled-reports 方案](docs/dev/scheduled-reports/plan.md)。
 
 > 旧版 `~/.pi/agent/pi-subagent-schedules.json` 的全局定时引擎已退役，不再读取也不再写入。
 
@@ -218,50 +229,44 @@ pi 的 agent 目录可以用 `PI_CODING_AGENT_DIR` 改变（默认 `~/.pi/agent`
 - `message`：到点给归属会话发一条消息；会话忙时排队，同一任务只留最新一条。默认不推飞书。
 - `message` 形式和 `--handoff` 依赖宿主 pi 提供的触发能力：能力缺失时，把任务新建或改成这两种形式会被拒（`E_UNSUPPORTED`）；已有这类任务时状态栏显示 `msg off`。由定时消息或接手触发的主会话运行最长 3600 秒，到时自动中止（期间有人工插话则解除上限），不可配置。
 - 每个会话最多 8 个任务。
-- 时间：5 段 cron（`--cron`）或一次性（`--at YYYY-MM-DDTHH:mm`），按任务时区（`--tz`，IANA 名）计算。
+- 时间：5 段 cron（`--cron`）或一次性（`--at YYYY-MM-DDTHH:mm`）按任务时区（`--tz`，IANA 名）计算；`--every` 使用 UTC elapsed，间隔整秒、30 秒至 365 天，不可配时区。
 
 **归属与错过**
 
-- 任务属于创建它的会话，只在该会话（交互式主会话）打开时才计时和执行。到点时会话没开着就**跳过**，不补跑、不拉临时会话。
+- 任务属于创建它的会话，只在该会话（交互式主会话）打开时才计时和执行。cron / at 到点时会话没开着就跳过，不拉临时会话；every 符合条件时将错过的间隔聚合补跑至多一次；最新时间点超过 24 小时或任务忙时不补跑。
 - 下次打开会话时有一条摘要说明错过了什么；`hub` 开着且飞书机器人可用时，每个任务每小时合并推一条「已错过」。
 - 运行中会话被关掉，记为「结果未知」并通知，不会重跑。
 - 加密会话、`--no-session`、subagent 子会话不执行；print / json 模式只能查看。
 
-**批准**
+**生效**
 
-- 你用 `/schedule add` 创建的任务直接生效。
-- **AI 通过 `schedule` 工具创建或修改的任务必须由你批准**：批准绑定任务定义的哈希（`defHash`），之后任何来源改了时间、形式或 prompt 等执行字段，旧批准自动失效。AI 没有批准动作，`resume` 只取消暂停，也不等于批准。
-- 批准：终端里 `/schedule approve <id>`，会展示完整定义和哈希，确认后才落批准；也可以在网页面板里审阅批准。编辑一个还没批准的任务，不会顺带批准它。
-- **当场确认**：AI 创建或修改任务后，终端当场弹出确认框（批准 / 拒绝 / 稍后；会话空闲且没有别的对话框时才弹，已显示的框不会被自动关掉）；开了 Web Hub 时网页自动打开该任务的审阅面板；绑定了飞书机器人的私聊（且你在里面发过请求）会收到带完整 prompt 的审批卡片。三处任一处先批准，其余自动收回；晚到的操作只会得到「已在其他端处理」之类的提示，不会重复生效。
-- **拒绝** = 撤销 AI 这次未经确认的改动：新建的任务被删除；修改的任务恢复到修改前的执行定义（之前的批准重新生效，任务名不回滚）。也可手动 `/schedule reject <id>`（仅在确认请求还有效时可用）。「稍后」或关掉框，任务保持待确认，仍可 `/schedule approve`。确认请求只在内存里、2 小时有效；`/reload` 或重启后不再补弹，遗留的待确认任务仍用 `/schedule approve` 或网页面板处理。
+用户或 AI 创建、修改任务写入后即生效，没有独立的定时任务审批流程。`defHash` 用于定义与执行的并发校验，不是审批凭据。执行仍受归属会话、模式、启用状态和能力门限制。
 
 **命令**
 
-| 子命令                                                                     | 作用                                                                                                                                                            |
-| -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `/schedule [list] [--all]`                                                 | 列出本会话（`--all`：所有会话）的任务                                                                                                                           |
-| `/schedule add <名称> --cron "<表达式>" \| --at <时间> [选项] -- <prompt>` | 创建；选项：`--tz` `--form background\|message` `--feishu` / `--no-feishu` `--type` `--model` `--thinking` `--timeout <秒>` `--handoff` `--worktree`            |
-| `/schedule edit <id> [选项] [-- <prompt>]`                                 | 修改（仅本会话）                                                                                                                                                |
-| `/schedule show <id>` / `log [<id>]`                                       | 完整定义与哈希 / 运行历史                                                                                                                                       |
-| `/schedule approve <id> [<hash>]`                                          | 审阅并批准                                                                                                                                                      |
-| `/schedule reject <id> [<hash>]`                                           | 撤销 AI 未确认的改动（新建 ⇒ 删除；修改 ⇒ 恢复原定义），仅在当场确认请求有效时可用                                                                              |
-| `/schedule pause\|resume\|rm <id>`                                         | 暂停 / 恢复 / 删除；暂停和删除会一并撤销该任务已排队、尚未发出的定时消息                                                                                        |
-| `/schedule run <id>`                                                       | 立即运行一次（仅本会话、仅已批准任务）                                                                                                                          |
-| `/schedule repair`                                                         | 隔离损坏的账本；账本正常时重置卡住的定时消息调度（对话框计数、会话栅栏）。仅本地终端可用，网页调用一律拒绝；启用跨会话时 `/fabric fence reset` 也会做同样的重置 |
+| 子命令                                                                                       | 作用                                                                                                                                                            |
+| -------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/schedule [list] [--all]`                                                                   | 列出本会话（`--all`：所有会话）的任务                                                                                                                           |
+| `/schedule add <名称> --cron "<表达式>" \| --at <时间> \| --every <间隔> [选项] -- <prompt>` | 创建；选项：`--tz` `--form background\|message` `--feishu` / `--no-feishu` `--type` `--model` `--thinking` `--timeout <秒>` `--handoff` `--worktree`            |
+| `/schedule edit <id> [选项] [-- <prompt>]`                                                   | 修改（仅本会话）                                                                                                                                                |
+| `/schedule show <id>` / `log [<id>]`                                                         | 完整定义与哈希 / 运行历史                                                                                                                                       |
+| `/schedule pause\|resume\|rm <id>`                                                           | 暂停 / 恢复 / 删除；暂停和删除会一并撤销该任务已排队、尚未发出的定时消息                                                                                        |
+| `/schedule run <id>`                                                                         | 立即运行一次（仅归属会话；仍受执行门限制）                                                                                                                      |
+| `/schedule repair`                                                                           | 隔离损坏的账本；账本正常时重置卡住的定时消息调度（对话框计数、会话栅栏）。仅本地终端可用，网页调用一律拒绝；启用跨会话时 `/fabric fence reset` 也会做同样的重置 |
 
-`--all` 可对其他会话的任务做 list / show / log / pause / resume / rm / approve；`edit` 和 `run` 只能在归属会话里做。
+`--all` 可对其他会话的任务做 list / show / log / pause / resume / rm；`edit` 和 `run` 只能在归属会话里做。
 
 **可见性**
 
 - AI 工具 `schedule`：`list` / `get` / `create` / `update` / `pause` / `resume` / `delete` / `run_now` / `history`。
 - system prompt 里有会话级的任务定义段（只含定义，不含下次运行时间，不破坏缓存前缀；fork 出的会话不继承）。
 - TUI 状态栏形如 `sched 2 · next 08:00 · run 1 · pending 1`。
-- 网页：详情头的「定时」按钮打开面板，列出任务、运行记录与待确认项；首期以只读为主，写操作只有批准和拒绝（AI 刚建/改任务时面板会自动弹出）。需要 `webHub.enabled`。
+- 网页：详情头的「定时」按钮打开面板，列出任务与运行记录，可暂停、恢复和删除；edit 默认被策略拒绝，显式覆盖策略可改变此默认值。需要 `webHub.enabled`。
 
 **飞书**
 
 - 后台任务的报告由 Web Hub 推送给飞书机器人的 owner 私聊，需要 `feishuBot` 与 Web Hub 控制面（见上文「飞书机器人设置」）。hub 停机或本地模式期间完成的报告，hub 恢复后补推 24 小时内的。
-- 在飞书私聊里发 `/schedule` 得到只读任务列表，`/schedule run <序号>` 立即运行（要求归属会话在线，否则回复不在线）。飞书命令入口不能创建、修改或批准任务；唯一的例外是上面「当场确认」的审批卡片——只发给 owner 的私聊，且该私聊要能证明是 owner（owner 在里面发过请求；很久没发过则先随便发一条再等卡片），群聊与话题从不发卡，卡片只有「批准 / 拒绝」两个按钮，只有 owner 本人点击有效。
+- 在飞书私聊里发 `/schedule` 查看列表，`/schedule run <序号>` 立即运行（归属会话须在线）；飞书入口不创建或修改任务。
 
 **设置**（均非 live）
 

@@ -2,6 +2,13 @@
 import { mount } from "@vue/test-utils";
 import { computed, nextTick, ref } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createMemCommand } from "../../../src/memory/command.js";
+import type { JevCommandPort } from "../../../src/memory/jev/contracts.js";
+import { wrapCommandApi } from "../../../src/commands/capture.js";
+import type { ArgCompleter } from "../../../src/web-hub/agent/command-complete.js";
+import { wireWebHub } from "../../../src/web-hub/agent/index.js";
+import { decodeAgentFrame } from "../../../src/web-hub/protocol/messages.js";
+import { ackFrame, fakeCtx, fakeNet, fakePi, pathsIn, resetGlobals, SETTINGS, tmpDir } from "../agent/helpers.js";
 import Composer from "../../../src/web-hub/ui/src/components/control/Composer.vue";
 import { CONTROL_VIEW, type ControlView } from "../../../src/web-hub/ui/src/components/control/controlContext.js";
 import { CONTROL_CTX } from "../../../src/web-hub/ui/src/composables/useControl.js";
@@ -146,7 +153,7 @@ function mountComposer(opts: MountOpts = {}) {
   });
   mounted.push(wrapper);
   wrapper.find("textarea").element.focus();
-  return { wrapper, agent };
+  return { wrapper, agent, control };
 }
 
 async function type(wrapper: ReturnType<typeof mount>, value: string): Promise<void> {
@@ -582,4 +589,263 @@ describe("Composer /-argument completion — error policy (§6.2/r1 #9)", () => 
     expect(argPanel(w).find(".arg-head").exists()).toBe(true);
     expect(argRows(w)).toHaveLength(0);
   });
+});
+
+/** Offline HTTP adapter over a FAKE socket, not a stub of the candidate producer:
+ * factory → capture RAW → wireWebHub/real service → complete_reply → real Vue DOM.
+ * The commands supplied to Composer are the ACTUAL cap-filtered commands slot. */
+const memoryLinks: Array<() => void> = [];
+afterEach(() => {
+  for (const dispose of memoryLinks.splice(0)) dispose();
+});
+async function memoryHttp(
+  opts: {
+    jev?: boolean;
+    review?: boolean;
+    deny?: boolean;
+    mode?: "off";
+    capless?: boolean;
+    webCommands?: boolean;
+  } = {},
+) {
+  resetGlobals();
+  const box = tmpDir("vm-composer-");
+  let disposed = false;
+  const dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    resetGlobals();
+    box.cleanup();
+  };
+  memoryLinks.push(dispose);
+  const businessReads: string[] = [];
+  const jev = new Proxy({} as JevCommandPort, {
+    get(_target, key) {
+      if (key === "isChildSession") return false;
+      businessReads.push(String(key));
+      throw Error("UI completion attempted backend discovery");
+    },
+  });
+  const command = createMemCommand(opts.jev === false ? {} : { jev });
+  const native = vi.spyOn(command, "handler");
+  const records = new Map<string, typeof command>();
+  const { pi, fire } = fakePi();
+  pi.registerCommand = (name, c) => {
+    records.set(name, c as typeof command);
+  };
+  Object.assign(pi, {
+    getCommands: () => [...records].map(([name, c]) => ({ name, source: "extension", description: c.description })),
+  });
+  const raw = new Map<string, ArgCompleter>();
+  const owned = new Set<string>();
+  wrapCommandApi(pi, () => undefined, owned, raw).registerCommand("mem", command);
+  expect(raw.get("mem")).toBe(command.getArgumentCompletions);
+  expect(owned).toEqual(new Set(["mem"]));
+  const capabilities = vi.fn(() => ({ sessionAdd: false, revisionReview: opts.review !== false }));
+  const own = vi.spyOn(raw, "get");
+  const start = vi.fn(() => {
+    throw Error("candidate selection must not start memory work");
+  });
+  const spawn = vi.fn(() => {
+    throw Error("offline UI test must not launch Hub");
+  });
+  const n = fakeNet();
+  const { ctx } = fakeCtx({ mode: "rpc" });
+  const flushSocket = () => new Promise<void>((resolve) => setImmediate(resolve));
+  wireWebHub(pi, {
+    settings: {
+      ...SETTINGS,
+      commandComplete: opts.mode ?? "toolkit",
+      webCommands: opts.webCommands !== false,
+      ...(opts.deny ? { webCommandPolicy: { mem: "deny" as const } } : {}),
+    },
+    fleet: () => [],
+    argCompleters: raw,
+    ownedCommandNames: owned,
+    memoryWrite: { capabilities, start },
+    env: { HOME: box.dir },
+    paths: pathsIn(box.dir),
+    netConnect: n.netConnect,
+    spawnImpl: spawn,
+    argv1: "/nonexistent/pi",
+    buildInfo: async () => ({ pluginVersion: "1.2.3", buildId: "vm-dom" }),
+  });
+  fire("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await flushSocket();
+  const socket = n.sockets[0]!;
+  socket.emit("connect");
+  socket.hub(ackFrame("agent-a", 4242, opts.capless ? ["command.v1"] : ["command.v1", "cmd.args.v1"]));
+  const published = decodeAgentFrame(
+    socket
+      .frames()
+      .filter((row) => row.t === "commands")
+      .at(-1),
+  );
+  if (published?.t !== "commands") throw Error("real wire did not publish commands");
+  const commands = published.items.filter((row) => row.name === "mem").map((row) => ({ ...row }));
+  const answers: unknown[] = [];
+  const fetchImpl = vi.fn<typeof fetch>(async (url, init) => {
+    expect(url).toBe("/api/command/complete");
+    const body = JSON.parse(String(init?.body)) as { agentKey: string; name: string; prefix: string };
+    expect(body.agentKey).toBe("agent-a");
+    expect(body.name).toBe("mem");
+    socket.hub({
+      t: "complete_req",
+      rid: "vm-dom",
+      name: body.name,
+      prefix: body.prefix,
+      deadlineMs: 2000,
+      origin: { listener: "loopback" },
+    });
+    await flushSocket();
+    const reply = decodeAgentFrame(
+      socket
+        .frames()
+        .filter((row) => row.t === "complete_reply")
+        .at(-1),
+    );
+    if (reply?.t !== "complete_reply") throw Error("fake wire did not return real service answer");
+    answers.push(reply);
+    expect(start).not.toHaveBeenCalled();
+    expect(spawn).not.toHaveBeenCalled();
+    return reply.ok ? jsonResponse(reply) : jsonResponse({ error: reply.code }, { status: 403 });
+  });
+  return { commands, dispose, fetchImpl, answers, native, businessReads, own, capabilities, start, spawn };
+}
+
+describe("V-M real memory completion HTTP → Composer + real CommandArgPalette", () => {
+  it.each(["ArrowDown", "ArrowUp", "click"])(
+    "%s applies only --list to the complete textarea prefix, never executes",
+    async (pick) => {
+      const f = await memoryHttp();
+      const { wrapper: w, control } = mountComposer({ commands: f.commands, fetchImpl: f.fetchImpl });
+      const run = vi.spyOn(control, "runCommand");
+      const send = vi.spyOn(control, "sendPrompt");
+      try {
+        await type(w, "/mem review ");
+        await soon();
+        expect(bodies(f.fetchImpl)).toEqual([{ agentKey: "agent-a", name: "mem", prefix: "review " }]);
+        expect(f.answers).toEqual([
+          {
+            t: "complete_reply",
+            rid: "vm-dom",
+            ok: true,
+            source: "own",
+            items: [{ value: "review --list", label: "--list", description: "只读列出当前建议" }],
+          },
+        ]);
+        expect(argRows(w)).toHaveLength(1);
+        expect(argRows(w)[0]!.text()).toContain("--list");
+        expect(argRows(w)[0]!.attributes("title")).toBe("review --list");
+        expect(argPanel(w).text()).not.toContain("--run");
+        expect(argPanel(w).find(".policy-chip").exists()).toBe(false);
+        if (pick === "click") await argRows(w)[0]!.trigger("click");
+        else {
+          await press(w, { key: pick });
+          expect(ta(w).attributes("aria-activedescendant")).toBe(argRows(w)[0]!.attributes("id"));
+          expect((await press(w, { key: "Enter" })).prevented).toBe(true);
+        }
+        expect(value(w)).toBe("/mem review --list");
+        expect(w.emitted("send")).toBeUndefined();
+        expect(run).not.toHaveBeenCalled();
+        expect(send).not.toHaveBeenCalled();
+        expect(f.native).not.toHaveBeenCalled();
+        expect(f.businessReads).toEqual([]);
+      } finally {
+        f.dispose();
+      }
+    },
+  );
+
+  it("without navigation Enter preserves original send emission, not implicit candidate selection", async () => {
+    const f = await memoryHttp();
+    const { wrapper: w, control } = mountComposer({ commands: f.commands, fetchImpl: f.fetchImpl });
+    const run = vi.spyOn(control, "runCommand");
+    const send = vi.spyOn(control, "sendPrompt");
+    try {
+      await type(w, "/mem review ");
+      await soon();
+      expect(argRows(w)).toHaveLength(1);
+      await press(w, { key: "Enter" });
+      expect(w.emitted("send")).toEqual([["/mem review ", "steer"]]);
+      expect(run).not.toHaveBeenCalled();
+      expect(send).not.toHaveBeenCalled();
+      expect(f.native).not.toHaveBeenCalled();
+    } finally {
+      f.dispose();
+    }
+  });
+
+  it("Escape dismisses the real candidate without changing textarea or emitting send", async () => {
+    const f = await memoryHttp();
+    const w = mountComposer({ commands: f.commands, fetchImpl: f.fetchImpl }).wrapper;
+    try {
+      await type(w, "/mem review ");
+      await soon();
+      expect(argRows(w)).toHaveLength(1);
+      await press(w, { key: "Escape" });
+      expect(argPanel(w).exists()).toBe(false);
+      expect(value(w)).toBe("/mem review ");
+      expect(w.emitted("send")).toBeUndefined();
+    } finally {
+      f.dispose();
+    }
+  });
+
+  it.each(["old-agent", "feature-off", "commands-disabled", "offline", "deny"] as const)(
+    "%s does not even read completion service/capability/backend",
+    async (gate) => {
+      const f = await memoryHttp({
+        deny: gate === "deny",
+        capless: gate === "old-agent",
+        webCommands: gate !== "commands-disabled",
+        ...(gate === "feature-off" ? { mode: "off" as const } : {}),
+      });
+      const commands = f.commands;
+      const w = mountComposer({
+        commands,
+        fetchImpl: f.fetchImpl,
+        commandsEnabled: gate !== "commands-disabled",
+        down: gate === "offline",
+      }).wrapper;
+      try {
+        await type(w, "/mem review ");
+        await settle();
+        expect(argRows(w)).toHaveLength(0);
+        expect(f.fetchImpl).not.toHaveBeenCalled();
+        expect(f.own).not.toHaveBeenCalled();
+        expect(f.capabilities).not.toHaveBeenCalled();
+        expect(f.start).not.toHaveBeenCalled();
+        expect(f.spawn).not.toHaveBeenCalled();
+        expect(f.native).not.toHaveBeenCalled();
+        expect(f.businessReads).toEqual([]);
+        expect(value(w)).toBe("/mem review ");
+      } finally {
+        f.dispose();
+      }
+    },
+  );
+
+  it.each(["jev-off", "review-capability-off", "--run"] as const)(
+    "%s HTTP service result yields no actionable DOM candidate",
+    async (gate) => {
+      const f = await memoryHttp({ jev: gate !== "jev-off", review: gate !== "review-capability-off" });
+      const w = mountComposer({ commands: f.commands, fetchImpl: f.fetchImpl }).wrapper;
+      try {
+        const text = gate === "--run" ? "/mem review --r" : "/mem review ";
+        await type(w, text);
+        await soon();
+        expect(f.fetchImpl).toHaveBeenCalledTimes(1);
+        expect(f.answers).toEqual([{ t: "complete_reply", rid: "vm-dom", ok: true, source: "own", items: [] }]);
+        expect(argRows(w)).toHaveLength(0);
+        expect(argPanel(w).find(".command-empty").exists()).toBe(true);
+        expect(value(w)).toBe(text);
+        expect(w.emitted("send")).toBeUndefined();
+        expect(f.native).not.toHaveBeenCalled();
+        expect(f.businessReads).toEqual([]);
+      } finally {
+        f.dispose();
+      }
+    },
+  );
 });

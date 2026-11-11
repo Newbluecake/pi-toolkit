@@ -59,7 +59,7 @@ pi install .
 | `/agent settings set <key> <value>` | 写入一个键（脚本可用）                                                    |
 | `/agent settings reset <key>`       | 恢复默认并移除文件覆盖（脚本可用）                                        |
 
-大多数设置**非 live**：改完需要 `/reload` 才生效（例外见「生效矩阵」）。`/agent budget` 是 budget 键的快捷别名。
+大多数设置**非 live**：改完需要 `/reload` 才生效（例外见「生效矩阵」）。推荐 `/agent settings`；`/agent budget` 仍是 budget 键的兼容快捷别名。
 
 ## 顶层模块开关与默认值
 
@@ -176,7 +176,7 @@ EOF
 ```
 
 - `webHub` 打开后 `/reload`，再 `/webhub open`（无 hub 在跑时自动拉起，默认 `127.0.0.1:7878`）。
-- `schedule` 打开后有 `/schedule` 命令与 AI 的 `schedule` 工具；AI 建/改的任务须你批准。
+- `schedule` 打开后有 `/schedule` 命令与 AI 的 `schedule` 工具；用户或 AI 创建、修改任务写入后立即生效，无独立 schedule 审批流程。
 - `traffic` 需 Node ≥22.13；库默认 `~/.pi/agent/records/traffic.db`，**库里含 API key 明文**，请自行控制本机访问。
 - web_search 凭证仍独立，droid 用 `FACTORY_API_KEY` 环境变量或 droid CLI 登录；飞书 webhook URL/secret 可放统一 `feishuNotify`，但只能手工编辑 JSON，不进入普通设置 UI；也可继续用环境变量。含凭据文件建议 0600。
 

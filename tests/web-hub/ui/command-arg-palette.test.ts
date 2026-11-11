@@ -1,6 +1,11 @@
 // @vitest-environment happy-dom
 import { mount } from "@vue/test-utils";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { createMemCommand } from "../../../src/memory/command.js";
+import type { JevCommandPort } from "../../../src/memory/jev/contracts.js";
+import { wrapCommandApi } from "../../../src/commands/capture.js";
+import { createCommandComplete, type ArgCompleter } from "../../../src/web-hub/agent/command-complete.js";
 import CommandArgPalette from "../../../src/web-hub/ui/src/components/control/CommandArgPalette.vue";
 
 /**
@@ -148,4 +153,83 @@ describe("CommandArgPalette render states", () => {
     expect(w.find(".arg-item script").exists()).toBe(false);
     expect(w.find(".arg-item i").exists()).toBe(false);
   });
+});
+
+describe("V-M real memory candidates keep policy chips and pick payloads in the real palette", () => {
+  it.each(["allow", "confirm", "deny"] as const)(
+    "%s policy is rendered without inventing --run or execution permission",
+    async (policy) => {
+      const reads: string[] = [];
+      const jev = new Proxy({} as JevCommandPort, {
+        get(_target, key) {
+          if (key === "isChildSession") return false;
+          reads.push(String(key));
+          throw Error("palette cannot query backend");
+        },
+      });
+      const command = createMemCommand({ jev });
+      const native = vi.spyOn(command, "handler");
+      const records = new Map<string, typeof command>();
+      const pi = {
+        registerCommand(name: string, c: typeof command) {
+          records.set(name, c);
+        },
+        getCommands: () => [...records].map(([name, c]) => ({ name, source: "extension", description: c.description })),
+      };
+      const raw = new Map<string, ArgCompleter>();
+      const owned = new Set<string>();
+      wrapCommandApi(pi as unknown as ExtensionAPI, () => undefined, owned, raw).registerCommand("mem", command);
+      expect(raw.get("mem")).toBe(command.getArgumentCompletions);
+      const service = createCommandComplete({
+        commands: pi,
+        own: () => raw,
+        tui: () => undefined,
+        mode: "toolkit",
+        overrides: { mem: policy },
+        memoryCapabilities: () => ({ sessionAdd: false, revisionReview: true }),
+      });
+      try {
+        const reply = await service.answer({
+          t: "complete_req",
+          rid: "vm-chip",
+          name: "mem",
+          prefix: "review ",
+          deadlineMs: 2000,
+          origin: { listener: "loopback" },
+        });
+        const w = mountPanel({
+          name: "mem",
+          usage: "review [--list]",
+          items: reply.ok ? reply.items : [],
+          listboxId: "vm-list",
+        });
+        expect(w.text()).not.toContain("--run");
+        if (policy === "deny") {
+          expect(reply).toMatchObject({ ok: false, code: "E_COMMAND_DENIED" });
+          expect(w.findAll(".arg-item")).toHaveLength(0);
+          expect(w.emitted("pick")).toBeUndefined();
+        } else {
+          expect(reply).toMatchObject({
+            ok: true,
+            source: "own",
+            items: [{ value: "review --list", label: "--list" }],
+          });
+          if (!reply.ok) throw Error("real service refused");
+          const rows = w.findAll(".arg-item");
+          expect(rows).toHaveLength(1);
+          expect(rows[0]!.attributes("title")).toBe("review --list");
+          expect(rows[0]!.attributes("id")).toBe("vm-list-opt-0");
+          expect(rows[0]!.find(".command-name").text()).toBe("--list");
+          expect(rows[0]!.find(".policy-chip").exists()).toBe(policy === "confirm");
+          if (policy === "confirm") expect(rows[0]!.find(".policy-chip").attributes("data-policy")).toBe("confirm");
+          await rows[0]!.trigger("click");
+          expect(w.emitted("pick")).toEqual([[reply.items[0]]]);
+        }
+        expect(native).not.toHaveBeenCalled();
+        expect(reads).toEqual([]);
+      } finally {
+        service.dispose();
+      }
+    },
+  );
 });

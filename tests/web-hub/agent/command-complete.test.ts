@@ -1,4 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { createMemCommand } from "../../../src/memory/command.js";
+import type { JevCommandPort } from "../../../src/memory/jev/contracts.js";
+import { parseMemorySettings } from "../../../src/memory/settings.js";
+import * as memoryFs from "../../../src/memory/safe-fs.js";
+import { wrapCommandApi } from "../../../src/commands/capture.js";
+import { resolveCommandPolicy } from "../../../src/web-hub/agent/command-policy.js";
+import { parseRevisionFlowCommand } from "../../../src/memory/command-flow.js";
+import { executeMemoryRead } from "../../../src/memory/command-readonly.js";
 import {
   createCommandComplete,
   type ArgCompleter,
@@ -488,5 +497,205 @@ describe("#65 completion write-port projection", () => {
     const blocked = await denied.answer(req("mem"));
     expect(blocked.ok).toBe(false);
     denied.dispose();
+  });
+});
+
+/** V-M: only registration through the production capture proxy populates RAW. */
+function capturedMemory(layout: "blocks" | "tiered" = "blocks", jevOn = true) {
+  const businessReads: string[] = [];
+  const jev = new Proxy({} as JevCommandPort, {
+    get(_target, key) {
+      if (key === "isChildSession") return false;
+      businessReads.push(String(key));
+      throw new Error("completion must not inspect Jev business ports");
+    },
+  });
+  const command = createMemCommand({
+    settings: parseMemorySettings({ layout }),
+    ...(jevOn ? { jev } : {}),
+  });
+  const native = vi.spyOn(command, "handler");
+  const registered = new Map<string, typeof command>();
+  const pi = {
+    registerCommand(name: string, value: typeof command) {
+      registered.set(name, value);
+    },
+    getCommands: () => [...registered].map(([name, c]) => ({ name, description: c.description, source: "extension" })),
+  };
+  const raw = new Map<string, ArgCompleter>();
+  const owned = new Set<string>();
+  wrapCommandApi(pi as unknown as ExtensionAPI, () => undefined, owned, raw).registerCommand("mem", command);
+  expect(owned).toEqual(new Set(["mem"]));
+  expect(raw.size).toBe(1);
+  expect(raw.get("mem")).toBe(command.getArgumentCompletions);
+  expect(registered.get("mem")?.getArgumentCompletions).toBe(command.getArgumentCompletions);
+  return { pi, command, raw, owned, businessReads, native };
+}
+
+describe("V-M real memory factory → capture RAW → completion/policy", () => {
+  it.each(["toolkit", "all"] as const)(
+    "%s uses the identical RAW function, never S-tui or memory I/O",
+    async (mode) => {
+      const f = capturedMemory();
+      const own = vi.fn(() => f.raw);
+      const tui = vi.fn(async () => ({ items: [], prefix: "review " }));
+      const fsReadsAndWrites: Array<{ mockRestore(): void }> = Object.entries(memoryFs)
+        .filter(([, value]) => typeof value === "function")
+        .map(([name]) => vi.spyOn(memoryFs, name as keyof typeof memoryFs));
+      const cc = createCommandComplete({
+        commands: f.pi,
+        own,
+        tui: () => ({ getSuggestions: tui }),
+        mode,
+        memoryCapabilities: () => ({ sessionAdd: false, revisionReview: true }),
+      });
+      try {
+        for (const prefix of ["review ", "review --l", "review\t--l"]) {
+          expect(await cc.answer(req("mem", prefix))).toEqual({
+            t: "complete_reply",
+            rid: "r-1",
+            ok: true,
+            source: "own",
+            items: [{ value: "review --list", label: "--list", description: "只读列出当前建议" }],
+          });
+        }
+        for (const prefix of ["review --r", "review --run", "review --list extra"])
+          expect(await cc.answer(req("mem", prefix))).toMatchObject({ ok: true, items: [] });
+        expect(f.command.getArgumentCompletions(`review ${"x".repeat(1025)}`)).toEqual([]);
+        expect(await cc.answer(req("mem", `review ${"x".repeat(1025)}`))).toMatchObject({
+          ok: false,
+          code: "E_BAD_REQUEST",
+        });
+        expect(await cc.answer(req("mem", "review\n"))).toMatchObject({ ok: false, code: "E_BAD_REQUEST" });
+        expect(own.mock.results.every((r) => r.value === f.raw)).toBe(true);
+        expect(own).toHaveBeenCalled();
+        expect(tui).not.toHaveBeenCalled();
+        expect(f.native).not.toHaveBeenCalled();
+        expect(f.businessReads).toEqual([]);
+        for (const spy of fsReadsAndWrites) expect(spy).not.toHaveBeenCalled();
+      } finally {
+        cc.dispose();
+        for (const spy of fsReadsAndWrites) spy.mockRestore();
+      }
+    },
+  );
+
+  it.each(["blocks", "tiered"] as const)(
+    "%s Jev on/off preserves discovery gate through real capture",
+    async (layout) => {
+      for (const jevOn of [false, true]) {
+        const f = capturedMemory(layout, jevOn);
+        const cc = createCommandComplete({
+          commands: f.pi,
+          own: () => f.raw,
+          tui: () => undefined,
+          mode: "toolkit",
+          memoryCapabilities: () => ({ sessionAdd: false, revisionReview: true }),
+        });
+        try {
+          const root = await cc.answer(req("mem", "r"));
+          expect(root.ok).toBe(true);
+          if (!root.ok) throw Error("completion refused");
+          expect(root.items.map((r) => r.value)).toEqual(jevOn ? ["restore", "review"] : ["restore"]);
+          expect(await cc.answer(req("mem", "review "))).toMatchObject({
+            ok: true,
+            items: jevOn ? [{ value: "review --list", label: "--list" }] : [],
+          });
+          expect(f.businessReads).toEqual([]);
+          expect(f.native).not.toHaveBeenCalled();
+        } finally {
+          cc.dispose();
+        }
+      }
+    },
+  );
+
+  it.each(["missing", "false", "throw"] as const)(
+    "review %s capability is fail-closed even with allow override",
+    async (state) => {
+      const f = capturedMemory();
+      const capabilities = vi.fn(() => {
+        if (state === "throw") throw Error("private backend unavailable");
+        return { sessionAdd: false, revisionReview: false };
+      });
+      const cc = createCommandComplete({
+        commands: f.pi,
+        own: () => f.raw,
+        tui: () => undefined,
+        mode: "toolkit",
+        overrides: { mem: "allow" },
+        ...(state === "missing" ? {} : { memoryCapabilities: capabilities }),
+      });
+      try {
+        expect(await cc.answer(req("mem", "review "))).toMatchObject({ ok: true, items: [] });
+        for (const args of ["review", "review --list"])
+          expect(
+            resolveCommandPolicy({ name: "mem", args, kind: "extension", overrides: { mem: "allow" } }).policy,
+          ).toBe("deny");
+        expect(f.businessReads).toEqual([]);
+        expect(f.native).not.toHaveBeenCalled();
+        if (state === "missing") expect(capabilities).not.toHaveBeenCalled();
+        else expect(capabilities).toHaveBeenCalledTimes(2);
+      } finally {
+        cc.dispose();
+      }
+    },
+  );
+
+  it("rechecks actual capability after awaiting the unchanged synchronous factory completer", async () => {
+    const f = capturedMemory();
+    let enabled = true;
+    const capabilities = vi.fn(() => ({ sessionAdd: false, revisionReview: enabled }));
+    const cc = createCommandComplete({
+      commands: f.pi,
+      own: () => f.raw,
+      tui: () => undefined,
+      mode: "toolkit",
+      memoryCapabilities: capabilities,
+    });
+    try {
+      const pending = cc.answer(req("mem", "review "));
+      expect(capabilities).toHaveBeenCalledTimes(1);
+      // raceCall has an await boundary even for the real, synchronous RAW factory function.
+      await Promise.resolve();
+      enabled = false;
+      expect(await pending).toMatchObject({ ok: true, items: [] });
+      expect(capabilities.mock.results.map((r) => r.value.revisionReview)).toEqual([true, false]);
+      expect(f.native).not.toHaveBeenCalled();
+    } finally {
+      cc.dispose();
+    }
+  });
+
+  it("deny override blocks real RAW lookup; native --run compatibility is not a Web grammar expansion", async () => {
+    const f = capturedMemory();
+    const own = vi.fn(() => f.raw);
+    const cc = createCommandComplete({
+      commands: f.pi,
+      own,
+      tui: () => undefined,
+      mode: "toolkit",
+      overrides: { mem: "deny" },
+      memoryCapabilities: () => ({ sessionAdd: false, revisionReview: true }),
+    });
+    try {
+      expect(await cc.answer(req("mem", "review "))).toMatchObject({ ok: false, code: "E_COMMAND_DENIED" });
+      expect(own).not.toHaveBeenCalled();
+      expect(parseRevisionFlowCommand("review")).toEqual({ kind: "review", listOnly: false });
+      expect(parseRevisionFlowCommand("review --list")).toEqual({ kind: "review", listOnly: true });
+      expect(parseRevisionFlowCommand("review --run")).toBeUndefined();
+      expect(
+        resolveCommandPolicy({ name: "mem", args: "review --run", kind: "extension", memoryRevisionReview: true })
+          .policy,
+      ).toBe("confirm");
+      expect(executeMemoryRead("review --run", "/nonexistent-v-m-project")).toMatchObject({
+        ok: false,
+        code: "E_MEM_WEB_UNSUPPORTED",
+      });
+      expect(f.native).not.toHaveBeenCalled();
+      expect(f.businessReads).toEqual([]);
+    } finally {
+      cc.dispose();
+    }
   });
 });

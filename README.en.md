@@ -62,7 +62,7 @@ Detailed guides live in [`docs/guide/`](docs/guide/) and are **written in Chines
 | Subagent tools                    | `Agent` / `get_run_result` / `steer_subagent` / `abort_subagent` / `extend_subagent_timeout` / `set_model`; background, extendable timeouts, optional worktree isolation.                                                                                                                                                                                                                                                                                                                           | [subagents](docs/guide/subagents.md#工具)                        |
 | Agent tree                        | Live subagent tree above the editor: phases, tool trail, cost, deadline highlights.                                                                                                                                                                                                                                                                                                                                                                                                                 | [subagents](docs/guide/subagents.md#agent-tree)                  |
 | SubagentWorkflow                  | Sandboxed JS orchestration (`agent()` / `parallel()` / `pipeline()`), background, journal replay. Off by default.                                                                                                                                                                                                                                                                                                                                                                                   | [subagents](docs/guide/subagents.md#subagentworkflow)            |
-| Scheduled tasks (`schedule`)      | Session-owned cron / one-off tasks: a background subagent produces a report, or a timed message; AI-created tasks need your approval; reports can go to Feishu. Off by default.                                                                                                                                                                                                                                                                                                                     | this README [schedule](#scheduled-tasks-schedule)                |
+| Scheduled tasks (`schedule`)      | Session-owned cron / one-off / interval tasks: a background subagent produces a report, or a timed message; creation and edits take effect immediately; reports can go to Feishu. Off by default.                                                                                                                                                                                                                                                                                                   | this README [schedule](#scheduled-tasks-schedule)                |
 | Anti-hang architecture            | Per-phase deadlines, escalation ladder, orphan registry, persistent notice delivery.                                                                                                                                                                                                                                                                                                                                                                                                                | [subagents](docs/guide/subagents.md#防卡死架构)                  |
 | Message fabric                    | Fire-and-forget messages between subagents along the agent tree (`message_agent`). Off by default.                                                                                                                                                                                                                                                                                                                                                                                                  | [subagents](docs/guide/subagents.md#message-fabric)              |
 | External droid agent              | Dispatch Factory droid as the virtual provider `droid/<model>`, with a model allowlist and quota gate. Off by default.                                                                                                                                                                                                                                                                                                                                                                              | [subagents](docs/guide/subagents.md#外部-droid-agent)            |
@@ -88,23 +88,34 @@ Detailed guides live in [`docs/guide/`](docs/guide/) and are **written in Chines
 
 ## Commands
 
-| Command                                                                  | What it does                                                                                                                                                                    |
-| ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `/agent` (`status [runId]` / `costs` / `settings` / `budget` / `reload`) | Run diagnostics, cost breakdown, settings editor, deferred reload                                                                                                               |
-| `/task <description>`                                                    | Start a background general-purpose subagent                                                                                                                                     |
-| `/mem`                                                                   | Project memory: `list` / `init` / `path` / `import` / `doctor` / `review` / `expired` / `migrate` / `restore --trash` / `restore --block`                                       |
-| `/tasklist`                                                              | Task panel (`clear` empties it)                                                                                                                                                 |
-| `/cache-ttl`                                                             | `on` / `off` / `auto` / `save` / `keepalive on\|off\|reset` / `status` / `probe`                                                                                                |
-| `/topic-switch`                                                          | Show state (`status`); `last [--send]` retrieves the last held request                                                                                                          |
-| `/webhub`                                                                | `status` / `open` / `restart` / `stop` / `start` / `token rotate` / `passwd` / `unlock` / `2fa` / `user` / `feishu`                                                             |
-| `/schedule`                                                              | Scheduled tasks (needs `schedule.enabled`): `list` / `add` / `edit` / `show` / `log` / `approve` / `pause` / `resume` / `rm` / `run` / `repair`; `--all` manages other sessions |
-| `/watch`                                                                 | Notify Feishu every time a task ends in this session                                                                                                                            |
-| `/feishu-test`                                                           | Send a Feishu test card                                                                                                                                                         |
-| `/pi-hud-refresh`                                                        | `git fetch` and refresh the HUD                                                                                                                                                 |
-| `/resume-recent`                                                         | Resume sessions from the last 48 hours (`--all` for everything)                                                                                                                 |
-| `/secure status`                                                         | Encrypted-session verdict and mount state (registered only when a `secure` section is configured)                                                                               |
-| `/record`                                                                | Traffic recording: `on` / `off` / `status` (needs `traffic.enabled`, Node ≥22.13; web `on` asks for confirmation)                                                               |
-| `/clear`                                                                 | Start a new session                                                                                                                                                             |
+Common: Pi's built-in `/new` and `/resume`; toolkit's `/agent status <id>`, `/agent settings`, `/task`, `/mem`, `/tasklist` and `/fast`. Pi `/settings` and toolkit `/agent settings` are separate.
+
+Advanced: `/agent costs`, memory `doctor` / `review` / `expired`, `/title`, `/reflex`, `/thread`, `/fabric`, and `/cache-ttl probe` / `measure`. Probe and measure start incur costs; measure status / estimate send no measurement requests. Recovery: `/agent reload now|cancel`, `/topic-switch last --send`, memory restore, `/schedule repair`, `/fabric fence reset`, `/webhub` administration, `/cache-ttl measure cancel` / `keepalive reset` / `off`, and `/record off`.
+
+Compatibility spellings remain accepted: `/clear`, `/agent budget`, `/agent <id>`, `/fast reset`, and `/mem session|hub list`; prefer `/new`, `/agent settings`, `/agent status <id>`, `/fast inherit`, and `/mem session|hub status` respectively. These groups are documentation, not hidden commands. Tool names, skills, Feishu commands and internal trampolines are not in this table.
+
+| Command           | Description                                                     |
+| ----------------- | --------------------------------------------------------------- |
+| `/agent`          | Status, costs and settings; prefer `status <id>` and `settings` |
+| `/cache-ttl`      | Cache TTL, `probe`, `measure` and keepalive                     |
+| `/clear`          | Compatibility entry for a new session                           |
+| `/fabric`         | Cross-session messaging and recovery (feature-gated)            |
+| `/fast`           | Service tier; prefer `inherit`                                  |
+| `/feishu-test`    | Send a Feishu test card                                         |
+| `/mem`            | Project and scoped memory                                       |
+| `/pi-hud-refresh` | Refresh HUD                                                     |
+| `/record`         | Traffic recording (when enabled)                                |
+| `/reflex`         | Introspection diagnostics (when enabled)                        |
+| `/resume-recent`  | Resume recent sessions                                          |
+| `/schedule`       | Session-owned scheduled tasks (when enabled)                    |
+| `/secure`         | Encrypted-session status (when configured)                      |
+| `/task`           | Start a background subagent                                     |
+| `/tasklist`       | Task panel                                                      |
+| `/thread`         | Thread subscriptions (when enabled)                             |
+| `/title`          | Automatic titles                                                |
+| `/topic-switch`   | Topic switching and request recovery                            |
+| `/watch`          | Feishu task-completion notifications                            |
+| `/webhub`         | Web Hub management (when enabled)                               |
 
 ## Configuration
 
@@ -201,7 +212,7 @@ pi's agent directory can be moved with `PI_CODING_AGENT_DIR` (default `~/.pi/age
 
 ## Scheduled tasks (schedule)
 
-Attach cron or one-off tasks to the current session. At the due time the session either dispatches a background subagent that runs in a clean context (its final reply is the report) or sends itself a message. Off by default (`schedule.enabled`, non-live: `/reload` after editing). When off there is no `schedule` tool, no `/schedule` command, and the system prompt and status bar are unchanged. Design (Chinese): [scheduled-reports plan](docs/dev/scheduled-reports/plan.md).
+Attach cron, one-off or interval tasks to the current session. At the due time the session either dispatches a background subagent that runs in a clean context (its final reply is the report) or sends itself a message. Off by default (`schedule.enabled`, non-live: `/reload` after editing). When off there is no `schedule` tool, no `/schedule` command, and the system prompt and status bar are unchanged. Design (Chinese): [scheduled-reports plan](docs/dev/scheduled-reports/plan.md).
 
 > The old global scheduler (`~/.pi/agent/pi-subagent-schedules.json`) is retired: it is no longer read or written.
 
@@ -211,47 +222,44 @@ Attach cron or one-off tasks to the current session. At the due time the session
 - `message`: sends a message into the owning session at the due time. While the session is busy it queues, keeping only the latest message per task. Not pushed to Feishu by default.
 - The `message` form and `--handoff` depend on a trigger capability of the host pi: when it is missing, creating a task with these forms (or switching a task to them) is refused (`E_UNSUPPORTED`), and the status bar shows `msg off` while such tasks exist. A main-session run triggered by a scheduled message or handoff is aborted after at most 3600 s (the cap is lifted if someone types into the session meanwhile); not configurable.
 - At most 8 tasks per session.
-- Time: a 5-field cron expression (`--cron`) or a one-off time (`--at YYYY-MM-DDTHH:mm`), evaluated in the task's time zone (`--tz`, an IANA name).
+- Time: 5-field cron (`--cron`) or one-off (`--at YYYY-MM-DDTHH:mm`) uses the task time zone (`--tz`, IANA). `--every` uses UTC elapsed time, whole seconds from 30 seconds to 365 days, without a time zone.
 
 **Ownership and missed runs**
 
-- A task belongs to the session that created it and only ticks and runs while that session (an interactive main session) is open. If the session is not open at the due time the run is **skipped**: no catch-up, no temporary session.
+- A task belongs to the session that created it and only ticks and runs while that session (an interactive main session) is open. Missed cron / at runs are skipped without a temporary session; eligible missed every intervals are coalesced into at most one catch-up run; none runs if the latest point is over 24 hours old or the task is busy.
 - The next time the session opens, a digest lists what was missed. If the hub is running and the Feishu bot is available, a "missed" notice is pushed, merged per task per hour.
 - If the session is closed mid-run, the run is recorded as "result unknown" and you are notified; it is never re-run.
 - Encrypted sessions, `--no-session` sessions and subagent child sessions never execute tasks; print / json mode can only view them.
 
-**Approval**
+**Effect**
 
-- Tasks you create with `/schedule add` take effect immediately.
-- **Tasks the AI creates or changes through the `schedule` tool need your approval.** Approval is bound to a hash of the task definition (`defHash`): if anything changes the schedule, form, prompt or other execution fields afterwards, the old approval stops matching. The AI has no approve action, and `resume` only un-pauses; it does not approve.
-- To approve, run `/schedule approve <id>` in the terminal (it shows the full definition and hash and asks for confirmation), or review it in the web panel. Editing a task that is still pending does not approve it as a side effect.
+Tasks created or edited by a user or AI take effect when written; there is no separate schedule approval flow. `defHash` is a definition/execution concurrency check, not an approval credential. Ownership, mode, enabled state and capability gates still apply.
 
 **Commands**
 
-| Subcommand                                                                  | What it does                                                                                                                                                                                                                               |
-| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `/schedule [list] [--all]`                                                  | List this session's tasks (`--all`: every session)                                                                                                                                                                                         |
-| `/schedule add <name> --cron "<expr>" \| --at <time> [options] -- <prompt>` | Create. Options: `--tz` `--form background\|message` `--feishu` / `--no-feishu` `--type` `--model` `--thinking` `--timeout <s>` `--handoff` `--worktree`                                                                                   |
-| `/schedule edit <id> [options] [-- <prompt>]`                               | Edit (owning session only)                                                                                                                                                                                                                 |
-| `/schedule show <id>` / `log [<id>]`                                        | Full definition and hash / run history                                                                                                                                                                                                     |
-| `/schedule approve <id> [<hash>]`                                           | Review and approve                                                                                                                                                                                                                         |
-| `/schedule pause\|resume\|rm <id>`                                          | Pause / resume / delete; pausing or deleting also cancels the task's queued, not-yet-sent scheduled messages                                                                                                                               |
-| `/schedule run <id>`                                                        | Run once now (owning session only, approved tasks only)                                                                                                                                                                                    |
-| `/schedule repair`                                                          | Quarantine a corrupt ledger; with a healthy ledger, reset a stuck message scheduler (dialog count, session fence). Local terminal only, always refused from the web; with cross-session enabled, `/fabric fence reset` does the same reset |
+| Subcommand                                                                                        | What it does                                                                                                                                                                                                                               |
+| ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `/schedule [list] [--all]`                                                                        | List this session's tasks (`--all`: every session)                                                                                                                                                                                         |
+| `/schedule add <name> --cron "<expr>" \| --at <time> \| --every <interval> [options] -- <prompt>` | Create. Options: `--tz` `--form background\|message` `--feishu` / `--no-feishu` `--type` `--model` `--thinking` `--timeout <s>` `--handoff` `--worktree`                                                                                   |
+| `/schedule edit <id> [options] [-- <prompt>]`                                                     | Edit (owning session only)                                                                                                                                                                                                                 |
+| `/schedule show <id>` / `log [<id>]`                                                              | Full definition and hash / run history                                                                                                                                                                                                     |
+| `/schedule pause\|resume\|rm <id>`                                                                | Pause / resume / delete; pausing or deleting also cancels the task's queued, not-yet-sent scheduled messages                                                                                                                               |
+| `/schedule run <id>`                                                                              | Run once now (owning session only, subject to execution gates)                                                                                                                                                                             |
+| `/schedule repair`                                                                                | Quarantine a corrupt ledger; with a healthy ledger, reset a stuck message scheduler (dialog count, session fence). Local terminal only, always refused from the web; with cross-session enabled, `/fabric fence reset` does the same reset |
 
-With `--all`, other sessions' tasks can be listed, shown, logged, paused, resumed, removed and approved; `edit` and `run` only work in the owning session.
+With `--all`, other sessions' tasks can be listed, shown, logged, paused, resumed, and removed; `edit` and `run` only work in the owning session.
 
 **Visibility**
 
 - The AI's `schedule` tool: `list` / `get` / `create` / `update` / `pause` / `resume` / `delete` / `run_now` / `history`.
 - A session-scoped task-definition section in the system prompt (definitions only, no next-run time, so the cached prefix is not disturbed; forked sessions do not inherit it).
 - TUI status bar, e.g. `sched 2 · next 08:00 · run 1 · pending 1`.
-- Web: the "schedule" button in the detail header opens a panel with tasks, run history and pending items. It is mostly read-only at first; the only write is approval. Needs `webHub.enabled`.
+- Web: the "schedule" button in the detail header opens a panel with tasks and run history, with pause, resume and delete. Edit is denied by default policy; an explicit override can change that default. Needs `webHub.enabled`.
 
 **Feishu**
 
 - Reports from background tasks are pushed by Web Hub to the Feishu bot owner's p2p chat; this needs `feishuBot` and the Web Hub control plane (see "Feishu bot settings" above). Reports finished while the hub was down, or in local mode, are pushed after the hub recovers if they are under 24 hours old.
-- Sending `/schedule` in the Feishu p2p chat returns a read-only task list, and `/schedule run <n>` runs one immediately (the owning session must be online; otherwise the reply says it is offline). The Feishu entry cannot create, edit or approve tasks.
+- Sending `/schedule` in the Feishu p2p chat returns a read-only task list, and `/schedule run <n>` runs one immediately (the owning session must be online; otherwise the reply says it is offline). The Feishu entry cannot create or edit tasks.
 
 **Settings** (all non-live)
 

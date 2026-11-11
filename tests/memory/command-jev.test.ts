@@ -4,8 +4,9 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import * as safeFs from "../../src/memory/safe-fs.js";
 import { createMemCommand } from "../../src/memory/command.js";
 import type { MemoryPaths } from "../../src/memory/paths.js";
 import { parseMemorySettings } from "../../src/memory/settings.js";
@@ -323,4 +324,41 @@ describe("default listing + completions (I9 surface)", () => {
     await plain.handler("", ctx);
     expect(notifications[2]!.message).not.toMatch(/\njev:/);
   });
+});
+
+test.each(["blocks", "tiered"] as const)("%s Jev review completion is static, bounded and port-free", (layout) => {
+  const port = stubPort();
+  const router = vi.fn(async () => ({ handled: false as const }));
+  const afterWrite = vi.fn();
+  const cmd = createMemCommand({
+    settings: parseMemorySettings({ layout }),
+    jev: port,
+    scopedRouter: router,
+    onAfterWrite: afterWrite,
+  });
+  const spies = Object.entries(safeFs)
+    .filter(([, value]) => typeof value === "function")
+    .map(([name]) => vi.spyOn(safeFs, name as keyof typeof safeFs));
+  try {
+    const expected = [{ value: "review --list", label: "--list", description: "只读列出当前建议" }];
+    for (const prefix of ["review ", "review --l", "review\t--l"])
+      expect(cmd.getArgumentCompletions(prefix)).toEqual(expected);
+    for (const prefix of [
+      "review --r",
+      "review --run",
+      "review --list extra",
+      "review \n",
+      `review ${"x".repeat(1025)}`,
+    ])
+      expect(cmd.getArgumentCompletions(prefix)).toEqual([]);
+    expect(cmd.getArgumentCompletions("review")[0]?.description).toBe("只读展示当前建议；可用 --list");
+    expect(cmd.getArgumentCompletions("expired")[0]?.description).toBe("只读列出到期日期与待核对条件");
+    expect(port.calls).toEqual([]);
+    expect(router).not.toHaveBeenCalled();
+    expect(afterWrite).not.toHaveBeenCalled();
+    for (const spy of spies) expect(spy).not.toHaveBeenCalled();
+  } finally {
+    for (const spy of spies) spy.mockRestore();
+  }
+  expect(createMemCommand({ settings: parseMemorySettings({ layout }) }).getArgumentCompletions("review ")).toEqual([]);
 });

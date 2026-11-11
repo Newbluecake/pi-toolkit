@@ -21,7 +21,8 @@
 | `/webhub token rotate`   | 轮换访问 token                                                                                                                                      |
 | `/webhub passwd`         | 设置 LAN 登录密码                                                                                                                                   |
 | `/webhub unlock`         | 解除 LAN 登录锁定                                                                                                                                   |
-| `/webhub 2fa <op>`       | LAN 二次验证（仅本地 TUI）：`status` / `enroll [--replace]` / `feishu on\|off` / `recovery` / `reset --confirm` / `forget-ips` / `repair --confirm` |
+| `/webhub 2fa status`     | 查看 LAN 二次验证状态；网页调用仍受原有策略限制                                                                                                     |
+| `/webhub 2fa <op>`       | LAN 二次验证敏感操作（仅本地 TUI 内）：`enroll [--replace]` / `feishu on\|off` / `recovery` / `reset --confirm` / `forget-ips` / `repair --confirm` |
 | `/webhub user <op>`      | LAN 账号（仅本地 TUI）：`list` / `delete <用户名>`                                                                                                  |
 
 ## 查看（P1，只读）
@@ -89,12 +90,12 @@
 ### 局域网安全
 
 - **客户端 IP 白名单**（`webHub.lan.allowClients`，逗号分隔的 IP / CIDR，如 `192.168.32.0/24,10.8.0.3`）：留空 = 不限制；全部写错 = 全部拒绝。在局域网监听和每个代理端口上生效，被拒的连接在发出任何字节前断开。经可信反向代理时按 `X-Forwarded-For` 判断。
-- **二次验证（2FA）**：在本地 TUI 执行 `/webhub 2fa enroll`，用验证器 App 扫码、输入 6 位码确认，同时得到一组一次性恢复码（`/webhub 2fa recovery` 重新生成）；`/webhub 2fa feishu on` 另开飞书审批（需要飞书机器人）。绑定后，**从新 IP 登录**（该账号 30 天内没登录过的 IP）输完密码还要过一道验证：验证器 6 位码、飞书审批卡片或恢复码三选一；已知 IP 只需密码。首次绑定会清空该账号的已知 IP，每台设备都要验证一次。
+- **二次验证（2FA）**：在本地 TUI 执行 `/webhub 2fa enroll`，用验证器 App 扫码、输入 6 位码确认，同时得到一组一次性恢复码（`/webhub 2fa recovery` 重新生成并作废旧恢复码）；`/webhub 2fa feishu on` 另开飞书审批（需要飞书机器人）。绑定后，**从新 IP 登录**（该账号 30 天内没登录过的 IP）输完密码还要过一道验证：验证器 6 位码、飞书审批卡片或恢复码三选一；已知 IP 只需密码。首次绑定会清空该账号的已知 IP，每台设备都要验证一次。
 - **已知 IP 按账号记**：一个账号的登录不会让另一个账号在同一 IP 上免验证。**被踢下线的设备**（在「登录会话」里被下线）其 IP 会从该账号的已知列表移除，下次登录必须重新二次验证；自己退出登录不影响。`/webhub 2fa forget-ips` 清空所有已知 IP。
 - **登录会话管理**：设置页「登录会话」卡片列出本账号的所有已登录设备（浏览器 / 系统、IP、登录时间、最近活跃、验证方式），可单个下线或「下线其他所有设备」；下线即时生效，连同 SSE、代理会话与 HTML 预览链接一起失效。会话闲置超时 `webHub.lan.sessionIdleMinutes`（默认 720）。
 - **账号**：会话列表与 2FA 都按账号独立。`/webhub user list` 查看账号，`/webhub user delete <用户名>` 删除多余账号（主账号与最后一个账号不可删，删除会立即下线其全部会话）；`/webhub passwd` 输入一个新用户名时会先确认是否新建第二个账号。
 - **飞书安全告警**（顶层 `feishuBot.securityAlerts`，默认 `true`，需飞书机器人）：新 IP 登录、白名单拒绝、会话被下线、改密码 / 2FA 变更等事件推送到飞书。
-- 2FA 与账号相关的子命令一律只在本地 TUI 执行，网页 / LAN 触发的调用一律拒绝（与 `webCommandPolicy` 无关）。改动非 live：`/reload` 后 `/webhub restart`。
+- 2FA 敏感操作与账号管理受本地 TUI 等原有门控；`/webhub 2fa status` 不应被视为仅 TUI。网页 / LAN 调用仍受原有策略限制（与 `webCommandPolicy` 无关）。改动非 live：`/reload` 后 `/webhub restart`。
 
 ## 安装到手机 / 桌面（PWA）
 
@@ -117,3 +118,7 @@ UI 自带 `manifest.webmanifest` 与全套图标（含 iOS 的 `apple-touch-icon
 ## 设计文档
 
 [arch](../dev/web-hub/arch.md) · [control-plan](../dev/web-hub/control-plan.md) · [lan-plan](../dev/web-hub/lan-plan.md) · [vue-plan](../dev/web-hub/vue-plan.md) · [spawn](../dev/web-hub-spawn/) · [restore](../dev/web-hub-spawn-restore/plan.md) · [session-history](../dev/web-hub-session-history/plan.md) · [preview](../dev/web-hub-preview/) · [html-preview](../dev/web-hub-html-preview/plan.md) · [proxy](../dev/web-hub-proxy/plan.md) · [worktree-diff](../dev/worktree-diff/plan.md) · [worktree-graph](../dev/worktree-graph/plan.md) · [bash-jobs-panel](../dev/web-hub/bash-jobs-panel-plan.md) · [keepalive 面板](../dev/cache-ttl-keepalive/webhub-plan.md) · [privacy](../dev/web-hub-privacy/plan.md) · [avatar](../dev/web-hub-avatar/plan.md)
+
+## 本地管理与恢复
+
+常用 `/webhub status`；高级管理使用 `start`、`stop`、`restart`。恢复入口包括 `token rotate`、`unlock` 及 `2fa recovery` / `reset` / `repair`；重置和修复具有破坏性，按原命令确认执行。补全只提示语法，不授予执行权限。

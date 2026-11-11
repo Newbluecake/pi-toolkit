@@ -52,8 +52,8 @@
 `sessionNav.enabled` 默认 `true`，仅主会话 TUI。
 
 - `/resume-recent`：只列最近 48 小时的会话（`--all` 全量；裸输 `resume` 等效）。
-- `/clear` 开新会话（裸输 `clear` 等效）；裸 `exit` 直接退出。
-- 会话列表标题清洗 skill 信封，subagent 会话标注 `[sub:类型]`。
+- 推荐 Pi 内置 `/new` 开新会话；`/clear`（裸输 `clear` 等效）仍是兼容入口。裸 `exit` 直接退出。
+- 会话列表标题清洗 skill 信封，并过滤 subagent 会话。
 
 ## topic-switch
 
@@ -68,7 +68,12 @@
 
 ## 自动标题
 
-`title.enabled` 默认 `true`：用小模型（`title.model`，默认 `zai-coding-cn/glm-5.3-flash`）给会话生成并按需刷新标题（`refreshEveryInputs` 4、`refreshAfterMinutes` 15、最多 `maxRefreshes` 5 次）。
+`title.enabled` 默认 `true`：用小模型（`title.model`，默认 `zai-coding-cn/glm-5.3-flash`）给会话生成并按需刷新标题（`refreshEveryInputs` 4、`refreshAfterMinutes` 15、最多 `maxRefreshes` 5 次）。主会话可用 `/title` 查看和管理标题；即使 `title.enabled=false` 命令仍注册，但自动生成关闭。
+
+## 高级命令导航
+
+- `/reflex`：只读自省功能的状态与诊断入口。`reflex.enabled` 默认关闭；仅在主会话启用且安全域为 plain 时注册。
+- `/thread`：飞书群话题订阅管理入口。仅主会话在 `fabric.enabled` 和 `fabric.threads.enabled` 均有效开启时注册；secure / locked 域强制关闭。
 
 ## 延迟 `/reload`
 

@@ -84,7 +84,7 @@ v3 提供以下五种操作，具体参数以工具描述为准：
 /mem list                         项目记忆列表
 /mem path                         实际项目记忆目录
 /mem doctor                       按布局做健康检查和元数据诊断
-/mem review [--list|--run]         只读展示建议，--run 也不启动整理
+/mem review [--list]               只读展示建议
 /mem expired                      只读展示到期日期与待核对条件
 /mem restore --block <id or stored name>
 /mem migrate --status              配置、磁盘格式与迁移状态
@@ -92,6 +92,7 @@ v3 提供以下五种操作，具体参数以工具描述为准：
 /mem migrate --report              查看已发布迁移报告
 ```
 
+- **兼容**：`/mem review --run` 仍受理，但只读、不调用模型、不运行整理；推荐 `review` 或 `review --list`。scoped 概览推荐 `/mem session status` / `/mem hub status`，`list` 与空参数仍兼容。
 - **review**：合并现有 Jev 侧车建议（包括非治理类型）与即时治理建议，核对锚点并去重。不是只看 review-lite 治理子集；查看不会运行 sweep/分类器，不会交互式改写。
 - **expired**：展示 active 块的已过期 expires 和所有 until，区分 user/agent；同一块可占两行。已取代/归档的块不参与；命令本身不延期、不删除。
 - **restore --block**：恢复已取代或归档的单块。恢复不会递归恢复它曾取代的其他块，删除取代者也不会自动撤销其关系。

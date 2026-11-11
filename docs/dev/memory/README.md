@@ -435,6 +435,8 @@ is raw `closeSync`, not idempotent; a second close propagates `EBADF`.
 
 ### `/mem review` 与 `/mem expired` 只读展示
 
+Jev-on 补全仅推荐 `review --list`；手输 `review --run` 仍由原 native handler 只读受理，不代表 Web grammar 或执行授权改变。补全只查静态词表，不调用业务端口或读取存储。
+
 这两个命令只列出结果，不运行 sweep、分类器或交互式写入；`--run` 也只显示现有建议。blocks 的 review 合并现有侧车建议和 `planSweep` 的瞬时治理建议，并沿用 review-lite 的锚点有效性检查；非治理类型同样可见。expired 独立列出 active 块的过期 `expires` 和所有 `until` 条件，按权威标识；同一块可占两行。已取代或归档的块不参与。files 布局使用现有条目和建议索引；未启用建议索引时明确提示不可用。日期判定仍沿用既有规则，until 不是日期到期断言。
 
 ### #36 I1 事件与预算装配（2026-11-08）

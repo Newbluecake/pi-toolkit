@@ -52,7 +52,7 @@ run 活跃期间，编辑器上方常驻实时 agent tree（`fleetWidget`，默�
 
 ## 定时任务
 
-定时任务已改为会话级功能：默认关闭，`schedule.enabled` 打开后用 `/schedule` 命令和 AI 的 `schedule` 工具管理，任务属于创建它的会话，AI 创建或修改的任务须你批准，并会在终端 / 网页 / 飞书私聊当场请你确认（任一处批准或拒绝，其余收回）。用法、批准规则与设置见 [README 的「定时任务」](../../README.md#定时任务schedule)。
+定时任务默认关闭；`schedule.enabled` 打开后用 `/schedule` 和 AI 的 `schedule` 工具管理，任务归属创建会话，用户或 AI 创建和修改写入后立即生效，无独立审批流程。时间、执行条件与设置见 [README 的「定时任务」](../../README.md#定时任务schedule)。
 
 旧的全局引擎（`~/.pi/agent/pi-subagent-schedules.json`）已退役，不再读取也不再写入，原文件里的任务不会迁移。
 
@@ -101,3 +101,5 @@ subagent 之间的可选 fire-and-forget 消息：`"fabric": { "enabled": true }
 - 权限：droid 以高自治级别运行并自动批准权限请求，同时会读取你的全局 skills / AGENTS.md / MCP，使用前请确认可接受。
 
 完整说明：[docs/dev/external-agent/README.md](../dev/external-agent/README.md)。
+
+常用入口推荐 `/agent status <id>` 和 `/agent settings`；裸 `/agent <id>` 与 `/agent budget` 仍兼容。Pi 内置 `/settings` 与 toolkit `/agent settings` 分别配置不同范围。

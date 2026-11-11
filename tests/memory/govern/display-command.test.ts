@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { createMemCommand } from "../../../src/memory/command.js";
 import { memoryDirFor } from "../../../src/memory/paths.js";
@@ -49,7 +49,7 @@ function setup() {
       },
     },
   } as unknown as ExtensionCommandContext;
-  return { dir, ctx, cmd: createMemCommand({ paths }), messages };
+  return { dir, ctx, paths, cmd: createMemCommand({ paths }), messages };
 }
 it("shows all suggestion kinds and four expiry quadrants without writing, including --run", async () => {
   const { dir, cmd, ctx, messages } = setup();
@@ -91,17 +91,21 @@ it("shows all suggestion kinds and four expiry quadrants without writing, includ
     }),
   );
   const before = snapshot(dir);
+  await cmd.handler("review", ctx);
+  await cmd.handler("review --list", ctx);
   await cmd.handler("review --run", ctx);
   await cmd.handler("expired", ctx);
+  expect(messages[0]).toBe(messages[1]);
+  expect(messages[2]).toBe(`${messages[0]}\n只展示现有建议，不会启动整理。`);
   expect(messages[0]).toContain("review: 4 suggestions");
   expect(messages[0]).toContain("[duplicate]");
   expect(messages[0]).toContain("[expired-user]");
   expect(messages[0]!.match(/\[until-check\]/g)).toHaveLength(2);
-  expect(messages[1]).toContain("expired: 4 entries");
+  expect(messages[3]).toContain("expired: 4 entries");
   for (const label of ["user expires", "user until", "agent expires", "agent until"])
-    expect(messages[1]).toContain(`[${label}]`);
-  expect(messages[1]).not.toContain(old.id);
-  expect(messages[1]).not.toContain("topic.999");
+    expect(messages[3]).toContain(`[${label}]`);
+  expect(messages[3]).not.toContain(old.id);
+  expect(messages[3]).not.toContain("topic.999");
   expect(snapshot(dir)).toEqual(before);
 });
 it("empty blocks produce explicit results without creating a sidecar", async () => {
@@ -195,5 +199,82 @@ it("shows pure transient governance and excludes today and future expires", asyn
   expect(expired).toContain(past.id);
   expect(expired).not.toContain(today.id);
   expect(expired).not.toContain(future.id);
+  expect(snapshot(dir)).toEqual(before);
+});
+
+it("files Jev review variants are read-only without model, sweep, confirmation or writes", async () => {
+  const { dir, ctx, messages } = setup();
+  rmSync(join(dir, "blocks"), { recursive: true });
+  writeFileSync(join(dir, "core.md"), "# Core\n\n- item <!-- mem lesson expires=2020-01-01 -->\n");
+  const list = vi.fn(() => []);
+  const run = vi.fn();
+  const classify = vi.fn();
+  const confirm = vi.fn();
+  const select = vi.fn();
+  const onAfterWrite = vi.fn();
+  const jev = { review: { list, run } } as unknown as import("../../../src/memory/jev/contracts.js").JevCommandPort;
+  const command = createMemCommand({
+    paths: { memoryRoot: join(dir, ".."), ccProjectsRoot: join(dir, "..", "cc") },
+    jev,
+    onAfterWrite,
+  });
+  const testCtx = {
+    ...ctx,
+    modelRegistry: { classify },
+    ui: { ...ctx.ui, confirm, select },
+  } as unknown as ExtensionCommandContext;
+  const before = snapshot(dir);
+  for (const args of ["review", "review --list", "review --run", "expired"]) await command.handler(args, testCtx);
+  expect(messages.slice(0, 3)).toEqual(["review: no suggestions", "review: no suggestions", "review: no suggestions"]);
+  expect(messages[3]).toContain("expired: 1 entries");
+  expect(list).toHaveBeenCalledTimes(3);
+  expect(run).not.toHaveBeenCalled();
+  expect(classify).not.toHaveBeenCalled();
+  expect(confirm).not.toHaveBeenCalled();
+  expect(select).not.toHaveBeenCalled();
+  expect(onAfterWrite).not.toHaveBeenCalled();
+  expect(snapshot(dir)).toEqual(before);
+});
+
+it("blocks Jev review variants never invoke side effects or change fixture bytes", async () => {
+  const { dir, ctx, paths, messages } = setup();
+  createBlockLocked(
+    join(dir, "blocks"),
+    "topic",
+    { authority: "agent", expires: "2020-01-01" },
+    "expired",
+    new Date("2020-01-01T00:00:00Z"),
+  );
+  const run = vi.fn();
+  const list = vi.fn();
+  const classify = vi.fn();
+  const confirm = vi.fn();
+  const select = vi.fn();
+  const onAfterWrite = vi.fn();
+  const jev = { review: { list, run } } as unknown as import("../../../src/memory/jev/contracts.js").JevCommandPort;
+  const command = createMemCommand({ paths, jev, onAfterWrite });
+  const testCtx = {
+    ...ctx,
+    modelRegistry: { classify },
+    ui: { ...ctx.ui, confirm, select },
+  } as unknown as ExtensionCommandContext;
+  const before = snapshot(dir);
+  for (const args of ["review", "review --list", "review --run", "expired"]) await command.handler(args, testCtx);
+  expect(messages[0]).toBe(messages[1]);
+  expect(messages[2]).toBe(`${messages[0]}\n只展示现有建议，不会启动整理。`);
+  expect(messages[3]).toContain("expired: 1 entries");
+  for (const spy of [run, list, classify, confirm, select, onAfterWrite]) expect(spy).not.toHaveBeenCalled();
+  expect(snapshot(dir)).toEqual(before);
+});
+
+it("content-readonly child continues rejecting review and expired before discovery", async () => {
+  const { dir, ctx, paths, messages } = setup();
+  const onAfterWrite = vi.fn();
+  const cmd = createMemCommand({ paths, isChildSession: true, contentReadonly: true, onAfterWrite });
+  const before = snapshot(dir);
+  for (const args of ["review", "review --list", "review --run", "expired"]) await cmd.handler(args, ctx);
+  expect(messages).toHaveLength(4);
+  for (const message of messages) expect(message).toContain("E_CHILD_READONLY");
+  expect(onAfterWrite).not.toHaveBeenCalled();
   expect(snapshot(dir)).toEqual(before);
 });
