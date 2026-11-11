@@ -7,6 +7,154 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-11-11
+
+### ⚠️ Breaking Changes
+
+- **memory**: remove tidy and retain strict trash recovery (`4bfe0e3f`)
+- remove the /goal feature (`ae36440a`)
+
+### Added
+
+- **memory**: wire native startup diagnostics and Web revision review (`e933c327`)
+- **memory**: bind revision streaming to final transport authorization (`84d69e83`)
+- **memory**: add exact-confirmed multi-step revision review flow (`4a058b8d`)
+- **memory**: retain live proposals and fence confirmed revision effects (`ec4844fd`)
+- **memory**: add bounded streaming proxy transport (`d84ec9a6`)
+- **web-hub**: encode bounded memory flow outcome facts (`ebd62bc4`)
+- **schedule**: add bounded offline schema shape diagnostics (`0553c2b3`)
+- **memory**: add bounded read-only revision startup diagnostics (`c18bfe5d`)
+- **memory**: restore revisions through exact native confirmation (`c2b8492b`)
+- **memory**: wire guarded revision suggestions through the shared client (`1edc96a7`)
+- **memory**: add bounded revision discovery and batch host (`d080ec61`)
+- **memory**: bind automatic retire to durable generation evidence (`76b799e4`)
+- **memory**: add audited single-action revision commits (`6d292477`)
+- **memory**: add frozen revision proposals and review custody (`26d0ae86`)
+- **memory**: add durable revision audit and raw-byte recovery (`cf28c624`)
+- **memory**: define revision audit contracts and bounded raw-byte reads (`4bbaeded`)
+- **memory**: add controlled revision generation and independent coverage validation (`9cbe57e8`)
+- **web-hub**: stream verified child throughput through a bounded live bridge (`b89cbecc`)
+- **feishu-notify**: merge notification configuration with legacy fallback (`38a0434e`)
+- **memory**: add opt-in bounded client budgets and verified provenance (`c2b1b16e`)
+- **web-hub**: expose an activity port on the dispatch proof (`ba698411`)
+- **memory**: aggregate background revision triggers (`1135d0da`)
+- **schedule**: expose interval triggers end to end (`efc51534`)
+- **web-hub**: record subagent token throughput (`f4780b82`)
+- **schedule**: interval kernel with one-shot catch-up, plus a real secure gate (`5afcde30`)
+- **memory**: publish the v4 memory surface on the blocks layout (`3265ef39`)
+- **fabric**: cap child reports at three and echo the remaining budget (`14e95e95`)
+- **memory**: add the v4 memory surface behind the unified dispatcher (`f6ff86ee`)
+- **memory**: show the write a person is approving, not its internal plan (`9e1a83d0`)
+- **memory**: let an oversized section be repaired instead of freezing the block (`7bc2bdd9`)
+- **memory**: make blocks the layout a new session gets (`2f7a3658`)
+- **web-hub**: show how long a subagent's tool call took (`e2254522`)
+- **memory**: count background as relevant when it prevents a misunderstanding (`76dc42bd`)
+- **memory**: confirm a web memory write end to end and wire the seam (`efcd261a`)
+- **web-hub**: let a tracking card be dismissed on this side (`92cec216`)
+- **memory**: act on the progress signals the session already produces (`acabb9ef`)
+- **web-hub**: give the browser a way to watch and cancel a memory write (`e92be5d0`)
+- **memory**: show every review suggestion the store actually holds (`6ae35450`)
+- **memory**: gate web memory writes behind a bound, cancellable confirmation (`7b1d0e40`)
+- **memory**: review user rules once after a migration, within a bound (`bbd8de4a`)
+- **memory**: remind once per migration to reload (`63bb5f82`)
+- **memory**: report a real budget pressure signal from the renderer (`fd281c2b`)
+- **memory**: collect governance events into a single coalesced turn (`aa4ad37f`)
+- **web-hub**: keep more of a task description before truncating (`bb708ff3`)
+- **memory**: give web memory writes a bounded, verifiable commit path (`b502576f`)
+- **fabric**: tell the root when a wake was delivered but not acted on (`1a1b18e4`)
+- **memory**: widen read-only /mem and settle its completions (`8d5ef92c`)
+- **memory**: run read-only /mem commands from the web hub (`0a5bf852`)
+- **fabric**: explain cross-session tool mistakes instead of repeating them (`8bea72d3`)
+- **memory**: add the confirm kernel for web memory commands (`e8d19b58`)
+- **web-hub**: show total output speed for anthropic-messages too (`a7711ec7`)
+- **web-hub**: accept chat-completions generation proof for the speed chip (`17333898`)
+- **archive**: archive only the excess over the count limit (`35cd1b75`)
+
+### Fixed
+
+- **memory**: clarify inline authority and classify invalid metadata (`d2e0d033`)
+- **tools**: retain run identity in model-switch refusal guidance (`cebf26f2`)
+- **web-hub**: retain archived fleet runs within explicit display budgets (`45b44aad`)
+- **web-hub**: distinguish visible fleet counts from omitted runs (`a65e4a99`)
+- **web-hub**: preserve fleet omission counts across SSE replay (`9a4e9458`)
+- **runtime**: preserve known effects in run-control failures (`df3a0218`)
+- **fabric**: provide safe next steps for rejected message operations (`c9e72fc6`)
+- **tools**: clarify memory capacity and stale ownership refusals (`7f254698`)
+- **web-tools**: redact sensitive error and progress details (`0d44e1cf`)
+- **runtime**: reject structured submissions after capture closes (`6d0a3141`)
+- **todo**: report persistence uncertainty after in-memory changes (`4c20674f`)
+- **schedule**: preserve uncertain writes and avoid unsafe retry guidance (`d2fdde2b`)
+- **web-hub**: invalidate transcript memo on generation metadata changes (`e360bc0f`)
+- **runtime**: allow twenty minutes for model progress by default (`0245f9c6`)
+- **schedule**: accept empty create id placeholders without weakening validation (`760c82fd`)
+- **memory**: bind revision identity and preserve semantic dismissal guards (`1f653f13`)
+- **memory**: preserve unknown provenance in audited revision suggestions (`f64a7199`)
+- **memory**: expose lifecycle activity from the human dispatch owner (`8fa58ede`)
+- **memory**: expose incremental durations in seconds with legacy compatibility (`862865ce`)
+- **thread**: preserve unknown effects and confirm queued posts before replay (`dd604113`)
+- **schedule**: return bounded actionable error guidance without echoing input (`b5fe9d4b`)
+- **web-hub**: stop treating a task named E_TIMEOUT as a failed save (`f6f2a21e`)
+- **web-hub**: show tokens/s in the subagent run drawer (`30bc63a2`)
+- **memory**: give every scoped memory error code actionable guidance (`f478f75c`)
+- **memory**: give a section label the same room as the heading it duplicates (`7eee4e20`)
+- **memory**: make restore --trash look in the block trash (`e0993f03`)
+- **memory**: stop oversized legacy metadata from blocking reads (`2769ad14`)
+- **memory**: actually cancel a jev call when its deadline passes (`50cbb50b`)
+- **memory**: stop a review from clobbering what it did not own (`c3364fca`)
+- **memory**: stop a stale judgement from replacing newer content (`3be7522d`)
+- **web-hub**: keep the chosen drawer panel across a reload (`9d1532cf`)
+- **todo**: remind about stale in-progress tasks sooner (`6552c7c7`)
+- **memory**: stop rejecting hub writes that pass an explicit authority (`976804fc`)
+
+### Changed
+
+- **preview**: reduce path scanning allocation and context checks (`7aba691e`)
+- **memory**: route both memory tools through one dispatcher (`21daaa6c`)
+- **memory**: read the session file through the safe wrappers (`d1bf01d6`)
+- **web-hub**: fold the scheduled tasks into one summary line (`4bf79ab3`)
+- **web-hub**: drop the scheduled-task detail button (`2126c9c6`)
+- **commands**: show /mem and /cache-ttl options that actually apply (`8a05a52d`)
+- **web-hub**: lay scheduled tasks out as a timeline list (`94259a20`)
+- **web-hub**: drop the fleet drawer pin toggle (`57162f99`)
+
+### Documentation
+
+- **research**: archive Claude Dream findings and implementation proposal (`f5160daa`)
+- **tools**: document refusal guidance and offline diagnostic boundaries (`eb781edf`)
+- **dev-flow**: let GPT models verify (`834a3349`)
+- **schedule**: design interval triggers and one-shot catch-up (`cc6dd503`)
+- **memory**: design configurable background conflict correction (`1ba4d532`)
+- **memory**: design one unified memory tool over the three scopes (`68753f48`)
+- **memory**: correct three places the architecture note disagreed with the code (`c2ed4ce8`)
+- **memory**: note that the trash route is fixed, not pending (`22d2961c`)
+- **memory**: finish the governance guidance the design asked for (`f8c0037c`)
+- **memory**: record a G2 run that fails on recall (`bda19e02`)
+- **memory-jev**: describe only the block layout (`87d260a4`)
+- **memory-jev**: teach the skill the block layout it now writes into (`c14b737a`)
+- **dev-flow**: drop references to a skill that no longer exists (`74664e55`)
+- **dev-flow**: keep capabilities in the skill and providers in memory (`2f35a9be`)
+- **memory**: flip the default layout without waiting for G1 (`9db8964d`)
+- **memory**: give the migration runbook steps that cannot lose data (`0fe86e77`)
+- **memory**: record the permissions granted to #50 self-correction (`891522a6`)
+- **memory**: record why G1 cannot reach its positive-sample floor (`d1ae1cf8`)
+- **memory**: freeze the P5b signal contract before wiring it (`41846026`)
+- **todo**: record why idle recovery still cannot be switched on (`eb105111`)
+- **commands**: stop advertising slash options that do not exist (`1922aa29`)
+- **memory**: record what the web /mem seams actually delivered (`1996647e`)
+
+### Tests
+
+- **feishu**: await list handler completion before teardown (`f4d2f583`)
+- **runtime**: align integration consumers with structured run errors (`50b75bf7`)
+- catch up with the fabric and memory contract changes (`cc61c848`)
+- **memory**: make the G2 recall levers measurable and its misses attributable (`242e8c01`)
+- **memory**: allow the approved classifier budget without widening defaults (`b3900c24`)
+- **config**: teach the pins about the bounded jev queue (`4b3abdac`)
+- **todo**: keep idle recovery switched off in production (`584b929d`)
+- **memory**: harden the read-only and lifecycle proofs (`7cf40229`)
+
+Stats: 53 feat, 33 fix, 8 refactor/perf, 22 docs, 8 test, 2 breaking
+
 ## [0.11.0] - 2026-11-08
 
 ### ⚠️ Breaking Changes
@@ -1847,7 +1995,8 @@ First public release: anti-hang subagent extension for pi — drop-in replacemen
 
 Stats: 30 feat, 12 fix, 1 refactor, 1 docs, 3 chore/test · 970+ tests (state-machine transition matrix, seeded property invariants, widget rendering)
 
-[Unreleased]: https://github.com/Newbluecake/pi-toolkit/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/Newbluecake/pi-toolkit/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/Newbluecake/pi-toolkit/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/Newbluecake/pi-toolkit/compare/v0.10.6...v0.11.0
 [0.10.6]: https://github.com/Newbluecake/pi-toolkit/compare/v0.10.5...v0.10.6
 [0.10.5]: https://github.com/Newbluecake/pi-toolkit/compare/v0.10.4...v0.10.5
