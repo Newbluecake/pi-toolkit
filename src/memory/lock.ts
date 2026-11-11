@@ -1,7 +1,6 @@
 // Directory-scoped mutual exclusion for the memory module (optimize-plan
 // §3.2, todo #22 P0-b). ALL memory-directory mutations (v2 create/
-// str_replace/insert/delete/rename/write/append, tidy apply, `--frontmatter`
-// apply, restore, `/mem import`) run their synchronous `body` inside
+// str_replace/insert/delete/rename/write/append, restore, `/mem import`) run their synchronous `body` inside
 // `withMemoryDirLock` so two concurrent callers on the same canonical
 // directory never interleave. Reads (view/search/list, injection, doctor)
 // never take the lock — they only ever see a fully-replaced file (renameSync
@@ -28,7 +27,7 @@ import {
 
 /** M-T4: age is never proof of death. Only a same-host owner whose
  * pid+starttime (or legacy pid alone) is provably dead may be reclaimed;
- * cross-host and unprovable owners require explicit --break-lock. */
+ * cross-host and unprovable owners require manual operator inspection. */
 const RETRY_MS = 25;
 const DEFAULT_TIMEOUT_MS = 2_000;
 /** `body` running longer than this WARNs (not an error — the lock is still
@@ -109,7 +108,7 @@ export async function withMemoryDirLock<T>(dir: string, body: () => T, opts: Mem
       const since = holder ? new Date(holder.at).toISOString() : "unknown";
       const ownerText = holder === undefined ? "unknown owner" : `pid ${holder.pid} on ${holder.host}`;
       throw new MemoryError(
-        `memory dir busy: lock ${resolvePath(dir, ".lock")} is held by ${ownerText} since ${since} (owner cannot be verified) — if no pi process holds it, run /mem tidy --break-lock`,
+        `memory dir busy: lock ${resolvePath(dir, ".lock")} is held by ${ownerText} since ${since} (owner cannot be verified) — inspect the owner manually; remove the lock only after verifying that no process holds it`,
       );
     }
     await sleep(RETRY_MS);

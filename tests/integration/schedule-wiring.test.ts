@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import activate from "../../src/index.js";
 import type { RunOutcome } from "../../src/core/types.js";
@@ -558,4 +558,82 @@ describe("refusals", () => {
     expect(existsSync(join(schedDir, SID))).toBe(false);
     await emit(h, "session_shutdown", { type: "session_shutdown" }, c.ctx);
   });
+});
+
+describe("interval P2 production producer through actual activate, reopen and executors", () => {
+  it.each(["background", "message"] as const)(
+    "reopens a five-hour %s backlog, executes only the latest point once and keeps v2",
+    async (form) => {
+      const A = Date.now() - 5 * 3_600_000,
+        D = 5_400_000;
+      // Produce through the real registered tool, close for five hours, then reopen.
+      const wall = vi.spyOn(Date, "now").mockReturnValue(A);
+      const first = await openSession();
+      let task: any;
+      try {
+        const result = await first.tool({
+          action: "create",
+          name: "90 minute task",
+          every: "90m",
+          form,
+          feishu: true,
+          prompt: "report once",
+        });
+        expect(result.details.ok).toBe(true);
+        task = first.ledger().tasks[0];
+        expect(task.when).toEqual({ kind: "every", everyMs: D, anchorAt: A });
+        expect(first.ledger().v).toBe(2);
+        expect(first.ledger().runs).toHaveLength(0);
+      } finally {
+        await first.shutdown();
+        wall.mockRestore();
+        resetGlobals();
+      }
+      const s = await openSession();
+      try {
+        await until(() => s.ledger().runs.length === 1, "one durable aggregate run");
+        expect(s.ledger().occ[task.id]).toMatchObject({ decidedThrough: A + 3 * D, missedTotal: 2, firedTotal: 1 });
+        expect(s.ledger().runs[0]).toMatchObject({
+          scheduledAt: A + 3 * D,
+          catchUp: { cause: "reopen", dueCount: 3, fromExclusive: A, through: A + 3 * D },
+        });
+        if (form === "background") {
+          await until(() => s.ledger().runs[0].state === "completed", "aggregate background report");
+          expect(harness.requests).toHaveLength(1);
+          expect(harness.requests[0].prompt).toContain("合并 3 次到期，本次只执行一次");
+        } else {
+          await emit(s.h, "before_agent_start", userTrigger(), s.c.ctx);
+          await until(() => s.h.sent.some((m) => m.message.details?.kind === "message"), "aggregate wake");
+          const wake = s.h.sent.find((m) => m.message.details?.kind === "message")!;
+          expect(wake.message.content).toContain("合并 3 次到期，本次只执行一次");
+          s.c.state.idle = false;
+          await emit(s.h, "before_agent_start", wakeEvent(wake.message.details), s.c.ctx);
+          await emit(s.h, "agent_start", { type: "agent_start" }, s.c.ctx);
+          await emit(
+            s.h,
+            "message_start",
+            { message: { role: "custom", customType: "subagent:schedule", details: wake.message.details } },
+            s.c.ctx,
+          );
+          await emit(
+            s.h,
+            "message_end",
+            { message: { role: "assistant", content: [{ type: "text", text: "one aggregate result" }] } },
+            s.c.ctx,
+          );
+          s.c.state.idle = true;
+          await emit(s.h, "agent_settled", { aborted: false }, s.c.ctx);
+          await until(() => s.ledger().runs[0].state === "settled", "aggregate message report");
+          expect(s.h.sent.filter((m) => m.options?.triggerTurn === true)).toHaveLength(1);
+        }
+        const run = s.ledger().runs[0];
+        expect(readFileSync(join(schedDir, SID, run.reportFile), "utf8")).toContain("合并 3 次到期，本次只执行一次");
+        expect(s.ledger().v).toBe(2);
+        await emit(s.h, "turn_start", { type: "turn_start", turnIndex: 1, timestamp: Date.now() }, s.c.ctx);
+        expect(s.ledger().runs).toHaveLength(1);
+      } finally {
+        await s.shutdown();
+      }
+    },
+  );
 });

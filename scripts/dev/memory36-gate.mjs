@@ -20,6 +20,7 @@ import { homedir, tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { MessageChannel } from "node:worker_threads";
+import { candidateAudit } from "./memory36-candidate-audit.mjs";
 
 export const BASELINE = "122de638";
 const ROOT = resolve(fileURLToPath(new URL("../..", import.meta.url)));
@@ -168,7 +169,7 @@ export function metricsG2(labels, runs) {
  * via an explicitly supplied callback AND the environment switch. No SDK import
  * or credential access happens on replay. Cache stores answers, not credentials.
  */
-export function createReplyCache({ dir, namespace, live = false, transport, maxCalls = 400, signal }) {
+export function createReplyCache({ dir, namespace, live = false, transport, maxCalls = 400, signal, observeLookup }) {
   let calls = 0,
     hits = 0;
   const missing = new Set();
@@ -183,10 +184,12 @@ export function createReplyCache({ dir, namespace, live = false, transport, maxC
         const cached = JSON.parse(readFileSync(path, "utf8"));
         check(cached.key === key && cached.requestHash === digest(request), "cache fingerprint mismatch");
         validateAnswers(context.questions, cached.result);
+        observeLookup?.({ contextHash: digest(context), key, elapsedMs: cached.elapsedMs, found: true });
         await replayDelay(cached.elapsedMs, options.signal, signal);
         hits++;
         return cached.result;
       }
+      observeLookup?.({ contextHash: digest(context), key, found: false });
       if (!live || process.env.PI_TOOLKIT_MEMORY36_GATE_LIVE !== "1") {
         missing.add(key);
         throw new Error("NOT-EVALUATED: uncached classifier request");
@@ -818,7 +821,7 @@ export function clientFor(p, config) {
 /** Thin turn-local view: retain the production client's lastModel and sticky
  * budget, but own every wire subscription and every FINAL ask outcome. Registry
  * always comes from this call's request, never a cached session context. */
-export function turnClient(client, identity) {
+export function turnClient(client, identity, observations) {
   const outcomes = [],
     subscriptions = new Set();
   let callseq = 0;
@@ -845,8 +848,11 @@ export function turnClient(client, identity) {
         resolved: false,
       };
       outcomes.push(record);
+      const observation = observations ? { callseq: record.callseq, req, outcome: undefined } : undefined;
+      if (observation) observations.push(observation);
       try {
         const outcome = await client.ask(req);
+        if (observation) observation.outcome = outcome;
         record.ok = outcome.ok;
         record.answeredIds = Object.keys(outcome.answers ?? {});
         let valid = false;
@@ -1095,8 +1101,13 @@ export async function runTurn({
   summaryDir,
   entryIds = [],
   relevantIds = [],
+  auditEntries,
+  cacheLookups,
 }) {
-  const scoped = turnClient(sharedClient, identity);
+  const lookupStart = cacheLookups?.length ?? 0;
+  const observedCalls = auditEntries ? [] : undefined;
+  const observedChat = auditEntries ? [] : undefined;
+  const scoped = turnClient(sharedClient, identity, observedCalls);
   const client = scoped.client;
   let complete = false,
     closedReason = "not-evaluated",
@@ -1106,6 +1117,7 @@ export async function runTurn({
     ...registry,
     streamSimple: (...args) => {
       p2Dispatched++;
+      if (observedChat) observedChat.push(args[1]);
       return registry.streamSimple(...args);
     },
   };
@@ -1137,6 +1149,7 @@ export async function runTurn({
   // snapshot tags were prepared above, and only real before_agent_start is
   // under evaluation. Fresh activation/segment per independently labelled turn.
   let renderInfo;
+  let observedBudgetStats;
   let rendered;
   let renderRoot;
   const oldMemoryRoot = process.env.ARMORY_MEMORY_ROOT;
@@ -1213,8 +1226,9 @@ export async function runTurn({
       frozenBlocks: new Map(),
       getActiveTools: () => ["memory", "read"],
       stripInlineMeta: true,
-      onRender: (_cwd, _block, info) => {
+      onRender: (_cwd, _block, info, _resident, budgetStats) => {
         renderInfo = info;
+        if (auditEntries) observedBudgetStats = budgetStats;
       },
     });
     rendered = section.provider({ ctx, promptText: "", optionsCwd: dir });
@@ -1273,6 +1287,31 @@ export async function runTurn({
         hardFailures: registry.hardFailures(),
         subscriptions: scoped.subscriptions(),
       });
+      if (auditEntries) {
+        try {
+          persistTurnSummary(`${summaryDir}-candidate-audit`, identity, {
+            diagnostic: candidateAudit({
+              entries: auditEntries,
+              calls: observedCalls,
+              redact: p.redactForJev,
+              renderInfo,
+              budgetStats: observedBudgetStats,
+              settings,
+              config,
+              outboundLimit: p.OUTBOUND_MAX_TOTAL_BYTES,
+              chat: observedChat,
+              messages,
+              cacheLookups: cacheLookups?.slice(lookupStart) ?? [],
+              contextHash: digest,
+              rendered,
+              prompt,
+            }),
+          });
+        } catch {
+          // Observability must not change the gate's result or disclose data.
+          console.error("candidate audit unavailable");
+        }
+      }
     }
   }
 }
@@ -1291,9 +1330,14 @@ async function runG2({
   now,
   summaryDir,
   evalId,
+  candidateAuditEnabled,
+  cacheLookups,
+  recallTopK,
+  recallThreshold,
 }) {
   const runs = [];
-  const clients = { old: clientFor(oldP, config), new: clientFor(p, config) };
+  const newConfig = withRecallThreshold(withRecallTopK(config, recallTopK), recallThreshold);
+  const clients = { old: clientFor(oldP, config), new: clientFor(p, newConfig) };
   await clients.old.probe(registry, signal);
   await clients.new.probe(registry, signal);
   const ledgers = { old: new Map(), new: new Map() };
@@ -1346,11 +1390,22 @@ async function runG2({
           summaryDir,
           entryIds: [...prep.snap.map].map(([id, e]) => [e.hash, id]),
           relevantIds: row.relevantIds,
+          ...(candidateAuditEnabled
+            ? {
+                auditEntries: [...prep.snap.map].map(([id, entry]) => {
+                  const item = prep.snap.items.find((value) => value.id === id);
+                  const parsed =
+                    blocks && item ? blockApi.parseBlockFile(`${item.block.id}.md`, item.block.raw) : undefined;
+                  return { id, entry, rev: parsed && !("stray" in parsed) ? parsed.rev : undefined };
+                }),
+              }
+            : {}),
           dir,
           prompt: prompts.get(row.turnId) ?? row.prompt,
           previousPrompt: row.previousPrompt,
           registry,
-          config,
+          config: blocks ? newConfig : config,
+          cacheLookups,
           settings: { ...settings, layout: blocks ? "blocks" : "tiered" },
           now,
           signal,
@@ -1638,6 +1693,19 @@ export function createFatalRejectionLatch({ audit, abort, setExitCode }) {
     forcedExit: (code) => (tripped ? 2 : code),
   };
 }
+export function validateRunBudgets(maxCalls, timeoutMs, maxClassifierUsd) {
+  check(
+    Number.isInteger(maxCalls) &&
+      maxCalls > 0 &&
+      maxCalls <= 800 &&
+      Number.isInteger(timeoutMs) &&
+      timeoutMs > 0 &&
+      timeoutMs <= 900000,
+    "invalid run budgets",
+  );
+  check(maxClassifierUsd > 0 && maxClassifierUsd <= 1.5, "classifier cap exceeds approved budget");
+}
+
 /** The SAME listener lifetime used by main and offline regressions. */
 export async function withFatalLatchScope({ audit, controller, setExitCode }, fn) {
   const latch = createFatalRejectionLatch({ audit, abort: () => controller.abort(), setExitCode });
@@ -1648,11 +1716,34 @@ export async function withFatalLatchScope({ audit, controller, setExitCode }, fn
     process.removeListener("unhandledRejection", latch.onFatalRejection);
   }
 }
+export function withRecallTopK(config, topK) {
+  return topK === undefined ? config : { ...config, recall: { ...config.recall, maxEntries: topK } };
+}
+export function withRecallThreshold(config, threshold) {
+  return threshold === undefined ? config : { ...config, recall: { ...config.recall, threshold } };
+}
+
+/** Experimental override of only the new G2 U-layer entry cap; absent leaves production settings unchanged. */
+export function parseRecallTopK(value) {
+  if (value === undefined) return undefined;
+  check(/^(?:[1-9]|10)$/.test(value), "invalid recall top-k (expected integer 1..10)");
+  return Number(value);
+}
+
+export function parseRecallThreshold(value) {
+  if (value === undefined) return undefined;
+  check(
+    /^0\.\d+$/.test(value) && Number(value) >= 0.5 && Number(value) <= 0.99,
+    "invalid recall threshold (expected 0.5..0.99)",
+  );
+  return Number(value);
+}
+
 export async function main(args = process.argv.slice(2)) {
   const [mode, ...rest] = args;
   if (mode === "--help") {
     console.log(
-      "memory36-gate.mjs g1|g2 --data DIR --baseline-dist /tmp/.../dist [--max-calls N] [--timeout-ms N]\nOffline requires complete exact-request cache. Live requires PI_TOOLKIT_MEMORY36_GATE_LIVE=1. See pg-report.md for corpus schema and baseline build.",
+      "memory36-gate.mjs g1|g2 --data DIR --baseline-dist /tmp/.../dist [--max-calls N] [--timeout-ms N]\nG2 experiments: [--recall-top-k 1..10] [--recall-threshold 0.5..0.99] affect only the new variant.\nOffline requires complete exact-request cache. Live requires PI_TOOLKIT_MEMORY36_GATE_LIVE=1. See pg-report.md for corpus schema and baseline build.",
     );
     return 0;
   }
@@ -1662,6 +1753,14 @@ export async function main(args = process.argv.slice(2)) {
     check(rest[i]?.startsWith("--") && text(rest[i + 1]), "invalid arguments");
     options[rest[i].slice(2)] = rest[i + 1];
   }
+  check(
+    options["candidate-audit"] === undefined || options["candidate-audit"] === "on",
+    "invalid candidate audit flag",
+  );
+  const recallTopK = parseRecallTopK(options["recall-top-k"]);
+  const recallThreshold = parseRecallThreshold(options["recall-threshold"]);
+  check(recallTopK === undefined || mode === "g2", "recall top-k is G2 only");
+  check(recallThreshold === undefined || mode === "g2", "recall threshold is G2 only");
   const data = resolve(options.data ?? DEFAULT_DATA);
   const read = (name) => readFileSync(join(data, name), "utf8");
   const frozen = JSON.parse(read("freeze.json"));
@@ -1732,15 +1831,7 @@ export async function main(args = process.argv.slice(2)) {
   const live = process.env.PI_TOOLKIT_MEMORY36_GATE_LIVE === "1";
   const maxCalls = Number(options["max-calls"] ?? 400),
     timeoutMs = Number(options["timeout-ms"] ?? 900000);
-  check(
-    Number.isInteger(maxCalls) &&
-      maxCalls > 0 &&
-      maxCalls <= 400 &&
-      Number.isInteger(timeoutMs) &&
-      timeoutMs > 0 &&
-      timeoutMs <= 900000,
-    "invalid run budgets",
-  );
+  validateRunBudgets(maxCalls, timeoutMs, Number(options["max-classifier-usd"] ?? 0.5));
   const agentDir = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi/agent");
   const settingPath = options.settings ?? join(agentDir, "pi-toolkit.json");
   const userSettings = existsSync(settingPath) ? JSON.parse(readFileSync(settingPath, "utf8")).memory : undefined;
@@ -1760,10 +1851,6 @@ export async function main(args = process.argv.slice(2)) {
     proxyHash: digest(config.proxy),
     day: new Date(now).toISOString().slice(0, 10),
   };
-  check(
-    Number(options["max-classifier-usd"] ?? 0.5) > 0 && Number(options["max-classifier-usd"] ?? 0.5) <= 0.5,
-    "classifier cap exceeds approved budget",
-  );
   check(
     Number(options["max-chat-usd"] ?? 0.28) > 0 &&
       Number(options["max-chat-usd"] ?? 0.28) <= 0.28 &&
@@ -1816,6 +1903,7 @@ export async function main(args = process.argv.slice(2)) {
   const scratch = mkdtempSync(join(tmpdir(), "memory36-gate-"));
   let cache;
   let chat;
+  const cacheLookups = options["candidate-audit"] === "on" ? [] : undefined;
   try {
     return await withFatalLatchScope(
       {
@@ -1839,7 +1927,15 @@ export async function main(args = process.argv.slice(2)) {
                     audit,
                   )
                 : undefined;
-              cache = createReplyCache({ dir: join(data, "cache"), namespace, live, transport, maxCalls, signal });
+              cache = createReplyCache({
+                dir: join(data, "cache"),
+                namespace,
+                live,
+                transport,
+                maxCalls,
+                signal,
+                ...(cacheLookups ? { observeLookup: (event) => cacheLookups.push(event) } : {}),
+              });
               chat =
                 mode === "g2"
                   ? await createChatCache({
@@ -1877,6 +1973,10 @@ export async function main(args = process.argv.slice(2)) {
                 corpus,
                 labels,
                 prompts,
+                candidateAuditEnabled: options["candidate-audit"] === "on",
+                cacheLookups,
+                recallTopK,
+                recallThreshold,
                 scratch,
                 registry,
                 config,
@@ -1921,6 +2021,15 @@ export async function main(args = process.argv.slice(2)) {
                 corpusHash: digest(rawCorpus),
                 labelsHash: digest(rawLabels),
                 configHash: digest(config),
+                ...(recallTopK === undefined && recallThreshold === undefined
+                  ? {}
+                  : {
+                      ...(recallTopK === undefined ? {} : { experimentalRecallTopK: recallTopK }),
+                      ...(recallThreshold === undefined ? {} : { experimentalRecallThreshold: recallThreshold }),
+                      experimentalNewConfigHash: digest(
+                        withRecallThreshold(withRecallTopK(config, recallTopK), recallThreshold),
+                      ),
+                    }),
                 at: new Date(now).toISOString(),
                 parameters: {
                   SUPERSEDE_AUTO_P: governance.SUPERSEDE_AUTO_P,

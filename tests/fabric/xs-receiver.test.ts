@@ -224,7 +224,7 @@ describe("xs-receiver: pipeline stage rejections (§8.4)", () => {
     expect(h.receiver.deliver(h.input()).effect).toBe("applied");
   });
 
-  it("stage 5: each fence window ⇒ none{fenced:<name>}; goal only downgrades a wake", () => {
+  it("stage 5: each fence window ⇒ none{fenced:<name>}", () => {
     for (const opener of ["session_before_compact", "session_before_tree", "session_before_switch"] as const) {
       const h = makeHarness();
       h.fence.onEvent({ type: opener });
@@ -234,22 +234,6 @@ describe("xs-receiver: pipeline stage rejections (§8.4)", () => {
         woke: false,
       });
     }
-    const h = makeHarness();
-    const goalFence = createSessionFence({ clock: h.clock, ports: { goal: () => true } });
-    // goal active: plain delivery passes, wake degrades — pinned in the truth-table suite; here the reject-only half:
-    const receiver2 = new XsReceiver({
-      sessionId: SESSION,
-      membership: h.membership,
-      fence: goalFence,
-      inbox: h.inbox,
-      recvPerHour: 30,
-      wakesInPerHour: 12,
-      host: h.host,
-      dedup: h.dedup,
-      clock: h.clock,
-      warn: () => {},
-    });
-    expect(receiver2.deliver(h.input()).effect).toBe("applied"); // delivery itself never blocked by goal
   });
 
   it("stage 6: recvPerHour exhausted ⇒ none{inbound_rate}; inbox full ⇒ none{inbox_full}", () => {

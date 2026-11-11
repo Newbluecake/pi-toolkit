@@ -53,7 +53,7 @@ it("topic-switch held prompt rejects xs with none/fenced:topic_switch until real
     settings: () => DEFAULT_TOPIC_SWITCH_SETTINGS,
     titleModel: "",
     warmth: { assess: () => ({ state: "cold", reason: "ttl-elapsed", nextWriteTtl: "5m" }) },
-    stack: () => ({ activeRuns: () => 0, backgroundBash: () => 0, goalBusy: () => false }),
+    stack: () => ({ activeRuns: () => 0, backgroundBash: () => 0 }),
     remote: () => undefined,
   });
   for (const h of handlers.get("session_start") ?? []) h({ reason: "startup" }, ctx);

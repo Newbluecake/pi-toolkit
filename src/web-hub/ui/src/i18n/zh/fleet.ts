@@ -10,12 +10,13 @@ type Messages<T> = { [K in keyof T]: string };
 const fleet = {
   commandsTitle: "后台命令",
   activityTitle: "活动入口",
-  pin: "固定面板",
-  unpin: "取消固定",
 
   panelTitle: "Agents",
   running: "{n} 个运行中",
   totalCost: "共 {n} 个 · {cost}",
+  listedCost: "已列出 {n} 个 · 已列出成本 {cost}",
+  omittedActive: "另有 {n} 个活跃项未列出",
+  omittedTerminal: "另有 {n} 个终态项未列出",
   showFinished: "显示已完成的 {n} 个",
   treeLabel: "Agents",
   archive: "归档",

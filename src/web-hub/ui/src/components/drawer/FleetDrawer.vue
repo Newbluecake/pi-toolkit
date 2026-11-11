@@ -85,7 +85,7 @@ export function useFleetDrawerOpen(mode: Readonly<Ref<FleetDrawerMode>>): FleetD
 <script setup lang="ts">
 /** #41/#42: production passes an explicit panel and effective mode; undefined panel
  * preserves legacy combined callers. Keyboard/outside/focus remain owned here, while
- * transient hover/pinned intent belongs to AgentDetail's useActivityRail. */
+ * open intent belongs to AgentDetail's useActivityRail. */
 import { inject, nextTick, onBeforeUnmount, onMounted, provide } from "vue";
 import type { FleetRowWire } from "@protocol/messages.js";
 import type { FleetDrawerEmits, FleetDrawerProps } from "../../contracts.js";
@@ -112,18 +112,16 @@ import { buildFleetTree, orphanRunIds, runTranscriptAvailable, FLEET_ARCHIVE, FL
 import RunHeader from "./RunHeader.vue";
 import RunTranscript from "./RunTranscript.vue";
 
-const props = defineProps<FleetDrawerProps & { readonly floating?: boolean }>();
+const props = defineProps<FleetDrawerProps>();
 const emit = defineEmits<FleetDrawerEmits>();
+// Capture before stopped run-open clicks, and include native keyboard activation of
+// buttons and summaries. Passive clicks and data-driven fold changes are not intent.
+function onDrawerClick(event: MouseEvent): void {
+  if (event.target instanceof Element && event.target.closest("button, summary, a, input, select, textarea")) {
+    emit("intent");
+  }
+}
 const { t } = useI18n();
-
-/** Task60 (compact-panel-plan §2.2): `floating` 是 AgentDetail 派生的 peek/held 真值
- * （panelFloating = peeking || held，生产必传），驱动 data-floating 几何、bridge 渲染与
- * fill 预算重测。旧独立调用未传时以 peeking 回退 —— 不能由 mode 猜测：中宽 manual
- * overlay 与 held overlay 同为 data-mode="overlay"，只有 floating 能区分。
- * 注：用 `||` 而非方案文案里的 `??`：Vue 运行时把缺席的 Boolean prop 规范化为 false
- * （不是 undefined），`??` 永远短路到 false、回退不可达；而生产口径下 floating=false
- * 时 peeking 必为 false（floating = peeking || held），`||` 与 `??` 语义在真实调用上等价。 */
-const resolvedFloating = computed(() => props.floating || (props.peeking ?? false));
 
 const rootEl = ref<HTMLElement | null>(null);
 
@@ -393,10 +391,8 @@ watch(
 onBeforeUnmount(() => unobserveFill?.());
 
 // A mode/width or panel transition invalidates cached line heights; measure the rendered panel.
-// Task60: resolvedFloating 也入列 —— held 释放时 effectiveMode 仍可能是 overlay，但
-// floating 从 true→false 改变了可用宽度（right72+桥8 ⇒ right12），必须清行高缓存重测。
 watch(
-  () => [props.panel, props.mode, props.open, resolvedFloating.value] as const,
+  () => [props.panel, props.mode, props.open] as const,
   () => {
     lastAgentRowPx = lastBashRowPx = lastAgentFoldPx = lastBashFoldPx = 0;
     fillBudget.value = null;
@@ -433,7 +429,6 @@ provide(FLEET_SELECT, {
   canOpen,
   select(runId: string): void {
     if (!canOpen.value) return;
-    emit("promote");
     hub?.selectRun?.(props.agent.key, runId);
   },
 });
@@ -463,21 +458,6 @@ function onClose(): void {
   emit("close");
   if (props.panel !== undefined) void nextTick(restoreTrigger);
 }
-// Keep the pointerdown target still until its click handler has run. Capture queues the
-// release even when FleetTree stops bubbling; a microtask never changes layout mid-dispatch.
-function finishInteraction(): void {
-  queueMicrotask(() => emit("interaction-end"));
-}
-function promoteInteraction(ev: Event): void {
-  const target = ev.target;
-  if (!(target instanceof Element) || target.closest(".drawer-close, .activity-pin") !== null) return;
-  // Task60 guard-fix: HEAD 语义是「仅交互元素才 promote」——非交互区域（drawer-title/head/
-  // run-open 等）pointerdown 不升级，peek 由 hover 状态机自行收起；否则反例 1024 hover peek
-  // 下点标题会误 pin 并迁 header（right 952→1012 跳 60px），focusin 也走不到 .run-open 升级。
-  if (target.closest("button,a,input,textarea,select,[tabindex]") === null) return;
-  emit("promote", ev.type === "pointerdown");
-}
-
 /** 「← 子 agent 列表」:退选 run(订阅由 useHub 拆除),抽屉保持打开、回到树视图。 */
 function onBackToTree(): void {
   hub?.selectRun?.(props.agent.key, null);
@@ -519,7 +499,7 @@ function onPointer(ev: PointerEvent): void {
   if (target === null) return;
   if (rootEl.value?.contains(target) === true) return;
   if (target instanceof Element && target.closest('[aria-controls="fleet-drawer"]') !== null) return;
-  if (!props.peeking) emit("close"); // outside clicks retain their own natural focus
+  emit("close"); // outside clicks retain their own natural focus
 }
 
 watch(
@@ -592,41 +572,19 @@ watch(
     class="fleet-drawer"
     :data-mode="mode"
     :data-panel="panel"
-    :data-peeking="peeking || undefined"
-    :data-floating="resolvedFloating || undefined"
-    @pointerenter="emit('peek-keep')"
-    @pointerleave="emit('peek-end')"
-    @pointerdown.capture="promoteInteraction"
-    @click.capture="finishInteraction"
-    @pointercancel="finishInteraction"
-    @focusin="promoteInteraction"
     :data-open="open || undefined"
     :role="mode === 'docked' ? undefined : 'dialog'"
     :aria-modal="mode === 'fullscreen' ? true : undefined"
     :aria-label="t(panel === 'bash' ? 'fleet.commandsTitle' : 'fleet.panelTitle')"
+    @click.capture="onDrawerClick"
   >
-    <!-- Task60 §2.2: 桥仅 hover/held 浮动几何存在（resolvedFloating 与根 data-floating
-         同源）；manual overlay 入口已进头部，无外侧 rail 栏也无桥。 -->
-    <span v-if="mode === 'overlay' && resolvedFloating" class="activity-bridge" aria-hidden="true"></span>
-    <!-- Task60 §2.2: 公共头部行提升到 tree/run 互斥分支之外 —— 列表时标题/入口/既有
-         pin/close；子详情时入口+pin（下方原 RunHeader 保留 back/name/status/close，
-         公共头部不重复 close）。活动入口宿主（activity slot）在分支切换间永不销毁。 -->
+    <!-- The activity host remains mounted across tree/run transitions. -->
     <div class="drawer-head">
       <template v-if="selectedRunId === null">
         <AppIcon :name="panel === 'bash' ? 'terminal' : 'bot'" class="icon-sm drawer-title-icon" />
         <span class="drawer-title">{{ t(panel === "bash" ? "fleet.commandsTitle" : "fleet.panelTitle") }}</span>
       </template>
       <slot name="activity"></slot>
-      <button
-        v-if="panel !== undefined && canPeek"
-        class="btn btn-ghost btn-icon activity-pin"
-        type="button"
-        :aria-label="t(peeking ? 'fleet.pin' : 'fleet.unpin')"
-        :aria-pressed="!peeking"
-        @click="emit('toggle-pin')"
-      >
-        <AppIcon :name="peeking ? 'unlock' : 'lock'" class="icon-sm" />
-      </button>
       <button
         v-if="selectedRunId === null"
         class="btn btn-ghost btn-icon drawer-close"

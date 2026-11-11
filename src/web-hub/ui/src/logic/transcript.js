@@ -56,15 +56,22 @@ export function indexTools(a) {
  */
 export function itemRenderKey(it, idx) {
   const m = it.message;
-  if (!m || m.role !== "assistant" || !Array.isArray(m.content)) return it.id;
+  if (!m) return it.id;
+  if (m.role === "toolResult" && typeof m.toolCallId === "string")
+    return `${it.id}|dur:${String(idx.durations?.get(m.toolCallId) ?? "")}`;
+  if (m.role !== "assistant" || !Array.isArray(m.content)) return it.id;
   const sig = [];
   for (const b of m.content) {
     if (!b || b.type !== "toolCall") continue;
     const id = String(b.id ?? "");
-    if (idx.results.has(id)) sig.push(`${id}=r`);
+    const duration = idx.durations?.get(id);
+    const timing = duration === undefined ? "" : `:${duration}`;
+    if (idx.results.has(id)) sig.push(`${id}=r${timing}`);
     else {
       const t = idx.live.get(id);
-      sig.push(t ? `${id}=${t.done ? "d" : "l"}${String(t.partial ?? "").length}` : `${id}=p`);
+      sig.push(
+        t ? `${id}=${t.done ? "d" : "l"}${String(t.partial ?? "").length}:${t.seenAt ?? ""}${timing}` : `${id}=p`,
+      );
     }
   }
   return sig.length ? `${it.id}|${sig.join(",")}` : it.id;

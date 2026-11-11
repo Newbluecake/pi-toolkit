@@ -325,7 +325,13 @@ export function buildTxEntries(a: TranscriptSource, cmdLive?: CmdLiveContext): T
     const entry = itemEntry(it, idx, a.generation);
     if (!entry) continue;
     entries.push(entry);
-    renderKeys.push(itemRenderKey(it, idx));
+    const generation = entry.type === "assistant" ? entry.assistant.generation : undefined;
+    const key = itemRenderKey(it, idx);
+    renderKeys.push(
+      generation === undefined
+        ? key
+        : `${key}|generation:${generation.v}:${generation.tokens}:${generation.genMs}:${generation.deltaCount}`,
+    );
     anchors.push(anchorIdsOf(it));
   }
   if (a.streaming) {
@@ -345,7 +351,9 @@ export function buildTxEntries(a: TranscriptSource, cmdLive?: CmdLiveContext): T
       key: `live:${t.toolCallId}`,
       view: toolView(undefined, undefined, t, idx.durations) as ToolView,
     });
-    renderKeys.push(`live:${t.toolCallId}:${t.done ? "d" : "l"}:${String(t.partial ?? "").length}`);
+    renderKeys.push(
+      `live:${t.toolCallId}:${t.done ? "d" : "l"}:${String(t.partial ?? "").length}:${t.seenAt ?? ""}:${idx.durations?.get(t.toolCallId) ?? ""}`,
+    );
     anchors.push([]);
   }
   return { entries, renderKeys, anchors };

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { ARCHIVE_ENTRIES_CAP, archiveItem, emptyArchiveState, type ArchiveState } from "../../src/archive/state.js";
 import { liveKey, selectAutoArchives, trimToCap, type ArchiveCandidate } from "../../src/archive/sweep.js";
 
-const policy = { afterMs: 100, keepRuns: 6, keepBash: 5 };
+const policy = { keepRuns: 6, keepBash: 5 };
 function rows(kind: "run" | "bash", count: number): ArchiveCandidate[] {
   return Array.from({ length: count }, (_, i) => ({ kind, id: `${kind}-${i}`, terminal: true, settledAt: i }));
 }
@@ -10,7 +10,7 @@ function ids(candidates: ArchiveCandidate[], state = emptyArchiveState(), overri
   return selectAutoArchives(state, candidates, 1000, { ...policy, ...overrides }).map((item) => item.id);
 }
 
-describe("fleet auto-archive count + age gates", () => {
+describe("fleet auto-archive count gate", () => {
   it("retains all old items at or below the thresholds", () => {
     expect(ids([...rows("run", 6), ...rows("bash", 5)])).toEqual([]);
     expect(ids([...rows("run", 2), ...rows("bash", 1)])).toEqual([]);
@@ -25,10 +25,10 @@ describe("fleet auto-archive count + age gates", () => {
     expect(state).toEqual(emptyArchiveState());
   });
 
-  it("stops when no more items meet the time gate, including the exact age boundary", () => {
-    const candidates = rows("run", 9).map((item, i) => ({ ...item, settledAt: i < 2 ? 899 + i : 901 + i }));
-    expect(ids(candidates)).toEqual(["run-0", "run-1"]);
-    expect(ids(rows("run", 7).map((item) => ({ ...item, settledAt: 901 })))).toEqual([]);
+  it("archives freshly settled excess items without an age gate", () => {
+    const candidates = rows("run", 9).map((item, i) => ({ ...item, settledAt: 998 + i }));
+    expect(ids(candidates)).toEqual(["run-0", "run-1", "run-2"]);
+    expect(ids(candidates.slice(0, 6))).toEqual([]);
   });
 
   it("counts held items but never selects them, even if holds alone exceed the keep count", () => {
@@ -38,11 +38,11 @@ describe("fleet auto-archive count + age gates", () => {
     expect(ids(rows("run", 9), { entries: [], held })).toEqual(["run-8"]);
   });
 
-  it("0 means legacy time-only selection, still respecting holds and age", () => {
+  it("0 archives all eligible items, still respecting holds", () => {
     const state: ArchiveState = { entries: [], held: [{ kind: "run", id: "run-0", at: 999 }] };
     expect(
       ids([...rows("run", 3), { kind: "run", id: "fresh", terminal: true, settledAt: 901 }], state, { keepRuns: 0 }),
-    ).toEqual(["run-1", "run-2"]);
+    ).toEqual(["run-1", "run-2", "fresh"]);
     expect(ids(rows("bash", 2), emptyArchiveState(), { keepBash: 0 })).toEqual(["bash-0", "bash-1"]);
   });
 
@@ -61,12 +61,6 @@ describe("fleet auto-archive count + age gates", () => {
     const state: ArchiveState = { entries: [{ kind: "run", id: "run-0", at: 1 }], held: [] };
     expect(ids(rows("run", 7), state)).toEqual([]);
     expect(ids([...rows("run", 6), ...rows("run", 6)])).toEqual([]);
-  });
-
-  it("afterMs=0 stays off regardless of count gates", () => {
-    expect(
-      ids([...rows("run", 9), ...rows("bash", 9)], emptyArchiveState(), { afterMs: 0, keepRuns: 0, keepBash: 0 }),
-    ).toEqual([]);
   });
 });
 

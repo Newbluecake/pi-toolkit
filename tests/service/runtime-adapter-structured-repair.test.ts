@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { FakeClock } from "../../src/core/clock.js";
 import { DEFAULT_BUDGET } from "../../src/core/deadline.js";
 import { STRUCTURED_REPAIR_PROMPT } from "../../src/core/structured-repair.js";
+import { VERDICT_SCHEMA_V1 } from "../../src/core/verdict-schema.js";
 import { MemoryRunStore } from "../../src/core/store.js";
 import type { AgentTypeConfig, DeadlineBudget, DriverEvent, RunOutcome, RunSnapshot } from "../../src/core/types.js";
 import { EscalatingReaper } from "../../src/runtime/reaper.js";
@@ -64,6 +65,11 @@ interface HarnessOpts {
   callbacks?: { onSnapshot?: (snapshot: RunSnapshot) => void };
 }
 
+interface StructuredToolResult {
+  content: Array<{ type: "text"; text: string }>;
+  details?: { ok?: boolean; errors?: string[]; code?: "window_closed" };
+}
+
 interface Harness {
   clock: FakeClock;
   store: MemoryRunStore;
@@ -71,13 +77,13 @@ interface Harness {
   adapter: Runner;
   runId: string;
   prompts: string[];
-  toolResults: Array<{ details?: { ok?: boolean } }>;
+  toolResults: StructuredToolResult[];
   repairAborts: () => number;
   requestAbortCalls: () => number;
   disposeCalls: () => number;
   deadlineFired: () => number;
   emit: (e: DriverEvent) => void;
-  submit: (value: unknown) => Promise<{ details?: { ok?: boolean } }>;
+  submit: (value: unknown) => Promise<StructuredToolResult>;
   releasePending: () => void;
   enqueue: ReturnType<typeof vi.fn>;
   finalize: ReturnType<typeof vi.fn>;
@@ -95,7 +101,7 @@ function startRun(opts: HarnessOpts = {}): Harness {
   const first: PromptScript = { events: textTurn(), ...opts.first };
   const repair: PromptScript = { events: textTurn(), ...opts.repair };
   const prompts: string[] = [];
-  const toolResults: Array<{ details?: { ok?: boolean } }> = [];
+  const toolResults: StructuredToolResult[] = [];
   const requestAbortMock = vi.fn();
   const disposeMock = vi.fn(
     () => ({ returned: true, killed: 0, unkillable: [] }) as ReturnType<SessionHandle["dispose"]>,
@@ -107,10 +113,10 @@ function startRun(opts: HarnessOpts = {}): Harness {
   let adapterRef: Runner | undefined;
 
   const structuredTool = ():
-    { execute: (id: string, params: unknown) => Promise<{ details?: { ok?: boolean } }> } | undefined => {
+    { execute: (id: string, params: unknown) => Promise<StructuredToolResult> } | undefined => {
     const list = capturedReq?.customTools ?? [];
     const found = list.find((t) => (t as { name?: unknown }).name === "StructuredOutput");
-    return found as { execute: (id: string, params: unknown) => Promise<{ details?: { ok?: boolean } }> } | undefined;
+    return found as { execute: (id: string, params: unknown) => Promise<StructuredToolResult> } | undefined;
   };
   const submit = async (value: unknown) => {
     const tool = structuredTool();
@@ -511,7 +517,7 @@ describe("runtime-adapter structured repair: sub-phase clocks (review #2)", () =
     }
   }
 
-  it("#10 default modelTurnMs nearly exhausted (850s of 900s): local close at +45s — failed(schema), NOT timed_out, watchdog silent", async () => {
+  it("#10 default modelTurnMs nearly exhausted (1150s of 1200s): local close at +45s — failed(schema), NOT timed_out, watchdog silent", async () => {
     const h = startRun({
       request: { schema: objSchema },
       first: { mode: "hang" },
@@ -519,8 +525,8 @@ describe("runtime-adapter structured repair: sub-phase clocks (review #2)", () =
     });
     await untilPrompts(h, 1);
     const start = h.clock.now();
-    await consumeModelTurn(h, 850_000);
-    expect(h.clock.now()).toBe(start + 850_000);
+    await consumeModelTurn(h, 1_150_000);
+    expect(h.clock.now()).toBe(start + 1_150_000);
     h.releasePending();
     await untilPrompts(h, 2); // planning ran, repair prompt pending
     h.clock.advance(45_000); // exactly the 45s window: local close fires
@@ -533,15 +539,15 @@ describe("runtime-adapter structured repair: sub-phase clocks (review #2)", () =
     expect(h.deadlineFired()).toBe(0);
   });
 
-  it("#11 not enough left (890s consumed): skipped_budget suffix, one prompt", async () => {
+  it("#11 not enough left (1190s consumed): skipped_budget suffix, one prompt", async () => {
     const h = startRun({
       request: { schema: objSchema },
       first: { mode: "hang" },
     });
     await untilPrompts(h, 1);
     const start = h.clock.now();
-    await consumeModelTurn(h, 890_000);
-    expect(h.clock.now()).toBe(start + 890_000);
+    await consumeModelTurn(h, 1_190_000);
+    expect(h.clock.now()).toBe(start + 1_190_000);
     h.releasePending();
     const outcome = await driveToSettle(h, 500, 30_000);
     expect(outcome.status).toBe("failed");
@@ -660,6 +666,9 @@ describe("runtime-adapter structured repair: self-check, late submissions, caps"
     const ok = await accepted.submit(validPayload);
     expect(ok.details?.ok).toBe(true);
     accepted.clock.advance(120_000); // past windowDue: local close fires
+    const lateReplacement = await accepted.submit({ answer: "must not replace 42" });
+    expect(lateReplacement.details).toMatchObject({ ok: false, code: "window_closed" });
+    expect(lateReplacement.content[0]?.text).toContain("Stop submitting");
     const outAccepted = await driveToSettle(accepted, 100, 5_000);
     expect(outAccepted.status).toBe("completed");
     expect(outAccepted.structuredResult).toEqual(validPayload);
@@ -845,5 +854,107 @@ describe("runtime-adapter structured repair: self-check, late submissions, caps"
     const patch = accepted.finalize.mock.calls[0]?.[2] as { textPreview?: string };
     expect(patch.textPreview).toContain("verdict: reject");
     expect(patch.textPreview).toContain("looks bad");
+  });
+});
+
+const windowVerdict = { verdict: "pass", blockers: 0, findings: [], report: "done" };
+const windowVerdictRequest = { schema: VERDICT_SCHEMA_V1, schemaPreset: "verdict/v1" as const };
+
+function expectWindowClosed(result: StructuredToolResult): void {
+  expect(result.details).toEqual({
+    ok: false,
+    code: "window_closed",
+    errors: ["the result window for this run has closed; this submission was not accepted"],
+  });
+  expect(result.content[0]?.text).toContain("Stop submitting StructuredOutput for this run");
+  expect(result.content[0]?.text).not.toContain("Fix the payload");
+  expect(result.content[0]?.text).not.toContain("call StructuredOutput again");
+}
+
+describe("runtime-adapter structured repair: host-only closed-window preflight (#84 C)", () => {
+  it.each([
+    ["legal", windowVerdict],
+    ["semantic-invalid", { ...windowVerdict, blockers: 1 }],
+    ["schema-invalid (direct execute only)", { report: 42 }],
+  ])("local close rejects %s payload with stop guidance, not a payload retry", async (_label, payload) => {
+    const h = startRun({ request: windowVerdictRequest, repair: { mode: "hang" } });
+    await untilPrompts(h, 2);
+    h.clock.advance(120_000);
+    // The direct tool harness does not exercise SDK pre-execute schema
+    // rejection. Only calls reaching execute can receive window_closed.
+    const result = await h.submit(payload);
+    expectWindowClosed(result);
+    const outcome = await driveToSettle(h, 100, 5_000);
+    expect(outcome.status).toBe("failed");
+    expect(outcome.error?.kind).toBe("schema");
+    expect(outcome.structuredResult).toBeUndefined();
+    expect(h.prompts).toHaveLength(2);
+    expect(h.deadlineFired()).toBe(0);
+  });
+
+  it("onSubmit rejects a window closed synchronously after the open preflight", async () => {
+    const h = startRun({
+      request: windowVerdictRequest,
+      repair: { mode: "hang", events: [{ t: "turn_start" }] },
+    });
+    await untilPrompts(h, 2);
+    let semanticReads = 0;
+    // A deterministic re-entry seam, not a model JSON payload: semantics runs
+    // after the open preflight; its getter closes the actual capture window
+    // through the existing turn cap before onSubmit gets the valid payload.
+    const payload = {
+      ...windowVerdict,
+      get blockers() {
+        semanticReads++;
+        for (let n = 0; n < 3; n++) h.emit({ t: "turn_end", toolResults: 0 });
+        return 0;
+      },
+    };
+    const result = await h.submit(payload);
+    expect(semanticReads).toBe(1);
+    expectWindowClosed(result);
+    const outcome = await driveToSettle(h, 100, 5_000);
+    expect(outcome.status).toBe("failed");
+    expect(outcome.structuredResult).toBeUndefined();
+    expect(h.repairAborts()).toBe(1);
+    expect(h.deadlineFired()).toBe(0);
+  });
+
+  it("open repair window permits correcting real semantic and schema errors on the same run", async () => {
+    const h = startRun({ request: windowVerdictRequest, repair: { mode: "hang" } });
+    await untilPrompts(h, 2);
+    const semanticBad = await h.submit({ ...windowVerdict, blockers: 1 });
+    expect(semanticBad.details?.ok).toBe(false);
+    expect(semanticBad.details?.code).toBeUndefined();
+    expect(semanticBad.content[0]?.text).toContain("fix the blockers count");
+    expect(semanticBad.content[0]?.text).toContain("Fix the payload and call StructuredOutput again");
+    const schemaBad = await h.submit({ ...windowVerdict, report: 42 });
+    expect(schemaBad.details?.ok).toBe(false);
+    expect(schemaBad.details?.code).toBeUndefined();
+    expect(schemaBad.content[0]?.text).toContain('expected type "string"');
+    expect(schemaBad.content[0]?.text).toContain("Fix the payload and call StructuredOutput again");
+    expect((await h.submit(windowVerdict)).details).toEqual({ ok: true });
+    h.releasePending();
+    const outcome = await driveToSettle(h, 100, 5_000);
+    expect(outcome.status).toBe("completed");
+    expect(outcome.structuredResult).toEqual(windowVerdict);
+    expect(h.prompts).toHaveLength(2);
+    expect(outcome.diag.structuredRepair).toBe("succeeded");
+  });
+
+  it.each([
+    ["legal", windowVerdict],
+    ["semantic-invalid", { ...windowVerdict, blockers: 1 }],
+  ])("cancellation synchronously rejects a %s payload before any microtask", async (_label, payload) => {
+    const h = startRun({ request: windowVerdictRequest, repair: { mode: "hang" } });
+    await untilPrompts(h, 2);
+    if (!h.adapter.abort) throw new Error("adapter abort is required");
+    void h.adapter.abort(h.runId, "user_stop");
+    const submission = h.submit(payload); // execute runs before yielding to abort cleanup
+    expectWindowClosed(await submission);
+    const outcome = await driveToSettle(h, 100, 5_000);
+    expect(outcome.status).toBe("aborted");
+    expect(outcome.structuredResult).toBeUndefined();
+    expect(h.prompts).toHaveLength(2);
   });
 });

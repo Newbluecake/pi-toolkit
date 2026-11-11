@@ -76,6 +76,7 @@ function nextLabel(row: TaskRow): string {
         <span v-if="row.lastRun !== undefined" class="sched-row-run">
           last <span :class="runToneOf(row.lastRun.state) ?? 'plain'">{{ runStateKey(row.lastRun.state) }}</span>
           {{ relAgo(row.lastRun.at, props.now) }}
+          <span v-if="row.lastRun.catchUp" class="chip">catch-up ×{{ row.lastRun.catchUp.dueCount }}</span>
           <template v-if="row.lastRun.runId !== undefined">
             <span class="sep"> · </span>
             <button class="sched-run-link" type="button" @click="emit('openRun', row.lastRun!.runId)">

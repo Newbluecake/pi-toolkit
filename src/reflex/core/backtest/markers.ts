@@ -56,7 +56,7 @@ export const HUD_TUI_GATE_SINCE = 1_789_715_067_000;
  * Text prefixes marking injected (non-typed) user messages ⇒ origin "injected" ⇒ excluded
  * from corpus turns (CorrectionFacts still record them). Longest-meaningful heads; anchors:
  * `src/tools/steer-tool.ts`, `src/context-switch/tool.ts`, `src/web-hub/protocol/upload.ts`,
- * `src/web-hub/protocol/feishu.ts`, `src/mention/mention.ts`, `src/goal/texts.ts`,
+ * `src/web-hub/protocol/feishu.ts`, `src/mention/mention.ts`, historical goal continuations,
  * `src/stack.ts` (thread events), `src/fabric/format-fence.ts` (wake_result / inbox /
  * dead_letter / mention-resume deliveries).
  */

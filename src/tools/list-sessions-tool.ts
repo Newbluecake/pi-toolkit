@@ -98,6 +98,51 @@ const CHANNEL_DESCRIPTION =
 
 const ALIAS_SUFFIX = " alias is a human-assigned, hub-unique short name.";
 
+/** #84 D2: failed discovery is not an empty directory. Only closed, known tokens enter advice. */
+function listFailureText(outcome: XsListOutcome, channel: string | undefined): string {
+  const safeCodes = ["E_XS_OFF", "E_XS_BAD_FRAME", "E_XS_STALE_ORIGIN", "E_XS_INTERNAL"];
+  const safeReasons = [
+    "origin_changed",
+    "not_joined",
+    "bad_channel",
+    "channel_unsupported",
+    "client_deadline",
+    "link_lost",
+  ];
+  const code =
+    outcome.code === undefined ? "" : ` (${safeCodes.includes(outcome.code) ? outcome.code : "unknown_code"})`;
+  const reason =
+    outcome.reason !== undefined && safeReasons.includes(outcome.reason) ? ` · reason=${outcome.reason}` : "";
+  const prefix = `list_sessions unavailable: ${outcome.status}${code}${reason}`;
+  let advice: string;
+  switch (outcome.status) {
+    case "bad_channel":
+      advice =
+        channel?.trim() === ""
+          ? "channel 为空字符串不等于省略；不需要过滤请省略该参数。"
+          : "channel 无效或不在本链路；核对频道名，不需要过滤请省略该参数。成员资格须由用户确认，不要自行 join 或改 policy。";
+      break;
+    case "not_joined":
+      advice = "当前会话没有本链路成员资格；请用户确认参与意图，不要自行 join 或改变策略。";
+      break;
+    case "off":
+    case "channel_unsupported":
+      advice = "当前链路功能关闭或不支持；请用户核对 /fabric status 与 /webhub status，不要自行改设置。";
+      break;
+    case "origin_changed":
+      advice = "查询已取消或来源会话已变化；停止本次查询，在当前会话确认意图后再查询，不要使用旧目录猜目标。";
+      break;
+    default:
+      advice =
+        outcome.reason === "client_deadline"
+          ? "目录查询超过等待期限；请用户核对宿主状态后再查询，不要连续轮询。"
+          : outcome.reason === "link_lost"
+            ? "目录查询链路已断开；等待宿主链路恢复后再查询，不要连续轮询。"
+            : "无法确定具体故障原因；请用户核对宿主状态后再查询，不要猜测网络或权限问题。";
+  }
+  return `${prefix}。目录查询失败，不代表没有可见会话。${advice}`;
+}
+
 export function createListSessionsTool(deps: ListSessionsToolDeps): ToolDefinition<typeof ListSessionsParamsLegacy> {
   const channelsOn = deps.channels === true;
   return {
@@ -109,15 +154,22 @@ export function createListSessionsTool(deps: ListSessionsToolDeps): ToolDefiniti
       const params = rawParams as ListSessionsParams;
       // legacy instance: `channel` can never legitimately arrive and is never forwarded
       const channel = channelsOn ? params.channel : undefined;
-      const outcome: XsListOutcome = await deps.sender.list({
-        ...(signal !== undefined ? { signal } : {}),
-        ...(params.query !== undefined ? { query: params.query } : {}),
-        ...(params.scope !== undefined ? { scope: params.scope } : {}),
-        ...(channel !== undefined ? { channel } : {}),
-      });
+      let outcome: XsListOutcome;
+      try {
+        outcome = await deps.sender.list({
+          ...(signal !== undefined ? { signal } : {}),
+          ...(params.query !== undefined ? { query: params.query } : {}),
+          ...(params.scope !== undefined ? { scope: params.scope } : {}),
+          ...(channel !== undefined ? { channel } : {}),
+        });
+      } catch {
+        throw new Error(
+          "list_sessions unavailable: unexpected failure。目录查询失败，不代表没有可见会话；请用户核对宿主状态后再查询，不要猜测网络或权限问题。",
+        );
+      }
       const text =
         outcome.status !== "ok"
-          ? `list_sessions unavailable: ${outcome.status}${outcome.code !== undefined ? ` (${outcome.code})` : ""}`
+          ? listFailureText(outcome, channel)
           : (outcome.rows ?? []).length === 0
             ? "No other joined sessions on this hub."
             : ["Joined sessions on this hub:", ...formatXsSessionRows(outcome.rows ?? [])].join("\n");

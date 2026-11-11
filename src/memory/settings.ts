@@ -1,14 +1,8 @@
 /**
  * memory · settings (#56 batch 2 ⑧): the `memory` block's types, frozen defaults and never-throws parser
- * (cwd-keyed project memory; tidy batch limits come from `./tidy/batch-settings.ts`). `src/config/settings.ts`
+ * (cwd-keyed project memory). `src/config/settings.ts`
  * imports ONLY this module for the block.
  */
-import {
-  DEFAULT_TIDY_BATCH_SETTINGS,
-  resolveTidyBatchSettings,
-  type TidyBatchSettings,
-} from "./tidy/batch-settings.js";
-
 /**
  * Merged armory-memory (memory-plan §3.1): cwd-keyed project memory under
  * `~/.pi/agent/memory/<slug>/` — auto-injection, the `memory` tool, `/mem`.
@@ -75,8 +69,9 @@ export interface MemorySettings {
   /** 治理总开关（arch §4.6）：false ⇒ 不做 sweep 写盘、不自动取代、不生成治理建
    *  议、不发治理通知；渲染时的到期过滤仍然生效。Default true。P0 只解析不使用。 */
   governance: MemoryGovernanceSettings;
+  /** P50.1 trigger aggregation; off preserves all existing behavior. */
+  incremental: MemoryIncrementalSettings;
   doctor: MemoryDoctorSettings;
-  tidy: MemoryTidySettings;
   /** Jev 核心 memory：jev-plan v2 §4 J3 / jev-arch §9.1. */
   jev: MemoryJevSettings;
 }
@@ -113,6 +108,8 @@ export interface MemoryJevSettings {
   maxCostUsd: number;
   /** 单次 activation 的 Jev 调用总次数上限。Default 800；0–5000。 */
   maxCalls: number;
+  /** Maximum running and queued background jobs. */
+  backgroundQueueLimit: number;
   /** A 层快速通道加白标签（默认只有 risk:"high" 标签能触发 A 注入；2026-11-03 噪音修复）。CSV 或数组，非法 id 静默丢弃。Default []。 */
   fastPathAllowTags: string[];
   /** A 层快速通道黑名单标签（优先于高危/加白判定）。Default []。 */
@@ -158,8 +155,7 @@ export interface MemoryJevPredictSettings {
 
 export type MemoryLayout = "tiered" | "legacy" | "blocks";
 
-/** #36：`"blocks"` 在 P0 只可解析（值域已登记），blocks 渲染器在 P3 合入、默认
- *  值翻转在 P5b；在此之前严禁把 `layout:"blocks"` 写进真实设置。 */
+/** #36 F1：blocks 为默认布局；存量 files 在自动迁移未完成时回退 tiered 渲染。 */
 export interface MemoryMigrateSettings {
   /** true = session_start 惰性自动迁移；false = 只能显式 `/mem migrate`。只接受布尔值。Default true。 */
   auto: boolean;
@@ -169,6 +165,21 @@ export interface MemoryMigrateSettings {
 export interface MemoryGovernanceSettings {
   /** Default true。 */
   enabled: boolean;
+}
+
+/** #50 P50.1; deliberately top-level memory.incremental (not governance.incremental).
+ * Runtime durations remain milliseconds; public settings use seconds. */
+export interface MemoryIncrementalSettings {
+  enabled: boolean;
+  /** Explicit paid job authorization; zero never authorizes paid P50 work. */
+  jobCostCapUsd: number;
+  /** Suggestions only unless explicitly enabled; E still owns permission. */
+  auto: boolean;
+  changeThreshold: number;
+  quietMs: number;
+  idleMs: number;
+  cooldownMs: number;
+  taskDoneTrigger: boolean;
 }
 
 export type MemoryToolSurface = "v2" | "legacy";
@@ -183,35 +194,6 @@ export interface MemoryDoctorSettings {
   /** `updated` age (days) past which a file is flagged stale (D08 warn).
    *  Default 60. */
   staleDays: number;
-}
-
-export interface MemoryTidySettings {
-  /** Agent type used for the tidy proposal-drafting subagent's system prompt
-   *  / model hint ONLY — the runtime forces `toolDomain:"readonly"` (§7.0)
-   *  regardless of this type's own `tools` list, so it can never widen what
-   *  the proposal run can do. Default "Plan". */
-  agentType: string;
-  /** Strict `provider/id`, or "" to use the current main-session model at
-   *  dispatch time (§7.1). Default "". */
-  model: string;
-  /** Hard total budget for a tidy run (no grace, no extension). File stores
-   *  `tidy.timeoutS`. Default 180_000 (180s). */
-  timeoutMs: number;
-  /** Total input bytes a tidy/restore snapshot may cover before `/mem tidy`
-   *  asks the user to narrow the file set. Default 49_152. */
-  maxInputBytes: number;
-  /** Hard cap on the tidy proposal's total output bytes (§7.2); over this,
-   *  the WHOLE proposal is discarded, zero writes. Default 65_536. */
-  maxOutputBytes: number;
-  /** Cumulative cost cap (USD) for a tidy run; only enforced for a priced
-   *  model (§7.1's N1: an unpriced model runs with a "no cost guarantee"
-   *  warning instead of this gate). Default 2.0; never 0. */
-  maxCostUsd: number;
-  /** Turn-boundary cap; a tidy run is aborted (zero writes) once it would
-   *  start turn `maxTurns + 1`. Default 4. */
-  maxTurns: number;
-  /** Batch tidy controls (§11); parsed by the frozen pi-free batch settings resolver. */
-  batch: TidyBatchSettings;
 }
 
 /** `memory.jev.classifiers` 必须匹配 `provider/id`（斜杠两侧均非空白、无空白字符）；否则记进 `classifiersRejected`（J3，Q34）。 */
@@ -357,6 +339,27 @@ export function parseMemorySettings(input: unknown): MemorySettings {
       : {};
   const governance: MemoryGovernanceSettings = { enabled: bool(governanceObj.enabled, defaults.governance.enabled) };
 
+  const incrementalRaw = value.incremental;
+  const incrementalObj: Record<string, unknown> =
+    incrementalRaw && typeof incrementalRaw === "object" && !Array.isArray(incrementalRaw)
+      ? (incrementalRaw as Record<string, unknown>)
+      : {};
+  const incremental: MemoryIncrementalSettings = {
+    enabled: bool(incrementalObj.enabled, defaults.incremental.enabled),
+    auto: bool(incrementalObj.auto, false),
+    jobCostCapUsd:
+      typeof incrementalObj.jobCostCapUsd === "number" &&
+      Number.isFinite(incrementalObj.jobCostCapUsd) &&
+      incrementalObj.jobCostCapUsd >= 0
+        ? incrementalObj.jobCostCapUsd
+        : 0,
+    changeThreshold: num(incrementalObj.changeThreshold, defaults.incremental.changeThreshold, 1, 1000),
+    quietMs: num(incrementalObj.quietMs, defaults.incremental.quietMs, 0, Number.MAX_SAFE_INTEGER),
+    idleMs: num(incrementalObj.idleMs, defaults.incremental.idleMs, 0, Number.MAX_SAFE_INTEGER),
+    cooldownMs: num(incrementalObj.cooldownMs, defaults.incremental.cooldownMs, 0, Number.MAX_SAFE_INTEGER),
+    taskDoneTrigger: bool(incrementalObj.taskDoneTrigger, defaults.incremental.taskDoneTrigger),
+  };
+
   const doctorRaw = value.doctor;
   const doctorObj: Record<string, unknown> =
     doctorRaw && typeof doctorRaw === "object" && !Array.isArray(doctorRaw)
@@ -365,24 +368,6 @@ export function parseMemorySettings(input: unknown): MemorySettings {
   const doctor: MemoryDoctorSettings = {
     notifyOnStart: bool(doctorObj.notifyOnStart, defaults.doctor.notifyOnStart),
     staleDays: num(doctorObj.staleDays, defaults.doctor.staleDays, 7, 3650),
-  };
-
-  const tidyRaw = value.tidy;
-  const tidyObj: Record<string, unknown> =
-    tidyRaw && typeof tidyRaw === "object" && !Array.isArray(tidyRaw) ? (tidyRaw as Record<string, unknown>) : {};
-  const maxInputBytes = num(tidyObj.maxInputBytes, defaults.tidy.maxInputBytes, 8192, 262_144);
-  const tidy: MemoryTidySettings = {
-    agentType:
-      typeof tidyObj.agentType === "string" && tidyObj.agentType.trim() !== ""
-        ? tidyObj.agentType
-        : defaults.tidy.agentType,
-    model: typeof tidyObj.model === "string" ? tidyObj.model : defaults.tidy.model,
-    timeoutMs: num(tidyObj.timeoutMs, defaults.tidy.timeoutMs, 30_000, 1_800_000),
-    maxInputBytes,
-    maxOutputBytes: num(tidyObj.maxOutputBytes, defaults.tidy.maxOutputBytes, 4096, 262_144),
-    maxCostUsd: numFloat(tidyObj.maxCostUsd, defaults.tidy.maxCostUsd, 0.05, 50),
-    maxTurns: num(tidyObj.maxTurns, defaults.tidy.maxTurns, 1, 20),
-    batch: resolveTidyBatchSettings(tidyObj.batch, maxInputBytes),
   };
 
   const jevRaw = value.jev;
@@ -419,6 +404,7 @@ export function parseMemorySettings(input: unknown): MemorySettings {
     },
     maxCostUsd: numFloat(jevObj.maxCostUsd, defaults.jev.maxCostUsd, 0.01, 5),
     maxCalls: num(jevObj.maxCalls, defaults.jev.maxCalls, 0, 5000),
+    backgroundQueueLimit: num(jevObj.backgroundQueueLimit, defaults.jev.backgroundQueueLimit, 1, 1024),
     fastPathAllowTags: parseJevTagIdList(jevObj.fastPathAllowTags),
     fastPathDenyTags: parseJevTagIdList(jevObj.fastPathDenyTags),
     fastPathCooldownH: num(jevObj.fastPathCooldownH, defaults.jev.fastPathCooldownH, 0, 720),
@@ -452,8 +438,8 @@ export function parseMemorySettings(input: unknown): MemorySettings {
     migrate,
     residentBytes,
     governance,
+    incremental,
     doctor,
-    tidy,
     jev,
   };
 }
@@ -469,7 +455,7 @@ export const DEFAULT_MEMORY_SETTINGS: MemorySettings = {
   indexMax: 15,
   maxFileBytes: 262_144,
   maxWriteBytes: 65_536,
-  layout: "tiered",
+  layout: "blocks",
   toolSurface: "v2",
   childProfile: "core",
   coreBytes: 1600,
@@ -479,17 +465,17 @@ export const DEFAULT_MEMORY_SETTINGS: MemorySettings = {
   migrate: { auto: true },
   residentBytes: 2048,
   governance: { enabled: true },
-  doctor: { notifyOnStart: true, staleDays: 60 },
-  tidy: {
-    agentType: "Plan",
-    model: "",
-    timeoutMs: 180_000,
-    maxInputBytes: 49_152,
-    maxOutputBytes: 65_536,
-    maxCostUsd: 2.0,
-    maxTurns: 4,
-    batch: { ...DEFAULT_TIDY_BATCH_SETTINGS },
+  incremental: {
+    enabled: true,
+    auto: false,
+    jobCostCapUsd: 0,
+    changeThreshold: 5,
+    quietMs: 15_000,
+    idleMs: 2000,
+    cooldownMs: 300_000,
+    taskDoneTrigger: true,
   },
+  doctor: { notifyOnStart: true, staleDays: 60 },
   jev: {
     enabled: true,
     classifiers: ["opencode/jev-1.13-free", "opencode/jev-1.13"],
@@ -500,6 +486,7 @@ export const DEFAULT_MEMORY_SETTINGS: MemorySettings = {
     review: { intervalDays: 7 },
     maxCostUsd: 0.5,
     maxCalls: 800,
+    backgroundQueueLimit: 32,
     fastPathAllowTags: [],
     fastPathDenyTags: [],
     fastPathCooldownH: 24,

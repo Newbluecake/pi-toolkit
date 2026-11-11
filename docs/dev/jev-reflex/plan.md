@@ -77,6 +77,7 @@ R0（契约 + 关着的骨架，独占热点面）
 | R4   | 可选 | R1      | R2b/R3a/R3b   | dev:R4 · glm-5.3 / verifier deepseek-flash         | ~700 行        |
 
 > verifier 必须与 dev 异源且非 GPT 系（dev-flow 规则 5）；表中仅为建议，主会话按当时额度用回退链替换。
+> （该约束已于 2026-11-09 解除：GPT 系可参与验收，仍须与开发模型异源）
 
 ---
 

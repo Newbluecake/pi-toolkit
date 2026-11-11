@@ -145,23 +145,42 @@
   padding-top: var(--sp-1);
 }
 
-.composer-tasks-sec-title {
-  margin: 0 0 2px;
-  font-size: var(--fs-2xs);
-  font-weight: var(--fw-semibold);
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+.composer-tasks-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  background: transparent;
   color: var(--c-text-3);
+  font: inherit;
+  font-size: var(--fs-xs);
+  text-align: left;
+  cursor: pointer;
+}
+
+.composer-tasks-summary:focus-visible {
+  outline: 2px solid var(--c-focus);
+  outline-offset: 1px;
+}
+
+.composer-tasks-summary-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-tasks-summary .icon-sm {
+  flex: none;
 }
 
 /* Strictly read-only: no action buttons ever (ScheduleRows gets no canWrite) and the names
  * render as plain spans there (`plain-names`) — nothing focusable but the run links. */
-
-.composer-sched-readonly {
-  margin: 4px 0 0;
-  color: var(--c-text-3);
-  font-size: var(--fs-2xs);
-}
 
 .composer-todo-head {
   display: flex;

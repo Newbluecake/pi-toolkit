@@ -427,14 +427,12 @@ describe("调度条件", () => {
     expect(host.sent).toHaveLength(1);
   });
 
-  it("rootWake busy / xs wake owner / goal / open ui prompt / compaction window all defer", async () => {
+  it("rootWake busy / xs wake owner / open ui prompt / compaction window all defer", async () => {
     let rootBusy = true;
     let xsOwned = true;
-    let goal: boolean | undefined = true;
     const s = build({
       rootWakeBusy: () => rootBusy,
       xsWakeOwned: () => xsOwned,
-      fencePorts: { goal: () => goal },
     });
     const task = await mkTask();
     const run = await mkRun(task);
@@ -445,9 +443,6 @@ describe("调度条件", () => {
     await drive(s, 5_000);
     expect(host.sent).toHaveLength(0);
     xsOwned = false;
-    await drive(s, 5_000);
-    expect(host.sent).toHaveLength(0); // goal still running ⇒ defer (never reject)
-    goal = undefined;
     s.onUiPrompt(true);
     await drive(s, 5_000);
     expect(host.sent).toHaveLength(0);
@@ -1778,7 +1773,7 @@ describe("I1 review r1 #2 — a fence window opened during the pre-start wait st
     expect(host.aborts).toBeGreaterThan(again);
   });
 
-  it("a human's / merged run is never aborted by this re-check; `goal` alone never refuses", async () => {
+  it("a human's / merged run is never aborted by this re-check", async () => {
     const s = build();
     const task = await mkTask();
     const { run, token } = await sendOne(s, task);

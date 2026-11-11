@@ -8,6 +8,8 @@ import { readGovernBlock } from "../../../src/memory/govern/supersede.js";
 import { serializeBlock } from "../../../src/memory/blocks/format.js";
 import * as locks from "../../../src/memory/lock.js";
 import { MemoryError } from "../../../src/memory/paths.js";
+import { createGovernanceSignals, type BudgetObservation } from "../../../src/memory/govern/signals.js";
+import * as planModule from "../../../src/memory/govern/sweep-plan.js";
 const roots: string[] = [];
 const now = new Date("2026-11-06T00:00:00Z");
 function setup() {
@@ -38,7 +40,8 @@ it("archives and notifies, origin sweep is inert; restore uses mapping", async (
   expect(readCorpus(join(d, "blocks")).blocks).toHaveLength(0);
   expect(notices[0]).toContain("archived 1");
   expect(origins).toEqual(["sweep"]);
-  expect((await r.runSweep(d, "write", undefined, "sweep")).stopped).toBe("self");
+  for (const origin of ["sweep", "revision", "p50-auto"])
+    expect((await r.runSweep(d, "write", undefined, origin)).stopped).toBe("self");
   expect(await restoreBlock(d, b.id)).toContain("restored:");
   expect(readGovernBlock(d, b.id).meta.status).toBe("active");
   expect(readArchiveIndex(d)).toEqual({});
@@ -169,6 +172,242 @@ it("reentrant signals merge once and yield is invoked without timers", async () 
   await Promise.all([a, b]);
   expect(yields).toBe(4);
 });
+it("admitted budget observations bypass only the corpus debounce and use current render statistics", async () => {
+  const d = setup();
+  createBlockLocked(join(d, "blocks"), "rules", { authority: "user", scope: "global" }, "rule", now);
+  const r = runner({ render: { residentBytes: 0, residentBudget: 100, indexOverflow: false } });
+  expect((await r.runSweep(d, "write")).suggestions).toBe(0);
+  expect((await r.runSweep(d, "budget")).stopped).toBe("unchanged");
+  const result = await r.runSweep(d, "budget", undefined, undefined, {
+    residentBytes: 0,
+    residentBudget: 100,
+    indexOverflow: true,
+  });
+  expect(result.stopped).toBe("done");
+  expect(result.suggestions).toBe(1);
+  expect((await r.runSweep(d, "write")).stopped).toBe("unchanged");
+});
+
+it("keeps an admitted budget observation when a later event coalesces into the trailing pass", async () => {
+  const d = setup();
+  createBlockLocked(join(d, "blocks"), "rules", { authority: "user", scope: "global" }, "rule", now);
+  let release = () => {};
+  const held = new Promise<void>((resolve) => (release = resolve));
+  let yields = 0;
+  const r = runner({
+    yield: async () => {
+      if (++yields === 1) await held;
+    },
+  });
+  const first = r.runSweep(d, "write");
+  const budget = r.runSweep(d, "budget", undefined, undefined, {
+    residentBytes: 0,
+    residentBudget: 100,
+    indexOverflow: true,
+  });
+  r.runSweep(d, "push");
+  release();
+  expect((await first).suggestions).toBe(0);
+  expect((await budget).suggestions).toBe(1);
+});
+
+it("R1: budget arriving during the trailing pass is not settled by the old pass and can retry", async () => {
+  const d = setup();
+  createBlockLocked(join(d, "blocks"), "rules", { authority: "user", scope: "global" }, "rule", now);
+  let releaseFirst = () => {},
+    releaseTail = () => {},
+    tailStarted = () => {};
+  const firstHold = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  const tailHold = new Promise<void>((resolve) => {
+    releaseTail = resolve;
+  });
+  const tailReady = new Promise<void>((resolve) => {
+    tailStarted = resolve;
+  });
+  let yields = 0;
+  const r = runner({
+    yield: async () => {
+      yields++;
+      if (yields === 1) await firstHold;
+      if (yields === 2) {
+        tailStarted();
+        await tailHold;
+      }
+    },
+  });
+  const signals = createGovernanceSignals();
+  const plans = vi.spyOn(planModule, "planSweep");
+  const observation = (budget: number): BudgetObservation => ({
+    identity: { realpath: d, dev: 1, ino: 2 },
+    stats: {
+      corpusFingerprint: "corpus",
+      localToday: "2026-11-06",
+      policyVersion: "v1",
+      resident: { inputFingerprint: "resident", usedBytes: 200, budgetBytes: budget, over: true },
+      index: { inputFingerprint: "index", limitBytes: 2048, omittedCount: 0, over: false },
+    },
+  });
+  const first = r.runSweep(d, "write");
+  const a = observation(100);
+  signals.observeBudget(a);
+  const batchA = signals.consumeBudgets(a.identity, { external: false });
+  const tail = r.runSweep(d, "budget", undefined, undefined, {
+    residentBytes: 200,
+    residentBudget: 100,
+    indexOverflow: false,
+  });
+  releaseFirst();
+  await tailReady;
+  const b = observation(50);
+  signals.observeBudget(b);
+  const batchB = signals.consumeBudgets(b.identity, { external: false });
+  const skipped = await r.runSweep(d, "budget", undefined, undefined, {
+    residentBytes: 200,
+    residentBudget: 50,
+    indexOverflow: false,
+  });
+  expect(skipped.stopped).toBe("not-executed");
+  signals.settleBudgets(batchB, skipped.stopped === "done");
+  expect(signals.consumeBudgets(b.identity, { external: false })).toEqual([]);
+  releaseTail();
+  expect((await first).stopped).toBe("done");
+  const resultA = await tail;
+  expect(resultA.stopped).toBe("done");
+  expect(plans.mock.calls.map((call) => [call[4], call[5]?.residentBudget])).toEqual([
+    ["write", undefined],
+    ["budget", 100],
+  ]);
+  signals.settleBudgets(batchA, true);
+  const retry = signals.consumeBudgets(b.identity, { external: true });
+  expect(retry).toHaveLength(1);
+  expect(retry[0]?.observation.stats.resident.budgetBytes).toBe(50);
+  expect(
+    (
+      await r.runSweep(d, "budget", undefined, undefined, {
+        residentBytes: 200,
+        residentBudget: 50,
+        indexOverflow: false,
+      })
+    ).stopped,
+  ).toBe("done");
+  signals.settleBudgets(retry, true);
+  expect(plans.mock.calls.map((call) => [call[4], call[5]?.residentBudget])).toEqual([
+    ["write", undefined],
+    ["budget", 100],
+    ["budget", 50],
+  ]);
+  plans.mockRestore();
+  expect(signals.consumeBudgets(b.identity, { external: true })).toEqual([]);
+});
+
+it("R1: a new event during the trailing pass is dormant, not attributed to that pass", async () => {
+  const d = setup();
+  let releaseFirst = () => {},
+    releaseTail = () => {},
+    tailStarted = () => {};
+  const firstHold = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  const tailHold = new Promise<void>((resolve) => {
+    releaseTail = resolve;
+  });
+  const tailReady = new Promise<void>((resolve) => {
+    tailStarted = resolve;
+  });
+  let yields = 0;
+  const r = runner({
+    yield: async () => {
+      if (++yields === 1) await firstHold;
+      else if (yields === 2) {
+        tailStarted();
+        await tailHold;
+      }
+    },
+  });
+  const signals = createGovernanceSignals();
+  const first = r.runSweep(d, "write");
+  const tail = r.runSweep(d, "budget", undefined, undefined, {
+    residentBytes: 200,
+    residentBudget: 100,
+    indexOverflow: false,
+  });
+  releaseFirst();
+  await tailReady;
+  signals.markSignal("release", { success: true, readOnly: false });
+  const events = signals.consumeSignals({})!;
+  const skipped = await r.runSweep(d, "release");
+  expect(skipped.stopped).toBe("not-executed");
+  signals.deferSignals(events);
+  expect(signals.consumeSignals({})).toBeUndefined();
+  releaseTail();
+  await Promise.all([first, tail]);
+  expect(signals.consumeSignals({ external: true })).toEqual(["release"]);
+});
+
+it("R1: superseded queued budgets cannot receive another queued budget's result", async () => {
+  const d = setup();
+  let release = () => {};
+  const hold = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let yields = 0;
+  const r = runner({
+    yield: async () => {
+      if (++yields === 1) await hold;
+    },
+  });
+  const first = r.runSweep(d, "write");
+  const old = r.runSweep(d, "budget", undefined, undefined, {
+    residentBytes: 200,
+    residentBudget: 100,
+    indexOverflow: false,
+  });
+  const current = r.runSweep(d, "budget", undefined, undefined, {
+    residentBytes: 200,
+    residentBudget: 50,
+    indexOverflow: false,
+  });
+  expect((await old).stopped).toBe("not-executed");
+  release();
+  expect((await first).stopped).toBe("done");
+  expect((await current).stopped).toBe("done");
+});
+
+it.each(["first-fails", "tail-fails"])("R1: independent pass outcomes %s", async (mode) => {
+  const d = setup();
+  let release = () => {};
+  const hold = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let yields = 0,
+    locksCalled = 0;
+  const original = locks.withMemoryDirLock;
+  const spy = vi.spyOn(locks, "withMemoryDirLock").mockImplementation((...args) => {
+    locksCalled++;
+    if ((mode === "first-fails" && locksCalled === 1) || (mode === "tail-fails" && locksCalled === 2))
+      return Promise.reject(new MemoryError("memory dir busy"));
+    return original(...args);
+  });
+  const r = runner({
+    yield: async () => {
+      if (++yields === 1) await hold;
+    },
+  });
+  const first = r.runSweep(d, "write");
+  const tail = r.runSweep(d, "budget", undefined, undefined, {
+    residentBytes: 200,
+    residentBudget: 50,
+    indexOverflow: true,
+  });
+  release();
+  const [a, b] = await Promise.all([first, tail]);
+  expect(a.stopped).toBe(mode === "first-fails" ? "memory dir busy" : "done");
+  expect(b.stopped).toBe(mode === "tail-fails" ? "memory dir busy" : "done");
+  spy.mockRestore();
+});
+
 it("busy lock is abandoned instead of retrying a sweep", async () => {
   const d = setup();
   expired(d);
@@ -252,4 +491,64 @@ it("archive storage names exhausted through r999 skip without overwriting the so
   expect(readdirSync(archive).sort()).toEqual([...names].sort());
   for (const name of names) expect(readFileSync(join(archive, name), "utf8")).toBe(`occupied:${name}`);
   expect(existsSync(join(archive, "index.json"))).toBe(false);
+});
+
+it("sweep updates only its own persisted clock and fingerprint, never semantic review state", async () => {
+  const d = setup();
+  createBlockLocked(join(d, "blocks"), "rule", { authority: "user", expires: "2020-01-01" }, "rule", now);
+  const { readIndex, writeIndexPatch } = await import("../../../src/memory/jev/index-store.js");
+  const original = {
+    lastRunAt: "2026-01-01T00:00:00.000Z",
+    corpusFp: "semantic-fingerprint",
+    suggestions: [],
+    dismissed: [],
+  };
+  await writeIndexPatch(d, { review: original });
+  await runner().runSweep(d, "startup");
+  const after = readIndex(d).index.review!;
+  expect(after.lastRunAt).toBe(original.lastRunAt);
+  expect(after.corpusFp).toBe(original.corpusFp);
+  expect(after.sweepLastRunAt).toBe(now.toISOString());
+  expect(after.sweepCorpusFp).toBeTruthy();
+  expect(after.suggestions.map((s) => s.kind)).toContain("expired-user");
+  await writeIndexPatch(d, {
+    review: { ...original, lastRunAt: "2026-11-07T00:00:00.000Z", corpusFp: "new-semantic" },
+  });
+  expect(readIndex(d).index.review).toMatchObject({
+    sweepLastRunAt: after.sweepLastRunAt,
+    sweepCorpusFp: after.sweepCorpusFp,
+    corpusFp: "new-semantic",
+  });
+});
+
+it("never rewrites archived historical oversized metadata during recovery or restore", async () => {
+  const d = setup();
+  mkdirSync(join(d, "blocks/archive"));
+  const name = "old.001.md";
+  const raw = serializeBlock(
+    {
+      kind: "block",
+      authority: "agent",
+      status: "active",
+      version: 1,
+      created: now.toISOString(),
+      updated: now.toISOString(),
+    },
+    "old",
+  ).replace("status: active", `status: active\nwhen: ${"w".repeat(95)}`);
+  const path = join(d, "blocks/archive", name);
+  writeFileSync(path, raw);
+  writeFileSync(
+    join(d, "blocks/archive/index.json"),
+    JSON.stringify({ [name]: { id: "old.001", archivedAt: now.toISOString(), reason: "write" } }),
+  );
+  await runner().runSweep(d, "startup");
+  expect(readFileSync(path, "utf8")).toBe(raw);
+  await expect(restoreBlock(d, "old.001")).rejects.toThrow(
+    /E_META: archived when exceeds limit \(95B > 70B\).*manually/,
+  );
+  writeFileSync(path, raw.replace("kind: block\n", ""));
+  await expect(restoreBlock(d, "old.001")).rejects.toThrow("structural corruption");
+  writeFileSync(path, raw);
+  expect(readFileSync(path, "utf8")).toBe(raw);
 });

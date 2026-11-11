@@ -71,8 +71,8 @@ R 层（Reflex）：在 `input` 阶段对只读自省问题（后台 job / subag
 
 接受方式分两种：B1 的 D1–D4 由 root 通过 steer 明确裁定接受；B2 §3、B3 §2、B5 的默认做法由 root 审阅子 agent 的 finding 后接受（未逐条书面回复，但已记入任务并据此派发下游）。各条「是什么、为什么」；详细论证见对应报告。不改变 R-I12/R-I13/R-I14 与威胁模型的含义。
 
-- **B1 · fence active ⇒ lenient**（B1 §3 D1）：topic-switch hold / goal 活跃（导出为 active）时该事实计入 `unknownFacts`，轮次归 lenient。为什么：active fence 在运行时必被 `fence-topic`/`fence-goal` 否决，若计入 confirmed 会稀释分歧率语义（宁少算不虚算，K11 同向）。
-- **B1 · fence 状态轮开启时快照**（B1 §3 其余实现口径，`corpus.ts`）：fence（topic-switch/goal）状态在**轮开启时**快照，区间内被 outcome 解除不改写历史（与运行时 input 时读一致）；fence 的 malformed 条目使后续轮计为 lenient，直到下一条合法条目重新定格状态。为什么：回测只能重放已落盘事实，不能反推「若 fence 未激活会怎样」。
+- **B1 · fence active ⇒ lenient**（B1 §3 D1，历史回放口径）：回放中的 topic-switch hold 或旧 `subagent:goal` 活跃记录（导出为 active）计入 `unknownFacts`，轮次归 lenient。为什么：功能存在时的运行时会被对应 `fence-topic`/`fence-goal` 否决，将这些历史轮次计入 confirmed 会稀释分歧率语义（宁少算不虚算，K11 同向）；现役生产运行时不再有 goal 退让来源。
+- **B1 · fence 状态轮开启时快照**（B1 §3 其余实现口径，`corpus.ts`）：历史回放中的 fence（topic-switch 与旧 goal 记录）状态在**轮开启时**快照，区间内被 outcome 解除不改写历史（复现当时 input 时读取的事实）；fence 的 malformed 条目使后续轮计为 lenient，直到下一条合法条目重新定格状态。为什么：回测只能重放已落盘事实，不能反推「若 fence 未激活会怎样」，也不会据此恢复已移除的目标循环。
 - **B1 · replay 用理想 TUI 事实**（D2）：回测对**所有**轮次（含 steer/replay 来源）用与 `/reflex explain` 同口径的理想 TUI 空闲事实；来源分类只服务语料筛选（web/injected 排除）与聚类，不影响 gate。为什么：回测的问题是「若在 TUI 空闲敲出会否命中」（BA §4.3 counterfactual 语义）。
 - **B1 · CorrectionFact 只受 since 下界**（D3）：纠正证据不受 `until` 上界截断，晚于窗口结束的纠正仍可指向窗口内轮次。为什么：截断只会少计纠正，违反「离线只会多计纠正（保守）」原则；运行时 90s memo 窗天然兜底。
 - **B1 §3.1 / B3 · 升序喂入约定**（D4）：编排层把会话文件按 header `timestamp` 升序（同刻按文件名稳定排序）喂给 `createCorpusBuilder`（祖先先于 fork），并仍消费 `takeRevoked()`。为什么：钉住 BD5 的次序无关语义并保证 cold/warm 逐字节一致；builder 本身 turn 级 steal+revoke 自愈，乱序时结果仍自洽但 confirmed/lenient 划分可能偏松（保守方向）。
@@ -108,7 +108,7 @@ R 层（Reflex）：在 `input` 阶段对只读自省问题（后台 job / subag
 - **R-I8** 所有状态都在 `wireReflex` 闭包里，不用 `Symbol.for` 全局。
 - **R-I9** 输出只有 `subagent:reflex`（custom message）、`subagent:reflex-record` 与 `subagent:reflex-correction`（custom entry）三种；details 只追加字段；不写 system prompt。customType 一律 `subagent:reflex*`（I7，不用 `pi-toolkit:*`）。
 - **R-I10** `src/reflex/core/**` pi-free（`tests/boundary/pi-free.test.ts` 值闭包门禁，PD3；`ports/*.ts` 同款，PD4）。
-- **R-I11** 注册位置：web-hub 块之后、topic-switch 之前；topic-switch hold 或 goal 活跃时退让（S0 veto `fence-topic` / `fence-goal`）。
+- **R-I11** 注册位置：web-hub 块之后、topic-switch 之前；现役运行时在 topic-switch hold 时退让（S0 veto `fence-topic`）。生产 `goalBusy` 事实恒为 `false`，`fence-goal` 仅保留给历史回放事实，不再是生产退让来源。
 - **R-I12**（#25 BA §6 改写）：auto 只可能来自内置 catalog（`origin:"builtin"`）；`validateCatalog` 拒绝 `extracted` 与 `draft.*` id。草案只能在 `reflex.drafts.enabled` 下经 `validateDraft` 加载，恒为 shadow；AUTO 准入只认 `scriptById` 中的 builtin id，草案不调用状态机。rscript/1 没有 argv 种类，草案正则受 DRX 语法约束（`core/draft-regex.ts`，拒绝 = 解析器拒绝而非黑名单）。
 - **R-I13**（#25 新增）：草案加载有界、no-follow、fail-closed（受信目录 0700/属主校验 → `opendir` 流式 ≤64 → 名字白名单 → no-follow fd 同 fd stat → 读 cap+1 → dev/ino 复核 → `clampSpanMs(500)` 预算），不影响内置脚本；secure/locked/子会话不可达（D8 + HOST_KEY + `secureDomainKind` 三重门）。
 - **R-I14**（#25 新增）：离线评审 / 暴露 / 批次 / manifest / 修订记录都是**未认证记录**（同 UID agent 可读写任意文件）；人工认证只发生在用户批准把草案改写进 `catalog.ts` 的 PR（或用户在对话中明确确认）。运行时安全不依赖任何离线记录：草案恒 shadow，port 只读。
@@ -175,3 +175,7 @@ R 层（Reflex）：在 `input` 阶段对只读自省问题（后台 job / subag
 - web-hub 镜像把 `subagent:reflex` 按通用 custom message 显示原文（含 XML 外壳）——I10 不新增 wire 字段，记为残留。
 - 跨会话重复口径偏严（10min 内不同会话问同一句也算重复）；若 shadow 期长期不达标由主会话 `ask_user` 决定是否只计同会话。
 - **C-R7 手动复核**（若将来 harness 无法驱动主循环）：真实 TUI 里在 input handler 的 await 期间连提两条消息，确认第二条排队而非并发进入 `prompt()`。当前由 `reflex.test.ts` C-R7 自动覆盖。
+
+## Objective-loop removal (2026-11-09)
+
+The live `goalBusy` callback is removed; runtime facts always set the historical slot to false. The frozen offline corpus DTO, its old `subagent:goal` replay and injected-message marker remain historical data interpretation only: they do not restore, schedule, evaluate or continue a goal. Existing backtest facts/gate tests still validate historical sessions.

@@ -373,7 +373,15 @@ describe("tools/agent-tool: X3 nested delegation gating (allowedTypes/forceSlotl
 
 describe("tools/agent-tool: nested blocking failure diagnostics", () => {
   const failed = (text?: string, sessionFile?: string) =>
-    outcome("failed-42", { status: "failed", text, error: { message: "boom" } }, { sessionFile });
+    outcome(
+      "failed-42",
+      {
+        status: "failed",
+        ...(text === undefined ? {} : { text }),
+        error: { kind: "startup_transient", message: "boom", retryable: true },
+      },
+      sessionFile === undefined ? {} : { sessionFile },
+    );
 
   it("includes runId, a non-committal resume hint, and a capped output tail", async () => {
     const port = fakePort();
@@ -388,7 +396,7 @@ describe("tools/agent-tool: nested blocking failure diagnostics", () => {
         {} as never,
       ),
     ).rejects.toThrow(
-      /run_id: failed-42.*label: "demo".*did not complete successfully: boom.*may be resumable.*resume: "failed-42"/,
+      /run_id: failed-42.*label: "demo".*did not complete successfully: startup_transient.*may be resumable.*resume: "failed-42"/,
     );
     try {
       await tool.execute(
@@ -829,14 +837,18 @@ describe("tools/agent-tool: dispatch meta + verdict/v1 preset", () => {
   });
 
   it.each([
-    ["unknown key", { lane: "L1", oops: 1 }, /unknown key\(s\): oops.*Allowed keys: lane, packageId, feature$/],
+    [
+      "unknown key",
+      { lane: "L1", oops: 1 },
+      /unknown key\(s\): oops.*Allowed keys: lane, packageId, feature.*code=agent_validation_failed/,
+    ],
     ["non-plain object", "L2", /meta must be a plain object with keys/],
     ["invalid lane", { lane: "L9" }, /meta\.lane must be one of: L0, L1, L2, L3/],
     ["invalid packageId", { packageId: "-nope" }, /meta\.packageId must be a non-empty id matching/],
     [
       "the removed abArm key",
       { packageId: "p", abArm: "control" },
-      /unknown key\(s\): abArm\. Allowed keys: lane, packageId, feature$/,
+      /unknown key\(s\): abArm\. Allowed keys: lane, packageId, feature.*code=agent_validation_failed/,
     ],
   ])("rejects meta with %s, listing what is allowed, and never spawns", async (_label, meta, message) => {
     const port = fakePort();

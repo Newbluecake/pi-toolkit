@@ -4,7 +4,7 @@
  * Gate order (cheapest/most-selective first; thunks only run once their turn
  * comes — the `branch()` scan is deferred until after gate 2c):
  *   1a disabled / no-ui · 1b busy-turn · compacting · draining · cooldown ·
- *   background · goal · 2a source · 2b prefix/short · 2c continuation ·
+ *   background · 2a source · 2b prefix/short · 2c continuation ·
  *   (branch() NOW) todo · first-turn · asked · 3a warm / warmth-unknown ·
  *   3b no-usage / unpriced / cheap.
  * Whole body wrapped in try/catch ⇒ `fact-error` (fail-open: I6 判不清就不问).
@@ -35,7 +35,6 @@ export function evaluateSyncGates(facts: GateFacts, s: TopicSwitchSettings): Gat
     if (facts.draining) return { pass: false, reason: "draining" };
     if (facts.cooldownActive) return { pass: false, reason: "cooldown" };
     if (facts.activeRuns > 0 || facts.backgroundBash > 0) return { pass: false, reason: "background" };
-    if (facts.goalBusy) return { pass: false, reason: "goal" };
     // ── 2 来源 / 文本 ──────────────────────────────────────────────────
     if (!sourceAllowed(facts.origin, facts.source)) return { pass: false, reason: "source" };
     const textClass = classifyText(facts.text, facts.imageCount, s.minChars);

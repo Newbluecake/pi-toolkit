@@ -1,3 +1,5 @@
+import { parseMemoryCommandFacts } from "@protocol/memory-command-facts.ts";
+
 /**
  * Control-plane pure helpers (control-plan v2.1 §7.2/§7.7, package C4 — takes over C0's stub).
  * No DOM, no I/O: every function here runs unchanged under vitest (node) and in the browser.
@@ -21,10 +23,12 @@
  * @typedef {{ id: string, kind: string, state: string, text?: string, deliver?: string,
  *   runId?: string, dialogId?: string, name?: string, at: number, behavior?: string,
  *   error?: string, message?: string, retryable?: boolean, effect?: string, reason?: string,
- *   offline?: boolean, lateQuery?: boolean, ctlAt?: number }} PendingItem
+ *   offline?: boolean, lateQuery?: boolean, ctlAt?: number, memoryUiKey?: any, memoryResult?: any,
+ *   memorySettled?: boolean, memoryTerminalSignal?: boolean, memoryQueryInFlight?: boolean, memoryQueried?: boolean, memoryInvalidated?: boolean }} PendingItem
  *
  * @typedef {{ type: "result", outcome: CmdOutcome }
  *   | { type: "query_start" }
+ *   | { type: "query_request" }
  *   | { type: "query_result", outcome: CmdOutcome }
  *   | { type: "retry" }
  *   | { type: "discard" }
@@ -343,6 +347,209 @@ function patchItem(item, patch) {
   return { ...item, ...patch };
 }
 
+/** Complete local identity comparison. Missing owners never match. */
+export function sameMemoryUiKey(a, b) {
+  return (
+    !!a &&
+    !!b &&
+    typeof a.cmdId === "string" &&
+    a.cmdId === b.cmdId &&
+    Number.isSafeInteger(a.operationGeneration) &&
+    a.operationGeneration === b.operationGeneration &&
+    !!a.owner &&
+    !!b.owner &&
+    typeof a.owner.agentKey === "string" &&
+    a.owner.agentKey !== "" &&
+    a.owner.agentKey === b.owner.agentKey &&
+    typeof a.owner.sessionId === "string" &&
+    a.owner.sessionId !== "" &&
+    a.owner.sessionId === b.owner.sessionId &&
+    typeof a.owner.epoch === "string" &&
+    a.owner.epoch !== "" &&
+    a.owner.epoch === b.owner.epoch
+  );
+}
+
+/** No authority here: just prevent old-scope callbacks from decorating the current session. */
+export function memoryOwnerMatches(key, agentKey, agent) {
+  return sameMemoryUiKey(key, {
+    ...key,
+    owner: {
+      agentKey,
+      sessionId: agent?.session?.sessionId,
+      epoch: agent?.card?.epoch,
+    },
+  });
+}
+
+/** Keep only the display fields, at most 32KiB of pure JSON. No callbacks/caps/second ledger. */
+function memoryResult(body, cmdId) {
+  const data = body?.data;
+  const text =
+    body?.ok === false
+      ? body.message
+      : data?.output?.entries?.length === 1 && data.output.entries[0]?.kind === "text"
+        ? data.output.entries[0].text
+        : undefined;
+  if (typeof text === "string") {
+    const parsed = parseMemoryCommandFacts(text, cmdId);
+    if (parsed.kind === "invalid")
+      return {
+        phase: "unknown",
+        effect: "unknown",
+        error: "E_BAD_RESPONSE",
+        message: "记忆效果事实不完整或身份不符；可能已写入，勿盲重试。",
+      };
+    if (parsed.kind === "facts") {
+      const effect = parsed.facts.effect;
+      if (
+        (body.ok === true && (effect === "partial" || effect === "unknown")) ||
+        (body.ok === false && (effect === "completed" || (body.effect === "none" && effect !== "none")))
+      )
+        return { phase: "unknown", effect: "unknown", error: "E_BAD_RESPONSE" };
+      // Display only: retain the one parsed projection + human summary, NEVER
+      // the full encoded message/output as another copy of the same facts.
+      const result = {
+        phase:
+          effect === "partial"
+            ? "partial"
+            : effect === "unknown"
+              ? "unknown"
+              : body.ok === true
+                ? "completed"
+                : "rejected",
+        effect,
+        facts: parsed.facts,
+        message: parsed.summary,
+        ...(body.ok === false ? { error: body.code ?? body.error ?? "E_COMMAND_DENIED" } : {}),
+      };
+      try {
+        if (new TextEncoder().encode(JSON.stringify(result)).length <= 24 * 1024) return result;
+      } catch {
+        /* bounded below */
+      }
+      return { phase: "unknown", effect: "unknown", error: "E_RESULT_TOO_LARGE" };
+    }
+  }
+  let result;
+  if (body?.ok === true && data?.completion === "sync" && data?.captured === true && data?.output) {
+    const facts = data.memoryWrite;
+    if (
+      facts !== undefined &&
+      (!facts ||
+        typeof facts.id !== "string" ||
+        !/^n[1-9][0-9]{0,5}$/.test(facts.id) ||
+        (facts.rev !== undefined && (typeof facts.rev !== "string" || facts.rev.length > 128)) ||
+        !["appended", "memory-only"].includes(facts.persistence))
+    )
+      return { phase: "unknown", effect: "unknown", error: "E_BAD_RESPONSE" };
+    result = {
+      phase: "completed",
+      effect: "completed",
+      output: data.output,
+      ...(facts === undefined
+        ? {}
+        : {
+            memoryWrite: {
+              id: facts.id,
+              ...(facts.rev === undefined ? {} : { rev: facts.rev }),
+              persistence: facts.persistence,
+            },
+          }),
+    };
+  } else if (body?.ok === false) {
+    result = {
+      phase: body.effect === "none" ? "rejected" : "unknown",
+      effect: body.effect === "none" ? "none" : "unknown",
+      error: typeof body.code === "string" ? body.code : typeof body.error === "string" ? body.error : "E_UNKNOWN",
+      ...(typeof body.message === "string" ? { message: body.message } : {}),
+    };
+  } else {
+    result = { phase: "unknown", effect: "unknown", error: "E_BAD_RESPONSE" };
+  }
+  try {
+    const json = JSON.stringify(result);
+    if (new TextEncoder().encode(json).length <= 32 * 1024) return JSON.parse(json);
+  } catch {
+    /* malformed/unbounded peer output cannot be success evidence */
+  }
+  return { phase: "unknown", effect: "unknown", error: "E_RESULT_TOO_LARGE" };
+}
+
+/** Mem only: ctl/late are signals, NEVER evidence of effect. Query the existing ledger. */
+function memoryTransition(item, event) {
+  if (item.memorySettled && item.memoryResult?.phase !== "unknown" && event.type !== "discard") return item;
+  const unknown = (outcome) =>
+    patchItem(item, {
+      state: "unknown",
+      memoryQueryInFlight: false,
+      lateQuery: false,
+      memoryResult: memoryResult({ ...outcome, ok: false, effect: "unknown" }, item.id),
+      retryable: false,
+    });
+  const settle = (body) => {
+    const result = memoryResult(body, item.id);
+    return patchItem(item, {
+      state: result.phase === "completed" ? "done" : result.phase === "rejected" ? "failed" : "unknown",
+      memoryResult: result,
+      memorySettled: true,
+      memoryQueryInFlight: false,
+      lateQuery: false,
+      retryable: false,
+    });
+  };
+  switch (event.type) {
+    case "discard":
+      return null;
+    case "retry":
+      return item; // queryOnly; even effect:none does not license replay of a write
+    case "query_request":
+      return patchItem(item, { state: "querying", lateQuery: true });
+    case "late":
+    case "ctl": {
+      const terminal =
+        event.type === "late" || ["ok", "late_ok", "failed", "late_failed", "consumed"].includes(event.entry?.state);
+      if (!terminal || item.memorySettled || item.memoryTerminalSignal) return item;
+      return patchItem(item, { state: "querying", memoryTerminalSignal: true, lateQuery: true });
+    }
+    case "query_start":
+      return patchItem(item, { state: "querying", memoryQueryInFlight: true, memoryQueried: true, lateQuery: false });
+    case "query_result": {
+      const o = event.outcome;
+      if (o?.ok !== true) return unknown(o);
+      const q = o.data;
+      if (["ok", "late_ok", "failed", "late_failed"].includes(q?.state) && typeof q?.result?.ok === "boolean")
+        return settle(q.result);
+      if (["dispatched", "observed", "started", "queued", "running"].includes(q?.state))
+        return patchItem(item, {
+          state: item.lateQuery ? "querying" : "running",
+          memoryQueryInFlight: false,
+          memoryResult: { phase: "running" },
+        });
+      return unknown({ error: "E_UNKNOWN_ID", message: "Command result unavailable or expired" });
+    }
+    case "result": {
+      // Terminal signal/query may precede the initial async HTTP acknowledgement.
+      if (item.memorySettled || item.memoryTerminalSignal || item.memoryQueried) return item;
+      const o = event.outcome;
+      if (o?.ok === true && o.data?.completion === "async")
+        return patchItem(item, { state: "running", memoryResult: { phase: "running" } });
+      if (o?.ok === true && o.data?.completion === "unknown") return unknown({ error: "E_COMMAND_UNKNOWN" });
+      if (
+        o?.ok === true ||
+        o?.effect === "none" ||
+        (typeof o?.message === "string" && parseMemoryCommandFacts(o.message, item.id).kind !== "legacy")
+      )
+        return settle(o);
+      return unknown(o);
+    }
+    case "offline":
+      return item.memorySettled ? item : { ...unknown({ error: "E_OFFLINE" }), offline: true };
+    default:
+      return item;
+  }
+}
+
 /**
  * Map a hub/agent HTTP response (or a queryOnly answer) onto the item. See the file header for
  * the machine; `null` removes the item from `pendingCtl`.
@@ -351,6 +558,7 @@ function patchItem(item, patch) {
  */
 export function pendingTransition(item, event) {
   if (!item || !event || typeof event.type !== "string") return item;
+  if (item.memoryUiKey) return memoryTransition(item, event);
   switch (event.type) {
     case "result": {
       const o = event.outcome;

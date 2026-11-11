@@ -41,6 +41,8 @@ export interface MemoryToolDeps {
   settings: MemorySettings;
   writeGate?: import("./contracts.js").MemoryWriteGate;
   isChildSession: boolean;
+  /** Host-only reason: scopes-on child content is hard read-only, not opt-in. */
+  childReadonlyReason?: "scopes";
   /** 写成功后由 wireMemory 接线：cache.delete(cwd) 或冻结标记（freezeInjectionAfterWrite）。 */
   onAfterWrite: (cwd: string) => void;
   paths?: MemoryPaths;
@@ -94,9 +96,11 @@ export function createMemoryTool(deps: MemoryToolDeps): ToolDefinition {
       // B1: child sessions are read-only by default. The tool throws the
       // actionable message itself; writeMemoryFile's allowWrite gate stays as
       // the structural backstop for any future second caller (R7).
-      if (deps.isChildSession && !settings.allowWriteInChildSessions) {
+      if (deps.isChildSession && (deps.childReadonlyReason === "scopes" || !settings.allowWriteInChildSessions)) {
         throw new Error(
-          "child sessions are read-only for memory by default; enable memory.allowWriteInChildSessions to allow writes",
+          deps.childReadonlyReason === "scopes"
+            ? "child project memory is read-only while memory scopes are enabled; hand off the intended change to the main session for review and writing"
+            : "child sessions are read-only for memory by default; enable memory.allowWriteInChildSessions to allow writes",
         );
       }
       const name = params.name;

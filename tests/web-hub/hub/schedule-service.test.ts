@@ -1359,3 +1359,43 @@ describe("deprecated wire tolerance", () => {
     expect(svc.port()).not.toHaveProperty("offersSeen");
   });
 });
+
+describe("interval P1 hub is read-only, with no speculative missed verdict or observation timer", () => {
+  it("excludes every from BOTH observePass and armObserve, but reconciles committed missedLog", async () => {
+    const root = tmp(),
+      reg = fakeRegistry();
+    const interval = task({ when: { kind: "every", everyMs: 30_000, anchorAt: BASE } });
+    const write = (missed: boolean) =>
+      writeStore(root, "sid-interval", (s) => {
+        s.v = 2;
+        s.tasks.push(interval);
+        s.occ[interval.id] = {
+          defHash: defHash(interval),
+          decidedThrough: missed ? BASE + 60_000 : BASE,
+          firedTotal: 0,
+          missedTotal: missed ? 2 : 0,
+          skippedTotal: 0,
+          missedLog: missed ? [missedEntry(defHash(interval), 1, BASE, BASE + 60_000, 2, 2)] : [],
+        };
+      });
+    write(false);
+    const svc = service(root, reg, BASE + 150_000);
+    const d = fakeDelivery();
+    svc.bindDelivery(d.delivery);
+    await svc.rescanAll();
+    const ctx = ctxOf(svc);
+    expect(ctx.mt.singles()).toBe(0);
+    expect(svc.snapshot().sessions[0]!.tasks).toEqual([]);
+    expect(svc.snapshot().sessions[0]!.intervalTasks).toHaveLength(1);
+    await svc.tickObserve();
+    expect(svc.status().counters.observations).toBe(0);
+    expect(d.notices).toEqual([]);
+    expect(ctx.mt.singles()).toBe(0);
+    write(true);
+    await svc.rescanAll();
+    expect(d.notices).toHaveLength(1);
+    expect(d.notices[0]).toMatchObject({ kind: "missed", count: 2 });
+    expect(svc.port().list()[0]!.when).toContain("every 30s @ UTC");
+    expect(svc.port().list()[0]!.interval).toBe(true);
+  });
+});

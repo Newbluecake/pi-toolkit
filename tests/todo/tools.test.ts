@@ -11,7 +11,7 @@ import { ARCHIVE_ENTRY, emptyState, replayState, STATE_ENTRY, type TodoState } f
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type AnyTool = ToolDefinition<any, any, any>;
 
-type ToolResult = { content: { type: string; text: string }[]; details?: any };
+type ToolResult = { content: { type: string; text: string }[]; details?: any; isError?: boolean };
 
 interface Host {
   pi: ExtensionAPI;
@@ -1207,6 +1207,314 @@ describe("wireTodo todo-archive-split §4.3 write-path scenarios", () => {
     await exec(host, "TaskCreate", { subject: "A", description: "d" }, ctx);
     expect(liveWrites(host).length).toBe(writes + 2);
   });
+});
+
+// ── #84 A: task mutations survive uncertain persistence without inviting duplicate writes ──
+
+describe("wireTodo mutation persistence uncertainty", () => {
+  type Phase = "pre" | "live" | "post";
+  type Entry = Host["appended"][number];
+
+  function phaseOf(entry: Entry): Phase {
+    if (entry.customType === STATE_ENTRY) return "live";
+    const data = entry.data as { put?: unknown[]; drop?: number[]; reset?: boolean };
+    return data.drop && !data.put && !data.reset ? "post" : "pre";
+  }
+
+  async function seeded() {
+    const host = fakePi();
+    const wiring = wireTodo(host.pi, { archive: { onCompact: true, afterTurns: 0 } });
+    const ctx = fakeCtx(host, "rpc");
+    await exec(host, "TaskCreate", { subject: "A", description: "A" }, ctx);
+    await exec(host, "TaskCreate", { subject: "B", description: "B" }, ctx);
+    await exec(host, "TaskUpdate", { taskId: "1", status: "completed" }, ctx);
+    await exec(host, "TaskUpdate", { taskId: "2", status: "completed" }, ctx);
+    await host.handlers.get("session_compact")?.({}, fakeCtx(host, "rpc", branchOf(host)));
+    await exec(host, "TaskCreate", { subject: "C", description: "C", blockedBy: ["1"] }, ctx);
+    expect(wiring.getTodoSnapshot().nextId).toBe(4);
+    return { host, wiring, ctx };
+  }
+
+  function failAppend(host: Host, at: number, timing: "before" | "after") {
+    const original = host.pi.appendEntry;
+    const attempts: Entry[] = [];
+    host.pi.appendEntry = (customType, data) => {
+      attempts.push({ customType, data });
+      if (attempts.length === at && timing === "before") throw new Error("write failed before record");
+      original(customType, data);
+      if (attempts.length === at && timing === "after") throw new Error("write failed after record");
+    };
+    return { attempts, restore: () => (host.pi.appendEntry = original) };
+  }
+
+  function expectUncertain(result: ToolResult, operation: string, taskId: string): void {
+    expect(result.isError).toBe(true);
+    expect(result.details).toMatchObject({
+      action: operation,
+      taskId,
+      operation,
+      memoryApplied: true,
+      persistence: "unknown",
+      error: "Mutation applied in memory; persistence unknown.",
+    });
+    expect(result.details.state).toBeUndefined();
+    const text = result.content[0]?.text ?? "";
+    expect(text).toContain(`Task #${taskId} operation=${operation}`);
+    expect(text).toContain("applied in memory; persistence unknown");
+    expect(text).toContain("Do not repeat the mutation or recreate the task");
+    expect(text).toContain(`TaskGet(taskId:"${taskId}")`);
+    expect(text).toContain("TaskList(includeCompleted:true)");
+    expect(text).toContain("reads inspect only current memory and cannot prove disk persistence");
+    if (operation === "delete") {
+      expect(text).toContain("TaskGet not-found after deletion is not proof that the deletion reached disk");
+    }
+  }
+
+  const scenarios: {
+    name: string;
+    tool: string;
+    operation: string;
+    params: unknown;
+    id: string;
+    phases: Phase[];
+    nextId: number;
+    continuation: Phase[][];
+  }[] = [
+    {
+      name: "create with an archived predecessor",
+      tool: "TaskCreate",
+      operation: "create",
+      params: { subject: "D", description: "D", blockedBy: ["2"] },
+      id: "4",
+      phases: ["pre", "live"],
+      nextId: 5,
+      continuation: [["pre", "live"], ["live"]],
+    },
+    {
+      name: "update reopening an archive and adding a cross-storage edge",
+      tool: "TaskUpdate",
+      operation: "update",
+      params: { taskId: "1", status: "pending", addBlocks: ["2"] },
+      id: "1",
+      phases: ["pre", "live", "post"],
+      nextId: 4,
+      continuation: [
+        ["pre", "live", "post"],
+        ["live", "post"],
+        ["live", "post"],
+      ],
+    },
+    {
+      name: "delete pruning an archived neighbor",
+      tool: "TaskDelete",
+      operation: "delete",
+      params: { taskId: "3" },
+      id: "3",
+      phases: ["pre", "live"],
+      nextId: 4,
+      continuation: [["pre", "live"], ["live"]],
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    for (const [index, phase] of scenario.phases.entries()) {
+      for (const timing of ["before", "after"] as const) {
+        test(`${scenario.name}: ${phase} throws ${timing} recording, earlier successful baselines survive`, async () => {
+          const { host, wiring, ctx } = await seeded();
+          const writesBefore = host.appended.length;
+          const fault = failAppend(host, index + 1, timing);
+          const result = await exec(host, scenario.tool, scenario.params, ctx);
+          expectUncertain(result, scenario.operation, scenario.id);
+          // A throwing append is attempted ONCE, and no later stage runs or retries in this call.
+          expect(fault.attempts.map(phaseOf)).toEqual(scenario.phases.slice(0, index + 1));
+          expect(host.appended).toHaveLength(writesBefore + index + (timing === "after" ? 1 : 0));
+          const memory = wiring.getTodoSnapshot();
+          expect(memory.nextId).toBe(scenario.nextId);
+          expect(memory.tasks.map((task) => task.id)).toEqual(
+            scenario.operation === "create" ? [1, 2, 3, 4] : scenario.operation === "delete" ? [1, 2] : [1, 2, 3],
+          );
+          if (scenario.operation === "create") {
+            expect(memory.tasks.find((task) => task.id === 4)?.blockedBy).toEqual([2]);
+            expect(memory.tasks.find((task) => task.id === 2)?.blocks).toEqual([4]);
+          } else if (scenario.operation === "update") {
+            expect(memory.tasks.find((task) => task.id === 1)).toMatchObject({ status: "pending", blocks: [3, 2] });
+            expect(memory.tasks.find((task) => task.id === 1)?.archivedAt).toBeUndefined();
+            expect(memory.tasks.find((task) => task.id === 2)?.blockedBy).toEqual([1]);
+            expect(memory.tasks.find((task) => task.id === 3)?.blockedBy).toEqual([1]);
+          } else {
+            expect(memory.tasks.find((task) => task.id === 1)?.blocks).toEqual([]);
+          }
+
+          // Read-only inspection observes memory, including archives, but never appends or retries.
+          const list = await exec(host, "TaskList", { includeCompleted: true }, ctx);
+          expect(list.content[0]?.text).toContain("#2 completed B");
+          expect(list.content[0]?.text).toContain("[archived]");
+          if (scenario.operation === "delete") {
+            await expect(exec(host, "TaskGet", { taskId: scenario.id }, ctx)).rejects.toThrow("Task #3 not found");
+            expect(list.content[0]?.text).not.toContain("#3");
+          } else {
+            const got = await exec(host, "TaskGet", { taskId: scenario.id }, ctx);
+            expect(got.details.task).toEqual(result.details.task);
+            expect(list.content[0]?.text).toContain(`#${scenario.id} pending`);
+          }
+          const neighbor = await exec(host, "TaskGet", { taskId: "2" }, ctx);
+          expect(neighbor.details.task).toEqual(memory.tasks.find((task) => task.id === 2));
+          expect(fault.attempts).toHaveLength(index + 1);
+          // A no-op update must not secretly retry an uncertain persist either.
+          const unchanged = await exec(host, "TaskUpdate", { taskId: "2", subject: "B" }, ctx);
+          expect(unchanged.details.changed).toBe(false);
+          expect(fault.attempts).toHaveLength(index + 1);
+          fault.restore();
+
+          // An independent later mutation still works and allocates the NEXT id, never recreates
+          // the uncertain task. Only unfinished stages are re-derived; successful pre appends
+          // are not repeated. A throw-after-record stage is deliberately NOT assumed successful.
+          const continuationStart = host.appended.length;
+          const next = await exec(host, "TaskCreate", { subject: "Next", description: "independent work" }, ctx);
+          expect(next.isError).toBeUndefined();
+          expect(next.details.task.id).toBe(scenario.nextId);
+          const tail = host.appended.slice(continuationStart);
+          expect(tail.map(phaseOf)).toEqual(scenario.continuation[index]);
+          const successfulEarlier = fault.attempts.slice(0, index).map((entry) => JSON.stringify(entry));
+          for (const entry of tail) expect(successfulEarlier).not.toContain(JSON.stringify(entry));
+          expect(replayState(branchOf(host))).toEqual(wiring.getTodoSnapshot());
+        });
+      }
+    }
+
+    test(`${scenario.name}: successful pre/live/post are not appended a second time`, async () => {
+      const { host, wiring, ctx } = await seeded();
+      const before = host.appended.length;
+      const result = await exec(host, scenario.tool, scenario.params, ctx);
+      expect(result.isError).toBeUndefined();
+      expect(host.appended.slice(before).map(phaseOf)).toEqual(scenario.phases);
+      const after = host.appended.length;
+      await exec(host, "TaskCreate", { subject: "Next", description: "independent work" }, ctx);
+      expect(host.appended.slice(after).map(phaseOf)).toEqual(["live"]);
+      expect(replayState(branchOf(host))).toEqual(wiring.getTodoSnapshot());
+    });
+  }
+
+  test.each(["before", "after"] as const)(
+    "fresh create throws %s recording: memory reads cannot establish durability",
+    async (timing) => {
+      const host = fakePi();
+      const wiring = wireTodo(host.pi);
+      const ctx = fakeCtx(host, "rpc");
+      const fault = failAppend(host, 1, timing);
+      const result = await exec(host, "TaskCreate", { subject: "A", description: "A" }, ctx);
+      expectUncertain(result, "create", "1");
+      expect(wiring.getTodoSnapshot().nextId).toBe(2);
+      expect(wiring.getTodoSnapshot().tasks.map((task) => task.id)).toEqual([1]);
+      expect((await exec(host, "TaskGet", { taskId: "1" }, ctx)).details.task.subject).toBe("A");
+      expect((await exec(host, "TaskList", { includeCompleted: true }, ctx)).content[0]?.text).toContain(
+        "#1 pending A",
+      );
+      expect(fault.attempts.map(phaseOf)).toEqual(["live"]);
+      expect(replayState(branchOf(host))?.tasks.map((task) => task.id)).toEqual(timing === "after" ? [1] : undefined);
+      fault.restore();
+      const next = await exec(host, "TaskCreate", { subject: "Next", description: "independent work" }, ctx);
+      expect(next.details.task.id).toBe(2);
+      expect(host.appended).toHaveLength(timing === "after" ? 2 : 1);
+      expect(replayState(branchOf(host))).toEqual(wiring.getTodoSnapshot());
+    },
+  );
+
+  test.each(["before", "after"] as const)("archived delete throws %s recording the pre-only drop", async (timing) => {
+    const { host, wiring, ctx } = await seeded();
+    const fault = failAppend(host, 1, timing);
+    const result = await exec(host, "TaskDelete", { taskId: "1" }, ctx);
+    expectUncertain(result, "delete", "1");
+    expect(fault.attempts).toHaveLength(1);
+    expect(fault.attempts[0]?.customType).toBe(ARCHIVE_ENTRY);
+    expect(fault.attempts[0]?.data).toEqual({ v: 1, drop: [1] });
+    expect(wiring.getTodoSnapshot().nextId).toBe(4);
+    expect(wiring.getTodoSnapshot().tasks.map((task) => task.id)).toEqual([2, 3]);
+    // The same in-memory not-found below occurs both when the disk still has #1 and when
+    // the drop was recorded. Neither TaskGet nor TaskList can resolve this uncertainty.
+    expect(replayState(branchOf(host))?.tasks.some((task) => task.id === 1)).toBe(timing === "before");
+    const got = await exec(host, "TaskGet", { taskId: "3" }, ctx);
+    expect(got.details.task.blockedBy).toEqual([]);
+    await expect(exec(host, "TaskGet", { taskId: "1" }, ctx)).rejects.toThrow("Task #1 not found");
+    expect((await exec(host, "TaskList", { includeCompleted: true }, ctx)).content[0]?.text).not.toContain("#1");
+    expect(fault.attempts).toHaveLength(1);
+    fault.restore();
+  });
+
+  test("validation errors propagate without persisting or consuming an id", async () => {
+    const { host, wiring, ctx } = await seeded();
+    const before = wiring.getTodoSnapshot();
+    const writes = host.appended.length;
+    await expect(exec(host, "TaskCreate", { subject: "", description: "invalid" }, ctx)).rejects.toThrow("subject");
+    await expect(
+      exec(host, "TaskCreate", { subject: "Bad", description: "Bad", blockedBy: ["99"] }, ctx),
+    ).rejects.toThrow("Task #99 not found");
+    await expect(exec(host, "TaskUpdate", { taskId: "1" }, ctx)).rejects.toThrow("at least one field");
+    await expect(exec(host, "TaskDelete", { taskId: "99" }, ctx)).rejects.toThrow("Task #99 not found");
+    expect(host.appended).toHaveLength(writes);
+    expect(wiring.getTodoSnapshot()).toBe(before);
+    const next = await exec(host, "TaskCreate", { subject: "Next", description: "valid" }, ctx);
+    expect(next.details.task.id).toBe(4);
+  });
+
+  test("post-persist widget failures propagate as UI errors, never as persistence-unknown", async () => {
+    const host = fakePi();
+    const wiring = wireTodo(host.pi);
+    const ctx = fakeCtx(host);
+    await host.handlers.get("session_start")?.({}, ctx);
+    ctx.ui.setWidget = () => {
+      throw new Error("widget unavailable");
+    };
+    await expect(exec(host, "TaskCreate", { subject: "A", description: "A" }, ctx)).rejects.toThrow(
+      "widget unavailable",
+    );
+    expect(host.appended).toHaveLength(1);
+    expect(replayState(branchOf(host))).toEqual(wiring.getTodoSnapshot());
+    expect((await exec(host, "TaskGet", { taskId: "1" }, ctx)).details.task.subject).toBe("A");
+  });
+
+  test("TaskUpdate handler widget errors before persistence are not caught as persistence-unknown", async () => {
+    const host = fakePi();
+    const wiring = wireTodo(host.pi, { archive: { onCompact: true, afterTurns: 0 } });
+    const ctx = fakeCtx(host, "rpc");
+    await exec(host, "TaskCreate", { subject: "A", description: "A" }, ctx);
+    await exec(host, "TaskUpdate", { taskId: "1", status: "completed" }, ctx);
+    await host.handlers.get("session_compact")?.({}, fakeCtx(host, "rpc", branchOf(host)));
+    const tuiCtx = fakeCtx(host, "tui", branchOf(host));
+    await host.handlers.get("session_start")?.({}, tuiCtx);
+    const writes = host.appended.length;
+    tuiCtx.ui.setWidget = () => {
+      throw new Error("handler widget unavailable");
+    };
+    await expect(exec(host, "TaskUpdate", { taskId: "1", status: "pending" }, tuiCtx)).rejects.toThrow(
+      "handler widget unavailable",
+    );
+    expect(host.appended).toHaveLength(writes);
+    expect(wiring.getTodoSnapshot().tasks[0]?.status).toBe("pending");
+    expect(replayState(branchOf(host))?.tasks[0]?.status).toBe("completed");
+  });
+
+  test.each(["TaskUpdate", "TaskDelete"])(
+    "%s notification failures are not mistaken for persistence failures",
+    async (name) => {
+      const host = fakePi();
+      const wiring = wireTodo(host.pi);
+      const ctx = fakeCtx(host);
+      await exec(host, "TaskCreate", { subject: "A", description: "A" }, ctx);
+      await exec(host, "TaskCreate", { subject: "B", description: "B", blockedBy: ["1"] }, ctx);
+      ctx.ui.notify = () => {
+        throw new Error("notification unavailable");
+      };
+      await expect(
+        exec(host, name, { taskId: "1", ...(name === "TaskUpdate" ? { status: "completed" } : {}) }, ctx),
+      ).rejects.toThrow("notification unavailable");
+      expect(host.appended).toHaveLength(3);
+      expect(replayState(branchOf(host))).toEqual(wiring.getTodoSnapshot());
+      expect((await exec(host, "TaskGet", { taskId: "2" }, ctx)).details.task.blockedBy).toEqual(
+        name === "TaskDelete" ? [] : [1],
+      );
+    },
+  );
 });
 
 // ── todo-archive-split #92 §8.3 properties: round-trip + crash-window (component-wise) + write rate ──

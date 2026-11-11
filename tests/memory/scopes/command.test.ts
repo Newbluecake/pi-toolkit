@@ -111,6 +111,16 @@ it("optional exact subrouter does not consume original /mem, preserves full add 
   });
   expect(await f.command.route("session add")).toMatchObject({ result: { code: "E_META_INVALID" } });
 });
+it("session and hub list remain equivalent to the recommended status", async () => {
+  const f = fixture();
+  await f.command.route("session add session-body");
+  await f.command.route("hub add hub-body");
+  for (const scope of ["session", "hub"]) {
+    const status = await f.command.route(`${scope} status`);
+    expect(status).toMatchObject({ handled: true, result: { ok: true } });
+    expect(await f.command.route(`${scope} list`)).toEqual(status);
+  }
+});
 it("RPC with UI, unknown, Web, missing UI and child refuse writes", async () => {
   const f = fixture();
   for (const ctx of [
@@ -416,4 +426,14 @@ it("native session add and Hub add/rm preserve original direct command behavior 
   expect(await command.route("hub rm general.001")).toMatchObject({ result: { ok: true } });
   expect(f.hub.view().items).toEqual([]);
   expect(popups).toBe(0);
+});
+
+it("adds guidance to command and underlying management failures", async () => {
+  const f = fixture();
+  expect(await f.command.route("session add")).toMatchObject({
+    result: { ok: false, code: "E_META_INVALID", message: expect.stringContaining("create") },
+  });
+  expect(await f.command.route("hub show invalid")).toMatchObject({
+    result: { ok: false, code: "E_META_INVALID", message: expect.any(String) },
+  });
 });

@@ -88,7 +88,8 @@ const SOURCE_BANNED_EXCEPT: Record<string, RegExp> = {
  * `ControlNotice.vue`'s per-variant dismiss memory (user decision: "全部可关", §7.6 revision),
  * `AgentList.vue`'s desktop sidebar collapse state, and — fleet-drawer plan v2 §6.2/§8.3 (F6) —
  * `drawer/FleetDrawer.vue`'s docked-mode open state (`webhub.fleetDrawer.open`, 默认 "1";
- * overlay/fullscreen 不持久化). 2026-10-08: + `composables/useI18n.ts` for the manual language
+ * overlay/fullscreen 不持久化); `composables/useActivityRail.ts` stores only the selected
+ * panel (`webhub.fleetDrawer.panel`, agent | bash). 2026-10-08: + `composables/useI18n.ts` for the manual language
  * override (`pwh_lang`, TopBar 中/EN toggle — mirrors useTheme.ts's `pwh_theme` discipline).
  * session-history plan §4.7.2 (P-ui): + `spawn/SessionHistoryDialog.vue` for the history
  * kind toggle (`pwh_history_kind`, "main" | "all" — a pure UI preference, same class).
@@ -96,7 +97,7 @@ const SOURCE_BANNED_EXCEPT: Record<string, RegExp> = {
  * breadcrumb (`pwh_diag_scroll` — a 12-entry ring of save/restore/unfollow facts: scroll
  * geometry + anchor ids only, no message content). Remove together with the breadcrumb. */
 const LOCALSTORAGE_ALLOWED =
-  /theme|token-client|ControlNotice\.vue|agents\/AgentList\.vue|drawer\/FleetDrawer\.vue|composables\/useI18n\.ts|spawn\/SessionHistoryDialog\.vue|logic\/state\.js|transcript\/Transcript\.vue/i;
+  /theme|token-client|ControlNotice\.vue|agents\/AgentList\.vue|drawer\/FleetDrawer\.vue|composables\/useActivityRail\.ts|composables\/useI18n\.ts|spawn\/SessionHistoryDialog\.vue|logic\/state\.js|transcript\/Transcript\.vue/i;
 
 describe("web-hub Vue UI has no HTML-injection / CSP-unsafe sinks", () => {
   it("scans the expected files (glob-failure canary)", () => {

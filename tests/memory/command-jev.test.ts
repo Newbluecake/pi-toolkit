@@ -8,6 +8,7 @@ import { afterEach, describe, expect, test } from "vitest";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { createMemCommand } from "../../src/memory/command.js";
 import type { MemoryPaths } from "../../src/memory/paths.js";
+import { parseMemorySettings } from "../../src/memory/settings.js";
 import type { JevCommandPort, ReviewSuggestionView, TagDefInput } from "../../src/memory/jev/contracts.js";
 
 const roots: string[] = [];
@@ -168,6 +169,25 @@ describe("/mem jev routing", () => {
   });
 });
 
+test("scoped help recommends status while preserving the no-router description", () => {
+  const plain = createMemCommand({});
+  const scoped = createMemCommand({ scopedRouter: async () => ({ handled: false }) });
+  expect(plain.description).not.toContain("session|hub status");
+  expect(scoped.description).toContain("session|hub status (list equivalent; status recommended)");
+});
+
+test.each(["blocks", "tiered"] as const)("scoped %s help puts daily entries before maintenance", (layout) => {
+  const settings = parseMemorySettings({ layout });
+  const jev = stubPort();
+  const scoped = createMemCommand({ settings, jev, scopedRouter: async () => ({ handled: false }) });
+  const unscoped = createMemCommand({ settings, jev });
+  const scopedIndex = scoped.description.indexOf("/mem session|hub status");
+  const maintenanceIndex = scoped.description.indexOf("维护:");
+  expect(scopedIndex).toBeGreaterThan(scoped.description.indexOf("/mem expired"));
+  expect(maintenanceIndex).toBeGreaterThan(scopedIndex);
+  expect(unscoped.description).not.toContain("/mem session|hub status");
+});
+
 describe("/mem tags routing", () => {
   test("bare /mem tags and `tags list` both list; quoted --desc/--label survive parsing", async () => {
     const { cwd, paths } = fixture();
@@ -188,6 +208,18 @@ describe("/mem tags routing", () => {
       description: "Two words here",
       risk: "high",
       commands: ["foo bar", "baz"],
+    });
+  });
+
+  test("tags add accepts the legacy --description flag", async () => {
+    const { cwd, paths } = fixture();
+    const port = stubPort();
+    const cmd = createMemCommand({ paths, jev: port });
+    await cmd.handler('tags add old-tag --label Old --description "legacy description"', fakeCtx(cwd).ctx);
+    expect(JSON.parse(port.calls[0]!.slice(`tags-add:${cwd}:`.length))).toMatchObject({
+      id: "old-tag",
+      label: "Old",
+      description: "legacy description",
     });
   });
 
@@ -251,6 +283,8 @@ describe("default listing + completions (I9 surface)", () => {
     const cmd = createMemCommand({ paths, jev: stubPort() });
     expect(cmd.description).toContain("/mem jev");
     expect(cmd.description).toContain("/mem tags");
+    expect(cmd.description).toContain("维护: /mem jev reset-index");
+    expect(cmd.getArgumentCompletions("jev reset")[0]?.description).toContain("维护");
     const values = (prefix: string) => cmd.getArgumentCompletions(prefix).map((c) => c.value);
     expect(values("j")).toEqual(["jev"]);
     expect(values("")).toContain("jev");

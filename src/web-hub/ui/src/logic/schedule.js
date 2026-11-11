@@ -31,7 +31,7 @@
 /** @typedef {import("@protocol/schedule.js").ScheduleTaskProjectionWire} ScheduleTaskProjectionWire */
 /** @typedef {import("@protocol/schedule.js").ScheduleRunProjectionWire} ScheduleRunProjectionWire */
 /** @typedef {import("@protocol/schedule.js").ScheduleTaskDef} ScheduleTaskDef */
-/** @typedef {import("@protocol/schedule.js").ScheduleWhen} ScheduleWhen */
+/** @typedef {import("@protocol/schedule.js").StoredWhen} ScheduleWhen */
 /** @typedef {import("@protocol/schedule.js").ScheduleRunState} ScheduleRunState */
 /** @typedef {import("@protocol/schedule.js").ScheduleFeishuDisplay} ScheduleFeishuDisplay */
 
@@ -102,6 +102,11 @@ export function isSchedulesPayloadLike(d) {
     if (typeof sess.sessionId !== "string" || sess.sessionId === "" || sess.sessionId.length > 128) return undefined;
     if (typeof sess.rev !== "number" || !Number.isFinite(sess.rev)) return undefined;
     if (!Array.isArray(sess.tasks) || !Array.isArray(sess.runs)) return undefined;
+    if (
+      sess.intervalTasks !== undefined &&
+      (!Array.isArray(sess.intervalTasks) || sess.tasks.length + sess.intervalTasks.length > 8)
+    )
+      return undefined;
     if (sess.tasks.length > 8 || sess.runs.length > 256) return undefined; // spec caps (8 tasks per session; runs list bounded)
   }
   return /** @type {SchedulesPayloadWire} */ (d);
@@ -130,7 +135,7 @@ export function scheduleBadgeOf(hubCaps, payload, sessionId) {
   if (!schedCapOn(hubCaps)) return undefined;
   const proj = sessionProjectionOf(payload, sessionId);
   if (proj === undefined) return undefined;
-  const count = proj.tasks.length;
+  const count = allScheduleTasks(proj).length;
   if (count === 0 && proj.degraded === undefined) return undefined;
   return { count };
 }
@@ -242,11 +247,20 @@ export function runToneOf(state) {
  * verbatim + tz; the hub-computed `nextAt` carries the authoritative next occurrence).
  * Returns i18n params, never a formatted string — locale lives in the component's t().
  * @param {ScheduleWhen | undefined} when
- * @returns {{ kind: "cron" | "once" | "invalid", expr: string, tz: string }}
+ * @returns {{ kind: "cron" | "once" | "every" | "invalid", expr: string, tz: string }}
  */
 export function whenParts(when) {
   if (when === null || typeof when !== "object") return { kind: "invalid", expr: "", tz: "" };
   const w = /** @type {Record<string, unknown>} */ (when);
+  if (
+    w.kind === "every" &&
+    typeof w.everyMs === "number" &&
+    Number.isFinite(w.everyMs) &&
+    typeof w.anchorAt === "number" &&
+    Number.isFinite(w.anchorAt) &&
+    Math.abs(w.anchorAt) <= 8_640_000_000_000_000
+  )
+    return { kind: "every", expr: `${w.everyMs / 1000}s · anchor ${fmtIntervalTs(w.anchorAt)}`, tz: "UTC" };
   const tz = str(w.tz) ?? "";
   if (w.kind === "cron") return { kind: "cron", expr: str(w.expr) ?? "", tz };
   if (w.kind === "once") return { kind: "once", expr: str(w.at) ?? "", tz };
@@ -272,7 +286,7 @@ export function panelView(in_) {
   if (typeof proj.degraded === "string" && proj.degraded !== "") {
     return { kind: "degraded", reason: proj.degraded, offline: in_.offline };
   }
-  const tasks = proj.tasks.map((task) => {
+  const tasks = allScheduleTasks(proj).map((task) => {
     const t = record(task);
     const def = record(t.task);
     const totals = record(t.totals);
@@ -312,6 +326,8 @@ export function panelView(in_) {
       startedAt: num(r.startedAt),
       endedAt: num(r.endedAt),
       reportFile: str(r.reportFile),
+      ...(r.catchUp === undefined ? {} : { catchUp: r.catchUp }),
+      ...(tasks.some((t) => t.id === r.taskId && t.when.kind === "every") ? { interval: true } : {}),
       runId: str(r.runId), // schedule-auto-approve P3: fleet jump target (append-only; absent on old wire)
       feishu: feishuKey(r.feishu, in_.stale),
     };
@@ -338,6 +354,7 @@ export function panelView(in_) {
 export function whenTextOf(when) {
   const p = whenParts(when);
   if (p.kind === "invalid" || p.expr === "") return "";
+  if (p.kind === "every") return `every ${p.expr} (UTC)`;
   return p.tz !== "" ? `${p.expr} (${p.tz})` : p.expr;
 }
 
@@ -364,7 +381,10 @@ export function whenTextOf(when) {
  */
 export function taskRowsOf(proj, now) {
   const p = record(proj);
-  const tasks = Array.isArray(p.tasks) ? p.tasks : [];
+  const tasks = [
+    ...(Array.isArray(p.tasks) ? p.tasks : []),
+    ...(Array.isArray(p.intervalTasks) ? p.intervalTasks : []),
+  ];
   const runs = Array.isArray(p.runs) ? p.runs : [];
   const rows = [];
   for (const task of tasks) {
@@ -384,6 +404,7 @@ export function taskRowsOf(proj, now) {
           state,
           at: num(r.endedAt) ?? num(r.startedAt) ?? num(r.scheduledAt),
           runId: str(r.runId),
+          ...(r.catchUp === undefined ? {} : { catchUp: r.catchUp }),
         };
       }
     }
@@ -393,7 +414,7 @@ export function taskRowsOf(proj, now) {
       name: str(def.name) ?? "",
       whenText: whenTextOf(/** @type {ScheduleWhen | undefined} */ (def.when)),
       nextAt,
-      nextIn: relIn(nextAt, now),
+      nextIn: record(def.when).kind === "every" ? fmtIntervalTs(nextAt) : relIn(nextAt, now),
       enabled: bool(def.enabled) === true,
       live,
       lastRun,
@@ -415,10 +436,44 @@ export function schedSummaryOf(hubCaps, payload, sessionId) {
   if (!schedCapOn(hubCaps)) return undefined;
   const proj = sessionProjectionOf(payload, sessionId);
   if (proj === undefined) return undefined;
-  const count = proj.tasks.length;
+  const count = allScheduleTasks(proj).length;
   if (count === 0 && proj.degraded === undefined) return undefined;
   return {
     count,
     live: proj.runs.some((run) => isRunLive(run.state)),
   };
+}
+
+/** Append-only interval slot, merged exactly once by all UI consumers. */
+export function allScheduleTasks(proj) {
+  return [...proj.tasks, ...(proj.intervalTasks ?? [])];
+}
+export function fmtIntervalTs(ts) {
+  return typeof ts === "number" && Number.isFinite(ts) && Math.abs(ts) <= 8_640_000_000_000_000
+    ? new Date(ts)
+        .toISOString()
+        .replace(/\.\d{3}Z$/, "")
+        .replace("T", " ") + " UTC"
+    : "";
+}
+
+/** Build the existing policy-governed /schedule edit command, never a new write channel.
+ * Double quotes/backslashes match tokenizeScheduleArgs; prompt remains the verbatim -- tail.
+ * @param {import("@protocol/schedule.js").StoredTask} task
+ * @param {{name:string,prompt:string,kind:string,value:string,tz:string}} draft
+ */
+export function scheduleEditArgs(task, draft) {
+  if (!/^s_[a-z2-7]{8}$/.test(task.id)) return undefined;
+  if ([draft.name, draft.value, draft.tz].some((v) => /(^|\s)--(\s|$)/.test(v))) return undefined;
+  const quote = (s) => `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+  if (!["cron", "once", "every"].includes(draft.kind)) return undefined;
+  const flags = [`edit ${task.id}`, `--name ${quote(draft.name)}`];
+  const old = task.when;
+  const oldValue = old.kind === "every" ? `${old.everyMs / 1000}s` : old.kind === "cron" ? old.expr : old.at;
+  const changed = draft.kind !== old.kind || draft.value !== oldValue || (old.kind !== "every" && draft.tz !== old.tz);
+  if (changed) {
+    flags.push(`--${draft.kind === "once" ? "at" : draft.kind} ${quote(draft.value)}`);
+    if (draft.kind !== "every") flags.push(`--tz ${quote(draft.tz)}`);
+  }
+  return `${flags.join(" ")} -- ${draft.prompt}`;
 }

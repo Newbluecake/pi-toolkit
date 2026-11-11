@@ -256,3 +256,57 @@ it("direct explicit conflict preserves authority checks, including agent→user 
     (await supersede(d, [{ ...verdict(a, old), kind: "conflict", auto: false, p: 0 }], { explicit: true }))[0]?.outcome,
   ).toBe("superseded");
 });
+it("concurrent judgments against one old revision never overwrite one another", async () => {
+  const d = setup(),
+    a = block(d),
+    b = block(d),
+    old = block(d);
+  const [first, second] = await Promise.all([supersede(d, [verdict(a, old)]), supersede(d, [verdict(b, old)])]);
+  expect([first[0]?.outcome, second[0]?.outcome].sort()).toEqual(["skipped", "superseded"]);
+  const winner = first[0]?.outcome === "superseded" ? a.id : b.id;
+  expect(readGovernBlock(d, old.id).meta.supersededBy).toBe(winner);
+  expect(readGovernBlock(d, old.id).meta.version).toBe(old.meta.version + 1);
+});
+it("frozen body hash rejects a mismatched judgment even when revision matches", async () => {
+  const d = setup(),
+    a = block(d),
+    old = block(d);
+  const before = readFileSync(join(d, "blocks", `${old.id}.md`));
+  const result = await supersede(d, [{ ...verdict(a, old), oldHash: "wrong" }]);
+  expect(result[0]).toMatchObject({ outcome: "skipped", reason: "old hash changed" });
+  expect(readFileSync(join(d, "blocks", `${old.id}.md`))).toEqual(before);
+  expect(() => readFileSync(join(d, "blocks", ".jev", "index.json"))).toThrow();
+});
+
+it("legacy restored pair stays dismissed after editing both blocks, including expired until", async () => {
+  const d = setup();
+  const a = block(d),
+    b = block(d);
+  expect((await supersede(d, [verdict(a, b)]))[0]?.outcome).toBe("superseded");
+  expect(await restoreSupersededBlock(d, b.id)).toBe(true);
+  const { readIndex } = await import("../../../src/memory/jev/index-store.js");
+  const { writeGovernIndexLocked } = await import("../../../src/memory/govern/supersede.js");
+  const index = readIndex(d).index;
+  expect(index.review!.dismissed[0]!.suggestionKey).toBeUndefined();
+  writeGovernIndexLocked(d, {
+    ...index,
+    review: { ...index.review!, dismissed: index.review!.dismissed.map((item) => ({ ...item, until: "2000-01-01" })) },
+  });
+  const restored = readGovernBlock(d, b.id);
+  replaceBlockLocked(join(d, "blocks"), a.id, a.rev, { meta: a.meta, body: "new completely rewritten content" }, now);
+  replaceBlockLocked(
+    join(d, "blocks"),
+    b.id,
+    restored.rev,
+    { meta: restored.meta, body: "old completely rewritten content" },
+    now,
+  );
+  const next = readGovernBlock(d, a.id),
+    old = readGovernBlock(d, b.id);
+  expect((await supersede(d, [verdict(next, old)]))[0]).toMatchObject({
+    outcome: "skipped",
+    reason: expect.stringContaining("dismissed"),
+  });
+  expect(readGovernBlock(d, b.id).meta.status).toBe("active");
+  expect(readIndex(d).index.review!.suggestions).toEqual([]);
+});

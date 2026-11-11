@@ -12,7 +12,7 @@
  */
 
 import { randomBytes } from "node:crypto";
-import { newTidyId } from "./tidy/manifest.js";
+import { newMemoryId } from "./trash.js";
 import type { ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { MemorySettings } from "../config/settings.js";
 import { resolveWorktreeOrigin } from "../core/worktree-origin.js";
@@ -57,6 +57,8 @@ export interface MemoryToolV2Deps {
   writeGate?: import("./contracts.js").MemoryWriteGate;
   settings: MemorySettings;
   isChildSession: boolean;
+  /** Host-only reason: scopes-on child content is hard read-only, not opt-in. */
+  childReadonlyReason?: "scopes";
   onAfterWrite: (cwd: string) => void;
   paths?: MemoryPaths;
   /** §14.1's sanctioned P1 dependency, injected as a port. */
@@ -537,11 +539,11 @@ const TRASH_DIR = ".trash";
 const TRASH_KEEP = 20;
 
 /** `.trash` id in the exact shape `safe-fs` TRASH_NAME_RE and
- *  `tidy/manifest` listTrashEntries accept (ms-precision stamp + 6 hex) —
+ *  `trash.ts` listTrashEntries accept (ms-precision stamp + 6 hex) —
  *  the previous local stamp dropped the milliseconds and used base36, so
  *  `/mem restore --trash` never listed tool/review deletions. */
 function trashId(): string {
-  return newTidyId(new Date(), process.pid, randomBytes(3).toString("hex"));
+  return newMemoryId(new Date(), process.pid, randomBytes(3).toString("hex"));
 }
 
 // ───────────────────────────── main factory ─────────────────────────────
@@ -587,9 +589,15 @@ export function createMemoryToolV2(deps: MemoryToolV2Deps): ToolDefinition {
   }
 
   function assertWritable(op: MemoryOp): void {
-    if (deps.isChildSession && !settings.allowWriteInChildSessions && !READ_ONLY_OPS.has(op)) {
+    if (
+      deps.isChildSession &&
+      (deps.childReadonlyReason === "scopes" || !settings.allowWriteInChildSessions) &&
+      !READ_ONLY_OPS.has(op)
+    ) {
       throw new Error(
-        "child sessions are read-only for memory by default; enable memory.allowWriteInChildSessions to allow writes",
+        deps.childReadonlyReason === "scopes"
+          ? "child project memory is read-only while memory scopes are enabled; hand off the intended change to the main session for review and writing"
+          : "child sessions are read-only for memory by default; enable memory.allowWriteInChildSessions to allow writes",
       );
     }
   }

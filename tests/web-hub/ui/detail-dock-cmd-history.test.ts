@@ -129,6 +129,7 @@ async function sendSlash(w: ReturnType<typeof mount>, text: string): Promise<voi
 }
 
 describe("DetailDock historyMode (cmd-history §4.7)", () => {
+  // Mem read/write coverage moved to memory-command.test.ts (production reducers + DOM).
   it("history:'recorded' ⇒ NO CommandResult, placeholder in the store, caller-minted id sent", async () => {
     const { control, calls } = fakeControl(() => ({
       ok: true,

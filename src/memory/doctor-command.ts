@@ -34,10 +34,11 @@ import { frontmatterSource } from "./frontmatter.js";
 import { splitEntries } from "./jev/entries.js";
 import type { JevDoctorPort } from "./jev/contracts.js";
 import { parseMemoryMeta } from "./meta.js";
+import { softMetaDiagnostics } from "./soft-meta.js";
 import { memoryDirFor, type MemoryPaths } from "./paths.js";
 import { canonicalDirState, inspectDirNoFollow, listDirNames, listRegular, readRegular } from "./safe-fs.js";
 import { renderTiered } from "./tiered.js";
-import { dirFormat, parseArchiveName } from "./blocks/naming.js";
+import { dirFormat, effectiveLayout, parseArchiveName } from "./blocks/naming.js";
 import { readCorpus } from "./blocks/store.js";
 import { legacyDrift } from "./blocks/legacy.js";
 import { readBlocksState, readHold } from "./blocks/state.js";
@@ -174,7 +175,11 @@ function runDoctorFor(
     return blocksDoctorFindings(display, settings, now);
   }
   const snapshot = buildSnapshot(cwd, paths, settings, renderPort, now, jev === undefined ? undefined : isoDate(now()));
-  return runDoctor(snapshot, toDoctorSettings(settings), jev === undefined ? undefined : { today: isoDate(now()) });
+  return runDoctor(
+    snapshot,
+    { ...toDoctorSettings(settings), layout: effectiveLayout(settings.layout, format) },
+    jev === undefined ? undefined : { today: isoDate(now()) },
+  );
 }
 
 /** #36 P4 fix round 2: should a "held" directory take the blocks dispatch?
@@ -270,7 +275,7 @@ function blocksDoctorFindings(memDir: string, settings: MemorySettings, now: () 
   return runDoctorBlocks(hold === undefined ? input : { ...input, hold });
 }
 
-/** P5 shared health port for the v2 directory view and tidy integration. */
+/** P5 shared health port for the v2 directory view. */
 export function collectDoctorFindings(
   cwd: string,
   paths: MemoryPaths | undefined,
@@ -301,8 +306,15 @@ export async function handleMemDoctorCommand(
   const renderPort = deps.renderTieredPort ?? DEFAULT_RENDER_PORT;
   const findings = runDoctorFor(cwd, deps.paths, settings, renderPort, now, deps.jev);
   const extra = deps.scoped?.() ?? [];
+  const display = memoryDirFor(cwd, deps.paths);
+  const state = canonicalDirState(display);
+  const soft = softMetaDiagnostics(state.state === "ok" ? state.dir.real : display);
+  const softLines = soft.map(
+    (d) => `E_META_SOFT ${d.field}: ${d.bytes}B exceeds ${d.limit}B; historical value truncated for reading`,
+  );
   const report =
     formatDoctorReport(findings) +
+    (softLines.length ? "\n" + softLines.join("\n") : "") +
     (extra.length
       ? "\n" + extra.map((f) => `${f.code} ${f.scope}: ${f.reason}${f.entryId ? ` (${f.entryId})` : ""}`).join("\n")
       : "");

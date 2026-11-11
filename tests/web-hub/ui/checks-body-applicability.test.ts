@@ -171,6 +171,22 @@ describe("check.run — scenario/route guards (the actual regression from the pr
     expect(fullClosed.find((o) => o.name === "fleet-drawer-open")?.ok).toBe(true);
   });
 
+  it("checks the selected bash button without requiring hidden agent rows", async () => {
+    process.env["PWH_VISUAL_STRICT_BODY"] = "1";
+    const ctx = fakeCtx({
+      bodyHtml:
+        `<div class="detail" data-drawer="docked" data-drawer-open data-docked-open><div class="detail-body"></div>` +
+        `<button data-panel="agent" aria-controls="fleet-drawer" aria-expanded="false"></button>` +
+        `<button data-panel="bash" aria-controls="fleet-drawer" aria-expanded="true"></button>` +
+        `<aside id="fleet-drawer" data-panel="bash"></aside></div>`,
+      scenario: "detail",
+      width: 1280,
+      expectFleetRows: true,
+    });
+    const outcomes = await check.run(ctx);
+    expect(outcomes.find((o) => o.name === "fleet-drawer-open")?.ok).toBe(true);
+  });
+
   it("fleet-drawer-open fails when the summary bar's aria-expanded disagrees with data-drawer-open", async () => {
     process.env["PWH_VISUAL_STRICT_BODY"] = "1";
     const ctx = fakeCtx({

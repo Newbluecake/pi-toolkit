@@ -180,7 +180,7 @@ export interface HumanTurnTracker {
   noteInteractive(owner: MemoryOwner): HumanTurn;
   /** Proven web dispatch turn (requires the P3 proof port upstream; here just host-fed). */
   noteWebTurn(owner: MemoryOwner): HumanTurn;
-  /** rpc/feishu/xs/wake/goal/schedule or any unprovable source: clear the turn. */
+  /** rpc/feishu/xs/wake/schedule or any unprovable source: clear the turn. */
   noteNonHuman(): void;
   /** agent_end / session_start(any) / tree / shutdown / reload / abort: revoke turn + caps. */
   invalidate(reason: HumanTurnEvent): void;

@@ -27,7 +27,7 @@ import {
   HUB_CTX,
   type ControlView,
 } from "../../../src/web-hub/ui/src/components/control/controlContext.js";
-import { resetLangForTests } from "../../../src/web-hub/ui/src/composables/useI18n.js";
+import { resetLangForTests, setLangOverride } from "../../../src/web-hub/ui/src/composables/useI18n.js";
 import type { AgentState, CmdOutcome, ControlHandle, HubHandle, TodoWire } from "../../../src/web-hub/ui/src/types.js";
 import type { SchedulesPayloadWire } from "../../../src/web-hub/protocol/schedule.js";
 import { makePayload, makeSession, makeTask } from "./fixtures/schedule.js";
@@ -118,6 +118,25 @@ function mountComposer(view?: ControlView, hub?: HubHandle) {
 }
 
 describe("Composer todo chip (2026-11 user request)", () => {
+  it.each([
+    ["en", "Truncated; see the TUI for the full content"],
+    ["zh", "已截断，完整内容请在 TUI 查看"],
+  ] as const)("shows the %s truncation tooltip only for truncated descriptions", async (lang, title) => {
+    setLangOverride(lang);
+    const todo = todoFixture({
+      tasks: [
+        { id: 1, subject: "short", status: "pending", blockedBy: [], description: "short" },
+        { id: 2, subject: "long", status: "pending", blockedBy: [], description: "long", descTruncated: true },
+      ],
+    });
+    const w = mountComposer(todoView(todo));
+    await w.find(".composer-todo-btn").trigger("click");
+    const descriptions = w.findAll(".composer-todo-desc");
+    expect(descriptions[0]!.attributes("title")).toBeUndefined();
+    expect(descriptions[1]!.attributes("title")).toBe(title);
+    expect(descriptions[1]!.text()).toBe("long…");
+  });
+
   it("no CONTROL_VIEW / no todo wire ⇒ the chip is not rendered (空态拍板)", () => {
     expect(mountComposer().find(".composer-todo-external").exists()).toBe(false);
     expect(mountComposer(todoView(undefined)).find(".composer-todo-external").exists()).toBe(false);
@@ -350,15 +369,88 @@ describe("Composer tasks chip ⏰ segment (r2 W3)", () => {
     const panel = w.find(".composer-todo-panel");
     expect(panel.exists()).toBe(true);
     expect(panel.find(".composer-tasks-sec").exists()).toBe(true);
+    expect(panel.findAll(".sched-row")).toHaveLength(0);
+    await panel.find(".composer-tasks-summary").trigger("click");
     expect(panel.findAll(".sched-row")).toHaveLength(1);
     expect(panel.find(".sched-row-acts").exists()).toBe(false); // read-only: no action column
     // a11y (2026-11-05 fix): plainNames — the row name is a plain SPAN, not a focusable button
     const name = panel.find(".sched-row-name");
     expect(name.element.tagName).toBe("SPAN");
     expect(panel.findAll(".composer-tasks-sec button.sched-row-name")).toHaveLength(0);
-    expect(panel.find(".composer-sched-readonly").exists()).toBe(true);
+    expect(panel.find(".composer-sched-readonly").exists()).toBe(false);
     await panel.find(".sched-run-link").trigger("click");
     expect(selectRuns).toEqual([["agent-a", "run-w3a"]]);
+  });
+
+  it("schedule summary defaults collapsed, excludes paused from next and remembers per session", async () => {
+    setLangOverride("zh");
+    const now = Date.now();
+    const payload = makePayload([
+      makeSession({
+        tasks: [
+          makeTask({ nextAt: now + 6 * 60_000 }),
+          makeTask({ task: { id: "s_paused", enabled: false }, nextAt: now + 60_000 }),
+        ],
+      }),
+    ]);
+    const hub = hubOf({ schedules: payload });
+    const view = todoView(todoFixture());
+    const w = mountComposer(view, hub);
+    await w.find(".composer-todo-btn").trigger("click");
+    const summary = w.find(".composer-tasks-summary");
+    expect(summary.text()).toContain("定时任务 2 · 下次 6m · 1 已暂停");
+    expect(summary.attributes("aria-expanded")).toBe("false");
+    expect(w.findAll(".sched-row")).toHaveLength(0);
+    expect(w.findAll(".composer-todo-item")).toHaveLength(2);
+    await summary.trigger("click");
+    expect(summary.attributes("aria-expanded")).toBe("true");
+    expect(w.findAll(".sched-row")).toHaveLength(2);
+    await w.find(".composer-todo-btn").trigger("click");
+    await w.find(".composer-todo-btn").trigger("click");
+    expect(w.find(".composer-tasks-summary").attributes("aria-expanded")).toBe("true");
+    const w2 = mountComposer(view, hub);
+    await w2.find(".composer-todo-btn").trigger("click");
+    expect(w2.find(".composer-tasks-summary").attributes("aria-expanded")).toBe("true");
+    await w2.find(".composer-tasks-summary").trigger("click");
+    expect(w2.findAll(".sched-row")).toHaveLength(0);
+    expect(w.find(".composer-tasks-summary").attributes("aria-expanded")).toBe("false");
+    const fresh = mountComposer(view, hubOf({ schedules: payload }));
+    await fresh.find(".composer-todo-btn").trigger("click");
+    expect(fresh.find(".composer-tasks-summary").attributes("aria-expanded")).toBe("false");
+  });
+
+  it("session switches retain independent folds and all-paused tasks omit next", async () => {
+    const secondId = "second-session";
+    const agent = ref({ session: { sessionId: SCHED_SID }, pendingCtl: [] } as unknown as AgentState);
+    const view = { ...todoView(undefined), agent: computed(() => agent.value) };
+    const payload = makePayload([
+      makeSession({ tasks: [makeTask()] }),
+      makeSession({ sessionId: secondId, tasks: [makeTask({ task: { enabled: false } })] }),
+    ]);
+    const w = mountComposer(view, hubOf({ schedules: payload }));
+    await w.find(".composer-todo-btn").trigger("click");
+    await w.find(".composer-tasks-summary").trigger("click");
+    agent.value = { session: { sessionId: secondId }, pendingCtl: [] } as unknown as AgentState;
+    await nextTick();
+    expect(w.find(".composer-tasks-summary").attributes("aria-expanded")).toBe("false");
+    expect(w.find(".composer-tasks-summary").text()).toContain("1 paused");
+    expect(w.find(".composer-tasks-summary").text()).not.toContain("next");
+    agent.value = { session: { sessionId: SCHED_SID }, pendingCtl: [] } as unknown as AgentState;
+    await nextTick();
+    expect(w.find(".composer-tasks-summary").attributes("aria-expanded")).toBe("true");
+  });
+
+  it("empty schedule section is absent even for degraded projections; summary is a native keyboard button", async () => {
+    const empty = makePayload([makeSession({ tasks: [], degraded: "unreadable" } as never)]);
+    const w = mountComposer(todoView(todoFixture()), hubOf({ schedules: empty }));
+    await w.find(".composer-todo-btn").trigger("click");
+    expect(w.find(".composer-tasks-sec").exists()).toBe(false);
+    const full = mountComposer(todoView(undefined), hubOf({ schedules: makePayload() }));
+    await full.find(".composer-todo-btn").trigger("click");
+    expect(full.find(".composer-tasks-summary").element.tagName).toBe("BUTTON");
+    const css = readFileSync(resolve("src/web-hub/ui/src/styles/composer-todo.css"), "utf8");
+    expect(css).toMatch(/\.composer-tasks-summary-text\s*\{[^}]*white-space:\s*nowrap/);
+    expect(css).toMatch(/\.composer-tasks-summary-text\s*\{[^}]*text-overflow:\s*ellipsis/);
   });
 
   it("badge rulings (2026-11-05 round 2): single segment ⇒ badge carries its count; both ⇒ inline numbers, no badge; expanded ⇒ badge hidden", async () => {

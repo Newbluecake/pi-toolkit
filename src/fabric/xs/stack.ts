@@ -37,7 +37,6 @@ import {
 import { XsReplyNoticeGate, buildInvalidationNoticeContent } from "./reply-notice.js";
 import type { XsStackPort, XsStackProgressPort } from "../../web-hub/agent/xs.js";
 import type { AgentSettings } from "../../config/settings.js";
-import type { GoalSessionStartReason } from "../../goal/state.js";
 import {
   XsProgressBag,
   XS_PROGRESS_CAP,
@@ -48,7 +47,7 @@ import {
 import type { XsPhase, XsProgress } from "../../web-hub/protocol/xs-activation.js";
 import { XS_TRACK_DEFAULT_MS } from "../../web-hub/protocol/xs-activation.js";
 
-/** Late-bound main-session ports; neither the web bridge nor goal/topic-switch owns a stack. */
+/** Late-bound main-session ports; neither the web bridge nor topic-switch owns a stack. */
 export interface StackXsInput {
   /** #20: late-bound synchronous read-only source mirror (never a hub round trip). */
   progressPhaseOf?: (sessionId: string, requestId: string) => XsPhase | undefined;
@@ -297,7 +296,7 @@ export function buildStackXs(
   pi: ExtensionAPI,
   ctx: ExtensionContext,
   settings: AgentSettings,
-  reason: GoalSessionStartReason,
+  reason: "new" | "resume" | "fork" | "reload" | "startup",
   level: CausalLevel | undefined,
   input: StackXsInput,
 ): StackXs {
@@ -546,10 +545,6 @@ export function buildStackXs(
           if (disposed || ctx.sessionManager.getSessionId() !== sessionId) return "session_changed";
           const verdict = fence.check();
           return !verdict.ok && !verdict.wakeOnly ? verdict.reason : undefined;
-        },
-        goalRunning: () => {
-          const verdict = fence.check();
-          return !verdict.ok && verdict.wakeOnly === true;
         },
         inboundWakeAvailable: () => receiver.wakeAvailable(),
         chargeInboundWake: () => receiver.chargeWake(),

@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -362,6 +362,57 @@ describe("#39 actual root activation with official SDK and offline provider", ()
       f.session.dispose();
     }
   });
+  it("actual TUI SDK hub create with explicit user authority confirms exact body", async () => {
+    const body = "TUI hub create exact body";
+    const f = await fixture("tui", {
+      op: "create",
+      storageScope: "hub",
+      authority: "user",
+      topic: "general",
+      text: body,
+    });
+    try {
+      f.session.setActiveToolsByName(["scoped_memory"]);
+      await f.session.prompt("create shared memory");
+      expect(f.select).toHaveBeenCalledTimes(1);
+      expect(f.select.mock.calls[0]![0]).toContain(body);
+      expect(f.scopes.current()!.hub!.view().items[0]).toMatchObject({
+        text: body,
+        grant: { via: "dialog", channel: "tui" },
+      });
+      expect(f.errors).toEqual([]);
+    } finally {
+      await f.session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+      f.session.dispose();
+    }
+  });
+  it("actual TUI SDK hub delete with explicit agent authority confirms original body", async () => {
+    const args = { op: "delete", storageScope: "hub", authority: "agent", id: "general.001", rev: "" };
+    const f = await fixture("tui", args);
+    try {
+      const hub = f.scopes.current()!.hub!;
+      await f.session.prompt("/mem hub add TUI hub delete exact body");
+      const item = hub.management.inspect(args.id);
+      if (!item.ok) throw Error(item.code);
+      args.rev = item.rev;
+      f.session.setActiveToolsByName(["scoped_memory"]);
+      await f.session.prompt("delete shared memory");
+      expect(f.select).toHaveBeenCalledTimes(1);
+      expect(f.select.mock.calls[0]![0]).toContain("TUI hub delete exact body");
+      expect(hub.view().items).toEqual([]);
+      const { resolveHubPaths } = await import("../../src/web-hub/protocol/paths.js");
+      const stateDir = resolveHubPaths({ home: f.cwd, uid: process.getuid?.() ?? 0 }).stateDir;
+      const audit = readFileSync(join(stateDir, "hub-memory", "audit.jsonl"), "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      expect(audit.at(-1)).toMatchObject({ op: "delete", via: "dialog", channel: "tui" });
+      expect(f.errors).toEqual([]);
+    } finally {
+      await f.session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+      f.session.dispose();
+    }
+  });
   it("real Stack SpawnService slot FIFO freezes seeds; nested uses direct parent's live branch and stale capture refuses", async () => {
     const f = await fixture();
     let release!: () => void;
@@ -558,7 +609,6 @@ describe("#39 actual root activation with official SDK and offline provider", ()
             releaseCapabilityAlert() {
               log.push("capability");
             },
-            disposeGoalHook() {},
             scheduleSurfaceShutdown() {},
             sealChildBashJobs: async () => {},
           },

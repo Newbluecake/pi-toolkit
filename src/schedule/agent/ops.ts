@@ -10,7 +10,7 @@
  */
 import { randomBytes } from "node:crypto";
 import { changeTask, type TaskChange } from "../core/claim.js";
-import { compileWhen, validateWhen } from "../core/cron.js";
+import { compileWhen, parseEvery, parseCron, validateWhen } from "../core/cron.js";
 import { initOcc } from "../core/occurrence.js";
 import { SchedFsError } from "../core/paths.js";
 import {
@@ -25,7 +25,7 @@ import {
   type ScheduleForm,
   type ScheduleTask,
   type ScheduleThinkingLevel,
-  type ScheduleWhen,
+  type StoredWhen,
   SCHEDULE_THINKING_LEVELS,
 } from "../core/spec.js";
 import { finishRun, removeTask, type SessionStore } from "../core/writer.js";
@@ -34,11 +34,16 @@ import type { XsHostCapabilityState } from "../../fabric/xs/host-cap.js";
 import type { ScheduleRefusal } from "./mode.js";
 import type { ScheduleAgent } from "./wire.js";
 
-export type OpFail = { ok: false; code: ScheduleErrorCode; detail: string };
+export type OpFail = { ok: false; code: ScheduleErrorCode; detail: string; uncertain?: boolean };
 export type OpOk<T> = { ok: true; value: T };
 export type OpResult<T> = OpOk<T> | OpFail;
 
-const fail = (code: ScheduleErrorCode, detail: string): OpFail => ({ ok: false, code, detail });
+const fail = (code: ScheduleErrorCode, detail: string, uncertain?: boolean): OpFail => ({
+  ok: false,
+  code,
+  detail,
+  ...(uncertain === undefined ? {} : { uncertain }),
+});
 
 export interface OpOrigin {
   by: "user" | "agent";
@@ -46,7 +51,7 @@ export interface OpOrigin {
 }
 
 export interface OpsPorts {
-  agent: Pick<ScheduleAgent, "ensureStore" | "store" | "gate" | "changed">;
+  agent: Pick<ScheduleAgent, "ensureStore" | "store" | "gate" | "changed" | "intervalReady">;
   now(): number;
   limits: { defaultTimeoutS: number; maxTimeoutS: number };
   /** Registry check for `bg.type`; `names()` only feeds the error text. */
@@ -66,7 +71,7 @@ export interface OpsPorts {
 export interface TaskDef {
   name: string;
   form: ScheduleForm;
-  when: ScheduleWhen;
+  when: StoredWhen;
   prompt: string;
   feishu: boolean;
   bg?: ScheduleBg;
@@ -85,7 +90,7 @@ export function defOf(task: ScheduleTask): TaskDef {
 
 // ----------------------------------------------------------------- field parsing
 
-const WHEN_KEYS = new Set(["kind", "expr", "at", "tz"]);
+const WHEN_KEYS = new Set(["kind", "expr", "at", "every", "tz"]);
 const BG_KEYS = new Set(["type", "model", "thinking", "timeoutS", "consultMain", "handoff", "isolation"]);
 const DEFAULT_TZ_FALLBACK = "UTC";
 
@@ -115,13 +120,26 @@ export interface RawFields {
   bg?: unknown;
 }
 
-function parseWhen(raw: unknown, base: ScheduleWhen | undefined, ports: OpsPorts): OpResult<ScheduleWhen> {
+function parseWhen(raw: unknown, base: StoredWhen | undefined, ports: OpsPorts): OpResult<StoredWhen> {
   if (!isRec(raw)) return fail("E_INVALID", "when must be an object {kind, expr|at, tz}");
   const bad = unknownKeys(raw, WHEN_KEYS);
   if (bad !== undefined) return fail("E_INVALID", `when: unknown field "${bad}"`);
   const kind = raw.kind;
-  if (kind !== "cron" && kind !== "once") return fail("E_INVALID", 'when.kind must be "cron" or "once"');
-  const tz = raw.tz ?? (base?.tz as unknown) ?? ports.defaultTz();
+  if (kind === "every") {
+    if (Object.hasOwn(raw, "tz"))
+      return fail("E_INVALID", 'every uses elapsed UTC time; remove tz and keep every:"90m"');
+    if (Object.hasOwn(raw, "expr") || Object.hasOwn(raw, "at"))
+      return fail("E_INVALID", 'give exactly one of cron, at, every; keep every:"90m"');
+    const parsed = parseEvery(raw.every as string);
+    if (!parsed.ok) return fail("E_INVALID", parsed.error);
+    return {
+      ok: true,
+      value: { kind: "every", everyMs: parsed.everyMs, anchorAt: base?.kind === "every" ? base.anchorAt : ports.now() },
+    };
+  }
+  if (kind !== "cron" && kind !== "once") return fail("E_INVALID", 'when.kind must be "cron", "once" or "every"');
+  if (Object.hasOwn(raw, "every")) return fail("E_INVALID", "give exactly one of cron, at, every; remove every");
+  const tz = raw.tz ?? (base?.kind === "every" ? undefined : base?.tz) ?? ports.defaultTz();
   if (typeof tz !== "string" || tz === "") return fail("E_INVALID", "when.tz must be an IANA time zone name");
   if (kind === "cron") {
     if (raw.at !== undefined) return fail("E_INVALID", "when: `at` only applies to kind once");
@@ -211,6 +229,8 @@ function parseBg(raw: unknown, base: ScheduleBg | undefined, ports: OpsPorts): O
  * when it is new or changed (renaming an expired once-task must stay possible).
  */
 export function resolveDef(raw: RawFields, base: TaskDef | undefined, ports: OpsPorts): OpResult<TaskDef> {
+  const unsupported = Object.keys(raw).find((key) => ["every", "everyMs", "intervalMs", "anchorAt"].includes(key));
+  if (unsupported !== undefined) return fail("E_INVALID", `unknown field "${unsupported}"`);
   let name = base?.name;
   if (raw.name !== undefined) {
     if (typeof raw.name !== "string") return fail("E_INVALID", "name must be a string");
@@ -244,8 +264,17 @@ export function resolveDef(raw: RawFields, base: TaskDef | undefined, ports: Ops
     if (!w.ok) return w;
     when = w.value;
   }
-  if (when === undefined) return fail("E_INVALID", "when is required");
+  if (when === undefined) return fail("E_INVALID", "give exactly one of cron, at, every");
   if (whenChanged || base === undefined) {
+    if (when.kind === "cron") {
+      const strict = parseCron(when.expr, { strictSteps: true });
+      if (!strict.ok) return fail("E_INVALID", strict.error);
+    }
+    if (when.kind === "every" && ports.agent.intervalReady?.() === false)
+      return fail(
+        "E_UNSUPPORTED",
+        'connect an interval-capable hub (update hub and run /webhub restart), or disable webHub and /reload; then retry every:"90m"',
+      );
     const v = validateWhen(when, ports.now());
     if (!v.ok) return fail("E_INVALID", v.error);
   } else if (!compileWhen(when).ok) {
@@ -330,7 +359,7 @@ function fromChange(c: TaskChange): OpResult<ScheduleTask> {
     case "refused":
       return fail(c.code, c.detail ?? "refused");
     case "error":
-      return fail(c.code, c.detail);
+      return fail(c.code, c.detail, c.uncertain);
   }
 }
 
@@ -353,11 +382,16 @@ export async function createTask(ports: OpsPorts, raw: RawFields, origin: OpOrig
     let id = newTaskId();
     while (draft.tasks.some((t) => t.id === id)) id = newTaskId();
     const task = taskOf(id, def.value, ownerCwd, origin, ctx.now);
+    if (task.when.kind === "every") task.when = { ...task.when, anchorAt: ctx.now };
     draft.tasks.push(task);
     draft.occ[id] = initOcc(task, ctx.now);
-    return { value: structuredClone(task), write: true };
+    return {
+      value: structuredClone(task),
+      write: true,
+      ...(task.when.kind === "every" ? { upgradeToV2: true as const } : {}),
+    };
   });
-  if (!r.ok) return fail(r.code, r.detail);
+  if (!r.ok) return fail(r.code, r.detail, r.uncertain);
   if (r.value === "limit") return fail("E_LIMIT", `at most ${SCHED_MAX_TASKS_PER_SESSION} tasks per session`);
   ports.agent.changed();
   return { ok: true, value: r.value };
@@ -371,6 +405,13 @@ export async function updateTask(ports: OpsPorts, id: string, raw: RawFields): P
   if (refusal !== undefined) return refusalOf(refusal);
   const store = ports.agent.store();
   if (store === undefined || !SCHED_TASK_ID_RE.test(id)) return fail("E_INVALID", `no such task ${id}`);
+  // Validate before any sweep or transaction can write. Recheck under the writer lock below.
+  const snapshot = store.read();
+  if (snapshot.kind === "degraded") return fail("E_DEGRADED", snapshot.detail);
+  const existing = snapshot.kind === "ok" ? snapshot.state.tasks.find((t) => t.id === id) : undefined;
+  if (existing === undefined) return fail("E_INVALID", `no such task ${id}`);
+  const checked = resolveDef(raw, defOf(existing), ports);
+  if (!checked.ok) return checked;
   const change = await changeTask(store, id, (task) => {
     const def = resolveDef(raw, defOf(task), ports);
     if (!def.ok) return { refuse: def.code, detail: def.detail };
@@ -452,7 +493,7 @@ export async function deleteTask(
     const removed = removeTask(draft, id);
     return { value: removed, write: removed };
   });
-  if (!r.ok) return fail(r.code, r.detail);
+  if (!r.ok) return fail(r.code, r.detail, r.uncertain);
   if (!r.value) return fail("E_INVALID", `no such task ${id}`);
   opts.revoke?.(id);
   await dropQueuedRuns(store, id);

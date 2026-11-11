@@ -2,12 +2,11 @@ import type { Notifier } from "./delivery/notifier.js";
 import type { OrphanRegistry } from "./runtime/reaper.js";
 import type { QueryService } from "./service/query-service.js";
 import type { SpawnService } from "./service/spawn-service.js";
-import type { SpawnRequest } from "./core/types.js";
 import type { BashJobManager } from "./bash/manager.js";
-import type { TidyPort, TidySpawnRequest } from "./memory/contracts.js";
 import type { WorkflowToolDeps } from "./tools/workflow-tool.js";
 import type { WorkflowQueryPort } from "./tools/workflow-target.js";
 import type { Stack } from "./stack.js";
+import type { ResumeCandidate } from "./service/resolve-target.js";
 
 /**
  * Holder-routed forwarders (moved out of index.ts, #56 batch 2 step 5).
@@ -18,29 +17,18 @@ import type { Stack } from "./stack.js";
  */
 export type StackHolder = { current?: Stack };
 
-export function requireStack(holder: StackHolder): Stack {
-  if (!holder.current) throw new Error("pi-toolkit: no active session yet");
-  return holder.current;
+/** A lifecycle refusal, not a transient transport error or permission to replay a call. */
+export class NoActiveSessionError extends Error {
+  constructor() {
+    super(
+      "pi-toolkit: no active session yet [code=no_active_session reason=no_active_session retryable=false effect=none]. " +
+        "Wait for a real session_start before using session tools; if this session is stopping or closed, stop issuing calls to it. Do not retry in a loop.",
+    );
+  }
 }
-/** todo #22 optimize-plan §7.0 (P0-b): projects the memory module's narrow
- *  `TidySpawnRequest` onto a real `SpawnRequest`, always forcing the P0-r
- *  readonly tool domain literal through untouched — `wireMemory`'s
- *  `TidyPort` is the only caller. */
-function mapTidySpawnRequest(req: TidySpawnRequest): SpawnRequest {
-  return {
-    type: req.type,
-    prompt: req.prompt,
-    ...(req.label === undefined ? {} : { label: req.label }),
-    ...(req.cwd === undefined ? {} : { cwd: req.cwd }),
-    ...(req.modelOverride === undefined ? {} : { modelOverride: req.modelOverride }),
-    ...(req.thinkingOverride === undefined ? {} : { thinkingOverride: req.thinkingOverride }),
-    ...(req.totalMs === undefined ? {} : { budgetOverride: { totalMs: req.totalMs } }),
-    ...(req.schema === undefined ? {} : { schema: req.schema }),
-    ...(req.inputBudget === undefined ? {} : { inputBudget: req.inputBudget }),
-    toolDomain: req.toolDomain,
-    expectAck: req.expectAck,
-    suppressDelivery: req.suppressDelivery,
-  };
+export function requireStack(holder: StackHolder): Stack {
+  if (!holder.current) throw new NoActiveSessionError();
+  return holder.current;
 }
 export function forwardSpawn(holder: StackHolder): SpawnService {
   return {
@@ -153,20 +141,22 @@ export function forwardNotifier(holder: StackHolder): Notifier {
   };
 }
 
-/** todo #22 optimize-plan P0-b (§7's spawn port): reads the CURRENT session stack, same late-bound
- *  `holder.current` pattern as `forwardSpawn`. Only reached for the main session (post-guard). */
-export function createTidyPort(holder: StackHolder): TidyPort {
-  // G8 (7b): once the session stack is gone (shutdown cleared the holder) a still-running `/mem tidy` must degrade
-  // instead of throwing out of its command: spawn reports an error outcome, waitOutcome says "pending" (⇒ the
-  // command's existing timeout/withhold path), abort says "nothing aborted".
-  return {
-    spawn: (req) =>
-      holder.current
-        ? holder.current.spawn.spawn(mapTidySpawnRequest(req))
-        : Promise.resolve({ error: { message: "no active session" } }),
-    waitOutcome: (runId, waitMs) =>
-      holder.current ? holder.current.spawn.waitOutcome(runId, waitMs) : Promise.resolve({ kind: "pending" as const }),
-    abort: (runId, cause) => (holder.current ? holder.current.spawn.abort(runId, cause) : Promise.resolve(false)),
-    snapshot: (runId) => holder.current?.query.get(runId),
-  };
+/** Resolver error text is an untrusted port field. Project only explicit candidate data. */
+export function safeRunCandidates(candidates: readonly ResumeCandidate[]): string {
+  const rows = candidates.slice(0, 10).map((candidate) => {
+    const line = (text: string) =>
+      text
+        .replace(/[\u0000-\u001f\u007f]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 80);
+    const status = ["queued", "running", "completed", "failed", "timed_out", "aborted", "terminal"].includes(
+      candidate.status,
+    )
+      ? candidate.status
+      : "unknown";
+    const age = Number.isFinite(candidate.ageMinutes) ? Math.max(0, Math.floor(candidate.ageMinutes)) : "unknown";
+    return `${line(candidate.label)} → ${line(candidate.runId)} (${status}, ${age}m ago)`;
+  });
+  return `Target resolution failed (unknown or ambiguous handle). Candidates: [${rows.join(", ") || "none"}]`;
 }

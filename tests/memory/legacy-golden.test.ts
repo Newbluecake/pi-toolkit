@@ -535,7 +535,7 @@ describe("A4 — memory tool surface (toolSurface=legacy) golden", () => {
 // (as opposed to relying on the DEFAULT_SETTINGS.memory default) renders
 // BYTE-IDENTICAL output to A1/A2/A4's golden; (b) every brand-new P0-b-only
 // field (coreBytes/blockBytes/topicWarnBytes/topicMaxBytes/childProfile/
-// doctor/tidy) is completely inert on the legacy path — legacy output does
+// doctor) is completely inert on the legacy path — legacy output does
 // not change no matter what those fields are set to.
 
 describe("A5 — explicit layout/toolSurface legacy pin", () => {

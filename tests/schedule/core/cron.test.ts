@@ -231,3 +231,22 @@ describe("once compile / validateWhen", () => {
     expect(validateWhen({ kind: "cron", expr: "0 8 * * *", tz: "Bad/Zone" }, now).ok).toBe(false);
   });
 });
+
+describe("P2 strict write-time steps (legacy parsing stays permissive)", () => {
+  it.each(["*/59 */23 */31 */12 */7", "0-5/59 * * * *", "0 0 1-2/31 1-2/12 0-1/7"])(
+    "allows per-field maximum steps even above the selected subrange length: %s",
+    (expr) => {
+      expect(parseCron(expr, { strictSteps: true }).ok).toBe(true);
+    },
+  );
+  it("preserves legacy minute=0 for */90 while strict writes offer --every 90m", () => {
+    const legacy = parseCron("*/90 * * * *");
+    expect(legacy.ok && legacy.fields.minute).toEqual([0]);
+    const strict = parseCron("*/90 * * * *", { strictSteps: true });
+    expect(strict).toMatchObject({ ok: false });
+    if (strict.ok) throw Error("strict step must reject");
+    expect(strict.error).toContain("minute step 90 exceeds 59");
+    expect(strict.error).toContain('every:"90m"');
+    expect(strict.error).toContain("--every 90m");
+  });
+});

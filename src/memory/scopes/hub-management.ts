@@ -10,13 +10,14 @@
  * live sidecars make ordinary reads inert. File uid is NOT exposed by safe-fs: this
  * package proves directory uid and file nofollow/mode/devino/bytes, not file uid.
  */
+import { SCOPED_ERROR_MESSAGES } from "./error-messages.js";
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { MemoryError } from "../paths.js";
 import { readCorpus } from "../blocks/store.js";
 import { parseBlockFile, type ParsedBlock } from "../blocks/format.js";
 import { listDirNames, renameNoClobber, fsyncDir } from "../safe-fs.js";
-import { newTidyId } from "../tidy/manifest.js";
+import { newMemoryId } from "../trash.js";
 import {
   checkHubSlot,
   dirSecurityMatches,
@@ -71,6 +72,12 @@ interface ArchiveEntry {
 }
 type Archive = Record<string, ArchiveEntry>;
 const fail = (code: ScopedMemoryErrorCode): ScopedMemoryWriteResult => ({ ok: false, code });
+const failureFromError = (err: unknown): ScopedMemoryWriteResult & { ok: false } => {
+  const code = asCode(err);
+  const detail =
+    err instanceof MemoryError && err.message.startsWith(`${code}: `) ? err.message.slice(code.length + 2).trim() : "";
+  return detail ? { ok: false, code, message: `${SCOPED_ERROR_MESSAGES[code]}（${detail}）` } : { ok: false, code };
+};
 const error = (code: ScopedMemoryErrorCode, detail = ""): never => {
   throw new MemoryError(`${code}: ${detail}`);
 };
@@ -191,7 +198,7 @@ export function archiveHubDeleteLocked(
   if (b.rev !== rev || b.rev !== provenance.rev || b.meta.updated !== provenance.updated) error("E_CONFLICT");
   const entries = readArchive(ctx);
   if (Object.keys(entries).length >= HUB_ARCHIVE_MAX_ENTRIES) error("E_FULL", "archive bound (no eviction)");
-  const name = `${newTidyId(ctx.now, process.pid, randomBytes(3).toString("hex"))}-${id}.md`;
+  const name = `${newMemoryId(ctx.now, process.pid, randomBytes(3).toString("hex"))}-${id}.md`;
   entries[name] = { id, digest: bodyTextDigest(b.body), provenance, state: "trashed" };
   // Preflight bounded serialization before even creating .trash.
   if (utf8Bytes(JSON.stringify({ v: 1, entries })) > HUB_ARCHIVE_MAX_BYTES) error("E_FULL");
@@ -306,7 +313,12 @@ declare const tokenBrand: unique symbol;
 export interface HubManagementToken {
   readonly [tokenBrand]: true;
 }
-type Failure = { readonly ok: false; readonly code: ScopedMemoryErrorCode; readonly reason?: string };
+type Failure = {
+  readonly ok: false;
+  readonly code: ScopedMemoryErrorCode;
+  readonly reason?: string;
+  readonly message?: string;
+};
 /** Local host presentation DTO, built from the token-bound prepare observation.
  * Full bodies are never truncated. No grant id is minted for presentation. */
 export interface HubConfirmationItem {
@@ -569,7 +581,7 @@ export function createHubManagement(host: HubManagementHost): HubManagementPort 
       });
       return Object.freeze({ ok: true as const, token, confirmation });
     } catch (err) {
-      return { ok: false, code: asCode(err) };
+      return failureFromError(err);
     }
   };
   return {
@@ -589,7 +601,7 @@ export function createHubManagement(host: HubManagementHost): HubManagementPort 
           b = corpus.blocks.find((i) => i.id === id);
         return item && b ? { ok: true, item, rev: b.rev } : { ok: false, code: "E_NOT_FOUND" };
       } catch (err) {
-        return { ok: false, code: asCode(err) };
+        return failureFromError(err);
       }
     },
     listTrash() {
@@ -661,7 +673,7 @@ export function createHubManagement(host: HubManagementHost): HubManagementPort 
           },
         );
       } catch (err) {
-        return Promise.resolve(fail(asCode(err)));
+        return Promise.resolve(failureFromError(err));
       }
     },
     prepareAdopt: (signal) => prepare("adopt", undefined, signal),
@@ -673,7 +685,7 @@ export function createHubManagement(host: HubManagementHost): HubManagementPort 
       try {
         guard(rec.owner, rec.signal);
       } catch (err) {
-        return Promise.resolve(fail(asCode(err)));
+        return Promise.resolve(failureFromError(err));
       }
       scheduled.set(token, rec);
       const validate = () => {
@@ -756,7 +768,7 @@ export function createHubManagement(host: HubManagementHost): HubManagementPort 
                 persistence: "appended",
               };
             } catch (err) {
-              return fail(mutation ? "E_PERSIST_UNKNOWN" : asCode(err));
+              return mutation ? fail("E_PERSIST_UNKNOWN") : failureFromError(err);
             }
           },
           validate,

@@ -8,7 +8,7 @@ import { parseBlockFile, serializeBlock, type BlockMeta } from "../../../src/mem
 it("every current-5 entry preserves its hash and heading through block serialization", () => {
   const dir = new URL("../../fixtures/memory/current-5/", import.meta.url).pathname;
   let checked = 0;
-  let oversizedSections = 0;
+  let newlyValidSections = 0;
   for (const file of readdirSync(dir).filter((f) => f.endsWith(".md"))) {
     const raw = readFileSync(join(dir, file), "utf8");
     for (const entry of splitEntries(file, raw, {
@@ -32,8 +32,8 @@ it("every current-5 entry preserves its hash and heading through block serializa
       expect(adapted.section).toBe(entry.section);
       if (Buffer.byteLength(entry.section) > 80) {
         expect(Buffer.byteLength(entry.section)).toBe(103);
-        expect(parsed.errors).toContain("E_SECTION_TOO_LARGE");
-        oversizedSections++;
+        expect(parsed.errors).not.toContain("E_SECTION_TOO_LARGE");
+        newlyValidSections++;
       }
       expect(adapted.hash).toBe(entry.hash);
       expect(adapted.heading).toBe(entry.heading);
@@ -43,5 +43,5 @@ it("every current-5 entry preserves its hash and heading through block serializa
     }
   }
   expect(checked).toBeGreaterThan(0);
-  expect(oversizedSections).toBe(2);
+  expect(newlyValidSections).toBe(2);
 });

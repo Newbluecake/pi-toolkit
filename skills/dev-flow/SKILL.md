@@ -23,11 +23,11 @@ metadata:
 
 ## 铁律
 
-1. **精确 ID**：`Agent` 的 `model` 用完整 `provider/modelId`（见 [references/models.md](./references/models.md)）；模糊别名会被扩展 block。
-2. **按序回退**：首选报错（过载/429/超时/额度耗尽）换下一个，不在同一模型上反复重试。可用模型列表里没有 gpt-6.1-sol 时**不得静默换模型**，按精确 ID 直接派，被拒才降级并明说原因。传输故障 ⇒ `resume` 同一 run；**安全策略拒绝 ≠ 传输错误**，不得自动换模型重发原 prompt（处置见 models.md）。
-3. **fable 只用于复杂任务（L3）**，且须 `ask_user` 批准（阶梯见 models.md）；疑难默认天花板是 opus-5.5。
+1. **精确 ID 来自注入，不来自本 skill**：`Agent` 的 `model` 必须用完整 `provider/modelId`，**具体值由 memory 注入的 provider 表给出**（[references/models.md](./references/models.md) 只描述能力，不列 provider/id）；不得靠猜或靠历史记录拼 provider 前缀。
+2. **按序回退**：首选报错（过载/429/超时/额度耗尽）换下一个，不在同一模型上反复重试。注入表里列了某模型时**不得因「可用模型列表界面里没看到」就静默换模型**，按注入的完整 ID 直接派，被拒才降级并明说原因。传输故障 ⇒ `resume` 同一 run（**换 provider 也走 resume**，不 abort 后重派）；**安全策略拒绝 ≠ 传输错误**，不得自动换模型重发原 prompt（处置见 models.md）。
+3. **fable 只用于复杂任务（L3）**，且须 `ask_user` 批准（阶梯见 models.md）；疑难默认天花板是 opus 档。
 4. **能并行必并行**：可并行任务必须在**同一条消息**发多个 `Agent`，或在 `SubagentWorkflow` 里 `parallel()`/`pipeline()`；顺序派发不算并行。**同一轮并行 >6 个 agent 必须用 `SubagentWorkflow`**（全局并发上限默认 6，第 7 个起排队且有超时）。workflow 子任务可用 `isolation:"worktree"`（分支 `pi-agent-<runId>` 由调度方自己合并）、按调用指定 `model`/`thinking`；需跨调用共享未提交改动的任务仍留在 `Agent`（详见 references/subagent-workflow.md）。**每轮派单前先做并行自检**（见「并行调度」）；选串行必须能指出具体硬依赖（谁消费谁的产物、谁和谁写同一文件），「稳妥起见」「先看看结果」不是合法理由。
-5. **评审独立性**：评审模型 ≠ 方案模型；验收模型 ≠ 开发模型（走回退链跳过同系）；**验收禁任何 GPT 系**；评审/验收不得向被评对象的作者询问对错。
+5. **评审独立性**：评审模型 ≠ 方案模型；验收模型 ≠ 开发模型（走回退链跳过同系）；评审/验收不得向被评对象的作者询问对错。
 6. **先澄清后规划**：需求模糊先做第 0 步轻量澄清（HARD GATE），禁止拿模糊需求派 Plan。
 7. **workflow 不越权**：`SubagentWorkflow` 只用于已确认方案后的批量执行或阶段内 fan-out，用户闸门留在主会话。
 8. **进度可追踪**：L2/L3 必须 `TaskCreate` 建 todo 并实时更新。
@@ -42,7 +42,6 @@ metadata:
 - **产出**：把答案收成 3–8 行需求摘要（目标 / 范围与不做 / 验收标准 / 已定取舍），回本流程定车道，派 Plan 时原样写进 prompt；L2/L3 的摘要同时落进方案文档开头。
 - **提速**：澄清（交互阻塞）期间后台预热 Explore。
 - **两道独立闸门**：「澄清未确认禁止出方案」与「方案未确认禁止开发」都不能跳；方案阶段才冒出的取舍点在方案评审 ∥ 用户确认时一并拍板。
-- **可选的重型澄清**：只有从零的产品级想法、范围本身未定，或用户明确要一份正式需求文档时，才用 `/skill:dev-clarify`（多轮访谈，产出 `docs/dev/{feature}/{feature}-requirements.md`）。
 
 ## 第一步：定车道
 
@@ -64,12 +63,12 @@ metadata:
 
 ### 闸门矩阵
 
-| 车道          | 流程概要                                                    | subagent 轮次 | 用户确认闸门       | 方案评审   | Todo       | 验收方式                                |
-| ------------- | ----------------------------------------------------------- | ------------- | ------------------ | ---------- | ---------- | --------------------------------------- |
-| **L0 直改**   | 主会话直接改 + 最小验证                                     | 0             | 无                 | 无         | 可省略     | 主会话自验                              |
-| **L1 快车道** | （可选 Explore）→ dev 带 3 行微方案开工 → 异源 verifier     | 2-3           | 无（微方案免审）   | 无         | 可省略     | 异源 verifier（verdict/v1）+ 主会话抽查 |
-| **L2 标准**   | Explore ∥ Plan → 评审 ∥ 用户确认 → 并行 dev → 验收 ∥ 测试   | 3-4           | **必须有**（HARD） | **必须有** | **必须建** | verifier 验收矩阵                       |
-| **L3 复杂**   | L2 + 前置 architect；方案升级 opus-5.5；多包并行 + 冲突预检 | 5+            | **必须有**（HARD） | **必须有** | **必须建** | verifier + 全量测试取证                 |
+| 车道          | 流程概要                                                   | subagent 轮次 | 用户确认闸门       | 方案评审   | Todo       | 验收方式                                |
+| ------------- | ---------------------------------------------------------- | ------------- | ------------------ | ---------- | ---------- | --------------------------------------- |
+| **L0 直改**   | 主会话直接改 + 最小验证                                    | 0             | 无                 | 无         | 可省略     | 主会话自验                              |
+| **L1 快车道** | （可选 Explore）→ dev 带 3 行微方案开工 → 异源 verifier    | 2-3           | 无（微方案免审）   | 无         | 可省略     | 异源 verifier（verdict/v1）+ 主会话抽查 |
+| **L2 标准**   | Explore ∥ Plan → 评审 ∥ 用户确认 → 并行 dev → 验收 ∥ 测试  | 3-4           | **必须有**（HARD） | **必须有** | **必须建** | verifier 验收矩阵                       |
+| **L3 复杂**   | L2 + 前置 architect；方案升级 opus 档；多包并行 + 冲突预检 | 5+            | **必须有**（HARD） | **必须有** | **必须建** | verifier + 全量测试取证                 |
 
 ### 升降级
 
@@ -79,24 +78,24 @@ metadata:
 
 ## 阶段→模型
 
-精确 ID、回退链、fable 闸门、订阅优先与失败处置见 [references/models.md](./references/models.md)。
-「订阅余量」指 [quota] 行未触 L3（≥90%）；GLM 订阅有余量时在候选阶段升为首选（前端开发除外：kimi-k3 首选）。droid 线已于 2026-10-24 移出路由（用户令）。
-「kimi-k3（订阅）」在可用时优先派 **kimi-coding/k3-256k**（同订阅，价格约为 k3 的一半）；仅当任务需要超过 256k 上下文（大文件通读、大包验收、长会话 resume）才用 kimi-coding/k3。
+精确 `provider/modelId` **不在本 skill 内**：provider 表与额度由 memory 注入（见 [references/models.md](./references/models.md) 的「provider 与额度从哪来」）。下表只给**能力档位**与回退顺序；派单时按注入的完整 ID 传。
+「订阅余量」指 [quota] 行未触 L3（≥90%）；订阅线有余量时在候选阶段升为首选（前端开发除外：kimi-k3 档首选）。已下线/不进路由的线路以 memory 的 provider 表为准，本表不重复登记。
+「kimi-k3 档」在上下文允许时优先用 256k 档（同订阅，价格约为长档的一半）；仅当任务需要超过 256k（大文件通读、大包验收、长会话 resume）才用长档。
 
-| 阶段                        | 首选                                                                 | 回退                           | 说明                                                                                                                          |
-| --------------------------- | -------------------------------------------------------------------- | ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------- |
-| **核心调度**（主会话）      | opus-5.5                                                             | kimi-k3（订阅）                | 拆解、派单、汇总、裁定                                                                                                        |
-| **代码探索**                | glm-5.3（订阅）⇄ deepseek-flash → sonnet                             | kimi-k3（订阅）                | `Explore`，只读；2026-10-27 用户令：deepseek-flash 与 glm 并列（便宜、1M 上下文，适合广撒网 grep/读文件）                     |
-| **架构设计**                | opus-5.5                                                             | gpt-6.1-sol                    | `architect`，仅 L3 / 新模块从零搭建                                                                                           |
-| **方案制定**                | opus-5.5                                                             | sonnet（简单方案）→ kimi-k3    | `Plan`                                                                                                                        |
-| **复杂任务方案 / 疑难攻坚** | opus-5.5                                                             | gpt-6.1-sol                    | 仅 L3 / 连续 2 轮无进展；Blocker 或仍卡死 → `ask_user` 批准后升 fable                                                         |
-| **前端开发**                | kimi-k3（订阅）→ glm-5.3（订阅）                                     | sonnet → opus-5.5（视觉/疑难） | `frontend-dev`（内置 deveye 浏览器调试，页面 bug 派单给可访问 URL/端口）；2026-10-24 用户令：kimi-k3 首选                     |
-| **方案评审**                | gpt-6.1-sol（`copilot-response/` → `cr-response/`）⇄ kimi-k3（订阅） | glm-5.3（订阅）→ sonnet        | `reviewer`；必须与方案模型异源；2026-10-26 用户令：kimi-k3 也可做评审，与 gpt-6.1-sol 并列（GPT 线限流/不可用时首选 kimi-k3） |
-| **开发实施**                | glm-5.3（订阅）→ sonnet ⇄ gpt-6.1-sol                                | kimi-k3（订阅）→ opus-5.5      | `general`（`general-purpose` 仅杂项多步）；sonnet 与 gpt-6.1-sol 并列，多包按包分摊                                           |
-| **任务验收**                | glm-5.3（订阅；开发用了 GLM 的包禁派）→ kimi-k3                      | deepseek-flash → sonnet        | `verifier`；异源；**禁任何 GPT 系**；kimi 订阅将尽（≥80%）优先 deepseek-flash；打回后复验优先 resume 原 verifier              |
+| 阶段                        | 首选                                              | 回退                              | 说明                                                                                                                                                              |
+| --------------------------- | ------------------------------------------------- | --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **核心调度**（主会话）      | opus 档                                           | kimi-k3 档（订阅）                | 拆解、派单、汇总、裁定                                                                                                                                            |
+| **代码探索**                | glm 档（订阅）⇄ deepseek-flash 档 → sonnet 档     | kimi-k3 档（订阅）                | `Explore`，只读；glm 与 deepseek-flash 并列（便宜、1M 上下文，适合广撒网 grep/读文件）                                                                            |
+| **架构设计**                | opus 档                                           | gpt-sol 档                        | `architect`，仅 L3 / 新模块从零搭建                                                                                                                               |
+| **方案制定**                | opus 档                                           | sonnet 档（简单方案）→ kimi-k3 档 | `Plan`                                                                                                                                                            |
+| **复杂任务方案 / 疑难攻坚** | opus 档                                           | gpt-sol 档                        | 仅 L3 / 连续 2 轮无进展；Blocker 或仍卡死 → `ask_user` 批准后升 fable 档                                                                                          |
+| **前端开发**                | kimi-k3 档（订阅）→ glm 档（订阅）                | sonnet 档 → opus 档               | `frontend-dev`（内置 deveye 浏览器调试，页面 bug 派单给可访问 URL/端口）                                                                                          |
+| **方案评审**                | gpt-sol 档 ⇄ kimi-k3 档（订阅）                   | glm 档（订阅）→ sonnet 档         | `reviewer`；必须与方案模型异源；GPT 线限流/不可用或需要更便宜的评审时改 kimi-k3 档                                                                                |
+| **开发实施**                | glm 档（订阅）→ sonnet 档 ⇄ gpt-sol 档            | kimi-k3 档（订阅）→ opus 档       | `general`（`general-purpose` 仅杂项多步）；sonnet 与 gpt-sol 并列首选，多包按包分摊                                                                               |
+| **任务验收**                | glm 档（订阅；开发用了 GLM 的包禁派）→ kimi-k3 档 | deepseek-flash 档 → sonnet 档     | `verifier`；异源；GPT 系已解禁，可用 astra 档验收 GPT 系开发产物（异源即可）；验收用模型订阅将尽（≥80%）优先 deepseek-flash 档；打回后复验优先 resume 原 verifier |
 
-- droid 线（`droid/<model>`）2026-10-24 起不进路由表（用户令），任何阶段都不派。
-- gpt-6.1-sol 开发的包，验收改派 Claude 系（sonnet）。开发用了 GLM 的包，验收不派 GLM。
+- 已下线/不进路由的线路（如 droid 线）以 memory 的 provider 表为准，任何阶段都不派。
+- gpt-sol 开发的包，验收改派 Claude 系（sonnet 档）。开发用了 GLM 的包，验收不派 GLM。
 - 专属 agent 定义在 `~/.pi/agent/agents/`（architect / frontend-dev / reviewer / verifier / general / Explore），调用时传 `subagent_type` 并按本表传 `model`。
 
 ## 各车道流程
@@ -125,15 +124,15 @@ metadata:
 ```
 0. 需求模糊 → 主会话 ask_user 轻量澄清（同时后台预热 Explore）
 1. 主会话定车道 + TaskCreate 建 todo
-2‖3. 同一条消息派：Explore(glm 订阅首选，回退见阶段表) ‖ Plan(opus-5.5)
+2‖3. 同一条消息派：Explore(glm 档订阅首选，回退见阶段表) ‖ Plan(opus 档)
      —— 改动点未知、方案强依赖探索结论时才退化为先 Explore 后 Plan
-4‖5. 方案到手：立刻呈给用户确认，同时后台派 reviewer(gpt-6.1-sol 或 kimi-k3)
+4‖5. 方案到手：立刻呈给用户确认，同时后台派 reviewer(gpt-sol 档 或 kimi-k3 档)
      —— 用户读方案的时间 = 评审时间；两者都通过才开工（HARD GATE）
      —— 呈给用户的是一页决策摘要：需拍板项走 ask_user（每项带推荐选项与一句理由）+
         关键取舍 / 主要风险 / 已由主会话裁定项（各 1 行）+ 方案文件路径
      —— 评审轮数上限见「评审收敛规则」
 6. 并行开发：按文件域拆包，同消息派多个 dev / frontend-dev（先过冲突预检）；prompt 写明「拿不准就问父 agent」（见「子 agent 提问」）
-7‖8. dev 返回后：主会话 bash_job 后台跑全量测试 ‖ 派 verifier（只读 diff，禁 GPT 系）
+7‖8. dev 返回后：主会话 bash_job 后台跑全量测试 ‖ 派 verifier（只读 diff）
 9. 主会话汇总验收结论，报告用户
 ```
 
@@ -141,10 +140,10 @@ metadata:
 
 ```
 0‖1. 同 L2（澄清 / 定车道 / 建 todo）
-2. 前置 architect(opus-5.5) 产出 docs/dev/<feature>/arch.md（可与 Explore 同消息并行）
-3. Plan(opus-5.5) 以 arch.md 与 Explore 产物路径为输入
-   —— 方案被 reviewer 判 Blocker 且 opus-5.5 二次仍不过，才 ask_user 批准后升 fable
-4‖5. reviewer(gpt-6.1-sol ⇄ kimi-k3 → glm-5.3 → sonnet，须与方案模型异源) ‖ 用户确认（HARD GATE）
+2. 前置 architect(opus 档) 产出 docs/dev/<feature>/arch.md（可与 Explore 同消息并行）
+3. Plan(opus 档) 以 arch.md 与 Explore 产物路径为输入
+   —— 方案被 reviewer 判 Blocker 且 opus 档二次仍不过，才 ask_user 批准后升 fable
+4‖5. reviewer(gpt-sol 档 ⇄ kimi-k3 档 → glm 档 → sonnet 档，须与方案模型异源) ‖ 用户确认（HARD GATE）
 6. 冲突预检 → 按文件域拆 ≥2 个写包同消息派 dev；跨包共享文件进冻结面；
    prompt 给 arch.md / 方案 / 已拍板决策的路径（先推后问）
 7. 每包 dev 返回即派对应 verifier（不等全部完成），主会话后台跑全量测试
@@ -223,7 +222,7 @@ metadata:
 | 前端开发 / 开发实施            | `medium`（机械性改动 `low`）              |
 | 方案评审 / 任务验收            | `medium`                                  |
 
-`claude-opus-5-5` 为自适应思考，支持到 `xhigh` / `max`。
+opus 档为自适应思考，支持到 `xhigh` / `max`（其余模型按自身能力上限，超出会被钳制）。
 
 ## 反模式（禁止）
 
@@ -240,12 +239,12 @@ metadata:
 
 ## 参考
 
-| 文档                                                                 | 内容                                                     |
-| -------------------------------------------------------------------- | -------------------------------------------------------- |
-| [references/models.md](./references/models.md)                       | 模型 ID/回退链、fable 闸门、订阅优先、失败处置、日期裁定 |
-| [references/parallel-safety.md](./references/parallel-safety.md)     | 冲突预检四步、冻结面纪律、共享工作树禁令、合并纪律       |
-| [references/subagent-workflow.md](./references/subagent-workflow.md) | `SubagentWorkflow` 适用场景、限制、模型映射、最小模板    |
-| `scripts/conflict-check.mjs`                                         | 文件域 glob 交集预检脚本                                 |
+| 文档                                                                 | 内容                                                                |
+| -------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| [references/models.md](./references/models.md)                       | 能力画像、fable 闸门、独立性、失败处置、provider/额度由 memory 注入 |
+| [references/parallel-safety.md](./references/parallel-safety.md)     | 冲突预检四步、冻结面纪律、共享工作树禁令、合并纪律                  |
+| [references/subagent-workflow.md](./references/subagent-workflow.md) | `SubagentWorkflow` 适用场景、限制、模型映射、最小模板               |
+| `scripts/conflict-check.mjs`                                         | 文件域 glob 交集预检脚本                                            |
 
-- 需求模糊 → 第 0 步轻量澄清（产品级想法 / 要正式需求文档时才用 `dev-clarify`）；需求清晰但任务复杂 → 可用 `dev-spec-dev` 的 SDD 流程替代本流程 2-8 步。
+- 需求模糊 → 第 0 步轻量澄清（`ask_user`）；需求清晰但边界很大 → 拆成多个方案分别走 2–8 步，而不是一次性规划。
 - 本 skill 只管「谁来做、怎么并行」；项目规范以项目 `CLAUDE.md` / `AGENTS.md` 为准，派单时写进 subagent prompt。

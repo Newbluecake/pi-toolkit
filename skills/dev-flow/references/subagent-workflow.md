@@ -67,9 +67,10 @@ workflow 的 `agent()` 超出 `maxParallel`（`min(4, concurrencyLimit − 1)`�
 下表的角色→模型映射**同样适用于 workflow**：`agent()` 的 `opts.model` / `opts.thinking` 与 `Agent` 的同名参数同规则
 （完整 `provider/id` 优先；同 prompt 换模型不会命中 journal 旧结果），也可以继续写进 agent 类型 frontmatter 的 `model:`。
 
-Explore=`cr-anthropic/claude-sonnet-5-5`，Plan=`cr-anthropic/claude-opus-5-5`，
-reviewer = gpt-6.1-sol（`copilot-response/gpt-6.1-sol`）；verifier = glm-5.3 / kimi-k3 → `deepseek/deepseek-flash` → sonnet（**禁派任何 GPT 系**，且与开发模型异源），
-dev=`cr-anthropic/claude-sonnet-5-5` ⇄ gpt-6.1-sol（`copilot-response`；并列首选、按包分摊；gpt-6.1-sol 开发的包 verifier 改派 Claude 系）；有订阅额度时 kimi-k3 / glm-5.3 可替换同阶段首选；
+Explore=`sonnet` 档，Plan=`opus` 档，dev=`sonnet` 档 ⇄ `gpt-sol` 档（并列首选、按包分摊），
+reviewer = `gpt-sol` 档 ⇄ `kimi-k3` 档（必须与方案模型异源）；
+verifier = `glm` 档 / `kimi-k3` 档 → `deepseek-flash` 档 → `sonnet` 档（与开发模型异源），
+**具体 `provider/id` 由 memory 注入的 provider 表给出**，本文件只写能力档位；
 以 SKILL.md「阶段→模型」表与 references/models.md 为准。
 
 `agent()` 返回 `null` 不区分「用户跳过」与「模型失败」；严格按序回退由主会话根据失败通知重派，
@@ -98,7 +99,7 @@ const results = await pipeline(
       label: `dev:${t.id}`,
       phase: "Implement",
       agentType: t.agentType || "general",
-      model: "zai/glm-5.3", // 按调用指定模型，与 Agent 的 model 参数同规则
+      model: "<provider>/<glm 档模型>", // 完整 provider/id 取自 memory 注入的 provider 表；与 Agent 的 model 参数同规则
     }),
   (dev, t) =>
     dev &&
@@ -106,7 +107,7 @@ const results = await pipeline(
       label: `verify:${t.id}`,
       phase: "Verify",
       agentType: "verifier",
-      model: "cr-anthropic/claude-sonnet-5-5", // 与 dev 一级不同模型，才满足验收独立性
+      model: "<provider>/<与 dev 不同家族的模型>", // 必须与 dev 异源，才满足验收独立性
     }).then((verify) => ({ task: t.id, dev, verify })),
 );
 return { results: results.filter(Boolean) };

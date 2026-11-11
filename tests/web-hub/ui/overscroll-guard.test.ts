@@ -59,6 +59,16 @@ function declBody(css: string, selector: string): string {
   return ruleBody(css, selector).replace(/\/\*[\s\S]*?\*\//g, "");
 }
 
+describe("ask float confirmation copy wraps without hiding the body (#65)", () => {
+  it("preserves paragraphs and breaks long question/context tokens in both viewport bands", () => {
+    const body = declBody(readCss("ask-float.css"), ".ask-float .ask-question-text, .ask-float .ask-context");
+    expect(body).toContain("white-space: pre-wrap");
+    expect(body).toContain("overflow-wrap: anywhere");
+    expect(body).toContain("word-break: break-word");
+    expect(body).not.toMatch(/(?:line-clamp|text-overflow|overflow\s*:)/);
+  });
+});
+
 describe("inner scrollers no longer trap the scroll chain (scroll-freeze fix, part 1)", () => {
   it("transcript-inner capped regions declare no overscroll-behavior at all", () => {
     expect(declBody(transcriptCss, ".thinking-text")).not.toContain("overscroll-behavior");

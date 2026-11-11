@@ -11,7 +11,8 @@ runtime IO probe、私有 rollback 或旁路 store。本实现尚未部署到用
   record、不主动请求档位、不占 footer。显式 false 在注册前返回：零 Fast command/hook/bus/owner/seed/
   branch 读回/写盘/payload 变化。该设置非 live，修改需 `/reload`。
 - `/fast`、`toggle`：on→off，其余→on；`on` 请求 priority，`off` 请求 default；`inherit`/`reset`
-  停止覆写并保留原 tier；`status` 只读。trim、大小写、usage、toggle 全部复用 P1 parser/resolver。
+  停止覆写并保留原 tier；`status` 只读。帮助及补全只推荐 `inherit`，旧拼写 `reset` 仍受理。
+  trim、大小写、usage、toggle 全部复用 P1 parser/resolver。
   usage/status/同 mode 不追加条目。**例外是最新记录 invalid/future 时，显式 inherit/reset 追加一次有效
   inherit 墓碑修复**；不让 helper 的 undefined 将这个修复误判为普通幂等。
 - 只保存原 session 的 `subagent:fast` custom entry，data 恰为 `{v:1,mode}`。主会话用 `pi.appendEntry`，

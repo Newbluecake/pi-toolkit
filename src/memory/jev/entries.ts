@@ -1,3 +1,4 @@
+import { softLegacyMetadata, recordSoftMeta } from "../soft-meta.js";
 // Entry splitting, hashing, inline-authority parsing, expiry predicates and
 // the per-directory entry index cache (jev-arch §4.1/§4.2, jev-plan J1).
 //
@@ -155,6 +156,8 @@ export function parseInlineMeta(
     when?: string;
     clearExpires?: true;
     clearUntil?: true;
+    section?: string;
+    clearSection?: true;
   } = { present: true };
   const ignoredKeys: string[] = [];
   const seen = new Set<string>();
@@ -226,6 +229,17 @@ export function parseInlineMeta(
           break;
         }
         meta.until = value;
+        break;
+      case "section":
+        if (!opts?.lenientServerOwned) {
+          errors.push(`unknown key ${JSON.stringify(key)}`);
+        } else if (value === undefined || value === "") {
+          errors.push("section requires a value");
+        } else if (value === "none") {
+          meta.clearSection = true;
+        } else {
+          meta.section = value;
+        }
         break;
       case "gate":
         sawGate = true;
@@ -817,7 +831,10 @@ export class EntryIndex {
   private splitBlockFile(dir: string, name: string, fp: string): CachedFile {
     const raw = this.fs.readBlock?.(dir, name);
     if (raw === undefined) return { fp, entries: [] };
-    const block = parseBlockFile(name, raw);
+    const block = parseBlockFile(name, raw, {
+      softLimits: true,
+      onSoftLimit: (field, value) => recordSoftMeta(dir, field, value),
+    });
     if ("stray" in block) return { fp, entries: [] };
     return { fp, entries: [blockToEntry(block, "")] };
   }
@@ -825,12 +842,13 @@ export class EntryIndex {
   private splitFile(dir: string, name: string, fp: string): CachedFile {
     const raw = this.fs.read(dir, name);
     if (raw === undefined) return { fp, entries: [] };
-    const { meta } = parseMemoryMeta(raw, name.replace(/\.md$/, ""));
+    const normalized = softLegacyMetadata(raw, dir);
+    const { meta } = parseMemoryMeta(normalized, name.replace(/\.md$/, ""), { legacyWhen: true });
     if (meta.status === "archived") return { fp, entries: [] };
     const handWritten = frontmatterSource(raw) !== "agent";
     return {
       fp,
-      entries: splitEntries(name, raw, {
+      entries: splitEntries(name, normalized, {
         status: meta.status === "stale" ? "stale" : "active",
         handWritten,
       }),

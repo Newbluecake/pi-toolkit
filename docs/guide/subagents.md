@@ -13,7 +13,7 @@ pi-toolkit 的核心：一套带多层 deadline 的 subagent 运行时，以及�
 - **`get_run_result`** — 取结果。默认非阻塞，`wait: true` + `wait_ms` 为有界阻塞。也接受工作流 ID（`wf_…`）。原名 `get_subagent_result`（≤ v0.9），升级说明见[迁移](migration.md#结果工具改名get_subagent_result--get_run_result)。
 - **`steer_subagent`** — 给运行中的子 agent 追加指令，可要求它回复。
 - **`abort_subagent`** — 停止子 agent；对终态 run 幂等。传 `wf_…` 则停止整个后台工作流。
-- **`extend_subagent_timeout`** — 延长运行中 run 的总超时。到点先进宽限并通知主会话，宽限内可延长，宽限耗尽才终止。每次延长最多 1 小时（`budget.extendStepS`，默认 3600，`0` = 旧行为），次数与硬天花板双上限。程序派生的固定预算 run（workflow 子 run、`/goal` 验证、RPC）不能延长。也接受工作流 ID。
+- **`extend_subagent_timeout`** — 延长运行中 run 的总超时。到点先进宽限并通知主会话，宽限内可延长，宽限耗尽才终止。每次延长最多 1 小时（`budget.extendStepS`，默认 3600，`0` = 旧行为），次数与硬天花板双上限。程序派生的固定预算 run（workflow 子 run、RPC）不能延长。也接受工作流 ID。
 - **`set_model`** — 运行中切换模型（下一次 LLM 调用生效）：缺省切自己，也可按 run_id / 前缀 / label 切子 agent；可选 `thinking`。
 - **Agent 类型** — 从 `.pi/agents/`、`.agents/agents/`、`~/.pi/agent/agents/` 发现 `.md` 定义并注入系统提示词；frontmatter `model:` 支持严格 id 或模糊 hint，`can_message:` 控制 fabric 关系。
 - **`@mention`** — 编辑器输入 `@<label> <消息>`，引导运行中的子 agent，或复活已结束的。
@@ -97,7 +97,7 @@ subagent 之间的可选 fire-and-forget 消息：`"fabric": { "enabled": true }
 - 前置：装好 droid CLI，已登录或设置 `FACTORY_API_KEY`。强烈建议在 `~/.factory/update-policy.json` 里 `{"disableAutoUpdate":true}`（自更新会导致协议漂移）。
 - **模型白名单**：`externalAgents.droid.models` 非空时，既是系统提示里展示的模型，也是新 spawn 的白名单——名单外的 `droid/<id>` 在派发前被拒，额度提示与改派建议也只列名单内模型；空列表（默认）= 自动，沿用 droid 的模型目录。resume 已有 run 不受白名单影响。
 - 计费：droid 用量 × 底层模型的 pi 单价折算；匹配不上显示 `unpriced`，不会推断为 0。
-- 额度闸门见 [额度与负载](quota-load.md)。`toolDomain:"readonly"` 对 droid 不可用，所以 tidy 不会使用 droid。
+- 额度闸门见 [额度与负载](quota-load.md)。`toolDomain:"readonly"` 对 droid 不可用。
 - 权限：droid 以高自治级别运行并自动批准权限请求，同时会读取你的全局 skills / AGENTS.md / MCP，使用前请确认可接受。
 
 完整说明：[docs/dev/external-agent/README.md](../dev/external-agent/README.md)。

@@ -4,25 +4,32 @@
  * same everywhere. Pure — no IO, no pi. UI language split (AGENTS.md): compact markers are English
  * tokens; prose aimed at the user lives with the callers.
  */
-import { compileWhen, formatLocal } from "../core/cron.js";
+import { compileWhen, formatLocal, parseCron } from "../core/cron.js";
 import { absoluteReportPath, type ReportLocation } from "./result-reference.js";
 import {
+  displayTz,
   defHash,
   isTerminalRunState,
   type OccState,
   type RunRecord,
   type ScheduleTask,
-  type ScheduleWhen,
+  type StoredWhen,
 } from "../core/spec.js";
 
-export function whenText(when: ScheduleWhen): string {
-  return when.kind === "cron" ? `cron "${when.expr}" ${when.tz}` : `once ${when.at} ${when.tz}`;
+export function whenText(when: StoredWhen): string {
+  if (when.kind === "every")
+    return `every ${when.everyMs / 1000}s · anchor ${new Date(when.anchorAt).toISOString()} · UTC`;
+  if (when.kind === "cron") {
+    const strict = parseCron(when.expr, { strictSteps: true });
+    return `cron "${when.expr}" ${when.tz}${!strict.ok && strict.error.includes(" exceeds ") ? ` · legacy-step: ${strict.error}` : ""}`;
+  }
+  return `once ${when.at} ${when.tz}`;
 }
 
 /** Local wall time of `t` in the task's tz (`YYYY-MM-DD HH:mm`), ISO fallback if the tz cannot compile. */
-export function localTime(when: ScheduleWhen, t: number): string {
+export function localTime(when: StoredWhen, t: number): string {
   const c = compileWhen(when);
-  return c.ok ? `${formatLocal(c.when, t)} ${when.tz}` : new Date(t).toISOString();
+  return c.ok ? `${formatLocal(c.when, t)} ${displayTz(when)}` : new Date(t).toISOString();
 }
 
 /** UI-derived flags: only `paused` (approval was removed — schedule-auto-approve r2). */
@@ -86,13 +93,14 @@ const DROPPED_NOTE: Readonly<Record<string, string>> = {
   "task-changed": "the task was paused, changed or deleted while queued; not sent",
 };
 
-export function runLine(run: RunRecord, when?: ScheduleWhen, location?: ReportLocation): string {
+export function runLine(run: RunRecord, when?: StoredWhen, location?: ReportLocation): string {
   const report = absoluteReportPath(location, run.reportFile);
   const at = when === undefined ? new Date(run.scheduledAt).toISOString() : localTime(when, run.scheduledAt);
   const end = run.endedAt !== undefined && isTerminalRunState(run.state) ? "" : " (in progress)";
   return [
     `${at}`,
     run.kind,
+    ...(run.catchUp === undefined ? [] : [`catch-up ×${run.catchUp.dueCount}`, catchUpText(run)]),
     `${run.state}${run.reason ? `(${run.reason})` : ""}${end}`,
     ...(run.state === "dropped" && run.reason !== undefined && DROPPED_NOTE[run.reason] !== undefined
       ? [DROPPED_NOTE[run.reason]!]
@@ -101,4 +109,12 @@ export function runLine(run: RunRecord, when?: ScheduleWhen, location?: ReportLo
     ...(report === undefined ? [] : [`report ${report}`]),
     ...(run.note === "unverified" ? ["note unverified"] : []),
   ].join(" · ");
+}
+
+/** The durable run is the only source: both executors/report/history consume the same window. */
+export function catchUpText(run: RunRecord): string {
+  const c = run.catchUp;
+  return c === undefined
+    ? ""
+    : `这是补跑；合并 ${c.dueCount} 次到期，本次只执行一次。区间 (${new Date(c.fromExclusive).toISOString()}, ${new Date(c.through).toISOString()}]；原计划时间 ${new Date(run.scheduledAt).toISOString()}；恢复时间 ${new Date(c.recoveredAt).toISOString()}（${c.cause}）。`;
 }

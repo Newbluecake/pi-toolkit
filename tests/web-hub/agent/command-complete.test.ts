@@ -462,3 +462,31 @@ describe("#39 completion reuses scoped execution policy", () => {
     cc.dispose();
   });
 });
+
+describe("#65 completion write-port projection", () => {
+  it("projects only session add and still respects explicit deny", async () => {
+    const make = (overrides: Record<string, "allow" | "deny" | "confirm">) =>
+      createCommandComplete({
+        commands: { getCommands: () => [{ name: "mem", description: "memory", source: "extension" }] },
+        own: () =>
+          ownMap({
+            mem: () => ["session list", "session add text", "hub add text"].map((value) => ({ value, label: value })),
+          }),
+        tui: () => undefined,
+        mode: "toolkit",
+        memoryScopes: true,
+        memoryCapabilities: () => ({ sessionAdd: true, revisionReview: false }),
+        overrides,
+      });
+    const allowed = make({ mem: "allow" });
+    const answer = await allowed.answer(req("mem"));
+    expect(answer.ok).toBe(true);
+    if (!answer.ok) throw Error("expected completion");
+    expect(answer.items.map((item) => item.value)).toEqual(["session list", "session add text"]);
+    allowed.dispose();
+    const denied = make({ mem: "deny" });
+    const blocked = await denied.answer(req("mem"));
+    expect(blocked.ok).toBe(false);
+    denied.dispose();
+  });
+});

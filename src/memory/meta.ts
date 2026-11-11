@@ -6,6 +6,8 @@
 //
 // Zero pi/typebox imports; independently unit-testable.
 
+import { decodeSoftScalar } from "./soft-meta.js";
+import { META_LIMITS, truncateMeta } from "./blocks/format.js";
 import { parseFrontmatter, stripLeadingDriftHeader } from "./frontmatter.js";
 import { stripDriftHeader } from "./render.js";
 import type { MemoryMeta, MemoryMetaResult, MemoryStatus } from "./contracts.js";
@@ -15,14 +17,14 @@ const STATUSES: readonly MemoryStatus[] = ["active", "stale", "archived"];
 const MAX_FRONTMATTER_LINES = 40;
 const MAX_FRONTMATTER_BYTES = 2048;
 // 2026-10-16 user ruling: 160B → 300B (≈100 CJK chars). Single source of
-// truth — every surface (doctor D07 text, tidy prompt/validation, docs) reads
+// truth — every surface (doctor D07 text, docs) reads
 // these constants. The tiered index still renders its own 110B cut.
 export const MAX_DESCRIPTION_BYTES = 300;
 export const MAX_READ_WHEN_BYTES = 240;
 
 /** Truncate a single-line frontmatter field value to `maxBytes` UTF-8 bytes
  *  at a code-point boundary (never splits a surrogate pair), appending "…"
- *  only when it still fits — tidy's apply-time normalize for over-limit
+ *  only when it still fits — metadata normalization for over-limit
  *  description/read_when (2026-10-16). */
 export function truncateMetaField(value: string, maxBytes: number): string {
   if (Buffer.byteLength(value, "utf8") <= maxBytes) return value;
@@ -40,7 +42,7 @@ export function truncateMetaField(value: string, maxBytes: number): string {
 
 /** True iff `message` is one of `parseMemoryMeta`'s pure length-overage
  *  errors (`description exceeds NB` / `read_when exceeds NB`) — the only
- *  frontmatter problems tidy may auto-truncate instead of rejecting. */
+ *  frontmatter length problems, distinct from structural errors. */
 export function isMetaLengthOverage(message: string): boolean {
   return /^(description|read_when) exceeds \d+B$/.test(message);
 }
@@ -65,7 +67,7 @@ export function splitReadWhen(raw: string): string[] {
  * throwing: structural problems are reported as `errors` for the doctor
  * (D07), not raised. `fallbackTopic` is normally the filename minus `.md`.
  */
-export function parseMemoryMeta(raw: string, fallbackTopic: string): MemoryMetaResult {
+export function parseMemoryMeta(raw: string, fallbackTopic: string, opts?: { legacyWhen?: true }): MemoryMetaResult {
   const errors: string[] = [];
   // Strip a head drift-import banner (pre-fix `/mem import` wrote it BEFORE
   // the frontmatter — field study F1) so the block behind it parses again.
@@ -90,7 +92,11 @@ export function parseMemoryMeta(raw: string, fallbackTopic: string): MemoryMetaR
   if (description !== undefined && Buffer.byteLength(description, "utf8") > MAX_DESCRIPTION_BYTES) {
     errors.push(`description exceeds ${MAX_DESCRIPTION_BYTES}B`);
   }
-  const readWhen = get("read_when");
+  // Decode exactly like the read-only compatibility serializer, then enforce
+  // the budget on the final consumed legacy `when` value, not escaped bytes.
+  const when = opts?.legacyWhen ? fm?.fields.get("when") : undefined;
+  const readWhen =
+    get("read_when") ?? (when === undefined ? undefined : truncateMeta(decodeSoftScalar(when), META_LIMITS.when));
   if (readWhen !== undefined && Buffer.byteLength(readWhen, "utf8") > MAX_READ_WHEN_BYTES) {
     errors.push(`read_when exceeds ${MAX_READ_WHEN_BYTES}B`);
   }

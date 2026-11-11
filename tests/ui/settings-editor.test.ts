@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { visibleWidth } from "@earendil-works/pi-tui";
@@ -117,8 +117,8 @@ describe("SettingsEditorModel navigation", () => {
   it("lists every settable key in seconds, with second-valued defaults", () => {
     const rows = new SettingsEditorModel(store()).snapshot().rows;
     const byKey = new Map(rows.map((r) => [r.key, r]));
-    expect(byKey.get("budget.idleS")?.value).toBe("240");
-    expect(byKey.get("budget.idleS")?.def).toBe("240");
+    expect(byKey.get("budget.idleS")?.value).toBe("1200");
+    expect(byKey.get("budget.idleS")?.def).toBe("1200");
     expect(byKey.has("budget.idleMs")).toBe(false);
     expect(byKey.get("budget.startupRetries")?.value).toBe("2");
     expect(byKey.has("foregroundAutoBackgroundS")).toBe(false); // removed with the foreground Agent mode
@@ -183,7 +183,7 @@ describe("SettingsEditorModel editing (seconds in, milliseconds live, seconds pe
     focus(model, "budget.idleS");
     model.apply({ type: "activate" });
     expect(model.snapshot().mode).toBe("edit");
-    expect(model.snapshot().draft).toBe("240"); // prefilled with the current seconds
+    expect(model.snapshot().draft).toBe("1200"); // prefilled with the current seconds
     model.apply({ type: "clear" });
     type(model, "600");
     expect(model.snapshot().error).toBeUndefined();
@@ -191,7 +191,7 @@ describe("SettingsEditorModel editing (seconds in, milliseconds live, seconds pe
     expect(model.snapshot().mode).toBe("browse");
     expect(s.current.budget.idleMs).toBe(600_000);
     expect(s.persisted).toEqual([["budget.idleS", 600]]);
-    expect(model.snapshot().status).toContain("budget.idleS: 240s → 600s");
+    expect(model.snapshot().status).toContain("budget.idleS: 1200s → 600s");
     expect(model.snapshot().status).toContain("applies to new runs immediately");
   });
 
@@ -296,7 +296,7 @@ describe("SettingsEditorModel editing (seconds in, milliseconds live, seconds pe
     model.apply({ type: "reset" });
     expect(s.current.budget.idleMs).toBe(DEFAULT_BUDGET.idleMs);
     expect(s.persisted).toEqual([["budget.idleS", undefined]]);
-    expect(model.snapshot().status).toContain("budget.idleS reset to default 240s");
+    expect(model.snapshot().status).toContain("budget.idleS reset to default 1200s");
     expect(model.snapshot().rows[model.snapshot().index]?.overridden).toBe(false);
   });
 
@@ -370,7 +370,7 @@ describe("renderSettingsEditor", () => {
     const text = renderSettingsEditor(model.snapshot(), { width: 100, maxVisible: 6 }).join("\n");
     expect(text).toContain("Extension settings — /tmp/pi-subagent.json");
     expect(text).toContain("Durations in seconds");
-    expect(text).toMatch(/›\s+budget\.idleS\s+600s\s+\(default 240s\)/);
+    expect(text).toMatch(/›\s+budget\.idleS\s+600s\s+\(default 1200s\)/);
     expect(text).toContain("↑↓ move · enter edit/toggle · space toggle · r reset · esc close");
     expect(text).toContain(`(${model.snapshot().index + 1}/${model.snapshot().rows.length})`);
   });
@@ -418,7 +418,7 @@ describe("renderSettingsEditor", () => {
     // 窗口以焦点行为中心；budget 块随新键增加而变长（含 minTotalS），窗口必须足够大才能同时看到 idleS。
     const text = renderSettingsEditor(model.snapshot(), { width: 120, maxVisible: 34 }).join("\n");
     expect(text).toContain("Max silence between session events");
-    expect(text).toMatch(/budget\.idleS\s+240s/);
+    expect(text).toMatch(/budget\.idleS\s+1200s/);
     // non-time values carry no unit
     expect(text).toMatch(/concurrencyLimit\s+6\s/);
     expect(text).not.toContain("6s ");
@@ -436,7 +436,7 @@ describe("renderSettingsEditor", () => {
     const rows = new SettingsEditorModel(store()).snapshot().rows;
     const byKey = new Map(rows.map((r) => [r.key, r]));
     expect(describeRow(byKey.get("budget.idleS")!)).toBe(
-      "seconds >= 0 · default 240 · applies to new runs immediately",
+      "seconds >= 0 · default 1200 · applies to new runs immediately",
     );
     expect(describeRow(byKey.get("coalesceWindowS")!)).toBe(
       "seconds 0..5 · default 0 · 0 disables coalescing; max 5s · takes effect after /reload",
@@ -499,6 +499,82 @@ describe("createSettingsEditorComponent", () => {
  * 整数秒") without needing a terminal.
  */
 describe("editor → settings file round trip", () => {
+  it.each([
+    ["quiet", 15_000],
+    ["idle", 2_000],
+    ["cooldown", 300_000],
+  ] as const)("clears the legacy %s alias on explicit set and reset", (name, defaultMs) => {
+    for (const sequence of ["reset", "set-reset", "set-reload-reset"] as const) {
+      const path = join(mkdtempSync(join(tmpdir(), "pi-incremental-reset-")), "settings.json");
+      const legacyKey = `${name}Ms`;
+      const secondsKey = `${name}Sec`;
+      const key = `memory.incremental.${secondsKey}`;
+      writeFileSync(path, JSON.stringify({ memory: { incremental: { [legacyKey]: 1234 } } }));
+      const store = {
+        current: loadSettingsFromFile(path),
+        persist: (k: string, value: unknown) => persistSettingOverride(k, value, path),
+      };
+      expect(store.current.memory.incremental[legacyKey as "quietMs" | "idleMs" | "cooldownMs"]).toBe(1234);
+      if (sequence !== "reset") {
+        const parsed = parseSettingValue(SETTING_SPECS[key]!, "9");
+        expect(parsed.ok).toBe(true);
+        if (!parsed.ok) throw new Error(parsed.error);
+        expect(writeSetting(store, key, parsed).persistError).toBeUndefined();
+        expect(JSON.parse(readFileSync(path, "utf8")).memory.incremental).toEqual({ [secondsKey]: 9 });
+        if (sequence === "set-reload-reset") {
+          store.current = loadSettingsFromFile(path);
+          expect(store.current.memory.incremental[legacyKey as "quietMs" | "idleMs" | "cooldownMs"]).toBe(9000);
+        }
+      }
+      expect(resetSetting(store, key).persistError).toBeUndefined();
+      expect(store.current.memory.incremental[legacyKey as "quietMs" | "idleMs" | "cooldownMs"]).toBe(defaultMs);
+      expect(JSON.parse(readFileSync(path, "utf8")).memory.incremental).toEqual({});
+      expect(loadSettingsFromFile(path).memory.incremental[legacyKey as "quietMs" | "idleMs" | "cooldownMs"]).toBe(
+        defaultMs,
+      );
+    }
+  });
+
+  it("does not remove other time-setting legacy aliases on explicit writes", () => {
+    const path = join(mkdtempSync(join(tmpdir(), "pi-other-time-reset-")), "settings.json");
+    writeFileSync(path, JSON.stringify({ budget: { idleMs: 1234 } }));
+    expect(persistSettingOverride("budget.idleS", 9, path)).toBeUndefined();
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ budget: { idleMs: 1234, idleS: 9 } });
+    expect(persistSettingOverride("budget.idleS", undefined, path)).toBeUndefined();
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ budget: { idleMs: 1234 } });
+  });
+  it("round-trips incremental seconds through the editor and runtime", () => {
+    const path = join(mkdtempSync(join(tmpdir(), "pi-incremental-editor-")), "settings.json");
+    const current = JSON.parse(JSON.stringify(DEFAULT_SETTINGS)) as AgentSettings;
+    const model = new SettingsEditorModel({
+      current,
+      path,
+      persist: (key, value) => persistSettingOverride(key, value, path),
+    });
+    for (const [key, value] of [
+      ["quietSec", "7"],
+      ["idleSec", "4"],
+      ["cooldownSec", "31"],
+    ]) {
+      focus(model, `memory.incremental.${key}`);
+      model.handleInput("\r");
+      model.handleInput("\u0015");
+      for (const ch of value!) model.handleInput(ch);
+      model.handleInput("\r");
+    }
+    expect(JSON.parse(readFileSync(path, "utf8")).memory.incremental).toEqual({
+      quietSec: 7,
+      idleSec: 4,
+      cooldownSec: 31,
+    });
+    expect(loadSettingsFromFile(path).memory.incremental).toMatchObject({
+      quietMs: 7000,
+      idleMs: 4000,
+      cooldownMs: 31000,
+    });
+    expect(current.memory.incremental).toMatchObject({ quietMs: 7000, idleMs: 4000, cooldownMs: 31000 });
+  });
+
   it("persists integer seconds that reload to the edited milliseconds", () => {
     const path = join(mkdtempSync(join(tmpdir(), "pi-subagent-editor-")), "pi-subagent.json");
     const current = JSON.parse(JSON.stringify(DEFAULT_SETTINGS)) as AgentSettings;
@@ -557,7 +633,7 @@ describe("setting-specs table", () => {
       const spec = SETTING_SPECS[key]!;
       expect(key.endsWith("Ms")).toBe(false);
       if (spec.time) {
-        expect(key.endsWith("S")).toBe(true);
+        expect(key.endsWith("S") || key.endsWith("Sec")).toBe(true);
         expect(spec.path.endsWith("Ms")).toBe(true);
         expect(spec.integer).toBe(true);
       }
@@ -569,7 +645,7 @@ describe("setting-specs table", () => {
     expect(parseSettingValue(spec, "600")).toEqual({ ok: true, stored: 600, live: 600_000 });
     expect(parseSettingValue(spec, " 600 ")).toEqual({ ok: true, stored: 600, live: 600_000 });
     expect(parseSettingValue(spec, "")).toEqual({ ok: false, error: "expected an integer >= 0 seconds" });
-    expect(defaultOf(spec)).toBe(240);
+    expect(defaultOf(spec)).toBe(1200);
     const current = JSON.parse(JSON.stringify(DEFAULT_SETTINGS)) as AgentSettings;
     current.budget.idleMs = 90_000;
     expect(currentOf(current, spec)).toBe(90);

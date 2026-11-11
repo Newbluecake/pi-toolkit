@@ -9,8 +9,8 @@ import {
   topicSummary,
   trashBlockLocked,
 } from "../../../src/memory/blocks/store.js";
-import { listTrashEntries } from "../../../src/memory/tidy/manifest.js";
-import { restoreFromTrash } from "../../../src/memory/tidy/restore.js";
+import { listTrashEntries } from "../../../src/memory/trash.js";
+import { restoreFromTrash } from "../../../src/memory/trash.js";
 import { defaultPaths } from "../../../src/memory/paths.js";
 import type { JevIndexV1 } from "../../../src/memory/jev/contracts.js";
 import { entryHash } from "../../../src/memory/jev/entries.js";
@@ -110,4 +110,18 @@ it("a closed write gate prevents all storage mutation", () => {
   );
   expect(readCorpus(dir).blocks).toEqual([]);
   expect(gate.check).toHaveBeenCalledOnce();
+});
+
+it("rejects edits rather than silently deleting historical over-limit metadata", () => {
+  const { dir } = setup();
+  const now = new Date();
+  const b = createBlockLocked(dir, "topic", { authority: "agent" }, "original", now);
+  const raw = b.raw.replace("status: active", `status: active\nwhen: ${"w".repeat(95)}`);
+  writeFileSync(join(dir, `${b.id}.md`), raw);
+  const read = readCorpus(dir).blocks[0]!;
+  expect(read.meta.when).toMatch(/…$/);
+  expect(() => replaceBlockLocked(dir, b.id, read.rev, { meta: read.meta, body: "edit" }, now)).toThrow(
+    "E_META: invalid when",
+  );
+  expect(readFileSync(join(dir, `${b.id}.md`), "utf8")).toBe(raw);
 });

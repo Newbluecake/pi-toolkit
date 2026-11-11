@@ -459,3 +459,39 @@ describe("createCommandLedger — session-scoped ctl frame (todo #32 finding 4 /
     expect(ledger.frame("sess-other", "epoch", 2000).items.map((i) => i.cmdId)).toEqual(["a"]);
   });
 });
+
+describe("memory completion reservations", () => {
+  it("settles once independently of generic settlement and retains non-retryable failure", () => {
+    const ledger = createCommandLedger();
+    const payload = { op: "command", name: "mem" };
+    expect(ledger.begin("mem", "command", payload, 0).kind).toBe("new");
+    expect(ledger.reserveMemoryCompletion("mem", 0)).toBe(true);
+    ledger.settle("mem", OK, 1);
+    expect(ledger.query("mem")?.state).toBe("running");
+    expect(ledger.settleMemoryCompletion("mem", RETRYABLE_NONE, 2)).toBe(true);
+    expect(ledger.settleMemoryCompletion("mem", OK, 3)).toBe(false);
+    expect(ledger.query("mem")).toMatchObject({ state: "failed", late: true, result: { retryable: false } });
+    expect(ledger.begin("mem", "command", payload, 4).kind).toBe("dup");
+    expect(ledger.begin("mem", "command", { ...payload, name: "different" }, 4).kind).toBe("digest_mismatch");
+  });
+
+  it("holds 32 slots under ordinary capacity pressure until terminal TTL", () => {
+    const ledger = createCommandLedger();
+    for (let i = 0; i < 32; i++) {
+      expect(ledger.begin(`mem-${i}`, "command", { i }, 0).kind).toBe("new");
+      expect(ledger.reserveMemoryCompletion(`mem-${i}`, 0)).toBe(true);
+      expect(ledger.settleMemoryCompletion(`mem-${i}`, OK, 1)).toBe(true);
+    }
+    expect(ledger.begin("extra", "command", {}, 2).kind).toBe("new");
+    expect(ledger.reserveMemoryCompletion("extra", 2)).toBe(false);
+    ledger.settle("extra", OK, 2);
+    for (let i = 0; i < LEDGER_CAPACITY + 20; i++) {
+      ledger.begin(`ordinary-${i}`, "abort", { i }, 3);
+      ledger.settle(`ordinary-${i}`, OK, 3);
+    }
+    expect(ledger.query("mem-0")?.result).toEqual(OK);
+    ledger.begin("after-expiry", "command", {}, 30 * 60_000 + 2);
+    expect(ledger.query("mem-0")).toBeUndefined();
+    expect(ledger.reserveMemoryCompletion("after-expiry", 30 * 60_000 + 2)).toBe(true);
+  });
+});

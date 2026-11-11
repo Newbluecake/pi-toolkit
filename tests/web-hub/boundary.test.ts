@@ -120,7 +120,6 @@ const SYSLOAD_FILE_CLOSURE: Record<string, string[]> = {
     "../ask-user/settings.js",
     "../todo/settings.js",
     "../hud/settings.js",
-    "../goal/settings.js",
     "../title/settings.js",
     "../reload/settings.js",
     "../sysprompt/settings.js",
@@ -137,6 +136,8 @@ const SYSLOAD_FILE_CLOSURE: Record<string, string[]> = {
     "../secure/domain.js",
     // data-encryption P1 review #5: cross-process settings-file lock (flock child, pi-free).
     "../secure/settings-lock.js",
+    // #70 sparse notification parser is pi-free, with no runtime imports (pinned below).
+    "../feishu-notify/settings.js",
     "./enabled-group.js",
     "./time-units.js",
   ],
@@ -154,6 +155,7 @@ const SYSLOAD_FILE_CLOSURE: Record<string, string[]> = {
   "src/secure/config.ts": ["node:path"],
   "src/secure/env.ts": [],
   "src/config/model-hint.ts": [],
+  "src/feishu-notify/settings.ts": [],
   "src/fabric/xs/channel.ts": ["../../web-hub/protocol/xs.js"],
   // #56 ⑧: fabric block settings — channel-plan CH0 pure channel-name rules + the pure receive/session-id rules.
   // fabric-thread P0 (arch §11.1): + the SHARED window clamp from web-hub/protocol/thread.js (typebox-only,
@@ -180,8 +182,6 @@ const SYSLOAD_FILE_CLOSURE: Record<string, string[]> = {
   "src/reload/settings.ts": [],
   // #56 ⑧: title block settings — self-contained (no imports at all).
   "src/title/settings.ts": [],
-  // #56 ⑧: goal block settings — self-contained (no imports at all).
-  "src/goal/settings.ts": [],
   // #56 ⑧: hud block settings — EnabledGroup is a type-only import.
   "src/hud/settings.ts": [],
   // #56 ⑧: todo block settings — EnabledGroup is a type-only import.
@@ -201,13 +201,12 @@ const SYSLOAD_FILE_CLOSURE: Record<string, string[]> = {
   // #56 ⑧: workflow block settings — self-contained (type-only core/types import).
   "src/workflow/settings.ts": [],
   // #56 ⑧: memory block settings — the tidy batch limits (pinned below: only ../contracts.js).
-  "src/memory/settings.ts": ["./tidy/batch-settings.js"],
+  "src/memory/settings.ts": [],
   // #56 ⑧: webHub/feishuBot block settings — LAN host/origin classification (L16 第一处) + the browser-safe,
   // import-free shared CIDR parser (LAN security P0). The hub whitelist is NOT loosened: these are the same two files.
   "src/web-hub/agent/settings.ts": ["../protocol/client-allow.js", "../protocol/lan.js"],
   "src/sysload/io-ledger.ts": [],
   // P0's compatibility re-export keeps the shared file limits available to pi-free callers.
-  "src/memory/tidy/batch-settings.ts": ["../contracts.js"],
   "src/memory/contracts.ts": [],
   "src/sysload/mounts.ts": ["./procfs.js"],
   "src/sysload/procfs.ts": [],

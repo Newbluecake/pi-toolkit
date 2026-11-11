@@ -866,3 +866,32 @@ describe("Transcript.vue — scroll memory v1 (session-switch plan §1.4)", () =
     expect(wrapper.emitted("update:following")).toBeUndefined();
   });
 });
+
+describe("#64 fabric wake notices in the Web transcript", () => {
+  it.each([
+    [
+      "root_limit",
+      "已送达但未唤醒（root_limit）；不代表 Root 已处理",
+      "Delivered without waking (root_limit); this does not mean Root has handled it",
+    ],
+    ["root_busy", "已排队，不新增唤醒（root_busy）", "Queued; no additional wake (root_busy)"],
+    ["root_reserved", "已排队，不新增唤醒（root_reserved）", "Queued; no additional wake (root_reserved)"],
+    [undefined, "", ""],
+  ])("renders %s in both languages", async (_reason, zh, en) => {
+    const { setLangOverride, resetLangForTests } = await import("../../../src/web-hub/ui/src/composables/useI18n.js");
+    try {
+      setLangOverride("zh", null);
+      const wrapper = mount(TxCustom, {
+        props: { customType: "subagent:fabric", text: `[@x]${zh ? ` · ${zh}` : ""}\nbody`, truncated: false },
+      });
+      expect(wrapper.text()).toContain(`[@x]${zh ? ` · ${zh}` : ""}`);
+      setLangOverride("en", null);
+      await wrapper.vm.$nextTick();
+      expect(wrapper.text()).toContain(`[@x]${en ? ` · ${en}` : ""}`);
+      expect(wrapper.text()).toContain("body");
+      wrapper.unmount();
+    } finally {
+      resetLangForTests();
+    }
+  });
+});

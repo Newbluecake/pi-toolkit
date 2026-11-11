@@ -710,8 +710,8 @@ scope: topic (decision record — injected when relevant). Looks like a standing
 resident: 2.3k/2.0k over budget — still injected; merge or demote to topic (suggestion queued)
 looks like a user order — if the user said it, add <!-- mem user -->
 state snapshot: run id / quota reading / progress — add expires=YYYY-MM-DD or until="…", or rewrite as a durable conclusion
-superseded: general.003 (user · global, p=0.91) — no longer injected; undo: /mem restore --block general.003
-  note: general.003 was global; this block is topic — add scope=global if it should stay always-on
+superseded: general.003 by general.004
+note: general.003 was global; new block remains topic
 not superseded: pitfalls.012 is a user rule — agent blocks never supersede user rules (conflict p=0.91; review suggested)
 conflict: pitfalls.020 (p=0.78) — below auto threshold; review suggested
 audience: looks main-session-only (dispatch) — add audience=main if so
@@ -720,15 +720,15 @@ voided user rule: …
 
 每行的出现条件：
 
-| 行                                              | 出现条件                                                            |
-| ----------------------------------------------- | ------------------------------------------------------------------- |
-| `scope:`                                        | user 块、没有显式 scope、分类器 `globalP ≥ 0.7`（§5.3）             |
-| `resident:`                                     | 写的是 global 块，或写入导致常驻区超额                              |
-| `looks like a user order`                       | 只对 agent 块（原 userLike 逻辑）                                   |
-| `state snapshot`                                | 只对 agent 块；取代 v2 的 `looks temporary`，**永不对 user 块出现** |
-| `superseded`/`note`/`not superseded`/`conflict` | §5.4                                                                |
-| `audience:`                                     | §6.1                                                                |
-| `voided user rule:`                             | #26 原有行                                                          |
+| 行                                              | 出现条件                                                                                                 |
+| ----------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `scope:`                                        | user 块、没有显式 scope、分类器 `globalP ≥ 0.7`（§5.3）                                                  |
+| `resident:`                                     | 写的是 global 块，或写入导致常驻区超额                                                                   |
+| `looks like a user order`                       | 只对 agent 块（原 userLike 逻辑）                                                                        |
+| `state snapshot`                                | 只对 agent 块；是独立的确定性提示，不取代 Jev 的 `looks temporary`（二者可并存），**永不对 user 块出现** |
+| `superseded`/`note`/`not superseded`/`conflict` | §5.4                                                                                                     |
+| `audience:`                                     | §6.1                                                                                                     |
+| `voided user rule:`                             | #26 原有行                                                                                               |
 
 v2 路径的回显保持原样（I9）。
 
@@ -1232,6 +1232,20 @@ export function planSweep(
 - **中止**：`session_shutdown`（含 reload）时 abort，每个操作之间检查 signal。
 - **闸门**：每个写操作之前调用 `memoryWriteGate.check(memDir)`（§4.7）。
 
+#### 4.5.1 #50 增量后台修正（子项，未启动）
+
+#50 合并为 #36 的子项，保留编号与独立验收。#36 已覆盖策略、确定性执行、同步关系判定和周期建议；#50 只新增增量聚合调度、模型修订正文及受控提交/撤销：
+
+1. **增量聚合调度器**：按 canonical memDir 汇聚变更，支持计数阈值、安静期 debounce、空闲窗口、冷却周期及任务完成触发。
+2. **修订提案与提交器**：模型生成修正正文而非仅分类；冻结双方 rev，受控提交。默认**建议模式**，仅获批动作自动提交。
+3. **修正审计与可恢复**：记录 origin、批次幂等键、输入/输出摘要，支持原文恢复。
+
+必须复用、禁止双实现：`govern/supersede.ts` 的权限/阈值、`govern/review-lite.ts` 的交互/dismiss、`govern/sweep-plan.ts` 的到期规则、`jev/tagging.ts` + `jev/client.ts` 分类器（勿新造客户端），以及目录锁/CAS/单边恢复。事件入口与建议存储各只能有一个 owner。
+
+前置缺陷：#66（sweep/review 共享运行状态导致建议被覆盖）和 #67（判定 rev 与提交 rev 不一致）必须先修；#68（Jev 120s 只 race 不 abort、队列无上限）作为作业级 abort 的基础。六类权限已由 root 于 2026-11-08 拍板（用户令允许窄条件自动取代、agent 块与已过期块可自动删除、同/跨主题合并可自动、低置信仅建议、agent 块 expires 可自动、跨 project/Hub 仅建议），详见 [plan 权限表](plan.md#权限表2026-11-08-root-已拍板)；所有自动动作仍须走既有阈值 + CAS + 审计快照 + 原文恢复。
+
+**验收钉子**：N 次变更合并一次；安静窗口内新写重置等待；自写不再入队；超时/abort/旧 rev 零提交；队列/调用/费用/并发达 cap 停止；撤销可恢复原文字节。
+
 ### 4.6 新增 / 变更设置（r4）
 
 | 键                               | 变更                | 默认                        | 说明                                                                                                                              |
@@ -1466,7 +1480,7 @@ blocks 目录下 `/mem tidy`（交互式和 `--batch`）直接返回 `not availa
 - **过滤**：子会话剔除 `main`，主会话剔除 `child`。
   - 作用于常驻区（只看 frontmatter）和 Jev 各层候选池（三条规则都用）；
   - `view/search` 不受影响。
-- 写入时如果第 2 条规则命中但没写 audience ⇒ 回显 `audience:` 提示。
+- 写入时如果没写 `audience`，且 `tool-v3.ts` 的确定性 `AUDIENCE_MAIN_HINTS` 在正文命中主会话线索（`主会话` / `dispatch`（含派单、派发）/ `ask_user` / `TUI`）⇒ 回显 `audience:` 提示；该提示不依赖第 2 条的 Jev 标签推导。
 
 ### 6.2 时效降权（`govern/decay.ts`）
 
@@ -1685,7 +1699,7 @@ blocks 目录下 `/mem tidy`（交互式和 `--batch`）直接返回 `not availa
 
 ### 9.2 需用户确认的问题
 
-**无待确认项。** r5 的 13 条为 root 裁定，全部是实现层收紧，未改变用户已定事项。r4 新增的 `memory.migrate.auto` 默认值为 true，保持了用户定的惰性迁移，只作为运维暂停开关，不改变任何已定事项；其余改动都是对评审意见的实现层修订。已定项落点：r1 Q1→§3.3、Q2→§7.1、Q3/Q4/Q7/Q10→§4.3、Q5→§5.5、Q6→§5.4、Q8→§4.3.1、Q9→§6.5；r2 N1→§3.2.3/§3.3.3、N2→§5.4。
+**#36 原范围无待确认项。** #50 的六类权限（用户令、删除、跨主题合并、低置信冲突、expires、跨 project/Hub）仍待正式设计时通过 `ask_user` 确认；见 [§4.5.1](#451-50-增量后台修正子项未启动) 与 [plan 权限待确认表](plan.md#权限待确认表)。 r5 的 13 条为 root 裁定，全部是实现层收紧，未改变用户已定事项。r4 新增的 `memory.migrate.auto` 默认值为 true，保持了用户定的惰性迁移，只作为运维暂停开关，不改变任何已定事项；其余改动都是对评审意见的实现层修订。已定项落点：r1 Q1→§3.3、Q2→§7.1、Q3/Q4/Q7/Q10→§4.3、Q5→§5.5、Q6→§5.4、Q8→§4.3.1、Q9→§6.5；r2 N1→§3.2.3/§3.3.3、N2→§5.4。
 
 ---
 

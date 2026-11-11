@@ -36,18 +36,61 @@ import type { CommandCapturePort } from "../../commands/capture.js";
 import type { CommandRecorder } from "./command-record.js";
 import type { CmdRecordNotice, CmdRecordState } from "../protocol/cmd-record.js";
 import { isFeishuCmdOrigin, type CmdOrigin } from "../protocol/messages.js";
+import type { LedgerResult } from "./ledger.js";
+import { parseRevisionFlowCommand } from "../../memory/command-flow.js";
+import { parseMemoryWriteRequest, type MemoryWriteRequest } from "../../memory/command-policy.js";
+import type {
+  MemoryCancelReason,
+  MemoryRevisionReviewRequest,
+  MemoryWebOutcome,
+  MemoryWebWritePort,
+  MemoryWriteTask,
+} from "../../memory/scopes/web-write-port.js";
 
 export interface BuiltinBridge {
   /** web-resume plan §2.4: may return a Promise for `resume __list` or the bounded P3b internal xs action — every
    *  other op stays a plain synchronous result (pinned by commands.test.ts; R4). The caller
-   *  (`commands.ts handleCommand`) races a thenable against the frame deadline. */
-  execute(frame: CmdFrame): CmdResultBody | Promise<CmdResultBody>;
+   *  (`commands.ts handleCommand`) races a thenable against the frame deadline.
+   *
+   *  `admission` is present only for authenticated closed session-add/revision
+   *  flow dispatch. Without it, these routes refuse rather than use SDK/native. */
+  execute(frame: CmdFrame, admission?: MemoryBridgeAdmission): CmdResultBody | Promise<CmdResultBody>;
   /** Quiet for resume __list and internal xs actions: no origin notify/model input.
    * Resume lists additionally have data.sessions stripped from the ledger. */
   isQuiet(frame: CmdFrame): boolean;
 }
 
+/**
+ * Commands → bridge task-control seam (§4.2). `cancel` returns the store's already-observed
+ * outcome mapped to a wire result — it never downgrades a completed/unknown observation to
+ * `none`. `release` is idempotent and is called by the dispatcher only AFTER the ledger has
+ * copied the final result out (observe-before-release ordering).
+ */
+export interface MemoryBridgeTaskControl {
+  cancel(reason: MemoryCancelReason): LedgerResult;
+  release(): void;
+}
+
+/**
+ * Per-write admission the dispatcher mints before calling `execute`. `attach` is called exactly
+ * once, synchronously, by the bridge once the write controller accepted the task; it returns
+ * `false` when the waiter was already cancelled (stale) — the bridge then cancels the task,
+ * copies the result, releases, and rejects.
+ */
+export interface MemoryBridgeAdmission {
+  readonly commandOwner: string;
+  readonly operationGeneration: number;
+  readonly deadline: number;
+  readonly signal: AbortSignal;
+  current(): boolean;
+  attach(control: MemoryBridgeTaskControl): boolean;
+}
+
 export interface BuiltinBridgeDeps {
+  memoryRead?: import("../../memory/index.js").MemoryReadPort;
+  /** Late-bound facade with actual-context per-operation capabilities. Absent ⇒
+   * every effect/flow refuses, with no native/SDK dispatch fallback. */
+  memoryWrite?(): MemoryWebWritePort | undefined;
   memoryScopes?: boolean;
   pi?: ExtensionAPI & CommandsPort;
   getCtx?(): ExtensionContext | undefined;
@@ -137,6 +180,78 @@ function errResult(
 }
 function okResult(data: CmdData): CmdResultBody {
   return { ok: true, data };
+}
+
+function wireMemFailureCode(code: string): CmdErrorCode {
+  switch (code) {
+    case "E_MEM_BUSY":
+    case "E_BUSY":
+      return "E_RATE";
+    case "E_MEM_CONFIRM_TIMEOUT":
+    case "E_MEM_PLAN_BUDGET":
+      return "E_DEADLINE";
+    case "E_MEM_CONFIRM_STALE":
+    case "E_STALE_SESSION":
+      return "E_STALE_CTX";
+    case "E_MEM_CONFIRM_UNAVAILABLE":
+    case "E_MEM_FILE_TOO_LARGE":
+      return "E_UNSUPPORTED";
+    case "E_MEM_ARGS":
+      return "E_BAD_REQUEST";
+    default:
+      return "E_COMMAND_DENIED";
+  }
+}
+
+/** §4.6 wire mapping: a domain write outcome becomes a ledger result (effect none/unknown). */
+function mapWriteOutcome(outcome: MemoryWebOutcome): LedgerResult {
+  if ("kind" in outcome) {
+    const result = outcome.result;
+    if (result.ok)
+      return {
+        ok: true,
+        data: {
+          op: "command",
+          kind: "extension",
+          completion: "sync",
+          captured: true,
+          // R4 already enforces the complete terminal <=24KiB bound. Never clip an
+          // appendix (or duplicate its parsed facts in a second wire field).
+          output: { entries: [{ kind: "text", text: result.message }] },
+        },
+      };
+    return {
+      ok: false,
+      code: result.code ?? "E_COMMAND_DENIED",
+      retryable: false,
+      effect: result.facts.effect === "none" ? "none" : "unknown",
+      message: result.message,
+    };
+  }
+  if (outcome.ok) {
+    // command data is an open wire slot. Keep facts separate from localized/clipped prose;
+    // old clients retain their text output and new clients render these fields directly.
+    const data = {
+      op: "command" as const,
+      kind: "extension" as const,
+      completion: "sync" as const,
+      captured: true,
+      output: textOutput(outcome.message),
+      memoryWrite: {
+        id: outcome.id,
+        ...(outcome.rev === undefined ? {} : { rev: outcome.rev }),
+        persistence: outcome.persistence,
+      },
+    };
+    return { ok: true, data };
+  }
+  return {
+    ok: false,
+    code: wireMemFailureCode(outcome.code),
+    retryable: false,
+    effect: outcome.effect,
+    message: `${outcome.code} · ${outcome.message}`,
+  };
 }
 
 function commandArgs(frame: CmdFrame): (CmdArgs & { op: "command" }) | undefined {
@@ -625,13 +740,187 @@ function dispatchBuiltin(
 }
 
 export function createBuiltinBridge(deps: BuiltinBridgeDeps = {}): BuiltinBridge {
+  function dispatchMemoryWrite(
+    frame: CmdFrame,
+    cmd: CmdArgs & { op: "command" },
+    request: MemoryWriteRequest | MemoryRevisionReviewRequest,
+    admission: MemoryBridgeAdmission | undefined,
+  ): CmdResultBody | Promise<CmdResultBody> {
+    const origin: unknown = frame.origin;
+    if (
+      !origin ||
+      typeof origin !== "object" ||
+      !((origin as CmdOrigin).listener === "loopback" || (origin as CmdOrigin).listener === "lan") ||
+      typeof (origin as CmdOrigin).ip !== "string" ||
+      !(origin as CmdOrigin).ip ||
+      typeof (origin as CmdOrigin).reqId !== "string" ||
+      !(origin as CmdOrigin).reqId ||
+      isFeishuCmdOrigin(origin as CmdOrigin)
+    )
+      return errResult("E_UNSUPPORTED", false, "none", "E_MEM_CONFIRM_UNAVAILABLE: untrusted origin");
+    if (!Number.isFinite(frame.deadlineMs) || frame.deadlineMs <= 0) return errResult("E_DEADLINE", false, "none");
+    const writePort = deps.memoryWrite?.();
+    if (!writePort || !admission)
+      return errResult("E_UNSUPPORTED", false, "none", "E_MEM_CONFIRM_UNAVAILABLE: memory write channel unavailable");
+    if (!admission.commandOwner || !admission.current()) return errResult("E_STALE_CTX", false, "none");
+    const ctx = deps.getCtx?.();
+    if (!ctx || !ctx.cwd) return errResult("E_STALE_CTX", false, "none");
+    const capabilities = writePort.capabilities(ctx);
+    if (request.kind === "session.add" ? capabilities.sessionAdd !== true : capabilities.revisionReview !== true)
+      return errResult("E_UNSUPPORTED", false, "none", "E_MEM_CONFIRM_UNAVAILABLE: memory capability unavailable");
+    const sessionId = deps.getSessionId?.();
+    if (!sessionId || (cmd.expect?.sessionId !== undefined && cmd.expect.sessionId !== sessionId))
+      return errResult("E_SESSION_CHANGED", false, "none");
+    const override = deps.overrides?.()?.mem;
+    if (override === "deny") return errResult("E_COMMAND_DENIED", false, "none");
+    if (override === "confirm" && cmd.confirm !== true)
+      return errResult("E_CONFIRM_REQUIRED", false, "none", confirmMessage(cmd.name, cmd.args, "extension"));
+    let started:
+      { accepted: true; task: MemoryWriteTask<MemoryWebOutcome> } | { accepted: false; outcome: MemoryWebOutcome };
+    try {
+      started = writePort.start(
+        {
+          write: request,
+          cmdId: frame.id,
+          commandOwner: admission.commandOwner,
+          operationGeneration: admission.operationGeneration,
+          deadline: admission.deadline,
+          signal: admission.signal,
+          current: admission.current,
+        },
+        ctx,
+      );
+    } catch {
+      return errResult("E_UNSUPPORTED", false, "none", "E_MEM_CONFIRM_UNAVAILABLE: memory write channel unavailable");
+    }
+    if (!started.accepted) return mapWriteOutcome(started.outcome);
+    const control: MemoryBridgeTaskControl = {
+      cancel(reason) {
+        return mapWriteOutcome(started.task.cancel(reason));
+      },
+      release() {
+        started.task.release();
+      },
+    };
+    let attached: boolean;
+    try {
+      attached = admission.attach(control);
+    } catch {
+      attached = false;
+    }
+    if (!attached) {
+      // The waiter was already cancelled while `start` ran: cancel the task, copy its
+      // observed result, release, then reject — never leave a live task unregistered.
+      let body: LedgerResult;
+      try {
+        body = control.cancel("reload");
+      } catch {
+        body = errResult("E_UNSUPPORTED", false, "unknown", "memory cancellation observation unavailable");
+      } finally {
+        try {
+          control.release();
+        } catch {
+          // The outcome has already been observed; release failure cannot rewrite it.
+        }
+      }
+      return body;
+    }
+    return started.task.done.then(
+      (outcome) => mapWriteOutcome(outcome),
+      () => errResult("E_UNSUPPORTED", false, "unknown", "memory write result unavailable"),
+    );
+  }
+
   return {
-    execute(frame: CmdFrame): CmdResultBody | Promise<CmdResultBody> {
+    execute(frame: CmdFrame, admission?: MemoryBridgeAdmission): CmdResultBody | Promise<CmdResultBody> {
       const cmd = commandArgs(frame);
       if (cmd === undefined) return errResult("E_UNSUPPORTED", false, "none");
       if (!/^[A-Za-z0-9:_.-]{1,64}$/.test(cmd.name))
         return errResult("E_BAD_REQUEST", false, "none", "bad command name");
       if (byteLen(cmd.args) > ARGS_MAX_BYTES) return errResult("E_BAD_REQUEST", true, "none", "args too long");
+      // SDK duplicate-command names still resolve to the ORIGINAL native mem
+      // handler. Never let a qualified alias escape into generic slash/capture.
+      if (/^mem:[1-9][0-9]*$/.test(cmd.name))
+        return errResult(
+          "E_UNSUPPORTED",
+          false,
+          "none",
+          "E_MEM_CONFIRM_UNAVAILABLE: qualified memory command unsupported",
+        );
+      // The direct, read-only capability is closure-injected by the host, never
+      // obtained from frame fields or capture tickets. No SDK/native fallback.
+      if (cmd.name === "mem") {
+        // §4.1/§5.2: a strict Web write is routed to the separate write seam (no native/SDK
+        // fallback); an empty `session add` is a usage error; everything else — reads and
+        // unsupported writes — stays on the read-only path below.
+        const review = parseRevisionFlowCommand(cmd.args);
+        if (review) {
+          try {
+            return dispatchMemoryWrite(
+              frame,
+              cmd,
+              { kind: "revision.review", rawArgs: cmd.args, listOnly: review.listOnly },
+              admission,
+            );
+          } catch {
+            return errResult(
+              "E_UNSUPPORTED",
+              false,
+              "none",
+              "E_MEM_CONFIRM_UNAVAILABLE: memory review channel unavailable",
+            );
+          }
+        }
+        const write = parseMemoryWriteRequest(cmd.args);
+        if (write.ok) {
+          try {
+            return dispatchMemoryWrite(frame, cmd, write.request, admission);
+          } catch {
+            return errResult(
+              "E_UNSUPPORTED",
+              false,
+              "none",
+              "E_MEM_CONFIRM_UNAVAILABLE: memory write channel unavailable",
+            );
+          }
+        }
+        if (write.code === "E_MEM_ARGS") return errResult("E_BAD_REQUEST", false, "none", write.message);
+        if (!deps.memoryRead || isFeishuCmdOrigin(frame.origin))
+          return errResult(
+            "E_UNSUPPORTED",
+            false,
+            "none",
+            "E_MEM_CONFIRM_UNAVAILABLE: memory command channel unavailable",
+          );
+        try {
+          const ctx = deps.getCtx?.();
+          if (!ctx || !ctx.cwd) return errResult("E_STALE_CTX", false, "none");
+          const sessionId = deps.getSessionId?.();
+          if (!sessionId || (cmd.expect?.sessionId !== undefined && cmd.expect.sessionId !== sessionId))
+            return errResult("E_SESSION_CHANGED", false, "none");
+          if (frame.deadlineMs <= 0) return errResult("E_DEADLINE", false, "none");
+          const override = deps.overrides?.()?.mem;
+          if (override === "deny") return errResult("E_COMMAND_DENIED", false, "none");
+          const result = deps.memoryRead(cmd.args, ctx.cwd);
+          if (!result.ok) return errResult("E_UNSUPPORTED", false, "none", `${result.code}: ${result.message}`);
+          if (override === "confirm" && cmd.confirm !== true)
+            return errResult("E_CONFIRM_REQUIRED", false, "none", confirmMessage(cmd.name, cmd.args, "extension"));
+          return okResult({
+            op: "command",
+            kind: "extension",
+            completion: "sync",
+            captured: true,
+            output: textOutput(result.output),
+          });
+        } catch {
+          return errResult(
+            "E_UNSUPPORTED",
+            false,
+            "none",
+            "E_MEM_CONFIRM_UNAVAILABLE: memory command channel unavailable",
+          );
+        }
+      }
       const ctx = deps.getCtx?.();
       if (ctx === undefined) return errResult("E_STALE_CTX", true, "none");
       if (cmd.expect?.sessionId !== undefined) {

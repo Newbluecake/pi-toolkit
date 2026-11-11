@@ -366,12 +366,12 @@ describe("I5: delete / rename", () => {
     writeFile(fx.memDir, "a.md", "---\nsource: agent\n---\ncontent");
     const { tool } = makeTool(fx);
     await exec(tool, { command: "delete", path: "a.md" }, fakeCtx(fx.cwd));
-    const { listTrashEntries } = await import("../../src/memory/tidy/manifest.js");
+    const { listTrashEntries } = await import("../../src/memory/trash.js");
     const listed = listTrashEntries(fx.memDir);
     expect(listed.map((e) => e.name)).toEqual(["a.md"]);
     expect(listed[0]!.fileName).toMatch(/^\d{8}T\d{9}Z-\d+-[0-9a-f]{6}-a\.md$/);
     // ...and the restore side (safe-fs TRASH_NAME_RE) accepts it end to end
-    const { restoreFromTrash } = await import("../../src/memory/tidy/restore.js");
+    const { restoreFromTrash } = await import("../../src/memory/trash.js");
     expect(await restoreFromTrash(fx.cwd, listed[0]!.id, "skip", fx.paths)).toEqual({ restored: true });
     expect(readFileSync(join(fx.memDir, "a.md"), "utf8")).toBe("---\nsource: agent\n---\ncontent");
   });
@@ -897,3 +897,35 @@ describe("I12: onAfterWrite", () => {
     expect(onAfterWrite).toHaveBeenCalledTimes(1);
   });
 });
+
+test.each([true, false])(
+  "scopes child reason rejects every v2 mutation even with allow=%s",
+  async (allowWriteInChildSessions) => {
+    const fx = fixture();
+    const onAfterWrite = vi.fn();
+    const tool = createMemoryToolV2({
+      settings: { ...DEFAULT_SETTINGS.memory, allowWriteInChildSessions },
+      isChildSession: true,
+      childReadonlyReason: "scopes",
+      paths: fx.paths,
+      onAfterWrite,
+    });
+    const calls = [
+      { command: "create", path: "a.md", file_text: "x" },
+      { command: "str_replace", path: "a.md", old_str: "x", new_str: "y" },
+      { command: "insert", path: "a.md", insert_line: 0, insert_text: "y" },
+      { command: "delete", path: "a.md" },
+      { command: "rename", old_path: "a.md", new_path: "b.md" },
+      { action: "append", name: "a.md", content: "x" },
+      { action: "write", name: "a.md", content: "x" },
+    ];
+    for (const call of calls) {
+      await expect(exec(tool, call, fakeCtx(fx.cwd))).rejects.toThrow(
+        "child project memory is read-only while memory scopes are enabled; hand off the intended change to the main session for review and writing",
+      );
+    }
+    expect(existsSync(fx.memDir)).toBe(false);
+    expect(onAfterWrite).not.toHaveBeenCalled();
+    expect(textOf(await exec(tool, { command: "view" }, fakeCtx(fx.cwd)))).toContain("No memory");
+  },
+);

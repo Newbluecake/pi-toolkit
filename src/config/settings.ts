@@ -81,7 +81,6 @@ export type {
   MemoryDoctorSettings,
   MemoryLayout,
   MemorySettings,
-  MemoryTidySettings,
   MemoryToolSurface,
 } from "../memory/settings.js";
 import { DEFAULT_WORKFLOW_BUDGET, DEFAULT_WORKFLOW_SETTINGS, parseWorkflowSettings } from "../workflow/settings.js";
@@ -102,6 +101,7 @@ export type {
   ExternalProtocolCheck,
 } from "../external-agent/settings.js";
 import { parseEnabledGroup } from "./enabled-group.js";
+import { parseFeishuNotifySettings, type FeishuNotifySettings } from "../feishu-notify/settings.js";
 import type { EnabledGroup } from "./enabled-group.js";
 export type { EnabledGroup } from "./enabled-group.js";
 import { DEFAULT_ASK_USER_SETTINGS, parseAskUserSettings } from "../ask-user/settings.js";
@@ -113,9 +113,6 @@ export type { TodoArchiveSettings, TodoNudgeSettings, TodoSettings } from "../to
 import { DEFAULT_HUD_SETTINGS, parseHudSettings } from "../hud/settings.js";
 import type { HudSettings } from "../hud/settings.js";
 export type { HudSettings } from "../hud/settings.js";
-import { DEFAULT_GOAL_SETTINGS, parseGoalSettings } from "../goal/settings.js";
-import type { GoalSettings } from "../goal/settings.js";
-export type { GoalSettings } from "../goal/settings.js";
 import { DEFAULT_TITLE_SETTINGS, parseTitleSettings } from "../title/settings.js";
 import type { TitleSettings } from "../title/settings.js";
 export type { TitleSettings } from "../title/settings.js";
@@ -214,8 +211,6 @@ export interface AgentSettings {
   quota: QuotaSettings;
   /** Load-aware dispatch（docs/dev/sysload/plan.md）：CPU/MEM/DISK 监控 + 派发闸门 + 阶梯提示。 */
   load: LoadSettings;
-  /** /goal 目标驱动持续运行（goal-plan v4）。 */
-  goal: GoalSettings;
   /** Merged plugins (plugin-merge): HUD footer takeover. Default on; `enabled:false` leaves pi's built-in footer untouched. */
   hud: HudSettings;
   /** web-hub browser UI (plan 包 I). Default OFF: when disabled there is zero wiring, zero network, zero disk. */
@@ -229,7 +224,7 @@ export interface AgentSettings {
   /** ask_user interactive question tool (main session only — child subagent sessions never see it). Default on. */
   askUser: AskUserSettings;
   /** Feishu notification cards (main-session singleton). Default on. */
-  feishuNotify: EnabledGroup;
+  feishuNotify: FeishuNotifySettings;
   /** Session navigation enhancements (/resume-recent, /clear, bare exit, resume-list titles). Main-session TUI only. Default on. */
   sessionNav: EnabledGroup;
   /** Merged plugins: cwd-keyed project memory (injection + memory tool + /mem). Pre-guard, child sessions included. Default on. */
@@ -287,7 +282,6 @@ export const DEFAULT_SETTINGS: AgentSettings = {
   quota: DEFAULT_QUOTA_SETTINGS,
   load: DEFAULT_LOAD_SETTINGS,
   extend: DEFAULT_EXTEND_SETTINGS,
-  goal: DEFAULT_GOAL_SETTINGS,
   hud: DEFAULT_HUD_SETTINGS,
   webHub: DEFAULT_WEBHUB_SETTINGS,
   webSearch: { enabled: true },
@@ -372,11 +366,9 @@ export const TIME_SETTING_MS_PATHS: readonly string[] = [
   "fabric.rootMinIntervalMs",
   // fabric-thread P0 (arch §11.1): single-steer budget stored as fabric.threads.steerTimeoutS.
   "fabric.threads.steerTimeoutMs",
-  "goal.evalTimeoutMs",
-  "goal.untilCmdTimeoutMs",
-  "goal.deliveryWatchdogMs",
-  "memory.tidy.timeoutMs",
-  "memory.tidy.batch.totalTimeoutMs",
+  "memory.incremental.quietMs",
+  "memory.incremental.idleMs",
+  "memory.incremental.cooldownMs",
   "memory.jev.recall.waitMs",
   // memory-predict plan §10: file keys `memory.jev.predict.model.waitS` /
   // `requestBudgetS` (integer seconds), internal millisecond fields below.
@@ -457,6 +449,7 @@ function applySecureDomainOverrides(settings: AgentSettings): AgentSettings {
     },
     externalAgents: { ...settings.externalAgents, droid: { ...settings.externalAgents.droid, enabled: false } },
     feishuNotify: { ...settings.feishuNotify, enabled: false },
+    schedule: { ...settings.schedule, enabled: false },
     // traffic-merge plan §6：加密/锁定域禁止流量落库（唯一落库闸口 persist 另有每次复查）。
     traffic: { ...settings.traffic, enabled: false },
     // jev-plan v2 §4 J3 / jev-arch §7.3（I11）：加密/锁定域强制关闭 Jev，无论用户文件怎么写。
@@ -464,6 +457,7 @@ function applySecureDomainOverrides(settings: AgentSettings): AgentSettings {
       ...settings.memory,
       scopes: { ...settings.memory.scopes, hub: false },
       jev: { ...settings.memory.jev, enabled: false },
+      incremental: { ...settings.memory.incremental, enabled: false, auto: false, jobCostCapUsd: 0 },
     },
     // jev-reflex arch §4.1（I11/D8）：加密/锁定域强制关闭 R 层（wireReflex 另有 secureDomainKind 守卫）；
     // #25 BA §4.6：drafts 同属 D8 强制关闭面（离线脚本永不进入加密域）。
@@ -577,14 +571,13 @@ function parseSettingsSource(source: unknown): AgentSettings {
     quota: parseQuotaSettings(value.quota),
     load: parseLoadSettings(value.load),
     extend: parseExtendSettings(value.extend),
-    goal: parseGoalSettings(value.goal),
     hud: parseHudSettings(value.hud),
     webHub: parseWebHubSettings(value.webHub),
     webSearch: parseEnabledGroup(value.webSearch, DEFAULT_SETTINGS.webSearch),
     date: parseEnabledGroup(value.date, DEFAULT_SETTINGS.date),
     todo: parseTodoSettings(value.todo),
     askUser: parseAskUserSettings(value.askUser),
-    feishuNotify: parseEnabledGroup(value.feishuNotify, DEFAULT_SETTINGS.feishuNotify),
+    feishuNotify: parseFeishuNotifySettings(value.feishuNotify),
     sessionNav: parseEnabledGroup(value.sessionNav, DEFAULT_SETTINGS.sessionNav),
     memory: parseMemorySettings(value.memory),
     fast: parseEnabledGroup(value.fast, DEFAULT_SETTINGS.fast),
@@ -772,10 +765,9 @@ export function loadSettingsFromFile(path: string = defaultSettingsPath()): Agen
       );
     }
     return loadSettings(cache.value);
-  } catch (error) {
-    console.warn(
-      `[pi-subagent] failed to parse ${path}: ${error instanceof Error ? error.message : String(error)}; using defaults.`,
-    );
+  } catch {
+    // JSON parser errors can quote credential-bearing file contents. Never echo them.
+    console.warn(`[pi-subagent] failed to parse ${path}: invalid or unreadable settings; using defaults.`);
     return loadSettings(undefined);
   }
 }
@@ -965,8 +957,8 @@ export function persistSettingOverride(dottedKey: string, value: unknown, explic
           return `${path}: top-level value is not an object; not modifying it`;
         raw = parsed as Record<string, unknown>;
       }
-    } catch (error) {
-      return `${path}: ${error instanceof Error ? error.message : String(error)}`;
+    } catch {
+      return `${path}: invalid or unreadable settings; not modifying it`;
     }
     const segments = dottedKey.split(".");
     let node: Record<string, unknown> = raw;
@@ -980,6 +972,11 @@ export function persistSettingOverride(dottedKey: string, value: unknown, explic
       node = next;
     }
     const leaf = segments[segments.length - 1]!;
+    // Explicit edits supersede the legacy fractional-millisecond override too;
+    // otherwise resetting the seconds key resurrects that value on reload.
+    if (/^memory\.incremental\.(quiet|idle|cooldown)Sec$/.test(dottedKey)) {
+      delete node[`${leaf.slice(0, -3)}Ms`];
+    }
     if (value === undefined) delete node[leaf];
     else node[leaf] = value;
     try {

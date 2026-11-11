@@ -243,6 +243,10 @@ describe("index rendering", () => {
     expect(result.text).toContain("- quota · 1 blocks · 1 expired");
     expect(result.text).toContain("(+1 archived)");
     expect(result.text).not.toContain("\n- gone ");
+    expect(result.budgetStats.index.over).toBe(false);
+    expect(result.budgetStats.index.omittedCount).toBe(0);
+    // archived-only topics are a suffix detail, not whole-topic row overflow
+    // (the signal is based exclusively on the `kept < ordered.length` gate).
     // archived topic not listed by name
   });
 
@@ -260,6 +264,9 @@ describe("index rendering", () => {
     expect(Buffer.byteLength(result.text, "utf8")).toBeGreaterThan(INDEX_MAX_BYTES); // the WHOLE text is bigger…
     const indexPart = result.text.slice(result.text.indexOf("Topics ("));
     expect(Buffer.byteLength(indexPart, "utf8")).toBeLessThanOrEqual(INDEX_MAX_BYTES + 512);
+    expect(result.budgetStats.index.over).toBe(true);
+    expect(result.budgetStats.index.omittedCount).toBeGreaterThan(0);
+    expect(result.budgetStats.index.limitBytes).toBe(INDEX_MAX_BYTES);
     // degradation is the buildTail rule: whole-name `- also:` when names fit,
     // the plain overflow line otherwise — both are the compact shape.
     expect(indexPart).toMatch(/^- also: .*\(\+\d+ more\)|^- … \+\d+ more/m);

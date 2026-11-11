@@ -198,3 +198,26 @@ describe("memory tool (§7.5)", () => {
     }
   });
 });
+
+test.each([true, false])(
+  "scopes child reason rejects legacy writes even with allow=%s",
+  async (allowWriteInChildSessions) => {
+    const fx = fixture();
+    const onAfterWrite = vi.fn();
+    const tool = createMemoryTool({
+      settings: { ...DEFAULT_SETTINGS.memory, allowWriteInChildSessions },
+      isChildSession: true,
+      childReadonlyReason: "scopes",
+      paths: fx.paths,
+      onAfterWrite,
+    });
+    for (const action of ["write", "append"] as const) {
+      await expect(exec(tool, { action, name: "a.md", content: "never persist" }, fakeCtx(fx.cwd).ctx)).rejects.toThrow(
+        "child project memory is read-only while memory scopes are enabled; hand off the intended change to the main session for review and writing",
+      );
+    }
+    expect(existsSync(memoryDirFor(fx.cwd, fx.paths))).toBe(false);
+    expect(onAfterWrite).not.toHaveBeenCalled();
+    expect(textOf(await exec(tool, { action: "list" }, fakeCtx(fx.cwd).ctx))).toContain("No memory");
+  },
+);

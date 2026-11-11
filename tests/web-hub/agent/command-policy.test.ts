@@ -105,8 +105,8 @@ describe("resolveCommandPolicy — pi-toolkit sub-command table (§4.6 pi-toolki
     expect(resolve("mem", "init", "extension").policy).toBe("confirm"); // one-shot write, like import
     expect(resolve("mem", "tidy", "extension").policy).toBe("confirm");
     expect(resolve("mem", "restore --trash", "extension").policy).toBe("confirm");
-    expect(resolve("mem", "tidy --batch --dry-run", "extension").policy).toBe("allow");
-    expect(resolve("mem", "tidy --batch --status", "extension").policy).toBe("allow");
+    expect(resolve("mem", "tidy --batch --dry-run", "extension").policy).toBe("confirm");
+    expect(resolve("mem", "tidy --batch --status", "extension").policy).toBe("confirm");
     expect(resolve("mem", "tidy --batch", "extension").policy).toBe("confirm");
     expect(resolve("mem", "tidy --break-lock", "extension").policy).toBe("confirm");
   });
@@ -134,14 +134,12 @@ describe("resolveCommandPolicy — pi-toolkit sub-command table (§4.6 pi-toolki
     expect(resolve("mem", "tags frobnicate", "extension").policy).toBe("confirm");
   });
 
-  // J8 (Q35, jev-plan §4 J8): `review --list` is a read-only listing —
-  // allowed even server-side, same tier as `mem list`/`mem doctor`; the
-  // bare interactive default and `--run` spend a Jev run (or at least
-  // change review state) — generic confirm. `expired` has no read-only
-  // form at all, so it is always confirm.
-  it("mem review/expired: --list allows, everything else confirms (jev-plan §4 J8)", () => {
-    expect(resolve("mem", "review --list", "extension").policy).toBe("allow");
-    expect(resolve("mem", "review", "extension").policy).toBe("confirm");
+  // I1: review and review --list are now the closed revision-flow grammar,
+  // requiring actual same-owner capability. Legacy --run/expired classification
+  // cannot enable them: the production direct read executor still refuses them.
+  it("mem revision review requires actual capability; legacy unsupported effects retain their classification", () => {
+    expect(resolve("mem", "review --list", "extension").policy).toBe("deny");
+    expect(resolve("mem", "review", "extension").policy).toBe("deny");
     expect(resolve("mem", "review --run", "extension").policy).toBe("confirm");
     expect(resolve("mem", "expired", "extension").policy).toBe("confirm");
   });
@@ -164,15 +162,6 @@ describe("resolveCommandPolicy — pi-toolkit sub-command table (§4.6 pi-toolki
   it("/tasklist: no-args allow (text fallback), clear confirms", () => {
     expect(resolve("tasklist", "", "extension").policy).toBe("allow");
     expect(resolve("tasklist", "clear", "extension").policy).toBe("confirm");
-  });
-
-  it("/goal: no-args/status allow, everything else (pause/resume/clear/free-text objective) confirms", () => {
-    expect(resolve("goal", "", "extension").policy).toBe("allow");
-    expect(resolve("goal", "status", "extension").policy).toBe("allow");
-    expect(resolve("goal", "pause", "extension").policy).toBe("confirm");
-    expect(resolve("goal", "resume", "extension").policy).toBe("confirm");
-    expect(resolve("goal", "clear", "extension").policy).toBe("confirm");
-    expect(resolve("goal", "ship the thing", "extension").policy).toBe("confirm");
   });
 
   it("/task, /watch, /feishu-test always confirm; /pi-hud-refresh always allows", () => {
@@ -374,5 +363,30 @@ describe("#39 scopes-on exact command policy", () => {
     expect(resolveCommandPolicy({ name: "mem", args, kind: "extension", overrides: { mem: "allow" } })).toEqual({
       policy: "allow",
     });
+  });
+});
+
+describe("#65 session add policy projection", () => {
+  it("defaults closed and permits only valid session add with the internal port projection", () => {
+    const base = { name: "mem", kind: "extension" as const, memoryScopes: true };
+    expect(resolveCommandPolicy({ ...base, args: "session add text" })).toEqual({ policy: "deny" });
+    expect(resolveCommandPolicy({ ...base, args: "session add text", memorySessionAdd: true })).toEqual({
+      policy: "allow",
+    });
+    for (const args of ["session add", "session add   ", "session\tadd text", "hub add text", "session rm n1"]) {
+      expect(resolveCommandPolicy({ ...base, args, memorySessionAdd: true, overrides: { mem: "allow" } })).toEqual({
+        policy: "deny",
+      });
+    }
+    for (const policy of ["deny", "confirm", "allow"] as const) {
+      expect(
+        resolveCommandPolicy({
+          ...base,
+          args: "session add --text\nbody",
+          memorySessionAdd: true,
+          overrides: { mem: policy },
+        }),
+      ).toEqual({ policy });
+    }
   });
 });

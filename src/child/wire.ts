@@ -13,9 +13,16 @@ import type { AgentSettings } from "../config/settings.js";
 import { wireFastChild, type FastWireOptions } from "../fast/wire.js";
 import { wireChildContextSwitch } from "../context-switch/child.js";
 import { wireChildKeepalive } from "../cache-ttl/child.js";
+import { wireChildMessageSpeed, type ChildMessageSpeedOptions } from "./message-speed.js";
 import { getInputBudgetRegistry, inputTokensForBytes } from "../runtime/input-budget-registry.js";
 
-export function wireChildSession(pi: ExtensionAPI, settings: AgentSettings, fastOptions?: FastWireOptions): void {
+export function wireChildSession(
+  pi: ExtensionAPI,
+  settings: AgentSettings,
+  fastOptions?: FastWireOptions,
+  messageSpeedOptions?: ChildMessageSpeedOptions,
+): void {
+  wireChildMessageSpeed(pi, settings, messageSpeedOptions);
   const keepalive = wireChildKeepalive(pi, settings);
   // Fast must precede even synchronous budget-registry replay (and traffic outside this factory).
   wireFastChild(pi, settings.fast.enabled, fastOptions);

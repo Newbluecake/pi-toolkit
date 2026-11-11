@@ -14,6 +14,10 @@
 // pi-ai's classifier API (jev-arch §5.1) so the jev directory never has to
 // import pi. No module-scope mutable state (I4).
 
+import type { ProxyStreamFetch } from "./proxy-stream-fetch.js";
+import type { MemoryWriteGate } from "../contracts.js";
+import type { IncrementalDirectory } from "../govern/incremental.js";
+
 // ───────────────────────────── entry model (jev-arch §4.1) ─────────────────────────────
 
 /** sha1(normalizeBody(body)).slice(0, 12) — sidecar key; changing ONLY the
@@ -110,6 +114,9 @@ export interface InlineMeta {
   readonly expires?: string;
   /** `until="event"` — event-type expiry; listed for confirmation only. */
   readonly until?: string;
+  /** Blocks v3 write-only section override. */
+  readonly section?: string;
+  readonly clearSection?: true;
   /** `gate` (guard once) / `gate=hold` / `nogate` — parsed for backward
    *  compatibility with memory files written before the gate feature was
    *  removed (2026-11); carrying one has no effect anymore. */
@@ -237,6 +244,9 @@ export interface ReviewSuggestion {
   readonly b?: { hash: EntryHash; anchor: string };
   readonly p: number;
   readonly at: string;
+  /** P50 factory-only payload. D must reject an invalid revision as a whole
+   * suggestion, never strip it into a legacy executable suggestion. No wire. */
+  readonly revision?: RevisionProposal;
 }
 
 export interface DismissedPair {
@@ -248,8 +258,9 @@ export interface DismissedPair {
   /** #36: which suggestion kind this dismissal targets — absent = the legacy
    *  pairwise dismissal semantics (kind-agnostic). */
   readonly kind?: ReviewSuggestionKind;
-  /** #36: ISO date — the dismissal auto-expires once passed; absent =
-   *  permanent (the pre-#36 semantics). */
+  /** Stable source/kind/entry identity for permanent dismissal. */
+  readonly suggestionKey?: string;
+  /** Legacy deadline retained for compatibility; dismissals are permanent. */
   readonly until?: string;
 }
 
@@ -258,6 +269,11 @@ export interface ReviewState {
   readonly corpusFp: string;
   readonly suggestions: readonly ReviewSuggestion[];
   readonly dismissed: readonly DismissedPair[];
+  /** Independent governance sweep clock; absent on legacy sidecars. */
+  readonly sweepLastRunAt?: string;
+  readonly sweepCorpusFp?: string;
+  /** Stable keys explicitly resolved by the user. */
+  readonly resolved?: readonly string[];
 }
 
 export interface JevIndexV1 {
@@ -289,6 +305,8 @@ export interface IndexPatch {
   readonly remove?: readonly EntryHash[];
   readonly lastTaggedAt?: string;
   readonly review?: ReviewState;
+  /** Snapshot seen by a review run, for detecting in-flight changes. */
+  readonly reviewBase?: ReviewState | null;
   /** Upserted into the A-layer cooldown map (per-key replace). */
   readonly aInjectedAt?: Readonly<Record<EntryHash, string>>;
   /** Upserted into the P-layer cooldown map (per-key replace). */
@@ -354,7 +372,12 @@ export interface ClassifierRegistryLike {
   classify?(
     model: object,
     ctx: { state: JsonObject; questions: Record<string, JevQuestion> },
-    opts?: { signal?: AbortSignal; fetch?: FetchLike },
+    opts?: {
+      signal?: AbortSignal;
+      fetch?: FetchLike;
+      maxRetries?: 0;
+      onPayload?(payload: unknown): unknown;
+    },
   ): Promise<{
     stopReason: "stop" | "error" | "aborted";
     answers: Record<string, JevAnswer>;
@@ -363,6 +386,695 @@ export interface ClassifierRegistryLike {
     provider: string;
     model: string;
   }>;
+}
+
+// ───────────────────────────── P50 controlled classify (opt-in only) ─────────────────────────────
+
+export type ClassifyResult = Awaited<ReturnType<NonNullable<ClassifierRegistryLike["classify"]>>>;
+export type ClassifyContext = { state: JsonObject; questions: Record<string, JevQuestion> };
+
+/** Actual successful identity. Unknown/unverified routes are diagnostic only,
+ * NEVER independent-source evidence. Digests are SHA-256 of canonical JSON. */
+export interface ClientProvenance {
+  readonly provider: string;
+  readonly model: string;
+  readonly adapterId: string;
+  readonly chainVersion: string;
+  readonly routeIdentity: string;
+  readonly routeAliases: readonly string[];
+  readonly requestChainId: string;
+  readonly requestDigest: string;
+  readonly inputDigest: string;
+  readonly trusted: boolean;
+  /** Revision SDK request identity, separate from verified actual provider/model. */
+  readonly requestedProvider?: string;
+  readonly requestedModel?: string;
+  /** Verified canonical identity; absent when the response cannot be bound. */
+  readonly canonicalProvider?: string;
+  readonly canonicalModel?: string;
+}
+
+export interface CanonicalClassifyRoute {
+  readonly provider: string;
+  readonly model: string;
+  /** Canonical route digest, not the requested chain id. */
+  readonly routeIdentity: string;
+  /** Complete canonical alias set, including the requested and returned ids. */
+  readonly routeAliases: readonly string[];
+}
+
+export interface ClassifyBounds {
+  /** Verified bound including provider formatting/prompt overhead, not bytes/4. */
+  readonly maxInputTokens: number;
+  readonly maxOutputTokens: number;
+  readonly priceUsdPerMillion: { readonly input: number; readonly output: number };
+}
+
+/** Trusted host seam, NOT implemented by the stock pi 1.5 classify API.
+ * prepare is synchronous/pure, binds the exact frozen DTO, and returns undefined
+ * unless input AND executable provider output limits and prices are known.
+ * dispatch must issue exactly ONE provider call (no hidden retries), enforce
+ * both bounds at transport level, and return the original provider promise and
+ * actual identity/usage, including late/errored responses. Abort is advisory.
+ * A provider ignoring bounds can still overbill: client records all actual cost.
+ * resolveRoute must use canonical registry/adapter evidence, never simply copy
+ * result.provider/model or split the requested id. Missing proof => untrusted.
+ * No default implementation: passing an arbitrary maxTokens option to the SDK
+ * is NOT proof that the provider enforces it. */
+export interface ControlledClassifyTransport {
+  prepare(input: {
+    readonly registry: ClassifierRegistryLike;
+    readonly model: object;
+    readonly requestChainId: string;
+    readonly context: ClassifyContext;
+    readonly requestDigest: string;
+  }):
+    | {
+        readonly adapterId: string;
+        readonly chainVersion: string;
+        readonly bounds: ClassifyBounds;
+        dispatch(opts: { readonly signal: AbortSignal; readonly fetch?: FetchLike }): Promise<ClassifyResult>;
+        /** When supplied, raw evidence replaces SDK default identity/usage. */
+        resultEvidence?(result: ClassifyResult): RevisionResultEvidence;
+        resolveRoute(result: ClassifyResult): CanonicalClassifyRoute | undefined;
+      }
+    | undefined;
+}
+
+// ───────────────────────────── P50 revision transport (host opt-in, no wire) ─────────────────────────────
+
+/** Frozen local admission evidence, not an outbound DTO. Unknown privacy or
+ * parse status is refused, not defaulted. The caller must read the real block;
+ * this seam does not freeze raw files or grant permission to commit. */
+export interface RevisionBlockInput {
+  readonly id: string;
+  readonly rev: string;
+  readonly authority: "user" | "agent";
+  readonly topic: string;
+  readonly section?: string;
+  readonly body: string;
+  readonly private: boolean;
+  readonly secret: boolean;
+  readonly parseErrors: readonly string[];
+  readonly status: "active";
+  readonly storageScope?: "hub";
+  readonly residue?: true;
+  readonly origin?: unknown;
+}
+export interface RevisionOutboundBlock {
+  readonly id: string;
+  readonly rev: string;
+  readonly authority: "user" | "agent";
+  readonly topic: string;
+  readonly section?: string;
+  readonly body: string;
+}
+export type RevisionOutbound =
+  | {
+      readonly purpose: "generate";
+      readonly instruction: "rewrite-single" | "merge-survivor";
+      readonly target: RevisionOutboundBlock;
+      readonly context?: RevisionOutboundBlock;
+    }
+  | {
+      readonly purpose: "coverage";
+      readonly target: RevisionOutboundBlock;
+      readonly context?: RevisionOutboundBlock;
+      readonly candidateBody: string;
+    };
+
+/** Structural mirror of registry.complete. No direct fetch or provider lookup
+ * is allowed in the controlled adapter. Stock registry identity alone does NOT
+ * certify prompt token bounds, no retries, aliases or provider limit support. */
+export interface RevisionRegistryLike {
+  complete?(
+    model: object,
+    context: RevisionTransportContext,
+    opts: {
+      signal: AbortSignal;
+      maxTokens: number;
+      maxRetries: 0;
+      /** Standard streaming fetch, never the classifier JSON-only FetchLike. */
+      fetch?: ProxyStreamFetch;
+      onPayload(payload: unknown): unknown;
+      onProviderStreamEvent?(event: unknown): void;
+    },
+  ): Promise<RevisionTransportResult>;
+}
+export interface RevisionTransportContext {
+  systemPrompt: string;
+  messages: { role: "user"; content: string; timestamp: number }[];
+}
+export interface RevisionTransportResult {
+  readonly stopReason: string;
+  readonly content: readonly { readonly type: string; readonly text?: string }[];
+  readonly provider: string;
+  readonly model: string;
+  /** SDK model is the requested alias, NOT necessarily the actual response model. */
+  readonly responseModel?: string;
+  readonly usage?: {
+    readonly input?: number;
+    readonly output?: number;
+    readonly cacheRead?: number;
+    readonly cacheWrite?: number;
+    readonly totalTokens?: number;
+    readonly cost?: { readonly total: number };
+  };
+}
+/** Trusted adapter observation, not fields inferred from SDK default zeros.
+ * No evidence means unknown cost (reserve) and unknown actual identity. */
+export interface RevisionResultEvidence {
+  readonly actual?: { readonly provider: string; readonly model: string };
+  readonly costUsd?: number;
+}
+/** Trusted CODE capability for this exact registry/serializer version/proxy.
+ * No auth snapshot: the SDK still resolves credentials at request time.
+ * A missing/changed capability cannot authorize direct transport. */
+export interface RevisionStreamProxyCapability {
+  readonly registry: RevisionRegistryLike;
+  readonly chainVersion: string;
+  readonly proxy: string;
+  readonly fetch: ProxyStreamFetch;
+  isCurrent(): boolean;
+}
+export interface ControlledRevisionTransport {
+  readonly streamingProxy?: RevisionStreamProxyCapability;
+  prepare(input: {
+    readonly registry: RevisionRegistryLike;
+    readonly requestChainId: string;
+    readonly outbound: RevisionOutbound;
+    readonly maxOutputTokens: number;
+    readonly requestDigest: string;
+  }):
+    | {
+        readonly adapterId: string;
+        readonly chainVersion: string;
+        readonly bounds: ClassifyBounds;
+        readonly streamingProxy?: RevisionStreamProxyCapability;
+        dispatch(opts: {
+          readonly signal: AbortSignal;
+          readonly fetch?: ProxyStreamFetch;
+          /** Original client dynamic authority, rechecked after payload/auth callbacks
+           * and at the last HTTP hop. Run before the adapter's terminal pure checks. */
+          readonly isCurrent?: () => boolean;
+          /** Internal client-owned PURE witness. Unlike isCurrent this must only
+           * read closure state/data descriptors: no host callbacks or getters.
+           * Called after the factory's provider witness, just before HTTP. */
+          readonly terminalCurrent?: () => boolean;
+        }): Promise<RevisionTransportResult>;
+        resultEvidence(result: RevisionTransportResult): RevisionResultEvidence;
+        resolveRoute(result: RevisionTransportResult): CanonicalClassifyRoute | undefined;
+      }
+    | undefined;
+}
+
+/** Host attestation for ONE actual registered model/adapter version. A binding
+ * is trusted code, not a setting or model-supplied assertion. quoteInput must
+ * cover the exact serialized prompt including adapter overhead; no bytes/4
+ * heuristic. maxTokensEnforced certifies the actual provider serializer and
+ * no-hidden-retry behavior, not just the presence of an SDK option. Unknown
+ * capabilities must not be bound. Production conformance is still required. */
+export interface RegistryRevisionBinding {
+  readonly streamingProxy?: RevisionStreamProxyCapability;
+  readonly registry: RevisionRegistryLike;
+  readonly requestChainId: string;
+  readonly model: object;
+  readonly adapterId: string;
+  readonly chainVersion: string;
+  readonly maxTokensEnforced: true;
+  /** Verified last-hop onPayload support for this exact provider adapter. */
+  readonly outputLimitField: "max_tokens" | "max_completion_tokens" | "max_output_tokens";
+  readonly maxOutputTokens: number;
+  /** Explicit verified observer for this adapter. The SDK mode consumes raw
+   * onProviderStreamEvent evidence, never default usage/model. A callback is
+   * only for a different host-controlled protocol with its own evidence;
+   * simply copying SDK result.usage.cost/model is NOT a valid attestation.
+   * Omitted => reserve accounting and untrusted provenance, even for zero. */
+  readonly resultEvidence?: "openai-completions" | ((result: RevisionTransportResult) => RevisionResultEvidence);
+  quoteInput(context: RevisionTransportContext):
+    | {
+        readonly maxInputTokens: number;
+        readonly priceUsdPerMillion: { readonly input: number; readonly output: number };
+      }
+    | undefined;
+  /** Last SDK payload check against the already reserved exact quote. Throw before HTTP on mismatch. */
+  verifyPayload?(
+    payload: Readonly<Record<string, unknown>>,
+    bounds: ClassifyBounds,
+    context: RevisionTransportContext,
+  ): boolean;
+  resolveRoute(result: RevisionTransportResult): CanonicalClassifyRoute | undefined;
+}
+export interface RevisionRequestBudget {
+  readonly registry: RevisionRegistryLike;
+  readonly mode: "sync" | "background";
+  readonly budgetMs: number;
+  readonly maxOutputTokens: number;
+  readonly signal?: AbortSignal;
+  readonly jobId?: string;
+  /** Missing means zero: revision is never an implicit paid opt-in. */
+  readonly jobCostCapUsd?: number;
+}
+export interface RevisionGenerateRequest extends RevisionRequestBudget {
+  readonly instruction: "rewrite-single" | "merge-survivor";
+  readonly target: RevisionBlockInput;
+  readonly context?: RevisionBlockInput;
+}
+export interface RevisionCoverageRequest extends RevisionRequestBudget {
+  readonly target: RevisionBlockInput;
+  readonly context?: RevisionBlockInput;
+  readonly candidateBody: string;
+}
+export type RevisionUnavailable = {
+  readonly kind: "unavailable";
+  readonly reason: "revision-unavailable" | "invalid-output";
+};
+export type RevisionGenerateResult =
+  | RevisionUnavailable
+  | {
+      readonly kind: "ok";
+      readonly body: string;
+      readonly outputDigest: string;
+      readonly provenance: ClientProvenance;
+      /** False means generation can only support a suggestion, not full coverage. */
+      readonly inputComplete: boolean;
+      readonly costUsd: number;
+    };
+export type RevisionCoverageResult =
+  | RevisionUnavailable
+  | {
+      readonly kind: "ok";
+      readonly verdict: "complete" | "partial" | "unknown";
+      readonly targetRev: string;
+      readonly beforeDigest: string;
+      readonly candidateDigest: string;
+      readonly promptVersion: string;
+      readonly provenance: ClientProvenance;
+      readonly inputComplete: boolean;
+      readonly costUsd: number;
+    };
+
+// ───────────────────────────── P50 C0 shared revision contracts (factory-only, no wire) ─────────────────────────────
+// Sole cross-C/D type owner. No audit/revision runtime imports or implementations.
+// D's FreezeSpec/Deps/PlanInput/PrepareDeps/ReviewDeps remain private to D (§3.3).
+
+/** File bytes admitted by D only after lossless UTF-8 round-trip and strict parse.
+ * Copy custody is a runtime obligation: copy rawBefore on ingress, retain the
+ * private copy, return a fresh copy on every read. readonly/Object.freeze do NOT
+ * make Buffer bytes immutable. Do not send rawBefore/path/meta to the client. */
+export interface FrozenRevisionBlock {
+  readonly id: string;
+  readonly rev: string;
+  readonly rawBefore: Buffer;
+  readonly rawDigest: string;
+  readonly block: RevisionBlockInput & {
+    readonly private: false;
+    readonly secret: false;
+    readonly parseErrors: readonly [];
+    readonly storageScope?: never;
+    readonly residue?: never;
+    readonly origin?: never;
+  };
+}
+
+export interface FrozenRevisionInput {
+  readonly v: 1;
+  /** Canonical MEMORY root, not blocks root. Epoch remains a separate live gate. */
+  readonly directory: IncrementalDirectory;
+  /** SHA-256 binding canonical realpath/dev/ino, not sessionEpoch. */
+  readonly directoryIdentityDigest: string;
+  /** P50.1 selection key, diagnostic only; never the final raw-evidence batch. */
+  readonly selectionBatchId: string;
+  /** SHA-256(sessionEpoch, directory identity, sorted frozen action set, policy). */
+  readonly batchId: string;
+  readonly policyVersion: string;
+  /** SHA-256(batchId, action, target.id, target.rev). IDs are 64 lowercase hex. */
+  readonly actionId: string;
+  readonly action: RevisionProposal["action"];
+  readonly target: FrozenRevisionBlock;
+  readonly context?: FrozenRevisionBlock;
+}
+
+export interface RelationEvidence {
+  readonly kind: "conflict" | "supersedes";
+  readonly p: number;
+  /** Frozen pair id/rev/RAW digest; NOT provenance.inputDigest (outbound DTO). */
+  readonly inputDigest: string;
+  readonly provenance: ClientProvenance;
+}
+
+export interface WholeCoverageEvidence {
+  readonly v: 1;
+  readonly verdict: "complete";
+  readonly targetRev: string;
+  /** Full BODY digests from B; audit.beforeDigest separately binds raw bytes. */
+  readonly beforeDigest: string;
+  readonly candidateDigest: string;
+  readonly promptVersion: string;
+  readonly provenance: ClientProvenance;
+  readonly evidenceDigest: string;
+}
+
+/** Independently recomputed expectations, never copied from returned provenance.
+ * Structurally consumed by B's independentCoverageSources once all three exist.
+ * Missing entries can support suggestions only, never automatic permission. */
+export type RevisionEvidenceBindings = Readonly<
+  Partial<
+    Record<
+      "relation" | "generation" | "coverage",
+      {
+        readonly requestDigest: string;
+        readonly inputDigest: string;
+      }
+    >
+  >
+>;
+
+export type ExpiryPayload =
+  | { readonly op: "set"; readonly nextExpires: string; readonly dateRuleVersion: string }
+  | { readonly op: "clear"; readonly dateRuleVersion: string; readonly nextExpires?: never };
+
+export interface RevisionProposalBase {
+  readonly v: 1;
+  readonly actionId: string;
+  readonly batchId: string;
+  readonly targetId: string;
+  readonly expectedRev: string;
+  readonly contextId?: string;
+  readonly contextExpectedRev?: string;
+  readonly reason: "conflict" | "supersedes" | "expired" | "duplicate" | "budget";
+  readonly relation?: RelationEvidence;
+  readonly coverage?: WholeCoverageEvidence;
+  readonly policyVersion: string;
+  readonly directoryIdentityDigest: string;
+  readonly evidenceBindings: RevisionEvidenceBindings;
+  /** Canonical digest of the ENTIRE payload except this field. No Buffer,
+   * registry, signal, function or filesystem path may be persisted in a proposal. */
+  readonly proposalDigest: string;
+  /** Hint only, never commit authorization. E must recheck every locked gate. */
+  readonly autoEligible: boolean;
+}
+
+/** Locally frozen BEFORE the real request, never reconstructed from settings
+ * or returned provenance. Optional on old body proposals/audits. */
+export interface RevisionRequestSpec {
+  readonly v: 1;
+  readonly promptVersion: string;
+  readonly maxOutputTokens: number;
+}
+/** Historical generation custody, NOT an executable retire body. */
+export interface RetireEvidence {
+  readonly v: 1;
+  readonly source: { readonly batchId: string; readonly actionId: string; readonly proposalDigest: string };
+  readonly successorRawDigest: string;
+  readonly generationRequest: RevisionRequestSpec;
+  readonly generationProvenance: ClientProvenance;
+  readonly generationInputComplete: true;
+  readonly outputDigest: string;
+  readonly coverageRequest: RevisionRequestSpec;
+}
+
+/** Reuses B's successful generation shape, preserving truncation evidence.
+ * A deterministic suggestion may omit the whole bundle, never part of it.
+ * Body must pass the existing govern/revision-output.ts validator in D. */
+export type RevisionGenerationPayload =
+  | {
+      readonly generatedBody: string;
+      readonly outputDigest: RevisionGenerateSuccess["outputDigest"];
+      readonly generationProvenance: RevisionGenerateSuccess["provenance"];
+      readonly generationInputComplete: RevisionGenerateSuccess["inputComplete"];
+      readonly generationRequest?: RevisionRequestSpec;
+    }
+  | {
+      readonly generatedBody?: never;
+      readonly outputDigest?: never;
+      readonly generationProvenance?: never;
+      readonly generationInputComplete?: never;
+      readonly generationRequest?: never;
+    };
+type RevisionGenerateSuccess = Extract<RevisionGenerateResult, { readonly kind: "ok" }>;
+
+export type RevisionProposal = RevisionProposalBase &
+  (
+    | ({
+        readonly action: "rewrite-single" | "merge-survivor";
+        readonly expiry?: never;
+        readonly retireEvidence?: never;
+      } & RevisionGenerationPayload)
+    | {
+        readonly action: "retire";
+        readonly retireEvidence?: RetireEvidence;
+        readonly generationRequest?: never;
+        readonly expiry?: never;
+        readonly generatedBody?: never;
+        readonly outputDigest?: never;
+        readonly generationProvenance?: never;
+        readonly generationInputComplete?: never;
+      }
+    | {
+        readonly action: "delete";
+        readonly retireEvidence?: never;
+        readonly generationRequest?: never;
+        readonly expiry?: never;
+        readonly generatedBody?: never;
+        readonly outputDigest?: never;
+        readonly generationProvenance?: never;
+        readonly generationInputComplete?: never;
+      }
+    | {
+        readonly action: "expires";
+        readonly generationRequest?: never;
+        readonly retireEvidence?: never;
+        readonly expiry: ExpiryPayload;
+        readonly generatedBody?: never;
+        readonly outputDigest?: never;
+        readonly generationProvenance?: never;
+        readonly generationInputComplete?: never;
+      }
+  );
+
+type WithoutProposalDigest<T> = T extends unknown ? Omit<T, "proposalDigest"> : never;
+export type RevisionProposalDigestInput = WithoutProposalDigest<RevisionProposal>;
+
+/** Exact E-constructed bytes; C must not serialize a proposal to manufacture them.
+ * Same copy custody as rawBefore, including all getter/read-result boundaries. */
+export type ExpectedAfter =
+  | { readonly kind: "file"; readonly raw: Buffer; readonly digest: string; readonly rev: string }
+  | { readonly kind: "missing"; readonly raw?: never; readonly digest?: never; readonly rev?: never };
+
+/** At most two relative, validated basenames. Never accept absolute paths from
+ * an audit as write targets. C must enforce basename/byte bounds at runtime. */
+export type RevisionPathEvidence = readonly [
+  { readonly area: "blocks" | "trash" | "temp"; readonly name: string },
+  { readonly area: "blocks" | "trash" | "temp"; readonly name: string }?,
+];
+
+/** Root's C0 technical clarification of the already-approved delete/link
+ * semantics (not new product authorization): the old single rename shape could
+ * not express missing. A trash link alone never proves source deletion.
+ * Only trusted synchronous syscall observers in C/E may construct applied;
+ * neither proposals nor post-hoc reads prove application. No applier in C0. */
+export type ApplyObservation =
+  | { readonly kind: "not-applied" }
+  | {
+      readonly kind: "applied";
+      readonly expectedAfter: { readonly kind: "file"; readonly digest: string; readonly rev: string };
+      readonly proof: "rename-observed" | "link-observed";
+      readonly paths?: RevisionPathEvidence;
+    }
+  | {
+      readonly kind: "applied";
+      readonly expectedAfter: { readonly kind: "missing"; readonly digest?: never; readonly rev?: never };
+      readonly proof: "unlink-observed";
+      readonly paths?: RevisionPathEvidence;
+    }
+  | { readonly kind: "unknown"; readonly reason: string; readonly paths?: RevisionPathEvidence };
+
+export interface RevisionAudit {
+  readonly v: 1;
+  readonly origin: "p50-auto" | "p50-suggestion" | "web-b3";
+  /** E: actual commit intent, frozen by the expected-after barrier. Original
+   * prepared origin remains immutable when a suggestion is later approved. */
+  readonly commitOrigin?: "p50-auto" | "web-b3";
+  readonly batchId: string;
+  readonly actionId: string;
+  readonly directoryIdentityDigest: string;
+  readonly action: RevisionProposal["action"];
+  readonly targetId: string;
+  readonly expectedRev: string;
+  readonly contextId?: string;
+  readonly contextExpectedRev?: string;
+  readonly contextRawDigest?: string;
+  readonly inputDigest: string;
+  readonly proposalDigest: string;
+  readonly expiry?: ExpiryPayload;
+  readonly relation?: RelationEvidence;
+  readonly generationProvenance?: ClientProvenance;
+  readonly generationInputComplete?: boolean;
+  readonly generationRequest?: RevisionRequestSpec;
+  readonly retireEvidence?: RetireEvidence;
+  readonly outputDigest?: string;
+  readonly coverage?: WholeCoverageEvidence;
+  readonly evidenceBindings?: RevisionEvidenceBindings;
+  /** Observation of the EXISTING client ledger, never a second budget owner. */
+  readonly budget?: NonNullable<JevUsage["budget"]>;
+  readonly beforeDigest: string;
+  /** No redundant expectedAfterDigest/Rev: one source of expected identity. */
+  readonly expectedAfter?:
+    | { readonly kind: "file"; readonly digest: string; readonly rev: string; readonly file: "after.md" }
+    | { readonly kind: "missing"; readonly digest?: never; readonly rev?: never; readonly file?: never };
+  readonly beforeFile: "before.md";
+  readonly policyVersion: string;
+  readonly state: "prepared" | "proposed" | "committed" | "skipped" | "failed" | "commit-unknown" | "restored";
+  readonly reason?: string;
+  readonly createdAt: string;
+  readonly settledAt?: string;
+  /** Actual trusted syscall observation, including bounded two-path unknown
+   * evidence. Diagnostic ONLY: never read paths back as filesystem write targets.
+   * Distinct from restoreAttempt.observation; does not authorize recovery. */
+  readonly commitObservation?: ApplyObservation;
+  /** Persisted BEFORE restore data syscall. An unresolved attempt forbids a
+   * blind ordinary restore retry; committed/restored are not scan-downgraded. */
+  readonly restoreAttempt?: {
+    readonly state: "intent" | "effect-unknown";
+    readonly startedAt: string;
+    readonly observation?: ApplyObservation;
+    readonly reason?: string;
+  };
+}
+
+export type CommitActionResult =
+  | { readonly kind: "committed"; readonly actionId: string; readonly afterRev?: string }
+  | {
+      readonly kind: "skipped";
+      readonly actionId: string;
+      readonly reason: "stale" | "permission" | "gate" | "digest" | "unavailable";
+    }
+  | {
+      readonly kind: "effect-unknown";
+      readonly actionId: string;
+      readonly dataApplied: boolean | "unknown";
+      readonly expectedAfterRev?: string;
+      readonly reason: "post-apply-failure" | "observation-mismatch" | "finalization-failure";
+    };
+
+export type RestoreRevisionResult =
+  | { readonly kind: "restored"; readonly actionId: string }
+  | {
+      readonly kind: "refused";
+      readonly reason: "state" | "stale" | "permission" | "gate" | "corrupted" | "unavailable" | "ambiguous";
+    }
+  | { readonly kind: "effect-unknown"; readonly dataApplied: true | "unknown"; readonly reason: string };
+
+/** Read-only, bounded classification. Unavailable includes incomplete scans;
+ * never present a truncated enumeration as a complete absence of pending work. */
+export type RevisionRecoveryDiagnostic =
+  | {
+      readonly kind: "action";
+      readonly batchId: string;
+      readonly actionId: string;
+      readonly state: RevisionAudit["state"] | "corrupted";
+      readonly reason?: string;
+    }
+  | { readonly kind: "unavailable"; readonly reason: string };
+
+export interface RevisionAuditDeps {
+  readonly gate?: MemoryWriteGate;
+  readonly signal?: AbortSignal;
+  /** Host epoch/owner/directory lifetime; rechecked inside the SAME memDir lock. */
+  isCurrent(): boolean;
+  now(): Date;
+}
+export type AuditReadResult =
+  | {
+      readonly kind: "ok";
+      readonly audit: RevisionAudit;
+      readonly before: Buffer;
+      readonly expectedAfter?: ExpectedAfter;
+    }
+  | { readonly kind: "missing" | "corrupted" | "unavailable"; readonly reason?: string };
+
+export type RetireSourceHintScan =
+  | {
+      readonly kind: "ok";
+      readonly refs: readonly {
+        readonly source: RetireEvidence["source"];
+        readonly oldId: string;
+        readonly oldRev: string;
+        readonly survivorId: string;
+        readonly survivorAfterRev: string;
+      }[];
+    }
+  | { readonly kind: "unavailable"; readonly reason: string };
+
+export interface RevisionAuditPort {
+  /** Optional, read-only C-owned bounded enumeration. Missing/incomplete is NOT an empty lane. */
+  listRetireSourceHintsLocked?(): RetireSourceHintScan;
+  // All Locked calls are synchronous; caller already owns the memDir lock.
+  readActionLocked(batchId: string, actionId: string): AuditReadResult;
+  persistPreparedBarrierLocked(input: {
+    readonly frozen: FrozenRevisionInput;
+    readonly proposal: RevisionProposal;
+    readonly origin: RevisionAudit["origin"];
+  }): AuditReadResult;
+  persistExpectedAfterBarrierLocked(input: {
+    readonly batchId: string;
+    readonly actionId: string;
+    readonly proposalDigest: string;
+    readonly commitOrigin?: "p50-auto" | "web-b3";
+    readonly expected: ExpectedAfter;
+  }): AuditReadResult;
+  /** Audit finalization seam ONLY; not E's commitAction, never applies a body. */
+  finalizeCommitLocked(input: {
+    readonly batchId: string;
+    readonly actionId: string;
+    readonly proposalDigest: string;
+    readonly observation: ApplyObservation;
+    readonly dataDirectories: readonly string[];
+  }): CommitActionResult;
+  scanPendingLocked(): readonly RevisionRecoveryDiagnostic[];
+}
+
+/** Signatures only: C implements these in govern/revision-audit.ts later. No
+ * factory, restore command or runtime binding is exported/implemented by C0. */
+export type CreateRevisionAuditPort = (memDir: string, deps: RevisionAuditDeps) => RevisionAuditPort;
+export interface RestoreRevisionRequest {
+  readonly actionId: string;
+  /** Optional native exact-confirmation binding. Omitted preserves the original raw protocol. */
+  readonly expectedAuditDigest?: string;
+  readonly signal?: AbortSignal;
+}
+export type RestoreRevisionRaw = (
+  memDir: string,
+  request: RestoreRevisionRequest,
+  deps: RevisionAuditDeps,
+) => Promise<RestoreRevisionResult>;
+export type RestoreRevisionRawLocked = (
+  memDir: string,
+  request: RestoreRevisionRequest,
+  deps: RevisionAuditDeps,
+) => RestoreRevisionResult;
+
+/** Closure-owned identity token; forged/copied tokens are not accepted. These
+ * helpers are shared by ask and the future in-client generate implementation;
+ * callers cannot dispatch a provider with a reservation outside this kernel. */
+export interface ClientAttemptReservation {
+  readonly id: string;
+  readonly jobId?: string;
+  readonly maxProviderCalls: number;
+  readonly reservedCostUsd: number;
+}
+export interface ClientAttemptBudgetInput {
+  readonly mode: "sync" | "background";
+  readonly jobId?: string;
+  readonly jobCostCapUsd?: number;
+  readonly maxProviderCalls: number;
+  readonly worstCostUsd: number;
+}
+
+export interface ClientAnswerProvenance {
+  readonly questionIds: readonly string[];
+  readonly provenance: ClientProvenance;
 }
 
 // ───────────────────────────── client / status (jev-arch §5.1–§5.3) ─────────────────────────────
@@ -378,6 +1090,9 @@ export interface JevRequest {
   /** sync: ≤3 batches in flight · background: ≤4, aborted on session_shutdown. */
   readonly mode: "sync" | "background";
   readonly signal?: AbortSignal;
+  /** P50 only; absent job cap is the client cap. A named job requires a cap. */
+  readonly jobId?: string;
+  readonly jobCostCapUsd?: number;
 }
 
 export type JevOutcome =
@@ -388,6 +1103,9 @@ export type JevOutcome =
       readonly missing: readonly string[];
       readonly costUsd: number;
       readonly latencyMs: number;
+      /** P50 only. Split answers retain per-dispatch evidence; never flatten. */
+      readonly sources?: readonly ClientAnswerProvenance[];
+      readonly provenance?: ClientProvenance;
     }
   | {
       readonly ok: false;
@@ -398,6 +1116,20 @@ export type JevOutcome =
 export interface JevUsage {
   readonly costUsd: number;
   readonly calls: number;
+  /** P50 only; absent off, so legacy reports remain byte-identical. */
+  readonly budget?: {
+    readonly settledCostUsd: number;
+    readonly reservedCostUsd: number;
+    readonly reservedCalls: number;
+    readonly outstanding: number;
+    readonly zombies: number;
+    readonly queued: { readonly sync: number; readonly background: number };
+    readonly costSource: "none" | "usage" | "reserve" | "mixed";
+    readonly overReservedUsd: number;
+    readonly adjustmentUsd: number;
+    readonly exhausted: boolean;
+    readonly disposed: boolean;
+  };
 }
 
 export interface JevClient {
@@ -405,6 +1137,9 @@ export interface JevClient {
   status(): JevStatus;
   /** Never rejects. */
   ask(req: JevRequest): Promise<JevOutcome>;
+  /** Optional for legacy client facades. Only the real handle implements these. */
+  generateRevision?(req: RevisionGenerateRequest): Promise<RevisionGenerateResult>;
+  judgeRevisionCoverage?(req: RevisionCoverageRequest): Promise<RevisionCoverageResult>;
   /** Forces an availability-cache refresh (review #12). */
   probe(registry: ClassifierRegistryLike, signal?: AbortSignal): Promise<JevStatus>;
 }
@@ -839,3 +1574,25 @@ export const P_INJECTED_AT_MAX = A_INJECTED_AT_MAX;
 export const MAX_ENABLED_TAGS = 64;
 /** Inline authority comment byte budget (§4.2: ≤200B). */
 export const INLINE_META_MAX_BYTES = 200;
+
+// ───────────────────────────── #36 S0 governance names (not wired) ─────────────────────────────
+// docs/dev/memory-governance/p5b-contracts.md is the lifecycle/ownership contract.
+// Additive names only: no existing interface, default, hook or wire payload changes.
+
+/** Successful operation edges, coalesced at the next existing turn_end.
+ * Intent, read-only results and aborts never create a governance event. */
+export const JEV_GOVERNANCE_EVENTS = ["task-done", "push", "release"] as const;
+export type JevGovernanceEvent = (typeof JEV_GOVERNANCE_EVENTS)[number];
+
+/** Renderer observations; dedup belongs to govern/signals.ts, not the
+ * ordinary sweep corpus fingerprint. Resident budgets never truncate rules. */
+export const JEV_GOVERNANCE_BUDGET_SIGNALS = ["resident-over-budget", "index-overflow"] as const;
+export type JevGovernanceBudgetSignal = (typeof JEV_GOVERNANCE_BUDGET_SIGNALS)[number];
+
+/** Reserved keys in blocks/.jev/governance-markers.json (format v:1).
+ * Only govern/markers.ts may persist them; neither belongs in JevIndexV1.
+ * Completed review means one bounded pass, NOT exhaustive corpus coverage. */
+export const JEV_GOVERNANCE_FIRST_USER_REVIEW_MARKER = "first-user-review/v1";
+export const JEV_GOVERNANCE_RELOAD_REMINDER_MARKER = "migration-reload-reminder/v1";
+export type JevGovernanceMarkerKey =
+  typeof JEV_GOVERNANCE_FIRST_USER_REVIEW_MARKER | typeof JEV_GOVERNANCE_RELOAD_REMINDER_MARKER;

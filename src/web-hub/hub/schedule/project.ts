@@ -6,7 +6,7 @@
  * droppedReports. Pure: no IO beyond the compiled-when math, no clock reads (`now` is injected).
  */
 import { compileTask } from "../../../schedule/core/occurrence.js";
-import { nextOccurrence } from "../../../schedule/core/cron.js";
+import { nextOccurrence, parseCron } from "../../../schedule/core/cron.js";
 import {
   defHash,
   isExecutable,
@@ -23,6 +23,8 @@ import type {
   SchedulesPayloadWire,
   ScheduleSessionProjectionWire,
   ScheduleTaskProjectionWire,
+  EveryTaskProjection,
+  StoredTaskProjection,
 } from "../../protocol/schedule.js";
 
 export interface ReceiptView {
@@ -71,7 +73,9 @@ const feishuOf = (run: RunRecord, state: ScheduleStateFile, deps: ProjectDeps): 
   return "waiting";
 };
 
-function taskProjection(task: ScheduleTask, state: ScheduleStateFile, deps: ProjectDeps): ScheduleTaskProjectionWire {
+function taskProjection(task: ScheduleTask, state: ScheduleStateFile, deps: ProjectDeps): StoredTaskProjection {
+  const strict = task.when.kind === "cron" ? parseCron(task.when.expr, { strictSteps: true }) : undefined;
+  const legacyStep = strict?.ok === false && strict.error.includes(" exceeds ") ? strict.error : undefined;
   const hash = defHash(task);
   const occ = state.occ[task.id];
   const compiled = compileTask(task);
@@ -87,6 +91,7 @@ function taskProjection(task: ScheduleTask, state: ScheduleStateFile, deps: Proj
   }
   return {
     task,
+    ...(legacyStep === undefined ? {} : { legacyStep }),
     defHash: hash,
     executable: isExecutable(task),
     pendingApproval: false,
@@ -98,11 +103,12 @@ function taskProjection(task: ScheduleTask, state: ScheduleStateFile, deps: Proj
       skipped: occ?.skippedTotal ?? 0,
       manual: state.manualTotal[task.id] ?? 0,
     },
-  };
+  } as StoredTaskProjection;
 }
 
 function runProjection(run: RunRecord, state: ScheduleStateFile, deps: ProjectDeps): ScheduleRunProjectionWire {
   return {
+    ...(run.catchUp === undefined ? {} : { catchUp: run.catchUp }),
     runKey: run.runKey,
     taskId: run.taskId,
     kind: run.kind,
@@ -123,7 +129,16 @@ export function projectSession(state: ScheduleStateFile, deps: ProjectDeps): Sch
   return {
     sessionId: state.sessionId,
     rev: state.rev,
-    tasks: state.tasks.map((t) => taskProjection(t, state, deps)),
+    tasks: state.tasks
+      .filter((t) => t.when.kind !== "every")
+      .map((t) => taskProjection(t, state, deps) as ScheduleTaskProjectionWire),
+    ...(state.tasks.some((t) => t.when.kind === "every")
+      ? {
+          intervalTasks: state.tasks
+            .filter((t) => t.when.kind === "every")
+            .map((t) => taskProjection(t, state, deps) as EveryTaskProjection),
+        }
+      : {}),
     runs,
     droppedReports: state.reportStats.droppedIndexCap,
   };

@@ -1,4 +1,4 @@
-/** Host-only scalar adapter. Never reads content/usage or hands a snapshot to the tap. */
+/** Scalar adapter for main/child observations. Never reads content/usage or hands a snapshot to the tap. */
 import { generationOwnData as own, isGenerationId } from "../protocol/message-generation.js";
 
 export interface MessageSpeedBinding {

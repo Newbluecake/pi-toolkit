@@ -1,5 +1,5 @@
 /**
- * The single transaction temporary-name grammar from tidy-batch §9.1.
+ * The single transaction temporary-name grammar retained for shared filesystem primitives.
  * This module is deliberately pi-free and does not touch the filesystem.
  */
 

@@ -73,6 +73,7 @@ const detail = {
   todoStatusPending: "Pending",
   todoStatusInProgress: "In progress",
   todoStatusCompleted: "Completed",
+  todoDescTruncated: "Truncated; see the TUI for the full content",
   todoBlockedBy: "blocked by {ids}",
   todoMore: "(+{n} more)",
   // web-hub-delete-session plan v2 §5.4: DashboardView's 「已删除」 empty state (appended at
@@ -126,7 +127,6 @@ const detail = {
   // keys above; the sched section header reuses tasksSchedSec.
   composerTasksAria: "Show tasks",
   composerTasksTitle: "Tasks",
-  composerSchedReadonly: "Scheduled tasks are read-only here — pause or delete them from the detail panel.",
   composerTodoDone: "{n} done",
   composerTodoMore: "(+{n} more)",
   // schedule-auto-approve r2 W2: the aggregated TasksPanel (detail header — todo section +
@@ -136,7 +136,8 @@ const detail = {
   tasksSummary: "Tasks {done}/{total} · {active} active",
   tasksTodoSec: "Todos {n}",
   tasksSchedSec: "Scheduled {n}",
-  tasksFoot: "Details »",
+  composerSchedNext: "next {t}",
+  composerSchedPaused: "{n} paused",
   tasksSchedUnreadable: "Task store unreadable ({reason}) — repair from a terminal (/schedule repair).",
   tasksActionFailed: "Action failed: {reason}",
   schedPause: "Pause",

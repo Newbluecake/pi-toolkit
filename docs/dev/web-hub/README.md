@@ -218,6 +218,11 @@ Design: `docs/dev/worktree-web/plan.md`.
 
 ## Bash-jobs panel
 
+The activity drawer remembers the selected agent/bash panel separately from its docked open state.
+If the saved panel has no content at mount, it falls back temporarily and restores when content
+arrives only until the user acts: a panel toggle, drawer close, or activation of a drawer control
+(including run selection and tree folds) cancels that pending restore. Passive data updates do not.
+
 **Bash-jobs panel (bash-jobs-panel plan v3/v4)**: `agent/bash-jobs-sampler.ts` samples the main session's
 background bash jobs (`BashJobManager`, source-generation pinned, single-flight with per-job deadlines, all
 timers unref'd) and `agent/bash-jobs.ts` projects to the optional `StatusInfo.bashJobs` slot (D1 row
@@ -243,23 +248,21 @@ halos are not clipped. This is an absolute overlay, never a reserved column. At 
 remains transparent, borderless and shadowless, regardless of coarse/fine pointer capability.
 
 `AgentDetail` owns `useActivityRail` and mounts the rail beside `FleetDrawer` at the existing
-relative `.detail-split` anchor. Fine/hover pointers above 767px peek after 120ms; leaving both
-button/bridge/panel closes after 280ms. Peek never resizes the main column, persists state or
-steals composer focus. Click pins using the EXISTING viewport modes: ≥1280 docked (grid shrinks
-main), 768–1279 overlay, ≤767 fullscreen with no hover. `useFleetDrawerOpen` still exclusively
-owns `webhub.fleetDrawer.open`, default-open and breakpoint resets; no new key/wire/setting.
-`data-docked-open` alone drives grid allocation; `data-peek-open` is transient visibility intent.
-Pinned hover never switches type; clicking the other button does. Production always passes an
-explicit `panel`, while undefined panel is legacy combined-render/fill-budget compatibility.
+relative `.detail-split` anchor. The rail is click-driven: opening the drawer keeps it expanded,
+including when the pointer leaves. There is no pin control, hover preview or timed auto-close.
+Close only with `×`, `Esc`, another click on the active rail icon, or an outside click in overlay
+mode. Clicking the other rail icon switches the panel without closing the drawer.
 
-Peek interactions promote before action. Real pointer testing caught dock movement losing the
-mouseup/click target: `layoutHeld` temporarily retains overlay geometry after logical pin, then
-click-capture queues release AFTER the target action. Pointercancel/blur/close/type/viewport/
-unmount clean the temporary state and gesture listeners; pointerup uses only a next-task no-click
-fallback, never a pre-action microtask. Run subscribe/unsubscribe still belongs solely to useHub.
-Only keyboard Enter/Space opens focus close; close/Escape return to the triggering type (never
-first aria-controls), timeout/outside do not grab focus. Fullscreen restores background inert
-values on close/resize/unmount and traps Tab; input/composition Escape guards remain.
+Viewport layout rules are unchanged: ≥1280 docked (grid shrinks main), 768–1279 overlay,
+≤767 fullscreen. `useFleetDrawerOpen` exclusively owns `webhub.fleetDrawer.open`: docked-mode
+open/close state is persisted there, with the existing default-open and breakpoint-reset behavior;
+no new key/wire/setting. `data-docked-open` alone drives grid allocation. Production always
+passes an explicit `panel`, while undefined panel is legacy combined-render/fill-budget compatibility.
+
+Run subscribe/unsubscribe still belongs solely to useHub. Only keyboard Enter/Space opens focus
+close; close/Escape return to the triggering type (never first aria-controls), while outside close
+does not grab focus. Fullscreen restores background inert values on close/resize/unmount and traps
+Tab; input/composition Escape guards remain.
 
 Budget measurement resets on panel/effective-mode/open and ResizeObserver updates; explicit
 panels give the other class zero budget counts, undefined preserves the previous joint algorithm.
@@ -268,7 +271,11 @@ Privacy lock still unmounts the whole detail subtree including both rail buttons
 checks-body-applicability,detail-body}.test.ts`; real compiled-UI evidence and design decisions:
 `docs/dev/activity-rail/plan.md`. No Vue Transition/rAF, inline style or new dependency.
 
-### Task60 compact panel — zero reserved column, entry moves into the header
+### Historical Task60 compact panel — zero reserved column, entry moves into the header
+
+**Historical implementation, superseded by the click-driven drawer described above.** The following
+records the former hover preview / pin / held geometry and its validation, not current behavior.
+The pin control, hover preview, held state and timed auto-close have since been removed.
 
 User-confirmed rework (`docs/dev/activity-rail/compact-panel-plan.md`, frozen): the expanded
 panel no longer keeps ANY right-edge reserved column (the old docked 84px padding overrides are
@@ -309,22 +316,23 @@ pulse in `agents.css` is a DIFFERENT object and stays untouched.
 
 **Fleet drawer archive (archive-report.md)**: `src/archive/` (per-session `ArchiveControl` built by
 `buildSessionStack`, `webHub.enabled`-gated, state in the `subagent:archive` session entry, full-snapshot-per-change,
-60s unref'd auto-sweep under `webHub.archiveAfterMin` — default 30, 0 = off, agent-side only ⇒ `/reload` suffices)
+60s unref'd auto-sweep under `webHub.archiveEnabled` — default on, agent-side only ⇒ `/reload` suffices)
 hides TERMINAL run rows / bash rows from the fleet drawer and the TUI fleet widget (display only — never
 get_run_result/`/agent status`/notifications). Web ops ride the `archive` cmd op (`{kind,target,set}`, hub
 `parseCmdBody` whitelist ⇒ needs one `/webhub restart`); the set rides the open `StatusInfo.archived` slot
 (no proto bump/caps, absent when empty); user-unarchived ids are `held` and never re-auto-archived. Report:
 `docs/dev/web-hub/archive-report.md`.
 
-**#59 count + age gates**: `webHub.archiveKeepRuns` defaults to 6 and
-`webHub.archiveKeepBash` to 5 (non-negative integers; `0` = no count gate, legacy
-age-only behavior). Each sweep counts unarchived TERMINAL items per kind, including
+**Count-only auto-archive**: `webHub.archiveKeepRuns` defaults to 6 and
+`webHub.archiveKeepBash` to 5 (non-negative integers; `0` = archive all eligible items). Each sweep counts unarchived TERMINAL items per kind, including
 held items; running and already archived items do not count. Only when a kind exceeds
 its keep count does it archive eligible items oldest-settled-first, stopping at the
-keep count or when no age-eligible non-held items remain. Held items never auto-archive.
-`archiveAfterMin=0` still disables the timer; manual archive remains available.
+keep count or when no non-held items remain, regardless of their age. Held items never auto-archive.
+`archiveEnabled=false` disables the timer; manual archive remains available. Legacy
+`archiveAfterMin=0` disables the timer and a positive value enables it only when the new
+boolean is absent; its duration no longer applies. The explicit boolean takes precedence.
 `src/archive/sweep.ts` performs pure selection; control adapts snapshots and batch-commits
-once. All three settings are agent-only, non-live: `/reload` suffices, no hub restart.
+once. These settings are agent-only, non-live: `/reload` suffices, no hub restart.
 Evidence: `docs/dev/web-hub/archive-threshold-report.md`.
 
 **Cap-full progression (#91)**: a FULL 256-entry cap no longer stalls auto-archive (the pre-#91
@@ -342,10 +350,11 @@ leaves the explicit set only via gone (not a candidate), horizon (never selectab
 auto-selected) — no resurrect flip-flop, by construction. Writes stay bounded: a stable fleet
 converges to zero writes, every arrival settles in one write, the post-upgrade first sweep over a
 legacy full-cap snapshot is exactly one horizon-only write; `sameArchiveState`/`semanticKey` treat
-the horizon as semantic state. The horizon never rides the wire (I10) — implicit rows sit at the
-256 depth, beyond every display window (two honest boundaries, plan §5 R1: mass-gone can float
-implicit rows into view, and bash `(+N more)` eviction within retention does not converge).
-Manual paths share the trim: `setArchived` protects its own id; `setArchivedMany` protects the batch
+the horizon as semantic state. The horizon never rides `StatusInfo` or any other wire surface (I10):
+`ArchiveControl.runDisplayView()` exposes it only to the agent-internal fleet projection, which
+does not synthesize implicit-history rows. The archive write/cap rules and the bash `(+N more)`
+eviction-within-retention non-convergence boundary remain unchanged. Manual paths share the trim:
+`setArchived` protects its own id; `setArchivedMany` protects the batch
 (P4 keeps a >cap batch's newest rows). Tests: `tests/archive/{state,sweep,control}.test.ts`
 (T1–T6), `tests/archive/write-rate.test.ts` (S5–S7, CF3). Design: `docs/dev/archive-full/plan.md`.
 Write-dedup safety net (#89 A1): `commit()` compares the next snapshot against the per-instance
@@ -355,6 +364,32 @@ when the content already matches, retrying on the next real change after a failu
 itself is pinned by `tests/archive/write-rate.test.ts` (24 h sweep simulation; red against both the
 998dce27 at-rewrite and the 43d892fd id-flip forms, replayed as in-file counterfactuals):
 docs/dev/web-hub/refresh-slow/archive-dedup-plan.md.
+
+**Bounded fleet retention (#9 P1/P4)**: the 1 Hz tick passes the original control's safe
+`runDisplayView()` to `projectFleet(snaps, now, typeOf?, archiveView?)`; a missing/detached/throwing
+getter degrades to legacy projection, and `snapshot_reply` deliberately keeps the legacy 8-terminal
+array. With a view, terminal classification is explicit archive E → held/ordinary U → implicit H
+(non-terminal is always active, regardless of stale metadata): active keeps its original 64-row
+severity/elapsed window, U keeps an INDEPENDENT newest 8, and E keeps up to 256 real snapshots,
+newest-first. H is omitted rather than resurrected or turned into a metadata-only placeholder;
+resume identity remains runId-keyed. The shared VM is unchanged — archive mode alone calls it with
+`recentTerminal:0` plus the selected-id retain hook, so U/E do not consume each other's quota and
+final output stays in VM order. `runDisplayView()` rebuilds detached run sets from the current
+immutable state; it reads no candidates and performs no append, rev bump or timer arm.
+
+Fleet rows/frames have exact UTF-8 producer budgets: 4 KiB per JSON row and 512 KiB for the actual
+`{t:"fleet",runs,omitted?}` JSON plus LF. Only oversized rows clone and degrade display fields
+(UTF-8-safe `…` truncation, then optional-field removal); runId/parentRunId are never truncated,
+and an identity-only oversized row is skipped. Admission is active → U8 → E newest-first, skipping
+an over-budget row without blocking smaller later rows; final omission counts are recomputed AFTER
+all row/frame drops (`original active/terminal − actually emitted`), included in the fingerprint,
+and the exact serialized frame is authoritative. Snapshots are never mutated. Thus history remains
+honestly bounded: implicit H, ordinary/held rows beyond U8, and byte-pressure losers among original
+RunSnapshots are reported as omitted; metadata without a live snapshot neither synthesizes a row
+nor counts as omitted, so the fleet is not presented as complete history. Pure/wiring
+gates: `tests/archive/control.test.ts` and `tests/web-hub/agent/fleet-retention.test.ts` (64/58,
+256/horizon/held, 70 active, Unicode/identity degradation, 4-KiB ±1 and final-frame ±1, real NDJSON
+and SSE serialization, legacy snapshot/tick fallback).
 
 ## Cache keepalive panel
 
@@ -421,7 +456,9 @@ agent's slot-flush strips `args` for cap-less hubs). Sources: S-own (toolkit com
 `wrapCommandApi` records each raw `getArgumentCompletions`; new toolkit completers must be
 reviewed pure functions) and S-tui (`mode:"tui"` + `all` only — a transparent
 `addAutocompleteProvider` passthrough capturing pi's base provider for third-party/builtin
-commands; RPC/print never gets it). Deny commands never complete and deny ITEMS are dropped
+commands; RPC/print never gets it). The `/mem` usage's scoped fragment is taken only from the
+registered command description, which reflects whether a scoped router was actually wired;
+missing descriptions fail closed to the unscoped static usage. Deny commands never complete and deny ITEMS are dropped
 per-item (the execution path's own tables); budgets: agent 1.5s hard timeout + in-flight ≤2
 (a SYNCHRONOUS third-party hang blocks the process — accepted residual, r1 #4), hub 4s route
 deadline / in-flight ≤8 global ≤3 per principal / independent limiter, browser disconnect ⇒
@@ -476,6 +513,37 @@ hub.log/agent logs must never carry output bodies (gated by tests). Integration:
 no-renderer, streaming/settled-deferral timing, `expandPromptTemplates:false`,
 no-file-before-first-message, newSession cancelled/stale-ctx) before any pi peer bump;
 real-device checklist `docs/dev/web-hub-cmd-history/acceptance.md`.
+
+## #65 Web session-add 独立结果通路（B1 包4）
+
+生产注入受 S1 硬门约束，只有 main/plain/session-memory-on 才提供可选 memoryWrite；没有端口
+仍 fail closed。`wireWebHub` 仅在现有四处窄接线：completion 的内部 memorySessionAdd 能力投影、
+bridge 的 write getter（闭包晚取 attached/remote readiness，避开 wireDialogs TDZ）、独立
+memoryOwner=MODULE_INSTANCE、可选类型。hold owner、原 session/tree/reload 边界调用及注册顺序不变。
+
+验收修订 B1/B2：S1 在 running/rejected/completed/unknown 每个阶段重新读取 DOM 的
+`data-cmd-id`，与真实 ledger entry.id 严格比较，逐态记录 `commandIdentity`（phase/domPhase/
+domCmdId/ledgerCmdId/ledgerState）；汇总输出 `/tmp/65-pkg4-s1-command-ids.json`，不以领域 n1
+或运行开始时的样本代替终态身份。缺失的可选 rev 仍不补 wire 值，DetailDock 另显示
+「Revision 不可得：宿主未提供版本标识，未生成推测值。」，history on/off DOM 测试钉住该提示。
+
+commands/ledger 是唯一终态源：异步回执 reply-only，原 cmdId 查询，cancel 观察在 release 之前；
+abort 自己的 ok 不是记忆已撤回证明。成功使用既有开放 command data 的
+`memoryWrite:{id,rev?,persistence}`（没有新 op/cap/PROTO/schema），message/output 只放人读提示；
+UI reducer 有界投影这些事实，DetailDock 直接渲染，不用正则从文案提取 id。坏字段转 unknown；
+旧客户端仍读原 output。记忆独立卡与 history 开关无关，不接 beginExternal/sink/settle，不改 Composer。
+
+验收入口：`tests/integration/memory-web-command-confirm.test.ts`、
+`tests/conformance/memory-web-command-dispatch.test.ts`（真实 SDK、5s settled TTL）和
+`npx tsx scripts/web-hub/memory-command-confirm-probe.ts`。probe 的 28 组真实浏览器/SDK场景验证
+按钮→HTTP→handleAbort→task.cancel→真实 ledger→SSE/query→DOM、running/refused/completed/unknown，
+以及 history on/off 的身份/权限/断网/隐藏/真实模型后启/页面刷新和迟到 ACK；完成 DOM id 与 ledger 结构化 id 精确比较。
+完整输出、截图和 DOM 在 `/tmp/65-pkg4-s1-*`；它使用隔离测试 HTTP host，不冒充实际 Hub daemon
+认证、生产部署或收费模型验收。浏览器不可用退出 2，不能据此打开生产写端口。
+
+file-backed 的 `appended` 不保证 SDK 此刻 flush/fsync。会话级停止不能回滚已完成写入；断网/进程
+退出/ledger 过期可能无法查询，unknown 永不显示成功。外部 writer 与最后 guard/SDK append 之间
+竞态、同步 I/O 软预算和已提交标签不可回滚为已接受限界，见 memory 的设计附件与 README。
 
 ## History tail reads (`hub/history.ts`)
 
@@ -838,28 +906,38 @@ Design, compiled-App evidence and manual physical-device/AT limits:
 实现状态：P1 backend/protocol 与 P2 UI 已实现、合入并各自独立验收；**尚未部署，未做
 真实服务/收费模型速度验证**。UI 通过 `entries.ts` 的唯一解析点和 production reducer
 消费 core / 精确 mid 历史 map，在 `TxAssistant.vue` 以独立 span 显示费用和固定一位小数的
-`20.0 tokens/s`，streaming 始终隐藏。设计定稿见
+`20.0 tokens/s`，streaming 始终隐藏。assistant 的 `renderKeys` 包含已经解析的 generation
+标量，因而同一 item ID 的 metadata 新增、替换或删除会使 `v-memo` 更新该 DOM，而不影响
+其他未变化条目的缓存；这不改变 metadata 的来源或测速证明门。设计定稿见
 `docs/dev/web-hub-tokens-speed/plan.md`（r3.1 Root gate）。
 
-- **计时/信任**：分母为原始摄取点首个→最后一个非空 `text|thinking|toolcall` delta 的
-  `performance.now()` 窗口（delta-only，无合并后观测）；分子固定 SDK `usage.output`。
-  正向证明（A）仅接受归一化前公开 provider stream event 严格
-  `response.completed` + 自有非空 `response.id`/`output_tokens`/
-  `output_tokens_details.reasoning_tokens`（number 且严格 0）并与最终
-  `AssistantMessage.responseId` 关联；**normalized 0 不是证据**，缺失/unknown/redacted/
-  summary 一律隐藏。证据 B（完整原生 thinking）**本期恒 false**——推理模型 summary-only
-  或不能证明完整观测的均 hide，不承诺推理模型出数。无 delta/一次性返回/短窗口
-  （<2 delta 或 <500ms）/streaming 中均无数字。abort/error 无正向证明自然隐藏；
-  已发 live 不因 turn_end 未到而撤销，仅不持久。
+> P2 补充：Responses 在有效 turn 内可由 raw `response.created` 建立单一候选，先到的
+> `completed` 仅保存标量；之后每次 delta 的 binding、最终消息及 turn owner 必须精确匹配，
+> 无 binding、候选冲突、重复终结或终结后同 ID/匿名 raw 均隐藏。此规则不放宽归属和终结门。
+
+- **计时/信任**：分母为本地摄取点首个→最后一个非空 `text|thinking|toolcall` delta 的
+  `performance.now()` 观测窗口；分子为 provider 上报、经原始事件证明且与最终 SDK
+  `usage.output` 一致的总输出 token（含 reasoning，缺 reasoning 子字段不阻止显示）。
+  同源计数不意味着本地 delta 完整覆盖服务端的隐式推理或所有生成耗时，不能视作 GPU 吞吐。
+  Responses/Chat 依各自终结与身份关联门校验；Anthropic 因缺少逐事件响应 ID，采用保守
+  单 lane 启发式，归属不确定即隐藏。无 delta/一次性返回/短窗口（<2 delta 或 <500ms）/
+  streaming 中均无数字；失败、矛盾终结或非成功 stopReason 隐藏。已发 live 不因 turn_end
+  未到而撤销，仅不持久。
 - **持久 metadata 机制**：主 session metadata 持久化（显式 `turn_end.messageEntryId`
   mid，exact 最终对象引用 + 当前 ctx/session/loop/message generation + owner token 同步
-  recheck，不匹配只跳过不写）；child/run 详情仅 live，旧历史不回填（recent 不兜底）。
+  recheck，不匹配只跳过不写）；#77 批 2 明确扩大到 child 持久 metadata：同样只写
+  `subagent:web-msg-speed` custom entry，不写 SDK assistant。child `/api/run/*` 详情在
+  重新打开/刷新后由该 entry 恢复，旧历史不回填（recent 不兜底）；#77 批 3 另补已打开
+  drawer 的即时出数，见下述 live/历史最终一致性规则。
   wire 唯一容器为 `WireEntry.piToolkitGeneration`（类型见 `protocol/messages.ts`，纯 optional
   追加，`WireEntrySchema` 开放、无 PROTO bump；投影在 `keys.ts` 条件展开，历史 map 上限
   512 已加载 entries）。`subagent:web-msg-speed` custom(data) 是 display:false 墓碑，
   旧 UI 不渲染。
 - **边界**：不做收费/GPU 真实吞吐/字符估算/端到端兑底承诺，也不声称一般流式均支持
-  tokens/s 显示（仅上述完整可观测窗口）；child 无公开 raw 端口，保守 hide 且永不 append。
+  tokens/s 显示（仅满足上述归属与本地观测窗口条件）。child 复用相同测速器/标量 binding
+  与公开 `provider_stream_event` raw proof，口径仍是 **provider 总输出 token ÷ 本地首末非空
+  delta 窗口**；不比主 session 更精确。缺 raw proof / usage 冲突 / 窗口不足 / 持久化失败 /
+  换 owner / 锁定 / child extension 缺失一律跳过，不得估算。
   tests: `tests/web-hub/agent/{message-speed,message-speed-p0,wiring-message-speed}.test.ts`、
   `tests/web-hub/protocol/message-generation.test.ts`。
 
@@ -868,8 +946,7 @@ Design, compiled-App evidence and manual physical-device/AT limits:
   内存 fake Responses SSE，经公开 provider raw / message / turn 事件进入生产
   `wireMessageSpeed` / `eventTap`，所得 frames 进入生产 reducer / `buildTxEntries`；
   不手填最终 core。两条相同文本回复之间插入真实 SessionManager toolResult entry，
-  断言公开 mid 精确匹配、10 tokens / 500ms / 2 delta → `20.0 tokens/s`、费用独立；第三条
-  缺 raw reasoning 字段但 SDK normalized reasoning=0 必须隐藏。实际 `manager.getBranch()`
+  断言公开 mid 精确匹配、10 tokens / 500ms / 2 delta → `20.0 tokens/s`、费用独立；第三条缺 raw reasoning 子字段仍显示；第四条缺合法 raw 总量则隐藏。实际 `manager.getBranch()`
   经 `projectSessionEntry` 新建 snapshot 恢复，并验证删除/replace metadata 无残留；
   metadata 不在 SDK assistant 对象、`buildSessionContext` 或后续模型 context 中。
 - **真实浏览器验收**：同文件的 opt-in Chromium companion 使用已缓存的 Playwright
@@ -879,5 +956,117 @@ Design, compiled-App evidence and manual physical-device/AT limits:
   真刷新恢复，费用不变、767px 两 chip 不重叠。此为组件浏览器集成，不宣称真实 hub/App
   网络、真实 provider、收费覆盖率或物理移动设备已验证；默认 tier2 运行不启动浏览器，
   浏览器需显式设该环境变量。P2 的独立 App fakeHub 浏览器验收不替代本条删除链。
-  当前 child producer 无同等公开 raw port，保守隐藏且无持久化；UI 可消费合法 child live
-  core 不意味着当前 child 请求会产生数值。旧历史永不回填，并非所有 Requests 都显示。
+  child producer 的历史持久化见下；#77 批 3 在合法 child `message_end` core 上补 live
+  盖章，仍不承诺所有 child 请求都会产生数值。
+  旧历史永不回填，并非所有 Requests 都显示。
+
+- **#77 批 2 child 接线/清理**：`src/index.ts` pre-guard child 分支经
+  `src/child/wire.ts` 注入同步 `ctx => secureGuards?.recheckForWrite(ctx)` 权限闭包；plain 无
+  guards 时明确返回 undefined，而未传闭包时测速器拒绝持久化。`src/child/message-speed.ts`
+  仅在 `webHub.enabled && webHub.subagentTranscript !== "off"` 时安装 hooks/renderer，off 零注册
+  零 append；复用 agent 叶子模块，不引入 hub runtime/client。`agent_start` lazy 建立
+  sessionManager/sessionId + activation/session generation/owner token，`turn_start`、assistant
+  `message_start`、原始未合并 `message_update`、`provider_stream_event`、`message_end` 与扩展
+  `turn_end` 分别采样/验证/以公开 `messageEntryId` 关联后同步 append。raw port 同样复核当前
+  ctx owner，观察到换 owner 即废弃整轮。无需 `session_start`；`agent_end`/`agent_settled`
+  释放 pending/context，shutdown 仅作防御。除批 3 弱完成桥外无进程级注册表、外部订阅或
+  timer；hooks 只由 child 持有，`AgentSession.dispose()` 不发 shutdown 也能整体 GC，不依赖 shutdown 退订。
+  append 在扩展 `turn_end` 内完成，因此正常终态 runner seal 固定的 `finalLeafId` 祖先链可见
+  metadata；seal 后补写不能用作兜底。验证：`tests/child/message-speed.test.ts` 的 fail-closed
+  矩阵，以及 `tests/integration/subagent-message-speed.test.ts` 真实 SDK fake Responses 流 →
+  RuntimeRunner seal → 持久 jsonl → run-file-reader → production reducer → RunTranscript drawer，
+  同时验证 extension 缺失只隐藏、费用独立和 SDK/model context 不带 metadata。
+
+- **#77 批 3 live/历史最终一致性**：`child/message-speed-bridge.ts` 通过
+  `Symbol.for("pi-subagent:child-message-speed-completion")` 共享 WeakMap，每 enabled child
+  最多一槽，以最终 SDK message 对象为弱 key，绑定 sessionId、sessionGeneration、
+  activationGeneration、ownerToken；child 在 `message_end` 获得合法实测 core 后发布，父
+  `run-transcript.ts` public observer 在同一同步调用栈读取一次，EventTap 剥除不可信容器后
+  **只盖 wire 副本**（无父侧重算/SDK mutation/协议变更）。assistant 下一消息/turn、owner
+  变化、agent end/settled/shutdown 清槽；unsubscribe/reset/link-down 释放精确旧槽与弱撤销
+  回调，不让旧回调影响新 tap，成功持久化后静默清理。off 不建桥，无新增 hook/timer/client。
+  **历史是唯一最终真源**：live 不等可能含长工具执行的 `turn_end`；该处 guard/append 失败
+  时清槽并向仍活跃的原 tap 尽力发既有 `run_gap`，由 hub 用历史快照替换，撤销异常不抛。
+  可接受的不一致仅为「live 曾显示，撤销竞态/失败后成功刷新时 chip 消失」，不向历史补数；
+  不承诺网络失败时未刷新的 DOM 当场撤销。缺桥/失效/换 owner 只隐藏。
+  证据：`tests/child/message-speed-live.test.ts`（真实组件、同值、并发/重订阅/断线/resume/
+  持久失败），`tests/integration/subagent-message-speed.test.ts`（真实 SDK 扩展→public observer
+  的同步窗口，`turn_end` barrier 前一个 Vue tick 出 `20.0 tokens/s`，稍后从真实文件恢复同值）。
+
+### Activity drawer interaction
+
+The Agents/commands rail is click-driven: opening stays open on pointer leave, without a pin control or hover preview. Close via the active rail button, ×, Escape, or an outside pointer in overlay mode. Docked open state remains in `webhub.fleetDrawer.open`; viewport breakpoints and their existing mode-transition reset behavior are unchanged.
+
+## Composer inline schedule summary
+
+The composer task popover retains its existing chip and open-only Todo section. Its read-only
+schedule section starts as one keyboard-operable summary; opening it reveals the existing compact
+`ScheduleRows`. The summary counts every task, shows the earliest enabled task's `relIn` token
+when available, and separately counts paused tasks. The `pi-webhub:composer-schedule-expanded`
+symbol stores a per-session fold map on the browser's hub instance: it survives composer remounts
+and session switches, but not a page refresh. No storage, setting, or wire field is added. Empty
+schedule projections do not render the section; a degraded projection still retains its existing
+chip gate. The separate detail-header schedule dialog is unchanged.
+
+## Subagent tool durations (#72)
+
+Run transcripts reuse the main transcript renderer. The drawer passes the reducer's timing map
+through to it; live `tool_execution_start` uses browser receipt time, and a snapshot taken after
+start intentionally has no running timer. Completed results prefer the tap's measured duration;
+when absent, newer pi toolResult messages carry their own per-execution `durationMs` (including
+parallel executions), projected unchanged from JSONL. Older results without either value remain
+unknown: batch timestamps are not per-tool measurements. No protocol or hub change is required.
+
+## Feishu webhook 共存诊断（#70）
+
+agent 侧 `feishu-admin.ts` 的通知共存检查与发送端复用
+`feishu-notify/config.ts::resolveNotifyConfig`，读取统一 `feishuNotify` 覆盖、旧文件、环境和默认。
+不再独立判断「env 或旧文件有 URL」：统一显式空 URL、enabled:false、secure/locked 都不能被旧文件
+或环境重新打开。只向状态渲染输出 `configured` / `watchDefault` 两个布尔值；无凭据/wire/PROTO 改动。
+建议用户编辑 `pi-toolkit.json` 的 `feishuNotify.watchDefault`，旧文件仍保留为回退。
+字段优先级/空值/路径覆盖语义见 [plugin-merge README](../plugin-merge/README.md#70-统一通知设置与敏感面)。
+门禁：`tests/web-hub/agent/feishu-admin.test.ts` + `tests/feishu-notify/extension.test.ts` 的发送/诊断一致性；
+`feishu-spawn-http-golden.json` 等冻结件字节不变。
+
+## #50 Web revision：实际 same-owner capability / R1 facts / R4 闭环（2026-11-10）
+
+I1 将原 memory facade 扩为独立的 sessionAdd / revisionReview 能力，**不是 facade 存在即 session
+可写**。Web index/completion 每次从 actual ctx 查询原 scopes owner；hub-only 仍可 review，但无
+sessionAdd；all-off、无实际 owner、错误 manager、unknown、child/secure/locked 均拒绝。query
+不创建 owner/kernel/锁或读正文；异步 completion 后重读，start/commit 再核。根原 plain 装配未改，
+无新 setting、cap、PROTO、失败 data 字段或第二控制面账本。
+
+- 只新增闭合 `mem review` / `mem review --list`。所有 bare mem 先走独立 bridge；SDK 重名别名
+  `mem:n`、prompt/held mem 也不能进入 generic slash/capture。没有端口/能力或抛错都就地拒绝，
+  不 fallback。旧 session.add 的原 store/gate/result bytes 保持；旧 tidy/model effects 不开放。
+- R2 原 host 通过冻结只读 actionLocked 端口提供 ORIGINAL LIVE custody；R4 只消费它，不重新
+  freeze/rebind/从 JSON 制造 owner。新 command 使用实际 MemoryWebCallBinding、原 owner kernel、
+  原 proof.activity lease（非 ctx.isIdle-only）。纯导航仍验证原 dialog nonce/id/epoch/精确选项与
+  loopback/lan origin，但不产 receipt。只有当前 same-owner LIVE 有 apply；历史只有 view/keep，
+  keep 自己仍有全文确认和原 review CAS，不借旧模型 effect。
+- commands 原 32 槽/29min once ledger 保持唯一终态源，observe/cancel → settle → release；已 applied
+  或 unknown 不因取消变 none，迟到 callback 不覆写。实际数据/review 观察经原 memory invalidator
+  回到 caches/activity，internal revision 不再排一次 P50。
+- partial/unknown 使用 R1 完整 message appendix，经原 success output / failure message 运输。
+  reducer 按 exact cmdId 统一解析 direct/late/queryOnly；坏 marker、冲突、截断或错 id 整份 unknown。
+  UI 仅保留 human summary+parsed facts（不同时留整份编码 message/output），终态≤24KiB，原进度界≤8KiB。
+  DetailDock 展示部分成功、每步 receipt/stage/data/audit/review、原领域码及无全局回滚/勿盲重试/
+  需另行确认恢复提示；历史结果本身没有 apply 按钮。ctl/late 只是通知，失败也读原 ledger；网络丢 ACK
+  仅有界 queryOnly，不换 id 重执行，不以 record 成功作为效果证据。
+
+实际离线门：`tests/integration/memory-revision-web-i1.test.ts`、原 session-add/conformance 与
+`node --import tsx scripts/web-hub/memory-revision-confirm-probe.ts`。新 feature probe 的 13 组使用
+own temp 真实 SDK/production bridge/controller/kernel/E/C+HTTP/SSE+AskUserForm+reducer/DetailDock；
+同一 real partial/unknown 在 direct duplicate、两种 ctl/late 乱序/重复和 queryOnly 得到相同 DOM。
+包括 history on/off、实际旁路 recorder I/O fault、实际 >30s 等待确认和已观察 E 后 ledger 前的
+测试宿主 completion barrier、29min、取消迟到批准、真实 SDK tree/reload/new-session 后历史 view/keep；
+每态 `data-cmd-id` 对真实 ledger.get(id).id。不是把终态字符串直接喂 UI，也不使用响应成功 stub。
+浏览器 unavailable exit2 不算 PASS；可选离线二进制/包路径只读现有资产，不下载/安装。
+
+这是隔离 SDK/组件与原控制链证据，**不是实际 Hub daemon 认证/部署、物理真人来源或生产 provider
+认证**。mem direct route 的结果独立于 recorder；history off 没有 recorder，on 下 recorder 的真实
+旁路 I/O 故障不改变 mem 领域事实，不声称 mem record 已持久。I2 streaming 的 conditional certified
+capability、末跳 pure-witness trusted-CODE 边界及 stock tokenizer/template/routes/cap/prices BLOCKED
+详见 memory README；synthetic 本地协议和 loopback TLS 不可当生产证书。旧客户端仍读人类摘要，
+不承诺旧 UI 新的结构化展示。同步 syscall 不可抢占、同 uid 竞态、无全局回滚、unknown 不重试及
+不保证 elsewhere SDK flush/fsync 的既有限界保持；未连接真实 Hub/用户数据或执行运行中 reload。

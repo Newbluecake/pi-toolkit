@@ -26,7 +26,6 @@ import { wireChildSession } from "../../src/child/wire.js";
 import { childActivationSnapshot, markChildExtensionActivated } from "../../src/child/activation-signal.js";
 import { computeChildExtensionMissing } from "../../src/runtime/session-driver.js";
 import { getInputBudgetRegistry } from "../../src/runtime/input-budget-registry.js";
-import { OVERHEAD_FLOOR_BYTES } from "../../src/memory/tidy/batch-plan.js";
 
 const dirs: string[] = [];
 const servers: Server[] = [];
@@ -220,16 +219,6 @@ describe("P-RT real pi conformance", () => {
     // Measured payload is the authoritative real-pi value used by G-overhead.
     console.info(`[P-RT G-overhead] measured payload bytes: ${measured}`);
     expect(measured).toBeGreaterThan(0);
-    // The frozen floor was measured on a developer machine whose loader also picks up user-level
-    // skills / AGENTS.md (~/.agents/skills etc. are discovered regardless of agentDir). A bare CI
-    // runner has none, so a bare pi payload (~3 KB) legitimately sits below the floor. Only assert
-    // the floor when the environment actually carries that ambient context.
-    const ambient = loader.getSkills().skills.length + loader.getAgentsFiles().agentsFiles.length;
-    if (ambient === 0) {
-      console.info(`[P-RT G-overhead] bare environment (no skills/AGENTS.md discovered): floor assertion skipped`);
-      return;
-    }
-    expect(OVERHEAD_FLOOR_BYTES).toBeLessThanOrEqual(measured);
   });
 
   it("G-measure-real: over budget is failed(config) with zero requests; within budget sends one measured payload", async () => {

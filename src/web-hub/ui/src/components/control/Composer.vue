@@ -107,7 +107,19 @@
   `plain-names` — no action buttons, run links still jump to the fleet drawer).
 -->
 <script setup lang="ts">
-import { computed, inject, nextTick, onMounted, onUnmounted, provide, ref, shallowRef, useId, watch } from "vue";
+import {
+  computed,
+  inject,
+  nextTick,
+  onMounted,
+  onUnmounted,
+  provide,
+  reactive,
+  ref,
+  shallowRef,
+  useId,
+  watch,
+} from "vue";
 import { useTicker } from "../../composables/useTicker.js";
 import {
   commandPolicyFor,
@@ -142,7 +154,7 @@ import {
   parseCompleteResponse,
 } from "@logic/cmdArgs.js";
 import { API } from "@logic/contract.js";
-import { schedSummaryOf, sessionProjectionOf, taskRowsOf } from "@logic/schedule.js";
+import { relIn, schedSummaryOf, sessionProjectionOf, taskRowsOf } from "@logic/schedule.js";
 import { useI18n } from "../../composables/useI18n.js";
 import type { ComposerEmits, ComposerProps } from "../../contracts.js";
 import type { ControlHandle } from "../../types.js";
@@ -547,6 +559,25 @@ onUnmounted(() => {
 const schedRows = computed<readonly TaskRow[]>(() =>
   schedWire.value === undefined ? [] : (taskRowsOf(schedProj.value, schedNow.value) as TaskRow[]),
 );
+/** UI-only state belongs to the hub instance, not storage: switching sessions or remounting
+ * the composer preserves each session's choice, while a page refresh starts collapsed. */
+const schedFoldKey = Symbol.for("pi-webhub:composer-schedule-expanded");
+const schedStateOwner = hub as typeof hub & { [schedFoldKey]?: Map<string, boolean> };
+const schedFoldState = schedStateOwner
+  ? (schedStateOwner[schedFoldKey] ??= reactive(new Map<string, boolean>()))
+  : reactive(new Map<string, boolean>());
+const schedExpanded = computed(() => schedFoldState.get(schedSessionId.value ?? "") === true);
+function toggleSchedExpanded(): void {
+  const id = schedSessionId.value;
+  if (id !== undefined) schedFoldState.set(id, !schedExpanded.value);
+}
+const schedPausedCount = computed(() => schedRows.value.filter((row) => !row.enabled).length);
+const schedNext = computed(() => {
+  const times = schedRows.value.flatMap((row) =>
+    row.enabled && row.nextAt !== undefined && Number.isFinite(row.nextAt) ? [row.nextAt] : [],
+  );
+  return times.length > 0 ? relIn(Math.min(...times), schedNow.value) : "";
+});
 /** Both chip segments showing — the inline-numbers mode (each seg carries its own count);
  *  a SINGLE-segment chip drops the inline number and surfaces it as the badge instead
  *  (2026-11-05 user rulings, screenshot feedback round 2). */
@@ -1546,7 +1577,10 @@ watch(
           <span class="sr-only">{{ todoStatusLabel(task.status) }}</span>
           <span class="composer-todo-body">
             <span class="composer-todo-subject">#{{ task.id }} {{ task.subject }}</span>
-            <span v-if="task.description" class="composer-todo-desc"
+            <span
+              v-if="task.description"
+              class="composer-todo-desc"
+              :title="task.descTruncated ? t('detail.todoDescTruncated') : undefined"
               >{{ task.description }}{{ task.descTruncated ? "…" : "" }}</span
             >
             <span v-if="task.blockedBy.length > 0" class="composer-todo-blocked">{{ todoBlockedLabel(task) }}</span>
@@ -1556,10 +1590,30 @@ watch(
           {{ t("detail.composerTodoMore", { n: todoMoreCount }) }}
         </li>
       </ul>
-      <div v-if="schedWire !== undefined" class="composer-tasks-sec">
-        <p class="composer-tasks-sec-title">{{ t("detail.tasksSchedSec", { n: schedWire.count }) }}</p>
-        <ScheduleRows :rows="schedRows" :now="schedNow" compact plain-names @open-run="onSchedOpenRun" />
-        <p class="composer-sched-readonly">{{ t("detail.composerSchedReadonly") }}</p>
+      <div v-if="schedWire !== undefined && schedWire.count > 0" class="composer-tasks-sec">
+        <button
+          type="button"
+          class="composer-tasks-summary"
+          :aria-expanded="schedExpanded"
+          @click="toggleSchedExpanded"
+        >
+          <span class="composer-tasks-summary-text">
+            {{ t("detail.tasksSchedSec", { n: schedWire.count })
+            }}<template v-if="schedNext"> · {{ t("detail.composerSchedNext", { t: schedNext }) }}</template
+            ><template v-if="schedPausedCount">
+              · {{ t("detail.composerSchedPaused", { n: schedPausedCount }) }}</template
+            >
+          </span>
+          <AppIcon :name="schedExpanded ? 'chev-down' : 'chev-right'" class="icon-sm" />
+        </button>
+        <ScheduleRows
+          v-if="schedExpanded"
+          :rows="schedRows"
+          :now="schedNow"
+          compact
+          plain-names
+          @open-run="onSchedOpenRun"
+        />
       </div>
     </div>
     <AttachmentTray

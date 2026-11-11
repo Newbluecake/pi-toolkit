@@ -28,7 +28,6 @@ function facts(overrides: Partial<GateFacts> = {}): GateFacts {
     cooldownActive: false,
     activeRuns: 0,
     backgroundBash: 0,
-    goalBusy: false,
     origin: "input",
     source: "interactive",
     text: "写一首关于秋天的七言绝句",
@@ -67,10 +66,9 @@ describe("evaluateSyncGates · each gate fails alone", () => {
     expectSkip(facts({ draining: true }), "draining");
     expectSkip(facts({ cooldownActive: true }), "cooldown");
   });
-  it("background / goal", () => {
+  it("background", () => {
     expectSkip(facts({ activeRuns: 1 }), "background");
     expectSkip(facts({ backgroundBash: 2 }), "background");
-    expectSkip(facts({ goalBusy: true }), "goal");
   });
   it("2a source", () => {
     expectSkip(facts({ source: "extension" as InputSourceLike }), "source");

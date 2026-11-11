@@ -85,7 +85,7 @@ describe("deleteEntry", () => {
     const trashFiles = readdirSync(join(dir, ".trash"));
     expect(trashFiles).toHaveLength(1);
     expect(trashFiles[0]).toMatch(/-core\.md$/);
-    // same shape /mem restore --trash lists (safe-fs TRASH_NAME_RE / tidy listTrashEntries)
+    // same shape /mem restore --trash lists (safe-fs TRASH_NAME_RE / trash listTrashEntries)
     expect(trashFiles[0]).toMatch(/^\d{8}T\d{9}Z-\d+-[0-9a-f]{6}-core\.md$/);
     expect(readFileSync(join(dir, ".trash", trashFiles[0]!), "utf8")).toBe(body);
   });

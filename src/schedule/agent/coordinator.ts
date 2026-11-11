@@ -32,6 +32,8 @@ import type {
 export interface SchedHubLink {
   /** Live link AND the hub advertised `sched.v1` in its latest hello_ack. */
   ready(): boolean;
+  /** P2 creation admission: false until the live hub supports the interval read contract. */
+  intervalReady?(): boolean;
   send(frame: SchedAgentFrame): void;
 }
 

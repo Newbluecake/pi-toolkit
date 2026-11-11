@@ -4,7 +4,7 @@
  * DIRECT writes (voided echo + one TUI warning notify + CAS/abort), never a
  * confirm — mirroring tests/integration/memory-user-rule-direct.test.ts for
  * the blocks layout. The production registration itself (toolSurfaceFor ⇒
- * the v3 surface while layout:blocks) is asserted on the way in.
+ * the v4 surface while layout:blocks) is asserted on the way in.
  */
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -15,7 +15,8 @@ import { DEFAULT_SETTINGS } from "../../src/config/settings.js";
 import { clearHealthTable } from "../../src/memory/jev/health.js";
 import { wireMemory } from "../../src/memory/index.js";
 import { memoryDirFor } from "../../src/memory/paths.js";
-import { MEMORY_TOOL_V3_TEXT, MEMORY_TOOL_V3_TEXT_JEV } from "../../src/memory/tool-surface.js";
+import { MEMORY_TOOL_V3_TEXT_JEV } from "../../src/memory/tool-surface.js";
+import { memoryV4Surface } from "../../src/memory/unified/surface.js";
 import { createPromptSectionHub } from "../../src/sysprompt/hub.js";
 import { createFakeRegistry } from "../memory/jev/helpers/fake-registry.js";
 import { writeBlocksDir, blockRaw } from "../memory/blocks/helpers.js";
@@ -71,7 +72,7 @@ function harness() {
   } as unknown as ExtensionAPI;
   const hub = createPromptSectionHub(pi, { mode: () => "stable", wakeReplay: false, adoptForeignForcedPrompt: false });
   wireMemory(pi, {
-    // layout:blocks + a blocks directory ⇒ toolSurfaceFor picks the V3
+    // layout:blocks + a blocks directory ⇒ toolSurfaceFor picks blocks and activates the V4
     // surface at activate (arch §3.4) — one `memory` tool, same name.
     settings: { ...DEFAULT_SETTINGS.memory, layout: "blocks" },
     isChildSession: false,
@@ -133,12 +134,12 @@ async function run(
   return result.content.map((x) => x.text).join("\n");
 }
 
-describe("user-rule changes through the production v3 wireMemory (#26 V29)", () => {
-  it("registers exactly one memory tool with the V3 surface (toolSurfaceFor; fix round: jev wires under layout:blocks, so the JEV description variant applies)", () => {
+describe("user-rule changes through the production v4 wireMemory (#26 V29)", () => {
+  it("registers exactly one memory tool with the V4 Jev surface", () => {
     const h = harness();
     expect(h.tool.name).toBe("memory");
-    expect(h.tool.description).toBe(MEMORY_TOOL_V3_TEXT_JEV.description);
-    expect(h.tool.description).not.toBe(MEMORY_TOOL_V3_TEXT.description);
+    expect(h.tool.description).toBe(memoryV4Surface({ jev: true }).description);
+    expect(h.tool.description).not.toBe(MEMORY_TOOL_V3_TEXT_JEV.description);
   });
 
   it.each(["rpc", "tui"] as const)(

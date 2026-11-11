@@ -158,6 +158,8 @@ describe("D01 — primary core (degraded stand-in / no primary at all)", () => {
     );
     expect(f).toHaveLength(1);
     expect(f[0]).toMatchObject({ severity: "info", file: "p.md" });
+    expect(f[0]?.fix).toBe("Manually merge the always-on rules into core.md and ensure its status is active.");
+    expect(f[0]?.fix).not.toMatch(/\/mem (?:tidy|migrate)/);
   });
   it("negative (review): archived MEMORY.md is not called out as a hand-maintained index", () => {
     const f = findingsOf(
@@ -809,6 +811,35 @@ if (UPDATE_DOCTOR_GOLDEN && existsSync(DOCTOR_GOLDEN_PATH)) {
 }
 
 describe("doctor-golden (current-5, generate-once §10.1)", () => {
+  it("blocks configuration on files retains tiered D01 and D09 report bytes", async () => {
+    const fx = materializeFixture("current-5");
+    vi.stubEnv("ARMORY_MEMORY_ROOT", fx.paths.memoryRoot);
+    try {
+      const reports: string[] = [];
+      for (const layout of ["tiered", "blocks"] as const) {
+        const notify = vi.fn();
+        const ctx = {
+          ui: { notify, editor: vi.fn(async () => undefined) },
+          hasUI: true,
+          cwd: fx.cwd,
+          sessionManager: { getSessionId: () => "s" },
+        } as unknown as ExtensionCommandContext;
+        await handleMemDoctorCommand("", ctx, {
+          paths: fx.paths,
+          settings: { ...DEFAULT_SETTINGS.memory, layout, migrate: { auto: false } },
+          now: () => NOW_MS,
+        });
+        reports.push((notify.mock.calls[0] as [string, string])[0]);
+      }
+      expect(reports[1]).toBe(reports[0]);
+      expect(reports[1]).toContain("D01");
+      expect(reports[1]).toContain("D09");
+    } finally {
+      vi.unstubAllEnvs();
+      fx.cleanup();
+    }
+  });
+
   it("runDoctor(current-5) via the real command path matches the checked-in golden", async () => {
     const fx = materializeFixture("current-5");
     vi.stubEnv("ARMORY_MEMORY_ROOT", fx.paths.memoryRoot);
@@ -834,4 +865,13 @@ describe("doctor-golden (current-5, generate-once §10.1)", () => {
       fx.cleanup();
     }
   });
+});
+
+it("D01 missing core.md gives manual primary guidance, not a migration command or a D02 fix", () => {
+  const snapshot = snap([file("p.md", { meta: meta({ pin: true }) })]);
+  const findings = runDoctor(snapshot, SETTINGS);
+  expect(findings.find((f) => f.id === "D01")?.fix).toBe(
+    "Manually rename this file to core.md to make it the always-on primary core.",
+  );
+  expect(findings.some((f) => f.id === "D02")).toBe(false);
 });

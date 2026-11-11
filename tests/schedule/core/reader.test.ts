@@ -246,7 +246,7 @@ describe("session directory names / validation", () => {
     expect(validateStateFile(good).ok).toBe(true);
     expect(validateStateFile(good, "other").ok).toBe(false);
     const cases: Array<(s: Record<string, unknown>) => void> = [
-      (s) => (s.v = 2),
+      (s) => (s.v = 3),
       (s) => (s.rev = -1),
       (s) => (s.tasks as unknown[]).push((s.tasks as unknown[])[0]), // duplicate id
       (s) => ((s.tasks as Record<string, unknown>[])[0]!.form = "message"), // bg present on message

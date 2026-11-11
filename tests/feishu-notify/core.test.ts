@@ -337,7 +337,7 @@ describe("sendToFeishu", () => {
     const sleep = vi.fn(async () => {});
     const result = await sendToFeishu({ webhookUrl: "https://x" }, {}, { fetchFn, sleep });
     expect(result.ok).toBe(false);
-    expect(result.error).toContain("network down");
+    expect(result.error).toBe("Feishu notification request failed");
     expect(fetchFn).toHaveBeenCalledTimes(3);
   });
 });

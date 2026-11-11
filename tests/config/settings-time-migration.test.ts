@@ -64,6 +64,31 @@ describe("settings file time-unit migration", () => {
     expect(SETTING_SPECS["bashJobs.drainTimeoutS"]).toMatchObject({ path: "bashJobs.drainTimeoutMs", time: true });
   });
 
+  it("preserves incremental legacy milliseconds, prioritizes seconds, and migrates without precision loss", () => {
+    expect(loadSettings({}).memory.incremental).toMatchObject({ quietMs: 15000, idleMs: 2000, cooldownMs: 300000 });
+    expect(
+      loadSettings({ memory: { incremental: { quietSec: 8, idleSec: 3, cooldownSec: 17 } } }).memory.incremental,
+    ).toMatchObject({ quietMs: 8000, idleMs: 3000, cooldownMs: 17000 });
+    write({ memory: { incremental: { quietMs: 1234, idleMs: 4000, cooldownMs: 5000, cooldownSec: 7 } } });
+    const result = loadSettingsFromFile(path).memory.incremental;
+    expect(result).toMatchObject({ quietMs: 1234, idleMs: 4000, cooldownMs: 7000 });
+    expect(readBack()).toEqual({ memory: { incremental: { quietMs: 1234, idleSec: 4, cooldownSec: 7 } } });
+    expect(loadSettingsFromFile(path).memory.incremental).toMatchObject({
+      quietMs: 1234,
+      idleMs: 4000,
+      cooldownMs: 7000,
+    });
+    expect(warnings()).toContain("memory.incremental.cooldownMs and memory.incremental.cooldownSec are both set");
+  });
+
+  it("preserves explicit progress overrides in seconds without rewriting the file", () => {
+    const raw = { budget: { idleS: 600, modelTurnS: 1800 } };
+    write(raw);
+    expect(loadSettingsFromFile(path).budget).toMatchObject({ idleMs: 600_000, modelTurnMs: 1_800_000 });
+    expect(readBack()).toEqual(raw);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
   it("reads the new second-valued keys and converts them to internal milliseconds", () => {
     write({
       budget: { idleS: 600, totalS: 1800, startupRetries: 4 },

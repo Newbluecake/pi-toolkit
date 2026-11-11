@@ -73,7 +73,30 @@ export interface RenderBlocksInput {
   readonly audienceOf?: (b: ParsedBlock) => "all" | "main" | "child";
 }
 
+export interface BudgetRenderStats {
+  readonly corpusFingerprint: string;
+  readonly localToday: string;
+  readonly policyVersion: string;
+  readonly resident: {
+    readonly inputFingerprint: string;
+    readonly usedBytes: number;
+    readonly budgetBytes: number;
+    readonly over: boolean;
+  };
+  readonly index: {
+    readonly inputFingerprint: string;
+    readonly limitBytes: number;
+    readonly omittedCount: number;
+    readonly over: boolean;
+  };
+}
+
+function fingerprint(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
 export interface RenderBlocksResult {
+  readonly budgetStats: BudgetRenderStats;
   readonly text: string;
   /** The resident blocks that were rendered, in render order. */
   readonly resident: readonly ParsedBlock[];
@@ -271,7 +294,7 @@ function renderIndexPart(
   visible: readonly ParsedBlock[],
   archivedCount: number,
   input: RenderBlocksInput,
-): { text: string; topicCount: number } {
+): { text: string; topicCount: number; inputFingerprint: string; omittedCount: number } {
   const stats = new Map<string, TopicStat>();
   for (const b of visible) {
     let stat = stats.get(b.topic);
@@ -320,16 +343,19 @@ function renderIndexPart(
     Math.max(0, INDEX_MAX_BYTES - used - 1),
   );
   const pieces = [INDEX_GUIDE, ...usedBy, ...(tail === "" ? [] : [tail])];
-  return { text: pieces.join("\n"), topicCount: ordered.length };
+  return {
+    text: pieces.join("\n"),
+    topicCount: ordered.length,
+    inputFingerprint: fingerprint([ordered, lines]),
+    omittedCount: ordered.length - kept,
+  };
 }
 
 // ───────────────────────────── top-level render ─────────────────────────────
 
 export function renderBlocks(corpus: BlockCorpus, input: RenderBlocksInput): RenderBlocksResult {
   const visible = visibleBlocks(corpus, input);
-  if (visible.length === 0 && corpus.archivedByTopic.size === 0) {
-    return { text: "", resident: [], residentBytesUsed: 0, overResidentBudget: false, topicCount: 0, blockCount: 0 };
-  }
+  const empty = visible.length === 0 && corpus.archivedByTopic.size === 0;
   // Budget verdict on the MAIN-session resident set (arch §3.3.2), even when
   // rendering for a child session.
   const mainResident = residentBlocksOf(corpus.blocks, {
@@ -356,9 +382,31 @@ export function renderBlocks(corpus: BlockCorpus, input: RenderBlocksInput): Ren
   if (residentSection.text !== "") pieces.push(residentSection.text);
   if (index.text !== "") pieces.push(index.text);
   const header = `## Memory (${input.slug}) — ${index.topicCount} topic(s) · ${visible.length} block(s)`;
-  const text = `${header}\n\n${pieces.join("\n\n")}\n\n${injectionSentinel(input.slug)}`;
+  const text = empty ? "" : `${header}\n\n${pieces.join("\n\n")}\n\n${injectionSentinel(input.slug)}`;
+  const budgetStats: BudgetRenderStats = {
+    corpusFingerprint: corpus.fingerprint,
+    localToday: input.today,
+    policyVersion: "blocks-render-v1",
+    resident: {
+      inputFingerprint: fingerprint([
+        mainResident.map((b) => [b.id, b.rev, expiryNote(b, input.today), audienceMatches(b, false, input.audienceOf)]),
+        input.project?.entryReserve ?? 0,
+        input.isChild,
+      ]),
+      usedBytes: mainSessionBytes,
+      budgetBytes: input.residentBytes,
+      over: residentSection.overBudget,
+    },
+    index: {
+      inputFingerprint: index.inputFingerprint,
+      limitBytes: INDEX_MAX_BYTES,
+      omittedCount: index.omittedCount,
+      over: index.omittedCount > 0,
+    },
+  };
   return {
     text,
+    budgetStats,
     resident,
     residentBytesUsed: mainSessionBytes,
     overResidentBudget: residentSection.overBudget,

@@ -29,7 +29,7 @@ describe("wake input arrival budget (without changing legacy causal classificati
     const first = budget.admit({ owner, messageKey: "key", rootState: "idle" });
     budget.clearReservation(owner, first.reservation!, "delivered");
     expect(budget.snapshot().used).toBe(1);
-    for (const text of ["/goal continue", "topic replay", "hello"]) hook({ source: "extension", text });
+    for (const text of ["machine continue", "topic replay", "hello"]) hook({ source: "extension", text });
     hook({ source: "rpc", text: "machine" });
     hook({ source: "extension", text: "hello", role: "user" } as never);
     expect(budget.snapshot()).toMatchObject({ window: 2, used: 1 });

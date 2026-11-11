@@ -5,9 +5,10 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { FakeClock } from "../../../src/core/clock.js";
+import { createJevClient, type JevClientHandle } from "../../../src/memory/jev/client.js";
 import { jevConfigOf } from "../../../src/memory/jev/config.js";
 import type { JevConfig, JevQuestion } from "../../../src/memory/jev/contracts.js";
 import { EntryIndex } from "../../../src/memory/jev/entries.js";
@@ -54,7 +55,15 @@ function answer(questions: Record<string, JevQuestion>): Record<string, never> {
 }
 
 function harness(
-  opts: { config?: Partial<JevConfig>; isChild?: boolean; available?: string[]; noRegistry?: boolean } = {},
+  opts: {
+    config?: Partial<JevConfig>;
+    isChild?: boolean;
+    available?: string[];
+    noRegistry?: boolean;
+    client?: JevClientHandle;
+    queueLimit?: number;
+    log?: (line: string) => void;
+  } = {},
 ) {
   const handlers = new Map<string, Handler[]>();
   const sent: unknown[] = [];
@@ -93,14 +102,18 @@ function harness(
   const writeHooks: ((cwd: string) => void)[] = [];
   const wire = wireJev(pi, {
     config,
-    settings: DEFAULT_MEMORY_SETTINGS,
+    settings: {
+      ...DEFAULT_MEMORY_SETTINGS,
+      jev: { ...DEFAULT_MEMORY_SETTINGS.jev, backgroundQueueLimit: opts.queueLimit ?? 32 },
+    },
     isChildSession: opts.isChild === true,
     dirFor: () => memDir,
     getRenderInfo: () => undefined,
     onAfterWriteHook: (fn) => writeHooks.push(fn),
     now: () => clock.now(),
     clock,
-    log: () => {},
+    log: opts.log ?? (() => {}),
+    ...(opts.client === undefined ? {} : { client: opts.client }),
   });
   const branch: unknown[] = [];
   const ctx = () => ({
@@ -314,5 +327,109 @@ describe("doctor port", () => {
       "memory: 1 expired entry → /mem expired",
       "memory: 1 review suggestion open → /mem review",
     ]);
+  });
+});
+
+describe("bounded Jev background lease", () => {
+  test("a newer sidecar tag wins over an in-flight bulk result", async () => {
+    vi.useFakeTimers();
+    try {
+      const config = { ...jevConfigOf(DEFAULT_MEMORY_SETTINGS), classifiers: CLASSIFIERS, reviewIntervalDays: 0 };
+      const base = createJevClient({ config, isChild: false, now: () => Date.now() });
+      const full = { kind: "full" as const, model: CLASSIFIERS[0]! };
+      let release: (() => void) | undefined;
+      const client: JevClientHandle = {
+        ...base,
+        status: () => full,
+        probe: async () => full,
+        ask: async (request) => {
+          if (request.duty !== "probe" && release === undefined)
+            await new Promise<void>((resolve) => {
+              release = resolve;
+            });
+          return {
+            ok: true,
+            model: full.model,
+            answers: answer(request.questions),
+            missing: [],
+            costUsd: 0,
+            latencyMs: 0,
+          };
+        },
+      };
+      const h = harness({ config: { reviewIntervalDays: 0 }, client });
+      await h.emit("session_start", { type: "session_start", reason: "startup" });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(release).toBeDefined();
+      const hash = new EntryIndex().get(memDir)[0]!.hash;
+      const newer = {
+        file: "core.md",
+        type: "rule" as const,
+        typeP: 0.9,
+        importance: 2 as const,
+        tags: { docs: { p: 0.8, rev: 1 } },
+        guard: 0.1,
+        temporal: "permanent" as const,
+        userLike: 0.2,
+        model: "newer",
+        at: "2026-10-31T00:00:00.000Z",
+        taxonomyRev: "abcd1234",
+      };
+      await writeIndexPatch(memDir, { upsert: { [hash]: newer } });
+      release!();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(readIndex(memDir).index.entries[hash]).toEqual(newer);
+      expect(Object.keys(readIndex(memDir).index.entries)).toHaveLength(2);
+      await h.emit("session_shutdown", { reason: "exit" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("120s abort invalidates a late result and rejects newest at capacity", async () => {
+    vi.useFakeTimers();
+    try {
+      const config = { ...jevConfigOf(DEFAULT_MEMORY_SETTINGS), classifiers: CLASSIFIERS, reviewIntervalDays: 7 };
+      const base = createJevClient({ config, isChild: false, now: () => Date.now() });
+      const full = { kind: "full" as const, model: CLASSIFIERS[0]! };
+      let signal: AbortSignal | undefined;
+      let late: ((v: Awaited<ReturnType<JevClientHandle["ask"]>>) => void) | undefined;
+      const client: JevClientHandle = {
+        ...base,
+        status: () => full,
+        probe: async () => full,
+        ask: async (request) => {
+          if (request.duty === "probe")
+            return { ok: true, model: full.model, answers: {}, missing: [], costUsd: 0, latencyMs: 0 };
+          signal = request.signal;
+          return new Promise((resolve) => {
+            late = resolve;
+          });
+        },
+      };
+      const logs: string[] = [];
+      const h = harness({ config: { reviewIntervalDays: 7 }, client, queueLimit: 1, log: (line) => logs.push(line) });
+      await h.emit("session_start", { type: "session_start", reason: "startup" });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(signal).toBeDefined();
+      expect(logs.some((line) => line.includes("rejected: background queue full"))).toBe(true);
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(signal!.aborted).toBe(true);
+      expect(logs.some((line) => line.includes("120000ms — aborted"))).toBe(true);
+      late!({
+        ok: true,
+        model: full.model,
+        answers: { q1: { type: "bool", probability: 1 } },
+        missing: [],
+        costUsd: 0,
+        latencyMs: 0,
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(readIndex(memDir).index.entries).toEqual({});
+      expect(readIndex(memDir).index.lastTaggedAt).toBeUndefined();
+      await h.emit("session_shutdown", { reason: "exit" });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

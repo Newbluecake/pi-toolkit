@@ -17,7 +17,7 @@
     ["budget.retrySlackS", "d85674437fb08ea51e803ada9df66dc8cb0edadcd99111cfb9dda739c7219d36"],
     ["budget.totalGraceS", "5c0d54b33b308ac9b8f34f8e90d4f2897ce7864118842894d37125af4ddb1417"],
     ["budget.maxExtensions", "588e38bd631d171404ca3b8ee22c57b4b2fc93b8da5dcd81c378d7b9c4ac8386"],
-    ["budget.maxTotalFactor", "1ea2b065e04c7cabc87dfe2cc1f7179eb5aec3d509357532d2a8b3b1ea19b0fd"],
+    ["budget.maxTotalFactor", "b734ab6e2c7bfa9a1defd52e50a4c0c9a8c79be5fcc2e894594e24f5e9066aab"],
     ["budget.extendStepS", "e8960d01a9b469db8c55f38c738f5a3cbedd5ee22de01d672cb56dc5c32e80f5"],
     ["concurrencyLimit", "9d8edd643ea924b0947890f60132ff3c461bd8de820edb521b5052e4f8cd73ef"],
     ["agent.queueWhenFull", "037d4774cf341a1b50be5a25936a87b8a95c2acfff0b8ac4b904cf8d0d3eba42"],
@@ -64,9 +64,10 @@
     ["webHub.commandComplete", "581e130ba3b390d89541e6b8f48171b935e1b542e7d312d3b730806804181065"],
     ["webHub.quota", "757e470fb17307610db682df1449d67d6d6f221360649dce20c0b4acb49f4795"],
     ["webHub.cmdHistory", "07a829355047d619df6b31927e31f9a0066e3d72d4777a75092869357198cbb6"],
-    ["webHub.archiveAfterMin", "704dff88d60e48083f46ad45d1a56b267f978f576884cc6725c21e5cf91d1186"],
-    ["webHub.archiveKeepRuns", "0cbf2b60d1ce01a4ffbf9ab083649e11af51bfe8cce7797feb1c0b6792fdffff"],
-    ["webHub.archiveKeepBash", "08afd04047c039744187df81c6ffeb6efae1e5fb1df04df76c2028c78b8fc89b"],
+    ["webHub.archiveEnabled", "cbbc22855b7f86fe1ea52fd116fa868d6772b5a57bd53f248b45ebc60bfc71f2"],
+    ["webHub.archiveAfterMin", "1e9c164d8cd07d4e0099a376ae6fc772d6d54377a2d37ee0b9fc770942824256"],
+    ["webHub.archiveKeepRuns", "a9d4e727e347b9a55c518412e683ee81749e5df52941388b323170f9a23b25d4"],
+    ["webHub.archiveKeepBash", "8145a1d5cdffb4e810c4ab1860fae33971246390d97fd16fc0bbef2633fc9c53"],
     ["webHub.lan.enabled", "abb06ddf6a8b4a23903aefd35a94110088d84b9db3d04b58b0601f9aaea8eeb0"],
     ["webHub.lan.port", "5e3a7dbd3c6a2d0d7107ebcbb04564ec750b64fc924bcd01912be59e67516487"],
     ["webHub.lan.allowClients", "f9417ae4fe2306598e93e3c713c5f6580fc4d4798620d1d1858f3d6e5eb51dfb"],
@@ -132,21 +133,14 @@
     ["memory.migrate.auto", "261444ec8ffe9fb7e426dd386f6f912c14e0135638f996245431c303855bb11a"],
     ["memory.residentBytes", "f872530712fa86a1d2b282c7e9c83d4df920e0c0267d3c9cc69919ad5baf6ca2"],
     ["memory.governance.enabled", "1e8d73d94d05a7f169a53206ed1c68dd5728b9d3a46fd74baed0facb437caf0f"],
+    ["memory.incremental.enabled", "bd29068c6c89601168af5317e2e51177c1b5b0dc855ae57ca1d349bfa780391d"],
+    ["memory.incremental.changeThreshold", "1356140cc7056d4c3ac267411ffa0835670151d1eba5d9a1453da8edf7dd2e40"],
+    ["memory.incremental.quietSec", "6dc0be326b816b1c870f7f02bd2cf18dc9ce4f4274b11f8b52fab83c4c4d05fb"],
+    ["memory.incremental.idleSec", "ca31b365677eb142d4eb7c284ba7558aaae81239ecf746b3450b909b67e730e7"],
+    ["memory.incremental.cooldownSec", "43e9bc326e87b367d04a98267ed8acb1a9d234423139d5d5fd0e8f11518fc9d5"],
+    ["memory.incremental.taskDoneTrigger", "5e38bf7996c21cddb9f4bbbf2074e93ca886e74e1990c6b52dc0782d20569d6a"],
     ["memory.doctor.notifyOnStart", "69f0bc0e5d03be4a3373bc47018284da82363fb73422cb677744108247c75121"],
     ["memory.doctor.staleDays", "09cb26552cdfe6f6b19250e8eeaf401382264a637c43d50b1c993044dc298479"],
-    ["memory.tidy.agentType", "9429afc2435c89005cbdce966afb71b65140a6829e29e614022263843ffbddf6"],
-    ["memory.tidy.model", "29ac773645df63ec6b103c620105b2fccfdd882d8735abba3ce219f3b6cae2bf"],
-    ["memory.tidy.timeoutS", "8c1ec4c7abcae995b595b2f8f95af76b3bd88363c950dd3510e752232750eb2f"],
-    ["memory.tidy.maxInputBytes", "b97cec231d928fd7251946cc146536304c88b26b5f9269763a95a6081572560b"],
-    ["memory.tidy.maxOutputBytes", "58907612c150de606abbc55802dc505f6967dbf1a9ab679bba7fe2011ba49f71"],
-    ["memory.tidy.maxCostUsd", "9aa5f662b47fa5b757683e574866b0673a193d986db7b8f8a67a03509fc477cd"],
-    ["memory.tidy.maxTurns", "6ccc13b84191a2e59171ae4f50be17247e5c45bd80577024a9bf313ddf518254"],
-    ["memory.tidy.batch.enabled", "3cf9143d39d4a65735d721225f53034e2b7a0b5e76dfaa17239195f4a87b6657"],
-    ["memory.tidy.batch.targetBytes", "2dff2b374358f4bfc5881c295e8af25c1c992cd200989e5ee445b9b069eaded5"],
-    ["memory.tidy.batch.maxModelRuns", "e8156f195f69237e571923358dc6ed82fd7df3ba658e77c9f2f9192ae2fab415"],
-    ["memory.tidy.batch.maxTotalCostUsd", "9131edf7a7a15aa2fc098c37adc324ccf619fb6ff5e125e41a071b85abde6f3a"],
-    ["memory.tidy.batch.totalTimeoutS", "d2e1bfd8cf64875bab22a297e3731a033c4959c7fc4aec8639cfb8ddbafbb271"],
-    ["memory.tidy.batch.outputTokPerSec", "ef03b0dd0425dc1cb18e6c6f43ec10605d093e338b00f5f2b3f6081f4c3a2980"],
     ["memory.jev.enabled", "564e17a607e55bbb16fd1468adb08862bb71b73a0228502b9674144133bde33c"],
     ["memory.jev.classifiers", "f8271afe786508dcaa2cdef1db2c179d2b98ad6ed756892ec105533407f34c89"],
     ["memory.jev.proxy", "c9a30dd88f1f6d3646c76338e6efc8a95c95116698f92fb701e45d28ba12da5d"],
@@ -216,7 +210,7 @@
     ["fabric.enabled", "24a665ea98bbabc925f2ee0f95972348d79d84f6db5f114914ee81d63c68ccde"],
     ["fabric.minIntervalS", "2b8dd14d31f9b1f3128c0b088dcb659dfd8fa87c5507dd20a996dbf00d100a34"],
     ["fabric.maxPerRun", "11d99f9ef17e872cd7d1709605dc47830913b4c4d4027ea51ea9c3174b1ec5ad"],
-    ["fabric.reportQuota", "6fd4109b29ae5a83c3c6834ba76e9c4c963b8f4f31eb36d91cd06e11f296c6da"],
+    ["fabric.reportQuota", "538f07209064feb35ffde38df3cfd6cd970f2a17d929a52311a6001c7f962f3f"],
     ["fabric.directiveQuota", "e02bb7b77f8c1f6f1305616ab6c00c3d26e961505d2e4380fed48e23ef195d59"],
     ["fabric.deadLetterQuota", "37aec980fc8017f67f162e4a14d7f2beafd0b9078322f656fcb815087c00e05f"],
     ["fabric.maxChars", "0be7b436772f731b9269a352a5e5524cae15301f0c16d1c9411577c3cf464c01"],
@@ -248,16 +242,6 @@
     ["fabric.crossSession.alias.autoFromCwd", "df7505be55bc5f56fb23952f4fa61c73d61f17f4ef852e500f9977e885b5316c"],
     ["fabric.crossSession.activation.enabled", "47a31d1a3fef95a9dbd60a5a8c48580ff3c36fac4d628966f2eb9412aec62a75"],
     ["fabric.crossSession.askRedirect.enabled", "5325816dba36a3835a01f010b67b8af3856d8cd25ee9ea5d300107883189ec3c"],
-    ["goal.enabled", "303485501709fe6021f6b7e7cb430a853aee960ce84563096da8033af77e0900"],
-    ["goal.maxTurns", "f7942010579fd27776a0122c4ea1e77108e741ff17de823a68e4ac5fa9936081"],
-    ["goal.maxMinutes", "d96f497eb393ef36b05196803c6a29d9292cd49cf2f339849b1538a6a659b844"],
-    ["goal.budgetTokens", "efa2f10daea477941d82eaefce0f9b30a31709cda928a00905770693a80dd5c0"],
-    ["goal.budgetCostUsd", "8816797aad8e8ae7729d34afbaff3ad16f1098e160edaab33584c4b1b97b0727"],
-    ["goal.verifierType", "860f0e9ab23fc43fb9cc50e60654dd2c6e66b79ed9239d74b33b331681f4b70c"],
-    ["goal.verifierModelHint", "f6ef02f45c51e836c0a2089f14e51459c7afda059444c0b0b7a17c525570957e"],
-    ["goal.evalTimeoutS", "da098defacf95cade3c4a31822a97efd833f4175a8ff757c8cf94625a1701765"],
-    ["goal.untilCmdTimeoutS", "b8575c11a5af0b3312cba6155f45f7258704f18653bcd7f6f11647d57afe512b"],
-    ["goal.deliveryWatchdogS", "27667c3b971a5f4b9c3801aa544b0d732ffb8a47292d7ceba5c792192d1db644"],
     ["quota.enabled", "85c7ae1c22603a9dd6720f8f8930c2c3f4ac692841aa34393437b799d51d0db3"],
     ["quota.providers", "e39ac4713e6a538abcd8d02bf66408fc718fb69f79b54d973fde7050e257ca64"],
     ["quota.subscriptionProviders", "7def79a0b5cab234ba721741a79418a4ba6827e52077357064fa4e1cc457f049"],
@@ -344,5 +328,33 @@
     ["reflex.autoResolve", "fa7252fca5b9d9612274c53c53b4ac0d2b8440a9574f7ddc36a4edb81bd9a726"],
     ["reflex.drafts.enabled", "424d403597834a370e6e25a0f89c9b2409242400cba7fde08de293bb5f820729"]
   ],
-  "all": "d30ce318a714f79204feaef2bf6b71e1774c547b84f83f177243bb52d1c602e8"
+  "all": "cb277ad84f1589b0aa40a0a6f0b9ca718ce28681260d5f95714200cdd0339c16",
+  "declaredChanges": {
+    "p50_1": [
+      {
+        "key": "memory.incremental.enabled",
+        "reason": "Default false; P50 trigger only with live scopes activity owner"
+      },
+      {
+        "key": "memory.incremental.changeThreshold",
+        "reason": "Default 5; count qualification OR successful TaskUpdate completed only"
+      },
+      {
+        "key": "memory.incremental.quietSec",
+        "reason": "Default 15 seconds; each external write restarts quiet window"
+      },
+      {
+        "key": "memory.incremental.idleSec",
+        "reason": "Default 2 seconds; continuous activity-owned live host-idle gate"
+      },
+      {
+        "key": "memory.incremental.cooldownSec",
+        "reason": "Default 300 seconds; independent release from last batch settle"
+      },
+      {
+        "key": "memory.incremental.taskDoneTrigger",
+        "reason": "Default true; replaces count eligibility only, never quiet/idle/cooldown"
+      }
+    ]
+  }
 }

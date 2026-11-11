@@ -179,8 +179,8 @@ describe("generation view resolution (entries.ts)", () => {
     expect(view.generation).toBeUndefined();
   });
 
-  it("a live item keeps its core even when a (run-shaped) source provides no map at all", () => {
-    // The drawer's RunTxState projection omits `generation` — child live stamps still render.
+  it("an explicitly stamped live item keeps its core when a structural caller provides no map", () => {
+    // Both production projections pass `generation`; this tests the optional-map fallback only.
     const live = {
       role: "assistant",
       content: [],

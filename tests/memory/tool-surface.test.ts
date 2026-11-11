@@ -5,10 +5,17 @@
 // vs. the `typebox@1.3.27` pi 0.87.1 aliases `@sinclair/typebox` to at
 // runtime — same key/value set, different key order).
 
+import { createHash } from "node:crypto";
+import { memoryV4Surface, MemoryToolParamsV4, measureMemorySurface } from "../../src/memory/unified/surface.js";
+import { wireMemory } from "../../src/memory/index.js";
+import { createPromptSectionHub } from "../../src/sysprompt/hub.js";
+import { fakePi } from "../integration/helpers/schedule-activate.js";
+import { tmpdir } from "node:os";
+import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { createRequire } from "node:module";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, mkdtempSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { Type as DevType } from "@sinclair/typebox";
 import {
   canonicalJson,
@@ -33,7 +40,22 @@ const fixture = JSON.parse(readFileSync(new URL("../fixtures/memory-tool-surface
   /** #36 P4 (arch r5 §4.1.6): v3 block-surface keys — additions only. */
   blocks: { description: string; promptSnippet: string; promptGuidelines: string; parameters: string };
   blocksJev: { description: string };
-  bytes: { legacy: number; v2: number; blocks: number; blocksJev: number };
+  blocksUnified: Record<string, string>;
+  blocksUnifiedJev: Record<string, string>;
+  blocksUnifiedChild: Record<string, string>;
+  blocksUnifiedJevInlineAuthority: Record<string, string>;
+  blocksUnifiedChildJevInlineAuthority: Record<string, string>;
+  bytes: {
+    legacy: number;
+    v2: number;
+    blocks: number;
+    blocksJev: number;
+    blocksUnified: number;
+    blocksUnifiedJev: number;
+    blocksUnifiedChild: number;
+    blocksUnifiedJevInlineAuthority: number;
+    blocksUnifiedChildJevInlineAuthority: number;
+  };
 };
 
 // The legacy tool is NEVER edited by this package (optimize-plan §2.7 复审
@@ -322,5 +344,163 @@ describe("v3 tool surface (#36 blocks, declared golden addition)", () => {
     expect(fixture.jev.bytes).toBe(1616);
     // the legacy/v2/v3 descriptions are three distinct surfaces
     expect(fixture.blocks.description).not.toBe(fixture.v2.description);
+  });
+});
+
+// Stage 2 declared additions only: old variants are not re-recorded.
+describe("v4 unified blocks surface (declared canonical variants)", () => {
+  const variants = {
+    blocksUnified: { options: {}, bytes: 2231, limit: 4096 },
+    blocksUnifiedChild: { options: { child: true }, bytes: 2295, limit: 4096 },
+    blocksUnifiedJevInlineAuthority: { options: { jev: true }, bytes: 2625, limit: 4608 },
+    blocksUnifiedChildJevInlineAuthority: { options: { child: true, jev: true }, bytes: 2689, limit: 4096 },
+  };
+  it.each(Object.entries(variants))("%s has all four canonical fields and exact measured bytes", (key, variant) => {
+    const surface = memoryV4Surface(variant.options);
+    const recorded = fixture[key as keyof typeof variants];
+    expect(Object.keys(recorded).sort()).toEqual(["description", "parameters", "promptGuidelines", "promptSnippet"]);
+    expect(recorded).toEqual(
+      Object.fromEntries(Object.entries(surface).map(([name, value]) => [name, canonicalJson(value)])),
+    );
+    expect(toolSurfaceBytes(surface)).toBe(variant.bytes);
+    expect(measureMemorySurface(surface)).toBe(variant.bytes);
+    expect(fixture.bytes[key as keyof typeof variants]).toBe(variant.bytes);
+    expect(variant.bytes).toBeLessThanOrEqual(variant.limit);
+  });
+
+  const registrationCases = (["blocks", "v2", "legacy"] as const).flatMap((kind) =>
+    [false, true].flatMap((child) => [false, true].map((jev) => ({ kind, child, jev }))),
+  );
+  it.each(registrationCases)(
+    "production $kind child=$child jev=$jev publishes the actual approved variant",
+    async ({ kind, child, jev }) => {
+      const root = mkdtempSync(join(tmpdir(), "memory-tool-surface-"));
+      vi.stubEnv("ARMORY_MEMORY_ROOT", root);
+      try {
+        const f = fakePi();
+        wireMemory(f.pi, {
+          settings: {
+            ...DEFAULT_SETTINGS.memory,
+            layout: kind === "blocks" ? "blocks" : "tiered",
+            toolSurface: kind === "legacy" ? "legacy" : "v2",
+            jev: { ...DEFAULT_SETTINGS.memory.jev, enabled: jev },
+          },
+          isChildSession: child,
+          sections: createPromptSectionHub(f.pi, {
+            mode: () => "stable",
+            wakeReplay: false,
+            adoptForeignForcedPrompt: false,
+          }),
+        });
+        const tool = f.tools.get("memory") as ToolDefinition;
+        if (kind !== "blocks") {
+          const recorded = kind === "legacy" ? fixture.legacy : fixture.v2;
+          expect(canonicalJson(tool.description)).toBe(
+            kind === "v2" && jev ? fixture.jev.description : recorded.description,
+          );
+          for (const key of ["promptSnippet", "promptGuidelines", "parameters"] as const)
+            expect(canonicalJson(tool[key])).toBe(recorded[key]);
+          expect(toolSurfaceBytes(tool)).toBe(
+            kind === "legacy" ? fixture.bytes.legacy : jev ? fixture.jev.bytes : fixture.bytes.v2,
+          );
+          return;
+        }
+        const key = jev
+          ? child
+            ? "blocksUnifiedChildJevInlineAuthority"
+            : "blocksUnifiedJevInlineAuthority"
+          : child
+            ? "blocksUnifiedChild"
+            : "blocksUnified";
+        const recorded = fixture[key];
+        const surface = memoryV4Surface({ child, jev });
+        for (const [field, value] of Object.entries(surface)) {
+          expect(canonicalJson(tool[field as keyof ToolDefinition])).toBe(recorded[field]);
+          expect(canonicalJson(value)).toBe(recorded[field]);
+        }
+        expect(toolSurfaceBytes(tool)).toBe(fixture.bytes[key]);
+        if (jev) {
+          expect(tool.description).toContain("<!-- mem user|lesson");
+          expect(tool.description).toContain("e.g. <!-- mem user -->");
+          expect(tool.description).toContain("authority: user is stored frontmatter, not an inline key");
+          expect(tool.description).toContain("authority= is invalid. Project rejects top-level authority");
+          expect(canonicalJson(tool.description)).not.toBe(fixture.blocksUnifiedJev.description);
+        }
+        expect(tool.parameters).toEqual(MemoryToolParamsV4);
+        const params = tool.parameters as typeof MemoryToolParamsV4;
+        expect(params.additionalProperties).toBe(false);
+        expect(params.required).toEqual(["command"]);
+        expect(Object.keys(params.properties).sort()).toEqual([
+          "authority",
+          "command",
+          "from",
+          "id",
+          "path",
+          "query",
+          "rev",
+          "scope",
+          "text",
+          "topic",
+        ]);
+        expect(params.properties.scope.default).toBe("project");
+        expect(params.properties).not.toHaveProperty("op");
+        expect(params.properties).not.toHaveProperty("storageScope");
+        if (child)
+          for (const authority of ["agent", "user"]) {
+            const result = await tool.execute(
+              "child",
+              { command: "view", scope: "hub", authority, unexpected: true },
+              undefined,
+              undefined,
+              undefined as never,
+            );
+            expect(JSON.parse(result.content.map((c) => ("text" in c ? c.text : "")).join(""))).toMatchObject({
+              ok: false,
+              code: "E_CHILD_AUTHORITY",
+            });
+          }
+      } finally {
+        vi.unstubAllEnvs();
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("all pre-fix fixture keys (including old Jev) and counters retain their exact serialized bytes", () => {
+    const oldHashes = {
+      typeboxDev: "af7ec3a921efd1aa6e33276ab59ee3c2ef6d82d88f3724e4cba79f382cd916e0",
+      generatedAt: "acf2da7e3cc29509bd5569b65b38881d984bb5a95fb7d69ea93a97ca7b566918",
+      legacy: "e0f9922f05a9238a40803354df72b43cd3a71f99be09568398ee6185950d7b36",
+      v2: "94360b40017a48e17b3866bd348bb3ac4448f0d47472fb0683c06efe8f9198be",
+      jev: "4ac99d8d919c7e81c584f6ec59b0819c9a933618793e722845deaae1616459d7",
+      bytes: "138e058f383bffb3418cd86417699bafa97de1fcc4f4667fb987117e0742e256",
+      blocks: "ac184b21c7279169169ceb6d13cee44488006e7a190b1c9c525dd64eed4ac491",
+      blocksJev: "19224dc01eac04671b8550ed4d712c0793db582be99ebb9768c1b9161474d1bd",
+      blocksUnified: "daaa2f4e22e421839ee6bd79d6c4d2741c196d30c349554e05dec207cf524fc9",
+      blocksUnifiedJev: "5d48fd473243a666d25b101070cf07f5efbc2dbff3ddcac5fe1699c126c2bdbc",
+      blocksUnifiedChild: "774f7e5ed61118cd7046f5b2d4670682d5fb5b9c8d2e7207a22e12ffd1c02c8f",
+    };
+    const additions = ["blocksUnifiedJevInlineAuthority", "blocksUnifiedChildJevInlineAuthority"];
+    const record = fixture as unknown as Record<string, unknown>;
+    for (const [key, digest] of Object.entries(oldHashes)) {
+      const value =
+        key === "bytes"
+          ? Object.fromEntries(Object.entries(fixture.bytes).filter(([name]) => !additions.includes(name)))
+          : record[key];
+      expect(createHash("sha256").update(JSON.stringify(value)).digest("hex"), key).toBe(digest);
+    }
+    expect(Object.keys(fixture).sort()).toEqual([...Object.keys(oldHashes), ...additions].sort());
+    expect(Object.keys(fixture.bytes).sort()).toEqual(
+      [
+        "legacy",
+        "v2",
+        "blocks",
+        "blocksJev",
+        "blocksUnified",
+        "blocksUnifiedJev",
+        "blocksUnifiedChild",
+        ...additions,
+      ].sort(),
+    );
   });
 });

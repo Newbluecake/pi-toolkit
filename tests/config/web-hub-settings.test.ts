@@ -42,6 +42,7 @@ describe("web-hub settings", () => {
       subagentTranscript: "all",
       quota: true,
       load: true,
+      archiveEnabled: true,
       archiveAfterMin: 30,
       archiveKeepRuns: 6,
       archiveKeepBash: 5,
@@ -139,6 +140,7 @@ describe("web-hub settings", () => {
       subagentTranscript: "all",
       quota: true,
       load: true,
+      archiveEnabled: true,
       archiveAfterMin: 30,
       archiveKeepRuns: 6,
       archiveKeepBash: 5,
@@ -942,6 +944,24 @@ describe("LAN security P0 settings", () => {
 
 // web-hub archive plan (docs/dev/web-hub/archive-report.md): webHub.archiveAfterMin — default
 // 30, 0 disables the auto sweep, garbage falls back; AGENT-side only (never in buildHubConfig).
+describe("webHub.archiveEnabled and legacy alias", () => {
+  it("defaults on and honors explicit boolean over the legacy value", () => {
+    expect(parseWebHubSettings({}).archiveEnabled).toBe(true);
+    expect(parseWebHubSettings({ archiveEnabled: false }).archiveEnabled).toBe(false);
+    expect(parseWebHubSettings({ archiveEnabled: true, archiveAfterMin: 0 }).archiveEnabled).toBe(true);
+    expect(parseWebHubSettings({ archiveEnabled: false, archiveAfterMin: 120 }).archiveEnabled).toBe(false);
+  });
+
+  it("uses valid legacy numbers only as an enable switch", () => {
+    expect(parseWebHubSettings({ archiveAfterMin: 0 }).archiveEnabled).toBe(false);
+    expect(parseWebHubSettings({ archiveAfterMin: 0.01 }).archiveEnabled).toBe(true);
+    expect(parseWebHubSettings({ archiveAfterMin: 120 }).archiveEnabled).toBe(true);
+    expect(parseWebHubSettings({ archiveAfterMin: -1 }).archiveEnabled).toBe(true);
+    expect(parseWebHubSettings({ archiveAfterMin: NaN }).archiveEnabled).toBe(true);
+    expect(parseWebHubSettings({ archiveEnabled: "false", archiveAfterMin: 0 }).archiveEnabled).toBe(false);
+  });
+});
+
 describe("webHub.archiveAfterMin (web-hub archive plan)", () => {
   it("defaults to 30 and survives explicit values including 0", () => {
     expect(defaults.archiveAfterMin).toBe(30);

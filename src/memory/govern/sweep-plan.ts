@@ -3,6 +3,7 @@ import type { BlockCorpus, LegacyFingerprint } from "../blocks/store.js";
 import { isExpired } from "../blocks/format.js";
 import type { JevIndexV1, ReviewSuggestion, ReviewSuggestionKind } from "../jev/contracts.js";
 import { entryHash } from "../jev/entries.js";
+import { suggestionKey } from "../jev/index-store.js";
 import { blockAnchor } from "./supersede.js";
 import { looksLikeStateSnapshot } from "./snapshot.js";
 export type SweepReason = "startup" | "reload" | "write" | "task-done" | "push" | "release" | "budget";
@@ -23,27 +24,29 @@ export function planSweep(
     suggestions: ReviewSuggestion[] = [];
   const add = (kind: ReviewSuggestionKind, b: (typeof corpus.blocks)[number]): void => {
     const a = { hash: entryHash(b.body), anchor: blockAnchor(b) };
-    const id = createHash("sha1").update(`${kind}|${a.anchor}|${a.hash}`).digest("hex").slice(0, 16);
+    const id = createHash("sha1").update(`governance|${kind}|${b.id}`).digest("hex").slice(0, 16);
+    const candidate: ReviewSuggestion = { id, kind, a, p: 1, at: `${today}T00:00:00.000Z` };
+    const key = suggestionKey(candidate);
+    if (index.review?.resolved?.includes(key)) return;
     if (
       index.review?.dismissed.some(
         (d) =>
-          (!d.kind || d.kind === kind) &&
-          (!d.until || d.until >= today) &&
-          (d.hashKey === a.hash || d.anchorKey === a.anchor),
+          d.suggestionKey === key ||
+          ((!d.kind || d.kind === kind) && (d.hashKey === a.hash || d.anchorKey === a.anchor)),
       )
     )
       return;
-    const existing = index.review?.suggestions.find((s) => s.id === id);
+    const existing = index.review?.suggestions.find((s) => suggestionKey(s) === key);
     // until checks recur after 14 days only when the old suggestion was resolved.
     if (existing) return;
     if (
       kind === "until-check" &&
-      index.review?.lastRunAt &&
-      Date.parse(today) - Date.parse(index.review.lastRunAt) < 14 * 86400000 &&
-      index.review.corpusFp === corpus.fingerprint
+      index.review?.sweepLastRunAt &&
+      Date.parse(today) - Date.parse(index.review.sweepLastRunAt) < 14 * 86400000 &&
+      index.review.sweepCorpusFp === corpus.fingerprint
     )
       return;
-    suggestions.push({ id, kind, a, p: 1, at: `${today}T00:00:00.000Z` });
+    suggestions.push(candidate);
   };
   for (const b of corpus.blocks) {
     if (b.meta.status !== "active") continue;

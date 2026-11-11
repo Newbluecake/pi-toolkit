@@ -20,7 +20,7 @@
  * SSE payload shapes (`event` → `data`), for the frontend mirror:
  *   hello{clientId} · hub{version,buildId,pid,startedAt,proto,port} · agents{agents:AgentCard[]}
  *   agent_up{agentKey,agent} · agent_down{agentKey,reason} · agent_stale{agentKey}
- *   session{agentKey,session} · status{agentKey,status} · fleet{agentKey,runs} · prompt{agentKey,prompts}
+ *   session{agentKey,session} · status{agentKey,status} · fleet{agentKey,runs,omitted?} · prompt{agentKey,prompts}
  *   ev{agentKey,seq,e} · gap{agentKey,fromSeq} · append{agentKey,entries}   (ev/gap/append: subscribers only)
  *   history HistoryPayload | {agentKey,error,message?}   (directed, never in the replay ring)
  *   resync{lastEventId,currentId} · ping{ts}
@@ -68,7 +68,7 @@ import {
   type HistoryPayload,
 } from "../protocol/http-contract.js";
 import { canonicalHostKey, canonicalOrigin, classifyHostToken, parseOrigin } from "../protocol/lan.js";
-import type { CmdOp, CtlItemWire, FleetRowWire } from "../protocol/messages.js";
+import type { CmdOp, CtlItemWire, FleetOmitted, FleetRowWire } from "../protocol/messages.js";
 import { TIMING } from "../protocol/messages.js";
 import { createAuth, SESSION_COOKIE, LOGIN_WINDOW_MS } from "./auth.js";
 import {
@@ -214,6 +214,19 @@ interface PendingFrame {
 interface PendingSub {
   frames: PendingFrame[];
   overflow: boolean;
+}
+
+interface FleetReplay {
+  runs: FleetRowWire[];
+  omitted?: FleetOmitted;
+}
+
+function fleetPayload(agentKey: string, cached: FleetReplay): unknown {
+  return {
+    agentKey,
+    runs: cached.runs,
+    ...(cached.omitted === undefined ? {} : { omitted: cached.omitted }),
+  };
 }
 
 /**
@@ -545,7 +558,7 @@ export function buildContext(
 
 export interface RouteSet {
   pending: Map<string, Map<string, PendingSub>>;
-  fleetCache: Map<string, FleetRowWire[]>;
+  fleetCache: Map<string, FleetReplay>;
   onHubEvent(e: HubEvent): void;
   /** scheduled-reports H1 (§5.6): direct-send the schedule projection to every client of THIS
    *  listener (no `id:`, never the replay ring — the connect burst carries the snapshot). */
@@ -602,7 +615,7 @@ function createRouteSet(
   },
 ): RouteSet {
   const pending = new Map<string, Map<string, PendingSub>>();
-  const fleetCache = new Map<string, FleetRowWire[]>();
+  const fleetCache = new Map<string, FleetReplay>();
   // #88: last ACTIVE-items `ctl` per agent (route-set closure state — one per listener, I4/I5
   // clean: no module scope, no timers). Fed from the SAME bus event the broadcast fans out
   // from (so the cache is never staler than what subscribers already received) and cleared in
@@ -694,10 +707,15 @@ function createRouteSet(
         case "status":
           sse.publish("status", { agentKey: e.agentKey, status: e.status });
           break;
-        case "fleet":
-          fleetCache.set(e.agentKey, e.runs);
-          sse.publish("fleet", { agentKey: e.agentKey, runs: e.runs });
+        case "fleet": {
+          const cached: FleetReplay = {
+            runs: e.runs,
+            ...(e.omitted === undefined ? {} : { omitted: e.omitted }),
+          };
+          fleetCache.set(e.agentKey, cached);
+          sse.publish("fleet", fleetPayload(e.agentKey, cached));
           break;
+        }
         case "prompt":
           sse.publish("prompt", { agentKey: e.agentKey, prompts: e.prompts });
           break;
@@ -845,7 +863,7 @@ function createRouteSet(
     // Same direct-send posture; absent coordinator ⇒ never sent.
     const schedulesWire = routeDeps.schedules?.();
     if (schedulesWire !== undefined) client.send("schedules", schedulesWire);
-    for (const [agentKey, runs] of fleetCache) client.send("fleet", { agentKey, runs });
+    for (const [agentKey, cached] of fleetCache) client.send("fleet", fleetPayload(agentKey, cached));
     res.once("close", () => {
       pending.delete(client.id);
       runRoutes?.onClientClose(client.id); // F4: run subs + watch refs die with the SSE conn

@@ -249,11 +249,11 @@ describe("get_run_result with a workflow id", () => {
     expect(run.details.workflowId).toBeUndefined();
   });
 
-  it("an unknown wf_ id throws a workflow-specific error; an unknown plain handle keeps the run resolver's error", async () => {
+  it("unknown workflow/run handles retain stable refusal classifications", async () => {
     const h = harness();
     const tool = createResultTool({ query: h.query, resolveRun: h.resolveRun, workflows: h.workflows });
     await expect(exec(tool, { run_id: "wf_missing" })).rejects.toThrow(/unknown workflow id: wf_missing/);
-    await expect(exec(tool, { run_id: "nothing" })).rejects.toThrow(/run target not found: nothing/);
+    await expect(exec(tool, { run_id: "nothing" })).rejects.toThrow(/code=result_target_resolution/);
   });
 });
 

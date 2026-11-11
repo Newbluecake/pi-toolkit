@@ -181,7 +181,10 @@ it("real SDK raw proof → live 20.0 tokens/s → exact public mids → refresh/
           const scripted = structuredClone(events);
           for (const event of scripted) {
             if ("response" in event && event.response) event.response.id = `resp_integrated_${fetches}`;
-            if (!positive && event.type === "response.completed") delete event.response!.usage!.output_tokens_details;
+            if (fetches === 3 && event.type === "response.completed")
+              delete event.response!.usage!.output_tokens_details;
+            if (fetches === 4 && event.type === "response.completed")
+              delete (event.response!.usage as { output_tokens?: number }).output_tokens;
           }
           return new Response(scripted.map((e) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join(""), {
             headers: { "content-type": "text/event-stream" },
@@ -238,16 +241,21 @@ it("real SDK raw proof → live 20.0 tokens/s → exact public mids → refresh/
     expect(publicIndex).toBe(0); // next real agent loop restarts at zero
     expect(appendAtTurn).toBe(true);
     appendAtTurn = false;
-    positive = false;
-    await session.prompt("synthetic raw-absent fixture");
+    await session.prompt("synthetic missing reasoning detail fixture");
     expect(fetches).toBe(3);
+    expect(appendAtTurn).toBe(true);
+    appendAtTurn = false;
+    positive = false;
+    await session.prompt("synthetic raw-total-absent fixture");
+    expect(fetches).toBe(4);
     expect(appendAtTurn).toBe(false);
-    expect(new Set(mids).size).toBe(3);
+    expect(new Set(mids).size).toBe(4);
     expect((final as { usage: { reasoning: number } }).usage.reasoning).toBe(0);
     const branch = manager.getBranch();
     const assistants = branch.filter((e) => e.type === "message" && e.message.role === "assistant");
-    expect(assistants).toHaveLength(3);
+    expect(assistants).toHaveLength(4);
     expect(assistants.map((e) => (e as any).message.content)).toEqual([
+      [{ type: "text", text: "hello world" }],
       [{ type: "text", text: "hello world" }],
       [{ type: "text", text: "hello world" }],
       [{ type: "text", text: "hello world" }],
@@ -257,14 +265,15 @@ it("real SDK raw proof → live 20.0 tokens/s → exact public mids → refresh/
     expect(toolIndex).toBeLessThan(branch.indexOf(assistants[1]!));
     expect(JSON.stringify(assistants)).not.toContain("piToolkitGeneration");
     const metadata = branch.filter((e) => e.type === "custom" && e.customType === "subagent:web-msg-speed");
-    expect(metadata.map((e) => (e as { data: any }).data.piToolkitGeneration.mid)).toEqual(mids.slice(0, 2));
+    expect(metadata.map((e) => (e as { data: any }).data.piToolkitGeneration.mid)).toEqual(mids.slice(0, 3));
     const ends = emitted.filter((e) => e.type === "message_end" && e.message?.role === "assistant");
-    expect(ends).toHaveLength(3);
-    expect(ends.slice(0, 2).map((e) => e.message!.piToolkitGeneration)).toEqual([
+    expect(ends).toHaveLength(4);
+    expect(ends.slice(0, 3).map((e) => e.message!.piToolkitGeneration)).toEqual([
+      { v: 1, tokens: 10, genMs: 500, deltaCount: 2 },
       { v: 1, tokens: 10, genMs: 500, deltaCount: 2 },
       { v: 1, tokens: 10, genMs: 500, deltaCount: 2 },
     ]);
-    expect(ends[2]!.message!.piToolkitGeneration).toBeUndefined();
+    expect(ends[3]!.message!.piToolkitGeneration).toBeUndefined();
     expect(manager.buildSessionContext().messages.some((m) => JSON.stringify(m).includes("piToolkitGeneration"))).toBe(
       false,
     );
@@ -287,20 +296,23 @@ it("real SDK raw proof → live 20.0 tokens/s → exact public mids → refresh/
     expect(views(liveState).map((e) => formatTokenSpeed(e.assistant.generation))).toEqual([
       "20.0 tokens/s",
       "20.0 tokens/s",
+      "20.0 tokens/s",
       "",
     ]);
     const restored = [...base, snapshot(entries)].reduce(reduce, initialState(null));
     expect(views(restored).map((e) => formatTokenSpeed(e.assistant.generation))).toEqual([
       "20.0 tokens/s",
       "20.0 tokens/s",
+      "20.0 tokens/s",
       "",
     ]);
-    expect(views(restored).map((e) => e.assistant.costUsd)).toEqual([0.01, 0.01, 0.01]);
+    expect(views(restored).map((e) => e.assistant.costUsd)).toEqual([0.01, 0.01, 0.01, 0]);
     const removed = entries.filter((e) => e.type !== "custom");
     const deleted = reduce(restored, snapshot(removed));
-    expect(views(deleted).map((e) => e.assistant.generation)).toEqual([undefined, undefined, undefined]);
+    expect(views(deleted).map((e) => e.assistant.generation)).toEqual([undefined, undefined, undefined, undefined]);
     const replaced = reduce(deleted, snapshot(entries));
     expect(views(replaced).map((e) => formatTokenSpeed(e.assistant.generation))).toEqual([
+      "20.0 tokens/s",
       "20.0 tokens/s",
       "20.0 tokens/s",
       "",
@@ -417,27 +429,28 @@ async function browserChain(fixture: { base: any[]; frames: any[]; entries: any[
     await page.evaluate(async (frames) => {
       await window.applyFrames(frames);
     }, fixture.frames);
-    expect(await speeds()).toEqual(["20.0 tokens/s", "20.0 tokens/s"]);
+    expect(await speeds()).toEqual(["20.0 tokens/s", "20.0 tokens/s", "20.0 tokens/s"]);
     expect(await page.locator(".msg-meta span:not(.tx-speed)").allTextContents()).toEqual([
       "$0.0100",
       "$0.0100",
       "$0.0100",
+      "$0",
     ]);
     loaded = fixture.entries;
     fromSeq = fixture.frames.length;
     await refresh(); // fresh document and reducer from actual projected SDK branch
-    expect(await speeds()).toEqual(["20.0 tokens/s", "20.0 tokens/s"]);
+    expect(await speeds()).toEqual(["20.0 tokens/s", "20.0 tokens/s", "20.0 tokens/s"]);
     loaded = fixture.removed;
     await page.evaluate(() => window.snapshot()); // replacing history removes custom metadata
     expect(await speeds()).toEqual([]);
     await refresh(); // deletion persists across a REAL browser refresh, no residual map
     expect(await speeds()).toEqual([]);
-    expect(await page.locator(".msg-meta span").allTextContents()).toEqual(["$0.0100", "$0.0100", "$0.0100"]);
+    expect(await page.locator(".msg-meta span").allTextContents()).toEqual(["$0.0100", "$0.0100", "$0.0100", "$0"]);
     loaded = fixture.entries;
     await page.evaluate(() => window.snapshot());
-    expect(await speeds()).toEqual(["20.0 tokens/s", "20.0 tokens/s"]);
+    expect(await speeds()).toEqual(["20.0 tokens/s", "20.0 tokens/s", "20.0 tokens/s"]);
     await refresh();
-    expect(await speeds()).toEqual(["20.0 tokens/s", "20.0 tokens/s"]);
+    expect(await speeds()).toEqual(["20.0 tokens/s", "20.0 tokens/s", "20.0 tokens/s"]);
     const geometry = await page
       .locator(".msg-meta")
       .first()

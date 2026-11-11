@@ -25,6 +25,7 @@ import { SCHEDULE_EXTRA } from "../../../src/web-hub/ui/src/i18n/schedule-extra.
 import type { AgentState, CmdOutcome, ControlHandle, HubHandle } from "../../../src/web-hub/ui/src/types.js";
 import type { SchedulesPayloadWire } from "../../../src/web-hub/protocol/schedule.js";
 import { makePayload, makePendingTask, makeRun, makeSession, makeTask, SCHED_SID } from "./fixtures/schedule.js";
+import { resetLangForTests, setLangOverride } from "../../../src/web-hub/ui/src/composables/useI18n.js";
 import { setDetailedListForTests } from "./helpers/list-density.js";
 
 const SCHED_CAP = "sched.v1";
@@ -40,6 +41,7 @@ beforeEach(() => {
   }));
 });
 afterEach(() => {
+  resetLangForTests();
   vi.unstubAllGlobals();
   for (const w of mounted.splice(0)) w.unmount();
   document.body.innerHTML = "";
@@ -149,10 +151,9 @@ describe("SchedulePanel", () => {
     expect(tasks[0]!.text()).toContain("0 8 * * *");
     expect(tasks[0]!.text()).toContain("Asia/Shanghai");
     expect(tasks[1]!.text()).toContain("周五归档提醒");
-    // r2: EVERY row is the read-only ghost 「详情」 — no primary 审阅 button anywhere,
-    // and the legacy pendingApproval task shows the plain 已启用/enabled chip (no 待确认).
+    // No separate detail action or approval action remains on the task cards.
     expect(w.findAll(".sched-task-act .btn-primary")).toHaveLength(0);
-    expect(w.findAll(".sched-task-act .btn-ghost")).toHaveLength(2);
+    expect(w.findAll(".sched-task-act .btn-ghost")).toHaveLength(0);
     // the legacy taskPending/taskExecutable copy (removed with the keys, r2) never renders
     expect(w.text()).not.toContain("review pending");
     expect(w.text()).not.toContain("待确认");
@@ -207,9 +208,21 @@ describe("SchedulePanel", () => {
     expect(w.find(".sched-task .sched-chip-missed").exists()).toBe(true);
   });
 
+  it.each(["enter", "space"])("opens the named detail from the focusable title with %s", async (key) => {
+    setLangOverride("zh");
+    const { w } = mountPanel({ schedules: makePayload() });
+    const title = w.findAll(".sched-task-name")[1]!;
+    expect(title.attributes("role")).toBe("button");
+    expect(title.attributes("tabindex")).toBe("0");
+    expect(title.attributes("aria-label")).toContain("周五归档提醒");
+    await title.trigger(`keydown.${key}`);
+    expect(w.find(".review-kv").exists()).toBe(true);
+    expect(w.text()).toContain("周五归档提醒");
+  });
+
   it("detail view: full prompt as INERT text (a <script> payload stays literal), bg kv rows", async () => {
     const { w } = mountPanel({ schedules: makePayload() });
-    await w.findAll(".sched-task-act .btn")[0]!.trigger("click"); // 详情
+    await w.findAll(".sched-task-name")[0]!.trigger("click"); // 详情
     const prompt = w.find(".review-prompt");
     expect(prompt.exists()).toBe(true);
     expect(prompt.element.tagName).toBe("PRE");
@@ -220,11 +233,11 @@ describe("SchedulePanel", () => {
     expect(w.text()).toContain("1800s");
   });
 
-  it("detail view is READ-ONLY: no approve/reject actions, no hash note (r2 §6-W1)", async () => {
+  it("detail view still ignores approval fields; editing is explicit and no hash note appears", async () => {
     const { w } = mountPanel({ schedules: makePayload() });
     // the legacy-pending task (pendingApproval:true + offer on the wire) opens the SAME
     // read-only view — no action row, no hash note, no tracked command of any kind
-    await w.findAll(".sched-task-act .btn")[1]!.trigger("click");
+    await w.findAll(".sched-task-name")[1]!.trigger("click");
     expect(w.find(".review-actions").exists()).toBe(false);
     expect(w.find(".review-hash").exists()).toBe(false);
     expect(w.text()).not.toContain("defHash");
@@ -236,7 +249,7 @@ describe("SchedulePanel", () => {
 
   it("a task vanishing mid-detail falls back to the list silently (no note)", async () => {
     const { w, state } = mountPanel({ schedules: makePayload() });
-    await w.findAll(".sched-task-act .btn")[0]!.trigger("click");
+    await w.findAll(".sched-task-name")[0]!.trigger("click");
     expect(w.find(".review-kv").exists()).toBe(true);
     state.value.schedules = makePayload([makeSession({ tasks: [], runs: [] })]);
     await nextTick();
@@ -248,6 +261,35 @@ describe("SchedulePanel", () => {
 });
 
 describe("SchedulePanel task actions + run jump (r2 §6-W2)", () => {
+  it("shows timeline state in both languages and keeps all actions operable", async () => {
+    setLangOverride("zh");
+    const tasks = [
+      makeTask({ nextAt: Date.now() + 29 * 60_000 }),
+      makeTask({ task: { id: "s_paused01", name: "暂停任务", enabled: false }, nextAt: undefined }),
+    ];
+    const { w, runs } = mountPanel({ schedules: makePayload([makeSession({ tasks, runs: [] })]) });
+    const rows = w.findAll(".sched-task");
+    expect(rows).toHaveLength(2);
+    expect(rows[0]!.find(".sched-task-meta strong").text()).toMatch(/下次 .* 后/);
+    expect(rows[0]!.find(".sched-task-when").text()).toContain("0 8");
+    expect(rows[1]!.find(".sched-task-when").text()).toContain("0 8");
+    expect(rows[1]!.find(".sched-task-meta").text()).toContain("暂停触发");
+    expect(rows.every((row) => row.find(".sched-task-dot").attributes("aria-hidden") === "true")).toBe(true);
+    expect(rows[0]!.findAll(".chip")).toHaveLength(0);
+    expect(rows[1]!.findAll("button").every((button) => !!button.attributes("aria-label"))).toBe(true);
+    await rows[1]!.find(".icon-btn").trigger("click");
+    await flushPromises();
+    await rows[0]!.find(".icon-btn.danger").trigger("click");
+    await flushPromises();
+    expect(runs.map((run) => run[2])).toEqual(["resume s_paused01", "rm s_abcd2345"]);
+    setLangOverride("en");
+    await nextTick();
+    expect(rows[0]!.find(".sched-task-meta").text()).toContain("next ");
+    expect(rows[1]!.find(".sched-task-meta").text()).toContain("trigger paused");
+    await rows[1]!.find(".sched-task-name").trigger("click");
+    expect(w.find(".sched-task-act").exists()).toBe(false);
+  });
+
   it("online + canWrite: task rows carry pause/resume/delete icon buttons", () => {
     const { w } = mountPanel({ schedules: makePayload() });
     // fixture: both tasks enabled ⇒ pause + delete per row
@@ -288,10 +330,12 @@ describe("SchedulePanel task actions + run jump (r2 §6-W2)", () => {
     expect(note.text()).toContain("boom");
   });
 
-  it("offline (E3): no action buttons — the read-only 详情 stays", () => {
+  it("offline (E3): no action buttons — the title still opens read-only detail", async () => {
     const { w } = mountPanel({ schedules: makePayload(), down: true });
     expect(w.findAll(".sched-task-act .icon-btn")).toHaveLength(0);
-    expect(w.findAll(".sched-task-act .btn-ghost")).toHaveLength(2);
+    expect(w.findAll(".sched-task-act .btn-ghost")).toHaveLength(0);
+    await w.find(".sched-task-name").trigger("click");
+    expect(w.find(".review-kv").exists()).toBe(true);
   });
 
   it("run rows with a runId jump to the fleet (hub.selectRun); legacy runs without one render no button", async () => {
@@ -341,9 +385,9 @@ describe("legacy offer wire is ignored (r2 §6-W1, old-hub compat)", () => {
     await settle();
     await body.find(".detail-sched-btn").trigger("click");
     await settle();
-    const buttons = body.findAll(".sched-task-act .btn");
-    expect(buttons).toHaveLength(2);
-    await buttons[1]!.trigger("click");
+    const titles = body.findAll(".sched-task-name");
+    expect(titles).toHaveLength(2);
+    await titles[1]!.trigger("click");
     await settle();
     expect(body.find(".review-kv").exists()).toBe(true);
     expect(body.find(".review-actions").exists()).toBe(false);
@@ -410,4 +454,141 @@ describe("AgentCard ⏰ badge", () => {
     expect(mountCard({ caps: [], schedules: makePayload() }).find(".chip-sched").exists()).toBe(false);
     expect(mountCard({}).find(".chip-sched").exists()).toBe(false); // no schedules slot at all
   });
+});
+
+describe("interval P1 mounted consumer", () => {
+  it("renders one interval row/detail with UTC seconds, a catch-up badge and the existing single-task actions", async () => {
+    const at = Date.parse("2026-11-09T10:07:23Z");
+    const interval = {
+      ...makeTask(),
+      task: {
+        ...makeTask().task,
+        name: "interval reminder",
+        id: "s_aaaaaaab",
+        when: { kind: "every" as const, everyMs: 45_000, anchorAt: at },
+      },
+      nextAt: at + 45_000,
+    };
+    const catchUp = {
+      cause: "resume" as const,
+      fromExclusive: at - 90_000,
+      through: at,
+      dueCount: 2,
+      recoveredAt: at + 1,
+    };
+    const { w } = mountPanel({
+      schedules: makePayload([
+        makeSession({ tasks: [], intervalTasks: [interval], runs: [makeRun({ taskId: interval.task.id, catchUp })] }),
+      ]),
+    });
+    expect(w.findAll(".sched-task")).toHaveLength(1);
+    expect(w.text()).toContain("every 45s");
+    expect(w.text()).toContain("2026-11-09 10:07:23 UTC");
+    expect(w.text()).toContain("2026-11-09 10:08:08 UTC");
+    expect(w.text()).toContain("catch-up ×2");
+    await w.find(".sched-task-name").trigger("click");
+    expect(w.find(".review-kv").exists()).toBe(true);
+    expect(w.text()).toContain("every 45s");
+    expect(w.text()).toContain("UTC");
+    expect(w.text()).toContain("interval reminder");
+  });
+});
+
+describe("P2 interval editing", () => {
+  const A = Date.parse("2026-11-09T10:07:23Z");
+  const interval = () => ({
+    ...makeTask(),
+    task: {
+      ...makeTask().task,
+      name: "90m reminder",
+      when: { kind: "every" as const, everyMs: 5_400_000, anchorAt: A },
+    },
+    nextAt: A + 5_400_000,
+  });
+  const payload = () => makePayload([makeSession({ tasks: [], intervalTasks: [interval()], runs: [] })]);
+
+  it("edits an interval through the existing tracked command + confirm, never serializing tz/anchor/everyMs", async () => {
+    const { w, runs } = mountPanel({
+      schedules: payload(),
+      runCommand: (_n, _a, opts) =>
+        Promise.resolve(
+          opts?.confirm ? ({ ok: true } as CmdOutcome) : ({ ok: false, error: "E_CONFIRM_REQUIRED" } as CmdOutcome),
+        ),
+    });
+    await w.find(".sched-task-name").trigger("click");
+    await w.find("[data-schedule-edit]").trigger("click");
+    expect(w.find('input[name="when"]').element).toHaveProperty("value", "5400s");
+    expect(w.find('input[name="tz"]').exists()).toBe(false);
+    await w.find('input[name="when"]').setValue("45s");
+    await w.find('input[name="name"]').setValue('edited "reminder"');
+    await w.find('textarea[name="prompt"]').setValue("one report only");
+    await w.find("form").trigger("submit");
+    await flushPromises();
+    expect(runs).toHaveLength(1);
+    expect(runs[0]![1]).toBe("schedule");
+    expect(runs[0]![2]).toBe('edit s_abcd2345 --name "edited \\"reminder\\"" --every "45s" -- one report only');
+    expect(runs[0]![2]).not.toMatch(/--tz|anchorAt|everyMs/);
+    expect(w.find(".command-confirm").exists()).toBe(true);
+    await w.find(".command-confirm-run").trigger("click");
+    await flushPromises();
+    expect(runs).toHaveLength(2);
+    expect(runs[1]![3]?.confirm).toBe(true);
+    expect(runs[1]![3]?.id).not.toBe(runs[0]![3]?.id);
+    expect(w.find(".sched-list").exists()).toBe(true);
+  });
+
+  it("closes the editor when a successful echo contains an error-like task name", async () => {
+    const { w } = mountPanel({
+      schedules: payload(),
+      runCommand: () =>
+        Promise.resolve({
+          ok: true,
+          data: { output: { entries: [{ text: "Updated task: E_TIMEOUT" }] } },
+        } as CmdOutcome),
+    });
+    await w.find(".sched-task-name").trigger("click");
+    await w.find("[data-schedule-edit]").trigger("click");
+    await w.find('input[name="name"]').setValue("E_TIMEOUT");
+    await w.find("form").trigger("submit");
+    await flushPromises();
+    expect(w.find("form").exists()).toBe(false);
+    expect(w.find('[role="alert"]').exists()).toBe(false);
+    expect(w.find(".sched-list").exists()).toBe(true);
+  });
+
+  it.each(["denied", "validation"])("shows %s without claiming a save or bypassing command policy", async (mode) => {
+    const { w, runs } = mountPanel({
+      schedules: payload(),
+      runCommand: () =>
+        Promise.resolve(
+          mode === "denied"
+            ? ({ ok: false, error: "E_DENIED" } as CmdOutcome)
+            : ({
+                ok: true,
+                data: {
+                  output: { entries: [{ text: "E_INVALID: every must be whole seconds within 30s..365d; use 45s" }] },
+                },
+              } as CmdOutcome),
+        ),
+    });
+    await w.find(".sched-task-name").trigger("click");
+    await w.find("[data-schedule-edit]").trigger("click");
+    await w.find('input[name="when"]').setValue("10s");
+    await w.find("form").trigger("submit");
+    await flushPromises();
+    expect(runs).toHaveLength(1);
+    expect(w.find("form").exists()).toBe(true);
+    expect(w.find('[role="alert"]').text()).toContain(mode === "denied" ? "E_DENIED" : "E_INVALID");
+    expect(w.text()).toContain("webHub.webCommandPolicy.schedule");
+  });
+
+  it.each([{ down: true }, { conn: "closed" }, { commandsEnabled: false }])(
+    "offline/stale/control-off remains read-only: %j",
+    async (over) => {
+      const { w, runs } = mountPanel({ schedules: payload(), ...over });
+      await w.find(".sched-task-name").trigger("click");
+      expect(w.find("[data-schedule-edit]").exists()).toBe(false);
+      expect(runs).toHaveLength(0);
+    },
+  );
 });

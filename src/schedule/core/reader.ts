@@ -32,6 +32,8 @@ import {
   type StoreRootOpts,
 } from "./paths.js";
 import {
+  isEveryWhen,
+  isEpoch,
   SCHED_HASH_RE,
   SCHED_MANUAL_REQS_MAX,
   SCHED_MAX_SESSION_DIRS,
@@ -47,7 +49,6 @@ import {
   SCHED_RUNS_PER_TASK,
   SCHED_STATE_FILE,
   SCHED_STATE_MAX_BYTES,
-  SCHED_STATE_VERSION,
   SCHED_TASK_ID_RE,
   SCHED_BG_TIMEOUT_MAX_S,
   SCHED_BG_TIMEOUT_MIN_S,
@@ -79,14 +80,17 @@ function vHolder(h: unknown, at: string): V {
   return undefined;
 }
 
-function vTask(t: unknown, at: string): V {
+function vTask(t: unknown, at: string, version: number): V {
   if (!isRec(t)) return `${at}: not an object`;
   if (typeof t.id !== "string" || !SCHED_TASK_ID_RE.test(t.id)) return `${at}.id`;
   if (!isStr(t.name, SCHED_NAME_MAX_CHARS)) return `${at}.name`;
   if (t.form !== "background" && t.form !== "message") return `${at}.form`;
   const w = t.when;
-  if (!isRec(w) || !isStr(w.tz, 64)) return `${at}.when`;
-  if (w.kind === "cron") {
+  if (!isRec(w)) return `${at}.when`;
+  if (w.kind === "every") {
+    if (version !== 2 || !isEveryWhen(w)) return `${at}.when.every`;
+  } else if (!isStr(w.tz, 64)) return `${at}.when`;
+  else if (w.kind === "cron") {
     if (!isStr(w.expr, 128)) return `${at}.when.expr`;
   } else if (w.kind === "once") {
     if (!isStr(w.at, 16)) return `${at}.when.at`;
@@ -116,31 +120,50 @@ function vTask(t: unknown, at: string): V {
   }
   if (t.createdBy !== "user" && t.createdBy !== "agent") return `${at}.createdBy`;
   if (t.createdVia !== "tui" && t.createdVia !== "web" && t.createdVia !== "tool") return `${at}.createdVia`;
-  if (!isNat(t.createdAt)) return `${at}.createdAt`;
+  if (!isNat(t.createdAt) || (version === 2 && !isEpoch(t.createdAt))) return `${at}.createdAt`;
   if (!isStr(t.ownerCwd, 4096) || !t.ownerCwd.startsWith("/")) return `${at}.ownerCwd`;
   return undefined;
 }
 
-function vMissed(e: unknown, at: string): V {
+function vMissed(e: unknown, at: string, version: number): V {
   if (!isRec(e)) return `${at}: not an object`;
   if (!isNat(e.seq) || !isNat(e.from) || !isNat(e.to) || !isNat(e.count) || !isNat(e.totalAfter) || !isNat(e.at)) {
     return `${at}: bad numbers`;
   }
   if (typeof e.defHash !== "string" || !SCHED_HASH_RE.test(e.defHash)) return `${at}.defHash`;
-  if (e.cause !== "offline" && e.cause !== "late" && e.cause !== "once-past") return `${at}.cause`;
+  if (
+    e.cause !== "offline" &&
+    e.cause !== "late" &&
+    e.cause !== "once-past" &&
+    !(version === 2 && e.cause === "paused")
+  )
+    return `${at}.cause`;
+  if (
+    version === 2 &&
+    (!isEpoch(e.from) ||
+      !isEpoch(e.to) ||
+      !isEpoch(e.at) ||
+      e.count < 1 ||
+      e.count > 10_000 ||
+      e.seq < 1 ||
+      e.totalAfter < e.count)
+  )
+    return `${at}: invalid v2 missed chunk`;
   if (e.to < e.from) return `${at}: to < from`;
   return undefined;
 }
 
-function vOcc(o: unknown, at: string): V {
+function vOcc(o: unknown, at: string, version: number): V {
   if (!isRec(o)) return `${at}: not an object`;
   if (typeof o.defHash !== "string" || !SCHED_HASH_RE.test(o.defHash)) return `${at}.defHash`;
   for (const k of ["decidedThrough", "firedTotal", "missedTotal", "skippedTotal"])
     if (!isNat(o[k])) return `${at}.${k}`;
+  if (version === 2 && !isEpoch(o.decidedThrough)) return `${at}.decidedThrough`;
+  if (o.resumePending !== undefined && (version !== 2 || o.resumePending !== true)) return `${at}.resumePending`;
   if (!Array.isArray(o.missedLog) || o.missedLog.length > SCHED_MISSED_LOG_MAX) return `${at}.missedLog`;
   let prev = -1;
   for (let i = 0; i < o.missedLog.length; i++) {
-    const err = vMissed(o.missedLog[i], `${at}.missedLog[${i}]`);
+    const err = vMissed(o.missedLog[i], `${at}.missedLog[${i}]`, version);
     if (err) return err;
     const seq = (o.missedLog[i] as Rec).seq as number;
     if (seq <= prev) return `${at}.missedLog: seq not ascending`;
@@ -149,13 +172,18 @@ function vOcc(o: unknown, at: string): V {
   return undefined;
 }
 
-function vRun(r: unknown, at: string): V {
+function vRun(r: unknown, at: string, version: number): V {
   if (!isRec(r)) return `${at}: not an object`;
   if (typeof r.runKey !== "string" || !SCHED_RUN_KEY_RE.test(r.runKey)) return `${at}.runKey`;
   if (typeof r.taskId !== "string" || !r.runKey.startsWith(`${r.taskId}@`)) return `${at}.taskId`;
   if (r.kind !== "auto" && r.kind !== "manual") return `${at}.kind`;
   if (r.form !== "background" && r.form !== "message") return `${at}.form`;
   if (!isNat(r.scheduledAt) || !isNat(r.startedAt)) return `${at}: times`;
+  if (
+    version === 2 &&
+    (!isEpoch(r.scheduledAt) || !isEpoch(r.startedAt) || (r.endedAt !== undefined && !isEpoch(r.endedAt)))
+  )
+    return `${at}: invalid v2 epoch`;
   if (r.endedAt !== undefined && !isNat(r.endedAt)) return `${at}.endedAt`;
   if (typeof r.defHash !== "string" || !SCHED_HASH_RE.test(r.defHash)) return `${at}.defHash`;
   if (!RUN_STATES.has(String(r.state))) return `${at}.state`;
@@ -173,6 +201,25 @@ function vRun(r: unknown, at: string): V {
     if (nh) return nh;
   }
   if (r.noteFileOffset !== undefined && !isNat(r.noteFileOffset)) return `${at}.noteFileOffset`;
+  if (r.catchUp !== undefined) {
+    const c = r.catchUp;
+    if (
+      version !== 2 ||
+      r.kind !== "auto" ||
+      !isRec(c) ||
+      !["resume", "reopen", "late"].includes(String(c.cause)) ||
+      !isEpoch(c.fromExclusive) ||
+      !isEpoch(c.through) ||
+      !isEpoch(c.recoveredAt) ||
+      !isNat(c.dueCount) ||
+      c.dueCount < 1 ||
+      c.through <= c.fromExclusive ||
+      c.recoveredAt < c.through ||
+      c.through !== r.scheduledAt ||
+      r.runKey !== `${r.taskId}@${r.scheduledAt}`
+    )
+      return `${at}.catchUp`;
+  }
   if (r.lateOutcome !== undefined && !isStr(r.lateOutcome, 256)) return `${at}.lateOutcome`;
   return undefined;
 }
@@ -195,7 +242,7 @@ export type StateValidation = { ok: true; state: ScheduleStateFile } | { ok: fal
 export function validateStateFile(raw: unknown, expectSid?: string): StateValidation {
   const fail = (error: string): StateValidation => ({ ok: false, error });
   if (!isRec(raw)) return fail("state: not an object");
-  if (raw.v !== SCHED_STATE_VERSION) return fail("state.v: unsupported version");
+  if (raw.v !== 1 && raw.v !== 2) return fail("state.v: unsupported version");
   if (typeof raw.sessionId !== "string" || raw.sessionId === "" || raw.sessionId.length > 256)
     return fail("state.sessionId");
   if (expectSid !== undefined && raw.sessionId !== expectSid)
@@ -204,7 +251,7 @@ export function validateStateFile(raw: unknown, expectSid?: string): StateValida
   if (!Array.isArray(raw.tasks) || raw.tasks.length > SCHED_MAX_TASKS_PER_SESSION) return fail("state.tasks");
   const ids = new Set<string>();
   for (let i = 0; i < raw.tasks.length; i++) {
-    const err = vTask(raw.tasks[i], `state.tasks[${i}]`);
+    const err = vTask(raw.tasks[i], `state.tasks[${i}]`, raw.v);
     if (err) return fail(err);
     const id = (raw.tasks[i] as Rec).id as string;
     if (ids.has(id)) return fail(`state.tasks[${i}].id: duplicate`);
@@ -213,8 +260,14 @@ export function validateStateFile(raw: unknown, expectSid?: string): StateValida
   if (!isRec(raw.occ)) return fail("state.occ");
   for (const [k, o] of Object.entries(raw.occ)) {
     if (!SCHED_TASK_ID_RE.test(k)) return fail("state.occ: bad key");
-    const err = vOcc(o, `state.occ.${k}`);
+    const err = vOcc(o, `state.occ.${k}`, raw.v);
     if (err) return fail(err);
+    if (
+      isRec(o) &&
+      o.resumePending !== undefined &&
+      !(raw.tasks as Rec[]).some((t) => t.id === k && isRec(t.when) && t.when.kind === "every")
+    )
+      return fail(`state.occ.${k}.resumePending: not an interval task`);
   }
   if (!isRec(raw.manualTotal)) return fail("state.manualTotal");
   for (const [k, n] of Object.entries(raw.manualTotal)) {
@@ -223,7 +276,7 @@ export function validateStateFile(raw: unknown, expectSid?: string): StateValida
   if (!Array.isArray(raw.runs) || raw.runs.length > SCHED_RUNS_HARD_MAX) return fail("state.runs");
   const keys = new Set<string>();
   for (let i = 0; i < raw.runs.length; i++) {
-    const err = vRun(raw.runs[i], `state.runs[${i}]`);
+    const err = vRun(raw.runs[i], `state.runs[${i}]`, raw.v);
     if (err) return fail(err);
     const k = (raw.runs[i] as Rec).runKey as string;
     if (keys.has(k)) return fail(`state.runs[${i}].runKey: duplicate`);
@@ -271,7 +324,7 @@ export type StateReadDegradedReason = SchedFsReason | "json" | "schema" | "sid-m
 export type SessionStateRead =
   | { kind: "ok"; state: ScheduleStateFile; bytes: number; mtimeMs: number }
   | { kind: "absent" }
-  | { kind: "degraded"; reason: StateReadDegradedReason; detail: string };
+  | { kind: "degraded"; reason: StateReadDegradedReason; detail: string; version?: 2 };
 
 /** Parse + validate a state.json buffer for the session directory `dirName`. */
 export function parseStateBytes(bytes: Buffer, dirName: string): SessionStateRead {
@@ -282,7 +335,13 @@ export function parseStateBytes(bytes: Buffer, dirName: string): SessionStateRea
     return { kind: "degraded", reason: "json", detail: "state.json is not valid JSON" };
   }
   const v = validateStateFile(raw);
-  if (!v.ok) return { kind: "degraded", reason: "schema", detail: v.error };
+  if (!v.ok)
+    return {
+      kind: "degraded",
+      reason: "schema",
+      detail: v.error,
+      ...(isRec(raw) && raw.v === 2 ? { version: 2 as const } : {}),
+    };
   if (sessionDirName(v.state.sessionId) !== dirName) {
     return { kind: "degraded", reason: "sid-mismatch", detail: "state.sessionId does not belong to this directory" };
   }

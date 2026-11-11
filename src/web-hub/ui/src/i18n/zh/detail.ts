@@ -76,6 +76,7 @@ const detail = {
   todoStatusPending: "待办",
   todoStatusInProgress: "进行中",
   todoStatusCompleted: "已完成",
+  todoDescTruncated: "已截断，完整内容请在 TUI 查看",
   todoBlockedBy: "被 {ids} 阻塞",
   todoMore: "（+{n} 更多）",
   removedTitle: "会话已从列表删除",
@@ -119,7 +120,6 @@ const detail = {
   // todoStatus*/todoBlockedBy；定时分区标题复用 tasksSchedSec。
   composerTasksAria: "查看任务",
   composerTasksTitle: "任务",
-  composerSchedReadonly: "定时任务在此只读——暂停或删除请到详情面板操作。",
   composerTodoDone: "已完成 {n} 项",
   composerTodoMore: "（+{n} 更多）",
   // schedule-auto-approve r2 W2：聚合 TasksPanel（详情头部——待办分区 + 定时任务分区，
@@ -129,7 +129,8 @@ const detail = {
   tasksSummary: "任务 {done}/{total} · {active} 进行中",
   tasksTodoSec: "待办 {n}",
   tasksSchedSec: "定时任务 {n}",
-  tasksFoot: "详情 »",
+  composerSchedNext: "下次 {t}",
+  composerSchedPaused: "{n} 已暂停",
   tasksSchedUnreadable: "任务数据不可读（{reason}）——请到终端执行 /schedule repair。",
   tasksActionFailed: "操作失败：{reason}",
   schedPause: "暂停",

@@ -42,19 +42,52 @@ if (process.env.GOV_SPECS_GENERATE === "1") {
   // remain pinned.
   const declaredAdditions = [
     "budget.minTotalS",
+    // #70: only the seven safe new notification leaves; credentials remain JSON-only.
+    "feishuNotify.waitNotifyTimeoutSec",
+    "feishuNotify.heartbeatIntervalSec",
+    "feishuNotify.idleNotifyTimeoutSec",
+    "feishuNotify.subagentSummaryEnabled",
+    "feishuNotify.subagentForegroundSummary",
+    "feishuNotify.requireBackgroundIdle",
+    "feishuNotify.watchDefault",
+
+    "memory.incremental.auto",
+    "memory.incremental.jobCostCapUsd",
+    "memory.jev.backgroundQueueLimit",
     "memory.scopes.session",
     "memory.scopes.hub",
     "fabric.wake.decisionRequests",
     "fast.enabled",
   ];
+  // F1 deliberately changes just the layout description; keep the baseline hash
+  // and order as evidence rather than rewriting the historical pin.
+  const oldLayoutDescription =
+    "Injection renderer: tiered (budgeted, default), legacy (byte-identical to pre-#22), or blocks (#36 one file per block; parseable now, renderer lands with #36)";
   const legacySpecs = Object.fromEntries(
-    Object.entries(SETTING_SPECS).filter(([key]) => !declaredAdditions.includes(key)),
+    Object.entries(SETTING_SPECS)
+      .filter(([key]) => !declaredAdditions.includes(key))
+      .map(([key, spec]) => [
+        key,
+        key === "memory.layout"
+          ? { ...spec, description: oldLayoutDescription }
+          : key === "memory.incremental.enabled"
+            ? {
+                ...spec,
+                description: "P50 incremental trigger aggregation; default off, requires a live scopes activity owner",
+              }
+            : spec,
+      ]),
   );
   describe("SETTING_SPECS pin (order + content)", () => {
     it("adds exactly declared Fast/scopes/decision keys with non-live defaults and keeps old ordering", () => {
       const oldKeys = pin.specs.map(([key]) => key);
       const minAnchor = oldKeys.indexOf("budget.totalS");
       expect(Object.keys(SETTING_SPECS).filter((key) => !oldKeys.includes(key))).toEqual(declaredAdditions);
+      const notifyAnchor = oldKeys.indexOf("feishuNotify.enabled");
+      const notifyKeys = declaredAdditions.filter((key) => key.startsWith("feishuNotify."));
+      const incAnchor = oldKeys.indexOf("memory.incremental.enabled");
+      const queueAnchor = oldKeys.indexOf("memory.jev.maxCalls");
+      expect(queueAnchor).toBeGreaterThan(0);
       const anchor = oldKeys.indexOf("memory.jev.predict.cacheTtlMin");
       expect(anchor).toBeGreaterThan(0);
       const wake = oldKeys.indexOf("fabric.wake.parkCapPerTarget");
@@ -62,7 +95,14 @@ if (process.env.GOV_SPECS_GENERATE === "1") {
       expect(Object.keys(SETTING_SPECS)).toEqual([
         ...oldKeys.slice(0, minAnchor + 1),
         "budget.minTotalS",
-        ...oldKeys.slice(minAnchor + 1, anchor + 1),
+        ...oldKeys.slice(minAnchor + 1, notifyAnchor + 1),
+        ...notifyKeys,
+        ...oldKeys.slice(notifyAnchor + 1, incAnchor + 1),
+        "memory.incremental.auto",
+        "memory.incremental.jobCostCapUsd",
+        ...oldKeys.slice(incAnchor + 1, queueAnchor + 1),
+        "memory.jev.backgroundQueueLimit",
+        ...oldKeys.slice(queueAnchor + 1, anchor + 1),
         "memory.scopes.session",
         "memory.scopes.hub",
         ...oldKeys.slice(anchor + 1, wake + 1),
@@ -70,6 +110,15 @@ if (process.env.GOV_SPECS_GENERATE === "1") {
         ...oldKeys.slice(wake + 1),
         "fast.enabled",
       ]);
+      expect(SETTING_SPECS["memory.jev.backgroundQueueLimit"]).toEqual({
+        kind: "number",
+        path: "memory.jev.backgroundQueueLimit",
+        min: 1,
+        integer: true,
+        description: "Maximum running and queued Jev background jobs; reject new jobs when full",
+        max: 1024,
+      });
+      expect(defaultOf(SETTING_SPECS["memory.jev.backgroundQueueLimit"]!)).toBe(32);
       for (const path of ["memory.scopes.session", "memory.scopes.hub"]) {
         expect(SETTING_SPECS[path]?.kind).toBe("boolean");
         expect(SETTING_SPECS[path]?.path).toBe(path);
@@ -89,6 +138,19 @@ if (process.env.GOV_SPECS_GENERATE === "1") {
       });
       expect(SETTING_SPECS["fabric.wake.decisionRequests"]?.live).toBeUndefined();
       expect(defaultOf(SETTING_SPECS["fabric.wake.decisionRequests"]!)).toBe(true);
+    });
+    it("declares F incremental default-on and only two paid/auto controls", () => {
+      expect(defaultOf(SETTING_SPECS["memory.incremental.enabled"]!)).toBe(true);
+      expect(defaultOf(SETTING_SPECS["memory.incremental.auto"]!)).toBe(false);
+      expect(defaultOf(SETTING_SPECS["memory.incremental.jobCostCapUsd"]!)).toBe(0);
+      expect(SETTING_SPECS["memory.incremental.jobCostCapUsd"]).toMatchObject({ kind: "number", min: 0 });
+      expect(SETTING_SPECS["memory.incremental.jobCostCapUsd"]).not.toHaveProperty("integer");
+    });
+    it("declares the F1 layout description and default", () => {
+      expect(SETTING_SPECS["memory.layout"]?.description).toBe(
+        "Injection renderer: blocks (default, one file per block), tiered (budgeted files), or legacy (byte-identical to pre-#22)",
+      );
+      expect(defaultOf(SETTING_SPECS["memory.layout"]!)).toBe("blocks");
     });
     it("lists the same keys in the same order", () => {
       expect(Object.keys(legacySpecs)).toEqual(pin.specs.map(([key]) => key));

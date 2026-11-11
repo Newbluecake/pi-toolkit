@@ -197,18 +197,74 @@ describe("GET /api/events", () => {
     expect(bogus.conn.events.some((e) => e.event === "resync")).toBe(true);
   });
 
-  it("fleet is cached and re-sent to new clients; dropped on agent_down", async () => {
-    const runs = [
-      { runId: "r1", status: "running", phaseLabel: "x", elapsedMs: 1, phaseMs: 1, highlight: "none", terminal: false },
-    ];
-    deps.emit({ type: "fleet", agentKey: "a1", runs: runs as never });
+  const runs = [
+    { runId: "r1", status: "running", phaseLabel: "x", elapsedMs: 1, phaseMs: 1, highlight: "none", terminal: false },
+  ];
+
+  it("fleet runs and omitted are cached and re-sent to new clients; both are dropped on agent_down", async () => {
+    const omitted = { active: 2, terminal: 3 };
+    deps.emit({ type: "fleet", agentKey: "a1", runs: runs as never, omitted });
     const late = await events();
     const fleet = await late.conn.waitFor((e) => e.event === "fleet");
-    expect(fleet.data).toEqual({ agentKey: "a1", runs });
+    expect(fleet.data).toEqual({ agentKey: "a1", runs, omitted });
+    expect(Object.keys(fleet.data)).toEqual(["agentKey", "runs", "omitted"]);
     deps.emit({ type: "agent_down", agentKey: "a1", reason: "quit" });
     await late.conn.waitFor((e) => e.event === "agent_down");
     const later = await events();
-    await new Promise((r) => setTimeout(r, 30));
+    deps.emit({ type: "agent_stale", agentKey: "a2" });
+    await later.conn.waitFor((e) => e.event === "agent_stale");
+    expect(later.conn.events.some((e) => e.event === "fleet")).toBe(false);
+  });
+
+  it("fleet live/replay payloads share omitted and key order; an absent update clears it and restores exact legacy JSON", async () => {
+    const first = await events();
+    const omitted = { active: 1, terminal: 4 };
+    deps.emit({ type: "fleet", agentKey: "a1", runs: runs as never, omitted });
+    const live = await first.conn.waitFor((e) => e.event === "fleet");
+    expect(JSON.stringify(live.data)).toBe(JSON.stringify({ agentKey: "a1", runs, omitted }));
+
+    const replay = await events();
+    const replayed = await replay.conn.waitFor((e) => e.event === "fleet");
+    expect(JSON.stringify(replayed.data)).toBe(JSON.stringify(live.data));
+
+    const nextRuns = [
+      {
+        runId: "r2",
+        status: "completed",
+        phaseLabel: "done",
+        elapsedMs: 2,
+        phaseMs: 2,
+        highlight: "none",
+        terminal: true,
+      },
+    ];
+    deps.emit({ type: "fleet", agentKey: "a1", runs: nextRuns as never });
+    const cleared = await first.conn.waitFor((e, all) => e.event === "fleet" && all.indexOf(e) > all.indexOf(live));
+    const legacyJson = JSON.stringify({ agentKey: "a1", runs: nextRuns });
+    expect(JSON.stringify(cleared.data)).toBe(legacyJson);
+    expect(cleared.data).not.toHaveProperty("omitted");
+
+    const afterClear = await events();
+    const replayedClear = await afterClear.conn.waitFor((e) => e.event === "fleet");
+    expect(JSON.stringify(replayedClear.data)).toBe(legacyJson);
+    expect(replayedClear.data).not.toHaveProperty("omitted");
+  });
+
+  it("agent_removed clears cached fleet runs and omitted before a later direct replay", async () => {
+    const first = await events();
+    deps.emit({
+      type: "fleet",
+      agentKey: "a1",
+      runs: runs as never,
+      omitted: { active: 0, terminal: 5 },
+    });
+    await first.conn.waitFor((e) => e.event === "fleet");
+    deps.emit({ type: "agent_removed", agentKey: "a1" });
+    await first.conn.waitFor((e) => e.event === "agent_removed");
+
+    const later = await events();
+    deps.emit({ type: "agent_stale", agentKey: "a2" });
+    await later.conn.waitFor((e) => e.event === "agent_stale");
     expect(later.conn.events.some((e) => e.event === "fleet")).toBe(false);
   });
 });

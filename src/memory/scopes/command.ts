@@ -1,4 +1,5 @@
 /** Optional /mem subrouter; never registers or changes the original command. */
+import { withScopedMessage } from "./error-messages.js";
 import { scopedFailure, scopedReadGate, scopedView, type ScopedSurfaceDeps } from "./tool.js";
 import { sameSessionOwner, type SessionCommandRegistry, type SessionCommandTarget } from "./session-command.js";
 import type { SessionMemoryWrite } from "./types.js";
@@ -83,7 +84,7 @@ export function createScopedMemoryCommand(deps: ScopedCommandDeps) {
       if (!match) return { handled: false };
       const scope = match[1] as "session" | "hub",
         rest = match[2] ?? "list";
-      const reply = (result: unknown) => ({ handled: true, result });
+      const reply = (result: unknown) => ({ handled: true, result: withScopedMessage(result) });
       const gate = scopedReadGate(deps, scope);
       if (gate) return reply(scopedFailure(gate));
       if (requestSignal?.aborted) return reply(scopedFailure("E_STALE_SESSION"));

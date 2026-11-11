@@ -34,7 +34,7 @@ const SESSION_REPLACING: ReadonlySet<string> = new Set(["new", "clear", "resume"
  * Commands with an i18n description (`control.cmdDesc.<name>`, zh+en parity) and a tile icon;
  * every other command falls back to `control.cmdDesc.generic` + the alert glyph. The keys mirror
  * every `confirm`-capable command in `src/web-hub/agent/command-policy.ts` (builtins new/reload/
- * compact/resume-by-override; pi-toolkit table agent/mem/cache-ttl/tasklist/goal/task/watch/
+ * compact/resume-by-override; pi-toolkit table agent/mem/cache-ttl/tasklist/task/watch/
  * feishu-test/clear; extension-fallback topic-switch/webhub).
  */
 const KNOWN: Readonly<Record<string, IconName>> = {
@@ -48,7 +48,6 @@ const KNOWN: Readonly<Record<string, IconName>> = {
   "cache-ttl": "clock",
   mem: "inbox",
   webhub: "monitor",
-  goal: "radio",
   "topic-switch": "swap",
   watch: "eye",
   task: "bot",

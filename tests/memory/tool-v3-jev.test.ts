@@ -11,6 +11,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_SETTINGS } from "../../src/config/settings.js";
 import { memoryDirFor, type MemoryPaths } from "../../src/memory/paths.js";
+import { memoryV4Surface } from "../../src/memory/unified/surface.js";
 import { createMemoryToolV3 } from "../../src/memory/tool-v3.js";
 import { createJevWritePort } from "../../src/memory/jev/write-port.js";
 import { EntryIndex } from "../../src/memory/jev/entries.js";
@@ -434,6 +435,26 @@ describe("v3 jev: relation verdicts (§5.4 — P5a executes)", () => {
 // ── 修复轮：checkInline 在端口开启时对服务端键保持 v3 忽略语义 ──
 
 describe("v3 jev fix-round", () => {
+  test("section repair passes the real Jev inline guard without triggering classification or relations", async () => {
+    const fx = fixture([{ id: "gen.001", section: "中".repeat(41), body: "- fact", allowOversize: true }]);
+    const tool = makeTool(fx);
+    const before = block(fx, "gen.001");
+    const reply = await exec(
+      tool,
+      {
+        command: "update",
+        path: "gen.001",
+        rev: before.rev,
+        text: '- fact <!-- mem section="short group" -->',
+      },
+      ctx(fx.cwd, { registry }),
+    );
+    expect(reply).toContain("updated gen.001");
+    expect(block(fx, "gen.001").meta.section).toBe("short group");
+    expect(block(fx, "gen.001").meta.authority).toBe(before.meta.authority);
+    expect(block(fx, "gen.001").meta.supersededBy).toBeUndefined();
+    expect(fx.asks).toHaveLength(0);
+  });
   test("server-owned keys pass checkInline under a wired port (tokens stripped, real errors kept)", async () => {
     const fx = fixture([{ id: "gen.001", authority: "agent", body: "- fact" }]);
     const tool = makeTool(fx);
@@ -463,7 +484,7 @@ describe("v3 jev fix-round", () => {
 // ── 修复轮：真实 wireMemory layout:blocks + jev on 的生产互斥证明 ──
 
 describe("production wireMemory with layout:blocks wires jev (fix round)", () => {
-  test("v3 registers with the JEV description; tagging + g1 + sidecar all reachable through the real assembly", async () => {
+  test("v4 registers with the JEV description; tagging + g1 + sidecar all reachable through the real assembly", async () => {
     clearHealthTable();
     const tmp = mkdtempSync(join(tmpdir(), "mem-blocks-prod-jev-"));
     tmpRoots.push(tmp);
@@ -534,9 +555,9 @@ describe("production wireMemory with layout:blocks wires jev (fix round)", () =>
       secureDomainKind: "plain",
     });
     // 1. the PRODUCTION layout:blocks activation wires jev (config fix) and
-    //    registers the v3 tool with the JEV description variant
+    //    registers the unified v4 tool with the JEV description variant
     const tool = tools.get("memory")!;
-    expect(tool.description).toBe(MEMORY_TOOL_V3_TEXT_JEV.description);
+    expect(tool.description).toBe(memoryV4Surface({ jev: true }).description);
     // 2. a user-rule create through the real tool: tagging + g1 in ONE
     //    askAll, and the verdict against the old agent block
     const result = (await tool.execute(

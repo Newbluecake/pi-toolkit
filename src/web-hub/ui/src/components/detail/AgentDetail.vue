@@ -63,7 +63,6 @@ import OutdatedReloadBanner from "./OutdatedReloadBanner.vue";
 import NoticeBanner from "../shell/NoticeBanner.vue";
 import FleetSummaryBar from "../fleet/FleetSummaryBar.vue";
 import { useActivityRail } from "../../composables/useActivityRail.js";
-import { useMedia } from "../../composables/useMedia.js";
 import type { FleetRowWire } from "@protocol/messages.js";
 import FleetDrawer, { useFleetDrawerMode, useFleetDrawerOpen } from "../drawer/FleetDrawer.vue";
 
@@ -529,13 +528,19 @@ const dockCtlProps = computed(() => ({
 // --- fleet drawer (fleet-drawer plan v2 §6.1/§6.2 — F6) --------------------------------------
 
 const drawerMode = useFleetDrawerMode(window).mode;
-const { open: pinnedOpen } = useFleetDrawerOpen(drawerMode);
-const hasFleet = computed(() => props.agent.fleet.length > 0);
+const { open: persistedOpen } = useFleetDrawerOpen(drawerMode);
+const hasFleetOmitted = computed(() => {
+  const omitted = props.agent.fleetOmitted;
+  return (omitted?.active ?? 0) > 0 || (omitted?.terminal ?? 0) > 0;
+});
+// A byte-bounded frame can contain no rows while still reporting omissions. Keep both the
+// summary entry and drawer mounted so those counts remain visible and the empty tree is reachable.
+const hasFleet = computed(() => props.agent.fleet.length > 0 || hasFleetOmitted.value);
 // 2026-10-15 bash→fleet 迁移:后台 bash 任务住在抽屉树视图的「bash」分组里 —— 无子 agent
 // 但有 bash 任务时抽屉同样挂载(否则分组不可达)。
 const hasBashJobs = computed(() => bashJobsOf(props.agent) !== undefined);
 const selectedRunId = computed(() => props.agent.runSel ?? null);
-// Only rail.open with real content may allocate a docked column. Peek never does.
+// Only an open drawer with real content allocates a docked column.
 
 /** 退选正在看的 run(「没人看就不推」,§2;transport 拆除在 useHub 里)。所有关闭入口统一
  * 走这个语义 —— Esc/外点/关闭按钮(onCloseDrawer)和摘要行按钮的关方向(onToggleDrawer)
@@ -545,37 +550,25 @@ function deselectRun(): void {
   if (typeof props.agent.runSel === "string") hub?.selectRun?.(props.agent.key, null);
 }
 
-const hoverFine = useMedia(window, "(hover: hover) and (pointer: fine)").matches;
 const rail = useActivityRail({
   mode: drawerMode,
-  pinnedOpen,
-  hoverFine,
+  drawerOpen: persistedOpen,
   hasAgent: computed(() => hasFleet.value || selectedRunId.value !== null),
   hasBash: hasBashJobs,
   deselectRun,
 });
 const drawerOpen = rail.open;
 const drawerPanel = rail.panel;
-const effectiveMode = rail.effectiveMode;
-const peeking = rail.peeking;
 const openOrigin = rail.origin;
 const trigger = rail.trigger;
-const canPeek = rail.canPeek;
 
-// --- Task60 (docs/dev/activity-rail/compact-panel-plan.md §2.1/§3): 单实例入口双宿主 -------
-// 零预留列后，手动/锁定/fullscreen 展开的入口进 FleetDrawer 公共头部（正常文档流）；
-// hover/held 及收起态留在浮动宿主。唯一一份 FleetSummaryBar 用局部 Teleport 在两个
-// 稳定 HTMLElement 之间移动 —— 不复制组件、不 Teleport 到 body、不用全局 selector 寻址。
-/** peek 或 held 都必须保持浮动 DOM 与几何：hover 打开时不移走 hover 目标（避免振荡），
- * held(pointerdown 提升后) 不在 click 落地前移动按钮（避免丢 click）。held 时 peeking
- * 已为 false，所以不能只看 peeking/mode —— 这正是独立派生 floating 的原因。 */
-const panelFloating = computed(() => peeking.value || rail.held.value);
+// One rail instance moves between the closed floating host and the open drawer header.
 const floatingHostEl = ref<HTMLElement | null>(null);
 const headerHostEl = ref<HTMLElement | null>(null);
 /** 首选宿主；header 宿主 ref 未就绪时返回 null ⇒ Teleport disabled，内容就地渲染在
  * 浮动宿主内（Teleport 本身在浮动宿主里），nextTick 后再迁移，绝不向不存在的目标传送。 */
 const railTarget = computed<HTMLElement | null>(() => {
-  if (panelFloating.value || !drawerOpen.value) return floatingHostEl.value;
+  if (!drawerOpen.value) return floatingHostEl.value;
   return headerHostEl.value;
 });
 // Teleport 移动可能使浏览器丢焦点：仅当移动前焦点在被移动的 rail 按钮内，且没有更高
@@ -605,8 +598,7 @@ function onCloseDrawer(): void {
     aria-labelledby="detail-title"
     :data-drawer="drawerMode"
     :data-drawer-open="drawerOpen || undefined"
-    :data-docked-open="(drawerOpen && effectiveMode === 'docked') || undefined"
-    :data-peek-open="peeking || undefined"
+    :data-docked-open="(drawerOpen && drawerMode === 'docked') || undefined"
   >
     <DetailHeader :agent="agent" :narrow="narrow" @back="emit('back')" />
 
@@ -673,39 +665,29 @@ function onCloseDrawer(): void {
           <FleetSummaryBar
             :rows="agent.fleet as unknown as readonly FleetRowWire[]"
             :bash-jobs="bashJobs"
+            :omitted="agent.fleetOmitted"
             :open="drawerOpen"
             :panel="drawerPanel"
             @toggle-panel="rail.toggle"
-            @peek-panel="rail.enter"
-            @peek-end="rail.leave"
-            @peek-keep="rail.keep"
           />
         </Teleport>
       </div>
       <!-- §6.1: 抽屉在 CONTROL_CTX 的 provide 作用域内(原为树上的行内动作,2026-10-17 已移除);
-           v-if 按方案冻结:有 fleet 行或有选中 run 才挂载;`id="fleet-drawer"` 在
+           有 fleet 行、正数 omitted 或有选中 run 才挂载;`id="fleet-drawer"` 在
            FleetDrawer 根元素上(§6.1 的锚点,FleetSummaryBar 的 aria-controls 指它)。 -->
       <FleetDrawer
         v-if="hasFleet || hasBashJobs || selectedRunId !== null"
         :agent="agent"
         :now="now"
-        :mode="effectiveMode"
+        :mode="drawerMode"
         :open="drawerOpen"
         :panel="drawerPanel"
-        :peeking="peeking"
-        :can-peek="canPeek"
         :open-origin="openOrigin"
         :trigger="trigger"
-        :floating="panelFloating"
-        @peek-keep="rail.keep"
-        @peek-end="rail.leave"
-        @promote="rail.promote"
-        @interaction-end="rail.releaseInteraction"
-        @toggle-pin="rail.togglePin"
         @close="onCloseDrawer"
+        @intent="rail.cancelRestore"
       >
-        <!-- 公共头部的常驻 header 宿主（在 tree/run 互斥分支之前，不随分支切换销毁）；
-             生产必传 floating，组件内仅局部扩展 props 类型，不改 contracts。 -->
+        <!-- 公共头部宿主在 tree/run 分支切换间保持不变。 -->
         <template #activity>
           <div ref="headerHostEl" data-rail-host="header"></div>
         </template>

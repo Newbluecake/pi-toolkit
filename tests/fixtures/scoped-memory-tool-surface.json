@@ -60,6 +60,7 @@
         "type": "string"
       },
       "authority": {
+        "description": "Only used for session scope; ignored for hub scope, where writes and deletes always require exact-content confirmation.",
         "anyOf": [
           {
             "const": "agent",

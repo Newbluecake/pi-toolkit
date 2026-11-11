@@ -14,32 +14,48 @@ const props = defineProps<FleetSummaryBarProps>();
 const emit = defineEmits<FleetSummaryBarEmits>();
 const { t } = useI18n();
 const summary = computed(() => fleetSummary(props.rows));
+const omittedActive = computed(() => {
+  const n = props.omitted?.active;
+  return typeof n === "number" && n > 0 ? n : 0;
+});
+const omittedTerminal = computed(() => {
+  const n = props.omitted?.terminal;
+  return typeof n === "number" && n > 0 ? n : 0;
+});
+const hasOmitted = computed(() => omittedActive.value > 0 || omittedTerminal.value > 0);
+const hasAgent = computed(() => summary.value.total > 0 || hasOmitted.value);
 const buttons = computed(() => {
   const bash = props.bashJobs === undefined ? null : summaryCounts(props.bashJobs);
+  const agentLabel = [
+    t("fleet.panelTitle"),
+    t("fleet.running", { n: summary.value.running }),
+    t(hasOmitted.value ? "fleet.listedCost" : "fleet.totalCost", {
+      n: summary.value.total,
+      cost: formatUsd(summary.value.costUsd),
+    }),
+  ];
+  if (omittedActive.value > 0) agentLabel.push(t("fleet.omittedActive", { n: omittedActive.value }));
+  if (omittedTerminal.value > 0) agentLabel.push(t("fleet.omittedTerminal", { n: omittedTerminal.value }));
   return [
     {
       kind: "agent" as const,
       icon: "bot" as const,
       running: summary.value.running,
-      total: summary.value.total,
-      label: [
-        t("fleet.panelTitle"),
-        t("fleet.running", { n: summary.value.running }),
-        t("fleet.totalCost", { n: summary.value.total, cost: formatUsd(summary.value.costUsd) }),
-      ].join(" · "),
+      available: hasAgent.value,
+      label: agentLabel.join(" · "),
     },
     {
       kind: "bash" as const,
       icon: "terminal" as const,
       running: bash?.running ?? 0,
-      total: bash === null ? 0 : bash.running + bash.done + bash.failed,
+      available: bash !== null && bash.running + bash.done + bash.failed > 0,
       label: [
         t("fleet.commandsTitle"),
         t("fleet.running", { n: bash?.running ?? 0 }),
         t("detail.bashJobsDone", { n: (bash?.done ?? 0) + (bash?.failed ?? 0) }),
       ].join(" · "),
     },
-  ].filter((b) => b.total > 0);
+  ].filter((b) => b.available);
 });
 function toggle(kind: "agent" | "bash", event: MouseEvent): void {
   emit("toggle-panel", kind, event.detail === 0 ? "keyboard" : "pointer", event.currentTarget as HTMLElement);
@@ -58,12 +74,9 @@ function toggle(kind: "agent" | "bash", event: MouseEvent): void {
       :data-panel="button.kind"
       :data-active="button.running > 0 || undefined"
       aria-controls="fleet-drawer"
-      :aria-expanded="open && (panel ?? (summary.total > 0 ? 'agent' : 'bash')) === button.kind"
+      :aria-expanded="open && (panel ?? (hasAgent ? 'agent' : 'bash')) === button.kind"
       :aria-label="button.label"
       @click="toggle(button.kind, $event)"
-      @pointerenter="emit('peek-panel', button.kind, $event)"
-      @pointerleave="emit('peek-end')"
-      @pointermove="emit('peek-keep')"
     >
       <AppIcon :name="button.icon" class="icon fab-icon" />
       <span v-if="button.running > 0" class="pill fab-count" data-st="running">

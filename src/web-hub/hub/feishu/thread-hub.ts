@@ -279,7 +279,11 @@ export function createFeishuThreads(deps: FeishuThreadsDeps) {
   const statusThreads = new Map<string, ThreadStatusSlotWire[]>();
   /** agentKeys we have EVER seen a threads slot from (post admission enforces only these). */
   const threadsCapSeen = new Set<string>();
-  const postSeen = new Map<string, number>();
+  /** One ledger owns post dedup: only confirmed durable enqueue is `queued`. Pending and
+   * unknown entries are pinned (no TTL/eviction), since losing one could resend an effective
+   * post. At capacity new work fails closed; known queued entries keep the §7.3 10m window.
+   * Instance/restart loss remains the documented §7.3 boundary. */
+  const postSeen = new Map<string, { at: number; state: "pending" | "queued" | "unknown" }>();
   const postBuckets = new Map<string, { min: number[]; hour: number[] }>();
   /** §4.5: per-h rebind buckets (3/min + 20/h) — a SEPARATE Map from postBuckets. */
   const rebindBuckets = new Map<string, { min: number[]; hour: number[] }>();
@@ -461,8 +465,7 @@ export function createFeishuThreads(deps: FeishuThreadsDeps) {
 
   // --------------------------------------------------------------- thr_req{op:"post"} (§6.8)
 
-  function rateLimited(h: string): boolean {
-    const now = clock.now();
+  function rateLimited(h: string, now: number): boolean {
     const bucket = postBuckets.get(h) ?? { min: [], hour: [] };
     bucket.min = bucket.min.filter((t) => now - t < 60_000);
     bucket.hour = bucket.hour.filter((t) => now - t < 3_600_000);
@@ -475,13 +478,14 @@ export function createFeishuThreads(deps: FeishuThreadsDeps) {
     return false;
   }
 
-  function markPostSeen(postId: string): boolean {
-    const now = clock.now();
-    for (const [id, ts] of postSeen) if (now - ts > THREAD_POST_DEDUP_MS) postSeen.delete(id);
-    if (postSeen.has(postId)) return false;
-    if (postSeen.size >= 256) postSeen.delete(postSeen.keys().next().value!);
-    postSeen.set(postId, now);
-    return true;
+  /** Only a proven pre-effect refusal releases the reservation. Unknowns keep their quota. */
+  function refundPostRate(h: string, at: number): void {
+    const bucket = postBuckets.get(h);
+    if (bucket === undefined) return;
+    for (const times of [bucket.min, bucket.hour]) {
+      const index = times.indexOf(at);
+      if (index !== -1) times.splice(index, 1);
+    }
   }
 
   async function post(input: {
@@ -492,7 +496,16 @@ export function createFeishuThreads(deps: FeishuThreadsDeps) {
     postId: string;
     text: string;
   }): Promise<FeishuThrOpResult> {
-    if (!markPostSeen(input.postId)) return { ok: true, data: { queued: true } }; // §7.3 dup ⇒ idempotent ok
+    const now = clock.now();
+    for (const [id, entry] of postSeen)
+      if (entry.state === "queued" && now - entry.at > THREAD_POST_DEDUP_MS) postSeen.delete(id);
+    const seen = postSeen.get(input.postId);
+    if (seen !== undefined)
+      return seen.state === "queued"
+        ? { ok: true, data: { queued: true } }
+        : { ok: false, code: seen.state === "pending" ? "E_THR_PENDING" : "E_THR_STATE", effect: "unknown" };
+    // Never evict unresolved posts (nor queued posts still inside the dedup window).
+    if (postSeen.size >= 256) return { ok: false, code: "E_THR_STATE", effect: "none" };
     const secret = deps.installation()?.installSecret;
     if (secret === undefined) return { ok: false, code: "E_THR_STATE", effect: "none" };
     const binding = deps.state.bindings.list().find((b) => feishuThreadHandle(secret, b.key) === input.h);
@@ -509,23 +522,50 @@ export function createFeishuThreads(deps: FeishuThreadsDeps) {
       if (slot === undefined || !slot.subs.some((r) => r.runId === input.by.runId))
         return { ok: false, code: "E_THR_UNKNOWN", effect: "none" };
     }
-    if (rateLimited(input.h)) return { ok: false, code: "E_THR_RATE", effect: "none" };
     const last = deps.state.requests
       .list()
       .filter((r) => r.bindingKey === binding.key && r.state !== "merged" && r.threadId === binding.threadId)
       .sort((a, b) => b.createdAt - a.createdAt)[0];
     if (last === undefined) return { ok: false, code: "E_THR_UNKNOWN", effect: "none" };
-    const result = await deps.enqueueNotice({
-      target: deps.targetFor(last),
-      message: renderNotice({
-        label: `${deps.label(binding.sessionId)} · @${input.by.label}（run_id: ${input.by.runId}）`,
-        text: input.text,
-      }),
-      key: `thr-post-${input.postId}`,
-      laneKey: binding.chatId,
-    });
-    if (!result.ok) return { ok: false, code: "E_THR_STATE", effect: "none" };
-    return { ok: true, data: { queued: true } };
+    let notice: EnqueueNoticeInput;
+    try {
+      // Pure preparation is outside the side-effect boundary. A failure here cannot enqueue.
+      notice = {
+        target: deps.targetFor(last),
+        message: renderNotice({
+          label: `${deps.label(binding.sessionId)} · @${input.by.label}（run_id: ${input.by.runId}）`,
+          text: input.text,
+        }),
+        key: `thr-post-${input.postId}`,
+        laneKey: binding.chatId,
+      };
+    } catch {
+      return { ok: false, code: "E_THR_STATE", effect: "none" };
+    }
+    if (rateLimited(input.h, now)) return { ok: false, code: "E_THR_RATE", effect: "none" };
+    const entry: { at: number; state: "pending" | "queued" | "unknown" } = { at: now, state: "pending" };
+    postSeen.set(input.postId, entry); // synchronous claim BEFORE invoking enqueue; duplicates cannot race it
+    try {
+      const result = await deps.enqueueNotice(notice);
+      if (!result.ok && result.refused !== "unavailable") {
+        // outbox.ts explicit refusals validate/rollback before commit/pump. `unavailable`
+        // is DIFFERENT: enqueueNotice's outer catch can hide a throw AFTER store.add/index.
+        postSeen.delete(input.postId);
+        refundPostRate(input.h, now);
+        return { ok: false, code: "E_THR_STATE", effect: "none" };
+      }
+      if (result.ok && result.durable) {
+        entry.at = clock.now(); // the dedup window begins at confirmation, not while pending
+        entry.state = "queued";
+        return { ok: true, data: { queued: true } };
+      }
+      // durable:false already has in-memory intent and may later send. Never refund/resubmit.
+    } catch {
+      // A thrown enqueue port can fail before OR after committing/sending. Catch is not proof
+      // of zero effect; retain the sole ledger entry, not a fabricated queued receipt.
+    }
+    entry.state = "unknown";
+    return { ok: false, code: "E_THR_STATE", effect: "unknown" };
   }
 
   // --------------------------------------------------------------- thr_req{op:"rebind"/"acquire"} (rebind-plan r3 §4.4–§4.6, P1)

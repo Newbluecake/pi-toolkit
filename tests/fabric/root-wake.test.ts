@@ -373,10 +373,10 @@ describe("RootWakeController §6.2 full lifecycle table", () => {
     expect(h.level.root).toBe(1); // no turn hop for a denied start
   });
 
-  it("only proven interactive/rpc/browser attribution hands over; reinjection/goal/reload do not", () => {
+  it("only proven interactive/rpc/browser attribution hands over; reinjection/machine/reload do not", () => {
     const h = harness();
     h.dispatch();
-    for (const text of ["reinjected", "/goal continue", "/agent reload fire"])
+    for (const text of ["reinjected", "machine continue", "/agent reload fire"])
       h.controller.input({ source: "extension", text });
     expect(h.controller.state).toBe("starting");
     h.controller.input({ source: "extension", text: "not browser" }, () => undefined);
@@ -677,7 +677,6 @@ describe("dispatch guard/downgrade seam (§4.5, X4 handles only-delivery)", () =
     ["wake_disabled", { wakeEnabled: false }],
     ["controller_disabled", { rootRunMaxS: 0 }],
     ["receiver_policy", { receive: () => "deliver" as const }],
-    ["goal", { goalRunning: () => true }],
     ["inbound_wake_rate", { inboundWakeAvailable: () => false }],
   ] as const)("%s never dispatches a run", (reason, overrides) => {
     const h = harness({ overrides });
@@ -776,12 +775,8 @@ describe("RX5 solicited return wakes", () => {
     replacement.dispose();
   });
 
-  it("solicited still obeys wake quota, goal and orphan authorization", () => {
-    for (const overrides of [
-      { inboundWakeAvailable: () => false },
-      { goalRunning: () => true },
-      { wakeEnabled: false },
-    ]) {
+  it("solicited still obeys wake quota and orphan authorization", () => {
+    for (const overrides of [{ inboundWakeAvailable: () => false }, { wakeEnabled: false }]) {
       const h = harness({ overrides });
       const r = h.controller.dispatch({ ...request(), solicited: true, returnLevel: 0 });
       expect(r.dispatched).toBe(false);

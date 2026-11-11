@@ -92,6 +92,6 @@ function parseTodoNudgeSettings(input: unknown, defaults: TodoNudgeSettings): To
 
 export const DEFAULT_TODO_SETTINGS: TodoSettings = {
   enabled: true,
-  nudge: { enabled: true, graceTurns: 2, fallbackTurns: 20, cooldownTurns: 8 },
+  nudge: { enabled: true, graceTurns: 2, fallbackTurns: 20, cooldownTurns: 3 },
   archive: { onCompact: true, afterTurns: 30 },
 };

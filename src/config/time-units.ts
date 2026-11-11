@@ -27,11 +27,13 @@
 
 /** Storage/display key for an internal millisecond path: `budget.idleMs` → `budget.idleS`. */
 export function secondsKeyOf(msKey: string): string {
+  if (/^memory\.incremental\.(quiet|idle|cooldown)Ms$/.test(msKey)) return `${msKey.slice(0, -2)}Sec`;
   return msKey.endsWith("Ms") ? `${msKey.slice(0, -2)}S` : msKey;
 }
 
 /** Inverse of {@link secondsKeyOf}: `budget.idleS` → `budget.idleMs`. */
 export function msKeyOf(secondsKey: string): string {
+  if (/^memory\.incremental\.(quiet|idle|cooldown)Sec$/.test(secondsKey)) return `${secondsKey.slice(0, -3)}Ms`;
   return secondsKey.endsWith("S") && !secondsKey.endsWith("Ms") ? `${secondsKey.slice(0, -1)}Ms` : secondsKey;
 }
 
@@ -109,7 +111,7 @@ function copyBranch(root: Rec, segments: readonly string[]): Rec | undefined {
 function splitTimePath(msPath: string): { container: string[]; msLeaf: string; secondsLeaf: string } {
   const segments = msPath.split(".");
   const msLeaf = segments[segments.length - 1]!;
-  return { container: segments.slice(0, -1), msLeaf, secondsLeaf: secondsKeyOf(msLeaf) };
+  return { container: segments.slice(0, -1), msLeaf, secondsLeaf: secondsKeyOf(msPath).split(".").at(-1)! };
 }
 
 /**
@@ -138,7 +140,11 @@ export function normalizeTimeUnits(raw: Rec, msPaths: readonly string[]): Rec {
       else delete node[msLeaf];
       continue;
     }
-    if (Object.hasOwn(node, msLeaf) && msToWholeSeconds(node[msLeaf]) === undefined) delete node[msLeaf];
+    if (Object.hasOwn(node, msLeaf) && msToWholeSeconds(node[msLeaf]) === undefined) {
+      const legacy = node[msLeaf];
+      if (!(secondsLeaf.endsWith("Sec") && typeof legacy === "number" && Number.isFinite(legacy) && legacy >= 0))
+        delete node[msLeaf];
+    }
   }
   return out;
 }
@@ -177,6 +183,16 @@ export function migrateTimeUnitsToSeconds(raw: Rec, msPaths: readonly string[]):
     if (!node || !Object.hasOwn(node, msLeaf)) continue;
     const legacy = node[msLeaf];
     const secondsPath = secondsKeyOf(msPath);
+    // Preserve existing sub-second incremental values exactly; the editor only accepts whole seconds.
+    if (
+      !Object.hasOwn(node, secondsLeaf) &&
+      secondsLeaf.endsWith("Sec") &&
+      typeof legacy === "number" &&
+      Number.isFinite(legacy) &&
+      legacy >= 0 &&
+      msToWholeSeconds(legacy) === undefined
+    )
+      continue;
     delete node[msLeaf];
     changed = true;
     if (Object.hasOwn(node, secondsLeaf)) {

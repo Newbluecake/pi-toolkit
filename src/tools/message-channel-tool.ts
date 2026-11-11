@@ -1,6 +1,7 @@
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "@sinclair/typebox";
 import type { XsSender } from "../fabric/xs/sender.js";
+import { xsNoneFailureHint } from "./message-session-tool.js";
 import type { XsBroadcastOutcome } from "../fabric/xs/types-channel.js";
 
 /**
@@ -57,13 +58,33 @@ export function createMessageChannelTool(deps: MessageChannelToolDeps): ToolDefi
     description: DESCRIPTION,
     parameters: MessageChannelParams,
     async execute(_toolCallId, params, signal) {
-      const outcome: XsBroadcastOutcome = await deps.sender.broadcast({
-        ...(signal !== undefined ? { signal } : {}),
-        channel: params.channel,
-        text: params.text,
-        ...(params.wake !== undefined ? { wake: params.wake } : {}),
-      });
-      const hint = outcome.effect === "unknown" ? `\n${XS_BROADCAST_UNKNOWN_HINT}` : "";
+      let outcome: XsBroadcastOutcome;
+      try {
+        outcome = await deps.sender.broadcast({
+          ...(signal !== undefined ? { signal } : {}),
+          channel: params.channel,
+          text: params.text,
+          ...(params.wake !== undefined ? { wake: params.wake } : {}),
+        });
+      } catch {
+        throw new Error(
+          "message_channel: unexpected failure — 无法确认广播效果，可能已部分投递；不要重发整条广播，请用户核对原结果。",
+        );
+      }
+      let hint = outcome.effect === "unknown" ? `\n${XS_BROADCAST_UNKNOWN_HINT}` : "";
+      if (outcome.effect === "none") {
+        const advice =
+          outcome.status === "default_channel"
+            ? "#default 不支持广播；请用 list_sessions 确认本次意图中的精确目标，再单独 message_session，不要猜测收件人。"
+            : outcome.status === "bad_channel"
+              ? "频道名无效、保留或不在当前链路；核对原频道名及 /fabric status。请用户确认成员资格，不要自行 join 或换频道绕过。"
+              : outcome.status === "fanout_too_large"
+                ? "收件人数超过广播上限；停止本次广播，请用户缩小明确的收件范围，不要拆批绕过上限。"
+                : outcome.reason === "no_recipients"
+                  ? "当前频道没有可投递收件人；用 list_sessions 核对可见目标，不要猜测收件人或自行加入其他频道。"
+                  : xsNoneFailureHint(outcome);
+        if (advice) hint += `\n${advice}`;
+      }
       return { content: [{ type: "text", text: JSON.stringify(outcome) + hint }], details: outcome };
     },
   };

@@ -260,6 +260,22 @@ describe("inline authority comment (§4.2)", () => {
     expect(meta.until).toBe("发版结束");
   });
 
+  it("accepts bare user/lesson, never authority=, in both strict and blocks write modes", () => {
+    for (const lenientServerOwned of [false, true]) {
+      expect(parseInlineMeta("<!-- mem user -->", { lenientServerOwned })).toMatchObject({
+        meta: { authority: "user" },
+        errors: [],
+      });
+      expect(parseInlineMeta("<!-- mem lesson -->", { lenientServerOwned })).toMatchObject({
+        meta: { authority: "lesson" },
+        errors: [],
+      });
+      const invalid = parseInlineMeta("<!-- mem authority=user -->", { lenientServerOwned });
+      expect(invalid.errors).toEqual(['unknown key "authority"']);
+      expect(invalid.meta.authority).toBeUndefined();
+    }
+  });
+
   it("unknown key, duplicate key, bad expires and >200B all land in errors (never thrown)", () => {
     expect(parseInlineMeta("x <!-- mem bogus=1 -->").errors[0]).toContain("unknown key");
     expect(parseInlineMeta("x <!-- mem user user -->").errors[0]).toContain("duplicate key");

@@ -9,6 +9,7 @@ import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { createMemCommand } from "../../src/memory/command.js";
 import { forgetWorktreeOrigin, recordWorktreeOrigin } from "../../src/core/worktree-origin.js";
 import { memoryDirFor, toSlug, type MemoryPaths } from "../../src/memory/paths.js";
+import { parseMemorySettings } from "../../src/memory/settings.js";
 import { DRIFT_HEADER } from "../../src/memory/store.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -183,7 +184,35 @@ describe("/mem getArgumentCompletions", () => {
     const fx = fixture();
     const cmd = createMemCommand({ paths: fx.paths });
     const items = cmd.getArgumentCompletions("")!;
-    expect(items.map((i) => i.value).sort()).toEqual(["doctor", "import", "init", "list", "path", "restore", "tidy"]);
+    expect(items.map((i) => i.value).sort()).toEqual(["doctor", "import", "init", "list", "path", "restore"]);
+  });
+
+  test("layout-specific menu exposes block restore and labels maintenance", async () => {
+    const fx = fixture();
+    const blocks = createMemCommand({ paths: fx.paths, settings: parseMemorySettings({ layout: "blocks" }) });
+    const tiered = createMemCommand({ paths: fx.paths, settings: parseMemorySettings({ layout: "tiered" }) });
+    expect(blocks.description).not.toContain("tidy");
+    expect(blocks.description).toContain("restore --block");
+    expect(blocks.description).toContain("维护: /mem migrate");
+    expect(blocks.getArgumentCompletions("").map((v) => v.value)).not.toContain("tidy");
+    expect(blocks.getArgumentCompletions("").find((v) => v.value === "restore")?.description).toBe(
+      "恢复归档块 [--block]",
+    );
+    expect(tiered.getArgumentCompletions("").find((v) => v.value === "restore")?.description).toBe(
+      "恢复回收项 [--trash]",
+    );
+    expect(blocks.getArgumentCompletions("tidy ")).toEqual([]);
+    expect(blocks.getArgumentCompletions("restore ").map((v) => v.value)).toContain("restore --block");
+    expect(tiered.description).not.toContain("tidy");
+    expect(tiered.description).not.toContain("restore --block");
+    expect(tiered.getArgumentCompletions("restore ").map((v) => v.value)).not.toContain("restore --block");
+    expect(tiered.getArgumentCompletions("tidy --break")).toEqual([]);
+    const dir = join(memoryDirFor(fx.cwd, fx.paths), "blocks");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, ".layout.json"), "{}");
+    const { ctx, notifications } = fakeCtx(fx.cwd);
+    await blocks.handler("tidy", ctx);
+    expect(notifications[0]?.message).toContain("/mem");
   });
 
   test("prefix filters subcommands", () => {
@@ -192,16 +221,9 @@ describe("/mem getArgumentCompletions", () => {
     expect(cmd.getArgumentCompletions("d")!.map((i) => i.value)).toEqual(["doctor"]);
   });
 
-  test("second level: tidy options and restore --trash", () => {
+  test("second level: restore --trash and import", () => {
     const fx = fixture();
     const cmd = createMemCommand({ paths: fx.paths });
-    expect(
-      cmd
-        .getArgumentCompletions("tidy ")!
-        .map((i) => i.value)
-        .sort(),
-    ).toEqual(["tidy --dry-run", "tidy --frontmatter"]);
-    expect(cmd.getArgumentCompletions("tidy --d")!.map((i) => i.value)).toEqual(["tidy --dry-run"]);
     expect(cmd.getArgumentCompletions("restore ")!.map((i) => i.value)).toEqual(["restore --trash"]);
     expect(cmd.getArgumentCompletions("import ")!.map((i) => i.value)).toEqual(["import --force"]);
   });
@@ -212,14 +234,6 @@ describe("/mem getArgumentCompletions", () => {
     // { value: "login github", label: "github" }).
     const fx = fixture();
     const cmd = createMemCommand({ paths: fx.paths });
-    const [dryRun] = cmd.getArgumentCompletions("tidy --d")!;
-    expect(dryRun!.value).toBe("tidy --dry-run");
-    expect(dryRun!.label).toBe("--dry-run");
-    expect(`/mem ${dryRun!.value}`).toBe("/mem tidy --dry-run");
-    const [batchStatus] = cmd.getArgumentCompletions("tidy --batch --s")!;
-    expect(batchStatus!.value).toBe("tidy --batch --status");
-    expect(batchStatus!.label).toBe("--batch --status");
-    expect(`/mem ${batchStatus!.value}`).toBe("/mem tidy --batch --status");
     const [trash] = cmd.getArgumentCompletions("restore ")!;
     expect(trash!.label).toBe("--trash");
     expect(`/mem ${trash!.value}`).toBe("/mem restore --trash");

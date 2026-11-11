@@ -279,9 +279,11 @@ export async function sendToFeishu(
       });
       const text = await res.text();
       if (res.ok && /"(code|StatusCode)":\s*0/.test(text)) return { ok: true };
-      lastError = `HTTP ${res.status}: ${truncate(text, 200)}`;
-    } catch (err) {
-      lastError = err instanceof Error ? err.message : String(err);
+      // Response bodies may reflect URLs, signing secrets or signed requests. Never forward them.
+      lastError = `HTTP ${res.status}: Feishu notification rejected`;
+    } catch {
+      // fetch errors (including URL validation) can embed the credential-bearing webhook URL.
+      lastError = "Feishu notification request failed";
     }
     if (attempt < MAX_RETRIES) {
       await sleep(1000 * 2 ** attempt);

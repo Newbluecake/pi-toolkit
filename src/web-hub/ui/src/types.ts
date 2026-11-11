@@ -17,6 +17,7 @@
  */
 import type { Ref } from "vue";
 import type { PreviewDims } from "@protocol/preview.js";
+import type { GenerationCore } from "@protocol/message-generation.js";
 import type { FleetRowWire, LoadGateWire, LoadTopWire, LoadWire, TodoTaskWire, TodoWire } from "@protocol/messages.js";
 import type { SchedulesPayloadWire } from "@protocol/schedule.js";
 import type { ForkReason, HistoryLiveWire, ProofGap } from "@protocol/session-history.js";
@@ -207,6 +208,8 @@ export interface RunTxState {
   readonly streaming: Record<string, unknown> | null;
   readonly tools: readonly LiveTool[];
   readonly toolDurations?: ReadonlyMap<string, number>;
+  /** History speed metadata indexed by assistant entry id, built by the reducer. */
+  readonly generation?: ReadonlyMap<string, GenerationCore>;
   readonly history: HistoryState;
   readonly historyError?: string;
   /** §3.6 denial reason (`not_persisted` …) — error states and disabled "load older" paging. */
@@ -386,6 +389,28 @@ export interface UploadsHandle {
   dispose(): void;
 }
 
+/** Browser display identity only; never spread into a command frame or used as authority. */
+export interface MemoryUiKey {
+  readonly cmdId: string;
+  readonly owner: { readonly agentKey: string; readonly sessionId: string; readonly epoch: string };
+  readonly operationGeneration: number;
+}
+
+/** A bounded, pure-data projection of the ONE command/query result in pendingCtl. */
+export interface MemoryUiResult {
+  readonly facts?: import("@protocol/memory-command-facts.js").MemoryCommandFacts;
+  readonly memoryWrite?: {
+    readonly id: string;
+    readonly rev?: string;
+    readonly persistence: "appended" | "memory-only";
+  };
+  readonly phase: "running" | "rejected" | "completed" | "partial" | "unknown";
+  readonly effect?: "none" | "completed" | "partial" | "unknown";
+  readonly output?: import("@protocol/messages.js").CommandOutputWire;
+  readonly error?: string;
+  readonly message?: string;
+}
+
 export interface ControlHandle {
   /** steer-recall plan §7 (P-ui): `original` overrides the FULL text cached for the minted
    * cmdId (defaults to `text`). The wire clips held-row text to 200 chars — this tab's cache
@@ -414,7 +439,12 @@ export interface ControlHandle {
   // may instead generate it itself and pass it through, so it can track the request by id
   // BEFORE the wire round-trip settles (web-model-switch plan v2 §5.2 #6, same precedent as
   // `answerDialog`'s id above / AgentDetail.vue's `trackOwnDialogCmdId`).
-  runCommand(agentKey: string, name: string, args: string, opts?: { confirm?: true; id?: string }): Promise<CmdOutcome>;
+  runCommand(
+    agentKey: string,
+    name: string,
+    args: string,
+    opts?: { confirm?: true; id?: string; memoryUiKey?: MemoryUiKey },
+  ): Promise<CmdOutcome>;
   /** web-resume plan §2.6 (P3): a NON-optimistic read-only command query — `transport.command`
    * with a FRESH id and `expect`, never `ctl_send`/`remember` (no queue row, nothing to
    * query/retry later). Used by `useResume` for the resume `__list` reads. Optional per the
@@ -422,6 +452,10 @@ export interface ControlHandle {
    * an unsupported error instead of sending anything). */
   queryCommand?(agentKey: string, name: string, args: string): Promise<CmdOutcome>;
   query(agentKey: string, id: string): Promise<CmdOutcome>;
+  /** Schedule queryOnly through useHub's sole automatic query driver (no second Dock query). */
+  requestMemoryQuery?(key: MemoryUiKey): void;
+  /** Local identity validity, including transient owner changes between render commits. */
+  isMemoryCurrent?(key: MemoryUiKey): boolean;
   retry(agentKey: string, id: string): Promise<CmdOutcome>;
   discard(agentKey: string, id: string): void;
   draft(agentKey: string): string;

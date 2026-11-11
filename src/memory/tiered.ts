@@ -24,6 +24,7 @@ import {
   type TieredRenderInput,
   type TieredRenderResult,
 } from "./contracts.js";
+import { softLegacyMetadata } from "./soft-meta.js";
 import { frontmatterSource, stripFrontmatter } from "./frontmatter.js";
 import { descriptionOrHeading, parseMemoryMeta, splitSections, type MemorySection } from "./meta.js";
 import { memoryDirFor, toSlug, type MemoryPaths } from "./paths.js";
@@ -123,7 +124,7 @@ function setEquals(a: ReadonlySet<string>, b: readonly string[]): boolean {
  * this function itself never throws. Rule 2 (consult's exact-set exception)
  * is checked before the general rule 3 combination so a consult run is
  * `"read"` even though it isn't literally "has read, no memory" — though
- * for the tidy readonly domain (four tools + `StructuredOutput`) rule 3
+ * for the generic readonly domain (four tools + `StructuredOutput`) rule 3
  * already yields `"read"` on its own (no special case needed there).
  */
 export function accessFromTools(tools: readonly string[] | undefined, toolSurface: MemoryToolSurface): MemoryAccess {
@@ -182,7 +183,7 @@ export class MetaCache {
       return updated;
     }
     const fallbackTopic = name.replace(/\.md$/, "");
-    const { meta, errors } = parseMemoryMeta(text, fallbackTopic);
+    const { meta, errors } = parseMemoryMeta(softLegacyMetadata(text, dir), fallbackTopic, { legacyWhen: true });
     const bodyAfterFm = stripDriftHeader(stripFrontmatter(text));
     const description = descriptionOrHeading(bodyAfterFm, meta);
     const entry: MetaEntry = { size, mtimeMs, sha1, meta, errors, description };

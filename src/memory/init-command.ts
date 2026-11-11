@@ -12,12 +12,12 @@
  * Provenance decision (2026-10-21 user ruling, supersedes the original
  * "user-authored, no source field" decision): the skeleton carries
  * `source: agent`. It is a TEMPLATE meant to be filled in — by the user
- * directly or by `/mem tidy` / the memory tool on the user's behalf — so it
+ * directly or by the memory tool on the user's behalf — so it
  * must not start life as suggestion-only/hand-written
  * (`frontmatterSource(content) !== "agent"` in `tool-v2.ts`'s
- * `isHandWritten` would block tidy's Apply and every frontmatter touch).
+ * `isHandWritten` would block tool writes and frontmatter updates).
  * A user who wants to LOCK the file deletes the `source: agent` line: it
- * then reads as hand-written (tidy suggestion-only, tool body edits carry
+ * then reads as hand-written (tool body edits carry
  * the user-authored warning, frontmatter untouchable). Doctor-clean is
  * preserved: `source` has no validation constraints (meta.ts), no D-rule
  * keys on it, and the tiered renderer already fences agent-source
@@ -58,7 +58,7 @@ export interface MemInitDeps {
   writeGate?: import("./contracts.js").MemoryWriteGate;
   paths?: MemoryPaths;
   isChildSession: boolean;
-  /** Defaults to `DEFAULT_SETTINGS.memory` (same convention as tidy). */
+  /** Defaults to `DEFAULT_SETTINGS.memory`. */
   settings?: MemorySettings;
   /** Post-write injection-block invalidation (wireMemory's onAfterWrite). */
   onAfterWrite?: (cwd: string) => void;
@@ -69,7 +69,7 @@ export interface MemInitDeps {
 
 /** Small skeleton — frontmatter mirrors what a healthy primary core carries
  *  (pin + description + topic + status + updated all keep D01/D06/D07/D08
- *  silent); `source: agent` marks it agent-managed so tidy/tool can keep
+ *  silent); `source: agent` marks it agent-managed so the memory tool can keep
  *  rewriting it (see the header's provenance decision — deleting the line
  *  locks it as user-authored). The body stays well under the default 1600B
  *  core budget so the freshly created file itself triggers no doctor
@@ -147,7 +147,7 @@ export async function handleMemInitCommand(ctx: ExtensionCommandContext, deps: M
   const settings = deps.settings ?? DEFAULT_SETTINGS.memory;
   // Child sessions are read-only for memory by default — same rule the
   // memory TOOL's write gate (`assertWritable` in tool-v2.ts) uses, since
-  // init performs exactly that class of write. (tidy/restore refuse child
+  // init performs exactly that class of write. (restore refuses child
   // sessions outright because they also need the main session's spawn port;
   // import predates the gate and is an unaddressed inconsistency.)
   if (deps.isChildSession && !settings.allowWriteInChildSessions) {
@@ -182,9 +182,9 @@ export async function handleMemInitCommand(ctx: ExtensionCommandContext, deps: M
       );
       return;
     case "pinStandin":
-      // D01's degraded-primary fix: "Rename it to core.md, or run /mem tidy to migrate."
+      // D01's degraded-primary fix: "Manually rename it to core.md (D01 primary selection, not D02 size)."
       ctx.ui.notify(
-        `未创建：「${outcome.name}」（pin: true）正在充当主核——把它改名为 core.md，或运行 /mem tidy 迁移。`,
+        `未创建：「${outcome.name}」（pin: true）正在充当主核——把它改名为 core.md，确认它是常驻 primary。`,
         "warning",
       );
       return;
@@ -193,7 +193,7 @@ export async function handleMemInitCommand(ctx: ExtensionCommandContext, deps: M
       const lines = [
         `已创建 core.md 骨架：${outcome.path}`,
         "编辑它，把每轮必须遵守的规则填进去；话题细节另建文件并在此留指针。",
-        "骨架标记为 source: agent（tidy / agent 可继续代为改写）；想锁定为用户文件就删掉 frontmatter 里的那一行。",
+        "骨架标记为 source: agent（agent 可继续代为改写）；想锁定为用户文件就删掉 frontmatter 里的那一行。",
       ];
       if (outcome.topicFiles > 0) {
         lines.push(

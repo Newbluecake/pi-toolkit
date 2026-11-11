@@ -174,6 +174,52 @@ describe("projectTodo — todo-archive D5: the fold", () => {
 });
 
 describe("projectTodo — caps and the byte budget (passes 0–3)", () => {
+  it.each([
+    ["100 bytes", "a".repeat(100), "a".repeat(100), false],
+    ["512 bytes", "a".repeat(512), "a".repeat(512), false],
+    ["513 bytes", "a".repeat(513), "a".repeat(512), true],
+    ["Chinese boundary", "a".repeat(510) + "中!", "a".repeat(510), true],
+    ["emoji boundary", "a".repeat(509) + "😀!", "a".repeat(509), true],
+    ["mixed exact boundary", "a".repeat(505) + "中😀", "a".repeat(505) + "中😀", false],
+  ])("description UTF-8 cap: %s", (_name, description, expected, truncated) => {
+    const row = projectTodo(stateOf([task(1, { description })]), noArchive)!.tasks[0]!;
+    expect(TODO_DESC_MAX_BYTES).toBe(512);
+    expect(row.description).toBe(expected);
+    expect(row.descTruncated).toBe(truncated ? true : undefined);
+    expect(row.description).not.toContain("�");
+    expect(Buffer.byteLength(row.description!, "utf8")).toBeLessThanOrEqual(512);
+  });
+
+  it("32 full 512-byte descriptions fit the finalized 32 KiB budget without pass-2 losses", () => {
+    const description = "x".repeat(512);
+    const tasks = Array.from({ length: 32 }, (_, i) => task(i + 1, { description }));
+    const wire = projectTodo(stateOf(tasks), noArchive)!;
+    expect(wire.tasks).toHaveLength(32);
+    expect(wire.tasks.map((row) => row.description)).toEqual(Array(32).fill(description));
+    expect(wireBytes(wire)).toBe(19059);
+    expect(wireBytes(wire)).toBeLessThanOrEqual(TODO_WIRE_BUDGET_BYTES);
+  });
+
+  it("32 printable mixed ASCII, CJK and emoji descriptions fit without losses", () => {
+    const description = "x".repeat(505) + "中😀";
+    expect(Buffer.byteLength(description, "utf8")).toBe(512);
+    const tasks = Array.from({ length: 32 }, (_, i) => task(i + 1, { description }));
+    const wire = projectTodo(stateOf(tasks), noArchive)!;
+    expect(wire.tasks).toHaveLength(32);
+    expect(wire.tasks.map((row) => row.description)).toEqual(Array(32).fill(description));
+    expect(wireBytes(wire)).toBe(19059);
+    expect(wireBytes(wire)).toBeLessThanOrEqual(TODO_WIRE_BUDGET_BYTES);
+  });
+
+  it("JSON escaping can force pass-2 description drops despite the 512-byte source cap", () => {
+    const description = "\u0001".repeat(512);
+    const tasks = Array.from({ length: 32 }, (_, i) => task(i + 1, { description }));
+    const wire = projectTodo(stateOf(tasks), noArchive)!;
+    expect(wire.tasks).toHaveLength(32);
+    expect(wire.tasks.filter((row) => row.description === description)).toHaveLength(9);
+    expect(wireBytes(wire)).toBeLessThanOrEqual(TODO_WIRE_BUDGET_BYTES);
+  });
+
   it("more than 32 visible tasks ⇒ 32 rows (open first), full non-archived total/counts, omitted counts the rest", () => {
     const tasks = Array.from({ length: 40 }, (_, i) =>
       task(i + 1, { status: i < 35 ? "pending" : "completed", updatedAt: i + 1 }),
@@ -196,11 +242,11 @@ describe("projectTodo — caps and the byte budget (passes 0–3)", () => {
 
   it("pass 2: over budget ⇒ whole descriptions dropped tail-first, row count and subject survive", () => {
     // 24 rows (21 open + 3 recent completed; one more completed folded into omitted) ×
-    // (600B subject + 450B owner + 240B truncated description + structure) ≈ 33.4 KB —
+    // (600B subject + 450B owner + 300B description + structure) ≈ 35 KB —
     // over the 32 KiB budget after pass 1, comfortably under it once descriptions are gone.
     const subject = "任".repeat(200);
     const owner = "务".repeat(150);
-    const description = "描".repeat(100); // 300B ⇒ pass-1 truncates to 240B
+    const description = "描".repeat(100); // 300B ⇒ fits the 512B cap
     const tasks = [
       ...Array.from({ length: 21 }, (_, i) => task(i + 1, { subject, owner, description, status: "pending" })),
       ...Array.from({ length: 4 }, (_, i) =>
@@ -224,7 +270,7 @@ describe("projectTodo — caps and the byte budget (passes 0–3)", () => {
   });
 
   it("pass 3: still over budget after all descriptions are gone ⇒ rows drop from the tail into omitted", () => {
-    // 18 rows × (600B subject + 600B owner + 600B activeForm + 240B desc) ≈ 38 KB; with every
+    // 18 rows × (600B subject + 600B owner + 600B activeForm + 512B desc) ≈ 38 KB; with every
     // description gone still ≈ 33.8 KB ⇒ the row-count pass must fire.
     const blob = "任".repeat(200);
     const tasks = Array.from({ length: 18 }, (_, i) =>

@@ -36,11 +36,13 @@ interface FakeCtxOptions {
   }) => void;
   findModel?: (provider: string, id: string) => { provider: string; id: string } | undefined;
   throwIsIdle?: boolean;
+  cwd?: string;
 }
 
 function fakeCtx(opts: FakeCtxOptions = {}) {
   const compactCalls: Array<{ customInstructions?: string }> = [];
   const ctx = {
+    cwd: opts.cwd ?? "/tmp",
     isIdle: () => {
       if (opts.throwIsIdle === true) throw new Error("stale");
       return opts.idle ?? true;
@@ -119,6 +121,28 @@ function baseDeps(over: Partial<BuiltinBridgeDeps> = {}): BuiltinBridgeDeps {
 }
 
 describe("execute — validation and classification", () => {
+  it("SDK duplicate mem:n aliases cannot escape into generic slash/capture even on allow", () => {
+    const p = fakePi({
+      commands: [
+        { name: "mem:1", source: "extension" },
+        { name: "mem:2", source: "extension" },
+      ],
+    });
+    const capture = fakeCapture();
+    const arm = vi.spyOn(capture, "arm");
+    const bridge = createBuiltinBridge(
+      baseDeps({ pi: p.pi, capture: () => capture, overrides: () => ({ "mem:1": "allow", "mem:2": "allow" }) }),
+    );
+    for (const name of ["mem:1", "mem:2"])
+      expect(bridge.execute(frame(name, "session add must not reach native", {}, true))).toMatchObject({
+        ok: false,
+        code: "E_UNSUPPORTED",
+        effect: "none",
+        retryable: false,
+      });
+    expect(p.sent).toEqual([]);
+    expect(arm).not.toHaveBeenCalled();
+  });
   it("rejects a non-command op with E_UNSUPPORTED", () => {
     const bridge = createBuiltinBridge();
     const f: CmdFrame = {
@@ -1090,17 +1114,311 @@ describe("#39 actual Web command choke point", () => {
       );
       expect(bridge.execute(frame("mem", args, {}, true))).toMatchObject({
         ok: false,
-        code: "E_COMMAND_DENIED",
+        code: "E_UNSUPPORTED",
         effect: "none",
       });
       expect(p.sent).toEqual([]);
       expect(capture.armed).toBeUndefined();
     },
   );
-  it("scoped reads reach existing real extension dispatch path", () => {
+  it("refuses before command discovery, even if registry lookup would throw", () => {
+    const send = vi.fn();
+    const getCommands = vi.fn(() => {
+      throw new Error("registry unavailable");
+    });
+    const bridge = createBuiltinBridge(baseDeps({ pi: { getCommands, sendUserMessage: send } as never }));
+    expect(bridge.execute(frame("mem", "init", {}, true))).toMatchObject({
+      ok: false,
+      code: "E_UNSUPPORTED",
+      retryable: false,
+      effect: "none",
+    });
+    expect(getCommands).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
+  });
+  it("scoped reads fail closed until direct dispatch is wired", () => {
     const p = fakePi({ commands: [{ name: "mem", source: "extension" }] });
     const bridge = createBuiltinBridge(baseDeps({ pi: p.pi, memoryScopes: true }));
-    expect(bridge.execute(frame("mem", "session list"))).toMatchObject({ ok: true });
-    expect(p.sent).toHaveLength(1);
+    expect(bridge.execute(frame("mem", "session list"))).toMatchObject({ ok: false, code: "E_UNSUPPORTED" });
+    expect(p.sent).toHaveLength(0);
+  });
+});
+
+import type { MemoryBridgeAdmission } from "../../../src/web-hub/agent/builtin-bridge.js";
+import type { MemoryWebWritePort, MemoryWriteTask, WriteOutcome } from "../../../src/memory/scopes/web-write-port.js";
+
+function writeAdmission(over: Partial<MemoryBridgeAdmission> = {}): MemoryBridgeAdmission {
+  return {
+    commandOwner: "activation",
+    operationGeneration: 1,
+    deadline: 1_000_000,
+    signal: new AbortController().signal,
+    current: () => true,
+    attach: () => true,
+    ...over,
+  };
+}
+
+const completedOutcome: WriteOutcome = {
+  ok: true,
+  effect: "completed",
+  id: "n1",
+  rev: "r1",
+  persistence: "memory-only",
+  message: "已追加到会话内存",
+};
+
+describe("#65 memory write seam (package 2)", () => {
+  it("refuses the write with no port or no admission, with no SDK/native fallback", () => {
+    const sent = fakePi().sent;
+    const bridge = createBuiltinBridge(baseDeps({ memoryWrite: () => undefined }));
+    expect(bridge.execute(frame("mem", "session add hello", {}, undefined))).toMatchObject({
+      ok: false,
+      code: "E_UNSUPPORTED",
+      message: expect.stringContaining("E_MEM_CONFIRM_UNAVAILABLE"),
+    });
+    expect(bridge.execute(frame("mem", "session add hello"), writeAdmission())).toMatchObject({
+      ok: false,
+      code: "E_UNSUPPORTED",
+    });
+    // An empty body is a usage error, not a write dispatch.
+    expect(bridge.execute(frame("mem", "session add"))).toMatchObject({ ok: false, code: "E_BAD_REQUEST" });
+    expect(sent).toHaveLength(0);
+  });
+
+  it("maps an accepted:false outcome to the wire body", () => {
+    const port: MemoryWebWritePort = {
+      capabilities: () => ({ sessionAdd: true, revisionReview: false }),
+      start: () => ({ accepted: false, outcome: completedOutcome }),
+    };
+    const bridge = createBuiltinBridge(baseDeps({ memoryWrite: () => port }));
+    expect(bridge.execute(frame("mem", "session add hello"), writeAdmission())).toMatchObject({
+      ok: true,
+      data: {
+        op: "command",
+        kind: "extension",
+        completion: "sync",
+        captured: true,
+        memoryWrite: { id: "n1", rev: "r1", persistence: "memory-only" },
+        output: { entries: [{ kind: "text", text: completedOutcome.message }] },
+      },
+    });
+    const failing: MemoryWebWritePort = {
+      capabilities: () => ({ sessionAdd: true, revisionReview: false }),
+      start: () => ({
+        accepted: false,
+        outcome: { ok: false, effect: "none", code: "E_MEM_BUSY", message: "busy", retryable: false },
+      }),
+    };
+    const bridge2 = createBuiltinBridge(baseDeps({ memoryWrite: () => failing }));
+    expect(bridge2.execute(frame("mem", "session add hello"), writeAdmission())).toMatchObject({
+      ok: false,
+      code: "E_RATE",
+      effect: "none",
+      message: expect.stringContaining("E_MEM_BUSY"),
+    });
+  });
+
+  it("preserves exact structured facts and omits an unavailable revision instead of inventing it", () => {
+    const { rev: _rev, ...withoutRevision } = completedOutcome;
+    const bridge = createBuiltinBridge(
+      baseDeps({
+        memoryWrite: () => ({
+          capabilities: () => ({ sessionAdd: true, revisionReview: false }),
+          start: () => ({
+            accepted: false,
+            outcome: { ...withoutRevision, id: "n42", persistence: "appended", message: "plain localized prose" },
+          }),
+        }),
+      }),
+    );
+    const result = bridge.execute(frame("mem", "session add hello"), writeAdmission());
+    expect(result).toEqual({
+      ok: true,
+      data: {
+        op: "command",
+        kind: "extension",
+        completion: "sync",
+        captured: true,
+        output: { entries: [{ kind: "text", text: "plain localized prose" }] },
+        memoryWrite: { id: "n42", persistence: "appended" },
+      },
+    });
+    expect((result as any).data.memoryWrite).not.toHaveProperty("rev");
+  });
+
+  it("attaches the accepted task and resolves its done promise through the mapping", async () => {
+    let attached: MemoryBridgeTaskControl | undefined;
+    let resolve!: (o: WriteOutcome) => void;
+    const task: MemoryWriteTask = {
+      done: new Promise<WriteOutcome>((r) => (resolve = r)),
+      cancel: () => completedOutcome,
+      release: () => {},
+    };
+    const port: MemoryWebWritePort = {
+      capabilities: () => ({ sessionAdd: true, revisionReview: false }),
+      start: () => ({ accepted: true, task }),
+    };
+    const bridge = createBuiltinBridge(baseDeps({ memoryWrite: () => port }));
+    const admission = writeAdmission({
+      attach: (control) => {
+        attached = control;
+        return true;
+      },
+    });
+    const result = bridge.execute(frame("mem", "session add hello"), admission);
+    expect(typeof (result as Promise<unknown>).then).toBe("function");
+    expect(attached).toBeDefined();
+    resolve(completedOutcome);
+    await expect(result).resolves.toMatchObject({
+      ok: true,
+      data: {
+        completion: "sync",
+        memoryWrite: { id: "n1", rev: "r1", persistence: "memory-only" },
+        output: { entries: [{ kind: "text", text: completedOutcome.message }] },
+      },
+    });
+    expect(attached!.cancel("abort")).toMatchObject({
+      ok: true,
+      data: { memoryWrite: { id: "n1", rev: "r1", persistence: "memory-only" } },
+    });
+  });
+
+  it("cancels and releases the task when attach fails (stale waiter)", () => {
+    let cancels = 0;
+    let releases = 0;
+    const task: MemoryWriteTask = {
+      done: Promise.resolve(completedOutcome),
+      cancel: () => {
+        cancels++;
+        return {
+          ok: false,
+          effect: "none",
+          code: "E_MEM_CONFIRM_STALE",
+          message: "stale",
+          retryable: false,
+        } as WriteOutcome;
+      },
+      release: () => {
+        releases++;
+      },
+    };
+    const port: MemoryWebWritePort = {
+      capabilities: () => ({ sessionAdd: true, revisionReview: false }),
+      start: () => ({ accepted: true, task }),
+    };
+    const bridge = createBuiltinBridge(baseDeps({ memoryWrite: () => port }));
+    const body = bridge.execute(frame("mem", "session add hello"), writeAdmission({ attach: () => false }));
+    expect(body).toMatchObject({ ok: false, code: "E_STALE_CTX" });
+    expect(cancels).toBe(1);
+    expect(releases).toBe(1);
+  });
+});
+
+describe("#65 M1/M3 real bridge and confirmation kernel", () => {
+  it.each([
+    ["deny", false, ORIGIN, 8000, "E_COMMAND_DENIED"],
+    ["confirm", false, ORIGIN, 8000, "E_CONFIRM_REQUIRED"],
+    ["allow", false, ORIGIN, 0, "E_DEADLINE"],
+    ["allow", false, ORIGIN, Number.NaN, "E_DEADLINE"],
+    ["allow", false, "legacy" as unknown as CmdOrigin, 8000, "E_UNSUPPORTED"],
+    ["allow", false, { ...ORIGIN, listener: "unknown" } as unknown as CmdOrigin, 8000, "E_UNSUPPORTED"],
+    ["allow", false, { ...ORIGIN, ip: "feishu" }, 8000, "E_UNSUPPORTED"],
+  ] as const)(
+    "rejects %s confirm=%s invalid admission before real kernel start",
+    async (policy, confirm, origin, deadlineMs, code) => {
+      const { createCommandConfirmKernel } = await import("../../../src/memory/command-confirm.js");
+      const kernel = createCommandConfirmKernel({ channel: { kind: "unavailable" }, isOwnerCurrent: () => true });
+      const starts = vi.spyOn(kernel, "start");
+      const bridge = createBuiltinBridge(
+        baseDeps({
+          overrides: () => ({ mem: policy }),
+          memoryWrite: () => ({
+            capabilities: () => ({ sessionAdd: true, revisionReview: false }),
+            start(req) {
+              kernel.start(req.write.rawArgs);
+              return {
+                accepted: false,
+                outcome: {
+                  ok: false,
+                  effect: "none",
+                  code: "E_MEM_CONFIRM_UNAVAILABLE",
+                  message: "unavailable",
+                  retryable: false,
+                },
+              };
+            },
+          }),
+        }),
+      );
+      const f = frame("mem", "session add hello", { origin, deadlineMs }, confirm ? true : undefined);
+      expect(bridge.execute(f, writeAdmission())).toMatchObject({ ok: false, code, effect: "none" });
+      expect(starts).not.toHaveBeenCalled();
+      kernel.dispose();
+    },
+  );
+  it("confirm bit admits start but cannot replace a real domain approval", async () => {
+    const { createCommandConfirmKernel } = await import("../../../src/memory/command-confirm.js");
+    let opens = 0;
+    const kernel = createCommandConfirmKernel({
+      channel: {
+        kind: "web",
+        remote: {
+          open() {
+            opens++;
+            return undefined;
+          },
+        },
+      },
+      isOwnerCurrent: () => true,
+    });
+    const starts = vi.spyOn(kernel, "start");
+    const bridge = createBuiltinBridge(
+      baseDeps({
+        overrides: () => ({ mem: "confirm" }),
+        memoryWrite: () => ({
+          capabilities: () => ({ sessionAdd: true, revisionReview: false }),
+          start(req) {
+            const call = kernel.start(req.write.rawArgs)!;
+            const done = kernel
+              .confirm(call, { rawArgs: req.write.rawArgs, step: 0, manifest: "real-plan", presentation: "text" })
+              .then((result) => {
+                if (result.approved) throw Error("approval must not be fabricated");
+                return {
+                  ok: false as const,
+                  effect: "none" as const,
+                  code: result.code,
+                  message: result.message,
+                  retryable: false as const,
+                };
+              });
+            return {
+              accepted: true,
+              task: {
+                done,
+                cancel: () => ({
+                  ok: false,
+                  effect: "none",
+                  code: "E_MEM_CONFIRM_STALE",
+                  message: "stale",
+                  retryable: false,
+                }),
+                release: () => kernel.close(call),
+              },
+            };
+          },
+        }),
+      }),
+    );
+    const result = await bridge.execute(frame("mem", "session add hello", {}, true), writeAdmission());
+    expect(starts).toHaveBeenCalledTimes(1);
+    expect(opens).toBe(1);
+    expect(result).toMatchObject({
+      ok: false,
+      code: "E_UNSUPPORTED",
+      effect: "none",
+      message: expect.stringContaining("E_MEM_CONFIRM_UNAVAILABLE"),
+    });
+    kernel.dispose();
   });
 });

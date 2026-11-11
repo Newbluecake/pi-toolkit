@@ -886,7 +886,20 @@ function commitPlanLocked(
     const code = asCode(err);
     if (blockCommitted || (blockAttempted && ["E_NAMESPACE", "E_WRITE_GATE", "E_HUB_CAP_STALE"].includes(code)))
       return { ok: false, code: "E_PERSIST_UNKNOWN" };
-    return { ok: false, code: mutationAttempted && (code === "E_PERSIST" || ENOENT(err)) ? "E_PERSIST_UNKNOWN" : code };
+    const failureCode = mutationAttempted && (code === "E_PERSIST" || ENOENT(err)) ? "E_PERSIST_UNKNOWN" : code;
+    // Only these exact local capacity diagnostics may add detail. Never echo an
+    // arbitrary MemoryError (paths/body/secrets), or override unknown effects.
+    const capacityMessage =
+      failureCode !== "E_PERSIST_UNKNOWN" && err instanceof MemoryError
+        ? err.message === "E_FULL: hub has 32 active items"
+          ? "Hub capacity is fixed at 32 items / 4096 UTF-8 body bytes; all 32 item slots are occupied. View Hub memory and delete obsolete items using their actual id/rev and the required approval before creating another. There is no capacity setting."
+          : err.message === "E_FULL: hub body budget is 4096 bytes"
+            ? "Hub capacity is fixed at 32 items / 4096 UTF-8 body bytes; this write would exceed the total body budget. View Hub memory and shorten or delete existing items using their actual id/rev and the required approval. There is no capacity setting."
+            : err.message === "E_TOO_LARGE: hub item exceeds 1024 bytes"
+              ? "Each Hub item is limited to 1024 UTF-8 body bytes; shorten this content. Hub capacity is fixed at 32 items / 4096 UTF-8 body bytes, with no capacity setting."
+              : undefined
+        : undefined;
+    return { ok: false, code: failureCode, ...(capacityMessage ? { message: capacityMessage } : {}) };
   }
 }
 

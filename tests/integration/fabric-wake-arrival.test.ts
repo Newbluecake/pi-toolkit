@@ -430,7 +430,7 @@ describe("#61 real SDK root arrival admission", () => {
       expect(await send("reload-no-window")).toMatchObject({ wake: false, wakeDowngraded: "root_no_window" });
       await session.prompt("machine RPC", { source: "rpc" });
       expect(fabric().rootBudget!.snapshot().window).toBe(0);
-      await session.sendUserMessage("/goal machine continuation");
+      await session.sendUserMessage("machine continuation");
       await session.sendCustomMessage({ customType: "machine", content: "role text user", display: false });
       expect(fabric().rootBudget!.snapshot().window).toBe(0);
       await session.sendUserMessage("verified web user");

@@ -48,13 +48,19 @@ export async function thrPostWithRetry(
   conn: () => HubConnection | undefined,
   args: { h: string; sessionId: string; by: { runId: string; label: string }; postId: string; text: string },
 ): Promise<ThrPostOutcome> {
+  let uncertain = false;
   for (let attempt = 0; attempt < 2; attempt++) {
     const c = conn();
-    if (c === undefined) return { error: "E_THR_STATE", effect: "none" };
+    if (c === undefined) return { error: "E_THR_STATE", effect: uncertain ? "unknown" : "none" };
     try {
       const res = await c.request({ t: "thr_req", rid: newAdminRid(), op: "post", ...args }, "thr.v1");
-      return classify(res) as ThrPostOutcome;
+      const outcome = classify(res) as ThrPostOutcome;
+      // A retry's rejection only describes THAT attempt. It cannot disprove an earlier
+      // request's effect (e.g. the session/binding changed after the first enqueue).
+      if (uncertain && "error" in outcome) return { ...outcome, effect: "unknown" };
+      return outcome;
     } catch {
+      uncertain = true;
       if (attempt === 1) return { unknown: true }; // §7.3: 5s + 1 retry ⇒ "possibly sent, do not repeat"
     }
   }
@@ -178,7 +184,9 @@ export function createThreadChildTool(deps: ThreadChildToolDeps): ToolDefinition
     parameters: ThreadChildParams,
     async execute(_toolCallId, params) {
       if (deps.ops.disposed())
-        return reply("E_THREAD_DISPOSED: the host session that owned this subscription is gone.");
+        return reply(
+          "E_THREAD_DISPOSED: the host session that owned this subscription is gone — use message_agent to notify the main session; do not post through this stale tool.",
+        );
       switch (params.action) {
         case "list": {
           const subs = deps.ops.listForRun();
@@ -200,13 +208,18 @@ export function createThreadChildTool(deps: ThreadChildToolDeps): ToolDefinition
           if (params.text === undefined || params.text.trim() === "")
             return reply("E_BAD_REQUEST: reply needs non-empty `text`.");
           if (Buffer.byteLength(params.text, "utf8") > THREAD_POST_TEXT_MAX_BYTES)
-            return reply(`E_THR_TOO_LARGE: reply body over ${THREAD_POST_TEXT_MAX_BYTES} bytes.`);
+            return reply(
+              `E_THR_TOO_LARGE: reply body over ${THREAD_POST_TEXT_MAX_BYTES} bytes — shorten the text and try again.`,
+            );
           const sub = deps.ops.activeSubOf(h);
           if (sub === undefined)
             return reply(
               'E_THREAD_UNKNOWN: this run has no ACTIVE subscription for that thread (see thread(action:"list")).',
             );
-          if (!deps.ops.hubCapable()) return reply("E_THREAD_HUB: the hub link is not live or lacks thr.v1.");
+          if (!deps.ops.hubCapable())
+            return reply(
+              "E_THREAD_HUB: the hub link is not live or lacks thr.v1 — notify the main session via message_agent to check /webhub status; retry only after the link supports threads.",
+            );
           postSeq += 1;
           const outcome = await thrPostWithRetry(deps.ops.conn, {
             h,
@@ -219,8 +232,30 @@ export function createThreadChildTool(deps: ThreadChildToolDeps): ToolDefinition
             deps.ops.recordReply(sub.subId);
             return reply("queued: the reply is in the hub outbox (best-effort delivery).");
           }
-          if ("error" in outcome) return reply(`${outcome.error} (effect ${outcome.effect}) — the reply was NOT sent.`);
-          return reply("unknown: the post may already be in the outbox — do NOT retry with the same text.");
+          if ("error" in outcome) {
+            const cause =
+              outcome.error === "E_THR_RATE"
+                ? "the thread reply rate limit was reached"
+                : outcome.error === "E_THR_REBOUND"
+                  ? "the thread is now bound to another session"
+                  : outcome.error === "E_THR_UNKNOWN"
+                    ? "the hub could not confirm this thread or the run's subscription"
+                    : "the hub link, session or outbox could not confirm the post";
+            if (outcome.effect === "unknown")
+              return reply(
+                `${outcome.error} (effect unknown): ${cause}; the reply may already be in the outbox — do NOT retry with the same text. Ask the main session via message_agent to verify the thread/outbox before any new post.`,
+              );
+            const next =
+              outcome.error === "E_THR_RATE"
+                ? "wait for the reply rate window to reset before retrying"
+                : outcome.error === "E_THR_REBOUND" || outcome.error === "E_THR_UNKNOWN"
+                  ? 'check thread(action:"list") and ask the main session to confirm the current binding/subscription before retrying'
+                  : "ask the main session via message_agent to check /webhub status and outbox health before retrying";
+            return reply(`${outcome.error} (effect none): ${cause} — the reply was NOT sent; ${next}.`);
+          }
+          return reply(
+            "unknown: the post request did not return a confirmed result; the reply may already be in the outbox — do NOT retry with the same text. Ask the main session via message_agent to verify the thread/outbox before any new post.",
+          );
         }
         case "unsubscribe": {
           const h = params.h ?? "";
@@ -230,7 +265,7 @@ export function createThreadChildTool(deps: ThreadChildToolDeps): ToolDefinition
           return reply(
             result.ok
               ? "unsubscribed: further events of this thread go back to the main session."
-              : `E_THREAD_ENDED: ${result.reason}`,
+              : `E_THREAD_ENDED: ${result.reason} — check thread(action:"list"); ask the main session via message_agent if further routing changes are needed.`,
           );
         }
         case "handback": {
@@ -283,10 +318,14 @@ export function createThreadChildTool(deps: ThreadChildToolDeps): ToolDefinition
             if (outcome.error === "E_THR_REVOKED") {
               deps.ops.markHandback(eventId, "done");
               deps.ops.noteRevokedHandback(eventId);
-              return reply("E_THR_REVOKED: the sender was revoked — the event is not propagated further.");
+              return reply(
+                "E_THR_REVOKED: the sender was revoked — the event is not propagated further; do not relay its content or retry the handback.",
+              );
             }
             deps.ops.markHandback(eventId, "unknown");
-            return reply(`${outcome.error} (effect ${outcome.effect}).`);
+            return reply(
+              `${outcome.error} (effect ${outcome.effect}): the hub could not confirm a handback — do NOT blindly retry; use message_agent to ask the main session to verify whether a successor request already exists.`,
+            );
           }
           deps.ops.markHandback(eventId, "unknown");
           return reply(

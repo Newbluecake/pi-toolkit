@@ -102,3 +102,26 @@ describe("controller", () => {
     ctl.dispose();
   });
 });
+
+describe("interval P1 status formatting", () => {
+  it("every is UTC with seconds, independent of the process zone", () => {
+    const s = stateWith([makeTask({ when: { kind: "every", everyMs: 45_000, anchorAt: NOW } })]);
+    const old = process.env.TZ;
+    try {
+      process.env.TZ = "America/New_York";
+      expect(renderStatus({ state: s, now: NOW, busy: false, capability: "verified" })).toBe(
+        "sched 1 · next 00:01:15 UTC",
+      );
+      process.env.TZ = "Asia/Shanghai";
+      expect(nextLabel(s, NOW)).toBe("00:01:15 UTC");
+    } finally {
+      if (old === undefined) delete process.env.TZ;
+      else process.env.TZ = old;
+    }
+  });
+  it("once retains its exact legacy minute label without adding UTC or seconds", () => {
+    expect(
+      nextLabel(stateWith([makeTask({ when: { kind: "once", at: "2026-01-01T09:30", tz: "Asia/Shanghai" } })]), NOW),
+    ).toBe("09:30");
+  });
+});

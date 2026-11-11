@@ -17,7 +17,7 @@ import { join } from "node:path";
 import type { MemoryWriteGate } from "../contracts.js";
 import type { JevIndexV1, RelationVerdict } from "../jev/contracts.js";
 import { entryHash, normalizeBody } from "../jev/entries.js";
-import { readIndex } from "../jev/index-store.js";
+import { isDismissedRelation, readIndex } from "../jev/index-store.js";
 import { withMemoryDirLock } from "../lock.js";
 import { MemoryError } from "../paths.js";
 import { dirFormat, parseBlockName } from "../blocks/naming.js";
@@ -80,6 +80,29 @@ export interface SupersedeOptions {
   notify?: (message: string) => void;
 }
 
+/** Pure metadata serialization seam; legacy and controlled appliers share the
+ * exact same now/meta/body computation. No permission or write is implied. */
+export function prepareGovernReplacement(old: ParsedBlock, meta: BlockMeta, now: Date): string {
+  return serializeBlock({ ...meta, version: old.meta.version + 1, updated: now.toISOString() }, old.body, {
+    allowOversize: true,
+  });
+}
+
+/** Single old-file retirement payload; never writes the successor. Caller
+ * must independently prove live/CAS/authority/evidence and cycle safety. */
+export function prepareSupersedeOne(old: ParsedBlock, next: ParsedBlock, now: Date): string {
+  if (
+    old.id === next.id ||
+    old.meta.status !== "active" ||
+    next.meta.status !== "active" ||
+    old.meta.supersededBy ||
+    next.meta.supersededBy ||
+    (old.meta.authority === "user" && next.meta.authority === "agent")
+  )
+    throw new MemoryError("E_BLOCK: ineligible supersession");
+  return prepareGovernReplacement(old, { ...old.meta, status: "superseded", supersededBy: next.id }, now);
+}
+
 /** Governance metadata writes preserve migration provenance (only a tool
  * update clears residue). The caller owns the lock; raw-byte CAS still
  * runs immediately before atomic replace. */
@@ -91,11 +114,7 @@ export function replaceGovernBlockLocked(
 ): void {
   governanceGate(memDir, opts.gate, opts.signal);
   const dir = join(memDir, "blocks");
-  const raw = serializeBlock(
-    { ...meta, version: old.meta.version + 1, updated: (opts.now ?? new Date()).toISOString() },
-    old.body,
-    { allowOversize: true },
-  );
+  const raw = prepareGovernReplacement(old, meta, opts.now ?? new Date());
   const tmp = writeTempRegular(dir, `${old.id}.md`, Buffer.from(raw), 0o600);
   governanceGate(memDir, opts.gate, opts.signal);
   if (readGovernBlock(memDir, old.id).rev !== old.rev) throw new MemoryError("E_CONFLICT");
@@ -138,16 +157,19 @@ export async function supersede(
           if (next.rev !== v.newRev) throw new MemoryError("new rev changed");
           if (next.meta.status !== "active" || next.meta.supersededBy) throw new MemoryError("new block not active");
           if (old.rev !== v.oldRev) throw new MemoryError("old rev changed");
+          const oldHash = (v as RelationVerdict & { readonly oldHash?: string }).oldHash;
+          if (oldHash !== undefined && entryHash(old.body) !== oldHash) throw new MemoryError("old hash changed");
           if (old.meta.status !== "active" || old.meta.supersededBy) throw new MemoryError("old block not active");
           if (next.meta.authority === "agent" && old.meta.authority === "user")
             throw new MemoryError("supersedes ignored: target is a user rule");
           if (!opts.explicit && old.meta.residue) throw new MemoryError("residue requires explicit supersedes");
-          const key = pair(next, old),
-            today = governanceToday(opts.now ?? new Date());
           if (
             !opts.explicit &&
-            readIndex(memDir).index.review?.dismissed.some(
-              (d) => (!d.until || d.until >= today) && (d.hashKey === key.hashKey || d.anchorKey === key.anchorKey),
+            isDismissedRelation(
+              readIndex(memDir).index.review?.dismissed ?? [],
+              { hash: entryHash(next.body), anchor: blockAnchor(next) },
+              { hash: entryHash(old.body), anchor: blockAnchor(old) },
+              "supersedes",
             )
           )
             throw new MemoryError("pair permanently dismissed");
@@ -188,7 +210,13 @@ export async function supersede(
   }
   // Failed automatic decisions remain actionable instead of disappearing in
   // a tool echo. A denied gate/abort/off path never writes a suggestion.
-  if (!opts.explicit && opts.enabled !== false && results.some((r) => r.outcome === "skipped")) {
+  if (
+    !opts.explicit &&
+    opts.enabled !== false &&
+    results.some(
+      (r) => r.outcome === "skipped" && !r.reason?.includes("rev changed") && !r.reason?.includes("hash changed"),
+    )
+  ) {
     try {
       governanceGate(memDir, opts.gate, opts.signal);
       await withMemoryDirLock(
@@ -199,7 +227,17 @@ export async function supersede(
           const review = index.review ?? { lastRunAt: "", corpusFp: "", suggestions: [], dismissed: [] };
           const suggestions = [...review.suggestions];
           for (const v of verdicts) {
-            if (!results.some((r) => r.oldId === v.oldId && r.outcome === "skipped") || v.newId === v.oldId) continue;
+            if (
+              !results.some(
+                (r) =>
+                  r.oldId === v.oldId &&
+                  r.outcome === "skipped" &&
+                  !r.reason?.includes("rev changed") &&
+                  !r.reason?.includes("hash changed"),
+              ) ||
+              v.newId === v.oldId
+            )
+              continue;
             let a: ParsedBlock, b: ParsedBlock;
             try {
               a = readGovernBlock(memDir, v.newId);
@@ -207,8 +245,18 @@ export async function supersede(
             } catch {
               continue;
             }
-            const key = pair(a, b);
-            if (review.dismissed.some((d) => d.hashKey === key.hashKey || d.anchorKey === key.anchorKey)) continue;
+            const oldHash = (v as RelationVerdict & { readonly oldHash?: string }).oldHash;
+            if (a.rev !== v.newRev || b.rev !== v.oldRev || (oldHash !== undefined && entryHash(b.body) !== oldHash))
+              continue;
+            if (
+              isDismissedRelation(
+                review.dismissed,
+                { hash: entryHash(a.body), anchor: blockAnchor(a) },
+                { hash: entryHash(b.body), anchor: blockAnchor(b) },
+                "conflict",
+              )
+            )
+              continue;
             const id = `relation-${v.newId}-${v.oldId}`;
             if (!suggestions.some((s) => s.id === id))
               suggestions.push({

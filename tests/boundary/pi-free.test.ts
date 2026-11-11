@@ -162,6 +162,14 @@ describe("pi-free boundaries", () => {
     });
   }
 
+  it("schedule/core including interval math and transactions stays pi-free through its value closure", () => {
+    const roots = globSync("src/schedule/core/*.ts", { cwd: ROOT }).map((file) => resolve(ROOT, file));
+    expect(roots).toContain(resolve(ROOT, "src/schedule/core/interval.ts"));
+    expect(roots).toContain(resolve(ROOT, "src/schedule/core/every.ts"));
+    const offenders = memoryOffenders(roots);
+    expect(offenders, offenders.join("; ")).toEqual([]);
+  });
+
   it("#39 pure scoped kernels and child-bind stay pi-free (PI-facing owner/wire are not pure domain)", () => {
     const names = [
       "types",
@@ -183,6 +191,17 @@ describe("pi-free boundaries", () => {
     ];
     const roots = names.map((name) => resolve(ROOT, `src/memory/scopes/${name}.ts`));
     for (const file of roots) expect(existsSync(file), file).toBe(true);
+    const offenders = memoryOffenders(roots);
+    expect(offenders, offenders.join("; ")).toEqual([]);
+  });
+
+  it("unified memory dispatcher/adapters and shared scoped operations stay pi-free", () => {
+    const roots = [
+      ...globSync("src/memory/unified/**/*.ts", { cwd: ROOT }),
+      "src/memory/scopes/tool-surface.ts",
+      "src/memory/scopes/tool-operations.ts",
+    ].map((file) => resolve(ROOT, file));
+    expect(roots.length).toBeGreaterThanOrEqual(6);
     const offenders = memoryOffenders(roots);
     expect(offenders, offenders.join("; ")).toEqual([]);
   });

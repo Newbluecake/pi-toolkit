@@ -90,7 +90,14 @@ function production(settings: MemorySettings = { ...DEFAULT_SETTINGS.memory }) {
       branch.push({ type: "custom", id: `e${n++}`, customType, data }),
   } as unknown as ExtensionAPI;
   const hub = createPromptSectionHub(pi, { mode: () => "stable", wakeReplay: false, adoptForeignForcedPrompt: false });
-  wireMemory(pi, { settings, isChildSession: false, sections: hub, secureDomainKind: "plain" });
+  // This suite pins the files/v2 Jev surface, D19 and core-usage reminder.
+  // Keep both activations on files instead of triggering startup migration.
+  wireMemory(pi, {
+    settings: { ...settings, layout: "tiered" },
+    isChildSession: false,
+    sections: hub,
+    secureDomainKind: "plain",
+  });
   const fake = createFakeRegistry({
     available: DEFAULT_SETTINGS.memory.jev.classifiers,
     responses: Object.fromEntries(

@@ -319,6 +319,7 @@ export function createScheduleService(deps: ScheduleServiceDeps): ScheduleCoordi
     const t = state.tasks.find((x) => x.id === taskId);
     if (t === undefined) return "deleted";
     const w = t.when;
+    if (w.kind === "every") return `every ${w.everyMs / 1000}s @ UTC · anchor ${new Date(w.anchorAt).toISOString()}`;
     return w.kind === "cron" ? `cron ${w.expr} @ ${w.tz}` : `once ${w.at} @ ${w.tz}`;
   };
 
@@ -685,7 +686,7 @@ export function createScheduleService(deps: ScheduleServiceDeps): ScheduleCoordi
     const onlineCache = new Map<string, boolean>();
     for (const [sid, state] of states) {
       for (const task of state.tasks) {
-        if (!isExecutable(task)) continue;
+        if (task.when.kind === "every" || !isExecutable(task)) continue;
         const c = compileTask(task);
         if (c === undefined) continue;
         const ts = store.data.sessions[sid]?.tasks[task.id];
@@ -729,7 +730,7 @@ export function createScheduleService(deps: ScheduleServiceDeps): ScheduleCoordi
     let earliest: number | undefined;
     for (const state of states.values()) {
       for (const task of state.tasks) {
-        if (!isExecutable(task)) continue;
+        if (task.when.kind === "every" || !isExecutable(task)) continue;
         const c = compileTask(task);
         if (c === undefined) continue;
         const next = occurrencesBetween(c, t, t + SCHED_FULL_SCAN_INTERVAL_MS + SCHED_OBSERVE_DELAY_MS, 1)[0];
@@ -876,6 +877,7 @@ export function createScheduleService(deps: ScheduleServiceDeps): ScheduleCoordi
             name: task.name,
             form: task.form,
             when: whenText(state, task.id),
+            ...(task.when.kind === "every" ? { interval: true as const } : {}),
             enabled: task.enabled,
             defHash: defHash(task),
             ...(nextAt === undefined ? {} : { nextAt }),

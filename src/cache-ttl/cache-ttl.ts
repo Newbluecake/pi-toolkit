@@ -634,7 +634,7 @@ export function wireCacheTtl(pi: ExtensionAPI, settings: AgentSettings, deps: Ca
           { value: "auto", label: "auto", description: "自动模式" },
           { value: "save", label: "save", description: "持久化当前模式" },
           { value: "keepalive", label: "keepalive", description: "保活开关（on|off|reset）" },
-          { value: "status", label: "status", description: "查看保活状态" },
+          { value: "status", label: "status", description: "查看模式、保活与测量状态" },
           { value: "probe", label: "probe", description: "线路体检（≤3 个真实计费请求，30s 预算）" },
           { value: "measure", label: "measure", description: "测量缓存 TTL 与读取续期（最多 17 个真实计费请求）" },
         ].filter((item) => item.value.startsWith(partial));
@@ -695,12 +695,14 @@ export function wireCacheTtl(pi: ExtensionAPI, settings: AgentSettings, deps: Ca
         return;
       }
 
-      if (head === "status") {
+      if (arg === "" || head === "status") {
         const port = deps.keepalive?.();
-        const lines: string[] = [];
+        const saved = dirty ? `\npersisted mode: ${MODE_LABEL[persisted]}` : "";
+        const lines: string[] = [
+          `current cache TTL mode: ${MODE_LABEL[mode]}${dirty ? "*" : ""}${saved}\nmode source: ${dirty ? "current process (unsaved)" : "persisted settings (loaded or saved)"}`,
+        ];
         if (port) lines.push(...renderKeepaliveReportLines(port.report()));
-        if (lines.length === 0)
-          lines.push("keepalive service unavailable (no active session, or cacheTtl.keepalive=false)");
+        if (!port) lines.push("keepalive service unavailable (no active session, or cacheTtl.keepalive=false)");
         const measurementLine = await measurement.statusLine(ctx);
         if (measurementLine === undefined) return; // session changed while the bounded status read was pending
         lines.push(measurementLine);
@@ -732,9 +734,6 @@ export function wireCacheTtl(pi: ExtensionAPI, settings: AgentSettings, deps: Ca
         dirty = false;
         updateStatus(ctx, mode, false, deps);
         ctx.ui.notify(`cache TTL persisted as ${MODE_LABEL[mode]}`, "info");
-      } else if (arg === "") {
-        const saved = dirty ? `\npersisted mode: ${MODE_LABEL[persisted]}` : "";
-        ctx.ui.notify(`current cache TTL mode: ${MODE_LABEL[mode]}${dirty ? "*" : ""}${saved}\n${USAGE}`, "info");
       } else {
         ctx.ui.notify(`invalid argument "${arg}", ${USAGE}`, "warning");
       }

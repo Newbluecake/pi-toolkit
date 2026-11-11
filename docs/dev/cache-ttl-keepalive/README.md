@@ -4,6 +4,15 @@
 > 来源：AGENTS.md@fcbf71dc 的对应条目，原文搬运，未改写（仅路径按目录移动更新）。新的实现细节直接写在这里，不要再写回 AGENTS.md。
 > 相关：`plan.md`、`breaker-recovery-plan.md`、`capture-pairing-plan.md`、`measure-plan.md`、`webhub-plan.md`
 
+## Unified read-only status output
+
+`/cache-ttl` and `/cache-ttl status` now render the same complete status: current mode, unsaved/persisted
+comparison and source, keepalive report, and the existing bounded measurement summary. This intentionally
+changes both output contracts: the empty form no longer prints usage, and `status` gains mode information.
+The source distinguishes current-process edits from the loaded or subsequently saved setting; it does not
+claim to distinguish a default from a file override. Status uses the existing saved-results read, never a
+probe, network request, or measurement run. A session change during the read can suppress notification.
+
 ## 局部类型兼容注记（pi 1.5，2026-11-06）
 
 `KeepaliveModelInfo.cost.tiers`（`keepalive-service.ts`）与 `KeepaliveCostModel.tiers`（`keepalive-state.ts`）的类型为显式 `…[] | undefined`：pi 1.5 的价目 DTO 可显式携带 `tiers: undefined`，这是 type-only 边界兼容；本地 pi 1.4 依赖下 typecheck/门禁保持通过，runtime JS 未变，不代表 TESTED_PI_RANGE 已升。详见 `docs/dev/pi-version-adaptation/plan.md`。

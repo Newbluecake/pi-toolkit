@@ -155,7 +155,8 @@ export interface ScheduleExecutor {
 }
 
 export type ScheduleRunNowResult =
-  { kind: "started"; runKey: string; replay: boolean } | { kind: "refused"; code: string; detail?: string };
+  | { kind: "started"; runKey: string; replay: boolean }
+  | { kind: "refused"; code: string; detail?: string; uncertain?: boolean };
 
 export interface ScheduleAgent {
   readonly mode: ScheduleModeVerdict;
@@ -181,6 +182,8 @@ export interface ScheduleAgent {
   runNow(req: { taskId: string; reqId: string; defHash?: string }): Promise<ScheduleRunNowResult>;
   /** A local ledger write happened (A1/A2/A3): notify the hub and re-check the clock. */
   changed(): void;
+  /** Local-only is ready; a configured hub must have completed an interval-capable handshake. */
+  intervalReady?(): boolean;
   /**
    * Subscribe to every local ledger write (the same signal `changed()` forwards to the coordinator; also
    * fired for the clock's / executors' writes). Synchronous, errors swallowed; returns the unsubscribe.
@@ -510,6 +513,7 @@ export function createScheduleAgent(deps: ScheduleAgentDeps): ScheduleAgent {
       return coordinator;
     },
     clock,
+    intervalReady: () => deps.router === undefined || deps.router.link()?.intervalReady?.() === true,
     store: getStore,
     ensureStore() {
       if (store !== undefined) return store;
@@ -574,7 +578,12 @@ export function createScheduleAgent(deps: ScheduleAgentDeps): ScheduleAgent {
           if (!r.replay) changed();
           return { kind: "refused", code: r.code };
         case "error":
-          return { kind: "refused", code: r.code, detail: r.detail };
+          return {
+            kind: "refused",
+            code: r.code,
+            detail: r.detail,
+            ...(r.uncertain === undefined ? {} : { uncertain: r.uncertain }),
+          };
       }
     },
     changed() {

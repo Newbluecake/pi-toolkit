@@ -6,6 +6,7 @@ import { afterEach, expect, it } from "vitest";
 import { runMigration } from "../../src/memory/blocks/migrate.js";
 import { createBlockLocked, readCorpus } from "../../src/memory/blocks/store.js";
 import { createSweepRunner, readArchiveIndex, restoreBlock } from "../../src/memory/govern/sweep.js";
+import { createGovernanceMarkers } from "../../src/memory/govern/markers.js";
 import { renderBlocks } from "../../src/memory/blocks/render.js";
 import { firstUserReviewPass } from "../../src/memory/govern/review-lite.js";
 import { readIndex } from "../../src/memory/jev/index-store.js";
@@ -44,19 +45,34 @@ it("migrate → user-only review → startup budget suggestion, no truncation �
     "expired state",
     new Date(),
   );
-  let pairs: readonly { a: string; b: string }[] = [];
-  const count = await firstUserReviewPass(root, async (p) => {
-    pairs = p;
-    return p.slice(0, 1).map((x) => ({ ...x, p: 1 }));
-  });
-  expect(count).toBe(1);
-  expect(pairs.every((p) => !p.a.startsWith("agent.") && !p.b.startsWith("agent."))).toBe(true);
+  const eligibleIds = readCorpus(blocks)
+    .blocks.filter((b) => b.meta.authority === "user")
+    .map((b) => b.id);
+  const review = await firstUserReviewPass(root, async (plan) =>
+    plan.pairs.map(({ a, b }, i) => ({ a, b, p: i === 0 ? 1 : 0 })),
+  );
+  expect(review.complete).toBe(true);
+  expect(review.added).toBe(1);
+  expect(review.suggestionsWritten).toBe(true);
+  expect(review.casFailures).toEqual([]);
+  expect(review.plan?.eligibleUsers).toBe(eligibleIds.length);
+  expect(review.plan?.selectedUsers).toBe(eligibleIds.length);
+  expect(review.plan?.pairs.length).toBeGreaterThan(0);
+  expect(review.answeredPairs).toBe(review.plan?.plannedPairs);
+  expect(review.plan?.pairs.every((p) => eligibleIds.includes(p.a) && eligibleIds.includes(p.b))).toBe(true);
+  expect(review.plan?.pairs.every((p) => !p.a.startsWith("agent.") && !p.b.startsWith("agent."))).toBe(true);
+  expect(readIndex(root).index.review?.suggestions.filter((s) => s.kind === "conflict")).toHaveLength(1);
   const notices: string[] = [];
   const runner = createSweepRunner({ enabled: true, residentBudget: 512, notify: (m) => notices.push(m) });
   const result = await runner.runSweep(root, "startup");
   expect(result.archived).toContain(a.id);
   expect(notices.some((m) => m.includes("resident budget exceeded"))).toBe(true);
-  expect(notices.some((m) => m.includes("reload"))).toBe(true);
+  expect(notices.some((m) => m.includes("reload"))).toBe(false);
+  const markers = createGovernanceMarkers(root);
+  expect((await markers.deliverReloadReminder((m) => notices.push(m))).status).toBe("delivered");
+  await runner.runSweep(root, "reload");
+  expect((await markers.deliverReloadReminder((m) => notices.push(m))).status).toBe("already-delivered");
+  expect(notices.filter((m) => m.includes("/reload"))).toHaveLength(1);
   expect(readIndex(root).index.review?.suggestions.some((s) => s.kind === "resident-budget")).toBe(true);
   const rendered = renderBlocks(readCorpus(blocks), {
     slug: "test",

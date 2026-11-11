@@ -290,6 +290,8 @@ describe("M8: list/channels recheck origin after await", () => {
     expect((await h.sender.list({})).status).toBe("not_joined");
     expect(h.listed).toHaveLength(0);
     const g = make({});
+    expect((await g.sender.list({ channel: "" })).status).toBe("bad_channel");
+    expect(g.listed).toHaveLength(0);
     expect((await g.sender.list({ channel: "other" })).status).toBe("bad_channel");
     await g.sender.list({ channel: "#Team" });
     expect(g.listed[0]!.channel).toBe("team");

@@ -49,6 +49,7 @@ describe("speed host assembly", () => {
       const message = {
         role: "assistant",
         ...binding,
+        stopReason: "stop",
         content: [{ type: "text", text: "ab" }],
         usage: { output: 10 },
         timestamp: 123,

@@ -121,7 +121,7 @@ describe("RootWakeController random event invariants", () => {
                 controllers.at(-1)!.recover();
                 break;
               case 11:
-                c.input({ source: "extension", text: "/goal continuation" });
+                c.input({ source: "extension", text: "machine continuation" });
                 break;
             }
             const owners = controllers.filter((controller) => controller.busy);

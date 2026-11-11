@@ -527,3 +527,62 @@ function writeCorpus2(dir: string): void {
 }
 
 void readFileSync;
+
+test("manual and background review overlap without replacing each other's results", async () => {
+  const { dir, cwd } = fixture();
+  writeCorpus(dir, ["- release flow alpha rule", "- release flow beta rule"]);
+  const entries = new EntryIndex().get(dir);
+  await writeIndexPatch(dir, {
+    upsert: Object.fromEntries(entries.map((e) => [e.hash, record({ tags: { release: { p: 0.9, rev: 1 } } })])),
+  });
+  const snapshot = readIndex(dir).index;
+  let release!: () => void;
+  const barrier = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let started = 0;
+  let bothStarted!: () => void;
+  const both = new Promise<void>((resolve) => {
+    bothStarted = resolve;
+  });
+  const delayed = (choice: string): JevClient => {
+    const base = fakeClient({
+      answer: (_duty, questions) =>
+        Object.fromEntries(
+          Object.keys(questions).map((id) => [
+            id,
+            { type: "choice", choice, probabilities: { [choice]: 0.99 }, confidence: 0.99 } as JevAnswer,
+          ]),
+        ),
+    });
+    return {
+      ...base,
+      ask: async (req) => {
+        if (++started === 2) bothStarted();
+        await barrier;
+        return base.ask(req);
+      },
+    };
+  };
+  const manual = makePort(dir, cwd, delayed("duplicate")).port.review.run(cwd, registry);
+  const { runReviewPass } = await import("../../../src/memory/jev/review.js");
+  const background = runReviewPass({
+    client: delayed("conflict"),
+    registry,
+    entries,
+    index: snapshot,
+    today: "2026-11-08",
+    project: "test",
+  });
+  await both;
+  release();
+  const backgroundResult = await background;
+  expect("ok" in backgroundResult).toBe(false);
+  if ("ok" in backgroundResult) throw new Error("background failed");
+  expect(backgroundResult.suggestions.map((s) => s.kind)).toContain("conflict");
+  expect(await writeIndexPatch(dir, { review: backgroundResult })).toBe("ok");
+  expect(await manual).toContain("review pass complete");
+  expect(readIndex(dir).index.review!.suggestions.map((s) => s.kind)).toEqual(
+    expect.arrayContaining(["duplicate", "conflict"]),
+  );
+});

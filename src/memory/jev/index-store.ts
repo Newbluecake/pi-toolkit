@@ -37,11 +37,13 @@ import {
   type IndexPatch,
   type JevIndexV1,
   type ReviewSuggestionKind,
+  type RevisionProposal,
   type ReviewState,
   type ReviewSuggestion,
   type TaxonomyFileV1,
 } from "./contracts.js";
 import { mergeTaxonomy } from "./taxonomy.js";
+import { validateRevisionProposal } from "../govern/revision.js";
 
 /** `.jev/` under the canonical memory slug directory. */
 export const JEV_DIR_NAME = ".jev";
@@ -159,6 +161,24 @@ function sanitizeSuggestions(v: unknown): readonly ReviewSuggestion[] | undefine
     ) {
       continue;
     }
+    const revision = Object.hasOwn(item, "revision") ? validateRevisionProposal(item["revision"]) : undefined;
+    if (Object.hasOwn(item, "revision") && revision === undefined) continue;
+    if (
+      revision &&
+      (item["id"] !== `revision:${revision.actionId}` ||
+        item["kind"] !==
+          (revision.reason === "expired"
+            ? "expired-user"
+            : revision.reason === "budget"
+              ? "oversize"
+              : revision.reason) ||
+        ![revision.targetId, `${revision.targetId}.md`].some((id) => (a["anchor"] as string).split("|")[0] === id) ||
+        (revision.contextId === undefined
+          ? b !== undefined
+          : !isPlainObject(b) ||
+            ![revision.contextId, `${revision.contextId}.md`].includes((b["anchor"] as string).split("|")[0]!)))
+    )
+      continue;
     out.push({
       id: item["id"],
       kind: item["kind"] as ReviewSuggestion["kind"],
@@ -166,6 +186,7 @@ function sanitizeSuggestions(v: unknown): readonly ReviewSuggestion[] | undefine
       ...(isPlainObject(b) ? { b: { hash: b["hash"] as string, anchor: b["anchor"] as string } } : {}),
       p: item["p"],
       at: item["at"],
+      ...(revision === undefined ? {} : { revision }),
     });
   }
   return out;
@@ -189,6 +210,9 @@ function sanitizeDismissed(v: unknown): readonly DismissedPair[] | undefined {
         hashKey: item["hashKey"],
         anchorKey: item["anchorKey"],
         ...(kind === undefined ? {} : { kind }),
+        ...(typeof item["suggestionKey"] === "string"
+          ? { suggestionKey: normalizeSuggestionKey(item["suggestionKey"]) }
+          : {}),
         ...(until === undefined ? {} : { until }),
       });
     }
@@ -208,7 +232,17 @@ function sanitizeReview(v: unknown): ReviewState | undefined {
   ) {
     return undefined;
   }
-  return { lastRunAt: v["lastRunAt"], corpusFp: v["corpusFp"], suggestions, dismissed };
+  return {
+    lastRunAt: v["lastRunAt"],
+    corpusFp: v["corpusFp"],
+    suggestions,
+    dismissed,
+    ...(typeof v["sweepLastRunAt"] === "string" ? { sweepLastRunAt: v["sweepLastRunAt"] } : {}),
+    ...(typeof v["sweepCorpusFp"] === "string" ? { sweepCorpusFp: v["sweepCorpusFp"] } : {}),
+    ...(Array.isArray(v["resolved"])
+      ? { resolved: v["resolved"].filter((x): x is string => typeof x === "string").map(normalizeSuggestionKey) }
+      : {}),
+  };
 }
 
 /** Sanitize an A/P-layer cooldown map: string values with a parseable date
@@ -265,9 +299,230 @@ export function readIndex(dir: string): { index: JevIndexV1; rebuilt: boolean } 
 
 // ───────────────────────────── merge + caps ─────────────────────────────
 
+/** Stable semantic identity; old pN/oN classifier question IDs are not stable. */
+export function suggestionKey(s: ReviewSuggestion): string {
+  if (s.revision)
+    return JSON.stringify([
+      "revision",
+      s.revision.action,
+      ...[s.revision.targetId, ...(s.revision.contextId ? [s.revision.contextId] : [])].sort(),
+    ]);
+  const entryId = (anchor: string): string => {
+    const match = /^([^|]+\.\d+\.md)\|/.exec(anchor);
+    return match?.[1] ?? anchor;
+  };
+  const anchors = [entryId(s.a.anchor), ...(s.b ? [entryId(s.b.anchor)] : [])].sort();
+  return JSON.stringify([s.kind, ...anchors]);
+}
+
+/** Read old source-prefixed keys without requiring sidecar migration. */
+export function normalizeSuggestionKey(key: string): string {
+  try {
+    const value: unknown = JSON.parse(key);
+    if (
+      Array.isArray(value) &&
+      (value[0] === "semantic" || value[0] === "governance") &&
+      value.length >= 3 &&
+      value.every((part) => typeof part === "string")
+    )
+      return JSON.stringify(value.slice(1));
+  } catch {
+    // Unknown key shapes remain opaque; never silently discard a tombstone.
+  }
+  return key;
+}
+
+/** Read-only P50 semantic projection. `reason` is absent before fresh
+ * classification: only revision-action and kindless legacy tombstones apply.
+ * IDs may be bare block IDs or strict legacy block anchors; never paths. */
+export interface RevisionSuppressionSubject {
+  readonly action: RevisionProposal["action"];
+  readonly reason?: RevisionProposal["reason"];
+  readonly target: { readonly id: string; readonly hash: string };
+  readonly context?: { readonly id: string; readonly hash: string };
+}
+/** Comparison only. Never rewrite persisted anchors/keys or infer a basename.
+ * blockAnchor's section/head are unescaped payload, not identity: normalizeBody
+ * preserves newlines and '+', and the head may itself contain '|'. */
+function suppressionBlockId(anchor: string): string | undefined {
+  const blockId = /^([a-z0-9][a-z0-9-]{0,47}\.[0-9]{3,6})/.exec(anchor)?.[1];
+  if (!blockId) return undefined;
+  const suffix = anchor.slice(blockId.length);
+  return suffix === "" || suffix === ".md" || (suffix.startsWith(".md|") && suffix.indexOf("|", 4) >= 0)
+    ? blockId
+    : undefined;
+}
+function suppressionIdentities(anchors: readonly string[]): string {
+  return JSON.stringify(anchors.map((a) => suppressionBlockId(a) ?? a).sort());
+}
+/** Legacy pair keys join UNESCAPED anchors with '+'. Try complete strict block
+ * boundaries, not split('+') on body text (e.g. C++). If multiple parses are
+ * possible, suppress only a matching complete subject pair, never all pairs or
+ * other typed semantics. Hash arity distinguishes a singleton from a pair;
+ * entryHash itself cannot contain '+'. Exact legacy fallbacks precede this. */
+function suppressionAnchorKeyMatches(key: string, hashKey: string, anchors: readonly string[]): boolean {
+  const ids = anchors.map(suppressionBlockId);
+  if (ids.some((id) => id === undefined) || hashKey.split("+").length !== ids.length) return false;
+  if (ids.length === 1) return suppressionBlockId(key) === ids[0];
+  if (ids.length !== 2) return false;
+  for (let at = key.indexOf("+"); at >= 0; at = key.indexOf("+", at + 1)) {
+    const right = suppressionBlockId(key.slice(at + 1));
+    if (right !== ids[0] && right !== ids[1]) continue;
+    const left = suppressionBlockId(key.slice(0, at));
+    if ((left === ids[0] && right === ids[1]) || (left === ids[1] && right === ids[0])) return true;
+  }
+  return false;
+}
+/** Sole revision suppression predicate shared by review, E and future host.
+ * Keyed tombstones keep their action/kind semantics; a duplicate dismissal
+ * cannot blanket-ban a later supersedes action. Unknown anchors retain exact
+ * fallback comparison rather than being discarded or guessed across paths. */
+export function revisionSemanticSuppression(
+  index: Pick<JevIndexV1, "review">,
+  subject: RevisionSuppressionSubject,
+): false | "dismissed" | "resolved" {
+  const review = index.review;
+  if (!review) return false;
+  const sides = [subject.target, ...(subject.context ? [subject.context] : [])];
+  const anchors = sides.map((s) => s.id);
+  const identities = suppressionIdentities(anchors);
+  const kind =
+    subject.reason === "expired" ? "expired-user" : subject.reason === "budget" ? "oversize" : subject.reason;
+  const matchesKey = (key: string): boolean => {
+    try {
+      const parts: unknown = JSON.parse(normalizeSuggestionKey(key));
+      if (!Array.isArray(parts) || !parts.every((p) => typeof p === "string")) return false;
+      if (parts[0] === "revision")
+        return (
+          parts[1] === subject.action &&
+          parts.length === sides.length + 2 &&
+          suppressionIdentities(parts.slice(2)) === identities
+        );
+      return (
+        kind !== undefined &&
+        parts[0] === kind &&
+        parts.length === sides.length + 1 &&
+        suppressionIdentities(parts.slice(1)) === identities
+      );
+    } catch {
+      return false;
+    }
+  };
+  if (review.resolved?.some(matchesKey)) return "resolved";
+  const hashKey = sides
+    .map((s) => s.hash)
+    .sort()
+    .join("+");
+  const anchorKey = anchors.slice().sort().join("+");
+  if (
+    review.dismissed.some((d) => {
+      if (d.suggestionKey !== undefined) return matchesKey(d.suggestionKey);
+      if (d.kind !== undefined && d.kind !== kind) return false;
+      if (d.hashKey === hashKey || d.anchorKey === anchorKey) return true;
+      return suppressionAnchorKeyMatches(d.anchorKey, d.hashKey, anchors);
+    })
+  )
+    return "dismissed";
+  return false;
+}
+
+/** Pairwise governance decisions suppress subsequent automatic relation work.
+ * Use the same suggestionKey as storage; legacy block anchors can still yield
+ * stable block identities, even if their recorded bodies have since changed. */
+export function isDismissedRelation(
+  dismissed: readonly DismissedPair[],
+  a: ReviewSuggestion["a"],
+  b: NonNullable<ReviewSuggestion["b"]>,
+  kind?: "duplicate" | "conflict" | "supersedes",
+): boolean {
+  const hashKey = [a.hash, b.hash].sort().join("+");
+  const anchorKey = [a.anchor, b.anchor].sort().join("+");
+  const keyFor = (left: typeof a, right: typeof b, k: "duplicate" | "conflict" | "supersedes") =>
+    suggestionKey({ id: "relation-", kind: k, a: left, b: right, p: 0, at: "" });
+  return dismissed.some((d) => {
+    // A keyed dismissal always has a type, including legacy source-prefixed keys.
+    // When a classifier has not answered yet, it cannot suppress the pair.
+    if (d.suggestionKey !== undefined) {
+      return kind !== undefined && normalizeSuggestionKey(d.suggestionKey) === keyFor(a, b, kind);
+    }
+    if (d.kind !== undefined && d.kind !== kind) return false;
+    if (d.hashKey === hashKey || d.anchorKey === anchorKey) return true;
+    const anchors = d.anchorKey.split("+");
+    if (anchors.length !== 2 || !anchors.every((x) => /^[^|]+\.\d+\.md\|/.test(x))) return false;
+    // Kindless legacy dismissals apply to all relation kinds, including before classification.
+    const k = kind ?? "conflict";
+    return keyFor({ hash: "", anchor: anchors[0]! }, { hash: "", anchor: anchors[1]! }, k) === keyFor(a, b, k);
+  });
+}
+
+function dismissedSuggestion(s: ReviewSuggestion, ds: readonly DismissedPair[]): boolean {
+  const hash = [s.a.hash, ...(s.b ? [s.b.hash] : [])].sort().join("+");
+  const anchor = [s.a.anchor, ...(s.b ? [s.b.anchor] : [])].sort().join("+");
+  return ds.some((d) => {
+    if (d.suggestionKey !== undefined) return normalizeSuggestionKey(d.suggestionKey) === suggestionKey(s);
+    return (
+      (!d.kind || d.kind === s.kind) &&
+      (d.hashKey === hash ||
+        d.anchorKey === anchor ||
+        (s.b !== undefined &&
+          isDismissedRelation(
+            [d],
+            s.a,
+            s.b,
+            s.kind === "duplicate" || s.kind === "conflict" || s.kind === "supersedes" ? s.kind : undefined,
+          )))
+    );
+  });
+}
+
+/** Merge only while holding the directory lock: snapshots never delete live rows. */
+export function mergeReview(
+  current: ReviewState | undefined,
+  incoming: ReviewState,
+  base?: ReviewState | null,
+): ReviewState {
+  current ??= { lastRunAt: "", corpusFp: "", suggestions: [], dismissed: [] };
+  const dismissed = [...current.dismissed];
+  for (const d of incoming.dismissed) {
+    if (!dismissed.some((x) => JSON.stringify(x) === JSON.stringify(d))) dismissed.push(d);
+  }
+  const resolved = [
+    ...new Set([...(current.resolved ?? []), ...(incoming.resolved ?? [])].map(normalizeSuggestionKey)),
+  ];
+  const items = new Map(current.suggestions.map((s) => [suggestionKey(s), s]));
+  for (const s of incoming.suggestions) {
+    const key = suggestionKey(s);
+    const existing = items.get(key);
+    const baseItem = base?.suggestions.find((item) => suggestionKey(item) === key);
+    const changedInFlight =
+      base !== undefined && existing !== undefined && JSON.stringify(existing) !== JSON.stringify(baseItem);
+    if (!changedInFlight && (!existing || s.at > existing.at)) items.set(key, s);
+  }
+  return {
+    ...current,
+    lastRunAt: incoming.lastRunAt > current.lastRunAt ? incoming.lastRunAt : current.lastRunAt,
+    corpusFp: incoming.lastRunAt >= current.lastRunAt ? incoming.corpusFp : current.corpusFp,
+    suggestions: [...items.values()].filter((s) =>
+      s.revision
+        ? !revisionSemanticSuppression(
+            { review: { lastRunAt: "", corpusFp: "", suggestions: [], dismissed, resolved } },
+            {
+              action: s.revision.action,
+              reason: s.revision.reason,
+              target: { id: s.revision.targetId, hash: s.a.hash },
+              ...(s.revision.contextId && s.b ? { context: { id: s.revision.contextId, hash: s.b.hash } } : {}),
+            },
+          )
+        : !dismissedSuggestion(s, dismissed) && !resolved.includes(suggestionKey(s)),
+    ),
+    dismissed,
+    ...(resolved.length ? { resolved } : {}),
+  };
+}
+
 /** Pure read → patch → merged (no fs). Upserts overwrite by hash; `remove`
- *  wins over an upsert of the same hash (explicit deletion); `review` and
- *  `lastTaggedAt` replace wholesale when present. */
+ *  wins over an upsert of the same hash (explicit deletion); review rows
+ *  merge by stable identity, while lastTaggedAt replaces when present. */
 export function mergeIndex(index: JevIndexV1, patch: IndexPatch): JevIndexV1 {
   const entries: Record<EntryHash, EntryTags> = { ...index.entries };
   for (const [hash, tags] of Object.entries(patch.upsert ?? {})) {
@@ -283,7 +538,7 @@ export function mergeIndex(index: JevIndexV1, patch: IndexPatch): JevIndexV1 {
       ? { lastTaggedAt: patch.lastTaggedAt ?? index.lastTaggedAt }
       : {}),
     ...(patch.review !== undefined
-      ? { review: patch.review }
+      ? { review: mergeReview(index.review, patch.review, patch.reviewBase) }
       : index.review !== undefined
         ? { review: index.review }
         : {}),
@@ -382,7 +637,12 @@ export function gcIndex(index: JevIndexV1, liveHashes: ReadonlySet<EntryHash>): 
 
 /** Exact blocks GC: a content hash survives while ANY block still references it.
  * Old files-layout gcIndex remains cap-triggered and byte-compatible. */
-export function gcBlockIndex(index: JevIndexV1, liveHashes: ReadonlySet<EntryHash>, today: string): JevIndexV1 {
+export function gcBlockIndex(
+  index: JevIndexV1,
+  liveHashes: ReadonlySet<EntryHash>,
+  _today: string,
+  liveRevisions?: ReadonlyMap<string, { readonly rev: string; readonly hash: string }>,
+): JevIndexV1 {
   const filter = <T>(values: Readonly<Record<string, T>> | undefined): Record<string, T> =>
     Object.fromEntries(Object.entries(values ?? {}).filter(([hash]) => liveHashes.has(hash)));
   const { aInjectedAt: _a, pInjectedAt: _p, review: _r, ...rest } = index;
@@ -397,12 +657,20 @@ export function gcBlockIndex(index: JevIndexV1, liveHashes: ReadonlySet<EntryHas
       ? {
           review: {
             ...index.review,
-            suggestions: index.review.suggestions.filter(
-              (s) => liveHashes.has(s.a.hash) && (!s.b || liveHashes.has(s.b.hash)),
-            ),
-            dismissed: index.review.dismissed.filter(
-              (d) => (!d.until || d.until >= today) && d.hashKey.split("+").every((h) => liveHashes.has(h)),
-            ),
+            suggestions: index.review.suggestions.filter((s) => {
+              if (!liveHashes.has(s.a.hash) || (s.b && !liveHashes.has(s.b.hash))) return false;
+              if (!s.revision || !liveRevisions) return true;
+              const p = s.revision,
+                target = liveRevisions.get(p.targetId);
+              const context = p.contextId ? liveRevisions.get(p.contextId) : undefined;
+              return (
+                target?.rev === p.expectedRev &&
+                target.hash === s.a.hash &&
+                (p.contextId === undefined ||
+                  (context !== undefined && context.rev === p.contextExpectedRev && context.hash === s.b?.hash))
+              );
+            }),
+            dismissed: index.review.dismissed,
           },
         }
       : {}),
@@ -439,6 +707,14 @@ function isLockBusy(err: unknown): boolean {
  *  busy ⇒ "busy" (the patch is dropped, never thrown); genuine fs errors
  *  propagate. */
 export async function writeIndexPatch(dir: string, patch: IndexPatch, gate?: MemoryWriteGate): Promise<"ok" | "busy"> {
+  return updateIndexLocked(dir, (index) => mergeIndex(index, patch), gate);
+}
+
+export async function updateIndexLocked(
+  dir: string,
+  update: (index: JevIndexV1) => JevIndexV1,
+  gate?: MemoryWriteGate,
+): Promise<"ok" | "busy"> {
   try {
     gateCheck(dir, gate);
     return await withMemoryDirLock(
@@ -449,10 +725,12 @@ export async function writeIndexPatch(dir: string, patch: IndexPatch, gate?: Mem
           jdir = join(base, JEV_DIR_NAME);
         gateCheck(dir, gate);
         ensurePrivateDir(jdir);
-        let merged = mergeIndex(readIndex(dir).index, patch);
+        let merged = update(readIndex(dir).index);
         if (base !== dir) {
-          const live = new Set(readCorpus(base).blocks.map((b) => entryHash(b.body)));
-          merged = gcBlockIndex(merged, live, new Date().toISOString().slice(0, 10));
+          const blocks = readCorpus(base).blocks;
+          const live = new Set(blocks.map((b) => entryHash(b.body)));
+          const revisions = new Map(blocks.map((b) => [b.id, { rev: b.rev, hash: entryHash(b.body) }]));
+          merged = gcBlockIndex(merged, live, new Date().toISOString().slice(0, 10), revisions);
         } else merged = capBlind(merged);
         gateCheck(dir, gate);
         const tmp = writeTempRegular(jdir, INDEX_NAME, serializeIndex(merged), INDEX_FILE_MODE);

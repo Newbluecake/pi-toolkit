@@ -113,7 +113,7 @@ export function parameterizedBuiltinPolicy(
  * mutates settings, writes files, dispatches a subagent, or sends external notifications is
  * `confirm`; sub-commands whose only UI is a TUI-only selector with no text fallback are `deny`.
  * Reference (read-only, per plan §12.3): `src/commands/status.ts`, `src/memory/command.ts`,
- * `src/cache-ttl/cache-ttl.ts`, `src/todo/index.ts`, `src/goal/command.ts`, `src/commands/task.ts`,
+ * `src/cache-ttl/cache-ttl.ts`, `src/todo/index.ts`, `src/commands/task.ts`,
  * `src/feishu-notify/index.ts`, `src/hud/index.ts`, `src/session-nav/index.ts`,
  * `src/commands/webhub.ts`.
  */
@@ -177,8 +177,8 @@ const PI_TOOLKIT_TABLE: Readonly<Record<string, SubPolicyFn>> = {
     // Anything else is a bare runId/prefix (`/agent r_xxx`) — a read-only detail view.
     return { policy: "allow" };
   },
-  // /mem [list] · path · doctor → read-only. init/import/tidy/restore write files or (tidy/restore)
-  // are multi-step interactive flows the web caller cannot drive (§4.9's downgrade-to-cancel row).
+  // /mem [list] · path · doctor → read-only. init/import/restore write files or
+  // involve multi-step interactive flows the web caller cannot drive (§4.9's downgrade-to-cancel row).
   // J4 (Q35): the read-only jev surfaces — bare `mem jev` (report) and `mem tags` / `mem tags
   // list` — are allow; the state-changing `mem jev probe|retag|reset-index` and
   // `mem tags add|rm|disable|enable` follow the generic confirm class (anti-misclick only).
@@ -206,15 +206,6 @@ const PI_TOOLKIT_TABLE: Readonly<Record<string, SubPolicyFn>> = {
       return { policy: tokens[1] === "--list" ? "allow" : "confirm" };
     }
     if (sub === "expired") return { policy: "confirm" };
-    // Batch's read-only surfaces are safe to invoke from the web hub. The
-    // interactive archive/normalize and lock-break flows remain confirmed.
-    if (
-      sub === "tidy" &&
-      tokens[1] === "--batch" &&
-      (tokens[2] === "--dry-run" || tokens[2] === "--status") &&
-      tokens.length === 3
-    )
-      return { policy: "allow" };
     return { policy: "confirm" };
   },
   // /cache-ttl [status] → read-only. Every mode switch / keepalive toggle / save mutates process
@@ -242,12 +233,6 @@ const PI_TOOLKIT_TABLE: Readonly<Record<string, SubPolicyFn>> = {
   // /tasklist [no args] → read-only listing (text fallback, §4.9). `clear` is destructive.
   tasklist(tokens) {
     return { policy: tokens[0] === undefined ? "allow" : "confirm" };
-  },
-  // /goal [status] → read-only. pause/resume/clear mutate the loop; any other single token is
-  // free-text objective, which starts a new loop (also mutating).
-  goal(tokens) {
-    const sub = tokens[0];
-    return { policy: sub === undefined || sub === "status" ? "allow" : "confirm" };
   },
   // /task always dispatches a background subagent.
   task() {
@@ -322,6 +307,9 @@ function tokenize(args: string): string[] {
 
 export interface ResolvePolicyOptions {
   memoryScopes?: boolean;
+  /** Internal actual-context capability projection; never a wire capability. */
+  memorySessionAdd?: boolean;
+  memoryRevisionReview?: boolean;
   name: string;
   args: string;
   kind: CommandKind;
@@ -331,9 +319,23 @@ export interface ResolvePolicyOptions {
 /** Main entry point (§4.6/§4.9): resolves the base decision for a classified command, before
  *  the busy/idle split (`effectivePolicy`) and before the caller checks `cmd.confirm`. */
 export function resolveCommandPolicy(opts: ResolvePolicyOptions): PolicyDecision {
+  if (/^mem:[1-9][0-9]*$/.test(opts.name)) return { policy: "deny" };
+  if (opts.name === "mem" && (opts.args.trim() === "review" || opts.args.trim() === "review --list"))
+    return { policy: opts.memoryRevisionReview === true ? (opts.overrides?.mem ?? "allow") : "deny" };
   if (opts.memoryScopes && opts.name === "mem") {
     const scoped = scopedMemoryCommandPolicy(opts.args);
-    if (scoped) return scoped;
+    if (scoped) {
+      // This narrowly opens admission to the separate business-confirmation path, never
+      // authorization itself. All other scoped writes remain hard-denied even on allow.
+      if (
+        opts.memorySessionAdd &&
+        /^session add ([\s\S]+)$/.test(opts.args.trim()) &&
+        opts.args.trim().slice("session add ".length).trim() !== ""
+      ) {
+        return { policy: opts.overrides?.mem ?? "allow" };
+      }
+      return scoped;
+    }
   }
   const override = opts.overrides?.[opts.name];
   if (override !== undefined) return { policy: override };

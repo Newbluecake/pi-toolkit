@@ -49,7 +49,7 @@ it("same hash survives deletion of one block; last deletion prunes tags, cooldow
   expect(index.aInjectedAt).toBeUndefined();
   expect(index.pInjectedAt).toBeUndefined();
 });
-it("dismiss until passed is pruned; today's deadline remains; legacy index is untouched", () => {
+it("dismissals survive expiry and GC; legacy index is untouched", () => {
   const index: JevIndexV1 = {
     v: 1,
     entries: {
@@ -80,7 +80,7 @@ it("dismiss until passed is pruned; today's deadline remains; legacy index is un
   };
   const before = JSON.stringify(index),
     out = gcBlockIndex(index, new Set(["abc"]), "2026-11-06");
-  expect(out.review?.dismissed.map((d) => d.anchorKey)).toEqual(["b", "c"]);
+  expect(out.review?.dismissed.map((d) => d.anchorKey)).toEqual(["a", "b", "c"]);
   expect(out.review?.suggestions).toEqual([]);
   expect(JSON.stringify(index)).toBe(before);
 });
@@ -116,4 +116,38 @@ it("denied sidecar writes do not acquire a write lock or create directories", as
   ).rejects.toThrow("locked");
   expect(existsSync(join(p, ".jev"))).toBe(false);
   expect(existsSync(join(p, ".lock"))).toBe(false);
+});
+
+it("blocks keep concurrent governance suggestions and dismissed rows across a late review and reload", async () => {
+  const p = mkdtempSync(join(tmpdir(), "blocks-review-race-"));
+  roots.push(p);
+  writeFileSync(join(p, "core.md"), "- first\n- second\n");
+  await runMigration(p);
+  const [a, b] = readCorpus(join(p, "blocks")).blocks;
+  expect(a).toBeDefined();
+  expect(b).toBeDefined();
+  const old = {
+    id: "p1",
+    kind: "obsolete" as const,
+    a: { hash: entryHash(a!.body), anchor: a!.id },
+    p: 0.9,
+    at: "2026-11-08",
+  };
+  const added = {
+    id: "governance",
+    kind: "oversize" as const,
+    a: { hash: entryHash(b!.body), anchor: b!.id },
+    p: 1,
+    at: "2026-11-08",
+  };
+  const base = { lastRunAt: "", corpusFp: "", suggestions: [old], dismissed: [] };
+  await writeIndexPatch(p, { review: base });
+  const stale = readIndex(p).index.review!;
+  await writeIndexPatch(p, {
+    review: { ...base, suggestions: [added], dismissed: [{ hashKey: old.a.hash, anchorKey: old.a.anchor }] },
+  });
+  await writeIndexPatch(p, { review: stale });
+  await writeIndexPatch(p, { review: stale });
+  expect(readIndex(p).index.review!.suggestions.map((s) => s.id)).toEqual(["governance"]);
+  expect(readIndex(p).index.review!.dismissed).toHaveLength(1);
 });

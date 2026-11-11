@@ -309,3 +309,121 @@ describe("thread main tool (§5.1 surface mapping)", () => {
     expect(text).toContain("话题");
   });
 });
+
+describe("reply effect evidence never regresses to none (#84)", () => {
+  const args = {
+    h: "fs:AAAAAAAAAAAA",
+    sessionId: "s1",
+    by: { runId: "r_0123456Q", label: "w1" },
+    postId: "r_0123456Q:1",
+    text: "hello",
+  };
+
+  it("request throw then lost conn preserves unknown at the REAL tool content boundary", async () => {
+    const request = vi.fn().mockRejectedValue(new Error("private credential MUST NOT appear"));
+    const conn = vi.fn().mockReturnValueOnce(fakeConn(request)).mockReturnValue(undefined);
+    const recordReply = vi.fn();
+    const tool = createThreadChildTool({
+      runId: args.by.runId,
+      label: args.by.label,
+      ops: baseOps({ activeSubOf: () => ({ subId: "t1", scope: "s" }), conn, recordReply }),
+    });
+    const content = await runTool(tool, { action: "reply", h: args.h, text: args.text });
+    expect(request).toHaveBeenCalledOnce();
+    expect(conn).toHaveBeenCalledTimes(2);
+    expect(content).toContain("E_THR_STATE (effect unknown)");
+    expect(content).toContain("may already be in the outbox");
+    expect(content).toContain("do NOT retry");
+    expect(content).toContain("message_agent");
+    expect(content).not.toContain("NOT sent");
+    expect(content).not.toContain("private credential");
+    expect(recordReply).not.toHaveBeenCalled();
+  });
+
+  it.each(["E_THR_STATE", "E_THR_RATE", "E_THR_REBOUND"])(
+    "a retry's %s/none cannot disprove the first throw's effect",
+    async (code) => {
+      const request = vi.fn().mockRejectedValueOnce(new Error("lost ack")).mockResolvedValueOnce(err(code, "none"));
+      expect(await thrPostWithRetry(() => fakeConn(request), args)).toEqual({ error: code, effect: "unknown" });
+      expect(request).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it.each(["E_THR_STATE", "E_THR_RATE", "E_THR_REBOUND", "E_THR_UNKNOWN", "E_THR_FUTURE"])(
+    "%s/unknown explains uncertainty and verification, never NOT sent or reply accounting",
+    async (code) => {
+      const request = vi.fn().mockResolvedValue(err(code, "unknown"));
+      const recordReply = vi.fn();
+      const tool = createThreadChildTool({
+        runId: args.by.runId,
+        label: args.by.label,
+        ops: baseOps({
+          activeSubOf: () => ({ subId: "t1", scope: "s" }),
+          conn: () => fakeConn(request),
+          recordReply,
+        }),
+      });
+      const content = await runTool(tool, { action: "reply", h: args.h, text: args.text });
+      expect(content).toContain(`${code} (effect unknown)`);
+      expect(content).toContain("may already be in the outbox");
+      expect(content).toContain("do NOT retry");
+      expect(content).toContain("verify");
+      expect(content).not.toContain("NOT sent");
+      expect(request).toHaveBeenCalledOnce(); // unknown is not a new-post retry instruction
+      expect(recordReply).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ["E_THR_RATE", "rate limit", "wait"],
+    ["E_THR_REBOUND", "another session", "binding/subscription"],
+    ["E_THR_UNKNOWN", "subscription", 'thread(action:"list")'],
+    ["E_THR_STATE", "could not confirm", "/webhub status"],
+  ])("%s/none has a reason, proven non-delivery, and a next step", async (code, cause, next) => {
+    const recordReply = vi.fn();
+    const tool = createThreadChildTool({
+      runId: args.by.runId,
+      label: args.by.label,
+      ops: baseOps({
+        activeSubOf: () => ({ subId: "t1", scope: "s" }),
+        conn: () => fakeConn(() => Promise.resolve(err(code!, "none"))),
+        recordReply,
+      }),
+    });
+    const content = await runTool(tool, { action: "reply", h: args.h, text: args.text });
+    expect(content).toContain(`${code} (effect none)`);
+    expect(content).toContain(cause);
+    expect(content).toContain("NOT sent");
+    expect(content).toContain(next);
+    expect(recordReply).not.toHaveBeenCalled();
+  });
+
+  it("no conn BEFORE any request is the only lost-link case that can promise none", async () => {
+    const tool = createThreadChildTool({
+      runId: args.by.runId,
+      label: args.by.label,
+      ops: baseOps({ activeSubOf: () => ({ subId: "t1", scope: "s" }) }),
+    });
+    const content = await runTool(tool, { action: "reply", h: args.h, text: args.text });
+    expect(content).toContain("effect none");
+    expect(content).toContain("NOT sent");
+    expect(content).toContain("/webhub status");
+  });
+  it("two transport throws surface unknown with a verification step and no reply accounting", async () => {
+    const request = vi.fn().mockRejectedValue(new Error("credential must not leak"));
+    const recordReply = vi.fn();
+    const tool = createThreadChildTool({
+      runId: args.by.runId,
+      label: args.by.label,
+      ops: baseOps({ activeSubOf: () => ({ subId: "t1", scope: "s" }), conn: () => fakeConn(request), recordReply }),
+    });
+    const content = await runTool(tool, { action: "reply", h: args.h, text: args.text });
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(content).toContain("unknown:");
+    expect(content).toContain("do NOT retry");
+    expect(content).toContain("verify");
+    expect(content).not.toContain("NOT sent");
+    expect(content).not.toContain("credential");
+    expect(recordReply).not.toHaveBeenCalled();
+  });
+});

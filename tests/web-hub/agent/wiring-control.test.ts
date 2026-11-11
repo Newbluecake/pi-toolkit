@@ -196,7 +196,7 @@ describe("wireWebHub — cmd round trip over the socket (§4.1/§4.2)", () => {
     // …and stays attributable after the hub's own input observer advanced the entry (handler order is unspecified)
     fire("input", { type: "input", text: "from the browser", source: "extension" }, ctx);
     expect(control.attributeInput("from the browser")).toBe("web_prompt");
-    // extension text the ledger never dispatched (topic-switch re-injection, goal loop, /agent reload fire) is not
+    // extension text the ledger never dispatched (topic-switch re-injection, machine continuation, /agent reload fire) is not
     expect(control.attributeInput("/agent reload fire")).toBeUndefined();
     expect(control.attributeInput("topic switch reinjection")).toBeUndefined();
   });
@@ -747,5 +747,70 @@ describe("wireWebHub — runtx session replacement (F2 P1 regression: reset, not
       source: "live",
       watching: true,
     });
+  });
+});
+
+describe("wireWebHub — readonly memory port", () => {
+  it("delivers actual reads over the hub socket and refuses unsupported commands", async () => {
+    const { mkdirSync, writeFileSync, readdirSync, readFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { executeMemoryRead } = await import("../../../src/memory/command-readonly.js");
+    const { memoryDirFor } = await import("../../../src/memory/paths.js");
+    const paths = { memoryRoot: join(tmp.dir, "memory"), ccProjectsRoot: join(tmp.dir, "cc") };
+    const dir = memoryDirFor("/tmp/wa", paths);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "note.md"), "# Real\n\nText\n");
+    const { sentUserMessages } = await connectFullCaps({
+      memoryRead: (args, cwd) => executeMemoryRead(args, cwd, paths),
+    });
+    const commands = ["list", "path", "restore", "migrate --dry-run", "doctor", "init", "restore --legacy old-v2"];
+    for (const [i, args] of commands.entries()) {
+      const id = `mem0000000000000${i}`;
+      hub!.send(hub!.conns[0]!, cmdFrame(id, { op: "command", name: "mem", args }));
+      await waitUntil(() => hub!.all().some((f) => f.t === "cmd_result" && f.id === id));
+    }
+    const results = hub!.all().filter((f) => f.t === "cmd_result");
+    expect(results).toHaveLength(7);
+    for (const [i, text] of [
+      [0, "note.md"],
+      [1, `memory dir: ${dir}`],
+      [3, "note.md"],
+    ] as const)
+      expect(results[i]).toMatchObject({
+        ok: true,
+        data: { output: { entries: [{ text: expect.stringContaining(text) }] } },
+      });
+    for (const i of [2, 6]) {
+      expect(results[i]).toMatchObject({
+        ok: false,
+        code: "E_UNSUPPORTED",
+        effect: "none",
+        message: expect.stringContaining("Legacy tidy backups are no longer supported"),
+      });
+      expect(results[i]).toMatchObject({ message: expect.stringContaining("#legacy-tidy-backup-recovery") });
+      expect(results[i]).toMatchObject({ message: expect.stringContaining("Stop all memory writers") });
+      expect(results[i]).not.toHaveProperty("data.output");
+    }
+    for (const result of results.slice(4))
+      expect(result).toMatchObject({
+        ok: false,
+        code: "E_UNSUPPORTED",
+        message: expect.stringContaining("E_MEM_WEB_UNSUPPORTED"),
+      });
+    expect(hub!.all().filter((f) => f.t === "dialog_open")).toHaveLength(0);
+    expect(sentUserMessages).toHaveLength(0);
+    expect(readdirSync(dir)).toEqual(["note.md"]);
+    expect(readFileSync(join(dir, "note.md"), "utf8")).toBe("# Real\n\nText\n");
+  });
+  it("does not fall back when the port is absent", async () => {
+    const { sentUserMessages } = await connectFullCaps();
+    hub!.send(hub!.conns[0]!, cmdFrame("mem0000000000010", { op: "command", name: "mem", args: "list" }));
+    await waitUntil(() => hub!.all().some((f) => f.t === "cmd_result" && f.id === "mem0000000000010"));
+    expect(hub!.all().find((f) => f.t === "cmd_result" && f.id === "mem0000000000010")).toMatchObject({
+      ok: false,
+      code: "E_UNSUPPORTED",
+      message: expect.stringContaining("E_MEM_CONFIRM_UNAVAILABLE"),
+    });
+    expect(sentUserMessages).toHaveLength(0);
   });
 });

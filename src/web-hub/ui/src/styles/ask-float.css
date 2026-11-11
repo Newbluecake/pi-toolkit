@@ -249,6 +249,13 @@
 }
 
 .ask-float .ask-question-text,
+.ask-float .ask-context {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.ask-float .ask-question-text,
 .ask-float .ask-option-label {
   font-size: 13px;
 }

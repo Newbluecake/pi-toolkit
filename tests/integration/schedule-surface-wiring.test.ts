@@ -3,6 +3,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vites
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { validateToolArguments } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import activate from "../../src/index.js";
 import { resetSettingsFilesIn } from "./helpers/home-sandbox.js";
@@ -211,13 +212,24 @@ describe("schedule surface — ON", () => {
       expect(empty).not.toContain("Scheduled tasks");
 
       const tool = h.tools.get("schedule");
-      const r = await tool.execute(
-        "c1",
-        { action: "create", name: "daily", cron: "0 8 * * *", tz: "Asia/Shanghai", prompt: "summarize" },
-        undefined,
-        undefined,
-        ctx,
-      );
+      // #83: a freshly activated production registration still requires only action. Feed its
+      // original schema through the actual SDK validator, which preserves an empty id placeholder.
+      expect(tool.parameters.required).toEqual(["action"]);
+      const args = validateToolArguments(tool, {
+        type: "toolCall",
+        name: "schedule",
+        id: "c1",
+        arguments: {
+          action: "create",
+          id: "",
+          name: "daily",
+          cron: "0 8 * * *",
+          tz: "Asia/Shanghai",
+          prompt: "summarize",
+        },
+      });
+      expect(args.id).toBe("");
+      const r = await tool.execute("c1", args, undefined, undefined, ctx);
       expect(r.details).toEqual({ ok: true, id: r.details.id });
 
       // status bar refreshes on the next turn_start

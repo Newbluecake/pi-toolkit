@@ -447,7 +447,7 @@ export function createTitleTrigger<M>(ports: TitlePorts, options: TitleTriggerOp
 
   return {
     onBeforeAgentStart(prompt: string, deps: TitleGenerationDeps<M>): void {
-      // 所有用户类 before_agent_start 都计数（r1 #7 裁定：/goal 续轮、compaction/
+      // 所有用户类 before_agent_start 都计数（r1 #7 裁定：compaction/
       // switch_context 恢复、web 投递都走 sendUserMessage，在 pi ≥1.2 里属于 messageType=user）；
       // pi ≥1.2 的唤醒轮（messageType=custom）由接线层 src/title/index.ts 过滤，不会到这里。
       inputSeq++;

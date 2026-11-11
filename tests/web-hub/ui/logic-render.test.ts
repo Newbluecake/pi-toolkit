@@ -133,6 +133,16 @@ describe("tools/toolView", () => {
     expect(toolView(call)).toMatchObject({ state: "pending" });
   });
 
+  it("uses a valid persisted tool execution duration only when the tap duration is unavailable", () => {
+    const call = { id: "t1", name: "read" };
+    const result = { role: "toolResult", toolCallId: "t1", durationMs: 367, isError: true };
+    expect(toolView(call, result)).toMatchObject({ state: "error", durationMs: 367 });
+    expect(toolView(call, result, undefined, new Map([["t1", 500]]))).toMatchObject({ durationMs: 500 });
+    for (const durationMs of [-1, NaN, Infinity, "367", null, undefined]) {
+      expect(toolView(call, { ...result, durationMs }).durationMs).toBeUndefined();
+    }
+  });
+
   it("tool-duration plan: durations map feeds done/error durationMs; live seenAt feeds runningSince", () => {
     const call = { type: "toolCall", id: "t1", name: "bash", arguments: {} };
     const durs = new Map([

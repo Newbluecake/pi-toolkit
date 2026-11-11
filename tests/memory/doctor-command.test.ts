@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import { DEFAULT_SETTINGS, type MemorySettings } from "../../src/config/settings.js";
 import { memoryDirFor, type MemoryPaths } from "../../src/memory/paths.js";
-import { collectDoctorFindings } from "../../src/memory/doctor-command.js";
+import { collectDoctorFindings, handleMemDoctorCommand } from "../../src/memory/doctor-command.js";
 import { formatDoctorReport, summaryLine } from "../../src/memory/doctor.js";
 import { writeBlocksDir, type BlockSpec } from "./blocks/helpers.js";
 import { writeIndexPatch } from "../../src/memory/jev/index-store.js";
@@ -236,4 +236,24 @@ describe("collectDoctorFindings — files/absent paths unchanged (legacy/tiered 
       expect(ids).not.toContain(legacy);
     }
   });
+});
+
+test("doctor exposes deduplicated soft metadata without exposing values", async () => {
+  const fx = fixture([{ id: "gen.001", body: "- fine" }]);
+  const secret = "s".repeat(95);
+  writeFileSync(join(fx.memDir, "jev-reflex.md"), `---\nwhen: ${secret}\n---\n- legacy\n`);
+  const notifications: string[] = [];
+  const ctx = {
+    cwd: fx.cwd,
+    hasUI: true,
+    ui: { notify: (message: string) => notifications.push(message), editor: async () => undefined },
+  } as unknown as import("@earendil-works/pi-coding-agent").ExtensionCommandContext;
+  await handleMemDoctorCommand("", ctx, { paths: fx.paths, settings: settings({ layout: "blocks" }) });
+  await handleMemDoctorCommand("", ctx, { paths: fx.paths, settings: settings({ layout: "blocks" }) });
+  expect(notifications).toHaveLength(2);
+  for (const message of notifications) {
+    expect(message.match(/E_META_SOFT when/g)).toHaveLength(1);
+    expect(message).toContain("E_META_SOFT when: 95B exceeds 70B");
+    expect(message).not.toContain(secret);
+  }
 });

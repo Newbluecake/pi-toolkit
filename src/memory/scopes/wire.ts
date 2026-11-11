@@ -1,9 +1,12 @@
+import type { MemoryActivityOwner } from "../govern/activity.js";
 /** Early, scopes-only assembly. Child receiver does not invent SDK resume facts or human hooks. */
+import type { ScopedMemoryDispatcher } from "../unified/dispatcher.js";
 import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { MemorySettings } from "../../config/settings.js";
 import type { AskUserRemotePort } from "../../ask-user/remote.js";
 import { isWebInvocation } from "../../commands/capture.js";
 import { createHumanDispatchHookOwner, type HumanDispatchBridge } from "../../web-hub/agent/human-dispatch-proof.js";
+import { scopedFailure } from "./error-messages.js";
 import { resolveHubSlot } from "./hub-slot.js";
 import { receiveMemoryChildBinding, type MemoryBindRequest } from "./child-bind.js";
 import { createMemoryOwner, hasMemoryManagerCapabilities, type MemoryOwnerRuntime } from "./owner.js";
@@ -19,7 +22,11 @@ export interface MemoryScopesWiring {
   current(): MemoryOwnerRuntime | undefined;
   group(): MemoryScopesGroup | undefined;
   proof: HumanDispatchBridge;
+  /** Same host-only proof owner; never construct a fallback activity tracker. */
+  activity?(): MemoryActivityOwner | undefined;
   context(ctx: ExtensionContext): void;
+  /** wireMemory supplies the sole per-activation dispatcher after both surfaces are built. */
+  attachDispatcher(dispatcher: ScopedMemoryDispatcher): void;
   command(args: string, ctx: ExtensionCommandContext): Promise<{ handled: boolean; result?: unknown }>;
   dispose(): void;
 }
@@ -37,6 +44,8 @@ export function wireMemoryScopes(
 ): MemoryScopesWiring | undefined {
   if (!opts.settings.enabled || opts.domain !== "plain" || (!opts.settings.scopes.session && !opts.settings.scopes.hub))
     return undefined;
+  let dispatcher: ScopedMemoryDispatcher | undefined;
+  let closed = false;
   let ctx: ExtensionContext | undefined;
   let commandCtx: ExtensionCommandContext | undefined;
   let group: MemoryScopesGroup | undefined;
@@ -80,6 +89,7 @@ export function wireMemoryScopes(
     },
   };
   function open(manager: unknown, reason: string, inherited?: EffectiveHubSlot) {
+    if (closed) return undefined;
     group?.dispose();
     group = undefined;
     runtime = undefined;
@@ -156,6 +166,7 @@ export function wireMemoryScopes(
   }
   let activeTree: (() => void) | undefined;
   function context(next: ExtensionContext) {
+    if (closed) return;
     try {
       const manager = next.sessionManager;
       if (!hasMemoryManagerCapabilities(manager)) {
@@ -201,6 +212,7 @@ export function wireMemoryScopes(
   } else {
     // These precede the bridge hooks (and every downstream handled/reentrant interceptor).
     pi.on("session_start", (event, next) => {
+      closed = false;
       ctx = next;
       const opened = open(next.sessionManager, event.reason);
       activeTree = opened?.tree;
@@ -216,6 +228,7 @@ export function wireMemoryScopes(
     });
     createHumanDispatchHookOwner(proof)(pi);
     pi.on("session_shutdown", () => {
+      closed = true;
       group?.dispose();
       ctx = undefined;
     });
@@ -234,11 +247,15 @@ export function wireMemoryScopes(
       ...schema,
       async execute(id: string, input: unknown, signal?: AbortSignal, _update?: unknown, next?: ExtensionContext) {
         if (next) context(next);
+        if (dispatcher) {
+          const result = await dispatcher.scoped(id, input, signal);
+          return { content: [{ type: "text" as const, text: JSON.stringify(result) }], details: undefined };
+        }
         const r = current();
         return r
           ? r.tool.execute(id, input, signal)
           : {
-              content: [{ type: "text" as const, text: JSON.stringify({ ok: false, code: "E_STALE_SESSION" }) }],
+              content: [{ type: "text" as const, text: JSON.stringify(scopedFailure("E_STALE_SESSION")) }],
               details: undefined,
             };
       },
@@ -265,9 +282,14 @@ export function wireMemoryScopes(
   }
   return {
     current,
+    activity: () =>
+      (current()?.proof as (HumanDispatchBridge & { activity?: MemoryActivityOwner }) | undefined)?.activity,
     group: () => group,
     proof,
     context,
+    attachDispatcher(next) {
+      dispatcher = next;
+    },
     async command(args, next) {
       context(next);
       commandCtx = next;
@@ -275,7 +297,7 @@ export function wireMemoryScopes(
         return (
           (await current()?.command.route(args)) ?? {
             handled: /^(session|hub)(?: |$)/.test(args),
-            result: { ok: false, code: "E_STALE_SESSION" },
+            result: scopedFailure("E_STALE_SESSION"),
           }
         );
       } finally {
@@ -283,8 +305,11 @@ export function wireMemoryScopes(
       }
     },
     dispose() {
+      closed = true;
       receiverOff?.();
       group?.dispose();
+      // Routing is stateless and follows this wiring's lifetime/GC. Retain the injected
+      // instance so a real session_start can resume through it, never a second route.
       ctx = undefined;
     },
   };

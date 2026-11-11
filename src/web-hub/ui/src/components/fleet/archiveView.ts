@@ -38,13 +38,14 @@ export interface ArchivePartition {
   readonly archivedRows: readonly FleetRowWire[];
 }
 
-/** Split fleet rows by the archive set. Rows whose id is archived but no longer in the wire are
- *  gone from both halves (they were dropped by the fleet projection's own caps long ago). */
+/** Split fleet rows by the archive set. Only terminal rows may enter the archive fold: stale
+ *  metadata must never hide a received active run. Archived ids absent from the wire appear in
+ *  neither half — the fold counts real received rows, not archive metadata entries. */
 export function partitionArchived(rows: readonly FleetRowWire[], set: ArchiveSet): ArchivePartition {
   const live: FleetRowWire[] = [];
   const archivedRows: FleetRowWire[] = [];
   for (const row of rows) {
-    if (set.has(String(row.runId))) archivedRows.push(row);
+    if (row.terminal === true && set.has(String(row.runId))) archivedRows.push(row);
     else live.push(row);
   }
   return { live, archivedRows };

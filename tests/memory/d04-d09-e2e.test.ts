@@ -3,8 +3,7 @@
 // user saw. Pins the whole chain with the REAL renderer: renderTiered L1
 // (name-only tail) ⇒ doctor D09 at severity info with the name-only count
 // (no longer a warn contradicting D04's "split it" advice), D04 still warn,
-// and the default `/mem tidy` snapshot carrying the oversized file as a
-// target whose prompt demands the split by name.
+// with a manual split recommendation; the removed tidy planner is not involved.
 
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -14,10 +13,8 @@ import { DEFAULT_SETTINGS } from "../../src/config/settings.js";
 import { collectDoctorFindings, type RenderTieredPort } from "../../src/memory/doctor-command.js";
 import { renderTiered } from "../../src/memory/tiered.js";
 import { memoryDirFor } from "../../src/memory/paths.js";
-import { snapshotMemoryDir } from "../../src/memory/tidy/snapshot.js";
-import { buildTidyPrompt } from "../../src/memory/tidy/prompt.js";
 
-it("user shape: D04 stays warn, D09-L1 reports info with the name-only count, tidy prompt demands the split", () => {
+it("user shape: D04 stays warn, D09-L1 reports info with the name-only count", () => {
   const root = mkdtempSync(join(tmpdir(), "d04-e2e-"));
   const cwd = join(root, "repo");
   mkdirSync(cwd, { recursive: true });
@@ -65,37 +62,11 @@ it("user shape: D04 stays warn, D09-L1 reports info with the name-only count, ti
     const d04 = findings.find((f) => f.id === "D04");
     expect(d04?.severity).toBe("warn");
     expect(d04?.file).toBe("pitfalls.md");
-    expect(d04?.fix).toContain("/mem tidy");
+    expect(d04?.fix).toContain("manually splitting");
 
     const d09 = findings.find((f) => f.id === "D09");
     expect(d09?.severity).toBe("info"); // was "warn" — the reported noise
     expect(d09?.message).toMatch(/L1 \(\d+ topic\(s\) listed by name only/);
-
-    // default tidy selection includes the oversized file, and the prompt
-    // names it under the split rule (plain /mem tidy path, command.ts's
-    // oversized computation mirrored here).
-    const snap = snapshotMemoryDir(cwd, { paths: { memoryRoot: root, ccProjectsRoot: root } });
-    const oversized = snap.files
-      .filter((f) => !f.isPrimaryCore && f.size > settings.topicWarnBytes)
-      .map((f) => ({ name: f.name, bytes: f.size }));
-    expect(oversized).toEqual([{ name: "pitfalls.md", bytes: expect.any(Number) }]);
-    const prompt = buildTidyPrompt({
-      cwd,
-      files: snap.files.map((f) => ({
-        name: f.name,
-        body: f.body,
-        isPrimaryCore: f.isPrimaryCore,
-        handWritten: f.handWritten,
-      })),
-      migrationMode: false,
-      coreBytes: settings.coreBytes,
-      topicMaxBytes: settings.topicMaxBytes,
-      topicWarnBytes: settings.topicWarnBytes,
-      oversized,
-    });
-    expect(prompt).toContain("8192-byte warn threshold (doctor D04)");
-    expect(prompt).toMatch(/Over the warn threshold now: pitfalls\.md \(\d+B\)/);
-    expect(prompt).toContain("### pitfalls.md");
   } finally {
     vi.unstubAllEnvs();
     rmSync(root, { recursive: true, force: true });

@@ -29,7 +29,6 @@ import { mergeExtensionPoints } from "./extensions/registry.js";
 import { buildSessionStack } from "./stack.js";
 import type { ActivationTeardown } from "./stack-teardown.js";
 import {
-  createTidyPort,
   forwardNotifier,
   forwardOrphans,
   forwardQuery,
@@ -71,9 +70,6 @@ import { scheduleSection } from "./sysprompt/schedule-section.js";
 import { renderXsMessage } from "./fabric/xs/render.js";
 import { renderToolkitMessage, TOOLKIT_LABELLED_CUSTOM_TYPES } from "./ui/toolkit-message-renderer.js";
 import { renderTaskStartedMessage, TASK_STARTED_CUSTOM_TYPE, createTaskCommand } from "./commands/task.js";
-import { createGoalCommand } from "./goal/command.js";
-import { createGoalLoopHook } from "./goal/hook.js";
-import { persistGoalRecord } from "./goal/store.js";
 import { createDisabledWorkflowToolStub, createWorkflowTool } from "./tools/workflow-tool.js";
 import { registerWebSearchTool } from "./web-tools/index.js";
 import { wireDate } from "./date/index.js";
@@ -234,10 +230,6 @@ export default function activate(rawPi: ExtensionAPI): void {
   // injectInChildSessions=true, aligned with the original plugin). M3: memory
   // registers a section into the hub instead of its own before_agent_start
   // hook — the hub folds memory -> agent types -> models in one handler.
-  // todo #22 optimize-plan P0-b: the return value is captured so the
-  // post-guard block below (main session only, structurally — a child
-  // session returns before that code ever runs) can attach a real
-  // `TidyPort` for `/mem tidy`/`/mem restore`.
   let memoryWiring: ReturnType<typeof wireMemory> | undefined;
   // #26 (no-user-guard-confirm plan): the memory touched>0 commits' session
   // lifecycle controller — a FRESH controller on every session_start,
@@ -292,7 +284,13 @@ export default function activate(rawPi: ExtensionAPI): void {
   // `-e`/`--no-extensions`, outside settings.json). Must not depend on any feature setting.
   if (isChildSession) {
     markChildExtensionActivated();
-    wireChildSession(pi, preGuardSettings, { canUse: (ctx) => secureGuards?.recheckForWrite(ctx) === undefined });
+    wireChildSession(
+      pi,
+      preGuardSettings,
+      { canUse: (ctx) => secureGuards?.recheckForWrite(ctx) === undefined },
+      // Explicit synchronous permission closure, even in plain domains without guards.
+      { secureRecheckForWrite: (ctx) => secureGuards?.recheckForWrite(ctx) },
+    );
     // traffic-merge T3（§2.3）：子会话只注册录制钩子（含 agent_settled / cache_warming_decision），
     // 无命令/服务/重放；isActive = 进程内 toolkit claim 存活（主会话发布；secure 域 settings 已强制
     // enabled=false，这里双保险在 assemble 内部复查）。childSessions=false 只禁落库不禁改写归属（拍板①）。
@@ -333,7 +331,7 @@ export default function activate(rawPi: ExtensionAPI): void {
   const reloadRef: { current?: DeferredReloadController } = {};
   const isReloadPending = () => reloadRef.current?.pending ?? false;
   const webHubRef: { current?: WebHubControl } = {};
-  const xsFencePorts: { topicSwitch?: () => boolean; goal?: () => boolean } = {};
+  const xsFencePorts: { topicSwitch?: () => boolean } = {};
   // child-context-switch plan.md §3.1: latest live session_start ctx (see the `onDisabled` alert below); declared
   // up here because the xs activation shares it (alias suggestions / alias-lost notice).
   const notifyCapabilityCtx: { current?: ExtensionContext } = {};
@@ -369,16 +367,12 @@ export default function activate(rawPi: ExtensionAPI): void {
   // existing session_start / session_tree handlers (no new handler); see tools/result-tool-activation.ts.
   const activateResultTool = createResultToolActivation(pi);
   pi.on("session_tree", (_event, ctx) => {
+    webHubRef.current?.onMemoryTreeBoundary?.();
     restoreArchive(ctx);
     activateResultTool(ctx);
   });
   pi.on("session_compact", (_event, ctx) => restoreArchive(ctx));
   xs.registerFenceHooks(pi);
-  // todo #22 optimize-plan P0-b (§7's spawn port): reads the CURRENT session
-  // stack, same late-bound `holder.current` pattern as `forwardSpawn` below.
-  // Only reached for the main session — structurally guaranteed by the
-  // HOST_KEY early-return above, so this never runs for a child session.
-  memoryWiring?.attachTidy(createTidyPort(holder));
   const releaseBackgroundStatus = publishBackgroundStatus(() => {
     const stack = holder.current;
     // Background workflows count as running subagent work (between child runs they have no live run).
@@ -574,11 +568,10 @@ export default function activate(rawPi: ExtensionAPI): void {
   // buildSessionStack; the old global cron engine is retired.
   const scheduleMessage = settings.schedule.enabled
     ? installMessageScheduler(pi, holder, {
-        // Same wiring as the xs controller (fence windows / web resume exec / topic-switch / goal / root wake).
+        // Same wiring as the xs controller (fence windows / web resume exec / topic-switch / root wake).
         fencePorts: {
           webExec: () => webHubRef.current?.webExecBusy?.() === true,
           topicSwitch: () => xsFencePorts.topicSwitch?.(),
-          goal: () => xsFencePorts.goal?.(),
         },
         rootWakeBusy: () => holder.current?.xs?.controller?.busy === true,
         attributeInput: () => wakeAttributeRef.current,
@@ -730,25 +723,6 @@ export default function activate(rawPi: ExtensionAPI): void {
     settings.workflow.enabled
       ? createWorkflowTool(forwardWorkflow(holder, isReloadPending))
       : createDisabledWorkflowToolStub(),
-  );
-  // /goal 目标驱动持续运行（goal-plan v4 条件 5）：循环钩子挂 agent_settled
-  // （唯一「无 retry/压缩/续跑待决」信号）；abort 检测所需的末条 stopReason
-  // 由 agent_end 记录（agent_settled 无消息载荷，见 goal/hook.ts 与
-  // adapters/pi-compat.ts 的未文档化行为假设登记）。两个注册各一次（I7）。
-  const goalHook = createGoalLoopHook(holder, {
-    exec: async (cmd, opts) => {
-      const result = await pi.exec("bash", ["-c", cmd], { timeout: opts.timeoutMs, cwd: opts.cwd });
-      return { code: result.code, killed: result.killed, stdout: result.stdout, stderr: result.stderr };
-    },
-    sendUserMessage: (text) => pi.sendUserMessage(text, { deliverAs: "followUp" }),
-    persist: (record) => persistGoalRecord(pi, record),
-  });
-  xsFencePorts.goal = () => goalHook.goalBusy();
-  pi.on("agent_end", goalHook.onAgentEnd);
-  pi.on("agent_settled", goalHook.onAgentSettled);
-  pi.registerCommand(
-    "goal",
-    createGoalCommand({ goal: () => holder.current?.goal, persist: (record) => persistGoalRecord(pi, record) }),
   );
   // Deferred /reload (src/reload/): the controller itself is wired at the
   // bottom of activate() — its session_start handler must run AFTER
@@ -920,7 +894,6 @@ export default function activate(rawPi: ExtensionAPI): void {
   const activationTeardown: ActivationTeardown = {
     defensiveXsTeardown: (nextXsSessionId) => xs.defensiveTeardown(nextXsSessionId),
     scheduleSurfaceShutdown: () => scheduleSurface?.shutdown(), // status bar cleared + digest disposed BEFORE the executor closes its runs
-    disposeGoalHook: () => goalHook.dispose(),
     releaseCapabilityAlert: () => {
       capabilityAlertOff?.();
       capabilityAlertOff = undefined;
@@ -1073,6 +1046,12 @@ export default function activate(rawPi: ExtensionAPI): void {
     // (non-live, like `lanSettingsWarnings` below) and only when the proxy is enabled at all.
     const proxyWarnings = settings.webHub.proxy?.enabled === true ? loadWebHubProxyWarnings() : [];
     webHubRef.current = wireWebHub(pi, {
+      ...(secureDomain.kind === "plain" && memoryWiring
+        ? {
+            memoryRead: memoryWiring.webRead,
+            ...(memoryWiring.webWrite ? { memoryWrite: memoryWiring.webWrite } : {}),
+          }
+        : {}),
       settings: settings.webHub,
       ...xs.webHubDeps(),
       feishuBot: settings.feishuBot,
@@ -1189,6 +1168,7 @@ export default function activate(rawPi: ExtensionAPI): void {
       // topic-switch plan.md §P3b.1 D2 flip point: removing this one line is the whole kill-switch
       // for web prompts ever being judged — web-hub then always takes its native dispatch path.
       promptGate: () => promptGateRef.current,
+      topicSwitchActive: () => xsFencePorts.topicSwitch?.() === true,
     });
     askUserRemoteRef.current = () => webHubRef.current?.askUserRemote();
     if (webHubRef.current.capture !== undefined) commandCaptureRef.current = webHubRef.current.capture;
@@ -1224,10 +1204,6 @@ export default function activate(rawPi: ExtensionAPI): void {
       },
       fences: {
         topicSwitchActive: () => reflexFence.topicSwitch?.() ?? false,
-        goalBusy: () => {
-          const s = holder.current?.goal.record?.state;
-          return s === "active" || s === "paused";
-        },
       },
     });
   }
@@ -1249,7 +1225,6 @@ export default function activate(rawPi: ExtensionAPI): void {
         return {
           activeRuns: () => activeSubagentRunCount(),
           backgroundBash: () => stack.bashJobs?.backgroundJobCount() ?? 0,
-          goalBusy: () => stack.goal.record?.state === "active" || stack.goal.record?.state === "paused",
         };
       },
       remote: () => askUserRemoteRef.current?.(),

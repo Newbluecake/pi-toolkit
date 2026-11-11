@@ -22,6 +22,8 @@
  * an executable task (and the caller's `defHash`, when given), the gate, no non-terminal run;
  * idempotent by `reqId` through `manualReqs` (refusals are recorded too).
  */
+import { appendEveryMissed } from "./interval.js";
+import { everyCount } from "./every.js";
 import { isOccurrence, nextOccurrence, occurrencesBetween } from "./cron.js";
 import {
   appendMissed,
@@ -45,6 +47,7 @@ import {
 } from "./recovery.js";
 import {
   autoRunKey,
+  canonicalJson,
   defHash,
   isExecutable,
   manualRunKey,
@@ -126,6 +129,7 @@ export async function autoClaim(store: SessionStore, input: AutoClaimInput): Pro
     (snap, now) => {
       const task = snap.tasks.find((t) => t.id === input.taskId);
       if (task === undefined) return { done: { kind: "ineligible", reason: "no-task" } };
+      if (task.when.kind === "every") return { done: { kind: "ineligible", reason: "invalid-when" } };
       const occ = snap.occ[task.id];
       if (occ === undefined) return { done: { kind: "ineligible", reason: "no-occ" } };
       if (!isExecutable(task)) return { done: { kind: "ineligible", reason: "not-executable" } };
@@ -378,6 +382,7 @@ export async function changeTask(
         // progress and sweep again — never switch definitions over unsettled misses (review m3).
         if (plan.tasks.some((t) => t.more)) return { value: { kind: "backlog", missed }, write: true };
         const task = draft.tasks.find((t) => t.id === taskId)!;
+        const oldTask = structuredClone(task);
         const before = defHash(task);
         const wasExecutable = isExecutable(task);
         const res = mutate(task, ctx.now);
@@ -388,8 +393,35 @@ export async function changeTask(
             write: missed.length > 0,
           };
         }
-        const after = defHash(task);
         const occ = draft.occ[taskId];
+        let after = defHash(task);
+        if (occ !== undefined && oldTask.when.kind === "every") {
+          const changed = after !== before;
+          const pausing = wasExecutable && !task.enabled;
+          if (changed || pausing) {
+            const n = everyCount(oldTask.when, occ.decidedThrough, ctx.now);
+            missed.push(...appendEveryMissed(occ, oldTask.when, n, before, pausing ? "paused" : "late", ctx.now));
+            const first = nextOccurrence(compileTask(oldTask)!, occ.decidedThrough);
+            if (n > 0 && first !== undefined) occ.decidedThrough = first + (n - 1) * oldTask.when.everyMs;
+            delete occ.resumePending;
+          }
+          if (changed) {
+            if (task.when.kind === "every") task.when = { ...task.when, anchorAt: ctx.now };
+            after = defHash(task);
+            occ.defHash = after;
+            voidUntil(occ, ctx.now);
+            delete occ.resumePending;
+          } else if (!wasExecutable && task.enabled) occ.resumePending = true;
+          return {
+            value: { kind: "changed", task: structuredClone(task), hashChanged: changed, missed },
+            write: canonicalJson(oldTask) !== canonicalJson(task) || changed,
+          };
+        }
+        if (occ !== undefined && task.when.kind === "every" && after !== before) {
+          task.when = { ...task.when, anchorAt: ctx.now };
+          after = defHash(task);
+          delete occ.resumePending;
+        }
         if (occ !== undefined && (after !== before || (!wasExecutable && isExecutable(task)))) {
           occ.defHash = after;
           voidUntil(occ, ctx.now);
@@ -397,6 +429,7 @@ export async function changeTask(
         return {
           value: { kind: "changed", task: structuredClone(task), hashChanged: after !== before, missed },
           write: true,
+          ...(task.when.kind === "every" ? { upgradeToV2: true as const } : {}),
         };
       },
     );
@@ -413,3 +446,5 @@ export async function changeTask(
 
 /** Sweep rounds `changeTask` may spend settling the old definition (each ≤ 64 × 10 000). */
 export const CHANGE_BACKLOG_ROUNDS = 4;
+
+export { reconcileEvery, planEveryDue } from "./interval.js";

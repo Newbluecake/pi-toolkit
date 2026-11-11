@@ -124,7 +124,8 @@ function harness(opts: { partial?: boolean } = {}) {
   } as unknown as ExtensionAPI;
   const hub = createPromptSectionHub(pi, { mode: () => "stable", wakeReplay: false, adoptForeignForcedPrompt: false });
   const wiring = wireMemory(pi, {
-    settings: { ...DEFAULT_SETTINGS.memory },
+    // This suite exercises the original files/v2 Jev lifecycle (including /mem init and append).
+    settings: { ...DEFAULT_SETTINGS.memory, layout: "tiered" },
     isChildSession: false,
     sections: hub,
     secureDomainKind: "plain",
@@ -256,6 +257,7 @@ describe("memory jev e2e (full)", () => {
       undefined,
       h.ctx(),
     );
+    expect(readFileSync(join(memDir, "core.md"), "utf8")).toContain("release.sh 运行期间禁止 commit/tag/切分支");
     await settle(2_100); // corpus cache window (2s)
     const passed = await h.toolCall("git commit -m wip2");
     expect(passed).toBeUndefined();
@@ -308,6 +310,7 @@ describe("memory jev e2e (partial)", () => {
       undefined,
       h.ctx(),
     );
+    expect(readFileSync(join(memDir, "core.md"), "utf8")).toContain("release.sh 运行期间禁止 commit/tag/切分支");
     await settle(2_100); // corpus cache window (2s)
 
     // U layer: no Jev available ⇒ no U injection (current-session semantics

@@ -117,6 +117,7 @@ export interface FeishuScheduleRow {
   form: "background" | "message";
   /** human-readable schedule (e.g. `cron 0 9 * * 1-5 @ Asia/Shanghai`) */
   when: string;
+  interval?: true;
   enabled: boolean;
   defHash: string;
   nextAt?: number;
@@ -562,7 +563,17 @@ export function scheduleListText(rows: readonly FeishuScheduleRow[]): { text: st
       r.online ? "会话在线" : "会话离线",
       r.form === "background" ? "后台" : "消息",
     ];
-    const next = r.nextAt !== undefined && r.enabled ? ` · 下次 ${isoMinute(r.nextAt)}` : "";
+    const next =
+      r.nextAt !== undefined && r.enabled
+        ? ` · 下次 ${
+            r.interval
+              ? new Date(r.nextAt)
+                  .toISOString()
+                  .replace(/\.\d{3}Z$/, "")
+                  .replace("T", " ") + " UTC"
+              : isoMinute(r.nextAt)
+          }`
+        : "";
     const last = r.lastStatus ? ` · 上次 ${r.lastStatus}` : "";
     return `${i + 1}. ${sanitizeLabel(r.name, 40)} [${sanitizeLabel(r.sessionLabel, 40)}] ${r.when} · ${flags.join(" · ")}${next}${last}`;
   });

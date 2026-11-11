@@ -1,3 +1,4 @@
+import { NoActiveSessionError } from "../holder.js";
 import { Type, type Static } from "@sinclair/typebox";
 import { Text } from "@earendil-works/pi-tui";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
@@ -332,61 +333,71 @@ export function createListSubagentsTool(deps: {
       return text;
     },
     async execute(_toolCallId, params) {
-      const now = deps.now?.() ?? Date.now();
-      const allRuns = deps.query.list();
-      const workflowSnapshots = deps.workflow?.activity.list() ?? [];
-      const workflowIds = new Set(workflowSnapshots.map((w) => w.workflowId));
-      const nonTerminal = allRuns.filter((s) => !isTerminalStatus(s.status));
-      const runs = buildRunTree(nonTerminal, workflowIds, now);
-      const workflows = workflowSnapshots.map((w) =>
-        buildWorkflowRow(w, now, (runId) => deps.query.get(runId), nonTerminal),
-      );
-      const slots = deps.spawn.slots();
-      const recentN = Math.max(0, Math.min(params.recent ?? 0, LIST_SUBAGENTS_MAX_RECENT));
-      const recentRows =
-        recentN > 0
-          ? allRuns
-              .filter((s) => isTerminalStatus(s.status))
-              .sort((a, b) => (b.diag.settledAt ?? b.updatedAt) - (a.diag.settledAt ?? a.updatedAt))
-              .slice(0, recentN)
-              .map((s) => runRow(s, now, 0))
-          : undefined;
+      try {
+        const now = deps.now?.() ?? Date.now();
+        const allRuns = deps.query.list();
+        const workflowSnapshots = deps.workflow?.activity.list() ?? [];
+        const workflowIds = new Set(workflowSnapshots.map((w) => w.workflowId));
+        const nonTerminal = allRuns.filter((s) => !isTerminalStatus(s.status));
+        const runs = buildRunTree(nonTerminal, workflowIds, now);
+        const workflows = workflowSnapshots.map((w) =>
+          buildWorkflowRow(w, now, (runId) => deps.query.get(runId), nonTerminal),
+        );
+        const slots = deps.spawn.slots();
+        const recentN = Math.max(0, Math.min(params.recent ?? 0, LIST_SUBAGENTS_MAX_RECENT));
+        const recentRows =
+          recentN > 0
+            ? allRuns
+                .filter((s) => isTerminalStatus(s.status))
+                .sort((a, b) => (b.diag.settledAt ?? b.updatedAt) - (a.diag.settledAt ?? a.updatedAt))
+                .slice(0, recentN)
+                .map((s) => runRow(s, now, 0))
+            : undefined;
 
-      const lines: string[] = [];
-      if (workflows.length) {
-        lines.push(`Workflows: ${workflows.length} active`);
-        for (const w of workflows) {
-          lines.push(`  ${formatWorkflowHeader(w)}`);
-          for (const child of w.children) for (const line of formatWorkflowChildLines(child)) lines.push(`  ${line}`);
+        const lines: string[] = [];
+        if (workflows.length) {
+          lines.push(`Workflows: ${workflows.length} active`);
+          for (const w of workflows) {
+            lines.push(`  ${formatWorkflowHeader(w)}`);
+            for (const child of w.children) for (const line of formatWorkflowChildLines(child)) lines.push(`  ${line}`);
+          }
         }
-      }
-      if (runs.length) {
-        lines.push(`Subagent runs: ${runs.length} active`);
-        for (const row of runs) lines.push(`  ${formatRunLine(row)}`);
-      }
-      if (workflows.length === 0 && runs.length === 0) {
-        lines.push("No active subagent runs or workflows.");
-      }
-      lines.push(formatSlots(slots));
-      if (recentRows !== undefined) {
-        if (recentRows.length) {
-          lines.push(`Recent (${recentRows.length}):`);
-          for (const row of recentRows) lines.push(formatRecentLine(row));
-        } else {
-          lines.push("Recent (0): no terminal runs recorded this session.");
+        if (runs.length) {
+          lines.push(`Subagent runs: ${runs.length} active`);
+          for (const row of runs) lines.push(`  ${formatRunLine(row)}`);
         }
-      }
+        if (workflows.length === 0 && runs.length === 0) {
+          lines.push("No active subagent runs or workflows.");
+        }
+        lines.push(formatSlots(slots));
+        if (recentRows !== undefined) {
+          if (recentRows.length) {
+            lines.push(`Recent (${recentRows.length}):`);
+            for (const row of recentRows) lines.push(formatRecentLine(row));
+          } else {
+            lines.push("Recent (0): no terminal runs recorded this session.");
+          }
+        }
 
-      const details: ListSubagentsDetails = {
-        runs,
-        workflows,
-        slots,
-        ...(recentRows !== undefined ? { recent: recentRows } : {}),
-      };
-      return {
-        content: [{ type: "text" as const, text: lines.join("\n") }],
-        details,
-      };
+        const details: ListSubagentsDetails = {
+          runs,
+          workflows,
+          slots,
+          ...(recentRows !== undefined ? { recent: recentRows } : {}),
+        };
+        return {
+          content: [{ type: "text" as const, text: lines.join("\n") }],
+          details,
+        };
+      } catch (error) {
+        if (error instanceof NoActiveSessionError) throw error;
+        const code = typeof error === "object" && error !== null ? (error as { code?: unknown }).code : undefined;
+        const reason =
+          typeof code === "string" && ["ETIMEDOUT", "ECONNRESET", "EPIPE"].includes(code) ? code : "unknown";
+        throw new Error(
+          `Subagent list read failed [code=list_subagents_read_failed reason=${reason} retryable=false effect=none]. No empty list or current capacity was established; check the live session before dispatching.`,
+        );
+      }
     },
   } satisfies ToolDefinition<typeof ListSubagentsParams>;
 }

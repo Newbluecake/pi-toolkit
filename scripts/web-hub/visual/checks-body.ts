@@ -116,10 +116,11 @@ async function checkFleetDrawerOpen(ctx: CheckContext): Promise<CheckOutcome> {
   if (shared !== null) return shared;
   const result = await ctx.page.evaluate((width: number) => {
     const detail = document.querySelector(".detail");
-    const bar =
-      document.querySelector('button[data-panel="agent"][aria-controls="fleet-drawer"]') ??
-      document.querySelector('button[data-panel="bash"][aria-controls="fleet-drawer"]');
     const drawer = document.querySelector("#fleet-drawer");
+    const panel = drawer?.getAttribute("data-panel");
+    const bar =
+      document.querySelector(`button[data-panel="${panel}"][aria-controls="fleet-drawer"]`) ??
+      document.querySelector('button[aria-controls="fleet-drawer"]');
     if (!detail || !bar || !drawer) return { present: false as const };
     const mode = detail.getAttribute("data-drawer");
     const open = detail.hasAttribute("data-drawer-open");
@@ -128,8 +129,8 @@ async function checkFleetDrawerOpen(ctx: CheckContext): Promise<CheckOutcome> {
       mode,
       open,
       dockedOpen: detail.hasAttribute("data-docked-open"),
-      peeking: detail.hasAttribute("data-peek-open"),
       ariaExpanded: bar.getAttribute("aria-expanded"),
+      panel,
       rows: drawer.querySelectorAll(".tree .run").length,
       expectMode: width >= 1280 ? "docked" : width <= 767 ? "fullscreen" : "overlay",
       expectOpen: width >= 1280, // §6.2: docked 持久化默认 "1";overlay/fullscreen 每次挂载关闭
@@ -148,12 +149,12 @@ async function checkFleetDrawerOpen(ctx: CheckContext): Promise<CheckOutcome> {
   const problems: string[] = [];
   if (result.mode !== result.expectMode) problems.push(`mode=${result.mode} expected=${result.expectMode}`);
   if (result.open !== result.expectOpen) problems.push(`open=${result.open} expected=${result.expectOpen}`);
-  if (result.dockedOpen !== (result.open && result.mode === "docked" && !result.peeking))
-    problems.push("docked-open does not match pinned viewport mode");
+  if (result.dockedOpen !== (result.open && result.mode === "docked"))
+    problems.push("docked-open does not match open viewport mode");
   if (result.ariaExpanded !== String(result.open)) {
     problems.push(`aria-expanded=${result.ariaExpanded} vs open=${result.open}`);
   }
-  if (ctx.expectFleetRows && result.rows === 0) {
+  if (ctx.expectFleetRows && result.panel !== "bash" && result.rows === 0) {
     problems.push("fixture promises fleet rows but #fleet-drawer .tree .run is empty");
   }
   return outcome(

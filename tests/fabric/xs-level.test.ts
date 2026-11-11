@@ -86,7 +86,6 @@ function build(options: BuildOptions = {}) {
       receive: () => membership.receive,
       host,
       guard: () => undefined,
-      goalRunning: () => false,
       inboundWakeAvailable: () => true,
       chargeInboundWake: () => {},
       level,

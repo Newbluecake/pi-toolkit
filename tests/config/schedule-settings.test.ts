@@ -103,10 +103,12 @@ describe("schedule settings: parsing", () => {
     expect(isTimeSettingKey("schedule.maxTimeoutS")).toBe(true);
   });
 
-  it("is NOT force-disabled by the secure domain in S0 (the agent refuses with E_SECURE, §3.3)", () => {
+  it("is force-disabled before registration in secure and locked domains (interval P1)", () => {
     v = makeFakeVault();
     freezeDomain(v);
-    expect(loadSettings({ schedule: { enabled: true } }).schedule.enabled).toBe(true);
+    expect(loadSettings({ schedule: { enabled: true } }).schedule.enabled).toBe(false);
+    freezeDomain(v, { mountinfo: v.unmounted });
+    expect(loadSettings({ schedule: { enabled: true } }).schedule.enabled).toBe(false);
   });
 });
 

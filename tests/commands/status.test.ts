@@ -60,6 +60,17 @@ function deps(runs: RunSnapshot[]) {
   };
 }
 
+describe("agent command recommendations", () => {
+  it("offers settings instead of budget and explains the aliases", () => {
+    const cmd = createStatusCommand(deps([]) as never);
+    const values = cmd.getArgumentCompletions!("", 0)!.map((item) => item.value);
+    expect(values).toContain("settings");
+    expect(values).not.toContain("budget");
+    expect(cmd.description).toContain("status recommended");
+    expect(cmd.description).toContain("Advanced: `/agent budget`");
+  });
+});
+
 describe("external provider availability status", () => {
   it("shows the live droid reason; absent/disabled port preserves legacy output", () => {
     const d = deps([]) as never;
@@ -233,6 +244,17 @@ describe("M-C4 renderRunDetail (tool timeline)", () => {
         toolCounts: { bash: 2, edit: 1 },
       },
     });
+
+  it("agent <run> and agent status <run> render the same run detail", async () => {
+    const notified: string[] = [];
+    const cmd = createStatusCommand(deps([detailed()]) as never);
+    const ctx = { ui: { notify: (text: string) => notified.push(text) } };
+    await cmd.handler("223b8f1e", ctx as never);
+    await cmd.handler("status 223b8f1e", ctx as never);
+    expect(notified[0]).toContain("223b8f1e");
+    expect(notified[0]).toContain("bash");
+    expect(notified[1]).toBe(notified[0]);
+  });
 
   it("renders header, timeline with offsets/marks/durations, tool counts and usage", async () => {
     const { renderRunDetail } = await import("../../src/commands/status.js");
@@ -473,7 +495,7 @@ describe("/agent settings subcommand", () => {
     const out = run(d, "settings");
     expect(out).toContain("budget.idleS");
     expect(out).not.toContain("budget.idleMs");
-    expect(out).toContain("600 (default 240)");
+    expect(out).toContain("600 (default 1200)");
     expect(out).toContain("concurrencyLimit");
     expect(out).toContain("worktree.enabled");
     expect(out).toContain("workflow.runawayPolicy");
@@ -509,7 +531,7 @@ describe("/agent settings subcommand", () => {
     const out = run(d, "settings set budget.idleS 600");
     expect(current.budget.idleMs).toBe(600_000);
     expect(persisted).toEqual([["budget.idleS", 600]]);
-    expect(out).toContain("240 → 600");
+    expect(out).toContain("1200 → 600");
     expect(out).toContain("applies to new runs immediately");
   });
 
@@ -550,7 +572,7 @@ describe("/agent settings subcommand", () => {
     const out = run(d, "settings reset budget.idleS");
     expect(current.budget.idleMs).toBe(DEFAULT_BUDGET.idleMs);
     expect(persisted).toEqual([["budget.idleS", undefined]]);
-    expect(out).toContain("reset to default 240");
+    expect(out).toContain("reset to default 1200");
   });
 
   it("rejects unknown keys and bad values without touching state", () => {
@@ -685,7 +707,7 @@ describe("/agent settings subcommand", () => {
     const items = cmd.getArgumentCompletions?.("settings set budget.idle", 0) as
       Array<{ value: string; label: string; description: string }> | undefined;
     expect(items?.map((i) => i.label)).toEqual(["budget.idleS"]);
-    expect(items?.[0]?.description).toBe("default 240");
+    expect(items?.[0]?.description).toBe("default 1200");
     // applyCompletion replaces the whole argument prefix with value: the value must carry
     // the already-typed tokens so applying it yields the full `/agent settings set …` text.
     expect(items?.[0]?.value).toBe("settings set budget.idleS");

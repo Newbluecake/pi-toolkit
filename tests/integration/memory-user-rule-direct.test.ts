@@ -9,7 +9,7 @@
  * `src/index.ts` no longer passes a `remote` port to wireMemory is carried by
  * typecheck (the opt no longer exists).
  */
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -20,10 +20,18 @@ import { wireMemory } from "../../src/memory/index.js";
 import { memoryDirFor } from "../../src/memory/paths.js";
 import { createPromptSectionHub } from "../../src/sysprompt/hub.js";
 import { createFakeRegistry } from "../memory/jev/helpers/fake-registry.js";
+import { writeBlocksDir } from "../memory/blocks/helpers.js";
 
 type Handler = (event: unknown, ctx: unknown) => unknown;
 
-const GUARD_FILE = "## Rules\n\n- 用户令一条\n";
+const BLOCK_ID = "rules.001";
+const GUARD_BODY = "- 用户令一条";
+
+function seed(authority: "user" | "agent", body = GUARD_BODY): void {
+  writeBlocksDir(memDir, [
+    { id: BLOCK_ID, authority, ...(authority === "user" ? { scope: "global" as const } : {}), body },
+  ]);
+}
 
 let envTmp: string;
 let cwd: string;
@@ -117,15 +125,23 @@ async function exec(
   tool: { execute: (id: string, p: unknown, s: unknown, u: unknown, c: unknown) => Promise<unknown> },
   c: unknown,
 ) {
+  const viewed = (await tool.execute("view-1", { command: "view", path: BLOCK_ID }, undefined, undefined, c)) as {
+    content: { type: string; text: string }[];
+  };
+  const viewText = viewed.content.map((part) => part.text).join("\n");
+  const rev = viewText.match(/#### rules\.001 · rev (\d+-[0-9a-f]{6})/)?.[1];
+  expect(rev).toBeDefined();
+  expect(viewText).toContain("用户令");
+  const original = viewText.slice(viewText.indexOf("\n") + 1);
+  const replacement = original.replace("用户令", "改掉");
+  expect(replacement).not.toBe(original);
   return (await tool.execute(
     "call-1",
-    { command: "str_replace", path: "core.md", old_str: "用户令", new_str: "改掉" },
+    { command: "update", path: BLOCK_ID, rev, text: replacement },
     undefined,
     undefined,
     c,
-  )) as {
-    content: { type: string; text: string }[];
-  };
+  )) as { content: { type: string; text: string }[] };
 }
 
 describe("user-rule edits through the production wireMemory (#26)", () => {
@@ -133,45 +149,80 @@ describe("user-rule edits through the production wireMemory (#26)", () => {
     "mode %s: ui.confirm/ui.select are never called; the write lands with the voided echo",
     async (mode) => {
       const h = harness();
-      writeFileSync(join(memDir, "core.md"), GUARD_FILE);
+      seed("user");
       const result = await exec(h.tool, h.ctx(mode));
       const text = result.content.map((c) => c.text).join("\n");
       expect(h.counters.confirm).toBe(0);
       expect(h.counters.select).toBe(0);
-      expect(text).toContain("edited core.md");
-      expect(text).toContain("voided user rule: core.md › Rules #1");
-      expect(readFileSync(join(memDir, "core.md"), "utf8")).toContain("改掉");
+      expect(text).toContain("updated rules.001");
+      expect(text).toContain("voided user rule: rules.001");
+      expect(readFileSync(join(memDir, "blocks", `${BLOCK_ID}.md`), "utf8")).toContain("改掉");
     },
   );
 
   it("tui: exactly one warning notify lands (rpc's notify is fire-and-forget, dropped by the hub — not an acceptance channel)", async () => {
     const h = harness();
-    writeFileSync(join(memDir, "core.md"), GUARD_FILE);
+    seed("user");
     await exec(h.tool, h.ctx("tui"));
     expect(h.counters.notify).toBe(1);
     expect(h.notifyMessages[0]).toEqual({
-      message: "agent 改动了 core.md 中的 1 条用户令（已直接写入，未经确认）：\n- 条目 #1 (L3-3)",
+      message: "agent 改动了用户令 rules.001（已直接写入，未经确认）",
       level: "warning",
     });
   });
 
   it("rpc: the notify call happens (hasUI true) but never blocks or fails the write — delivery is the hub's business", async () => {
     const h = harness();
-    writeFileSync(join(memDir, "core.md"), GUARD_FILE);
+    seed("user");
     const result = await exec(h.tool, h.ctx("rpc"));
-    expect(result.content.map((c) => c.text).join("\n")).toContain("voided user rule: core.md › Rules #1");
-    expect(readFileSync(join(memDir, "core.md"), "utf8")).toContain("改掉");
+    expect(result.content.map((c) => c.text).join("\n")).toContain("voided user rule: rules.001");
+    expect(readFileSync(join(memDir, "blocks", `${BLOCK_ID}.md`), "utf8")).toContain("改掉");
     expect(h.counters.confirm).toBe(0);
   });
 
   it("an edit that does NOT touch a user entry notifies nobody and confirms nobody", async () => {
     const h = harness();
-    // agent-frontmatter file: its entries default to AGENT authority, so the
-    // same old_str edit below is a skip plan (touched = 0)
-    writeFileSync(join(memDir, "core.md"), "---\nsource: agent\n---\n\n## Rules\n\n- 提到用户令的普通经验\n");
+    // Agent-authored block: the same text update is not a user-rule edit.
+    seed("agent", "- 提到用户令的普通经验");
     const result = await exec(h.tool, h.ctx("tui"));
-    expect(result.content.map((c) => c.text).join("\n")).toContain("edited core.md");
+    expect(result.content.map((c) => c.text).join("\n")).toContain("updated rules.001");
+    expect(readFileSync(join(memDir, "blocks", `${BLOCK_ID}.md`), "utf8")).toContain("提到改掉的普通经验");
     expect(h.counters.confirm).toBe(0);
     expect(h.counters.notify).toBe(0);
+  });
+  it("missing or stale rev returns errors without changing the block or notifying", async () => {
+    const h = harness();
+    seed("user");
+    const ctx = h.ctx("tui");
+    const file = join(memDir, "blocks", `${BLOCK_ID}.md`);
+    const before = readFileSync(file, "utf8");
+    const missing = (await h.tool.execute(
+      "missing",
+      { command: "update", path: BLOCK_ID, text: "- changed" },
+      undefined,
+      undefined,
+      ctx,
+    )) as { content: { text: string }[] };
+    expect(JSON.parse(missing.content[0]!.text)).toMatchObject({
+      ok: false,
+      code: "E_REV_REQUIRED",
+      message: expect.stringMatching(/\S/),
+    });
+    const stale = (await h.tool.execute(
+      "stale",
+      { command: "update", path: BLOCK_ID, rev: "1-000000", text: "- changed" },
+      undefined,
+      undefined,
+      ctx,
+    )) as { content: { text: string }[] };
+    expect(JSON.parse(stale.content[0]!.text)).toMatchObject({
+      ok: false,
+      code: "E_CONFLICT",
+      message: expect.stringMatching(/\S/),
+    });
+    expect(readFileSync(file, "utf8")).toBe(before);
+    expect(h.counters.notify).toBe(0);
+    expect(h.counters.confirm).toBe(0);
+    expect(h.counters.select).toBe(0);
   });
 });

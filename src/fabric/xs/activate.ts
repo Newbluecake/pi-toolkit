@@ -41,8 +41,8 @@ export interface XsActivationDeps {
   settings: AgentSettings;
   holder: StackHolder;
   webHubRef: { current?: WebHubControl };
-  /** index.ts's `xsFencePorts` (schedule / goal / topic-switch also write it). */
-  fencePorts: { topicSwitch?: () => boolean; goal?: () => boolean };
+  /** index.ts's `xsFencePorts` (schedule / topic-switch also write it). */
+  fencePorts: { topicSwitch?: () => boolean };
   /** index.ts's `notifyCapabilityCtx` (alias suggestions, alias-lost notice, @session cwd). */
   notifyCtx: { current?: ExtensionContext };
   /** Late-bound: the scheduler is built after this activation (`/fabric fence reset` → `resetBlockers`). */
@@ -655,7 +655,6 @@ export function createXsActivation(deps: XsActivationDeps): XsActivation {
           ports: {
             webExec: () => webHubRef.current?.webExecBusy?.() === true,
             topicSwitch: () => xsFencePorts.topicSwitch?.(),
-            goal: () => xsFencePorts.goal?.(),
           },
           memberChanged: () => webHubRef.current?.xs?.publishMember(),
           unreadChanged: refreshXsInbox,

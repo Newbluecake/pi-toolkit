@@ -65,3 +65,7 @@ npx vitest run tests/integration/foo.test.ts        # 改动的 tier2 文件单�
 PI_TOOLKIT_TEST_WORKERS=1 npm run test:secure       # 改 secure 时（独占本机 + 干净挂载表）
 npm test                                            # 全量（发版/CI 语义）
 ```
+
+## Required corresponding-directory gate
+
+Before committing changes under `src/fabric/**`, `src/memory/**`, `src/web-hub/**`, or `src/schedule/**`, run the entire corresponding `tests/fabric`, `tests/memory`, `tests/web-hub`, or `tests/schedule` directory, respectively. Running only individual test files does not satisfy this gate.

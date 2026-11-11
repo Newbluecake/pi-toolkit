@@ -39,6 +39,7 @@ import type { ScheduleWebHubPort } from "../../schedule/agent/coordinator.js";
 import {
   SCHED_AGENT_CAPS,
   SCHED_HUB_CAP,
+  SCHED_INTERVAL_CAP,
   type SchedDecideFrame,
   type SchedReceiptsFrame,
   type SchedRunFrame,
@@ -246,12 +247,12 @@ export interface WebHubSettings {
    * load sampler: `buildHubConfig` (P2a, this file) writes `config.load` only when this AND
    * `settings.load.enabled` are both true (§7.2's "任一为 false ⇒整键省略"). Default `true`. */
   load?: boolean;
-  /** web-hub archive plan (docs/dev/web-hub/archive-report.md): auto-archive terminal fleet
-   *  rows / bash rows after N minutes (default 30). `0` disables the sweep (manual archive
-   *  from the drawer still works). AGENT-side only — never read by buildHubConfig, so a change
-   *  needs just `/reload` (picked up at the next stack build), NOT a hub restart. */
+  /** Agent-side count-only auto-archive, default true; change requires /reload. */
+  archiveEnabled?: boolean;
+  /** Deprecated alias: 0 disables, positive enables; duration is ignored.
+   * The explicit archiveEnabled boolean takes precedence. */
   archiveAfterMin?: number;
-  /** #59: unarchived terminal keep counts (held included); 0 = time-only. Agent-side, /reload. */
+  /** Unarchived terminal keep counts (held included); 0 archives all eligible. */
   archiveKeepRuns?: number;
   archiveKeepBash?: number;
   /** web-hub-steer-recall plan §2/§4.7 (A6) / arch §11 Q1: hold busy web steer/followUp in the
@@ -323,6 +324,8 @@ export interface ThreadAgentPort extends ThreadPromptPort {
   threadClosed(h: string, reason: ThreadCloseReason): void;
 }
 export interface WebHubDeps {
+  memoryRead?: import("../../memory/index.js").MemoryReadPort;
+  memoryWrite?: import("../../memory/scopes/web-write-port.js").MemoryWebWritePort;
   /** P4 owns/wires ONE bridge independent of webHub.enabled; this client only dispatches. */
   memoryProof?: () => HumanDispatchBridge | undefined;
   /** Top-level, non-live settings; only buildHubConfig consumes it. */
@@ -403,6 +406,8 @@ export interface WebHubDeps {
    *  assigns the ref. Unset (topic-switch off, or not wired yet) ⇒ `commands.ts` never calls
    *  `tryClaim` at all — byte-identical to the pre-feature native/hold dispatch path. */
   promptGate?: () => PromptGatePort | undefined;
+  /** Existing topic-switch fence, sampled at direct memory read admission. */
+  topicSwitchActive?: () => boolean;
   /** fabric-thread arch r3 §11.1 P3: the stack's thread surface, late-bound (`holder.current?.threads`).
    *  Unset (threads off) ⇒ no §6.1 prompt step, no `status.threads`, no thr_closed handling —
    *  byte-identical prompt handling (G2a). Structural: `ThreadStackSurface` (stack.ts) satisfies
@@ -489,6 +494,7 @@ export type LanAdminResult<T> =
   | { ok: false; reason: "rejected"; code: string; message: string };
 
 export interface WebHubControl {
+  onMemoryTreeBoundary?(): void;
   readonly capture?: CommandCapturePort;
   /** #30 reload-result plan §1 D6: the deferred-reload command port's phase sink — the tracker
    *  behind `StatusInfo.reload`. Wired late-bound from src/index.ts
@@ -515,7 +521,7 @@ export interface WebHubControl {
    * fabric-cross-session plan §3.3 L7 (W1): attribution port for the causal-level reset. An `extension`-sourced `input`
    * event is a HUMAN prompt iff it is a prompt the web hub itself dispatched on a browser user's behalf — answered by a
    * pure, synchronous text lookup in the command ledger (the entry is registered BEFORE `sendUserMessage`). Anything the
-   * ledger does not vouch for (topic-switch re-injection, goal loop, `/agent reload fire`, other extensions) is `undefined`.
+   * ledger does not vouch for (topic-switch re-injection, `/agent reload fire`, other extensions) is `undefined`.
    */
   attributeInput(text: string): "web_prompt" | undefined;
   /** 2026-11-04 mention-handled fix: the mention input interceptor's consumption report —
@@ -826,6 +832,17 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     }
   };
 
+  /** #9 fleet retention: the original archive control's same-version, read-only run view.
+   * Missing/detached/throwing sources degrade to the legacy projection; snapshot_reply below
+   * deliberately does not consume this expanded display window. */
+  const archiveRunDisplayView = (): ReturnType<ArchiveControl["runDisplayView"]> | undefined => {
+    try {
+      return deps.archive?.()?.runDisplayView();
+    } catch {
+      return undefined;
+    }
+  };
+
   // ── web-hub-steer-recall plan §4.7 (A6): hold wiring — the gate/buffer/cap probes and the
   // `status.held` projection live in hold-wire.ts (source-governance batch2 ⑨-H1, pure
   // extraction; conn/ctx threaded as call-time getters, same as the captured closure vars).
@@ -918,6 +935,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   const commandComplete: CommandCompleteService | undefined = cmdCompleteOn
     ? createCommandComplete({
         ...(deps.memoryProof ? { memoryScopes: true } : {}),
+        ...(deps.memoryWrite ? { memoryCapabilities: () => deps.memoryWrite!.capabilities(ctx) } : {}),
         commands: pi,
         own: () => deps.argCompleters ?? EMPTY_COMPLETERS,
         tui: () => tuiProviderRef.current,
@@ -982,6 +1000,10 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     sendLate: (frame, result) => bridgeLate.current?.(frame, result),
   });
   const builtinBridge = createBuiltinBridge({
+    ...(deps.memoryRead ? { memoryRead: deps.memoryRead } : {}),
+    ...(deps.memoryWrite
+      ? { memoryWrite: () => (attached && bridgeLate.current && remoteAskUserEnabled() ? deps.memoryWrite : undefined) }
+      : {}),
     ...(deps.memoryProof ? { memoryScopes: true } : {}),
     pi,
     getCtx: () => ctx,
@@ -1267,7 +1289,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       /* stale ctx */
     }
     commandHandler.releaseSettledSteerLocks();
-    const rows = projectFleet(readFleet(), now(), deps.fleetTypeOf);
+    const rows = projectFleet(readFleet(), now(), deps.fleetTypeOf, archiveRunDisplayView());
     const fp = fleetFingerprint(rows);
     if (fp !== lastFleetFp) {
       lastFleetFp = fp;
@@ -1351,10 +1373,12 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     // through unchanged — `undefined` (the common case until topic-switch is wired) keeps
     // `handlePrompt` byte-identical to its pre-feature form.
     ...(deps.promptGate !== undefined ? { promptGate: deps.promptGate } : {}),
+    ...(deps.topicSwitchActive !== undefined ? { topicSwitchActive: deps.topicSwitchActive } : {}),
     // web-hub-steer-recall §4.7 step 3 (A6): the hold driver, looked up lazily so the driver can
     // be constructed after the handler it dispatches through (no temporal-dead-zone cycle).
     // `owner` (Y4/Y7.3) scopes every ledger lookup this handler makes to THIS module instance.
     ...(holdOn ? { hold: () => holdDriver, owner: MODULE_INSTANCE } : {}),
+    ...(deps.memoryWrite ? { memoryOwner: MODULE_INSTANCE } : {}),
     // web-resume plan §2.5 step c: web prompts are refused (E_STALE_CTX, effect none) while a
     // resume switch is between its execution-point checks and its post-switch verification.
     switchInFlight: () => resumeExec.switchInFlight(),
@@ -1460,6 +1484,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   const schedulePort = deps.schedule;
   schedulePort?.bindLink({
     ready: () => conn?.status().state === "live" && (conn?.caps.includes(SCHED_HUB_CAP) ?? false),
+    intervalReady: () => conn?.status().state === "live" && (conn?.caps.includes(SCHED_INTERVAL_CAP) ?? false),
     send: (frame) => conn?.send(frame),
   });
   const binding: BindingPort = {
@@ -2453,6 +2478,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     },
     askUserRemote: () => (remoteAskUserEnabled() ? dialogBridge : undefined),
     memoryHubPaths: () => paths,
+    onMemoryTreeBoundary: () => commandHandler.clearMemoryWaiters(),
     attributeInput: (text) =>
       safe(
         () =>

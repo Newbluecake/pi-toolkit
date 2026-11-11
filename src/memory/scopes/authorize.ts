@@ -125,8 +125,17 @@ export function createOpApprovalPort(deps: OpApprovalDeps): ApprovalPort {
     if (turn === undefined) return Promise.resolve({ approved: false, code: "E_HUB_NEEDS_HUMAN_TURN" } as const);
     if (deps.tracker.rejected()) return Promise.resolve({ approved: false, code: "E_HUB_DECLINED_TURN" } as const);
     if (deps.tracker.dialogsThisTurn() >= HUMAN_TURN_MAX_DIALOGS)
-      return Promise.resolve({ approved: false, code: "E_HUB_RATE" } as const);
-    if (inFlight > 0) return Promise.resolve({ approved: false, code: "E_HUB_RATE" } as const);
+      return Promise.resolve({
+        approved: false,
+        code: "E_HUB_RATE",
+        message: "本回合批准请求次数已达上限，因此不能继续请求；请等待用户的新消息后再按需重试。",
+      } as const);
+    if (inFlight > 0)
+      return Promise.resolve({
+        approved: false,
+        code: "E_HUB_RATE",
+        message: "上一个批准请求仍在进行中；请等它结算（批准 / 拒绝 / 超时）后再重试。",
+      } as const);
 
     const scope = input.operation.storageScope === "hub" ? "hub" : "session";
     const digest8 = input.binding.opDigest.slice(0, 8);

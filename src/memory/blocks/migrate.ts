@@ -25,7 +25,7 @@ import {
   isProcessAlive,
   type ProcIdentity,
 } from "../safe-fs.js";
-import { newTidyId } from "../tidy/manifest.js";
+import { newMemoryId } from "../trash.js";
 import { readIndex } from "../jev/index-store.js";
 import { planMigration, sourceSha, type MigrationSource, type MigrationPlan } from "./migrate-plan.js";
 import { dirFormat } from "./naming.js";
@@ -341,7 +341,7 @@ export async function rollbackMigration(
         gen,
         rollback: {
           from: "blocks" as const,
-          to: `.blocks-rolledback-${newTidyId(new Date(b.now()), process.pid, randomBytes(3).toString("hex"))}`,
+          to: `.blocks-rolledback-${newMemoryId(new Date(b.now()), process.pid, randomBytes(3).toString("hex"))}`,
           done: false,
         },
       };
@@ -366,7 +366,7 @@ export async function runMigration(
   allowSourceRetry = true,
 ): Promise<MigrationResult> {
   const b = new Budget(memDir, opts),
-    runId = newTidyId(new Date(b.now()), process.pid, randomBytes(3).toString("hex"));
+    runId = newMemoryId(new Date(b.now()), process.pid, randomBytes(3).toString("hex"));
   const name = `.blocks-staging-${runId}`,
     staging = join(memDir, name);
   const owner: StagingOwner = {

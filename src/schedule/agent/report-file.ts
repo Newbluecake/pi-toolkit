@@ -2,7 +2,9 @@
 import { randomUUID } from "node:crypto";
 import { sameHolder } from "../core/recovery.js";
 import { RESULT_TOOL_NAME } from "../../core/tool-names.js";
+import { catchUpText } from "./view.js";
 import {
+  displayTz,
   isTerminalRunState,
   reportFileOf,
   SCHED_REPORT_MAX_BYTES,
@@ -47,12 +49,12 @@ export function backgroundHeader(task: ScheduleTask, run: RunRecord): string {
     run.kind === "manual"
       ? "立即运行"
       : new Intl.DateTimeFormat("zh-CN", {
-          timeZone: task.when.tz,
+          timeZone: displayTz(task.when),
           dateStyle: "short",
           timeStyle: "medium",
           hour12: false,
         }).format(run.scheduledAt);
-  return `[定时任务 ${task.name} · ${when}]`;
+  return `[定时任务 ${task.name} · ${when}${task.when.kind === "every" && run.kind === "auto" ? " UTC" : ""}]${run.catchUp === undefined ? "" : `\n${catchUpText(run)}`}`;
 }
 
 function reportBytes(task: ScheduleTask, run: RunRecord, result: BackgroundResult): Buffer {
@@ -117,7 +119,7 @@ export async function commitBackgroundReport(input: BackgroundReportInput): Prom
     },
   };
   const tx = await writeReportLocked(guardedStore, {
-    reportFile: reportFileOf(run.taskId, run.scheduledAt, input.task.when.tz),
+    reportFile: reportFileOf(run.taskId, run.scheduledAt, displayTz(input.task.when)),
     allocateUnique: true,
     data: reportBytes(input.task, run, result),
     now: input.now,

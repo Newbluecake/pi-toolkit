@@ -2,7 +2,7 @@
 
 **中文** | [English](README.en.md)
 
-[pi](https://github.com/earendil-works/pi) 的工具箱扩展。旗舰是一套**零卡死 subagent 系统**（`Agent` / `get_run_result` / `steer_subagent` / `SubagentWorkflow`），外加一组可按需开关的日常模块：项目记忆、上下文交接与缓存保活、额度与负载感知、bash 自动转后台、任务工具、`/goal`、飞书通知，以及可选的浏览器控制面（Web Hub）。单一安装入口，统一 settings 门控。
+[pi](https://github.com/earendil-works/pi) 的工具箱扩展。旗舰是一套**零卡死 subagent 系统**（`Agent` / `get_run_result` / `steer_subagent` / `SubagentWorkflow`），外加一组可按需开关的日常模块：项目记忆、上下文交接与缓存保活、额度与负载感知、bash 自动转后台、任务工具、飞书通知，以及可选的浏览器控制面（Web Hub）。单一安装入口，统一 settings 门控。
 
 <p align="center">
   <img src="docs/images/hero-web-desktop.png" alt="Web UI：会话列表、对话与代理树" width="100%">
@@ -74,7 +74,7 @@ pi install .
 | 防卡死架构                | 分相 deadline、升级阶梯、orphan 登记、持久化通知投递。                                                                                                                                                                                                                                                                                                                                                     | [subagents](docs/guide/subagents.md#防卡死架构)                  |
 | Message fabric            | subagent 间沿 agent tree 的 fire-and-forget 消息（`message_agent`）。默认关闭。                                                                                                                                                                                                                                                                                                                            | [subagents](docs/guide/subagents.md#message-fabric)              |
 | 外部 droid agent          | 把 Factory droid 当作 `droid/<model>` 虚拟 provider 派发，带模型白名单与额度闸门。默认关闭。                                                                                                                                                                                                                                                                                                               | [subagents](docs/guide/subagents.md#外部-droid-agent)            |
-| 项目记忆                  | cwd 为键的被动记忆，分层注入 + `memory` 工具 + `/mem doctor` / `tidy`。                                                                                                                                                                                                                                                                                                                                    | [memory](docs/guide/memory.md)                                   |
+| 项目记忆                  | cwd 为键的项目记忆，默认 blocks 注入 + `memory` 工具；doctor/review/expired、布局迁移与 trash/block 恢复。                                                                                                                                                                                                                                                                                                 | [memory](docs/guide/memory.md)                                   |
 | bash 自动转后台           | 覆盖内置 `bash`：长命令转后台不杀，`bash_job` 管理，宽限与续期。                                                                                                                                                                                                                                                                                                                                           | [bash](docs/guide/bash.md)                                       |
 | 上下文交接与用量提示      | `switch_context` / `compact_context`，用量阶梯提示与强制线。                                                                                                                                                                                                                                                                                                                                               | [context](docs/guide/context.md#switch_context--compact_context) |
 | cache TTL 与保活          | Anthropic prompt cache 的 TTL 模式与保活 ping，带熔断与证据层。                                                                                                                                                                                                                                                                                                                                            | [context](docs/guide/context.md#cache-ttl-与保活)                |
@@ -83,7 +83,6 @@ pi install .
 | 额度感知                  | GLM / Kimi 订阅与 droid Standard / Core 池额度：阶梯预警、派发闸门、Core→Standard 回落。                                                                                                                                                                                                                                                                                                                   | [quota-load](docs/guide/quota-load.md#额度感知quota)             |
 | 负载感知                  | CPU / 内存 / IO / 磁盘采样，本机繁忙时暂缓新派发。                                                                                                                                                                                                                                                                                                                                                         | [quota-load](docs/guide/quota-load.md#负载感知派单load)          |
 | 任务工具                  | `TaskCreate` 等五个工具 + widget + `/tasklist`，完成项折叠与自动归档。                                                                                                                                                                                                                                                                                                                                     | [tools](docs/guide/tools.md#任务工具todo)                        |
-| `/goal`                   | 目标驱动循环：确定性命令或 verifier subagent 判定，带轮数 / 预算 / 时长刹车。                                                                                                                                                                                                                                                                                                                              | [tools](docs/guide/tools.md#goal-目标循环)                       |
 | `ask_user` / `web_search` | 结构化交互提问；四供应商 failover 的联网搜索。                                                                                                                                                                                                                                                                                                                                                             | [tools](docs/guide/tools.md#ask_user)                            |
 | HUD footer                | 接管 pi 底部 footer：git、token / 费用、上下文、额度 / 负载。                                                                                                                                                                                                                                                                                                                                              | [tools](docs/guide/tools.md#hud-footer)                          |
 | 飞书通知                  | 被动触发的结果 / 汇总 / 心跳卡片（`@notify`、`/watch`）。                                                                                                                                                                                                                                                                                                                                                  | [tools](docs/guide/tools.md#飞书通知)                            |
@@ -101,8 +100,7 @@ pi install .
 | ------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `/agent`（`status [runId]` / `costs` / `settings` / `budget` / `reload`） | 运行诊断、费用明细、设置编辑器、延迟 reload                                                                                                                             |
 | `/task <描述>`                                                            | 启动一个后台 general-purpose subagent                                                                                                                                   |
-| `/goal`                                                                   | 目标循环（`status` / `pause` / `resume` / `clear`）                                                                                                                     |
-| `/mem`                                                                    | 项目记忆：`list` / `path` / `import` / `doctor` / `tidy` / `restore`                                                                                                    |
+| `/mem`                                                                    | 项目记忆：`list` / `init` / `path` / `import` / `doctor` / `review` / `expired` / `migrate` / `restore --trash` / `restore --block`                                     |
 | `/tasklist`                                                               | 任务面板（`clear` 清空）                                                                                                                                                |
 | `/cache-ttl`                                                              | `on` / `off` / `auto` / `save` / `keepalive on\|off\|reset` / `status` / `probe`                                                                                        |
 | `/topic-switch`                                                           | 查看状态（`status`），`last [--send]` 取回上次截留的请求                                                                                                                |
@@ -141,7 +139,6 @@ pi install .
   "askUser": { "enabled": true },
   "feishuNotify": { "enabled": true },
   "sessionNav": { "enabled": true },
-  "goal": { "enabled": true },
   "quota": { "enabled": true },
   "load": { "enabled": true },
   "topicSwitch": { "enabled": true },
@@ -155,6 +152,15 @@ pi install .
 ```
 
 `web_search` 的供应商凭证在另一处，见 [tools 指南](docs/guide/tools.md#web_search)。
+
+### 飞书 webhook 通知配置
+
+`pi-toolkit.json` 的顶层 `feishuNotify` 可配置全部通知字段（含 `webhookUrl` / `secret`）。
+逐字段优先：统一有效值 → 旧 `~/.pi/agent/feishu-notify.json` → 既有环境变量 → 默认；
+旧文件保留，不自动迁移或删除。凭据 JSON-only，不进入普通设置 UI/list/set；文件明文建议 0600。
+省略/null 继续回退，false/0 保留；空 URL 停止发送、空 secret 关闭签名。
+`FEISHU_NOTIFY_CONFIG_PATH` 只指定旧文件回退（空串不读）；secure/locked 强制关闭不回退。
+改后 `/reload`；[全部字段、默认值与兼容语义](docs/dev/ask-user-feishu-merge/feishu-notify.md)。
 
 ### 飞书机器人设置（可选）
 
@@ -402,7 +408,7 @@ pi-secure unlock demo --global       # 私有库默认拒绝全局解锁，--glo
 
 ### 数据范围（拍板①）
 
-开启后默认**也录子 agent 流量**：`/goal` verifier、workflow 子 agent 的完整 prompt 与输出都会落库，数据量约随子 agent 用量线性增长。toolkit 自身的保活 ping、额度查询、会话标题、topic 判定请求结构上不经过录制钩子，不录也不改写（拍板⑥）。另有两点共存行为：改写规则启用期间，cache 保活 ping 被否决（HUD 显示 `ping off:traffic-rewrite`）、pi 原生 cache warming 被叫停；观测到 warming 决策后改写会暂停（fail closed，`/record status` 可见），`/record off → on` 恢复。
+开启后默认**也录子 agent 流量**：workflow 子 agent 的完整 prompt 与输出都会落库，数据量约随子 agent 用量线性增长。toolkit 自身的保活 ping、额度查询、会话标题、topic 判定请求结构上不经过录制钩子，不录也不改写（拍板⑥）。另有两点共存行为：改写规则启用期间，cache 保活 ping 被否决（HUD 显示 `ping off:traffic-rewrite`）、pi 原生 cache warming 被叫停；观测到 warming 决策后改写会暂停（fail closed，`/record status` 可见），`/record off → on` 恢复。
 
 ### LAN 风险
 

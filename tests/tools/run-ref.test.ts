@@ -179,6 +179,23 @@ describe("set_model run_id label display", () => {
       resolveRun,
       labelOf: () => label,
     });
+  it("not-running falls back to the raw handle when the label is absent or throws", async () => {
+    for (const labelOf of [
+      () => undefined,
+      () => {
+        throw new Error("internal secret");
+      },
+    ]) {
+      const t = createSetModelTool({
+        runs: { setModel: async () => ({ ok: false, reason: "not_running" }) },
+        resolveRun,
+        labelOf,
+      });
+      await expect(
+        t.execute("t", { model: "a/b", run_id: "r_CWZ" } as never, undefined, undefined, {} as never),
+      ).rejects.toThrow("run r_CWZ is not currently running");
+    }
+  });
   it("labeled success/err + renderCall target; unlabeled keeps the raw handle", async () => {
     const t = mk(LABEL);
     expect(render(t.renderCall!({ model: "b", run_id: LABEL } as never, theme, ctx))).toContain(

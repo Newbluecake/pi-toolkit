@@ -6,6 +6,7 @@
  */
 export interface TaskLastRun {
   state: string;
+  catchUp?: { dueCount: number };
   at: number | undefined;
   runId: string | undefined;
 }

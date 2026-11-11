@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { parseFrontmatter, stripFrontmatter, stripLeadingDriftHeader } from "../frontmatter.js";
 import { entryHash, splitEntries, stripInlineMeta } from "../jev/entries.js";
 import type { JevIndexV1, MemEntry, InlineMeta, ReviewSuggestion } from "../jev/contracts.js";
-import { bodyBytes, serializeBlock, type BlockMeta } from "./format.js";
+import { bodyBytes, serializeBlock, truncateMeta, META_LIMITS, type BlockMeta } from "./format.js";
 import { canonicalTopic } from "./naming.js";
 
 export interface MigrationSource {
@@ -39,6 +39,7 @@ export interface MigrationPlan {
     inlineErrors: { file: string; line: number; errors: readonly string[] }[];
     residue: { id: string; origin: string; bytes: number; preview: string }[];
     wholeInline: { file: string; line: number; meta: InlineMeta }[];
+    metaTruncated?: { blockId: string; field: keyof typeof META_LIMITS; from: string; to: string }[];
   };
 }
 export function planMigration(
@@ -191,6 +192,14 @@ export function planMigration(
           bytes: bodyBytes(body),
           preview: Array.from(body).slice(0, 80).join(""),
         });
+      }
+      for (const field of Object.keys(META_LIMITS) as (keyof typeof META_LIMITS)[]) {
+        const from = meta[field];
+        if (from !== undefined && Buffer.byteLength(from) > META_LIMITS[field]) {
+          const to = truncateMeta(from, META_LIMITS[field]);
+          meta[field] = to;
+          (plan.report.metaTruncated ??= []).push({ blockId: id, field, from, to });
+        }
       }
       const suggest = (kind: ReviewSuggestion["kind"]): void => {
         suggestions.push({ id: `migrate-${id}-${kind}`, kind, a: { hash, anchor: id }, p: 1, at });

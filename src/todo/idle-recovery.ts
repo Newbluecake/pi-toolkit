@@ -6,7 +6,7 @@
  * What lives here: candidate selection, the composite `(fingerprint, progressKey)` identity,
  * the per-window attempt budget, Stop suppression, and the append-only entry format that the
  * store replays (`foldIdleRecoveryEntries`). What does NOT live here: sending, aborting, the
- * B2 runner's 15-minute supervised deadline, and every host busy/goal probe. Nothing in this
+ * B2 runner's 15-minute supervised deadline, and every host busy probe. Nothing in this
  * file can start a turn, and nothing in this file grants authorization.
  *
  * Authorization model (do not weaken, plan §2/§4):

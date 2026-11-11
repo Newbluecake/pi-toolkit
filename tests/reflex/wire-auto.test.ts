@@ -111,7 +111,7 @@ function harness(
         return Promise.resolve(opts.git?.(gitCalls.n) ?? GIT_CLEAN);
       }) as never,
     },
-    fences: { topicSwitchActive: () => false, goalBusy: () => false },
+    fences: { topicSwitchActive: () => false },
     clock,
     monoNow: () => (mono += 5),
   };

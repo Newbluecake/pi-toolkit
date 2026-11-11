@@ -207,7 +207,7 @@ export interface OpApprovalRequest {
 }
 export type OpApprovalResult =
   | { readonly approved: true; readonly cap: PrivateOpCap }
-  | { readonly approved: false; readonly code: ScopedMemoryErrorCode };
+  | { readonly approved: false; readonly code: ScopedMemoryErrorCode; readonly message?: string };
 export interface ApprovalPort {
   /** Human turn is only a prerequisite. Mint solely after exact-content explicit affirmation. */
   request(request: OpApprovalRequest, signal?: AbortSignal): Promise<OpApprovalResult>;
@@ -302,6 +302,7 @@ export type ScopedMemoryWriteResult =
   | {
       readonly ok: false;
       readonly code: ScopedMemoryErrorCode;
+      readonly message?: string;
       readonly persistenceFailure?: SessionPersistenceFailure;
     };
 export interface SessionMemoryPort {

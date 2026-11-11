@@ -11,7 +11,7 @@
 // `cwd`/`files` on the snapshot, the four byte thresholds + `staleDays` on
 // settings) and only ADD optional fields on top (`metaErrors`, `content`,
 // `nlink`, `skipped`, `slugDirLinked`, `canonicalTargetNotDir`, `render`,
-// `nowMs`) — any caller written against the original stub (e.g. P4's tidy,
+// `nowMs`) — any caller written against the original stub (e.g. command callers,
 // developed in parallel from the same P0 base) still type-checks; the new
 // fields are additive-only and simply leave the corresponding rules silent
 // when omitted, never throw.
@@ -271,7 +271,10 @@ export function runDoctor(
         severity: "info",
         file: primary,
         message: `No core.md — "${primary}" (pin: true) is standing in as the degraded primary core.`,
-        fix: "Rename it to core.md, or run /mem tidy to migrate.",
+        // D01 fixes the primary name/status; D02 separately reports coreBytes overflow.
+        fix: files.some((f) => f.name === "core.md")
+          ? "Manually merge the always-on rules into core.md and ensure its status is active."
+          : "Manually rename this file to core.md to make it the always-on primary core.",
       });
     }
   }
@@ -301,7 +304,7 @@ export function runDoctor(
           severity: "error",
           file: f.name,
           message: `${f.name} is ${formatSize(f.size)}, over the hard topicMaxBytes limit (${formatSize(settings.topicMaxBytes)}) — writes past this limit are rejected.`,
-          fix: "Split it with /mem tidy.",
+          fix: "Manually split it into focused topic files.",
         });
       } else if (f.size > settings.topicWarnBytes) {
         findings.push({
@@ -309,7 +312,7 @@ export function runDoctor(
           severity: "warn",
           file: f.name,
           message: `${f.name} is ${formatSize(f.size)}, over topicWarnBytes (${formatSize(settings.topicWarnBytes)}).`,
-          fix: "Consider splitting it with /mem tidy.",
+          fix: "Consider manually splitting it into focused topic files.",
         });
       }
     }
@@ -331,7 +334,7 @@ export function runDoctor(
           severity: "warn",
           file: f.name,
           message: `${f.name} (pin: true) did not fit into the remaining core budget and was demoted to the index.`,
-          fix: "Split it, or drop pin: true, with /mem tidy.",
+          fix: "Manually split it, or remove pin: true.",
         });
       }
     }
@@ -560,7 +563,7 @@ export function runDoctor(
             severity: "warn",
             file: primary,
             message: `${primary} is at ${String(Math.round(ratio * 100))}% of coreBytes (${formatSize(settings.coreBytes)}) — getting close to the hard budget.`,
-            fix: "Trim it, or split topics out with /mem tidy.",
+            fix: "Manually trim it, or split topics out.",
           });
         }
       }
@@ -704,12 +707,12 @@ export function runDoctorBlocks(input: DoctorBlocksInput): BlocksDoctorFinding[]
   }
   // D23: parse errors (inline-meta remains, invalid frontmatter values,
   // agent scope ignored) + stray files in blocks/. Only the BODY oversize
-  // (`E_TOO_LARGE`) is D20's subject — an over-limit `section` (>80B,
+  // (`E_TOO_LARGE`) is D20's subject — an over-limit `section` (>120B,
   // `E_SECTION_TOO_LARGE`) has no other reporter, so D23 covers it
   // (acceptance fix).
   for (const b of input.blocks) {
     for (const err of b.errors) {
-      if (err === "E_TOO_LARGE") continue;
+      if (err === "E_TOO_LARGE" || err === "E_META_SOFT") continue;
       findings.push({
         id: "D23",
         severity: "warn",

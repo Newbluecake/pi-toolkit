@@ -22,7 +22,9 @@ mailbox, tree routing, per-link throttle. `message_agent` is scoped to subagents
 `src/runtime/tool-scope.ts`; routing relations come from the agent type's `can_message`
 frontmatter (default: parent only).
 
-**消息 kind（#34 起）**：`report`（子→父/祖先，注入对方模型上下文；请教、汇报、steer 的 ack/report 回复都用它）、`progress`（发给 root 时仅 TUI 展示）、`directive`（仅父→子）、`result`（子任务结果）、`dead_letter`（内部）。#34 把旧名 `finding` 彻底改为 `report`，这是 I10 的用户批准例外（2026-11-05），范围仅限：`message_agent` schema 的 kind 常量、持久化 `FabricRecord.kind`、context-message 正文首行 `[fabric <kind> …]`（随通用 `custom_message.content` 上 wire）、设置键、`steer_subagent` 两处 description 的词汇；PROTO/caps/`StatusInfo`/`xs_*`/`thr_*` 帧、WireEntry 字段与 `subagent:fabric` customType 均不变。不兼容：不做读侧归一化；stack 重建时，未投递的持久化记录如果 kind 不在当前集合（主要是旧值 `finding`），即置 `dropped`（`terminalReason:"unknown_kind"`），不发 dead letter，告警一行；pump、resume 候选与 trigger、WakeService 调度、`parkRetryAt` 都排除未知 kind：永不投递、永不注入、永不排定时器。冻结物：`fabric-wake-off-golden.json`、`fabric-xs-off-golden.json`、`message-agent-wake-schema-golden.json` 各改一行（kind anyOf const），手工申报式更新，未再生。设置键 `fabric.findingQuota` 同步改为 `fabric.reportQuota`（默认 10，旧键不再读取，静默忽略）。
+**消息 kind（#34 起）**：`report`（子→父/祖先，注入对方模型上下文；请教、汇报、steer 的 ack/report 回复都用它）、`progress`（发给 root 时仅 TUI 展示）、`directive`（仅父→子）、`result`（子任务结果）、`dead_letter`（内部）。#34 把旧名 `finding` 彻底改为 `report`，这是 I10 的用户批准例外（2026-11-05），范围仅限：`message_agent` schema 的 kind 常量、持久化 `FabricRecord.kind`、context-message 正文首行 `[fabric <kind> …]`（随通用 `custom_message.content` 上 wire）、设置键、`steer_subagent` 两处 description 的词汇；PROTO/caps/`StatusInfo`/`xs_*`/`thr_*` 帧、WireEntry 字段与 `subagent:fabric` customType 均不变。不兼容：不做读侧归一化；stack 重建时，未投递的持久化记录如果 kind 不在当前集合（主要是旧值 `finding`），即置 `dropped`（`terminalReason:"unknown_kind"`），不发 dead letter，告警一行；pump、resume 候选与 trigger、WakeService 调度、`parkRetryAt` 都排除未知 kind：永不投递、永不注入、永不排定时器。冻结物：`fabric-wake-off-golden.json`、`fabric-xs-off-golden.json`、`message-agent-wake-schema-golden.json` 各改一行（kind anyOf const），手工申报式更新，未再生。设置键 `fabric.findingQuota` 同步改为 `fabric.reportQuota`（默认 3，旧键不再读取，静默忽略）。
+
+报告额度按发送 run 计数，`fabric.reportQuota: 0` 禁止所有 report（不是无限）。成功的 router admission 附加发送后的 `quota`，工具文本附剩余提示；耗尽返回既有字段并提示改用完成汇报。旧版省略 wake 的已结束 @label 直启路径在 spawn 前同步向 router 持久化已消费的预留，和普通 admission 共用计数；spawn 失败或效果不明时保守不退款，避免并发超额及 /reload 重置。progress 不走此预留。`message_agent` 对 report 的拒绝与异常也回显 router 唯一账本的余额；预留后的异常附该次预留快照，不退款。
 
 ## Wake phase 1
 
@@ -67,6 +69,14 @@ re-reviewed first. Gates: `tests/integration/fabric-wake*.test.ts`, conformance 
 (`tests/conformance/fabric-wake.test.ts`; run before any pi peer bump), state-machine
 matrix/property in `tests/core/`.
 
+### #64 预算继承、因果深度与展示
+
+可信用户到达是对当前会话整体重新授权：所有仍在运行的 run 共享新的用户到达窗口预算（上限 2），包括旧 run；只继承预算，不重置其因果 level。它是用户到达窗口，不是小时滑窗。
+
+默认 `maxLevel=2`；level 是自主唤醒的因果深度，不是任务树深度。旧 root gate 和跨会话普通 wake 等剩余路径在触及 `level_limit` 时静默降级为 deliver-only；关键例外是 #61 生产 `child→root` 显式唤醒走用户窗口，不受 `level_limit` 限制。若修改限制，必须联动传播、spawn 继承、持久化和跨会话；风险是放大自激链，故暂不改。
+
+根侧已投递记录的可选 `wakeDowngraded` 是展示信息，不是送达或处理凭证；busy/reserved 显示已排队、不新增唤醒，其余降级显示已送达但未唤醒且不代表 Root 已处理。未降级记录投影不变。旧 hub 不识别该字段，仍可读记录但不会显示新提示；新 hub 向旧 UI 沿用既有正文投影，不新增字段或帧。新版 hub 的降级消息 content 变化是声明的行为变更；未降级路径的 wire 字节严格不变。若将来要求旧 hub 的 Web 也显示提示，需新增字段或帧，属于协议变更，须另立项。共享文案位于零依赖 `protocol/fabric-wake-notice.ts`：直接在 UI 引用 `keys.ts` 会引入 `node:buffer` 导致 Vite 构建失败。 解析也由该模块负责：先提取稳定 ASCII reason，再与当前双语格式化结果完整比较，不依赖具体文案；UI 翻译仅替换首行提示，不改正文或 wire 格式。无结构化 marker，旧 hub 的兼容结论不变。
+
 ## Cross-session phase 2
 
 **Cross-session phase 2** (`docs/dev/fabric-cross-session/phase2-plan.md`, §13/§14 + r3 rulings):
@@ -97,15 +107,16 @@ capability (`absent` ⇒ `host_unsupported` deliver-only; `unknown` ⇒ **optimi
 wake-unknown-optimistic 2026-11: the first run is authorized by BAS or aborted at its first
 `context` sight before any provider request on verified-shape hosts 1.0.4/1.1.0/1.4.0 — legacy
 conformance + C-X12 gates; other shapes degrade to a bounded supervised run; `woke:true` means
-"dispatch accepted", same as `start_deferred`, not a provider-request guarantee), goal and quotas.
+"dispatch accepted", same as `start_deferred`, not a provider-request guarantee), and quotas.
 root deadline `fabric.wake.rootRunMaxS` (default 900s) starts at dispatch, including
 pre-start compaction. Token authorization and dedup survive /reload; marked unauthorized/expired
 triggers abort before their first provider request (B1); human handover only after proven own-run
 start. Peer-upgrade gates: C-X1…C-X12 with real pi, **plus** the self-gated legacy conformance
 (`PI_TOOLKIT_LEGACY_PI_DIR=… npx vitest run tests/conformance/fabric-xs-legacy.test.ts` against
 unpacked pi 1.0.4 and 1.1.0 — local only, never in CI) — run both before any pi peer bump.
-Mutation fences (compaction/tree/switch/web_exec/topic_switch) reject ALL ingress; goal
-only downgrades wake. A 30s stuck warning never opens a fence; input/run-start is NOT completion
+Mutation fences (compaction/tree/switch/web_exec/topic_switch) reject ALL ingress. Current hosts
+expose no goal fence port; historical `goal` wake-only downgrade tokens remain only in the append-only
+wire vocabulary for old peers. A 30s stuck warning never opens a fence; input/run-start is NOT completion
 evidence (r3 M1); local `/fabric fence reset` is the manual escape. M2 effects: before-send
 cancellation/origin change = `none`; after-send no verdict = `unknown`, received remote evidence
 stays intact. Busy recipient = `unknown/queued` (may be queued, never blindly resend). Defaults
@@ -552,7 +563,7 @@ in wake requests and quiet notices in a later natural turn, asserting exact pros
 of injected sid/xid/messageId/activationKey sentinels. Run alongside C-X1…C-X14, bridge legacy gates,
 stack teardown, nine XsHarness suites, governance/mention and all three untouched off goldens.
 
-Accepted residuals: receiver sample/write re-entry or later human/goal/schedule activity can make idle
+Accepted residuals: receiver sample/write re-entry or later human/schedule activity can make idle
 advice a false positive (non-blocking, “大概率” only). The 2000-message scan or a lost started push may
 leave a **live** mirror on delivered; read-only lookup cannot detect that omission, hence observation
 wording and activation's started no-op. Expiry retains the farthest phase but overrides observation,
@@ -691,7 +702,7 @@ route remains paused; its provenance-unavailable statements do not govern this s
   change: used=0/root=0 and successive real arrivals still open new windows.
 - The budget WeakSet deduplicates the **same event object**, weakly held. A rewrapped event
   is not the same arrival identity; there is no cross-process/external replay proof. Machine
-  RPC, un-attributed extension/topic-switch/goal continuations, child/tool/completion events
+  RPC, un-attributed extension/topic-switch continuations, child/tool/completion events
   and user-role/text wrappers do not reset the budget. The shared legacy classifier is NOT
   changed: RPC continues its old causal-level-only reset, but never opens this budget.
   Web attribution is the existing port, not a new authentication layer.
@@ -734,3 +745,18 @@ opportunities on unknown state, missing confirmations, reload or a busy→idle r
 fail-closed outcomes, not a promise of immediate Root processing. SDK `isIdle` also includes
 manual compaction; this getter pair does not independently distinguish compaction from run
 startup. No new compaction fence or lifecycle observation hook is introduced or certified here.
+
+## Retired objective-loop owner (2026-11-09)
+
+No live goal fence port or root-wake goal policy remains. Historical `goal` fence/downgrade wire tokens and wakeOnly consumer handling remain for old-peer compatibility (append-only wire), not as producers or a hidden objective loop. Session lifecycle reasons are local literal types, independent of the deleted subsystem.
+
+## Refusal guidance (#84)
+
+Message and session-list tools add reason-specific next steps without changing admission or granting
+permissions. Permission and quota refusals must not be bypassed via another route or target; no retry
+time is invented without authoritative evidence. For a `replyTo` rejection, retain the original
+request/target identity and do not fabricate a credential or resend the final reply as an ordinary
+message. An unknown or partial effect is not proof of non-delivery: inspect the existing receipt
+and never blindly resend a body. `tests/tools/{message-agent,message-session,message-channel,list-sessions}-tool.test.ts`
+and `tests/tools/xs-tool-cancel.test.ts` exercise refusal and cancellation surfaces; these source
+changes do not establish live deployment.

@@ -46,7 +46,7 @@ export const MEMORY_SETTING_SPECS: Record<string, SettingSpec> = {
   "memory.layout": choice(
     "memory.layout",
     ["tiered", "legacy", "blocks"],
-    "Injection renderer: tiered (budgeted, default), legacy (byte-identical to pre-#22), or blocks (#36 one file per block; parseable now, renderer lands with #36)",
+    "Injection renderer: blocks (default, one file per block), tiered (budgeted files), or legacy (byte-identical to pre-#22)",
   ),
   "memory.toolSurface": choice(
     "memory.toolSurface",
@@ -100,6 +100,46 @@ export const MEMORY_SETTING_SPECS: Record<string, SettingSpec> = {
     "memory.governance.enabled",
     "Governance sweep, auto-supersede and suggestions (#36); rendering-time expiry filtering stays on when off",
   ),
+  // P50.1 declared additive trigger settings; no model/auto/audit switch in this package.
+  "memory.incremental.enabled": bool(
+    "memory.incremental.enabled",
+    "P50 incremental suggestions; default on, requires explicit positive job budget and trusted provider binding",
+  ),
+  "memory.incremental.auto": bool(
+    "memory.incremental.auto",
+    "P50 automatic commits; default false, existing E permission and provenance gates still required",
+  ),
+  "memory.incremental.jobCostCapUsd": {
+    kind: "number",
+    path: "memory.incremental.jobCostCapUsd",
+    min: 0,
+    description:
+      "Explicit finite per-job USD cap shared by relation/generation/coverage; default 0 authorizes no paid work",
+  },
+  "memory.incremental.changeThreshold": {
+    ...count(
+      "memory.incremental.changeThreshold",
+      1,
+      "External writes needed for eligibility; task-done only replaces this threshold",
+    ),
+    max: 1000,
+  } as SettingSpec,
+  "memory.incremental.quietSec": seconds("memory.incremental.quietMs", {
+    max: Math.floor(Number.MAX_SAFE_INTEGER / 1000),
+    description: "Quiet window in seconds; every external write resets it",
+  }),
+  "memory.incremental.idleSec": seconds("memory.incremental.idleMs", {
+    max: Math.floor(Number.MAX_SAFE_INTEGER / 1000),
+    description: "Continuous host inactivity in seconds; live idle and no pending messages required",
+  }),
+  "memory.incremental.cooldownSec": seconds("memory.incremental.cooldownMs", {
+    max: Math.floor(Number.MAX_SAFE_INTEGER / 1000),
+    description: "Cooldown in seconds from batch settlement; task-done never bypasses it",
+  }),
+  "memory.incremental.taskDoneTrigger": bool(
+    "memory.incremental.taskDoneTrigger",
+    "Successful TaskUpdate completed may replace the change-count threshold only",
+  ),
   "memory.doctor.notifyOnStart": bool(
     "memory.doctor.notifyOnStart",
     "Main-session startup reminder when /mem doctor would report an error (zero model cost)",
@@ -108,82 +148,6 @@ export const MEMORY_SETTING_SPECS: Record<string, SettingSpec> = {
     ...count("memory.doctor.staleDays", 7, "updated age (days) past which a file is flagged stale (D08 warn)"),
     max: 3650,
   } as SettingSpec,
-  "memory.tidy.agentType": {
-    kind: "string",
-    path: "memory.tidy.agentType",
-    description:
-      "Agent type for the tidy proposal subagent's prompt/model hint only — tools are always forced readonly (§7.0)",
-  },
-  "memory.tidy.model": {
-    kind: "string",
-    path: "memory.tidy.model",
-    description: 'Strict provider/id for /mem tidy, or "" to use the current main-session model',
-  },
-  "memory.tidy.timeoutS": seconds("memory.tidy.timeoutMs", {
-    min: 30,
-    max: 1800,
-    hint: "hard total budget of a tidy run (no grace, no extension)",
-    description: "/mem tidy run timeout",
-  }),
-  "memory.tidy.maxInputBytes": {
-    ...count(
-      "memory.tidy.maxInputBytes",
-      8192,
-      "Total input bytes a tidy/restore snapshot may cover before asking to narrow the file set",
-    ),
-    max: 262_144,
-  } as SettingSpec,
-  "memory.tidy.maxOutputBytes": {
-    ...count(
-      "memory.tidy.maxOutputBytes",
-      4096,
-      "Hard cap on the tidy proposal's total output bytes; over this the whole proposal is discarded",
-    ),
-    max: 262_144,
-  } as SettingSpec,
-  "memory.tidy.maxCostUsd": {
-    kind: "number",
-    path: "memory.tidy.maxCostUsd",
-    min: 0.05,
-    max: 50,
-    description: "Cumulative cost cap (USD) for a tidy run; only enforced for a priced model",
-  },
-  "memory.tidy.maxTurns": {
-    ...count("memory.tidy.maxTurns", 1, "Turn-boundary cap for a tidy run"),
-    max: 20,
-  } as SettingSpec,
-  "memory.tidy.batch.enabled": bool("memory.tidy.batch.enabled", "Enable batched tidy planning and application"),
-  "memory.tidy.batch.targetBytes": {
-    ...count("memory.tidy.batch.targetBytes", 8192, "Target bytes per batch; capped by memory.tidy.maxInputBytes"),
-    max: 262_144,
-  } as SettingSpec,
-  "memory.tidy.batch.maxModelRuns": {
-    ...count("memory.tidy.batch.maxModelRuns", 1, "Maximum model runs for one batched tidy"),
-    max: 20,
-  } as SettingSpec,
-  "memory.tidy.batch.maxTotalCostUsd": {
-    kind: "number",
-    path: "memory.tidy.batch.maxTotalCostUsd",
-    min: 0.1,
-    max: 100,
-    description: "Cumulative cost cap for one batched tidy run, USD",
-  },
-  "memory.tidy.batch.totalTimeoutS": seconds("memory.tidy.batch.totalTimeoutMs", {
-    min: 300,
-    max: 7200,
-    hint: "hard total budget for a batched tidy run",
-    description: "Batched tidy run timeout",
-  }),
-  "memory.tidy.batch.outputTokPerSec": {
-    kind: "number",
-    path: "memory.tidy.batch.outputTokPerSec",
-    min: 5,
-    max: 500,
-    description: "Expected model output rate for batched tidy budgeting, tokens per second",
-  },
-  // jev-plan v2 §4 J3 (jev-arch §9.1): 15 keys (14 − gate×2 removed 2026-11 + fastPath×3 of
-  // the 2026-11-03 noise fix), non-live (change → /reload). `classifiersRejected`
-  // is NOT a setting key (parse-time derived, doctor/startup-reminder display only).
   "memory.jev.enabled": bool(
     "memory.jev.enabled",
     "Jev-assisted memory: classifier-backed recall, tagging, review (Q27 default on)",
@@ -233,6 +197,14 @@ export const MEMORY_SETTING_SPECS: Record<string, SettingSpec> = {
   "memory.jev.maxCalls": {
     ...count("memory.jev.maxCalls", 0, "Per-activation Jev call count cap"),
     max: 5000,
+  } as SettingSpec,
+  "memory.jev.backgroundQueueLimit": {
+    ...count(
+      "memory.jev.backgroundQueueLimit",
+      1,
+      "Maximum running and queued Jev background jobs; reject new jobs when full",
+    ),
+    max: 1024,
   } as SettingSpec,
   "memory.jev.fastPathAllowTags": csvString(
     "memory.jev.fastPathAllowTags",

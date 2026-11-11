@@ -63,7 +63,7 @@
 ## 残留风险 / 范围
 
 - **定时任务的后台 run 本次不拦**；它们仍能在 pending 时进入 SpawnService，可能延后 reload。fire 的 admission-ID 并集重数仍防止打断刚准入的 run。
-- `/task`、RPC、goal/tidy 等非上述两个主会话工具入口也未加门，避免在共享服务层破坏内部 workflow/nested dispatch。
+- `/task`、RPC、tidy 等非上述两个主会话工具入口也未加门，避免在共享服务层破坏内部 workflow/nested dispatch。
 - **继续标记仅同进程有效**；退出/重启、reload 超过 120 秒、加载失败或不同会话会丢弃，不承诺跨进程恢复。容量一不是跨会话队列。
 - **print 模式无法通过此功能 reload**（json 同样禁用）。**RPC 模式 reload 后会按 needsContinue 自动续跑，这是有意行为**；正常 stop 且无队列时仍按上述规则不唤醒。
 - **idle 时 nextTurn 的挂起消息可能在 reload 后首回合出现一次**。它不立即唤醒，其是否计入 pending 队列依宿主实现；不改写已进入宿主队列的消息。

@@ -215,7 +215,7 @@ describe("capacity: reject, never truncate", () => {
     expect(readHubCorpus(slot, { expectedHost: hubHostFingerprint() }).items).toHaveLength(32);
     const over = await userCreate(slot, "item-33");
     expect(over.ok).toBe(false);
-    if (!over.ok) expect(over.code).toBe("E_FULL");
+    expect(over).toMatchObject({ ok: false, code: "E_FULL", message: expect.stringContaining("all 32 item slots") });
     expect(readHubCorpus(slot, { expectedHost: hubHostFingerprint() }).items).toHaveLength(32);
     const big = "x".repeat(1025);
     const h2 = home();
@@ -228,7 +228,11 @@ describe("capacity: reject, never truncate", () => {
       ),
     );
     expect(tooLarge.ok).toBe(false);
-    if (!tooLarge.ok) expect(tooLarge.code).toBe("E_TOO_LARGE");
+    expect(tooLarge).toMatchObject({
+      ok: false,
+      code: "E_TOO_LARGE",
+      message: expect.stringContaining("1024 UTF-8 body bytes"),
+    });
     expect(checkHubSlot(slot2)).toBe("absent"); // nothing was created on a size rejection
   });
 
@@ -238,7 +242,10 @@ describe("capacity: reject, never truncate", () => {
     for (let i = 1; i <= 4; i++) expect((await userCreate(slot, "y".repeat(1024))).ok).toBe(true);
     const over = await userCreate(slot, "z");
     expect(over.ok).toBe(false);
-    if (!over.ok) expect(over.code).toBe("E_FULL");
+    expect(over).toMatchObject({ ok: false, code: "E_FULL", message: expect.stringContaining("total body budget") });
+    expect(readHubCorpus(slot, { expectedHost: hubHostFingerprint() }).items.map((item) => item.text)).toEqual(
+      Array(4).fill("y".repeat(1024)),
+    );
   });
 });
 

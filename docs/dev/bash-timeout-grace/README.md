@@ -108,3 +108,11 @@ deadline/extension budget plus outstanding job grace, §3.5's `R_wait`/`G0`). De
 `tests/bash/tool.test.ts` A 点（默认开/显式/关/跨 chunk/onUpdate/finalText）；`tests/bash/manager.test.ts`
 B 点（原始 offset/cursor/磁盘、中截与末尾半序列、`readBashJobTail` 同源、`bash_job status` 真
 manager 断面）；`tests/integration/child-bash-jobs.test.ts` child 接线（真实进程 on/off）。
+
+## Stale manager guidance (#84)
+
+On `bash_job extend`, only the exact `stale bash job manager` error gains guidance to inspect status
+or list in the current session. It establishes neither whether the process is alive nor whether the
+extension took effect; do not automatically retry extend or kill. Other exceptions retain their
+existing path. Foreground bash behavior is unchanged. `tests/bash/job-tool.test.ts` covers the
+boundary; source changes do not imply an existing session has loaded them.

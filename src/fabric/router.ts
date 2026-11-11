@@ -85,6 +85,7 @@ export type AdmissionResult =
       key: MessageKey;
       seq: number;
       superseded?: MessageKey;
+      quota?: { used: number; limit: number; remaining: number };
       /** Effective wake of an explicit `wake` request (after a downgrade); absent when the sender omitted it. */
       wake?: boolean;
       /** Why an explicit `wake:true` to the root was delivered deliver-only instead (plan §3.1 / L5). */
@@ -174,6 +175,51 @@ export class FabricRouter {
   private labelOf(from: NodeRef): string | undefined {
     const label = this.config.senderLabel?.(from);
     return typeof label === "string" && label.trim() !== "" ? label : undefined;
+  }
+
+  /** Read the one per-run report ledger without changing admission or spending quota. */
+  reportQuotaSnapshot(from: NodeRef): { used: number; limit: number; remaining: number } {
+    const used = this.getUsed(from, "report");
+    const limit = this.config.reportQuota;
+    return { used, limit, remaining: Math.max(0, limit - used) };
+  }
+
+  /** Reserve a legacy mention-resume report synchronously and persist it as consumed, never for mailbox delivery.
+   * The reservation is deliberately not refunded: once spawn is attempted its effect can be ambiguous.
+   */
+  reserveMentionReport(from: NodeRef, to: NodeRef, generation: number): AdmissionResult {
+    if (this.frozen) throw new Error("shutting down");
+    if (this.tree.targetState(from, this.now()) !== "running") throw new Error("sender is not running");
+    const seq = this.nextSeq(from, to);
+    const key = makeMessageKey(from, to, generation, seq);
+    const used = this.getUsed(from, "report");
+    const quota = this.config.reportQuota;
+    if (used >= quota) return { ok: false, status: "quota_exhausted", key, seq, kind: "report", used, quota };
+    const now = this.now();
+    const stored = this.engine.put({
+      key,
+      from,
+      to,
+      kind: "report",
+      seq,
+      generation: generation as never,
+      payload: { text: "" },
+      ttlMs: this.config.reconcileTtlMs,
+      createdAt: now,
+      updatedAt: now,
+      state: "consumed",
+      attempts: 0,
+      via: { mode: "mention", lca: "root", hops: [] },
+    });
+    if (!stored) throw new Error("cannot persist mention report reservation");
+    this.count(from, "report");
+    return {
+      ok: true,
+      status: "accepted",
+      key,
+      seq,
+      quota: { used: used + 1, limit: quota, remaining: quota - used - 1 },
+    };
   }
 
   admit(from: NodeRef, input: AdmissionInput): AdmissionResult {
@@ -281,7 +327,7 @@ export class FabricRouter {
     )
       rejection = { ok: false, status: "target_backpressure", key, seq, retryAfterMs: 0 };
     const fromLabel = this.labelOf(from);
-    const record: FabricRecord = {
+    const record: FabricRecord & { wakeDowngraded?: RootWakeDowngrade } = {
       key,
       from,
       to: input.to,
@@ -300,6 +346,7 @@ export class FabricRouter {
         : {}),
       ...(senderLevel !== undefined && from !== "system" ? { level: senderLevel } : {}),
       ...(wake !== undefined ? { wake } : {}),
+      ...(!rejection && wakeDowngraded !== undefined ? { wakeDowngraded } : {}),
       ...(!rejection && canPark
         ? { parked: { at: this.now(), reason: reviveDowngrade ?? ("wake_false" as const) } }
         : {}),
@@ -330,6 +377,9 @@ export class FabricRouter {
         status: "accepted",
         key,
         seq,
+        ...(input.kind === "report" && quota !== undefined
+          ? { quota: { used: used + 1, limit: quota, remaining: Math.max(0, quota - used - 1) } }
+          : {}),
         ...(wakePolicy && input.wake !== undefined ? { wake: wake === true } : {}),
         ...(wakeDowngraded === undefined ? {} : { wakeDowngraded }),
         ...(parkRequested && !canPark ? { parkUnavailable: "stack_memory" as const } : {}),

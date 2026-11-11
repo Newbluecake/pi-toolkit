@@ -286,3 +286,45 @@ describe("projectSession — runs and the Feishu display", () => {
     expect(p.runs[1]!.reportFile).toBeUndefined();
   });
 });
+
+describe("interval P1 append-only projection", () => {
+  it("keeps legacy tasks unchanged, places every only in intervalTasks and projects catchUp once", () => {
+    const legacy = task();
+    const interval = task({ id: "s_aaaaaaab", when: { kind: "every", everyMs: 45_000, anchorAt: NOW } });
+    const catchUp = {
+      cause: "resume" as const,
+      fromExclusive: NOW - 90_000,
+      through: NOW,
+      dueCount: 2,
+      recoveredAt: NOW + 1,
+    };
+    const r = run({ taskId: interval.id, runKey: `${interval.id}@${NOW}`, scheduledAt: NOW, catchUp });
+    const deps = { now: NOW, receipts: new Map(), bot: noBot };
+    const original = projectSession(state({ tasks: [legacy] }), deps);
+    const projected = projectSession(state({ v: 2, tasks: [legacy, interval], runs: [r] }), deps);
+    expect(projected.tasks).toEqual(original.tasks);
+    expect(original).not.toHaveProperty("intervalTasks");
+    expect(projected.intervalTasks).toHaveLength(1);
+    expect(projected.intervalTasks![0]).toMatchObject({
+      task: interval,
+      nextAt: NOW + 45_000,
+      defHash: defHash(interval),
+    });
+    expect(projected.runs).toHaveLength(1);
+    expect(projected.runs[0]!.catchUp).toEqual(catchUp);
+    expect(projectSession(state({ tasks: [legacy], runs: [run()] }), deps).runs[0]).not.toHaveProperty("catchUp");
+  });
+});
+
+describe("P2 legacy-step diagnostics", () => {
+  it("preserves the old next occurrence while appending an actionable diagnostic only to legacy oversized steps", () => {
+    const t = task({ when: { kind: "cron", expr: "*/90 * * * *", tz: "UTC" } });
+    const legacy = projectSession(state({ tasks: [t] }), { now: NOW, receipts: new Map(), bot: noBot });
+    expect(legacy.tasks[0]!.nextAt).toBe(NOW + 3_600_000);
+    expect(legacy.tasks[0]!.legacyStep).toContain("minute step 90 exceeds 59");
+    expect(legacy.tasks[0]!.legacyStep).toContain("--every 90m");
+    const current = projectSession(state({ tasks: [task()] }), { now: NOW, receipts: new Map(), bot: noBot });
+    expect(current.tasks[0]).not.toHaveProperty("legacyStep");
+    expect(current).not.toHaveProperty("intervalTasks");
+  });
+});

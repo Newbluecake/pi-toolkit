@@ -267,7 +267,11 @@ describe("rate gates and teardown", () => {
     const { port, request } = rig({ select: select.select });
     const first = port.request(request);
     const second = await port.request(request);
-    expect(second).toMatchObject({ approved: false, code: "E_HUB_RATE" });
+    expect(second).toMatchObject({
+      approved: false,
+      code: "E_HUB_RATE",
+      message: "上一个批准请求仍在进行中；请等它结算（批准 / 拒绝 / 超时）后再重试。",
+    });
     select.answer(REJECT_LABEL);
     await first;
   });
@@ -281,7 +285,11 @@ describe("rate gates and teardown", () => {
       expect((await pending).approved).toBe(true);
     }
     const fourth = await port.request(request);
-    expect(fourth).toMatchObject({ approved: false, code: "E_HUB_RATE" });
+    expect(fourth).toMatchObject({
+      approved: false,
+      code: "E_HUB_RATE",
+      message: "本回合批准请求次数已达上限，因此不能继续请求；请等待用户的新消息后再按需重试。",
+    });
   });
 
   it("revoke/dispose clear the turn and every minted cap", async () => {

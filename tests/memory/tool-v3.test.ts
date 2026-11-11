@@ -896,3 +896,66 @@ describe("v3 fix-round additions", () => {
     expect(checked).toBeGreaterThan(0);
   });
 });
+
+describe("section repair in v3 writes", () => {
+  test("oversize inheritance refuses with guidance; explicit replacement or clearing repairs without other changes", async () => {
+    for (const replacement of ['section="短 分组"', "section=none"]) {
+      const fx = fixture([
+        {
+          id: "repair.001",
+          section: "中".repeat(41),
+          heading: "heading",
+          body: "- fact",
+          audience: "child",
+          allowOversize: true,
+        },
+      ]);
+      const { tool } = makeTool(fx);
+      const before = block(fx, "repair.001");
+      const err = await execErr(tool, { command: "update", path: "repair.001", rev: before.rev, text: before.body });
+      expect(err).toContain("E_SECTION_TOO_LARGE");
+      expect(err).toContain("section=none");
+      expect(err).toContain("section=");
+      expect(block(fx, "repair.001").raw).toBe(before.raw);
+      await exec(tool, {
+        command: "update",
+        path: "repair.001",
+        rev: before.rev,
+        text: `<!-- mem ${replacement} -->\n${before.body}`,
+      });
+      const after = block(fx, "repair.001");
+      expect(after.body).toBe(before.body);
+      expect(after.meta).toEqual({
+        ...before.meta,
+        section: replacement === "section=none" ? undefined : "短 分组",
+        version: before.meta.version + 1,
+        updated: after.meta.updated,
+      });
+      expect(after.rev).not.toBe(before.rev);
+    }
+  });
+
+  test("create and update enforce UTF-8 limit, and normal sections inherit unchanged", async () => {
+    const fx = fixture([{ id: "normal.001", section: "original", body: "- fact" }]);
+    const { tool } = makeTool(fx);
+    const atLimit = "中".repeat(40);
+    await exec(tool, { command: "create", topic: "boundary", text: `<!-- mem section=${atLimit} -->\n- at limit` });
+    expect(block(fx, "boundary.001").meta.section).toBe(atLimit);
+    let before = block(fx, "normal.001");
+    const oversized = "中".repeat(40) + "x";
+    expect(Buffer.byteLength(oversized)).toBe(121);
+    for (const params of [
+      { command: "create", topic: "normal", text: `<!-- mem section=${oversized} -->\n- new` },
+      { command: "update", path: "normal.001", rev: before.rev, text: `<!-- mem section=${oversized} -->\n- fact` },
+    ])
+      expect(await execErr(tool, params)).toContain("E_SECTION_TOO_LARGE");
+    expect(block(fx, "normal.001").raw).toBe(before.raw);
+    await exec(tool, { command: "update", path: "normal.001", rev: before.rev, text: "- revised" });
+    expect(block(fx, "normal.001").meta.section).toBe("original");
+    await exec(tool, { command: "create", topic: "normal", text: '<!-- mem section="new section" -->\n- new' });
+    expect(block(fx, "normal.002").meta.section).toBe("new section");
+    before = block(fx, "normal.002");
+    expect(before.meta.authority).toBe("agent");
+    expect(before.meta.supersededBy).toBeUndefined();
+  });
+});

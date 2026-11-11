@@ -236,8 +236,12 @@ describe("cache TTL settings", () => {
     const cmd = state.commands.get("cache-ttl");
     await cmd.handler("off", state.ctx);
     await cmd.handler("", state.ctx);
-    expect(state.notify).toHaveBeenLastCalledWith(expect.stringContaining("persisted mode"), "info");
-    expect(state.notify.mock.calls.at(-1)![0]).toContain("save");
+    expect(state.notify).toHaveBeenLastCalledWith(expect.any(String), "info");
+    const output = state.notify.mock.calls.at(-1)![0] as string;
+    expect(output).toContain("current cache TTL mode: off (provider default 5m)*");
+    expect(output).toContain("persisted mode: on (force 1h)");
+    expect(output).toContain("mode source: current process (unsaved)");
+    expect(output).not.toContain("usage:");
     await cmd.handler("bogus", state.ctx);
     expect(state.notify).toHaveBeenLastCalledWith(expect.stringContaining("invalid argument"), "warning");
   });
@@ -255,6 +259,25 @@ describe("cache TTL settings", () => {
     expect(failing.notify).toHaveBeenLastCalledWith(expect.stringContaining("disk full"), "error");
     await failing.commands.get("cache-ttl").handler("save", failing.ctx);
     expect(failing.persist).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("/cache-ttl unified status", () => {
+  it.each(["auto", "on", "off"] as const)("empty and status are byte-identical, including unsaved %s", async (mode) => {
+    const { commands, ctx, notify } = setup("auto");
+    const cmd = commands.get("cache-ttl");
+    if (mode !== "auto") await cmd.handler(mode, ctx);
+    notify.mockClear();
+    await cmd.handler("", ctx);
+    await cmd.handler("status", ctx);
+    expect(notify).toHaveBeenCalledTimes(2);
+    const first = notify.mock.calls[0]![0] as string;
+    expect(notify.mock.calls[1]).toEqual(notify.mock.calls[0]);
+    expect(first).toContain(`current cache TTL mode: ${mode}`);
+    expect(first).toContain("mode source:");
+    expect(first).toContain("keepalive service unavailable");
+    expect(first).toContain("ttl-measure idle");
+    if (mode !== "auto") expect(first).toContain("persisted mode: auto");
   });
 });
 
@@ -403,6 +426,8 @@ describe("legacy cap note with a live report", () => {
     expect(text.indexOf("note: cacheTtl.keepaliveMaxPings")).toBeGreaterThan(text.indexOf("cap:"));
     expect(text).toContain(legacyCapNote(cfg));
     expect(text).toContain("legacy value: 0");
+    await commands.get("cache-ttl").handler("", ctx);
+    expect(vi.mocked(ctx.ui.notify).mock.calls[1]).toEqual(vi.mocked(ctx.ui.notify).mock.calls[0]);
   });
 });
 

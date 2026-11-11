@@ -27,12 +27,17 @@ import { LIMITS, type FORWARDED_EVENTS, type InflightState, type SnapshotReplyBo
 import type { WireEvent, WireMessage } from "../protocol/messages.js";
 import { truncateText } from "../protocol/keys.js";
 import { ASK_USER_MARKER } from "../../ask-user/channel-handler.js";
+import type { GenerationCore } from "../protocol/message-generation.js";
 import type { MessageSpeed } from "./message-speed.js";
 import type { MessageSpeedBinding } from "./message-speed-binding.js";
 import { createInflightAccumulator } from "./inflight-accumulator.js";
 
 export interface EventTap {
-  handle(event: { type: string } & Record<string, unknown>, binding?: MessageSpeedBinding): void;
+  handle(
+    event: { type: string } & Record<string, unknown>,
+    binding?: MessageSpeedBinding,
+    completedCore?: GenerationCore,
+  ): void;
   recent(): SnapshotReplyBody["recent"];
   inflight(): InflightState | undefined;
   prompts(): SnapshotReplyBody["prompts"];
@@ -191,7 +196,11 @@ export function createEventTap(
     emit({ type: "message_update", assistantMessageEvent: out }, false);
   };
 
-  const handle = (event: { type: string } & Record<string, unknown>, binding?: MessageSpeedBinding): void => {
+  const handle = (
+    event: { type: string } & Record<string, unknown>,
+    binding?: MessageSpeedBinding,
+    completedCore?: GenerationCore,
+  ): void => {
     try {
       const type = event.type;
       if (type === "message_update") {
@@ -219,7 +228,7 @@ export function createEventTap(
         return;
       }
       flushDeltas();
-      const wire = project(type, event);
+      const wire = project(type, event, completedCore);
       if (wire === undefined) return;
       emit(wire, false);
     } catch {
@@ -227,7 +236,11 @@ export function createEventTap(
     }
   };
 
-  const project = (type: string, event: Record<string, unknown>): WireEvent | undefined => {
+  const project = (
+    type: string,
+    event: Record<string, unknown>,
+    completedCore?: GenerationCore,
+  ): WireEvent | undefined => {
     const flag = { truncated: false };
     let e: WireEvent | undefined;
     switch (type as ForwardedType) {
@@ -263,9 +276,9 @@ export function createEventTap(
         break;
       }
       case "message_end": {
-        let core;
+        let core = completedCore;
         try {
-          core = opts.speed?.end(event.message);
+          core ??= opts.speed?.end(event.message);
         } catch {
           opts.speed?.reset();
         }

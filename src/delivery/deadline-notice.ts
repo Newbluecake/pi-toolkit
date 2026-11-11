@@ -89,7 +89,7 @@ export function formatDeadlineNotice(notice: DeadlineNotice, ctx: { now: Millis;
  *  - policy "always": deliver everything (debug only, D-17 — rule 2 ignored).
  *  - policy "background" (default): skip runs a caller is synchronously
  *    blocked on (expectsAck — spawnAndWait from a nested Agent call, a
- *    workflow step, the /goal verifier, consult) — the waiting model could
+ *    workflow step, consult) — the waiting model could
  *    not act on the notice anyway, so it would be pure noise. The top-level
  *    Agent tool always spawns in the background, so its runs are never
  *    skipped.

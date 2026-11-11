@@ -397,6 +397,45 @@ export function xsRequestRows(
   return rows;
 }
 
+// ----------------------------------------------------------------- local request-list dismissal
+
+/** Browser-App lifetime only: hiding a row is presentation, NOT a query/activate outcome.
+ * Keep tombstones independently of row caches/revisions, including while SSE is offline or
+ * the detail view is unmounted. Never persist or evict a tombstone within the same session:
+ * an old frame (or FIFO-evicted row returning later) must not resurrect a dismissed request.
+ * Session replacement / explicit card removal discards its tombstones; a missing session
+ * during reconnect is not proof of session end. Each App owns its own closure (no shared
+ * module state); a browser reload starts empty. Received-card badges keep the original rows.
+ */
+export function createXsRequestDismissals() {
+  const stores = reactive(new Map<string, { sessionId: string; ids: Set<string> }>());
+  return {
+    dismiss(agentKey: string, sessionId: string, messageId: string): void {
+      let store = stores.get(agentKey);
+      if (store === undefined || store.sessionId !== sessionId) {
+        store = { sessionId, ids: new Set() };
+        stores.set(agentKey, store);
+        store = stores.get(agentKey)!;
+      }
+      store.ids.add(messageId);
+    },
+    rows(agentKey: string, sessionId: string, rows: readonly XsRowView[]): readonly XsRowView[] {
+      const store = stores.get(agentKey);
+      return store?.sessionId === sessionId ? rows.filter((row) => !store.ids.has(row.messageId)) : rows;
+    },
+    reconcile(sessions: ReadonlyMap<string, string>, removed: ReadonlySet<string>): void {
+      for (const [key, store] of stores) {
+        const sid = sessions.get(key);
+        if (removed.has(key) || (sid !== undefined && sid !== store.sessionId)) stores.delete(key);
+      }
+    },
+  };
+}
+
+export const XS_REQUEST_DISMISSALS: InjectionKey<ReturnType<typeof createXsRequestDismissals>> = Symbol(
+  "web-hub-xs-request-dismissals",
+);
+
 // ----------------------------------------------------------------- view projections
 
 /** The main-line English token (arch §4.9: four phases / unknown / not delivered). */

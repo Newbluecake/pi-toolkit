@@ -22,8 +22,8 @@
 import { frontmatterSource } from "../frontmatter.js";
 import { parseMemoryMeta } from "../meta.js";
 import { clampSpanMs } from "../../core/deadline.js";
-import { splitEntries, type EntryFileInfo, type EntryIndex } from "./entries.js";
-import type { MemEntry, RelationVerdict } from "./contracts.js";
+import { entryHash, splitEntries, type EntryFileInfo, type EntryIndex } from "./entries.js";
+import type { DismissedPair, MemEntry, RelationVerdict } from "./contracts.js";
 import {
   formatWriteEcho,
   formatV3ConflictLine,
@@ -32,7 +32,7 @@ import {
   type WriteEchoInput,
 } from "./format.js";
 import { touchedUserEntries as pairedUserEntries } from "./guard.js";
-import { readIndex, writeIndexPatch } from "./index-store.js";
+import { gcBlockIndex, isDismissedRelation, mergeIndex, readIndex, writeIndexPatch } from "./index-store.js";
 import { anchorOf } from "./review.js";
 import { prefilter } from "./match.js";
 import { redactForJev } from "./redact.js";
@@ -40,7 +40,14 @@ import { tagOne } from "./tagging.js";
 import { blockToEntry } from "../blocks/adapter.js";
 import { parseBlockFile } from "../blocks/format.js";
 import { readCorpus } from "../blocks/store.js";
-import { AUTO_PER_WRITE_MAX, SUPERSEDE_AUTO_P } from "../govern/supersede.js";
+import {
+  AUTO_PER_WRITE_MAX,
+  SUPERSEDE_AUTO_P,
+  governanceGate,
+  readGovernBlock,
+  writeGovernIndexLocked,
+} from "../govern/supersede.js";
+import { withMemoryDirLock } from "../lock.js";
 import type { ClassifierRegistryLike, EntryHash, EntryTags, JevClient, JevWritePort, Taxonomy } from "./contracts.js";
 import type { MemoryWriteGate } from "../contracts.js";
 
@@ -272,9 +279,10 @@ export function createJevWritePort(deps: JevWritePortDeps): JevWritePort {
     newRev: string,
     compare: readonly { cand: { id: string }; entry: MemEntry }[],
     answers: Record<string, unknown> | undefined,
-    revs: ReadonlyMap<string, string>,
+    snapshots: ReadonlyMap<string, { readonly rev: string; readonly hash: string }>,
+    dismissed: readonly DismissedPair[],
   ): readonly RelationVerdict[] {
-    const out: RelationVerdict[] = [];
+    const out: (RelationVerdict & { readonly oldHash: string })[] = [];
     for (const c of compare) {
       const answer = asChoiceAnswer(answers?.[c.cand.id]);
       if (answer === undefined) continue;
@@ -287,15 +295,28 @@ export function createJevWritePort(deps: JevWritePortDeps): JevWritePort {
             ? "supersedes"
             : undefined;
       if (kind === undefined) continue;
+      const answerKind = answer.choice === "duplicate" ? "duplicate" : kind;
+      if (
+        isDismissedRelation(
+          dismissed,
+          { hash: newEntry.hash, anchor: anchorOf(newEntry) },
+          { hash: c.entry.hash, anchor: anchorOf(c.entry) },
+          answerKind,
+        )
+      )
+        continue;
       const p = answer.probabilities[answer.choice] ?? answer.confidence;
       const auto =
         kind === "supersedes" && p >= SUPERSEDE_AUTO_P && out.filter((v) => v.auto).length < AUTO_PER_WRITE_MAX;
+      const snapshot = snapshots.get(oldId);
+      if (snapshot === undefined) continue;
       out.push({
         kind,
         newId: newEntry.block?.id ?? newEntry.file.replace(/\.md$/, ""),
         newRev,
         oldId,
-        oldRev: revs.get(oldId) ?? "",
+        oldRev: snapshot.rev,
+        oldHash: snapshot.hash,
         p,
         auto,
       });
@@ -344,21 +365,29 @@ export function createJevWritePort(deps: JevWritePortDeps): JevWritePort {
     }
 
     const taxonomy = deps.taxonomyFor(dir);
-    // Restoring an edge is a permanent decision to keep this pair. Filter
-    // before question construction, not merely at execution: it must never
-    // spend another automatic relation judgment on that restored pair.
+    // Legacy kindless dismissals can suppress a whole pair before asking.
+    // Kind-specific decisions are applied after the classifier answers.
     const dismissed = readIndex(dir).index.review?.dismissed ?? [];
-    const corpus = deps.entryIndex.get(dir).filter((e) => {
-      if (e.inline.isPrivate === true || e.secret) return false;
-      const hashKey = [entry.hash, e.hash].sort().join("+");
-      const anchorKey = [anchorOf(entry), anchorOf(e)].sort().join("+");
-      return !dismissed.some(
-        (d) =>
-          (!d.until || d.until >= today) &&
-          (!d.kind || d.kind === "conflict" || d.kind === "supersedes") &&
-          (d.hashKey === hashKey || d.anchorKey === anchorKey),
-      );
-    });
+    // Each entry and its revision come from the same raw block read, before
+    // the classifier can yield. Never pair a cached entry with a later rev.
+    const blocks = readCorpus(`${dir}/blocks`).blocks;
+    const snapshots = new Map(blocks.map((b) => [b.id, { rev: b.rev, hash: blockToEntry(b, today).hash }] as const));
+    const corpus = blocks
+      .map((b) => blockToEntry(b, today))
+      .filter((e) => {
+        if (e.inline.isPrivate === true || e.secret) return false;
+        return !isDismissedRelation(
+          dismissed.filter(
+            (d) =>
+              !d.kind ||
+              d.kind === "conflict" ||
+              d.kind === "supersedes" ||
+              (d.kind === "duplicate" && d.suggestionKey !== undefined),
+          ),
+          { hash: entry.hash, anchor: anchorOf(entry) },
+          { hash: e.hash, anchor: anchorOf(e) },
+        );
+      });
     const { pool, userEcho } = blockPool(entry, corpus);
     // userEcho candidates ride the SAME askAll (they need c-ids + answers for
     // the `not superseded:` suggestion) but stay OUT of the verdict pool —
@@ -404,15 +433,7 @@ export function createJevWritePort(deps: JevWritePortDeps): JevWritePort {
       }
       if (result.tags === undefined) return EMPTY; // private/secret guard — unreachable here
       const tags = result.tags;
-      // revs for the verdicts' oldRev (one no-lock corpus read; P5a rechecks
-      // in-lock anyway).
-      let revs: ReadonlyMap<string, string>;
-      try {
-        revs = new Map(readCorpus(`${dir}/blocks`).blocks.map((b) => [b.id, b.rev] as const));
-      } catch {
-        revs = new Map();
-      }
-      const verdicts = blockVerdicts(entry, block.rev, verdictCompare, outcome.answers, revs);
+      const verdicts = blockVerdicts(entry, block.rev, verdictCompare, outcome.answers, snapshots, dismissed);
       const echo: string[] = [];
       const input2: WriteEchoInput = {
         kind: "tagged",
@@ -451,19 +472,80 @@ export function createJevWritePort(deps: JevWritePortDeps): JevWritePort {
         if (answer === undefined) continue;
         const p = answer.probabilities[answer.choice] ?? answer.confidence;
         const related = answer.choice === "conflict" || answer.choice === "supersedes" || answer.choice === "duplicate";
-        if (related && p >= SUGGEST_P) {
+        if (
+          related &&
+          !isDismissedRelation(
+            dismissed,
+            { hash: entry.hash, anchor: anchorOf(entry) },
+            { hash: e.hash, anchor: anchorOf(e) },
+            answer.choice as "duplicate" | "conflict" | "supersedes",
+          ) &&
+          p >= SUGGEST_P
+        ) {
           echo.push(formatV3NotSupersededLine(e.block?.id ?? e.file, p));
         }
       }
       for (const v of verdicts) {
         if (!v.auto && v.p >= SUGGEST_P) echo.push(formatV3ConflictLine(v.oldId, v.p));
       }
-      // Sidecar merge: same lock turn + fail-soft rules as the v2 path.
-      await writeIndexPatch(
-        dir,
-        { upsert: { [entry.hash]: tags }, lastTaggedAt: new Date(deps.now()).toISOString() },
-        deps.gate,
-      ).catch(() => "busy" as const);
+      // Validate every candidate the classifier saw under the SAME lock as
+      // the sidecar merge. A lock-free precheck followed by writeIndexPatch
+      // would reopen the race, and updateIndexLocked creates .jev too early.
+      // The later supersede phase takes its own lock and rechecks again.
+      let stale: string | undefined;
+      try {
+        await withMemoryDirLock(
+          dir,
+          () => {
+            governanceGate(dir, deps.gate, signal);
+            for (const candidate of compare) {
+              const id = candidate.entry.block?.id;
+              const frozen = id === undefined ? undefined : snapshots.get(id);
+              try {
+                if (id === undefined || frozen === undefined) throw new Error("missing snapshot");
+                const current = readGovernBlock(dir, id);
+                if (current.rev !== frozen.rev || entryHash(current.body) !== frozen.hash) throw new Error("changed");
+              } catch {
+                stale = id ?? candidate.entry.file;
+                return;
+              }
+            }
+            const live = new Set(readCorpus(`${dir}/blocks`).blocks.map((b) => entryHash(b.body)));
+            const merged = gcBlockIndex(
+              mergeIndex(readIndex(dir).index, {
+                upsert: { [entry.hash]: tags },
+                lastTaggedAt: new Date(deps.now()).toISOString(),
+              }),
+              live,
+              new Date().toISOString().slice(0, 10),
+            );
+            // Match index-store's deterministic serialization.
+            const sort = <T>(items: Readonly<Record<string, T>>): Record<string, T> =>
+              Object.fromEntries(Object.entries(items).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
+            writeGovernIndexLocked(
+              dir,
+              {
+                ...merged,
+                entries: sort(merged.entries),
+                ...(merged.aInjectedAt === undefined ? {} : { aInjectedAt: sort(merged.aInjectedAt) }),
+                ...(merged.pInjectedAt === undefined ? {} : { pInjectedAt: sort(merged.pInjectedAt) }),
+              },
+              deps.gate,
+              signal,
+            );
+          },
+          { timeoutMs: 0, log: () => {} },
+        );
+      } catch {
+        // Sidecar failures remain fail-soft, as with writeIndexPatch.
+      }
+      if (stale !== undefined) {
+        return {
+          echo: [`skipped: ${stale}: old snapshot changed`],
+          usage: { costUsd: outcome.costUsd, calls: 1 },
+          relations: [],
+        };
+      }
       return { echo, usage: { costUsd: outcome.costUsd, calls: 1 }, relations: verdicts };
     } finally {
       clearTimeout(timer);

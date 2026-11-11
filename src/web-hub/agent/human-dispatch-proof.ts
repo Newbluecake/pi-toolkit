@@ -4,6 +4,7 @@
  */
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { ExtensionAPI, ExtensionContext, BeforeAgentStartEvent } from "@earendil-works/pi-coding-agent";
+import type { MemoryActivityOwner } from "../../memory/govern/activity.js";
 import type { HumanTurnTracker } from "../../memory/scopes/op-cap.js";
 import { createOpApprovalPort, type OpApprovalDeps } from "../../memory/scopes/authorize.js";
 import type {
@@ -52,6 +53,7 @@ export interface HumanDispatchBridge extends HumanDispatchProofPort {
   onBeforeAgentStart(event: Pick<BeforeAgentStartEvent, "messageType">): void;
   onAgentStart(): void;
   onSettled(): void;
+  readonly activity?: MemoryActivityOwner;
 }
 
 export function createHumanDispatchProof(deps: HumanDispatchDeps): HumanDispatchBridge {
@@ -62,6 +64,38 @@ export function createHumanDispatchProof(deps: HumanDispatchDeps): HumanDispatch
     dispatchGeneration = 0;
   let running = false,
     disposed = false;
+  let lastActivityAt = Date.now();
+  const inFlightToolIds = new Set<string>();
+  // Bounded duplicate recognition; evicted late results deliberately fail closed.
+  const completedToolIds = new Set<string>();
+  let activityUnknown = false;
+  const listeners = new Set<() => void>();
+  let activityDepth = 0;
+  const notifyActivity = (): void => {
+    if (activityDepth > 0) return;
+    for (const listener of [...listeners]) {
+      try {
+        listener();
+      } catch {
+        // Observation must never change dispatch/authority behavior.
+      }
+    }
+  };
+  const touchActivity = (now: number): void => {
+    if (Number.isFinite(now)) lastActivityAt = Math.max(lastActivityAt, now);
+    else activityUnknown = true;
+  };
+  // Nested revoke/claim paths publish only once, after the lifecycle state is final.
+  const updateActivity = (update: () => void): void => {
+    touchActivity(Date.now());
+    activityDepth++;
+    try {
+      update();
+    } finally {
+      activityDepth--;
+      notifyActivity();
+    }
+  };
   const allowed = (): boolean => {
     try {
       return !disposed && deps.enabled() === true;
@@ -85,10 +119,73 @@ export function createHumanDispatchProof(deps: HumanDispatchDeps): HumanDispatch
     }
   };
   const revoke: HumanDispatchProofPort["revoke"] = (reason) => {
+    touchActivity(Date.now());
     generation++;
     active = undefined;
     deps.tracker.invalidate(reason);
     if (reason === "session" || reason === "tree") running = false;
+    // session_start may revoke a freshly-created owner; only retirement is unknown.
+    if (reason === "shutdown") activityUnknown = true;
+    notifyActivity();
+  };
+  const activity: MemoryActivityOwner = {
+    snapshot(_now) {
+      let liveIdle: boolean | undefined;
+      let hasPendingMessages: boolean | undefined;
+      if (allowed()) {
+        try {
+          const ctx = deps.context(); // Never cache instantaneous idle/pending evidence.
+          try {
+            const result = ctx?.isIdle();
+            if (!activityUnknown && typeof result === "boolean") liveIdle = result;
+          } catch {
+            /* stale/missing context is unknown */
+          }
+          try {
+            const result = ctx?.hasPendingMessages();
+            if (typeof result === "boolean") hasPendingMessages = result;
+          } catch {
+            /* stale/missing context is unknown */
+          }
+        } catch {
+          /* context lookup itself may be stale */
+        }
+      }
+      return { generation, lastActivityAt, running, toolsInFlight: inFlightToolIds.size, liveIdle, hasPendingMessages };
+    },
+    subscribe(listener) {
+      if (disposed) return () => {};
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+    noteToolCall(toolCallId, now) {
+      if (disposed) return;
+      touchActivity(now);
+      if (toolCallId) {
+        completedToolIds.delete(toolCallId);
+        inFlightToolIds.add(toolCallId);
+      } else activityUnknown = true;
+      generation++; // Revoke same-millisecond idle leases, not human authority/caps.
+      notifyActivity();
+    },
+    noteToolResult(toolCallId, now) {
+      if (disposed) return;
+      touchActivity(now);
+      if (inFlightToolIds.delete(toolCallId)) {
+        completedToolIds.add(toolCallId);
+        if (completedToolIds.size > 256) completedToolIds.delete(completedToolIds.values().next().value!);
+      } else if (!completedToolIds.has(toolCallId)) activityUnknown = true;
+      generation++;
+      notifyActivity();
+    },
+    noteMemoryWrite(now) {
+      if (disposed) return;
+      touchActivity(now);
+      generation++;
+      notifyActivity();
+    },
   };
   const port: HumanDispatchBridge = {
     runDispatch(ticket, send) {
@@ -195,37 +292,51 @@ export function createHumanDispatchProof(deps: HumanDispatchDeps): HumanDispatch
       return turn;
     },
     onInput(ingress) {
-      const owner = ownerNow();
-      if (owner) port.claim(owner, ingress);
-      else revoke("input");
+      updateActivity(() => {
+        const owner = ownerNow();
+        if (owner) port.claim(owner, ingress);
+        else revoke("input");
+      });
     },
     onBeforeAgentStart(event) {
-      const candidate = active;
-      const owner = ownerNow();
-      if (event.messageType === "user" && candidate && owner) {
-        if (!port.confirmStart(candidate.token, owner)) revoke("handled");
-      } else revoke("handled");
-      running = true;
+      updateActivity(() => {
+        const candidate = active;
+        const owner = ownerNow();
+        if (event.messageType === "user" && candidate && owner) {
+          if (!port.confirmStart(candidate.token, owner)) revoke("handled");
+        } else revoke("handled");
+        running = true;
+      });
     },
     onAgentStart() {
-      // before_agent_start is the only mint point. An unobserved/foreign run revokes.
-      if (!running) revoke("handled");
-      running = true;
+      updateActivity(() => {
+        // before_agent_start is the only mint point. An unobserved/foreign run revokes.
+        if (!running) revoke("handled");
+        running = true;
+      });
     },
     settled() {
-      revoke("abort");
-      running = false;
+      updateActivity(() => {
+        revoke("abort");
+        running = false;
+      });
     },
     onSettled() {
-      revoke("abort");
-      running = false;
+      updateActivity(() => {
+        revoke("abort");
+        running = false;
+      });
     },
     revoke,
     dispose() {
-      revoke("shutdown");
-      disposed = true;
-      scope.disable();
+      updateActivity(() => {
+        revoke("shutdown");
+        disposed = true;
+        scope.disable();
+      });
+      listeners.clear();
     },
+    activity,
   };
   return port;
 }

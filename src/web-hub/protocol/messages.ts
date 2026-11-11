@@ -275,7 +275,7 @@ export interface TodoTaskWire {
   owner?: string; // passed through (≤200 chars)
   activeForm?: string;
   blockedBy: number[];
-  /** Truncated to 240 UTF-8 bytes by the projection; empty string omitted. */
+  /** Truncated to 512 UTF-8 bytes by the projection; empty string omitted. */
   description?: string;
   /** Present only when `description` was truncated. */
   descTruncated?: true;

@@ -60,7 +60,6 @@ describe("marker survival (literals still exist outside src/reflex)", () => {
       ["[web-hub attachments] ", "src/web-hub/protocol/upload.ts"],
       ["[飞书 · ", "src/web-hub/protocol/feishu.ts"],
       ["[用户 @mention] ", "src/mention/mention.ts"],
-      ["[/goal 续跑 · ", "src/goal/texts.ts"],
       ["[thread 事件 · ", "src/stack.ts"],
       ["[fabric ", "src/fabric/format-fence.ts"],
     ];
@@ -71,7 +70,9 @@ describe("marker survival (literals still exist outside src/reflex)", () => {
         `${prefix} missing from ${anchorFile}`,
       ).toBe(true);
     }
-    expect(INJECTED_PREFIXES.length).toBe(anchors.length);
+    // Retired producer: old persisted continuation messages remain non-human input.
+    expect(INJECTED_PREFIXES).toContain("[/goal 续跑 · ");
+    expect(INJECTED_PREFIXES.length).toBe(anchors.length + 1);
   });
 
   it("the HUD tui gate (sourceMode premise) is still in place", () => {

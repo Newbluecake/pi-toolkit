@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createTask, deleteTask, setTaskEnabled, updateTask } from "../../../src/schedule/agent/ops.js";
-import { isExecutable } from "../../../src/schedule/core/spec.js";
+import { isExecutable, defHash } from "../../../src/schedule/core/spec.js";
 import { validateStateFile } from "../../../src/schedule/core/reader.js";
 import { a3Env, basicRaw, CRON, stripApproval, type A3Env } from "./a3-helpers.js";
 import { holder } from "../core/fixtures.js";
@@ -282,5 +282,37 @@ describe("pause / delete revoke queued message runs (I1, A2 residual 3)", () => 
       await setTaskEnabled(env.agent.ensureStore(), "s_aaaaaaaa", false, { revoke: (id) => revoked.push(id) }),
     ).toMatchObject({ ok: false });
     expect(revoked).toEqual([]);
+  });
+});
+
+describe("interval external input guards", () => {
+  it.each([
+    { every: "90m" },
+    { everyMs: 5_400_000 },
+    { intervalMs: 5_400_000 },
+    { anchorAt: 1 },
+    { when: { kind: "every", everyMs: 5_400_000, anchorAt: 1 } },
+  ])("rejects internal interval creation before directory creation: %j", async (fields) => {
+    env = a3Env();
+    expect(await createTask(env.ports, basicRaw(fields), AI)).toMatchObject({ ok: false, code: "E_INVALID" });
+    expect(env.agent.store()).toBeUndefined();
+    expect(env.changed.n).toBe(0);
+  });
+  it("invalid updates cannot sweep/advance rev while validating, including a stored legacy cron", async () => {
+    env = a3Env();
+    const made = await createTask(env.ports, basicRaw(), AI);
+    if (!made.ok) throw Error(made.detail);
+    const seeded = await env.agent.ensureStore().transact((d) => {
+      d.tasks[0]!.when = { kind: "cron", expr: "*/90 * * * *", tz: "UTC" };
+      d.occ[made.value.id]!.defHash = defHash(d.tasks[0]!);
+      return { value: undefined, write: true };
+    });
+    expect(seeded.ok).toBe(true);
+    const before = JSON.stringify(state());
+    env.fake.advance(10 * 3_600_000);
+    expect(
+      await updateTask(env.ports, made.value.id, { when: { kind: "every", everyMs: 5_400_000, anchorAt: 1 } }),
+    ).toMatchObject({ ok: false, code: "E_INVALID" });
+    expect(JSON.stringify(state())).toBe(before);
   });
 });

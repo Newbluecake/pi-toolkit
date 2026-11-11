@@ -71,7 +71,7 @@ describe("withMemoryDirLock", () => {
     lockCreate(dir, { pid: 999_999_999, host: "some-other-host", token: "stale", at: Date.now() - 60_000 });
     utimesSync(join(dir, ".lock"), new Date(Date.now() - 60_000), new Date(Date.now() - 60_000));
     await expect(withMemoryDirLock(dir, () => "never", { timeoutMs: 80 })).rejects.toThrow(
-      new RegExp(`${join(dir, ".lock")}.*\\/mem tidy --break-lock`),
+      new RegExp(`${join(dir, ".lock")}.*inspect the owner manually`),
     );
   });
 

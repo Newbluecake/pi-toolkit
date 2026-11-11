@@ -29,12 +29,13 @@ import { Type, type TSchema } from "@sinclair/typebox";
 /** Hub-side cap: advertised on BOTH hub cap surfaces (`HubInfo.caps` / `hello_ack.caps`) iff
  *  `HubConfig.schedule` exists (key absence IS off). Folded by H1 — inert in S0. */
 export const SCHED_HUB_CAP = "sched.v1";
-export const SCHED_HUB_CAPS = [SCHED_HUB_CAP] as const;
+export const SCHED_INTERVAL_CAP = "sched.interval.v1";
+export const SCHED_HUB_CAPS = [SCHED_HUB_CAP, SCHED_INTERVAL_CAP] as const;
 /** Agent-side cap: advertised in `hello.caps` iff `schedule.enabled` (A0). The agent sends
  *  `sched_*` frames ONLY while the live link's `hello_ack.caps ∋ sched.v1`; otherwise it uses the
  *  NullCoordinator (does nothing, persists nothing). */
 export const SCHED_AGENT_CAP = "sched.v1";
-export const SCHED_AGENT_CAPS = [SCHED_AGENT_CAP] as const;
+export const SCHED_AGENT_CAPS = [SCHED_AGENT_CAP, SCHED_INTERVAL_CAP] as const;
 
 // ----------------------------------------------------------------- ids / hashes (§4.1/§4.2/§4.5/§7.1/§7.4)
 
@@ -64,6 +65,43 @@ export const SCHEDULE_FORMS = ["background", "message"] as const;
 /** `tz` is part of the definition (IANA name, validated with Intl by S1). `once.at` is a LOCAL
  *  wall-clock `"YYYY-MM-DDTHH:mm"` interpreted in `tz`. */
 export type ScheduleWhen = { kind: "cron"; expr: string; tz: string } | { kind: "once"; at: string; tz: string };
+
+/** Storage-only extension. The legacy wire task enum deliberately stays unchanged. */
+export type EveryWhen = { kind: "every"; everyMs: number; anchorAt: number };
+export type StoredWhen = ScheduleWhen | EveryWhen;
+export type StoredTask = Omit<ScheduleTaskDef, "when"> & { when: StoredWhen };
+export interface CatchUp {
+  cause: "resume" | "reopen" | "late";
+  fromExclusive: number;
+  through: number;
+  dueCount: number;
+  recoveredAt: number;
+}
+export function displayTz(when: StoredWhen): string {
+  return when.kind === "every" ? "UTC" : when.tz;
+}
+
+export const EVERY_MIN_MS = 30_000;
+export const EVERY_MAX_MS = 365 * 86_400_000;
+export const EVERY_GRACE_MS = 86_400_000;
+export const MAX_EPOCH_MS = 8_640_000_000_000_000;
+export function isEpoch(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= MAX_EPOCH_MS;
+}
+export function isEveryWhen(value: unknown): value is EveryWhen {
+  if (value === null || typeof value !== "object") return false;
+  const w = value as Record<string, unknown>;
+  return (
+    w.kind === "every" &&
+    isEpoch(w.anchorAt) &&
+    typeof w.everyMs === "number" &&
+    Number.isSafeInteger(w.everyMs) &&
+    w.everyMs % 1000 === 0 &&
+    w.everyMs >= EVERY_MIN_MS &&
+    w.everyMs <= EVERY_MAX_MS &&
+    Object.keys(w).every((k) => ["kind", "everyMs", "anchorAt"].includes(k))
+  );
+}
 
 /** Subagent-surface thinking levels — literal mirror of `core/types.ts`'s THINKING_LEVELS
  *  (protocol cannot import core; parity pinned by tests/schedule/core/spec.test.ts). */
@@ -451,12 +489,20 @@ export interface ScheduleTaskProjectionWire {
   nextAt?: number;
   /** `"never"` = no occurrence within the 400-day horizon / budget. */
   degraded?: "never";
+  /** Stored oversized steps retain their legacy meaning; new submissions must be corrected. */
+  legacyStep?: string;
   totals: { fired: number; missed: number; skipped: number; manual: number };
   /** @deprecated No longer produced; retained for old peers and UIs. */
   offer?: { offerId: string; expiresAt: number };
 }
 
+export type EveryTaskProjection = Omit<ScheduleTaskProjectionWire, "task"> & {
+  task: Omit<ScheduleTaskDef, "when"> & { when: EveryWhen };
+};
+export type StoredTaskProjection = ScheduleTaskProjectionWire | EveryTaskProjection;
+
 export interface ScheduleRunProjectionWire {
+  catchUp?: CatchUp;
   runKey: string;
   taskId: string;
   kind: ScheduleRunKind;
@@ -478,6 +524,7 @@ export interface ScheduleSessionProjectionWire {
   /** Store unreadable/invalid for this session — UI shows 「需在终端 /schedule repair」; tasks/runs empty. */
   degraded?: string;
   tasks: ScheduleTaskProjectionWire[];
+  intervalTasks?: EveryTaskProjection[];
   /** Most recent first; non-terminal runs always included. */
   runs: ScheduleRunProjectionWire[];
   /** `reportStats.droppedIndexCap` (§4.2.1). */

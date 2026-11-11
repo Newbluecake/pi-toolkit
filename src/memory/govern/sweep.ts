@@ -1,3 +1,4 @@
+import { isExternalWriteOrigin } from "./write-origin.js";
 /** Pi-free bounded governance runner. All state belongs to the factory. */
 import { join } from "node:path";
 import { createHash } from "node:crypto";
@@ -6,13 +7,14 @@ import { clampSpanMs } from "../../core/deadline.js";
 import type { MemoryWriteGate } from "../contracts.js";
 import type { BlockCorpus } from "../blocks/store.js";
 import { readMarker } from "../blocks/marker.js";
-import { parseBlockFile, serializeBlock } from "../blocks/format.js";
+import { META_LIMITS, parseBlockFile, serializeBlock } from "../blocks/format.js";
 import { residentBlocksOf, residentMeteredBytes } from "../blocks/render.js";
 import { parseArchiveName, parseBlockName } from "../blocks/naming.js";
-import { readIndex } from "../jev/index-store.js";
+import { mergeReview, readIndex } from "../jev/index-store.js";
 import { legacyDrift } from "../blocks/legacy.js";
 import { withMemoryDirLock } from "../lock.js";
 import { MemoryError } from "../paths.js";
+import { recordSoftMeta, softLegacyMetadata } from "../soft-meta.js";
 import {
   ensurePrivateDir,
   inspectDirNoFollow,
@@ -77,7 +79,10 @@ async function readSweepCorpus(
   for (const file of files.files.sort((a, b) => a.name.localeCompare(b.name))) {
     beforeRead();
     const raw = readRegular(dir, file.name).text;
-    const b = parseBlockFile(file.name, raw);
+    const b = parseBlockFile(file.name, raw, {
+      softLimits: true,
+      onSoftLimit: (field, value) => recordSoftMeta(memDir, field, value),
+    });
     if ("stray" in b || !parseBlockName(file.name)) strays.push(file.name);
     else {
       blocks.push(b);
@@ -89,10 +94,9 @@ async function readSweepCorpus(
   const legacy: BlockCorpus["legacy"]["files"][number][] = [];
   for (const file of listRegular(memDir, { names: "v2" }).files.sort((a, b) => a.name.localeCompare(b.name))) {
     beforeRead();
-    legacy.push({
-      name: file.name,
-      sha256: createHash("sha256").update(readRegular(memDir, file.name).text).digest("hex"),
-    });
+    const raw = readRegular(memDir, file.name).text;
+    softLegacyMetadata(raw, memDir);
+    legacy.push({ name: file.name, sha256: createHash("sha256").update(raw).digest("hex") });
   }
   beforeRead();
   const after = inspectDirNoFollow(dir);
@@ -112,6 +116,8 @@ async function readSweepCorpus(
     fingerprint: createHash("sha1").update(JSON.stringify(stamps)).digest("hex"),
   };
 }
+export type SweepRender = { residentBytes: number; residentBudget: number; indexOverflow: boolean };
+
 export interface SweepOptions {
   enabled: boolean;
   gate?: MemoryWriteGate;
@@ -122,7 +128,7 @@ export interface SweepOptions {
   diag?: (message: string) => void;
   yield?: () => Promise<void>;
   residentBudget?: number;
-  render?: { residentBytes: number; residentBudget: number; indexOverflow: boolean };
+  render?: SweepRender;
 }
 export interface SweepResult {
   operations: number;
@@ -131,11 +137,26 @@ export interface SweepResult {
   suggestions: number;
 }
 export function createSweepRunner(opts: SweepOptions) {
-  let inFlight: Promise<SweepResult> | undefined;
-  let pending: { dir: string; reason: SweepReason; signal?: AbortSignal } | undefined;
+  type Pending = {
+    dir: string;
+    reason: SweepReason;
+    signal?: AbortSignal;
+    admittedBudget?: SweepRender;
+    promise: Promise<SweepResult>;
+    resolve: (result: SweepResult) => void;
+  };
+  let inFlight = false;
+  let trailing = false;
+  let pending: Pending | undefined;
+  const notExecuted = (): SweepResult => ({ operations: 0, archived: [], stopped: "not-executed", suggestions: 0 });
   const previous = new Map<string, string>();
   const clock = opts.now ?? Date.now;
-  async function pass(memDir: string, reason: SweepReason, signal?: AbortSignal): Promise<SweepResult> {
+  async function pass(
+    memDir: string,
+    reason: SweepReason,
+    signal?: AbortSignal,
+    admittedBudget?: SweepRender,
+  ): Promise<SweepResult> {
     const result: SweepResult = { operations: 0, archived: [], stopped: "done", suggestions: 0 };
     if (!opts.enabled) {
       result.stopped = "disabled";
@@ -162,12 +183,20 @@ export function createSweepRunner(opts: SweepOptions) {
       const corpus = await readSweepCorpus(memDir, beforeRead, opts.yield ?? (() => scheduler.yield()));
       const today = governanceToday(new Date(clock()));
       const key = JSON.stringify([corpus.fingerprint, today, corpus.legacy]);
-      if (reason !== "startup" && reason !== "reload" && previous.get(memDir) === key) {
+      // Budget deduplication belongs to signals.ts. Only an explicitly admitted
+      // observation bypasses corpus debounce; a bare budget reason does not.
+      if (
+        reason !== "startup" &&
+        reason !== "reload" &&
+        !(reason === "budget" && admittedBudget) &&
+        previous.get(memDir) === key
+      ) {
         result.stopped = "unchanged";
         return result;
       }
       const index = readIndex(memDir).index;
       const render =
+        (reason === "budget" ? admittedBudget : undefined) ??
         opts.render ??
         (opts.residentBudget === undefined
           ? undefined
@@ -215,7 +244,7 @@ export function createSweepRunner(opts: SweepOptions) {
         if (result.operations + 2 > 50) break;
         await locked(() => {
           const b = parseBlockFile(name, readRegular(archive, name).text);
-          if (!("stray" in b) && b.meta.status !== "archived") {
+          if (!("stray" in b) && b.meta.status !== "archived" && b.errors.every((error) => error === "E_TOO_LARGE")) {
             let tmp = "";
             op(() => {
               tmp = writeTempRegular(
@@ -318,13 +347,9 @@ export function createSweepRunner(opts: SweepOptions) {
             {
               ...latest,
               review: {
-                ...review,
-                lastRunAt: new Date(clock()).toISOString(),
-                corpusFp: corpus.fingerprint,
-                suggestions: [
-                  ...review.suggestions,
-                  ...plan.suggestions.filter((s) => !review.suggestions.some((x) => x.id === s.id)),
-                ],
+                ...mergeReview(review, { ...review, suggestions: plan.suggestions }),
+                sweepLastRunAt: new Date(clock()).toISOString(),
+                sweepCorpusFp: corpus.fingerprint,
               },
             },
             opts.gate,
@@ -352,8 +377,8 @@ export function createSweepRunner(opts: SweepOptions) {
             `memory: resident budget exceeded (${render.residentBytes}/${render.residentBudget}B); no rules truncated — /mem review`,
           );
         if (count) opts.notify?.(`memory: ${count} suggestions — /mem review`);
-        if (corpus.marker?.source !== "fresh")
-          opts.notify?.("memory: migrated block memory — reload to refresh memory");
+        // Migration reload delivery belongs exclusively to govern/markers.ts;
+        // the host calls it independently of this governance-enabled runner.
       }
     } catch (e) {
       result.stopped = (e as Error).message;
@@ -372,23 +397,85 @@ export function createSweepRunner(opts: SweepOptions) {
     await opts.yield?.();
     return result;
   }
-  function runSweep(memDir: string, reason: SweepReason, signal?: AbortSignal, origin?: string): Promise<SweepResult> {
-    if (origin === "sweep") return Promise.resolve({ operations: 0, archived: [], stopped: "self", suggestions: 0 });
+  function runSweep(
+    memDir: string,
+    reason: SweepReason,
+    signal?: AbortSignal,
+    origin?: string,
+    admittedBudget?: SweepRender,
+  ): Promise<SweepResult> {
+    if (!isExternalWriteOrigin(origin))
+      return Promise.resolve({ operations: 0, archived: [], stopped: "self", suggestions: 0 });
     if (inFlight) {
-      pending = { dir: memDir, reason, ...(signal ? { signal } : {}) };
-      return inFlight;
+      // The trailing pass cannot accept a third pass: never return another
+      // batch's successful result as evidence for this request.
+      if (trailing) return Promise.resolve(notExecuted());
+      if (pending && pending.dir === memDir) {
+        if (reason === "budget" && admittedBudget && pending.reason === "budget" && pending.admittedBudget) {
+          pending.resolve(notExecuted());
+          pending = undefined;
+        } else {
+          // A budget pass covers coalesced events; never downgrade it.
+          if (reason === "budget" && admittedBudget) {
+            pending.reason = reason;
+            pending.admittedBudget = admittedBudget;
+            if (signal) pending.signal = signal;
+          } else if (pending.reason !== "budget") {
+            const priority: Record<SweepReason, number> = {
+              startup: 0,
+              reload: 0,
+              write: 0,
+              "task-done": 1,
+              push: 2,
+              release: 3,
+              budget: 4,
+            };
+            if (priority[reason] > priority[pending.reason]) pending.reason = reason;
+          }
+          return pending.promise;
+        }
+      }
+      if (pending) pending.resolve(notExecuted());
+      let resolve!: (result: SweepResult) => void;
+      const promise = new Promise<SweepResult>((done) => {
+        resolve = done;
+      });
+      pending = {
+        dir: memDir,
+        reason,
+        ...(signal ? { signal } : {}),
+        ...(admittedBudget ? { admittedBudget } : {}),
+        promise,
+        resolve,
+      };
+      return promise;
     }
-    inFlight = (async () => {
-      let result = await pass(memDir, reason, signal);
-      const next = pending;
-      pending = undefined;
-      if (next) result = await pass(next.dir, next.reason, next.signal);
-      return result;
-    })().finally(() => {
-      inFlight = undefined;
-      pending = undefined;
-    });
-    return inFlight;
+    inFlight = true;
+    const first = pass(memDir, reason, signal, admittedBudget);
+    void (async () => {
+      try {
+        await first;
+        const next = pending;
+        pending = undefined;
+        if (next) {
+          trailing = true;
+          try {
+            next.resolve(await pass(next.dir, next.reason, next.signal, next.admittedBudget));
+          } catch {
+            next.resolve(notExecuted());
+          }
+        }
+      } catch {
+        pending?.resolve(notExecuted());
+        pending = undefined;
+      } finally {
+        pending?.resolve(notExecuted());
+        pending = undefined;
+        trailing = false;
+        inFlight = false;
+      }
+    })();
+    return first;
   }
   return { runSweep };
 }
@@ -416,9 +503,27 @@ export async function restoreBlock(memDir: string, target: string, opts: Superse
       const [name, v] = choices[0]!;
       if (listDirNames(join(memDir, "blocks")).includes(`${v.id}.md`))
         throw new MemoryError(`restore conflict: ${v.id} already exists`);
-      const archive = join(memDir, "blocks", "archive"),
-        b = parseBlockFile(name, readRegular(archive, name).text);
-      if ("stray" in b) throw new MemoryError("invalid archived block");
+      const archive = join(memDir, "blocks", "archive");
+      const raw = readRegular(archive, name).text;
+      const overages: { field: keyof typeof META_LIMITS; bytes: number }[] = [];
+      const soft = parseBlockFile(name, raw, {
+        softLimits: true,
+        onSoftLimit: (field, value) => overages.push({ field, bytes: Buffer.byteLength(value) }),
+      });
+      if (
+        "stray" in soft ||
+        soft.errors.some((error) => !["E_TOO_LARGE", "E_META_SOFT", "E_SECTION_TOO_LARGE"].includes(error))
+      )
+        throw new MemoryError("invalid archived block: structural corruption; inspect the archive file manually");
+      if (overages.length) {
+        const { field, bytes } = overages[0]!;
+        throw new MemoryError(
+          `E_META: archived ${field} exceeds limit (${bytes}B > ${META_LIMITS[field]}B); inspect and correct the archived file manually before restore`,
+        );
+      }
+      const b = parseBlockFile(name, raw);
+      if ("stray" in b || b.errors.some((error) => error !== "E_TOO_LARGE"))
+        throw new MemoryError("invalid archived block: structural corruption; inspect the archive file manually");
       governanceGate(memDir, opts.gate, opts.signal);
       const tmp = writeTempRegular(
         archive,

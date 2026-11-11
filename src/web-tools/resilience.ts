@@ -91,6 +91,32 @@ export async function withRequestTimeout<T>(
   }
 }
 
+/**
+ * Public diagnostics are allowlisted, not redacted exception text. Only a valid
+ * structured HTTP status is authoritative; body/message wording must not infer
+ * auth/quota or a reset time. This intentionally differs from retry policy:
+ * responseBody and network messages remain available to that internal policy.
+ */
+export function webToolErrorSummary(error: unknown): string {
+  const rawStatus = error instanceof HttpError ? error.status : undefined;
+  const status =
+    rawStatus !== undefined && Number.isInteger(rawStatus) && rawStatus >= 100 && rawStatus <= 599
+      ? rawStatus
+      : undefined;
+  const http = status === undefined ? "" : ` (HTTP ${status})`;
+  if (status === 401 || status === 403) {
+    return `auth${http}: Check the provider API credentials and permissions.`;
+  }
+  if (status === 402 || status === 429) {
+    return `quota${http}: Check the provider quota or billing; try another configured provider.`;
+  }
+  if (status === 408 || status === 425 || (status !== undefined && status >= 500)) {
+    return `transient${http}: Try again later or use another configured provider.`;
+  }
+  return `unknown${http}: Check provider availability and request settings; try another configured provider.`;
+}
+
+/** Internal provider/retry plumbing only; never use as a public diagnostic. */
 export function errorMessage(error: unknown, secrets: string[]): string {
   const message = error instanceof Error ? error.message : String(error);
   return redactSecrets(message, secrets);

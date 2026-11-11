@@ -168,6 +168,7 @@ export function planSweep(state: ScheduleStateFile, now: number, opts: SweepOpts
   const cut = sweepCut(now);
   const plan: SweepPlan = { now, cut, tasks: [], rebase: [], validUntil: Number.POSITIVE_INFINITY, inTolerance: [] };
   for (const task of state.tasks) {
+    if (task.when.kind === "every") continue; // Owned exclusively by reconcileEvery, never legacy skip.
     if (opts.taskIds !== undefined && !opts.taskIds.includes(task.id)) continue;
     const occ = state.occ[task.id];
     if (occ === undefined || !isExecutable(task)) continue;

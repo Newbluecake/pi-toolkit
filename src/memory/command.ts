@@ -1,7 +1,7 @@
 /**
  * `/mem` slash command — human surface for project memory
  * (memory-plan §5.4): list / path / import [--force] [slug|all] / doctor /
- * tidy / restore.
+ * trash / block restore.
  *
  * Translated line-by-line from the standalone @getpipher/armory-memory
  * plugin, with the repository command-handler error convention applied:
@@ -15,16 +15,15 @@
  *   an explicit slug list is a serial `for…of` `await` loop, NOT
  *   `Promise.all` — the first rejection stops the batch and already-imported
  *   slugs keep their results, matching the pre-#22 synchronous behavior.
- * - `doctor` / `tidy` / `restore` dispatch to the (still-stubbed) P3/P4
- *   command handlers; their "not implemented yet" rejection flows through
- *   the same try/catch → warning notify as every other command error.
+ * - Doctor and standalone restore errors flow through the same
+ *   try/catch → warning notify as every other command error.
  */
 
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { isWebInvocation } from "../commands/capture.js";
 import { resolveWorktreeOrigin } from "../core/worktree-origin.js";
 import type { MemorySettings } from "../config/settings.js";
-import type { MemoryWriteGate, TidyPort } from "./contracts.js";
+import type { MemoryWriteGate } from "./contracts.js";
 import { parseTagsAddArgs, tokenizeTagsArgs } from "./jev/command-port.js";
 import type {
   ClassifierRegistryLike,
@@ -36,13 +35,16 @@ import type {
 } from "./jev/contracts.js";
 import { EntryIndex, expiredEntries, untilEntries } from "./jev/entries.js";
 import { deleteEntry as fsDeleteEntry, setInlineMeta as fsSetInlineMeta } from "./jev/entry-edit.js";
-import { handleMemExpired } from "./jev/expired-command.js";
+import { blockReviewDisplay, blockExpiredDisplay, fileExpiredDisplay } from "./govern/display.js";
 import { readIndex } from "./jev/index-store.js";
 import { restoreBlock } from "./govern/sweep.js";
-import { handleReviewLite } from "./govern/review-lite.js";
+import { previewRevisionRestore, restoreRevisionRaw, type RevisionRestorePreview } from "./govern/revision-audit.js";
+import { clampSpanMs } from "../core/deadline.js";
 import { handleMemReview } from "./jev/review-command.js";
 import { readMarker } from "./blocks/marker.js";
-import { dirFormat } from "./blocks/naming.js";
+import { dirFormat, parseBlockName } from "./blocks/naming.js";
+import { listTrashEntries } from "./trash.js";
+import { restoreTrashedBlock } from "./blocks/store.js";
 import {
   runMigration,
   resumeRollback,
@@ -55,22 +57,29 @@ import { legacyDrift, importLegacy } from "./blocks/legacy.js";
 import { readBlocksState, readHold } from "./blocks/state.js";
 import { join } from "node:path";
 import { memoryDirFor, defaultPaths, type MemoryPaths } from "./paths.js";
-import { canonicalMemoryDir, canonicalDir, ensureMemoryDir, inspectDirNoFollow, readRegular } from "./safe-fs.js";
+import {
+  canonicalMemoryDir,
+  canonicalDir,
+  ensureMemoryDir,
+  inspectDirNoFollow,
+  readRegular,
+  TxnFsError,
+} from "./safe-fs.js";
 import { discoverCCProjects, importAll, importProject, listMemory, type ImportResult } from "./store.js";
 import { formatSize } from "./render.js";
 import { handleMemDoctorCommand, collectDoctorFindings, type RenderTieredPort } from "./doctor-command.js";
 import { summaryLine } from "./doctor.js";
 import { handleMemInitCommand } from "./init-command.js";
-import { handleMemTidyCommand } from "./tidy/command.js";
+import { restoreFromTrash, LEGACY_BACKUP_REFUSAL } from "./trash.js";
 
 export type CommandHandler = (args: string, ctx: ExtensionCommandContext) => Promise<void>;
 
 const DESCRIPTION =
-  "Project memory. /mem · /mem list · /mem init · /mem import [--force] [slug|all] · /mem path · /mem doctor · /mem tidy [--batch] · /mem restore [--legacy]";
+  "Project memory. /mem · /mem list · /mem init · /mem import [--force] [slug|all] · /mem path · /mem doctor · /mem restore --trash";
 /** With a jev port the description gains the new subcommands (J4's jev/tags,
- *  J8's review/expired); without one it must stay byte-identical (I9 / off
- *  golden). */
-const DESCRIPTION_JEV = `${DESCRIPTION} · /mem jev · /mem tags · /mem review · /mem expired`;
+ *  J8's review/expired). The 2026-11-09 tidy removal is a declared
+ *  command-surface change; unrelated Jev-off bytes remain frozen. */
+const DESCRIPTION_JEV = `${DESCRIPTION} · /mem jev · /mem tags · /mem review · /mem expired · 维护: /mem jev reset-index`;
 
 function fmtImport(r: ImportResult): string {
   const s = r.skipped ? `, ${r.skipped} skipped (exists)` : "";
@@ -84,23 +93,28 @@ function resolveCwd(ctx: ExtensionCommandContext): string {
   return resolveWorktreeOrigin(raw) ?? raw;
 }
 
+/** Existing host owner lifetime, not a new authorization/approval owner. The
+ * assembly must bind actual manager/owner/epoch and plain domain, never provider. */
+export interface NativeRevisionRecoveryLifetime {
+  readonly signal: AbortSignal;
+  isCurrent(): boolean;
+}
+
 export interface CreateMemCommandDeps {
+  /** Absent => fail closed BEFORE audit discovery. Only plain main hosts supply it. */
+  revisionRecovery?: (ctx: ExtensionCommandContext) => NativeRevisionRecoveryLifetime | undefined;
   scopedRouter?: (args: string, ctx: ExtensionCommandContext) => Promise<{ handled: boolean; result?: unknown }>;
   scopedDoctor?: () => readonly import("./scopes/doctor.js").ScopedDoctorFinding[];
   contentReadonly?: boolean;
   contentWriteGate?: MemoryWriteGate;
   paths?: MemoryPaths;
   writeGate?: MemoryWriteGate;
-  /** Default false — used only by the `/mem tidy`/`/mem restore` gate (§7). */
+  /** Child sessions cannot restore files. */
   isChildSession?: boolean;
-  /** §7's spawn port; undefined ⇒ "tidy unavailable in this session". Wired
-   *  by `wireMemory`'s `attachTidy` (post-guard, main session only). */
-  getTidyPort?: () => TidyPort | undefined;
-  /** Activate-time memory settings shared by doctor and tidy. */
+  /** Activate-time memory settings used by doctor. */
   settings?: MemorySettings;
   renderBlock?: RenderTieredPort;
-  runDoctor?: typeof import("./doctor.js").runDoctor;
-  onAfterWrite?: (cwd: string) => void;
+  onAfterWrite?: (cwd: string, origin?: string) => void;
   /** Jev command port (`/mem jev`, `/mem tags`; jev-plan J4). `undefined` ⇔
    *  jev is not wired: every new branch below is skipped, the completion
    *  table and DESCRIPTION stay byte-identical (I9, jev-off-golden). */
@@ -113,31 +127,18 @@ const MEM_SUBCOMMANDS: ReadonlyArray<{ value: string; description: string }> = [
   { value: "path", description: "显示记忆目录路径" },
   { value: "import", description: "从 Claude Code 导入记忆 [--force] [slug|all]" },
   { value: "doctor", description: "记忆健康检查（D01-D14）" },
-  { value: "tidy", description: "治理记忆 [--batch|--dry-run|--status|--break-lock] [file…]" },
-  { value: "restore", description: "恢复 tidy 备份 [--trash]" },
+  { value: "restore", description: "恢复回收项 [--trash]" },
 ];
 
 const MEM_SECOND_LEVEL: Record<string, ReadonlyArray<{ value: string; description: string }>> = {
-  tidy: [
-    { value: "tidy --batch", description: "批量归档与规整（仅 TUI）" },
-    { value: "tidy --batch --dry-run", description: "预览批量计划，不写入" },
-    { value: "tidy --batch --status", description: "查看批量运行状态" },
-    { value: "tidy --batch --archive-only", description: "只执行批量归档" },
-    { value: "tidy --break-lock", description: "撤销并打破残留锁（仅 TUI）" },
-    { value: "tidy --dry-run", description: "只预览，不写入" },
-    { value: "tidy --frontmatter", description: "只整理 frontmatter" },
-  ],
-  restore: [
-    { value: "restore --trash", description: "从回收项恢复" },
-    { value: "restore --legacy", description: "显式恢复 v1 旧备份" },
-  ],
+  restore: [{ value: "restore --trash", description: "从回收项恢复" }],
   import: [{ value: "import --force", description: "覆盖已存在的同名文件" }],
 };
 
 /** jev/tags second-level completion (J4) — appended only with a port;
  *  review/expired added by J8, same gating. */
 const MEM_JEV_SUBCOMMANDS: ReadonlyArray<{ value: string; description: string }> = [
-  { value: "jev", description: "Jev 分类引擎状态 [probe|retag|reset-index]" },
+  { value: "jev", description: "Jev 分类引擎状态 [probe|retag]；维护：reset-index" },
   { value: "tags", description: "场景标签管理 [list|add|rm|disable|enable]" },
   { value: "review", description: "整理建议逐条确认 [--list|--run]" },
   { value: "expired", description: "到期条目处理" },
@@ -147,7 +148,7 @@ const MEM_JEV_SECOND_LEVEL: Record<string, ReadonlyArray<{ value: string; descri
     { value: "jev probe", description: "强制刷新可用集" },
     { value: "jev retag", description: "补打 pending 条目" },
     { value: "jev retag --all", description: "全部重打" },
-    { value: "jev reset-index", description: "清除侧车索引（保留 taxonomy）" },
+    { value: "jev reset-index", description: "维护：清除侧车索引（保留 taxonomy）" },
   ],
   tags: [
     { value: "tags list", description: "列出标签" },
@@ -168,7 +169,6 @@ export function createMemCommand(deps: CreateMemCommandDeps): {
   handler: CommandHandler;
 } {
   const isChildSession = deps.isChildSession ?? false;
-  const getTidyPort = deps.getTidyPort ?? (() => undefined);
   const jev = deps.jev;
   // J8: a dedicated `EntryIndex` for review/expired's hash→MemEntry lookups
   // — only ever `.get()`'d on a review/expired/doctor dispatch, and only
@@ -179,23 +179,38 @@ export function createMemCommand(deps: CreateMemCommandDeps): {
     const dir = dirFor(c);
     return dir === undefined || entryIndex === undefined ? [] : entryIndex.get(dir);
   };
-  // I9: without a port the tables and description stay exactly as before.
+  // Blocks expose their own layout-specific menu; files use the declared Jev-off contract.
   const blocks = deps.settings?.layout === "blocks";
   const subcommands = [
-    ...(jev === undefined ? MEM_SUBCOMMANDS : [...MEM_SUBCOMMANDS, ...MEM_JEV_SUBCOMMANDS]),
+    ...(jev === undefined ? MEM_SUBCOMMANDS : [...MEM_SUBCOMMANDS, ...MEM_JEV_SUBCOMMANDS]).map((item) =>
+      blocks && item.value === "restore" ? { ...item, description: "恢复归档块 [--block]" } : item,
+    ),
     ...(blocks
-      ? [{ value: "migrate", description: "块布局迁移 [--dry-run|--all|--report|--status|--import-legacy|--rollback]" }]
+      ? [
+          {
+            value: "migrate",
+            description: "维护：块布局迁移 [--dry-run|--all|--report|--status|--import-legacy|--rollback]",
+          },
+        ]
       : []),
   ];
   const secondLevel: Record<string, ReadonlyArray<{ value: string; description: string }>> = jev === undefined
     ? { ...MEM_SECOND_LEVEL }
     : { ...MEM_SECOND_LEVEL, ...MEM_JEV_SECOND_LEVEL };
+  if (blocks) {
+    secondLevel.restore = [{ value: "restore --block", description: "恢复归档块" }, ...MEM_SECOND_LEVEL.restore!];
+  }
+  const scopedHelp = deps.scopedRouter ? " · /mem session|hub status (list equivalent; status recommended)" : "";
+  const description = blocks
+    ? "Project memory blocks. /mem · /mem list · /mem init · /mem import · /mem path · /mem doctor · /mem restore --block" +
+      (jev === undefined ? "" : " · /mem jev · /mem tags · /mem review · /mem expired") +
+      scopedHelp +
+      " · 维护: /mem migrate [--dry-run|--all|--report|--status|--import-legacy|--rollback]"
+    : jev === undefined
+      ? DESCRIPTION + scopedHelp
+      : DESCRIPTION_JEV.replace(" · 维护:", `${scopedHelp} · 维护:`);
   return {
-    description: blocks
-      ? "Project memory blocks. /mem migrate [--dry-run|--all|--report|--status|--import-legacy|--rollback] · /mem doctor · /mem restore"
-      : jev === undefined
-        ? DESCRIPTION
-        : DESCRIPTION_JEV,
+    description,
     getArgumentCompletions: (argumentPrefix: string) => {
       try {
         const a = (argumentPrefix ?? "").trimStart();
@@ -204,18 +219,9 @@ export function createMemCommand(deps: CreateMemCommandDeps): {
         const head = tokens.length > 1 || (tokens.length === 1 && a.endsWith(" ")) ? tokens[0] : undefined;
         if (head !== undefined) {
           const second = secondLevel[head] ?? [];
-          // Preserve the compact legacy menu for a bare `tidy ` prompt; the
-          // batch surface is discoverable as soon as the user starts typing
-          // its flag (and remains available through exact completion values).
-          const visible =
-            head === "tidy" && a === "tidy "
-              ? second.filter((item) => item.value === "tidy --dry-run" || item.value === "tidy --frontmatter")
-              : head === "restore" && a === "restore "
-                ? second.filter((item) => item.value === "restore --trash")
-                : second;
           const typed = a.trim();
           return (
-            visible
+            second
               .filter((item) => item.value.startsWith(typed) || item.value.slice(head.length + 1).startsWith(partial))
               // `value` carries the full argument text (pi-tui's applyCompletion replaces the
               // whole argument prefix with it); `label` stays the completed tail only, like
@@ -428,6 +434,60 @@ export function createMemCommand(deps: CreateMemCommandDeps): {
           });
           return;
         }
+        // Exact native revision grammar is dispatched before every legacy/trash/
+        // block branch, including malformed mixed forms. No discovery on failure.
+        if (sub === "restore" && rest.includes("--revision")) {
+          if (rest.length !== 2 || rest[0] !== "--revision" || !/^[a-f0-9]{64}$/.test(rest[1]!))
+            throw new Error("usage: /mem restore --revision <64-lowercase-hex actionId>");
+          await restoreNativeRevision(rest[1]!, cwd, ctx, deps);
+          return;
+        }
+        if (sub === "restore" && rest[0] !== "--block" && rest.includes("--trash")) {
+          const display = memoryDirFor(cwd, deps.paths);
+          const root = canonicalDir(display)?.real;
+          const format = dirFormat(display);
+          if (format === "held") throw new Error("E_UNMIGRATED: layout is held");
+          if (root && format !== "blocks" && inspectDirNoFollow(root).names.includes("blocks"))
+            throw new Error("E_UNMIGRATED: blocks layout is inaccessible or invalid");
+          if (format === "blocks" && root) {
+            if (isChildSession || !ctx.hasUI) {
+              if (ctx.hasUI) ctx.ui.notify("/mem restore is only available in the main session", "warning");
+              return;
+            }
+            if (
+              rest.length > 2 ||
+              rest.filter((arg) => arg === "--trash").length !== 1 ||
+              rest.some((arg) => arg.startsWith("--") && arg !== "--trash")
+            )
+              throw new Error("usage: /mem restore --trash [id]");
+            const gate = deps.writeGate ?? plainMemoryWriteGate;
+            if (!gate.check(root).ok) throw new Error("E_WRITE_GATE: memory write refused");
+            const blocks = join(root, "blocks");
+            const info = inspectDirNoFollow(blocks);
+            if (info.names.includes(".trash")) {
+              const trash = inspectDirNoFollow(join(blocks, ".trash"));
+              if (trash.dev !== info.dev) throw new Error("E_WRITE_GATE: trash device changed");
+            }
+            const entries = listTrashEntries(blocks).filter((entry) => parseBlockName(entry.name));
+            const id = rest.find((arg) => arg !== "--trash");
+            if (!id) {
+              ctx.ui.notify(
+                entries.length ? entries.map((entry) => `  ${entry.id} — ${entry.name}`).join("\n") : "trash is empty",
+                "info",
+              );
+              return;
+            }
+            const entry = entries.find((item) => item.id === id);
+            if (!entry) {
+              ctx.ui.notify(`no trash entry ${id}`, "warning");
+              return;
+            }
+            const name = await restoreTrashedBlock(root, id, { gate });
+            deps.onAfterWrite?.(cwd);
+            ctx.ui.notify(`restore --trash: restored ${name}`, "info");
+            return;
+          }
+        }
         if (
           (sub === "restore" && rest[0] === "--block") ||
           ((sub === "review" || sub === "expired") && dirFormat(memoryDirFor(cwd, deps.paths)) === "blocks")
@@ -442,31 +502,56 @@ export function createMemCommand(deps: CreateMemCommandDeps): {
             const message = await restoreBlock(dir, rest[1], { gate: deps.writeGate ?? plainMemoryWriteGate });
             deps.onAfterWrite?.(cwd);
             if (ctx.hasUI) ctx.ui.notify(message, "info");
-          } else {
-            await handleReviewLite(dir, rest.join(" "), toMemCommandUi(ctx), {
-              interactive: !isChildSession && isInteractive(ctx),
-              enabled: deps.settings?.governance.enabled ?? false,
-              residentBudget: deps.settings?.residentBytes ?? 2048,
-              gate: deps.writeGate ?? plainMemoryWriteGate,
-              onAfterWrite: () => deps.onAfterWrite?.(cwd),
-            });
+          } else if (ctx.hasUI) {
+            ctx.ui.notify(
+              sub === "review"
+                ? `${blockReviewDisplay(dir)}${rest.includes("--run") ? "\n只展示现有建议，不会启动整理。" : ""}`
+                : blockExpiredDisplay(dir),
+              "info",
+            );
           }
           return;
         }
-        if (sub === "tidy" || sub === "restore") {
-          await handleMemTidyCommand(sub, rest.join(" "), ctx, {
-            ...(deps.paths === undefined ? {} : { paths: deps.paths }),
-            isChildSession,
-            getTidyPort,
-            settings: () =>
-              deps.settings ??
-              (() => {
-                throw new Error("memory settings unavailable");
-              })(),
-            ...(deps.runDoctor === undefined ? {} : { runDoctor: deps.runDoctor }),
-            ...(deps.onAfterWrite === undefined ? {} : { onAfterWrite: deps.onAfterWrite }),
-            ...(jev === undefined ? {} : { preserveInlineMeta: true }),
+        if (sub === "restore") {
+          // Old tidy journals/manifests/archives are deliberately never opened or recovered.
+          if (rest[0] !== "--trash") throw new Error(LEGACY_BACKUP_REFUSAL);
+          if (isChildSession || !isInteractive(ctx)) {
+            if (ctx.hasUI) ctx.ui.notify("/mem restore requires the interactive main session", "warning");
+            return;
+          }
+          if (rest.length > 2 || rest.some((arg, i) => i > 0 && arg.startsWith("-")))
+            throw new Error("usage: /mem restore --trash [id]");
+          const root = canonicalDir(memoryDirFor(cwd, deps.paths))?.real;
+          const entries = root ? listTrashEntries(root) : [];
+          if (!rest[1]) {
+            ctx.ui.notify(
+              entries.length ? entries.map((e) => `  ${e.id} — ${e.name}`).join("\n") : "trash is empty",
+              "info",
+            );
+            return;
+          }
+          const result = await restoreFromTrash(
+            cwd,
+            rest[1],
+            "skip",
+            deps.paths,
+            deps.writeGate ?? plainMemoryWriteGate,
+          ).catch((err: unknown) => {
+            if (err instanceof TxnFsError && err.mutated) {
+              try {
+                deps.onAfterWrite?.(cwd);
+              } catch {
+                /* preserve the partial-mutation observation */
+              }
+            }
+            throw err;
           });
+          if (!result.restored) {
+            ctx.ui.notify(result.reason ?? "restore refused", "warning");
+            return;
+          }
+          deps.onAfterWrite?.(cwd);
+          ctx.ui.notify("restore --trash: restored", "info");
           return;
         }
         if (sub === "jev" && jev !== undefined) {
@@ -479,7 +564,7 @@ export function createMemCommand(deps: CreateMemCommandDeps): {
         }
         if (sub === "review" && jev !== undefined) {
           const dir = dirFor(cwd);
-          await handleMemReview(rest.join(" "), toMemCommandUi(ctx), jev, {
+          await handleMemReview("--list", toMemCommandUi(ctx), jev, {
             cwd,
             dir,
             entries: entriesFor(cwd),
@@ -493,17 +578,19 @@ export function createMemCommand(deps: CreateMemCommandDeps): {
           });
           return;
         }
-        if (sub === "expired" && jev !== undefined) {
+        if (sub === "expired") {
           const dir = dirFor(cwd);
-          await handleMemExpired(rest.join(" "), toMemCommandUi(ctx), {
-            dir,
-            entries: entriesFor(cwd),
-            isChildSession,
-            interactive: isInteractive(ctx),
-            deleteEntry: (entry) => (dir === undefined ? Promise.resolve("stale" as const) : fsDeleteEntry(dir, entry)),
-            setInlineMeta: (entry, patch) =>
-              dir === undefined ? Promise.resolve("stale" as const) : fsSetInlineMeta(dir, entry, patch),
-          });
+          if (ctx.hasUI)
+            ctx.ui.notify(
+              dir === undefined
+                ? "expired: no memory directory"
+                : fileExpiredDisplay(jev === undefined ? new EntryIndex().get(dir) : entriesFor(cwd)),
+              "info",
+            );
+          return;
+        }
+        if (sub === "review") {
+          if (ctx.hasUI) ctx.ui.notify("review: unavailable\n此布局未启用建议索引，无法显示建议。", "info");
           return;
         }
         // default: list
@@ -515,6 +602,119 @@ export function createMemCommand(deps: CreateMemCommandDeps): {
       }
     },
   };
+}
+
+/** One existing native dialog, outside the C lock. Abort/timeout races even
+ * an uncooperative UI; a late true cannot revive the continuation. */
+async function confirmNativeRevision(
+  ctx: ExtensionCommandContext,
+  preview: RevisionRestorePreview,
+  signal: AbortSignal,
+): Promise<boolean> {
+  if (signal.aborted) return false;
+  const local = new AbortController();
+  const abort = () => local.abort();
+  let settleAbort: (() => void) | undefined;
+  const cancelled = new Promise<false>((resolve) => {
+    settleAbort = () => resolve(false);
+    local.signal.addEventListener("abort", settleAbort, { once: true });
+  });
+  signal.addEventListener("abort", abort, { once: true });
+  const timer = setTimeout(abort, clampSpanMs(120_000) ?? 120_000);
+  timer.unref();
+  try {
+    const { rawBefore, auditDigest, ...metadata } = preview;
+    return (
+      (await Promise.race([
+        ctx.ui.confirm(
+          "恢复指定 revision（仅此目标）",
+          [
+            JSON.stringify(metadata, null, 2),
+            `审计/命名空间摘要：${auditDigest}`,
+            `精确效果：${preview.expectedAfter.kind === "missing" ? "仅当目标仍缺失时创建" : "仅替换仍与 expectedAfter 完全匹配的"} ${preview.memoryDir}/blocks/${preview.targetId}.md；写回 before.md 的 ${preview.beforeBytes} 原始字节。`,
+            "不重新序列化、不增加 version、不修改 context/successor 或回收副本。BOM/CRLF 以审计原始字节为准。",
+            "—— 将恢复的完整原文（显示不替代上述字节摘要） ——",
+            rawBefore,
+          ].join("\n"),
+          { signal: local.signal },
+        ),
+        cancelled,
+      ])) === true && !local.signal.aborted
+    );
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+    signal.removeEventListener("abort", abort);
+    if (settleAbort) local.signal.removeEventListener("abort", settleAbort);
+    local.abort();
+  }
+}
+
+async function restoreNativeRevision(
+  actionId: string,
+  cwd: string,
+  ctx: ExtensionCommandContext,
+  deps: CreateMemCommandDeps,
+): Promise<void> {
+  const confirm = ctx.ui?.confirm;
+  const native = () =>
+    !deps.isChildSession &&
+    deps.settings?.enabled === true &&
+    !deps.contentReadonly &&
+    isInteractive(ctx) &&
+    typeof confirm === "function" &&
+    ctx.ui?.confirm === confirm;
+  if (!native()) throw new Error("restore --revision: requires actual native TUI main with confirmation");
+  const lifetime = deps.revisionRecovery?.(ctx);
+  if (!lifetime) throw new Error("restore --revision: current plain memory owner unavailable");
+  const current = () => {
+    const valid = lifetime.isCurrent();
+    return valid && !lifetime.signal.aborted && native() && resolveCwd(ctx) === cwd;
+  };
+  if (!current()) throw new Error("restore --revision: owner/epoch unavailable");
+  const display = memoryDirFor(cwd, deps.paths);
+  const gate = deps.writeGate;
+  if (!gate || !gate.check(display).ok || deps.contentWriteGate?.check(display).ok === false || !current())
+    throw new Error("restore --revision: write gate refused");
+  const dir = canonicalDir(display)?.real;
+  if (!dir || dirFormat(dir) !== "blocks") throw new Error("restore --revision: actual blocks directory required");
+  const auditDeps = {
+    gate,
+    signal: lifetime.signal,
+    isCurrent: () => current() && deps.contentWriteGate?.check(dir).ok !== false,
+    now: () => new Date(),
+  };
+  const result = previewRevisionRestore(dir, actionId, auditDeps);
+  if (result.kind !== "ready") throw new Error(`restore --revision refused: ${result.reason}`);
+  if (!current()) throw new Error("restore --revision: owner/epoch changed");
+  if (!(await confirmNativeRevision(ctx, result.preview, lifetime.signal))) {
+    ctx.ui.notify("restore --revision: cancelled; no recovery writes", "info");
+    return;
+  }
+  if (!current()) throw new Error("restore --revision: owner/epoch changed after confirmation");
+  const restored = await restoreRevisionRaw(
+    dir,
+    {
+      actionId,
+      expectedAuditDigest: result.preview.auditDigest,
+      signal: lifetime.signal,
+    },
+    auditDeps,
+  );
+  if (restored.kind === "restored" || restored.kind === "effect-unknown") {
+    try {
+      deps.onAfterWrite?.(cwd, "revision");
+    } catch {
+      /* do not misreport an observed effect as rejected */
+    }
+    ctx.ui.notify(
+      restored.kind === "restored"
+        ? `restore --revision: restored ${result.preview.targetId} (${actionId})`
+        : "restore --revision: effect-unknown; 目标可能已改变。禁止盲目重试，请人工检查目标和审计恢复 intent。",
+      restored.kind === "restored" ? "info" : "warning",
+    );
+  } else throw new Error(`restore --revision refused: ${restored.reason}`);
 }
 
 // ───────────────────────────── jev subcommands (J4) ─────────────────────────────
@@ -617,7 +817,7 @@ async function handleMemJev(
   const notify = (text: string, level: "info" | "warning" = "info"): void => {
     // Silent refusal without a UI — the framework offers no output channel
     // for /mem commands in print/RPC-no-UI mode (same convention as every
-    // other /mem branch and tidy's §7 gate; verifier item 2).
+    // other /mem branch and the restore gate; verifier item 2).
     if (ctx.hasUI) ctx.ui.notify(text, level);
   };
   if ((op === "retag" || op === "reset-index") && (jev.isChildSession || !ctx.hasUI)) {
@@ -663,7 +863,7 @@ async function handleMemTags(
   };
   const gated = (): boolean => {
     // No-UI refusals are silent (framework has no output channel here) —
-    // same convention as handleMemJev above and tidy's §7 gate.
+    // same convention as handleMemJev above and the restore gate.
     if (jev.isChildSession || !ctx.hasUI) {
       notify(`tags: ${op} requires the interactive main session`, "warning");
       return false;
@@ -711,5 +911,61 @@ async function handleMemTags(
     );
   } catch (err) {
     notify(`tags error: ${(err as Error).message}`, "warning");
+  }
+}
+
+/** Web-only gate. It does not change, call, or impersonate the native command handler. */
+export async function executeConfirmedMemoryWrite(
+  call: import("./command-confirm.js").MemoryWebCall,
+  request: import("./command-policy.js").MemoryWriteRequest,
+  plan: import("./scopes/session-store.js").FrozenPlan,
+  receipt: import("./command-confirm.js").MemoryCommandApproval,
+  deps: {
+    readonly kernel: import("./command-confirm.js").CommandConfirmKernel;
+    readonly currentOwnerMatches: (binding: import("./command-confirm.js").MemoryWebCallBinding) => boolean;
+    readonly store: Pick<
+      import("./scopes/session-store.js").SessionMemoryStore,
+      "ownsWebPlan" | "enqueueConfirmedCommand"
+    >;
+  },
+): Promise<import("./scopes/session-store.js").SessionWebOutcome> {
+  const failure = (
+    code: import("./command-confirm.js").CommandErrorCode,
+  ): import("./scopes/session-store.js").SessionWebFailure => ({
+    ok: false,
+    effect: "none",
+    code,
+    message: `${code}: 本步未执行。`,
+    retryable: false,
+  });
+  const reject = (code: import("./command-confirm.js").CommandErrorCode) => {
+    // Revoke only this call. The store retains its prepared observation until its owner
+    // releases it after completion; closing the kernel does not release the store plan.
+    deps.kernel.close(call);
+    return failure(code);
+  };
+  try {
+    const binding = deps.kernel.binding(call);
+    if (!binding || !deps.currentOwnerMatches(binding)) return reject("E_MEM_NEEDS_HUMAN_COMMAND");
+    if (request.kind !== "session.add" || plan.kind !== "session.add" || request.rawArgs !== plan.commandPlan.rawArgs)
+      return reject("E_MEM_PLAN_CHANGED");
+    if (!deps.store.ownsWebPlan(call, plan)) return reject("E_MEM_PLAN_CHANGED");
+    if (!deps.kernel.check(call, receipt, plan.commandPlan)) return reject("E_MEM_CONFIRM_STALE");
+  } catch {
+    return reject("E_MEM_CONFIRM_STALE");
+  }
+  try {
+    return await deps.store.enqueueConfirmedCommand(call, plan, receipt);
+  } catch {
+    // The store is responsible for classifying attempted writes; an unexpected rejection
+    // from an injected consumer cannot establish that no effect occurred.
+    return {
+      ok: false,
+      effect: "unknown",
+      code: "E_PERSIST_UNKNOWN",
+      message: "E_PERSIST_UNKNOWN: 写入结果未知，请勿盲目重试。",
+      retryable: false,
+      recovery: "explicit-reopen-and-verify",
+    };
   }
 }

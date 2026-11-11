@@ -17,7 +17,7 @@
   policy. Type/request floor overrides cannot lower the host floor. Invalid negative/nonfinite floors are
   discarded by `mergeBudget`; `0` disables the floor and huge finite spans are clamped. Generic `mergeBudget`
   does **not** floor total: unmarked programmatic producers (`/task`, RPC, fabric wake, workflow children,
-  goal verifier, schedule) remain unchanged even with extendable policy or pool/load rejection flags.
+  schedule) remain unchanged even with extendable policy or pool/load rejection flags.
 - Explicit `timeout_s: 1` and `1799` are intentionally raised by the default floor, not just omitted values.
   A fixed-policy resume also gets the floor but **keeps fixed policy** (no grace/extension). Phase watchdogs,
   earlier absolute deadlines, abort and parent lifecycle remain authoritative: the floor is **not a promise
@@ -151,7 +151,7 @@ spawn admission resolves it once (`req.timeoutPolicy` ?? resume-inherited ?? sha
 `budgetOverride.totalMs`), applies it via `applyBudgetPolicy({ fixedDeadline })`, and the resolved value lands
 in `diag.timeoutPolicy`, persisted through terminal entries, the non-terminal journal, tombstones and
 terminal rebuilds, and inherited by resumes (R-inherit). Program-derived runs (workflow children,
-`/goal` verifier, tidy, RPC) stay fixed-deadline. **Known accepted trade-off**: a nested extendable run's
+tidy, RPC) stay fixed-deadline. **Known accepted trade-off**: a nested extendable run's
 grace window notifies nobody (CC2 suppression) and child sessions have no `extend_subagent_timeout` —
 it silently lives up to `min(G,(f−1)·T)` past its deadline while the parent turn keeps waiting; the main
 session can still extend it by run id.
@@ -202,8 +202,9 @@ schedule at all). Rules that are easy to break:
   `compact-hint/register.ts`) stay separate `session_shutdown` handlers: their registration order relative to the other plugins'
   handlers is pinned by the activation-trace golden and the matrix test's handler counts;
 - the gaps found in 7-1 were fixed one per commit in 7b (`docs/dev/source-governance/batch2-step7-report.md` §7b); the matrix test
-  `tests/integration/stack-teardown-matrix.test.ts` pins each fix. Path C now also disposes: `external` (G7), the `/goal` hook
-  timers (G9, activate-level), the usage broadcaster (G1, after drain/seal), the coalescer/ack-hold windows by **discard, not
+  `tests/integration/stack-teardown-matrix.test.ts` pins the remaining fixes. Historically, path C also disposed the `/goal`
+  hook timers (G9, activate-level); that step and its dedicated regression were removed with the feature. Path C now also
+  disposes: `external` (G7), the usage broadcaster (G1, after drain/seal), the coalescer/ack-hold windows by **discard, not
   flush** (G2/G3 — the persisted `batched` outbox records are redelivered by the next stack's `reconcile`), the notifier retry
   timers (G10, after drain/seal so shutdown-time notices still reach the closing session) and the bash job manager (G4,
   timers only — the `parts.bashJobs` slot stays, path A still needs it as `prevBashJobs`); the child-switch `onDisabled`
@@ -425,3 +426,50 @@ P4c 续包实际 SDK 反例：`SessionManager.newSession()` 可让同一个实�
 而 Runner state 的已捕获 sid 尚未变化。`PiSessionHandle.getBranchEntries()` 因此同时保留构造时原 manager，
 在 branch read 前后核验 SDK 的实际 manager/sid；变化抛错，由 peek/capture 拒绝，不能把新空 branch
 当成旧 parent 的 empty seed。实际 Stack admission 测试已钉住这一负例；未改 SDK 或取消/预算语义。
+
+## `/goal` removal (2026-11-09)
+
+The objective loop, settings, hook teardown and Stack member are removed. Unknown custom session entries (including `subagent:goal`) are ignored: no payload read, migration, status badge or continuation. Regression: `tests/integration/retired-goal-entries.test.ts`. Three off goldens have a user-approved declared removal of the command and two hooks; all other frozen surfaces remain untouched. The nested Agent parameter description removes only the retired verifier example in the same approved declaration. The budget-factor setting description also drops that retired example in the approved single-key pin update; all other setting-spec hashes are unchanged.
+
+## Model progress defaults (#87)
+
+`budget.idleS` and `budget.modelTurnS` now default to 1200s (formerly 240s and 900s,
+respectively). In `model_turn`, the earlier of last event + idle and phase entry + model-turn
+cap wins; a steady stream can therefore still hit the hard cap. Zero disables the corresponding
+constraint. The shared idle setting also governs `retry_backoff` (plus retry delay and slack),
+so that default wait increases too. Tool, total and grace defaults are unchanged; total and other
+phase deadlines can still end a run sooner. The error's observed duration is not itself a configured default.
+
+Settings file seconds and legacy milliseconds are normalized as before; explicit values, including
+600s, override the defaults and are not rewritten to 1200. Admission merges host, type and request
+budgets for each run; the session watchdog separately uses the session settings budget. A run is not
+fully isolated from live settings changes: settings edits mutate that watchdog budget, affecting its
+subsequent ticks, even though the run's merged budget was captured at admission. Source changes require
+loading the new code in a new activation; existing running processes do not automatically acquire it.
+No settings, timers, grace behavior, or frozen fixtures are migrated by this change.
+
+## Structured submission window (#84)
+
+For calls reaching `StructuredOutput.execute`, a host-only synchronous preflight checks the capture
+window before local semantic validation; `onSubmit` checks the same window again before schema
+validation/capture, including synchronous re-entry. A closed window returns `window_closed` and
+instructs the caller to stop submitting, not to fix and retry the payload. SDK schema validation can
+reject before execute, so this does not promise closed-window precedence at that earlier boundary.
+`tests/tools/structured-output-tool.test.ts` and
+`tests/service/runtime-adapter-structured-repair.test.ts` cover both checks and late submissions.
+
+## Run-control failure surfaces (#84, independently verified and committed df3a0218)
+
+The implementation retains the holder's original `no active session yet` phrase
+with a fixed `no_active_session` code and effect facts. Blocking Agent admission retains classified
+kind/reason/retryability instead of turning it into a generic dispatch failure. Nested failure guidance
+only suggests resume conditionally when a persisted session exists and after checking outcome/partial
+effects; retryable does not establish effect-free execution. Unknown `set_model` effects do not by
+themselves establish a reload/stale binding; only the recognized stale-host condition gets that advice.
+`stop_failed` and an L4 escalation do not prove a process was killed. Query/read failures are not
+empty results or invented terminal states. Known `model_changed` and `deadline_extended` effects are
+preserved when later observation fails; unknown effects must not be blindly retried. The existing
+`steerRun` await remains unbounded, so this work does not claim a complete zero-hang fix.
+Evidence boundaries are in `tests/service/owner-errors84.test.ts`,
+`tests/tools/owner-errors84.test.ts` and adjacent query/tool tests; independent verification passed
+and the changes are committed as `df3a0218`, but have not been reloaded or LIVE-validated in an already-running session.

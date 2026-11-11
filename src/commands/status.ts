@@ -142,7 +142,7 @@ export interface StatusCommandDeps {
 export function createStatusCommand(deps: StatusCommandDeps): Omit<RegisteredCommand, "name" | "sourceInfo"> {
   return {
     description:
-      "Show diagnostics for running and recently finished subagents (phase, last event, orphans). `/agent status <runId>` shows one run's tool timeline; `/agent costs` per-run spend; `/agent settings` opens an interactive settings editor (`settings list` / `set <key> <value>` / `reset <key>` stay available for scripts; budget.* applies to new runs immediately, the rest after /reload). `/agent reload` reloads pi, deferred until running subagents settle (`reload now` forces, `reload cancel` cancels). Durations are configured in seconds. The live agent tree is pinned above the editor while runs are active.",
+      "Show diagnostics for running and recently finished subagents (phase, last event, orphans). `/agent status <runId>` shows one run's tool timeline (equivalent to `/agent <runId>`; status recommended); `/agent costs` per-run spend; `/agent settings` opens an interactive settings editor (`settings list` / `set <key> <value>` / `reset <key>` stay available for scripts; budget.* applies to new runs immediately, the rest after /reload). `/agent reload` reloads pi, deferred until running subagents settle (`reload now` forces, `reload cancel` cancels). Advanced: `/agent budget` is an alias scoped to budget settings. Durations are configured in seconds. The live agent tree is pinned above the editor while runs are active.",
     getArgumentCompletions: (argumentPrefix: string) => {
       const settingsAction = argumentPrefix.trimStart().match(/^(settings|budget)\s+(set|reset)\s+(\S*)$/);
       if (settingsAction) {
@@ -159,7 +159,6 @@ export function createStatusCommand(deps: StatusCommandDeps): Omit<RegisteredCom
         { value: "status", label: "status", description: "Text diagnostics (default)" },
         { value: "costs", label: "costs", description: "Per-run cost breakdown" },
         { value: "settings", label: "settings", description: "Interactive settings editor (or set/reset/list)" },
-        { value: "budget", label: "budget", description: "Alias: settings scoped to budget.*" },
         { value: "reload", label: "reload", description: "Reload pi, deferred until subagents settle (now/cancel)" },
       ].filter((item) => item.value.startsWith(argumentPrefix.trim()));
     },

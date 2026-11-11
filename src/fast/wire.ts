@@ -134,7 +134,7 @@ export function createFastController(deps: FastControllerDeps): FastController {
       const parsed = parseFastCommand(args);
       if (!current()) return;
       if (parsed.kind === "usage") {
-        say("用法：/fast [toggle|on|off|inherit|reset|status]", "warning");
+        say("用法：/fast [toggle|on|off|inherit|status]", "warning");
         return;
       }
       if (!refresh()) return;
@@ -314,7 +314,11 @@ export function wireFastMain(
     }
   };
   pi.registerCommand("fast", {
-    description: "会话服务档位：/fast [toggle|on|off|inherit|reset|status]；原生预热跟随，费用未核实",
+    description: "会话服务档位：/fast [toggle|on|off|inherit|status]；原生预热跟随，费用未核实",
+    getArgumentCompletions: (prefix) =>
+      ["toggle", "on", "off", "inherit", "status"]
+        .filter((value) => value.startsWith(prefix.trim()))
+        .map((value) => ({ value, label: value })),
     handler: async (args, ctx) => {
       get(ctx)?.command(args, { notify: (text, level) => ctx.ui.notify(text, level) });
     },

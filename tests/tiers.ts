@@ -31,11 +31,26 @@ export const BASE_TEST_INCLUDE: readonly string[] = ["tests/**/*.test.ts", "test
  * Directories whose every test file is Tier 2 (real child processes / real sockets /
  * self-gating conformance suites). Trailing slash on purpose: projectOf matches prefixes.
  */
+// #65: memory-web-command-confirm.test.ts + memory-web-command-dispatch.test.ts
+// are deliberately covered by these prefixes (real SDK / >5s settled barrier).
+// The opt-in real-browser probe lives in scripts/, never the daily test project.
+// Schedule interval P1: schedule-secure-activate and schedule-interval-lock are integration/
+// (actual activate / real kernel lock), hence covered by this prefix, never the secure mount project.
 export const TIER2_DIRS: readonly string[] = ["tests/integration/", "tests/conformance/"];
 
 /** Tier 2 files outside TIER2_DIRS (plan D2): real private lock / plain child processes /
  * build-artifact-dependent suites. Not real-mount — those are SECURE_MOUNT_FILES. */
 export const TIER2_FILES: readonly string[] = [
+  // #70 credential-safe persistence tests use the real settings flock, no real vault.
+  "tests/config/feishu-notify-settings.test.ts",
+  // Interval P1: these drivers use the real single-file writer/flock through fixtures (hidden
+  // from lexical proc scanning). Pure raw timer arithmetic remains tier1; contention/activate
+  // end-to-end tests are already covered by the integration/ prefix above.
+  "tests/schedule/core/every.test.ts",
+  "tests/schedule/agent/every-clock.test.ts",
+  "tests/schedule/agent/every-consumers.test.ts",
+  // Root WebHub activation attempts a real Unix socket connection via its wiring.
+  "tests/web-hub/agent/memory-lifecycle-wiring.test.ts",
   // private lock file only — no mount (keeps its fast unit behaviour out of tier1)
   "tests/secure/gocryptfs-test-lock.test.ts",
   // plain child processes, no gocryptfs mount
@@ -107,8 +122,11 @@ export const TIER1_DECLARED: Readonly<Record<string, Tier1DeclaredEntry>> = {
   "tests/memory/jev/off-golden.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/memory/jev/wire-predict.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/memory/legacy-golden.test.ts": { kind: "proc", why: "proc:node:child_process" },
+  "tests/memory/scopes/session-web-thenable.test.ts": {
+    kind: "proc",
+    why: "proc:node:child_process; strict unhandled-rejection probe",
+  },
   "tests/memory/safe-fs.test.ts": { kind: "proc", why: "proc:node:child_process" },
-  "tests/memory/tidy.test.ts": { kind: "timing", why: "wait:setTimeout(…, 1100)" },
   "tests/quota/credentials.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/reflex/core/draft-regex-redos.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/reflex/ports/git-real.test.ts": { kind: "proc", why: "proc:node:child_process" },

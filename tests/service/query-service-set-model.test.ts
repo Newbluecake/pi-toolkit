@@ -72,10 +72,10 @@ describe("QueryService.setModel", () => {
     expect(await make("running").setModel("run-1", model)).toEqual({ ok: false, reason: "not_running" });
   });
 
-  it("maps a throwing runner to rejected + detail", async () => {
+  it("maps a throwing runner to rejected without leaking its detail", async () => {
     const q = make("running", async () => {
       throw new Error("driver exploded");
     });
-    expect(await q.setModel("run-1", model)).toEqual({ ok: false, reason: "rejected", detail: "driver exploded" });
+    expect(await q.setModel("run-1", model)).toEqual({ ok: false, reason: "rejected", detail: "unknown" });
   });
 });

@@ -1,3 +1,4 @@
+import { softLegacyMetadata } from "./soft-meta.js";
 // Pure, pi-independent injection-block rendering for the memory module.
 // Output shape is pinned by 方案 §5.1.1; differences from the original plugin
 // (empty dir → undefined, pin priority, agent-source fence, tail sentinel,
@@ -163,7 +164,7 @@ export function renderMemoryBlock(
     if (remaining <= 0) break;
     let raw: string;
     try {
-      raw = readRegular(dir, f.name).text;
+      raw = softLegacyMetadata(readRegular(dir, f.name).text, dir);
     } catch {
       continue; // raced delete / became a symlink — skip this file (TOCTOU)
     }

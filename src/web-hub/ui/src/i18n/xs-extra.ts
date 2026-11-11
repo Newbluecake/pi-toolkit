@@ -42,6 +42,8 @@ const en = {
   mentionPending: "Delivered to {label}; wake pending.",
   mentionStarted: "{label} has started processing the request.",
   mentionUnknown: "Sent to {label} — outcome unknown (query later; do not resend).",
+  dismissAria: "Hide request {id} locally",
+  dismissTitle: "Only hides this request locally; tracking and query/activate remain unchanged.",
 } satisfies Record<string, string>;
 
 const zh: Record<keyof typeof en, string> = {
@@ -75,6 +77,8 @@ const zh: Record<keyof typeof en, string> = {
   mentionPending: "已送达 {label}，唤醒待执行。",
   mentionStarted: "{label} 已开始处理该请求。",
   mentionUnknown: "已向 {label} 发送，结果未知（稍后可查询，勿重发）。",
+  dismissAria: "仅在本端隐藏请求 {id}",
+  dismissTitle: "仅在本端隐藏，不删除跟踪记录，也不影响查询或激活。",
 };
 
 export const XS_EXTRA: Readonly<Record<"en" | "zh", Readonly<Record<string, string>>>> = { en, zh };

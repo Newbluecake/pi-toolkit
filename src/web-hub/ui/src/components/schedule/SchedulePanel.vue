@@ -26,7 +26,15 @@ import { useI18n } from "../../composables/useI18n.js";
 import { useTicker } from "../../composables/useTicker.js";
 import { useTrackedCommand } from "../../composables/useTrackedCommand.js";
 import { registerScheduleExtra } from "../../i18n/schedule-extra.js";
-import { fmtTs, panelView, relIn, runReasonKey, runStateKey } from "../../logic/schedule.js";
+import {
+  allScheduleTasks,
+  fmtIntervalTs,
+  fmtTs,
+  panelView,
+  relIn,
+  runReasonKey,
+  runStateKey,
+} from "../../logic/schedule.js";
 import { CONTROL_VIEW, HUB_CTX } from "../control/controlContext.js";
 import CommandConfirm from "../control/CommandConfirm.vue";
 import PickerSheet from "../control/PickerSheet.vue";
@@ -87,7 +95,7 @@ interface PanelTask {
   id: string;
   name: string;
   form: "background" | "message";
-  when: { kind: "cron" | "once" | "invalid"; expr: string; tz: string };
+  when: { kind: "cron" | "once" | "every" | "invalid"; expr: string; tz: string };
   enabled: boolean;
   createdBy: string;
   feishu: boolean;
@@ -110,6 +118,8 @@ interface PanelRun {
   reportFile: string | undefined;
   runId: string | undefined;
   feishu: string;
+  interval?: boolean;
+  catchUp?: { dueCount: number };
 }
 type PanelModel =
   | { kind: "none" }
@@ -156,15 +166,19 @@ const model = computed(
     }) as unknown as PanelModel,
 );
 
-function whenLabel(when: { kind: "cron" | "once" | "invalid"; expr: string; tz: string }): string {
+function whenLabel(when: { kind: "cron" | "once" | "every" | "invalid"; expr: string; tz: string }): string {
   if (when.kind === "cron") return t("schedule.whenCron", { expr: when.expr, tz: when.tz });
+  if (when.kind === "every") return t("schedule.whenEvery", { expr: when.expr });
   if (when.kind === "once") return t("schedule.whenOnce", { expr: when.expr, tz: when.tz });
   return t("schedule.whenInvalid");
 }
 
-function nextLabel(nextAt: number | undefined, degraded: boolean): string {
+function nextLabel(nextAt: number | undefined, degraded: boolean, interval = false): string {
   if (degraded || nextAt === undefined) return t("schedule.taskNextNever");
-  return t("schedule.taskNext", { t: `${fmtTs(nextAt)} (${relIn(nextAt, ticker.now.value)})` });
+  if (interval) return t("schedule.taskNext", { t: fmtIntervalTs(nextAt) });
+  const relative = relIn(nextAt, ticker.now.value);
+  if (relative === "due") return t("schedule.taskDue");
+  return t("schedule.taskNextRelative", { t: relative });
 }
 
 // --- detail view (in-dialog swap; ONE PickerSheet — stacked sheets would double the scroll lock) ---
@@ -176,7 +190,9 @@ const detailTaskId = ref<string | null>(null);
 const detailTask = computed(() => {
   if (detailTaskId.value === null || model.value.kind !== "ready") return null;
   const proj = hub?.state.value.schedules?.sessions.find((s) => s.sessionId === props.sessionId);
-  return proj?.tasks.find((task) => task.task.id === detailTaskId.value) ?? null;
+  return proj === undefined
+    ? null
+    : (allScheduleTasks(proj).find((task) => task.task.id === detailTaskId.value) ?? null);
 });
 
 watch(detailTask, (task) => {
@@ -190,6 +206,23 @@ function openDetail(taskId: string): void {
 }
 function closeDetail(): void {
   detailTaskId.value = null;
+  actionNote.value = null;
+}
+async function saveEdit(args: string): Promise<void> {
+  if (!canWrite.value || conn.value !== "open" || detailTaskId.value === null || busyTaskId.value !== null) return;
+  busyTaskId.value = detailTaskId.value;
+  actionNote.value = null;
+  try {
+    const r = await tracked.run("schedule", args);
+    if (!r.ok) {
+      if (!("cancelled" in r))
+        actionNote.value = { kind: "err", text: t("schedule.actionFailed", { reason: r.message ?? r.error }) };
+    } else if (/^\s*E_[A-Z_]+:/m.test(r.output)) {
+      actionNote.value = { kind: "err", text: r.output };
+    } else closeDetail();
+  } finally {
+    busyTaskId.value = null;
+  }
 }
 </script>
 
@@ -197,7 +230,24 @@ function closeDetail(): void {
   <PickerSheet :label="t('schedule.panelTitle')" class="sched-scrim" @close="emit('close')">
     <!-- detail view (swaps the whole dialog body; the task can vanish mid-view — a removed
          task falls back to the list view). -->
-    <ScheduleTaskDetail v-if="detailTask !== null" :task="detailTask" @back="closeDetail" @close="emit('close')" />
+    <ScheduleTaskDetail
+      v-if="detailTask !== null"
+      :task="detailTask"
+      :can-edit="canWrite && conn === 'open'"
+      :busy="busyTaskId !== null"
+      :error="actionNote?.text"
+      @save="void saveEdit($event)"
+      @back="closeDetail"
+      @close="emit('close')"
+    >
+      <CommandConfirm
+        v-if="trackedConfirm"
+        :name="trackedConfirm.name"
+        :args="trackedConfirm.args"
+        @confirm="tracked.confirm()"
+        @cancel="tracked.cancel()"
+      />
+    </ScheduleTaskDetail>
     <div v-else class="sched-dialog">
       <header class="sched-head">
         <h3 class="sched-title">
@@ -246,70 +296,69 @@ function closeDetail(): void {
           <p class="sched-sec-title">{{ t("schedule.sectionTasks", { n: model.tasks.length }) }}</p>
           <ul v-if="model.tasks.length > 0" class="sched-list">
             <li v-for="task in model.tasks" :key="task.id" class="sched-task" :data-enabled="task.enabled">
-              <div class="sched-task-head">
-                <span class="sched-task-name" translate="no">{{ task.name }}</span>
-                <span v-if="task.enabled" class="chip">{{ t("schedule.taskEnabled") }}</span>
-                <span v-else class="chip">{{ t("schedule.taskPaused") }}</span>
-                <span v-if="task.totals.missed > 0" class="chip sched-chip-missed">{{
-                  t("schedule.missedNote", { n: task.totals.missed })
-                }}</span>
-                <span class="sched-task-act">
-                  <template v-if="model.canWrite">
-                    <button
-                      v-if="task.enabled"
-                      class="icon-btn"
-                      type="button"
-                      :title="t('schedule.taskPause')"
-                      :aria-label="t('schedule.taskPauseAria', { name: task.name })"
-                      :disabled="busyTaskId !== null"
-                      @click="void onTaskAction('pause', task.id)"
-                    >
-                      <AppIcon name="pause" class="icon-sm" />
-                    </button>
-                    <button
-                      v-else
-                      class="icon-btn"
-                      type="button"
-                      :title="t('schedule.taskResume')"
-                      :aria-label="t('schedule.taskResumeAria', { name: task.name })"
-                      :disabled="busyTaskId !== null"
-                      @click="void onTaskAction('resume', task.id)"
-                    >
-                      <AppIcon name="play" class="icon-sm" />
-                    </button>
-                    <button
-                      class="icon-btn danger"
-                      type="button"
-                      :title="t('schedule.taskRemove')"
-                      :aria-label="t('schedule.taskRemoveAria', { name: task.name })"
-                      :disabled="busyTaskId !== null"
-                      @click="void onTaskAction('rm', task.id)"
-                    >
-                      <AppIcon name="trash" class="icon-sm" />
-                    </button>
-                  </template>
-                  <button class="btn btn-ghost btn-xs" type="button" @click="openDetail(task.id)">
-                    {{ t("schedule.details") }}
-                  </button>
-                </span>
+              <span class="sched-task-dot" aria-hidden="true"></span>
+              <div class="sched-task-body">
+                <div class="sched-task-head">
+                  <span
+                    class="sched-task-name"
+                    role="button"
+                    tabindex="0"
+                    translate="no"
+                    :aria-label="t('detail.schedOpenDetailAria', { name: task.name })"
+                    @click="openDetail(task.id)"
+                    @keydown.enter.prevent="openDetail(task.id)"
+                    @keydown.space.prevent="openDetail(task.id)"
+                    >{{ task.name }}</span
+                  >
+                  <span v-if="task.totals.missed > 0" class="chip sched-chip-missed">{{
+                    t("schedule.missedNote", { n: task.totals.missed })
+                  }}</span>
+                </div>
+                <div class="sched-task-meta">
+                  <strong>{{
+                    task.enabled
+                      ? nextLabel(task.nextAt, task.degraded, task.when.kind === "every")
+                      : t("schedule.taskTriggerPaused")
+                  }}</strong>
+                  <span class="sched-task-when" :title="whenLabel(task.when)">{{ whenLabel(task.when) }}</span>
+                </div>
               </div>
-              <p class="sched-task-meta">
-                {{ whenLabel(task.when) }} ·
-                {{ t(task.form === "message" ? "schedule.formMessage" : "schedule.formBackground")
-                }}<template v-if="task.feishu"> · {{ t("schedule.taskFeishuOn") }}</template>
-                <template v-if="task.createdBy === 'agent'"> · {{ t("schedule.taskCreatedByAgent") }}</template>
-                <template v-if="task.enabled"> · {{ nextLabel(task.nextAt, task.degraded) }}</template>
-              </p>
-              <p class="sched-task-stats">
-                {{
-                  t("schedule.taskStats", {
-                    fired: task.totals.fired,
-                    missed: task.totals.missed,
-                    skipped: task.totals.skipped,
-                    manual: task.totals.manual,
-                  })
-                }}
-              </p>
+              <span class="sched-task-act">
+                <template v-if="model.canWrite">
+                  <button
+                    v-if="task.enabled"
+                    class="icon-btn"
+                    type="button"
+                    :title="t('schedule.taskPause')"
+                    :aria-label="t('schedule.taskPauseAria', { name: task.name })"
+                    :disabled="busyTaskId !== null"
+                    @click="void onTaskAction('pause', task.id)"
+                  >
+                    <AppIcon name="pause" class="icon-sm" />
+                  </button>
+                  <button
+                    v-else
+                    class="icon-btn"
+                    type="button"
+                    :title="t('schedule.taskResume')"
+                    :aria-label="t('schedule.taskResumeAria', { name: task.name })"
+                    :disabled="busyTaskId !== null"
+                    @click="void onTaskAction('resume', task.id)"
+                  >
+                    <AppIcon name="play" class="icon-sm" />
+                  </button>
+                  <button
+                    class="icon-btn danger"
+                    type="button"
+                    :title="t('schedule.taskRemove')"
+                    :aria-label="t('schedule.taskRemoveAria', { name: task.name })"
+                    :disabled="busyTaskId !== null"
+                    @click="void onTaskAction('rm', task.id)"
+                  >
+                    <AppIcon name="trash" class="icon-sm" />
+                  </button>
+                </template>
+              </span>
             </li>
           </ul>
           <p v-else class="sched-empty">{{ t("schedule.empty") }}</p>
@@ -328,7 +377,10 @@ function closeDetail(): void {
               <span class="sched-run-state">{{ t(`schedule.runState.${runStateKey(run.state)}`) }}</span>
               <span class="sched-run-task" translate="no">{{ run.taskName || run.taskId }}</span>
               <span v-if="run.kind === 'manual'" class="chip">{{ t("schedule.runManual") }}</span>
-              <span class="sched-run-time">{{ fmtTs(run.startedAt) }}</span>
+              <span v-if="run.catchUp" class="chip">catch-up ×{{ run.catchUp.dueCount }}</span>
+              <span class="sched-run-time">{{
+                run.interval ? fmtIntervalTs(run.startedAt) : fmtTs(run.startedAt)
+              }}</span>
               <span class="sched-run-sub">
                 <template v-if="run.reason"
                   >{{ runReasonKey(run.state, run.reason) ? t(`schedule.runReason.${run.reason}`) : run.reason }} ·

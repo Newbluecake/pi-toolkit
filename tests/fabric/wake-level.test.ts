@@ -185,9 +185,9 @@ describe("input hook: only PROVEN human input resets the root (plan §3.3 L7)", 
       expect(h.level.root).toBe(0);
     }
   });
-  it("extension input does NOT reset without a web attribution (topic-switch re-injection, goal loop, reload fire)", () => {
+  it("extension input does NOT reset without a web attribution (topic-switch re-injection, machine continuation, reload fire)", () => {
     const h = hookFor();
-    for (const text of ["reinjected", "/goal continue", "/agent reload fire"])
+    for (const text of ["reinjected", "machine continue", "/agent reload fire"])
       expect(h.hook({ text, source: "extension" })).toEqual({ action: "continue" });
     expect(h.level.root).toBe(2);
   });

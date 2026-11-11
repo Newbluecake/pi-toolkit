@@ -258,6 +258,8 @@ export interface XsRequestListEmits {
   /** User click ONLY — no lifecycle path ever emits these (plan §3 P4: 不自动执行). */
   activate: [messageId: string, activationKey: string];
   query: [messageId: string, activationKey: string | null];
+  /** Local presentation only — never sends a control request or removes hub evidence. */
+  dismiss: [messageId: string];
 }
 export interface ControlNoticeProps {
   readonly plaintext?: boolean;
@@ -344,13 +346,13 @@ export interface FleetSummaryBarProps {
   readonly panel?: "agent" | "bash";
   /** Main-session bash rows; #41 keeps their badge separate from agent activity. */
   readonly bashJobs?: BashJobsWire | undefined;
+  /** Rows omitted by the bounded fleet projection. Positive counts keep the agent entry
+   *  reachable even when no rows were received; labels still describe only received rows. */
+  readonly omitted?: FleetOmittedWire | undefined;
 }
 export interface FleetSummaryBarEmits {
   toggle: [];
   "toggle-panel": [panel: "agent" | "bash", origin: "pointer" | "keyboard", trigger: HTMLElement];
-  "peek-panel": [panel: "agent" | "bash", event: PointerEvent];
-  "peek-end": [];
-  "peek-keep": [];
 }
 
 /** 2026-10-15 bash→fleet 迁移(components/fleet/FleetBashJobs.vue):fleet 抽屉树视图末尾
@@ -407,9 +409,7 @@ export interface FleetTreeEmits {
 export interface FleetDrawerProps {
   /** Absent only for legacy combined callers; production always supplies an explicit panel. */
   readonly panel?: "agent" | "bash";
-  readonly peeking?: boolean;
-  readonly canPeek?: boolean;
-  readonly openOrigin?: "hover" | "pointer" | "keyboard" | "restore" | "interaction";
+  readonly openOrigin?: "pointer" | "keyboard" | "restore";
   readonly trigger?: HTMLElement | null;
   readonly agent: AgentState;
   readonly now: number;
@@ -418,11 +418,7 @@ export interface FleetDrawerProps {
 }
 export interface FleetDrawerEmits {
   close: [];
-  "peek-keep": [];
-  "peek-end": [];
-  promote: [holdLayout?: boolean];
-  "interaction-end": [];
-  "toggle-pin": [];
+  intent: [];
 }
 
 export interface RunHeaderProps {
@@ -450,10 +446,9 @@ export interface RunTranscriptProps {
  *
  * task58 (web-hub-tokens-speed plan §5.3): `generation` — the mid→GenerationCore map the
  * reducer rebuilds from exactly the current loaded entries (`generationHistoryIndex`).
- * OPTIONAL so the frozen `AgentState`/`RunTxState` mirrors (types.ts — outside this task's
- * file domain) and the drawer's hand-built projection stay assignable unchanged; absent ⇒
- * history assistant items show no speed (the live stamped-core path in `entries.ts` still
- * works — it reads the message itself, not this map).
+ * Optional for structural callers with no history metadata; the main-session and drawer
+ * projections both pass their reducer-owned map. When absent, history items show no speed;
+ * an explicitly stamped live item can still supply its own core in `entries.ts`.
  */
 export type TranscriptSource = Pick<
   AgentState,

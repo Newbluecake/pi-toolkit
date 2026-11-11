@@ -351,7 +351,6 @@ export interface RootWakeDeps {
   };
   /** Receiver's final synchronous sessionGen/fence check. No await between this and sendMessage. */
   guard?: () => XsNoneReason | undefined;
-  goalRunning?: () => boolean;
   inboundWakeAvailable?: () => boolean;
   /** Charge ONLY after successful send. Admission and this call are in one synchronous block. */
   chargeInboundWake?: () => void;
@@ -374,7 +373,7 @@ export type RootWakeDispatchResult =
 
 /**
  * One per stack. Owns from BEFORE sendMessage, including pre-start compaction. Never awaits pi.
- * Only xs wakes enter here: legacy tree-root / goal / completion paths are intentionally untouched.
+ * Only xs wakes enter here: legacy tree-root / completion paths are intentionally untouched.
  * All timers go through Clock (systemClock is segmented and unref'd). dispose cancels stack timers
  * and leases, NOT process records. construct + recover after disposing the previous stack.
  */
@@ -487,7 +486,6 @@ export class RootWakeController {
       this.deps.host.hasPendingMessages()
     )
       return downgrade("busy");
-    if (this.deps.goalRunning?.()) return downgrade("goal");
     if (!request.solicited && !this.deps.level?.hopAllowed(request.level ?? 0) && this.deps.level !== undefined)
       return downgrade("level_limit");
     if (this.deps.inboundWakeAvailable?.() === false) return downgrade("inbound_wake_rate");
@@ -563,7 +561,7 @@ export class RootWakeController {
   /**
    * fabric-xs-activation P3 (arch §4.5): activate ONE already-delivered original message by
    * sending the fixed body-free control marker through the SAME dispatch gates (guard / policy /
-   * busy / goal / level / inbound quota / ledger / B1 / owner / deadline). It never creates a
+   * busy / level / inbound quota / ledger / B1 / owner / deadline). It never creates a
    * reply credential, never re-delivers the body and is never a second runner. `onEnded` fires
    * once when the supervised control run ends (pure observation).
    */

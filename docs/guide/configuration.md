@@ -33,8 +33,8 @@ pi install .
 
 用户配置文件是 `<agentDir>/pi-toolkit.json`；`<agentDir>` 默认 `~/.pi/agent`，跟随环境变量 `PI_CODING_AGENT_DIR`。**文件缺失或格式错误一律用默认值，不抛错**——一份 `{}` 与不存在等价。
 
-- **时间字段以整数秒配置**：键名以 `S` 结尾（如 `budget.idleS`、`bashJobs.autoBackgroundS`）；旧版毫秒键（`*Ms`）首次加载时自动迁移并回写。唯一例外 `feishuBot.debounceMs` 保持毫秒，不迁移。
-- 除设置文件外，各模块还有少量独立文件（如飞书通知的 `~/.pi/agent/feishu-notify.json`、web_search 凭证文件，见下文），不并入 `pi-toolkit.json`。
+- **时间字段以整数秒配置**：键名以 `S` 结尾（如 `budget.idleS`、`bashJobs.autoBackgroundS`）；旧版毫秒键（`*Ms`）首次加载时自动迁移并回写。例外 `feishuBot.debounceMs` 与通知的 `feishuNotify.subagentFlushDebounceMs` / `subagentDeliveryGraceMs` 保持毫秒，不迁移；通知的旧 `*Sec` 字段直接用秒。
+- 飞书通知已融合进顶层 `feishuNotify`，旧 `~/.pi/agent/feishu-notify.json` 保留为回退，不自动改动/删除。web_search 凭证文件等仍独立（见下文）。
 
 ### PI_CODING_AGENT_DIR 与继承
 
@@ -73,7 +73,6 @@ pi install .
 | web_search/fetch | `webSearch.enabled`        | `true` | 五供应商 failover 联网搜索（凭证另配，见下文）                                                                                         | [tools](tools.md#web_search--web_fetch)               |
 | 任务工具         | `todo.enabled`             | `true` | `TaskCreate` 等五工具 + widget + `/tasklist`                                                                                           | [tools](tools.md#任务工具todo)                        |
 | ask_user         | `askUser.enabled`          | `true` | 结构化交互提问（仅主会话）                                                                                                             | [tools](tools.md#ask_user)                            |
-| `/goal`          | `goal.enabled`             | `true` | 目标驱动循环                                                                                                                           | [tools](tools.md#goal-目标循环)                       |
 | 飞书通知         | `feishuNotify.enabled`     | `true` | `@notify`、`/watch` 被动卡片                                                                                                           | [tools](tools.md#飞书通知)                            |
 | 会话导航         | `sessionNav.enabled`       | `true` | `/resume-recent`、`/clear`、裸 `exit`                                                                                                  | [tools](tools.md#会话导航)                            |
 | topic-switch     | `topicSwitch.enabled`      | `true` | 无关新请求建议开新会话                                                                                                                 | [tools](tools.md#topic-switch)                        |
@@ -107,6 +106,19 @@ pi install .
 | hub 托管会话     | `webHub.spawn.enabled`         | `false` | hub 拉起 `pi --mode rpc`（仅 Linux）       | [web-hub](web-hub.md#托管会话spawn)          |
 | 本机端口代理     | `webHub.proxy.enabled`         | `false` | 浏览器打开 hub 机器上的 HTTP 服务          | [web-hub](web-hub.md#本机端口代理)           |
 | LAN 访问         | `webHub.lan.enabled`           | `false` | `0.0.0.0` 密码认证（默认 7879）            | [web-hub](web-hub.md#局域网访问与密码)       |
+
+## 飞书 webhook 通知配置
+
+`pi-toolkit.json` 顶层 `feishuNotify` 支持旧独立文件全部十二个字段（另含统一专属 `enabled`）。
+逐字段优先：**统一有效值 → 旧 `feishu-notify.json` → `FEISHU_WEBHOOK_URL` /
+`FEISHU_WEBHOOK_SECRET`（仅凭据）→ 内置默认**。省略/null/错误类型继续回退，false/0 不回退；
+空 URL 停止发送，空 secret 关闭签名。旧文件不会被本包迁移或删除。
+`FEISHU_NOTIFY_CONFIG_PATH` 只覆盖旧文件回退路径（空串禁用旧文件读取），不取代统一文件或环境回退。
+secure/locked 强制关闭且不尝试旧文件/环境重新开启。
+
+凭据 `webhookUrl` / `secret` 只在手工 JSON 中配置，**不进入普通 TUI/list/补全/set 明文面**；
+本地 JSON 仍为明文，建议权限 `0600`。改动后 `/reload`，无需重启 hub。
+全部字段/默认值、空值和路径语义见 [完整通知配置指南](../dev/ask-user-feishu-merge/feishu-notify.md#配置与优先级70)。
 
 ## web_search / web_fetch 凭证
 
@@ -166,7 +178,7 @@ EOF
 - `webHub` 打开后 `/reload`，再 `/webhub open`（无 hub 在跑时自动拉起，默认 `127.0.0.1:7878`）。
 - `schedule` 打开后有 `/schedule` 命令与 AI 的 `schedule` 工具；AI 建/改的任务须你批准。
 - `traffic` 需 Node ≥22.13；库默认 `~/.pi/agent/records/traffic.db`，**库里含 API key 明文**，请自行控制本机访问。
-- secret 一律不进 `pi-toolkit.json`：web_search 凭证见上节，droid 用 `FACTORY_API_KEY` 环境变量或 droid CLI 登录。
+- web_search 凭证仍独立，droid 用 `FACTORY_API_KEY` 环境变量或 droid CLI 登录；飞书 webhook URL/secret 可放统一 `feishuNotify`，但只能手工编辑 JSON，不进入普通设置 UI；也可继续用环境变量。含凭据文件建议 0600。
 
 ## 安装后验证清单
 

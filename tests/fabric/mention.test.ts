@@ -32,9 +32,16 @@ function setup(status: RunSnapshot["status"] | undefined = "running") {
   const registry = createMentionRegistry();
   registry.register("builder", { runId: target, type: "worker", parent: "root" });
   const admit = vi.fn(() => ({ ok: true as const, status: "accepted" as const, key: "k", seq: 1 }));
+  const reserve = vi.fn(() => ({
+    ok: true as const,
+    status: "accepted" as const,
+    key: "k" as never,
+    seq: 1,
+    quota: { used: 1, limit: 3, remaining: 2 },
+  }));
   const spawn = vi.fn(async () => ({ runId: "r_NEW00001" as const }));
   const channel = createMentionChannel({
-    router: { admit, targetState: () => "running" },
+    router: { admit, targetState: () => "running", reserveMentionReport: reserve },
     registry,
     query: { get: () => (status ? snapshot(status) : undefined) },
     spawn: { spawn },
@@ -42,7 +49,7 @@ function setup(status: RunSnapshot["status"] | undefined = "running") {
     generation: () => 3,
     canMessage: ["mention"],
   });
-  return { channel, registry, admit, spawn };
+  return { channel, registry, admit, reserve, spawn };
 }
 
 describe("fabric mention channel", () => {
@@ -63,7 +70,7 @@ describe("fabric mention channel", () => {
       if (status === "not_root_child")
         h.registry.reassign("builder", { runId: target, type: "worker", parent: "nested" });
       const channel = createMentionChannel({
-        router: { admit: h.admit, targetState: () => "running" },
+        router: { admit: h.admit, targetState: () => "running", reserveMentionReport: h.reserve },
         registry: h.registry,
         query: { get: () => snapshot(targetStatus!) },
         spawn: { spawn: h.spawn },
@@ -102,6 +109,7 @@ describe("fabric mention channel", () => {
       status: "resumed",
       label: "builder",
       runId: "r_NEW00001",
+      quota: { used: 1, limit: 3, remaining: 2 },
     });
     expect(h.spawn).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -117,7 +125,7 @@ describe("fabric mention channel", () => {
   it("checks authorization before terminal resume", async () => {
     const h = setup("completed");
     const channel = createMentionChannel({
-      router: { admit: h.admit, targetState: () => "running" },
+      router: { admit: h.admit, targetState: () => "running", reserveMentionReport: h.reserve },
       registry: h.registry,
       query: { get: () => snapshot("completed") },
       spawn: { spawn: h.spawn },
@@ -140,6 +148,7 @@ describe("fabric mention channel", () => {
       status: "resume_failed",
       label: "builder",
       error: "busy",
+      quota: { used: 1, limit: 3, remaining: 2 },
     });
     expect(h.spawn).toHaveBeenCalled();
   });
@@ -150,9 +159,16 @@ describe("fabric mention channel — wake (plan §3.1 / §3.3 L4, W1)", () => {
     const registry = createMentionRegistry();
     registry.register("builder", { runId: target, type: "worker", parent: "root" });
     const admit = vi.fn(() => ({ ok: true as const, status: "accepted" as const, key: "k", seq: 1 }));
+    const reserve = vi.fn(() => ({
+      ok: true as const,
+      status: "accepted" as const,
+      key: "k" as never,
+      seq: 1,
+      quota: { used: 1, limit: 3, remaining: 2 },
+    }));
     const spawn = vi.fn(async () => ({ runId: "r_NEW00001" as const }));
     const channel = createMentionChannel({
-      router: { admit, targetState: () => "running" },
+      router: { admit, targetState: () => "running", reserveMentionReport: reserve },
       registry,
       query: { get: () => snapshot(status) },
       spawn: { spawn },

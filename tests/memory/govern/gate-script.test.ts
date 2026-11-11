@@ -20,6 +20,10 @@ import * as srcStore from "../../../src/memory/jev/index-store.js";
 import * as srcLlm from "../../../src/memory/jev/predict/llm.js";
 import * as srcOutbound from "../../../src/memory/jev/predict/outbound.js";
 import * as srcFlight from "../../../src/memory/jev/predict/flight.js";
+import { buildRecallQuestions } from "../../../src/memory/jev/questions.js";
+import { redactForJev } from "../../../src/memory/jev/redact.js";
+import { decideRecall } from "../../../src/memory/jev/decide.js";
+import { candidateAudit } from "../../../scripts/dev/memory36-candidate-audit.mjs";
 import { wireJev } from "../../../src/memory/jev/wire.js";
 import { EntryIndex } from "../../../src/memory/jev/entries.js";
 import { memorySection } from "../../../src/memory/inject.js";
@@ -54,9 +58,14 @@ import {
   metricsG1,
   metricsG2,
   parseJsonl,
+  parseRecallTopK,
+  parseRecallThreshold,
+  withRecallTopK,
+  withRecallThreshold,
   productionClockPort,
   validateAnswers,
   validateLabels,
+  validateRunBudgets,
   verifyTurnSources,
 } from "../../../scripts/dev/memory36-gate.mjs";
 
@@ -88,6 +97,17 @@ const questions = { e1: { type: "bool", instructions: "production question", cri
 const model = { provider: "test", id: "classifier" };
 const context = { state: { user_message: "a real request", today: "2026-11-06" }, questions };
 const result = { stopReason: "stop", answers: { e1: { type: "bool", probability: 0.7 } } };
+
+describe("PG budget admission", () => {
+  it("accepts the authorized ceilings and rejects over-budget and invalid values without transport", () => {
+    expect(validateRunBudgets(800, 900000, 1.5)).toBeUndefined();
+    expect(validateRunBudgets(400, 900000, 0.5)).toBeUndefined();
+    expect(() => validateRunBudgets(801, 900000, 1.5)).toThrow("invalid run budgets");
+    expect(() => validateRunBudgets(800, 900000, 1.501)).toThrow("classifier cap exceeds approved budget");
+    expect(() => validateRunBudgets(800, 900001, 1.5)).toThrow("invalid run budgets");
+    expect(() => validateRunBudgets(0, 900000, 1.5)).toThrow("invalid run budgets");
+  });
+});
 
 describe("PG parsing/provenance", () => {
   it("parses JSONL with blanks and rejects malformed records, duplicate ids and missing references", () => {
@@ -1449,5 +1469,195 @@ describe("PG P2 conservative pre-admission bound through production wire", () =>
           srcFlight.estimatePredictUsd(system, "x".repeat(srcOutbound.OUTBOUND_MAX_TOTAL_BYTES), price),
         );
     }
+  });
+});
+
+describe("G2 optional candidate audit", () => {
+  it("overrides only the explicit new-variant recall cap, with no default change", () => {
+    const original = { recall: { maxEntries: 3, maxBytes: 4096, threshold: 0.6 }, predict: { maxEntries: 2 } };
+    expect(parseRecallTopK(undefined)).toBeUndefined();
+    expect(withRecallTopK(original, undefined)).toBe(original);
+    for (const n of [3, 4, 5]) {
+      const changed = withRecallTopK(original, parseRecallTopK(String(n)));
+      expect(changed.recall).toEqual({ ...original.recall, maxEntries: n });
+      expect(changed.predict).toBe(original.predict);
+      expect(original.recall.maxEntries).toBe(3);
+    }
+    for (const v of ["0", "11", "4.0", " 4", "NaN"]) expect(() => parseRecallTopK(v)).toThrow("invalid recall top-k");
+  });
+  it("isolates a valid explicit threshold from production defaults and exercises actual recall decisions", () => {
+    const original = { recall: { maxEntries: 3, maxBytes: 4096, threshold: 0.6 }, predict: { maxEntries: 2 } };
+    expect(parseRecallThreshold(undefined)).toBeUndefined();
+    expect(withRecallThreshold(original, undefined)).toBe(original);
+    for (const n of [0.5, 0.55, 0.6, 0.99]) {
+      const changed = withRecallThreshold(withRecallTopK(original, 4), parseRecallThreshold(String(n)));
+      expect(changed.recall).toEqual({ ...original.recall, maxEntries: 4, threshold: n });
+      expect(changed.predict).toBe(original.predict);
+      expect(original.recall).toEqual({ maxEntries: 3, maxBytes: 4096, threshold: 0.6 });
+    }
+    for (const value of ["0.49", "0.999", "1", " 0.55", "0x1", "NaN", ".55"])
+      expect(() => parseRecallThreshold(value)).toThrow("invalid recall threshold");
+    const candidates = ["a", "b", "c", "d"].map((id) => ({
+      id,
+      file: `${id}.md`,
+      excerpt: id,
+      authority: "user" as const,
+    }));
+    const answers = Object.fromEntries(
+      [0.7, 0.62, 0.58, 0.52].map((probability, i) => [candidates[i]!.id, { type: "bool" as const, probability }]),
+    );
+    const config = jevConfigOf(parseMemorySettings({}));
+    expect(decideRecall(answers, candidates, config).map((entry) => entry.id)).toEqual(["a", "b"]);
+    expect(
+      decideRecall(answers, candidates, withRecallThreshold(withRecallTopK(config, 4), 0.55)).map((entry) => entry.id),
+    ).toEqual(["a", "b", "c"]);
+    expect(
+      decideRecall(answers, candidates, withRecallThreshold(withRecallTopK(config, 4), 0.5)).map((entry) => entry.id),
+    ).toEqual(["a", "b", "c", "d"]);
+  });
+
+  it("rejects the experimental threshold outside G2 before reading any dataset", async () => {
+    await expect(main(["g1", "--recall-threshold", "0.55"])).rejects.toThrow("recall threshold is G2 only");
+  });
+
+  it("maps production questions and probabilities without exposing memory text or inventing exclusions", () => {
+    const body = "private-to-this-test: precise synthetic memory body";
+    const entry = { file: "topic.001.md", body, hash: "synthetic-hash", block: { id: "topic.001" } };
+    const q = buildRecallQuestions({
+      userMessage: "explain the synthetic task",
+      session: "main",
+      today: "2026-11-06",
+      candidates: [{ id: "e7", file: entry.file, excerpt: redactForJev(body, "entry"), authority: "user" }],
+    });
+    const args = {
+      entries: [
+        { id: "p/topic.001", entry, rev: "1-abcdef" },
+        { id: "p/other.001", entry: { ...entry, file: "other.md", body: "other", hash: "other-hash" }, rev: undefined },
+      ],
+      calls: [
+        {
+          callseq: 1,
+          req: { duty: "recall", state: q.state, questions: q.questions },
+          outcome: { ok: true, answers: { e7: { type: "bool", probability: 0.62 } } },
+        },
+      ],
+      contextHash: digest,
+      cacheLookups: [
+        {
+          contextHash: digest({ state: q.state, questions: q.questions }),
+          key: "safe-cache-hash",
+          elapsedMs: 123,
+          found: true,
+        },
+        { contextHash: "other", key: "other-hash", found: false },
+      ],
+      redact: redactForJev,
+      renderInfo: { residentBlocks: [] },
+      budgetStats: { resident: { budgetBytes: 2048, usedBytes: 42 }, index: { limitBytes: 2048 } },
+      settings: {},
+      config: { recall: { maxEntries: 3 } },
+      outboundLimit: 6144,
+      chat: [],
+      messages: [{ details: { layer: "U", items: [{ hash: "synthetic-hash", p: 0.62 }] }, content: "注入" }],
+      rendered: "section",
+      prompt: "request",
+    };
+    const audit = candidateAudit(args);
+    expect(audit.candidates[0]).toMatchObject({
+      labelId: "p/topic.001",
+      blockId: "topic.001",
+      rev: "1-abcdef",
+      observedInRecall: true,
+      aliases: [{ callseq: 1, alias: "e7", ambiguous: false }],
+    });
+    expect(audit.candidates[1]).toMatchObject({ observedInRecall: false, exclusion: "unknown" });
+    expect(audit.batches[0].questions[0]).toMatchObject({
+      alias: "e7",
+      matchIds: ["p/topic.001"],
+      match: "unique",
+      answer: { type: "bool", probability: 0.62 },
+    });
+    expect(audit.delivered).toEqual([{ layer: "U", labelIds: ["p/topic.001"], probability: 0.62 }]);
+    expect(audit.batches[0].cache).toMatchObject([{ key: "safe-cache-hash", elapsedMs: 123, found: true }]);
+    expect(audit.batches[0].inputBytes).toBe(
+      Buffer.byteLength(JSON.stringify({ state: q.state, questions: q.questions })),
+    );
+    expect(audit.byteMeasurements).toEqual({
+      systemMemorySectionBytes: 7,
+      userPromptBytes: 7,
+      injectedMessageBytes: 6,
+    });
+    expect(audit.budgets).toMatchObject({
+      resident: { usedBytes: 42 },
+      index: { limitBytes: 2048 },
+      outboundLimitBytes: 6144,
+    });
+    expect(JSON.stringify(audit)).not.toContain(body);
+    expect(candidateAudit(args)).toEqual(audit);
+    const ambiguous = candidateAudit({
+      ...args,
+      entries: [args.entries[0], { ...args.entries[0], id: "p/duplicate" }],
+    });
+    expect(ambiguous.batches[0].questions[0]).toMatchObject({
+      match: "ambiguous",
+      matchIds: ["p/topic.001", "p/duplicate"],
+    });
+  });
+
+  it("a cached answer slower than the per-tier budget times out even with auditing disabled", async () => {
+    vi.useFakeTimers();
+    const dir = temp();
+    const namespace = { case: "slow-cached-answer" };
+    const model = { provider: "test", id: "only" };
+    const request = { model, context };
+    const key = digest({ namespace, request });
+    writeFileSync(
+      join(dir, `${key}.json`),
+      JSON.stringify({ key, requestHash: digest(request), elapsedMs: 2383, result }),
+    );
+    const cache = createReplyCache({ dir, namespace, live: false });
+    const registry = registryFor(cache, [model]);
+    const config = { ...jevConfigOf(parseMemorySettings({})), classifiers: ["test/only"], proxy: "" };
+    const client = createJevClient({
+      config,
+      isChild: false,
+      now: Date.now,
+      health: new Map(),
+      bucket: createTokenBucket(),
+    });
+    await client.probe(registry);
+    const pending = client.ask({
+      duty: "recall",
+      registry,
+      state: context.state,
+      questions,
+      budgetMs: 4000,
+      mode: "sync",
+    });
+    await vi.advanceTimersByTimeAsync(2001);
+    expect(await pending).toMatchObject({
+      ok: false,
+      reason: "all-failed",
+      detail: expect.stringContaining("timeout after 2000ms"),
+    });
+    expect(cache.stats()).toMatchObject({ calls: 0, hits: 0, missing: 0, failures: 0 });
+  });
+
+  it("observing a turn preserves requests, returned outcomes and existing audit output", async () => {
+    const client = {
+      usage: () => ({ calls: 0, costUsd: 0 }),
+      ask: vi.fn(async () => ({ ok: true, answers: { e1: { type: "bool", probability: 0.8 } }, missing: [] })),
+    };
+    const identity = { evalId: "e", sampleId: "s", turn: 1, variant: "new" };
+    const request = { duty: "recall", questions };
+    const off = turnClient(client, identity);
+    const observations: unknown[] = [];
+    const on = turnClient(client, identity, observations);
+    const offResult = await off.client.ask(request);
+    const onResult = await on.client.ask(request);
+    expect(onResult).toEqual(offResult);
+    expect(on.outcomes).toEqual(off.outcomes);
+    expect(client.ask.mock.calls).toEqual([[request], [request]]);
+    expect(observations).toMatchObject([{ callseq: 1, req: request, outcome: onResult }]);
   });
 });

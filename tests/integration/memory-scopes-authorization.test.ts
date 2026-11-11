@@ -165,7 +165,7 @@ it("actual SDK Web prompt/command/current-capture and native direct/single-confi
       `hub restore ${trash.fileName}`,
     ].entries()) {
       handler.handle(frame(`deny-${i}`, { op: "command", name: "mem", args, confirm: true }));
-      expect(sent.at(-1)).toMatchObject({ ok: false, code: "E_COMMAND_DENIED", effect: "none" });
+      expect(sent.at(-1)).toMatchObject({ ok: false, code: "E_UNSUPPORTED", effect: "none" });
     }
     expect(scopes.current()!.session!.view().items).toHaveLength(before);
     expect(select).toHaveBeenCalledTimes(2);
@@ -183,13 +183,25 @@ it("actual SDK Web prompt/command/current-capture and native direct/single-confi
     await vi.waitFor(() => expect(JSON.stringify(capture.outputFor("captured-host"))).toContain("E_AUTHORITY"));
     expect(scopes.current()!.session!.view().items).toHaveLength(before);
     handler.handle(frame("read", { op: "command", name: "mem", args: "session list" }));
-    await vi.waitFor(() => expect(JSON.stringify(capture.outputFor("read"))).toContain("native exact"));
-    // Actual Web raw prompt leg preserves SDK expand=false: no slash execution, no hidden command grant.
+    expect(sent.at(-1)).toMatchObject({
+      ok: false,
+      code: "E_UNSUPPORTED",
+      effect: "none",
+      message: expect.stringContaining("memory command channel unavailable"),
+    });
+    expect(JSON.stringify(scopes.current()!.session!.view())).toContain("native exact");
+    // Slash-shaped memory prompts are denied before native dispatch.
+    const beforeRaw = local.callCount();
     handler.handle(frame("raw", { op: "prompt", text: "/mem session add raw-web-must-not-command", deliver: "steer" }));
-    await vi.waitFor(() => expect(local.callCount()).toBeGreaterThan(0));
-    await session.waitForIdle();
+    expect(sent.at(-1)).toMatchObject({
+      ok: false,
+      code: "E_COMMAND_DENIED",
+      effect: "none",
+      message: "Send /mem as a command",
+    });
+    expect(local.callCount()).toBe(beforeRaw);
     expect(scopes.current()!.session!.view().items).toHaveLength(before);
-    expect(JSON.stringify(local.requestMessages)).toContain("/mem session add raw-web-must-not-command");
+    expect(JSON.stringify(local.requestMessages)).not.toContain("/mem session add raw-web-must-not-command");
     const calls = local.callCount();
     handler.handle(frame("ordinary", { op: "prompt", text: "ordinary prompt unchanged", deliver: "steer" }));
     await vi.waitFor(() => expect(local.callCount()).toBeGreaterThan(calls));

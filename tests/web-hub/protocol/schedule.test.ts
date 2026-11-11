@@ -102,8 +102,8 @@ describe("tables / caps (§10.1)", () => {
   it("cap is sched.v1 on both sides; PROTO is not bumped (1.2)", () => {
     expect(SCHED_HUB_CAP).toBe("sched.v1");
     expect(SCHED_AGENT_CAP).toBe("sched.v1");
-    expect([...SCHED_HUB_CAPS]).toEqual(["sched.v1"]);
-    expect([...SCHED_AGENT_CAPS]).toEqual(["sched.v1"]);
+    expect([...SCHED_HUB_CAPS]).toEqual(["sched.v1", "sched.interval.v1"]);
+    expect([...SCHED_AGENT_CAPS]).toEqual(["sched.v1", "sched.interval.v1"]);
     expect(PROTO).toEqual({ major: 1, minor: 2 });
   });
 });

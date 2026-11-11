@@ -889,3 +889,35 @@ describe("createJevClient — code-point-safe detail truncation (2026-11-04 veri
     }
   });
 });
+
+describe("background abort with an uncooperative classifier", () => {
+  it("settles aborted requests and releases semaphore slots without accepting late results", async () => {
+    const { registry } = createFakeRegistry({ available: cfg().classifiers });
+    const signals: AbortSignal[] = [];
+    const resolvers: ((value: ClassifyResult) => void)[] = [];
+    registry.classify = vi.fn((_model, _input, options) => {
+      signals.push(options!.signal!);
+      return new Promise<ClassifyResult>((resolve) => resolvers.push(resolve));
+    });
+    const client = createJevClient({ config: cfg(), isChild: false, now: () => 0, health: freshHealth() });
+    const controllers = Array.from({ length: 4 }, () => new AbortController());
+    const calls = controllers.map((c) => client.ask(req({ mode: "background", signal: c.signal }, registry)));
+    await vi.waitFor(() => expect(signals).toHaveLength(4));
+    controllers.forEach((c) => c.abort());
+    expect(signals.every((s) => s.aborted)).toBe(true);
+    const results = await Promise.race([
+      Promise.all(calls),
+      new Promise<"stuck">((r) => setTimeout(() => r("stuck"), 100)),
+    ]);
+    expect(results).not.toBe("stuck");
+    if (results === "stuck") return;
+    expect(results.every((r) => !r.ok && r.reason === "aborted")).toBe(true);
+    const next = client.ask(req({ mode: "background" }, registry));
+    await vi.waitFor(() => expect(signals).toHaveLength(5));
+    resolvers.forEach((resolve) =>
+      resolve({ stopReason: "stop", answers: { e1: { type: "bool", probability: 0.9 } } }),
+    );
+    expect((await next).ok).toBe(true);
+    expect(client.usage().calls).toBe(1);
+  });
+});

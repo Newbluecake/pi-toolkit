@@ -18,9 +18,15 @@ pre-guard; widget is TUI-only. Completed tasks
 collapse out of the default views and auto-archive (on compaction and after `todo.archive.afterTurns`
 turns; `TaskList includeCompleted:true` lists everything) per `docs/dev/todo-archive/plan.md`. A read-only
 summary also reaches the web hub: `TodoWireResult.getTodoSnapshot()` → `projectTodo`
-(`src/web-hub/agent/todo.ts`, 32-task cap / 240B description / 32KiB three-pass budget) rides
+(`src/web-hub/agent/todo.ts`, 32-task cap / 512B description / 32KiB three-pass budget) rides
 the optional `StatusInfo.todo` slot (append-only, no proto bump) to a collapsible `TodoPanel`
 on the web detail header. Design: `docs/dev/todo-web/plan.md`.
+
+The 512-byte per-description limit is a UTF-8 code-point-safe source-text cap, not a
+32-row retention guarantee: the final 32 KiB JSON budget still drops whole descriptions
+from the tail when fields are large or JSON escaping expands control characters. For example,
+32 short-subject rows with 512 ASCII bytes each fit (19,059 serialized bytes), whereas 32
+rows of 512 U+0001 characters expand sixfold and only nine descriptions survive.
 
 **TodoPanel → TasksPanel（schedule-auto-approve r2 W2, 2026-11-05）**: the web detail header's
 todo surface is now the aggregated `TasksPanel.vue`（`components/detail/`）— same data path
@@ -46,19 +52,39 @@ asks for an actionable authorized-scope check first (continue tasks whose depend
 satisfied and not waiting on user/approval/external/timer; TaskUpdate after verified; do NOT
 use the nudge to start queued/unauthorized tasks), with evidence labels calibrated to the
 counting口径: E1 「N 条后台完成通知」（子 agent/workflow/bash job）, E2 「N 次 git 写操作」
-（commit/merge/cherry-pick/rebase/revert）. 阶段B（自动空闲唤醒）未实现。Tests:
+（commit/merge/cherry-pick/rebase/revert）. 阶段B 内核已实现但未接生产，见下文。Tests:
 `tests/web-hub/agent/todo-nudge-visibility.test.ts`（真实 SDK 组件 + 双端投影）。
 
-**todo-idle-recovery B1 / arrival 裁定（2026-11-08）**：已实现
-`src/todo/idle-recovery.ts` 的纯候选/指纹/窗口-Stop 内核及
-`idle-recovery-store.ts` 的全树 high-water 记账接口，**未接生产 hooks/设置/发送**，B2/B3 尚未实现。
-用户新裁定覆盖旧 strong-consumption 前置：未来可信 Host TUI/Web 新用户聊天入站 callback
-以 `HumanEpochPort` 提供 `user-arrival` proof，到达即开窗/清 Stop，不等模型消费、root-level persist
-变化或 #61 整项；连续 root-level-0 新消息每条新窗口，重复到达复用 proof 不退款。
-legacy `strong-consumption` 仅兼容；raw `admission`/`interactive`、`role:user`、机器/Task* 不续额。
-模型不能传 epoch/owner/inputId 宣称 human；本包只定义 API，不构造实际可信 producer。
-每窗口 2 次、全 sid 同组合一次、seen256 满闭、先 append attempt 再 send、unknown 不返不重试、
-旧 owner/stale epoch/重复 proof 不清 Stop、reload/replay 不造 live window 均保留。
-B2 专用 runner/owned deadline 等仍须真实 SDK 本地 conformance 证明；B3 共享入口待 #39
-当前包独验并 commit 后再接，todo 不依赖 fabric/#61 内核。详见 `../todo-idle-recovery/plan.md`
-顶部新裁定；旧历史 strong-window/Q2 口径由其覆盖。
+**todo-idle-recovery 现状（2026-11-08）**：B1 候选/指纹、窗口预算和 Stop 内核及 store，
+以及 B2 `idle-recovery-host.ts` / `idle-recovery-runner.ts` 均已在源码实现。候选须为未归档、
+依赖已完成的 `in_progress`，metadata 仅可收窄而非授权；每窗口最多 2 次、全 session 同组合只试一次，
+seen 达 256 闭锁；Stop 仅由新的合格真人到达解除；先记账再发送，unknown 不退款。runner 有 15 分钟
+期限和 10 秒宽限；空闲门要求 SDK idle/无 pending，query、workflow、jobs、notifier、web、两种 schedule、
+otherRoot 全 clear，缺失/未知闭锁。
+
+**未接生产**：`wireTodo` 不注册 recovery Host；生产缺真实 `AgentSession.subscribe` 时 runner 为
+`effective-off`，extension 的 `agent_settled` hook 本身不得排恢复。可信 arrival producer 和生产忙态口
+也未接入。独立单元测试不是生产启用证明。
+
+**尚未验证**：真实时钟下期限、跨 reload 账本语义（replay 只恢复账本，不恢复 live window）、与 #61
+fabric 唤醒、schedule 的真实拓扑互斥；异步 hook / deferred 输入 / reload 组合的 conformance
+已知不支持。历史设计及裁定见 `../todo-idle-recovery/plan.md`，其旧阶段计划不代表当前实现状态。
+
+**Nudge backoff default**: `todo.nudge.cooldownTurns` defaults to 3 silent turns; consecutive
+no-touch nudges use 3 / 6 / 12 / 12 silent turns (cap = 4 × base). The next turn after
+the silent interval is eligible to fire, so persistent candidates fire 4 / 7 / 13 turns apart.
+
+## Objective-loop removal (2026-11-09)
+
+Idle recovery no longer lists or probes a goal owner. The remaining busy sources still fail closed on unknown. Generic unknown-source tests now use `otherRoot`; production recovery remains effective-off as above.
+
+## Mutation persistence uncertainty (#84)
+
+Todo mutations apply to in-memory state before persistence. Only an exception from `persist()` is
+reported as `memoryApplied:true, persistence:"unknown"`; validation, formatting and UI errors are
+not reclassified. An append may have landed before throwing: do not repeat the mutation or recreate
+the task. `TaskGet` / `TaskList(includeCompleted:true)` inspect current memory only, not disk
+persistence; a missing deleted task is not proof of a durable deletion. Successful individual
+appends advance their own baseline; the failure path does not roll back or retry.
+`tests/todo/tools.test.ts` exercises these distinctions. Source implementation is not evidence that
+an already-running session has loaded it.

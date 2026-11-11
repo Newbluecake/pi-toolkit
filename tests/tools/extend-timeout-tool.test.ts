@@ -181,14 +181,15 @@ describe("tools/extend-timeout-tool: resolveRun", () => {
     void tool;
   });
 
-  it("a failed resolution throws the resolver's error (with candidates) untouched", async () => {
+  it("a failed resolution preserves its refusal classification without echoing arbitrary text", async () => {
     const { query } = setup(okOutcome());
     const tool = createExtendTimeoutTool({
       query,
       resolveRun: () => ({ ok: false, error: "ambiguous handle, candidates: a, b", candidates: [] }),
     });
     const message = await executeError(tool, { run_id: "rev", extend_s: 60 });
-    expect(message).toBe("ambiguous handle, candidates: a, b");
+    expect(message).toContain("code=extend_target_resolution");
+    expect(message).not.toContain("candidates: a, b");
   });
 });
 
@@ -257,7 +258,7 @@ describe("tools/extend-timeout-tool: rejection matrix (arch §4.4 — every refu
     );
     const message = await executeError(tool, { run_id: RUN_ID, extend_s: 60 });
     expect(message).toContain("has a fixed deadline (the system started it with a non-extendable time cap");
-    expect(message).toContain("/goal verifier or RPC run, or a resume of one");
+    expect(message).toContain("RPC run, or a resume of one");
     expect(message).toContain("it stops at its deadline (in 42s) and cannot be extended");
     expect(message).toContain("get_run_result"); // next step ①
     expect(message).toContain("abort_subagent and respawn with a larger timeout_s"); // next step ②
@@ -437,7 +438,7 @@ describe("tools/extend-timeout-tool: SubagentWorkflow targets", () => {
       workflowView({ deadlineAt: 70_000, hardDeadlineAt: 70_000 }),
     );
     const message = await executeError(tool, { run_id: WF, extend_s: 60 });
-    expect(message).toBe(
+    expect(message).toContain(
       `workflow ${WF} ("review-flow") has no headroom above its deadline (budget.maxTotalFactor is 1); it stops at its ` +
         `deadline (in 1m00s) and cannot be extended. Read what it produced with get_run_result(run_id: "${WF}") ` +
         "after the notification, or abort_subagent and restart the workflow with a larger timeout_s.",
@@ -463,7 +464,7 @@ describe("tools/extend-timeout-tool: SubagentWorkflow targets", () => {
     [{ ok: false, reason: "stopping" }, { stopRequested: "user_stop" }, ["is already stopping (user_stop)"]],
     [{ ok: false, reason: "already_terminal" }, { status: "completed" }, ["already finished (completed)"]],
     [{ ok: false, reason: "already_terminal" }, {}, ["already finished (its terminal decision is made)"]],
-    [{ ok: false, reason: "unsupported", detail: "boom" }, {}, ["this build cannot extend", "(boom)"]],
+    [{ ok: false, reason: "unsupported", detail: "boom" }, {}, ["this build cannot extend", "reason=unsupported"]],
     [{ ok: false, reason: "uncapped" }, {}, ["no time cap configured"]],
     [{ ok: false, reason: "unknown_workflow" }, {}, ["unknown workflow", "/agent status"]],
   ])("rejection %o → says what to do next", async (outcome, view, fragments) => {
@@ -490,7 +491,7 @@ describe("tools/extend-timeout-tool: SubagentWorkflow targets", () => {
     const child = { ...snapshot({}), parentRunId: WF } as RunSnapshot;
     const { query, tool } = setup(okOutcome(), child);
     const message = await executeError(tool, { run_id: RUN_ID, extend_s: 120 });
-    expect(message).toBe(
+    expect(message).toContain(
       `run r-abcdef is a child of workflow ${WF}; a workflow's children run under the workflow's own deadline and ` +
         `cannot be extended one by one. Extend the workflow instead: extend_subagent_timeout(run_id: "${WF}", extend_s: 120).`,
     );

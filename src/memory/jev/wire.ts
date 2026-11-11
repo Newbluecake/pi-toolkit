@@ -1,3 +1,7 @@
+import { createRevisionHost, type RevisionHostCustody } from "../govern/revision-host.js";
+import type { IncrementalBatch } from "../govern/incremental.js";
+import { resolveNativeP50Binding, type P50BindingResolver, type P50SdkBinding } from "./p50-binding.js";
+import type { MemoryActivityRecorder } from "../govern/activity.js";
 // `wireJev` — the Jev recall runtime (jev-plan §4 J6; jev-arch §5.3,
 // §6.1.1–§6.1.6, §6.2.3, §6.3.1, §8, §9.2).
 //
@@ -109,7 +113,7 @@ import {
   formatStatusLine,
 } from "./format.js";
 import { clearHealthTable, coverage, getHealthTable, notifyFor } from "./health.js";
-import { readIndex, readTaxonomyFile, writeIndexPatch } from "./index-store.js";
+import { mergeIndex, readIndex, readTaxonomyFile, updateIndexLocked, writeIndexPatch } from "./index-store.js";
 import { matchTags, prefilter } from "./match.js";
 import {
   carryFromFinal,
@@ -196,6 +200,7 @@ import { audienceMatches, effectiveAudience } from "../govern/audience.js";
 import { TOPIC_USER_POOL_CAP, decayFactor, decaySubjectOf, isDecayTarget, namesSubject } from "../govern/decay.js";
 import type { MemoryWriteGate } from "../contracts.js";
 import { parseBlockFile, type ParsedBlock } from "../blocks/format.js";
+import type { GovernanceCandidate, GovernanceSignal } from "../govern/signals.js";
 
 // ───────────────────────────── constants (jev-arch §5.5) ─────────────────────────────
 
@@ -309,7 +314,28 @@ export interface WireJevDeps {
    *  command-port、write-port 的全部侧车写入（打标/冷却戳/建议/taxonomy）都
    *  经 writeIndexPatch/writeTaxonomyFile 的逐原语 gateCheck 复检；缺省无
    *  gate 时行为与此前逐字节相同（I9，off-golden 不变）。 */
+  readonly activity?: () => MemoryActivityRecorder | undefined;
+  /** Fallback natural wake when the owner has no subscribe (coarser than onSettled). */
+  readonly activityWake?: () => void;
+  readonly governance?: {
+    capture(cwd: string, id: string, candidate: GovernanceCandidate): void;
+    take(cwd: string, id: string, inputFingerprint: string): GovernanceCandidate | undefined;
+    clear(): void;
+    mark(cwd: string, signal: GovernanceSignal): void;
+    abort(): void;
+    turnEnd(cwd: string, registry: ClassifierRegistryLike, client: JevClient): void;
+  };
   readonly writeGate?: MemoryWriteGate;
+  /** Main/plain assembly only. Provider/binding seam is trusted CODE, never settings. */
+  readonly p50?: {
+    readonly resolveBinding?: P50BindingResolver;
+    available(ctx: unknown): boolean;
+    isCurrent(batch: IncrementalBatch, ctx: unknown): boolean;
+    /** Original actual scopes-owner lifetime, independent of the generation attempt. */
+    custody?(batch: IncrementalBatch, actualCtx: unknown): RevisionHostCustody | undefined;
+    onAfterWrite(memDir: string, origin: "p50-auto"): void;
+    invalidate(): void;
+  };
 }
 
 export interface WireJevResult {
@@ -317,6 +343,14 @@ export interface WireJevResult {
   makeWritePort(): JevWritePort;
   readonly doctorPort: JevDoctorPort;
   readonly client: JevClient;
+  readonly p50?: {
+    ready(): boolean;
+    readonly handle: ReturnType<typeof createRevisionHost>["handle"];
+    readonly canAttempt: ReturnType<typeof createRevisionHost>["canAttempt"];
+    /** The ORIGINAL host closure, restricted to read-only locked custody lookup. */
+    readonly webReview: { readonly actionLocked: ReturnType<typeof createRevisionHost>["actionLocked"] };
+    reset(reason: "abort" | "tree" | "session"): void;
+  };
   /** memory-predict plan §11.1: late-bound W-signal ports (bashJobs/fleet) —
    *  `src/index.ts` attaches these post-guard, after `activeSubagentRunCount`
    *  exists; unattached ⇒ P1b sees empty bashJobs / 0 activeSubagents. */
@@ -435,7 +469,7 @@ function textOfContent(content: unknown): string {
 
 /** `ctx.modelRegistry` with all three classifier methods, else undefined
  *  (⇒ `off(pi-api)`, jev-plan §10 #2). Never throws. */
-function registryOf(ctx: unknown): ClassifierRegistryLike | undefined {
+export function registryOf(ctx: unknown): ClassifierRegistryLike | undefined {
   try {
     const r = (ctx as { modelRegistry?: unknown } | undefined)?.modelRegistry as Record<string, unknown> | undefined;
     if (r === undefined || r === null || typeof r !== "object") return undefined;
@@ -809,9 +843,111 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     });
   const isChild = deps.isChildSession;
   const config = deps.config;
+  const p50Wired =
+    !isChild && deps.settings.incremental.enabled && deps.settings.governance.enabled && deps.p50 !== undefined;
+  let p50Context: unknown;
+  let p50Closed = false;
+  let p50Binding: P50SdkBinding | undefined;
+  const p50Diagnostics = new Set<string>();
+  // P50 diagnostics NEVER use the existing persistent Jev log sink. No new
+  // sidecar/popup/turn; fixed reason set, once per reason per natural session.
+  const p50Diagnostic = (reason: string): void => {
+    if (p50Diagnostics.has(reason) || p50Diagnostics.size >= 12) return;
+    p50Diagnostics.add(reason);
+    const line = `p50: ${reason}; incremental unavailable, legacy Jev retained`;
+    if (ui !== undefined) {
+      errorLog.push({ at: now(), line });
+      if (errorLog.length > JEV_ERROR_LOG_MAX) errorLog.shift();
+    } else console.warn(line);
+  };
+  const currentP50Binding = (): P50SdkBinding | undefined => {
+    if (!p50Wired || p50Closed || p50Context === undefined) return undefined;
+    let next: P50SdkBinding | undefined;
+    let reason: string | undefined;
+    const r = registryOf(p50Context);
+    try {
+      if (!(Number.isFinite(deps.settings.incremental.jobCostCapUsd) && deps.settings.incremental.jobCostCapUsd > 0))
+        reason = "job-budget-zero";
+      else if (!deps.p50!.available(p50Context)) reason = "activity-owner-unavailable";
+      else if (!r) reason = "current-registry-missing";
+      else {
+        const result = (deps.p50?.resolveBinding ?? resolveNativeP50Binding)(r, config.classifiers);
+        if (
+          result.kind === "ready" &&
+          result.binding.registry === r &&
+          result.binding.isCurrent() &&
+          result.binding.classifiers.length === config.classifiers.length &&
+          result.binding.classifiers.every((id, i) => id === config.classifiers[i])
+        ) {
+          const stream = result.binding.revision.transport.streamingProxy;
+          if (
+            (config.proxy !== "" || stream !== undefined) &&
+            (stream === undefined ||
+              stream.registry !== r ||
+              stream.proxy !== config.proxy ||
+              typeof stream.fetch !== "function" ||
+              !stream.chainVersion ||
+              !stream.isCurrent())
+          )
+            reason = "streaming-proxy-contract-missing";
+          else next = result.binding;
+        } else reason = result.kind === "unsupported" ? result.reason : "binding-invalid";
+      }
+    } catch {
+      reason = "binding-invalid";
+    }
+    if (p50Binding !== undefined && next !== p50Binding) {
+      p50Binding = undefined;
+      revisionHost?.reset("abort");
+      deps.p50?.invalidate(); // abort scheduler signal before any old late result
+    }
+    p50Binding = next;
+    if (reason) p50Diagnostic(reason);
+    return next;
+  };
   const client: JevClientHandle =
     deps.client ??
-    createJevClient({ config, isChild, now, log: (line) => log(line.replace(/^\[pi-subagent\] jev: /, "")) });
+    createJevClient({
+      config,
+      isChild,
+      now,
+      log: (line) => log(line.replace(/^\[pi-subagent\] jev: /, "")),
+      ...(p50Wired && deps.settings.incremental.jobCostCapUsd > 0
+        ? {
+            p50: {
+              enabled: true,
+              onUnavailable: p50Diagnostic,
+              current: (expected) => {
+                const b = currentP50Binding();
+                return b?.registry === expected ? b : undefined;
+              },
+            },
+          }
+        : {}),
+    });
+  const revisionHost = p50Wired
+    ? createRevisionHost({
+        client,
+        binding: currentP50Binding,
+        isCurrent: (batch) => !p50Closed && deps.p50!.isCurrent(batch, p50Context) && currentP50Binding() !== undefined,
+        canAttempt: () => {
+          if (!currentP50Binding()) return false;
+          const u = client.usage();
+          return (
+            (config.maxCalls <= 0 || u.calls + (u.budget?.reservedCalls ?? 0) < config.maxCalls) &&
+            (config.maxCostUsd <= 0 || u.costUsd + (u.budget?.reservedCostUsd ?? 0) < config.maxCostUsd)
+          );
+        },
+        autoEnabled: () => deps.settings.incremental.auto === true,
+        ...(deps.p50?.custody ? { custody: (batch: IncrementalBatch) => deps.p50!.custody!(batch, p50Context) } : {}),
+        ...(deps.writeGate === undefined ? {} : { gate: deps.writeGate }),
+        now: () => new Date(now()),
+        onAfterWrite: (dir, origin) => deps.p50!.onAfterWrite(dir, origin),
+        // The host already bounds its per-directory diagnostics; retain a fixed
+        // aggregate code here rather than leaking parser/provider error strings.
+        diagnostic: () => p50Diagnostic("revision-host-unavailable"),
+      })
+    : undefined;
   const entryIndex = deps.entryIndex ?? new EntryIndex();
   const segment: SegmentState = createSegmentState();
   const platform = deps.platform ?? process.platform;
@@ -1024,7 +1160,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     } catch {
       return false; // deleted / rolled back mid-wait
     }
-    const parsed = parseBlockFile(name, raw);
+    const parsed = parseBlockFile(name, raw, { softLimits: true });
     if ("stray" in parsed) return false;
     if (rev !== undefined && parsed.rev !== rev) return false;
     return eligible(parsed, undefined, {
@@ -1046,7 +1182,9 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
   const effectiveStatus = (): JevStatus => (registryOk === true ? client.status() : { kind: "off", reason: "pi-api" });
 
   const observe = (ctx: unknown): ClassifierRegistryLike | undefined => {
+    if (p50Wired) p50Context = ctx;
     const r = registryOf(ctx);
+    if (p50Binding !== undefined) currentP50Binding();
     registryOk = r !== undefined;
     if (r !== undefined) registry = r;
     return r;
@@ -1173,17 +1311,37 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     recoveryTimer = { handle, at };
   }
 
-  /** Background task queue (bulk tagging / backfill / review): serialized,
-   *  each capped at 120s, aborted on session_shutdown. Main session only. */
-  const enqueue = (name: string, task: (signal: AbortSignal) => Promise<void>): void => {
-    if (isChild) return;
+  /** Running job counts toward the bound; reject newest rather than silently
+   * discard work already accepted. Each job owns its abort and commit lease. */
+  const enqueue = (name: string, task: (signal: AbortSignal, valid: () => boolean) => Promise<void>): void => {
+    if (isChild || bgAbort.signal.aborted) return;
+    if (bgDepth >= deps.settings.jev.backgroundQueueLimit) {
+      log(`${name} rejected: background queue full (limit ${String(deps.settings.jev.backgroundQueueLimit)})`);
+      return;
+    }
     bgDepth += 1;
-    const signal = bgAbort.signal;
+    const sessionSignal = bgAbort.signal;
     bgChain = bgChain
       .then(async () => {
-        if (signal.aborted) return;
-        const r = await withTimeout(task(signal), BACKGROUND_TOTAL_MS);
-        if (r === TIMEOUT) log(`${name} exceeded ${BACKGROUND_TOTAL_MS}ms — abandoned`);
+        if (sessionSignal.aborted) return;
+        const controller = new AbortController();
+        let live = true;
+        const abort = (): void => {
+          live = false;
+          controller.abort();
+        };
+        sessionSignal.addEventListener("abort", abort, { once: true });
+        const valid = (): boolean => live && !sessionSignal.aborted && !controller.signal.aborted;
+        try {
+          const r = await withTimeout(task(controller.signal, valid), BACKGROUND_TOTAL_MS);
+          if (r === TIMEOUT) {
+            abort();
+            log(`${name} exceeded ${BACKGROUND_TOTAL_MS}ms — aborted`);
+          }
+        } finally {
+          abort();
+          sessionSignal.removeEventListener("abort", abort);
+        }
       })
       .catch((err: unknown) => log(`${name} failed: ${String((err as Error)?.message ?? err)}`))
       .finally(() => {
@@ -1191,22 +1349,49 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
       });
   };
 
-  const persistTags = async (dir: string, upserts: Record<EntryHash, EntryTags>): Promise<void> => {
-    if (Object.keys(upserts).length === 0) return;
-    const out = await writeIndexPatch(
-      dir,
-      { upsert: upserts, lastTaggedAt: new Date(now()).toISOString() },
-      deps.writeGate,
-    );
-    if (out === "busy") log("sidecar busy — tagging results not saved");
-    dataCache.delete(dir);
+  const jobGate = (valid: () => boolean): MemoryWriteGate => ({
+    check: (dir) =>
+      valid() ? (deps.writeGate?.check(dir) ?? { ok: true }) : { ok: false, reason: "identity-changed" },
+    capture: (dir) => deps.writeGate?.capture(dir),
+  });
+  const STALE_JOB = Symbol("stale-job");
+  const persistTags = async (
+    dir: string,
+    upserts: Record<EntryHash, EntryTags>,
+    base: Record<EntryHash, EntryTags>,
+    taxonomyRev: string,
+    valid: () => boolean,
+  ): Promise<void> => {
+    if (!valid() || Object.keys(upserts).length === 0) return;
+    try {
+      const out = await updateIndexLocked(
+        dir,
+        (index) => {
+          const currentTaxonomy = mergeTaxonomy(readTaxonomyFile(dir));
+          if (!valid() || !currentTaxonomy.ok || currentTaxonomy.taxonomy.rev !== taxonomyRev) throw STALE_JOB;
+          const live = new Set(taggableEntries(new EntryIndex().get(dir)).map((entry) => entry.hash));
+          const fresh = Object.fromEntries(
+            Object.entries(upserts).filter(
+              ([hash]) => live.has(hash) && JSON.stringify(index.entries[hash]) === JSON.stringify(base[hash]),
+            ),
+          );
+          if (Object.keys(fresh).length === 0) throw STALE_JOB;
+          return mergeIndex(index, { upsert: fresh, lastTaggedAt: new Date(now()).toISOString() });
+        },
+        jobGate(valid),
+      );
+      if (out === "busy") log("sidecar busy — tagging results not saved");
+      dataCache.delete(dir);
+    } catch (err) {
+      if (err !== STALE_JOB && valid()) throw err;
+    }
   };
 
   /** §6.2.3 bulk tagging. `scope: "migration"` runs only when something is
    *  pending or tagged under an older taxonomy; "all" (tag add/enable) always
    *  re-asks every enabled tag. */
   const runBulk = (cwd: string, scope: "migration" | "all"): void => {
-    enqueue("bulk tagging", async (signal) => {
+    enqueue("bulk tagging", async (signal, valid) => {
       const reg = registry;
       const c = corpusFor(cwd);
       if (reg === undefined || c === undefined) return;
@@ -1229,8 +1414,8 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
           upserts[hash] = tags;
         },
       });
-      await persistTags(c.dir, upserts);
-      refreshInactive(cwd);
+      await persistTags(c.dir, upserts, c.index.entries, c.taxonomy.rev, valid);
+      if (valid()) refreshInactive(cwd);
     });
   };
 
@@ -1244,7 +1429,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     const pending = taggableEntries(c.entries).filter((e) => c.index.entries[e.hash] === undefined);
     if (pending.length === 0) return;
     lastBackfillAt = now();
-    enqueue("pending backfill", async (signal) => {
+    enqueue("pending backfill", async (signal, valid) => {
       const reg = registry;
       if (reg === undefined) return;
       const upserts: Record<EntryHash, EntryTags> = {};
@@ -1262,8 +1447,8 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
         if (r.tags !== undefined) upserts[entry.hash] = r.tags;
         else if (!r.outcome.ok) break;
       }
-      await persistTags(c.dir, upserts);
-      refreshInactive(cwd);
+      await persistTags(c.dir, upserts, c.index.entries, c.taxonomy.rev, valid);
+      if (valid()) refreshInactive(cwd);
     });
   };
 
@@ -1277,7 +1462,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     const lastMs = last === undefined ? Number.NaN : Date.parse(last);
     if (Number.isFinite(lastMs) && now() - lastMs < config.reviewIntervalDays * DAY_MS) return;
     if (c.index.review !== undefined && c.index.review.corpusFp === corpusFingerprint(c.entries)) return;
-    enqueue("periodic review", async (signal) => {
+    enqueue("periodic review", async (signal, valid) => {
       const reg = registry;
       if (reg === undefined || client.status().kind !== "full") return;
       const outcome = await runReviewPass({
@@ -1293,7 +1478,26 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
         log(`periodic review failed (${outcome.reason})`);
         return;
       }
-      const out = await writeIndexPatch(c.dir, { review: outcome }, deps.writeGate);
+      if (!valid()) return;
+      let out: "ok" | "busy";
+      try {
+        out = await updateIndexLocked(
+          c.dir,
+          (index) => {
+            if (
+              !valid() ||
+              JSON.stringify(index.review) !== JSON.stringify(c.index.review) ||
+              corpusFingerprint(new EntryIndex().get(c.dir)) !== corpusFingerprint(c.entries)
+            )
+              throw STALE_JOB;
+            return mergeIndex(index, { review: outcome, reviewBase: c.index.review ?? null });
+          },
+          jobGate(valid),
+        );
+      } catch (err) {
+        if (err === STALE_JOB || !valid()) return;
+        throw err;
+      }
       if (out === "busy") log("sidecar busy — review results not saved");
       dataCache.delete(c.dir);
     });
@@ -2774,6 +2978,115 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     }
   });
 
+  const governanceCandidate = (event: ToolCallEvent, ctx: ExtensionContext): void => {
+    const port = deps.governance;
+    if (!port || isChild) return;
+    const cwd = cwdOf(ctx);
+    let kind: GovernanceSignal | undefined;
+    let taskId: number | undefined;
+    const input = event.input as Record<string, unknown>;
+    if (
+      event.toolName === "TaskUpdate" &&
+      input["status"] === "completed" &&
+      typeof input["taskId"] === "string" &&
+      Object.keys(input).every((key) => key === "taskId" || key === "status")
+    ) {
+      const id = /^#?\d+$/.test(input["taskId"]) ? Number(input["taskId"].replace(/^#/, "")) : NaN;
+      const prior = deps.todo?.list().find((task) => task.id === id);
+      if (prior && prior.status !== "completed") {
+        kind = "task-done";
+        taskId = id;
+      }
+    } else if (event.toolName === "bash" && typeof input["command"] === "string") {
+      const command = input["command"].trim();
+      // Restrict to literal single commands: shell control, expansion, quotes,
+      // redirects and comments cannot be proven by a flat parser.
+      if (command.length <= 8192 && /^[A-Za-z0-9_./:=@+%,\-\s]+$/.test(command) && !/[\r\n]/.test(command)) {
+        const parsed = parseShell(command);
+        const c = parsed.ok && !parsed.hasRedirect && parsed.commands.length === 1 ? parsed.commands[0] : undefined;
+        if (
+          c &&
+          !c.argv.some(
+            (arg) =>
+              arg === "--dry-run" ||
+              arg.startsWith("--dry-run=") ||
+              arg === "--changelog" ||
+              arg.startsWith("--changelog=") ||
+              arg === "--help" ||
+              arg === "--version" ||
+              arg.startsWith("--help=") ||
+              arg === "-h" ||
+              /^-[^-]*n/.test(arg),
+          )
+        ) {
+          const program = basename(c.argv[0] ?? "");
+          if (
+            program === "git" &&
+            c.argv[1] === "push" &&
+            /^(?:[A-Za-z0-9_./-]+\/)?git\s+(?:(?:-C\s+[A-Za-z0-9_./-]+|--no-pager)\s+)*push(?:\s|$)/.test(command)
+          )
+            kind = "push";
+          else if (
+            program === "gh" &&
+            c.argv[1] === "release" &&
+            c.argv[2] === "create" &&
+            /^(?:[A-Za-z0-9_./-]+\/)?gh\s+release\s+create(?:\s|$)/.test(command)
+          )
+            kind = "release";
+          else if (
+            (program === "release.sh" && /^(?:[A-Za-z0-9_./-]+\/)?release\.sh(?:\s|$)/.test(command)) ||
+            (["bash", "sh"].includes(program) &&
+              basename(c.argv[1] ?? "") === "release.sh" &&
+              /^(?:[A-Za-z0-9_./-]+\/)?(?:bash|sh)\s+(?:[A-Za-z0-9_./-]+\/)?release\.sh(?:\s|$)/.test(command))
+          )
+            kind = "release";
+        }
+      }
+    }
+    if (!kind) return;
+    port.capture(cwd, event.toolCallId, {
+      kind,
+      inputFingerprint: createHash("sha256").update(JSON.stringify(input)).digest("hex"),
+      ...(taskId === undefined ? {} : { taskId }),
+    });
+  };
+  const governanceResult = (event: ToolResultEvent, ctx: ExtensionContext): void => {
+    const cwd = cwdOf(ctx);
+    const fingerprint = createHash("sha256").update(JSON.stringify(event.input)).digest("hex");
+    const candidate = deps.governance?.take(cwd, event.toolCallId, fingerprint);
+    if (
+      !candidate ||
+      event.isError ||
+      (candidate.kind === "task-done" ? event.toolName !== "TaskUpdate" : event.toolName !== "bash")
+    )
+      return;
+    const details = event.details as Record<string, unknown> | undefined;
+    if (candidate.kind === "task-done") {
+      const task = details?.["task"] as { id?: unknown; status?: unknown } | undefined;
+      if (
+        details?.["action"] !== "update" ||
+        details["changed"] !== true ||
+        task?.id !== candidate.taskId ||
+        task?.status !== "completed"
+      )
+        return;
+    } else {
+      const structured = event.structuredContent as Record<string, unknown> | undefined;
+      if (
+        !structured ||
+        structured["exit_code"] !== 0 ||
+        details?.["jobId"] !== undefined ||
+        details?.["backgrounded"] === true ||
+        details?.["timedOut"] === true ||
+        details?.["aborted"] === true ||
+        structured["timedOut"] === true ||
+        structured["aborted"] === true
+      )
+        return;
+    }
+    deps.governance?.mark(cwd, candidate.kind);
+  };
+
   // tool_call: the A layer only (the interception gate was removed with the
   // gate feature, 2026-11). Fully synchronous — returns `undefined` with ZERO
   // awaits. Everything is wrapped: an exception never blocks the call (C-J2 —
@@ -2781,7 +3094,10 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
   pi.on("tool_call", (event: ToolCallEvent, ctx: ExtensionContext) => {
     if (!runs) return undefined;
     try {
+      deps.activity?.()?.noteToolCall(event.toolCallId, now());
+      deps.activityWake?.();
       if (observe(ctx) === undefined) return undefined;
+      governanceCandidate(event, ctx);
       fastPath(event, cwdOf(ctx));
       if (config.predict.enabled) {
         try {
@@ -2811,7 +3127,10 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
   pi.on("tool_result", (event: ToolResultEvent, ctx: ExtensionContext) => {
     if (!runs) return undefined;
     try {
+      deps.activity?.()?.noteToolResult(event.toolCallId, now());
+      deps.activityWake?.();
       if (observe(ctx) === undefined) return undefined;
+      governanceResult(event, ctx);
       if (config.predict.enabled) {
         if (event.toolName === "edit" || event.toolName === "write" || event.toolName === "bash") invalidateDirty();
         if (event.isError === true) {
@@ -2886,8 +3205,13 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     pi.on("session_start", (_event: unknown, ctx: ExtensionContext) => {
       if (!runs) return;
       try {
+        if (p50Wired) {
+          p50Diagnostics.clear();
+          revisionHost?.reset("session");
+        }
         const reg = observe(ctx);
         generation += 1;
+        deps.governance?.clear();
         errorSignatures = new Set();
         errorAsks = 0;
         parsedCache.clear();
@@ -2896,6 +3220,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
         // branch on the next turn (arch §3.3.5 恢复) — reset the restored
         // flags so residentTurn rescans instead of trusting in-memory state.
         for (const st of residentStates.values()) st.restored = false;
+        bgAbort.abort();
         bgAbort = new AbortController();
         seedFrom(ctx);
         if (reg === undefined) return; // off(pi-api)
@@ -2906,6 +3231,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
         } catch {
           ui = undefined;
         }
+        if (p50Wired) currentP50Binding();
         refreshInactive(cwd);
         void probeOnce();
       } catch (err) {
@@ -2924,10 +3250,22 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     }
   });
 
-  pi.on("turn_end", (_event: unknown, ctx: ExtensionContext) => {
+  pi.on("turn_end", (event, ctx: ExtensionContext) => {
     if (!runs) return undefined;
     try {
-      if (observe(ctx) === undefined) return undefined;
+      const message = event.message as { stopReason?: unknown } | undefined;
+      const aborted = message?.stopReason === "aborted";
+      if (aborted) {
+        deps.governance?.clear();
+        deps.governance?.abort();
+      }
+      if (!aborted) deps.activityWake?.();
+      const currentRegistry = observe(ctx);
+      if (currentRegistry === undefined) return undefined;
+      if (!aborted) {
+        deps.governance?.clear();
+        deps.governance?.turnEnd(cwdOf(ctx), currentRegistry, client);
+      }
       turnSeq += 1;
       const branch = branchOf(ctx);
       if (branch === undefined) return undefined;
@@ -2943,9 +3281,16 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
 
   pi.on("session_shutdown", (event: SessionShutdownEvent) => {
     try {
+      deps.governance?.clear();
       recallAbort?.abort();
       bgAbort.abort();
       client.abortBackground();
+      if (revisionHost) {
+        p50Closed = true;
+        p50Context = undefined;
+        revisionHost.dispose();
+        p50Binding = undefined;
+      }
       // memory-predict plan §8.2: abort the in-flight predict request, clear
       // its timers, and mark the P2 model state disposed — late settles then
       // produce no side effects (no cache writes, no call records).
@@ -3164,6 +3509,17 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     },
     doctorPort,
     client,
+    ...(revisionHost
+      ? {
+          p50: {
+            ready: () => currentP50Binding() !== undefined,
+            handle: revisionHost.handle,
+            canAttempt: revisionHost.canAttempt,
+            webReview: Object.freeze({ actionLocked: revisionHost.actionLocked }),
+            reset: (reason: "abort" | "tree" | "session") => revisionHost.reset(reason),
+          },
+        }
+      : {}),
     attachPredictPorts(ports) {
       predictBashJobs = ports.bashJobs;
       predictFleet = ports.fleet;

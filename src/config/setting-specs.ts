@@ -3,6 +3,7 @@ import { bool, choice, count, seconds, type SettingSpec } from "./spec-helpers.j
 export type { SettingSpec, SettingSpecBase } from "./spec-helpers.js";
 import { COMPACT_SETTING_SPECS } from "../compact-hint/setting-specs.js";
 import { WEBHUB_SETTING_SPECS, FEISHU_BOT_SETTING_SPECS } from "../web-hub/agent/setting-specs.js";
+import { FEISHU_NOTIFY_SETTING_SPECS } from "../feishu-notify/setting-specs.js";
 import { TODO_SETTING_SPECS } from "../todo/setting-specs.js";
 import { ASK_USER_SETTING_SPECS } from "../ask-user/setting-specs.js";
 import { TITLE_SETTING_SPECS } from "../title/setting-specs.js";
@@ -11,7 +12,6 @@ import { CACHE_TTL_SETTING_SPECS } from "../cache-ttl/setting-specs.js";
 import { WORKFLOW_SETTING_SPECS } from "../workflow/setting-specs.js";
 import { BASH_JOBS_SETTING_SPECS } from "../bash/setting-specs.js";
 import { FABRIC_SETTING_SPECS } from "../fabric/setting-specs.js";
-import { GOAL_SETTING_SPECS } from "../goal/setting-specs.js";
 import { QUOTA_SETTING_SPECS } from "../quota/setting-specs.js";
 import { LOAD_SETTING_SPECS } from "../sysload/setting-specs.js";
 import { SYSTEM_PROMPT_SETTING_SPECS } from "../sysprompt/setting-specs.js";
@@ -46,7 +46,7 @@ const BUDGET_DESCRIPTIONS: Record<keyof DeadlineBudget, string> = {
     "Grace after the total budget for extendable runs, including explicit Agent timeouts (default 600 seconds); fixed runs have no grace; 0 = off",
   maxExtensions: "Max deadline extensions per run; 0 = no extension and no grace",
   maxTotalFactor:
-    "Hard ceiling as a multiple of the run's total budget, explicit timeout_s included (fixed-deadline system runs — workflow children, /goal verifier, RPC — are always 1)",
+    "Hard ceiling as a multiple of the run's total budget, explicit timeout_s included (fixed-deadline system runs — workflow children, RPC — are always 1)",
   extendStepMs:
     "Max seconds granted by a single extend_subagent_timeout call (default 3600); also widens the hard ceiling for extendable runs to total + maxExtensions × step; 0 = legacy (no per-grant cap, factor-only ceiling)",
 };
@@ -135,6 +135,7 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
   ...TODO_SETTING_SPECS,
   ...ASK_USER_SETTING_SPECS,
   "feishuNotify.enabled": bool("feishuNotify.enabled", "Feishu notification cards (main session only)"),
+  ...FEISHU_NOTIFY_SETTING_SPECS,
   "sessionNav.enabled": bool(
     "sessionNav.enabled",
     "Session navigation: /resume-recent 48h window, /clear, bare exit, resume-list titles",
@@ -160,7 +161,6 @@ export const SETTING_SPECS: Record<string, SettingSpec> = {
   ...WORKFLOW_SETTING_SPECS,
   ...BASH_JOBS_SETTING_SPECS,
   ...FABRIC_SETTING_SPECS,
-  ...GOAL_SETTING_SPECS,
   ...QUOTA_SETTING_SPECS,
   ...LOAD_SETTING_SPECS,
   ...SYSTEM_PROMPT_SETTING_SPECS,

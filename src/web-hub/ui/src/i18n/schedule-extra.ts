@@ -28,6 +28,16 @@ const en = {
   /** Per-task missed total > 0 (§4.4/§5.5). */
   missedNote: "{n} missed",
 
+  taskEdit: "Edit",
+  editInvalid: "Remove standalone -- from the name or schedule value, then retry.",
+  editName: "Task name",
+  editWhen: "Schedule value (90m / cron / local date-time)",
+  editTz: "IANA time zone",
+  editSave: "Save changes",
+  editEveryHint:
+    "every uses elapsed UTC: s/m/h/d (d=24h), up to 3 decimals, whole seconds within 30s..365d. No tz. Missed due points aggregate into one catch-up run.",
+  editPolicyHint:
+    "Web edits use /schedule edit and respect command policy. If denied, set webHub.webCommandPolicy.schedule to confirm in local settings and /reload, then retry.",
   taskEnabled: "enabled",
   taskPaused: "paused",
   /** r2 §6-W2: task-row action buttons (policy-confirm write path). */
@@ -43,14 +53,17 @@ const en = {
   taskStats: "fired {fired} · missed {missed} · skipped {skipped} · manual {manual}",
   taskFeishuOn: "feishu",
   taskNext: "next {t}",
+  taskNextRelative: "next {t}",
+  taskTriggerPaused: "trigger paused",
+  taskDue: "due",
   taskNextNever: "next —",
   taskCreatedByAgent: "created by AI",
   whenCron: "cron {expr} ({tz})",
   whenOnce: "once {expr} ({tz})",
+  whenEvery: "every {expr} (UTC)",
   whenInvalid: "(invalid schedule)",
   formBackground: "background",
   formMessage: "message",
-  details: "Details",
 
   runAuto: "auto",
   runManual: "manual",
@@ -127,6 +140,16 @@ const zh: Record<keyof typeof en, string> = {
   droppedReports: "{n} 份报告未能投递（索引溢出）",
   missedNote: "错过 {n} 次",
 
+  taskEdit: "编辑",
+  editInvalid: "请移除名称或时间值中独立的 -- 后重试。",
+  editName: "任务名称",
+  editWhen: "时间值（90m / cron / 本地日期时间）",
+  editTz: "IANA 时区",
+  editSave: "保存修改",
+  editEveryHint:
+    "every 使用 UTC elapsed 间隔：s/m/h/d（d=24h），最多三位小数，整秒且 30s..365d，不可带 tz；错过聚合补一次。",
+  editPolicyHint:
+    "网页编辑走 /schedule edit，遵守命令策略。若被拒绝，请在本地设置 webHub.webCommandPolicy.schedule 为 confirm 并 /reload 后重试。",
   taskEnabled: "已启用",
   taskPaused: "已暂停",
   /** r2 §6-W2：任务行操作按钮（走 policy confirm 的写路径）。 */
@@ -142,14 +165,17 @@ const zh: Record<keyof typeof en, string> = {
   taskStats: "已执行 {fired} · 错过 {missed} · 跳过 {skipped} · 手动 {manual}",
   taskFeishuOn: "推飞书",
   taskNext: "下次 {t}",
+  taskNextRelative: "下次 {t} 后",
+  taskTriggerPaused: "暂停触发",
+  taskDue: "即将触发",
   taskNextNever: "下次 —",
   taskCreatedByAgent: "AI 创建",
   whenCron: "cron {expr}（{tz}）",
   whenOnce: "一次性 {expr}（{tz}）",
+  whenEvery: "every {expr} (UTC)",
   whenInvalid: "（时间定义无效）",
   formBackground: "后台运行",
   formMessage: "定时消息",
-  details: "详情",
 
   runAuto: "自动",
   runManual: "手动",

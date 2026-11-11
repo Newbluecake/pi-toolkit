@@ -76,6 +76,8 @@ export interface LedgerEntry {
   owner?: string;
   readonly at: number;
   updatedAt: number;
+  /** Internal-only reserved memory completion; never contains capabilities or callbacks. */
+  memoryCompletion?: true;
 }
 
 export type BeginOutcome =
@@ -101,6 +103,8 @@ export interface CommandLedger {
     now: number,
     extra?: { text?: string; runId?: string; sessionId?: string; owner?: string },
   ): BeginOutcome;
+  reserveMemoryCompletion(id: string, now: number): boolean;
+  settleMemoryCompletion(id: string, result: LedgerResult, now: number, late?: boolean): boolean;
   get(id: string): LedgerEntry | undefined;
   /** Settle a running entry to a terminal state. A retryable, effect:"none" failure is deleted
    * instead of cached (D7 rule 2) so a retry re-executes from scratch. `opts.late` marks this as
@@ -207,15 +211,19 @@ function heldWithinGrace(e: LedgerEntry, now: number): boolean {
 
 /** Evict TTL-expired terminal entries, then oldest-terminal-first down to capacity. Running
  * entries are never evicted (D7: "只淘汰终态项"). */
+function protectedMemory(e: LedgerEntry, now: number): boolean {
+  return e.memoryCompletion === true && (e.state === "running" || now - e.updatedAt <= LEDGER_TTL_MS);
+}
+
 function sweep(bag: LedgerBag, now: number): void {
   for (const [id, e] of bag.entries) {
-    if (e.state === "running" || heldWithinGrace(e, now)) continue;
+    if (e.state === "running" || heldWithinGrace(e, now) || protectedMemory(e, now)) continue;
     if (now - e.updatedAt > LEDGER_TTL_MS) bag.entries.delete(id);
   }
   const over = bag.entries.size - LEDGER_CAPACITY;
   if (over <= 0) return;
   const terminal = [...bag.entries.values()]
-    .filter((e) => e.state !== "running" && !heldWithinGrace(e, now))
+    .filter((e) => e.state !== "running" && !heldWithinGrace(e, now) && !protectedMemory(e, now))
     .sort((a, b) => a.updatedAt - b.updatedAt);
   let remaining = over;
   for (const e of terminal) {
@@ -267,12 +275,31 @@ export function createCommandLedger(): CommandLedger {
       if (existing.state === "running") return { kind: "running" };
       return { kind: "dup", result: existing.result! };
     },
+    reserveMemoryCompletion(id, now) {
+      sweep(bag, now);
+      const entry = bag.entries.get(id);
+      if (!entry || entry.state !== "running" || entry.memoryCompletion === true) return false;
+      let reserved = 0;
+      for (const item of bag.entries.values()) if (item.memoryCompletion === true) reserved++;
+      if (reserved >= 32) return false;
+      entry.memoryCompletion = true;
+      return true;
+    },
+    settleMemoryCompletion(id, result, now, late = true) {
+      const entry = bag.entries.get(id);
+      if (!entry || entry.memoryCompletion !== true || entry.state !== "running") return false;
+      entry.state = result.ok ? "ok" : "failed";
+      entry.result = result.ok ? result : { ...result, retryable: false };
+      entry.updatedAt = now;
+      if (late) entry.late = true;
+      return true;
+    },
     get(id) {
       return bag.entries.get(id);
     },
     settle(id, result, now, opts) {
       const e = bag.entries.get(id);
-      if (e === undefined) return;
+      if (e === undefined || e.memoryCompletion === true) return;
       if (!result.ok && result.retryable && result.effect === "none") {
         bag.entries.delete(id);
         return;

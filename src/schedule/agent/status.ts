@@ -7,13 +7,13 @@
 import type { Clock, TimerHandle } from "../../core/clock.js";
 import { nextOccurrence } from "../core/cron.js";
 import { compileTask } from "../core/occurrence.js";
-import { isExecutable, isTerminalRunState, type ScheduleStateFile } from "../core/spec.js";
+import { displayTz, isExecutable, isTerminalRunState, type ScheduleStateFile } from "../core/spec.js";
 import type { XsHostCapabilityState } from "../../fabric/xs/host-cap.js";
 import type { ScheduleAgent } from "./wire.js";
 
 export const SCHED_STATUS_REFRESH_MS = 15_000;
 
-function localParts(at: number, tz: string): { day: string; hm: string; md: string } | undefined {
+function localParts(at: number, tz: string, seconds = false): { day: string; hm: string; md: string } | undefined {
   try {
     const f = new Intl.DateTimeFormat("en-CA", {
       timeZone: tz,
@@ -22,11 +22,16 @@ function localParts(at: number, tz: string): { day: string; hm: string; md: stri
       day: "2-digit",
       hour: "2-digit",
       minute: "2-digit",
+      ...(seconds ? { second: "2-digit" as const } : {}),
       hourCycle: "h23",
     });
     const o: Record<string, string> = {};
     for (const p of f.formatToParts(new Date(at))) o[p.type] = p.value;
-    return { day: `${o.year}-${o.month}-${o.day}`, hm: `${o.hour}:${o.minute}`, md: `${o.month}-${o.day}` };
+    return {
+      day: `${o.year}-${o.month}-${o.day}`,
+      hm: `${o.hour}:${o.minute}${seconds ? `:${o.second}` : ""}`,
+      md: `${o.month}-${o.day}`,
+    };
   } catch {
     return undefined;
   }
@@ -34,18 +39,20 @@ function localParts(at: number, tz: string): { day: string; hm: string; md: stri
 
 /** Earliest next occurrence over the executable tasks, rendered in that task's own tz. */
 export function nextLabel(state: ScheduleStateFile, now: number): string | undefined {
-  let best: { at: number; tz: string } | undefined;
+  let best: { at: number; tz: string; seconds: boolean } | undefined;
   for (const t of state.tasks) {
     if (!isExecutable(t)) continue;
     const c = compileTask(t);
     const at = c === undefined ? undefined : nextOccurrence(c, now);
-    if (at !== undefined && (best === undefined || at < best.at)) best = { at, tz: t.when.tz };
+    if (at !== undefined && (best === undefined || at < best.at))
+      best = { at, tz: displayTz(t.when), seconds: t.when.kind === "every" };
   }
   if (best === undefined) return undefined;
-  const p = localParts(best.at, best.tz);
+  const p = localParts(best.at, best.tz, best.seconds);
   if (p === undefined) return undefined;
   const today = localParts(now, best.tz);
-  return today !== undefined && today.day === p.day ? p.hm : `${p.md} ${p.hm}`;
+  const label = today !== undefined && today.day === p.day ? p.hm : `${p.md} ${p.hm}`;
+  return best.seconds ? `${label} UTC` : label;
 }
 
 export interface StatusFacts {

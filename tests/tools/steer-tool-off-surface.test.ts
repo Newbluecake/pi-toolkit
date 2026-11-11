@@ -95,6 +95,7 @@ const DECLARED_SUBS: readonly (readonly [string, string])[] = [
   ['kind "finding"', 'kind "report"'],
   ["Findings are", "Reports are"],
   ["fabric.findingQuota", "fabric.reportQuota"],
+  ["default 10", "default 3"],
 ];
 
 const applySubs = (text: string, subs: readonly (readonly [string, string])[]): string =>

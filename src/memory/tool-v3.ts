@@ -28,7 +28,10 @@
  * all mutable state lives in this factory's closure; no module state.
  */
 
-import { join } from "node:path";
+import { projectError } from "./unified/errors.js";
+import type { MemoryV4Params, ProjectReadGroup, ReadInspection } from "./unified/types.js";
+import { dirname, join } from "node:path";
+import { recordSoftMeta } from "./soft-meta.js";
 import type { ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { MemorySettings } from "../config/settings.js";
 import { resolveWorktreeOrigin } from "../core/worktree-origin.js";
@@ -174,6 +177,8 @@ interface WriteMeta {
   clearExpires?: true;
   until?: string;
   clearUntil?: true;
+  section?: string;
+  clearSection?: true;
   tagsAdd?: readonly string[];
   tagsRemove?: readonly string[];
   isPrivate?: boolean;
@@ -198,6 +203,8 @@ function parseWriteMeta(rawText: string): { meta: WriteMeta; body: string } {
     ...(meta.clearExpires === undefined ? {} : { clearExpires: meta.clearExpires }),
     ...(meta.until === undefined ? {} : { until: meta.until }),
     ...(meta.clearUntil === undefined ? {} : { clearUntil: meta.clearUntil }),
+    ...(meta.section === undefined ? {} : { section: meta.section }),
+    ...(meta.clearSection === undefined ? {} : { clearSection: meta.clearSection }),
     ...(meta.tagsAdd === undefined ? {} : { tagsAdd: meta.tagsAdd }),
     ...(meta.tagsRemove === undefined ? {} : { tagsRemove: meta.tagsRemove }),
     ...(meta.isPrivate === undefined ? {} : { isPrivate: meta.isPrivate }),
@@ -221,7 +228,7 @@ function stripServerOwnedTokens(rawText: string, ignored: readonly string[]): st
   if (ignored.length === 0) return rawText;
   let out = rawText;
   for (const key of ignored) {
-    out = out.replace(new RegExp(`[ \t]${key}(?:="[^"]*"|=\S+)?`), "");
+    out = out.replace(new RegExp(`[ \t]${key}(?:="[^"]*"|=\\S+)?`), "");
   }
   return out;
 }
@@ -247,17 +254,23 @@ function resolveTopicName(target: string): string | undefined {
   return canonicalTopic(s);
 }
 
-function readBlock(realDir: string, id: string): ParsedBlock {
+function readBlock(realDir: string, id: string, soft = false): ParsedBlock {
   const name = `${id}.md`;
   const { text: raw } = readRegular(realDir, name);
-  const parsed = parseBlockFile(name, raw);
+  const parsed = parseBlockFile(
+    name,
+    raw,
+    soft
+      ? { softLimits: true, onSoftLimit: (field, value) => recordSoftMeta(dirname(realDir), field, value) }
+      : undefined,
+  );
   if ("stray" in parsed) throw new MemoryError(`E_BAD_PATH: ${name} is not a well-formed block`);
   return parsed;
 }
 
-function readBlockIfExists(realDir: string, id: string): ParsedBlock | undefined {
+function readBlockIfExists(realDir: string, id: string, soft = false): ParsedBlock | undefined {
   try {
-    return readBlock(realDir, id);
+    return readBlock(realDir, id, soft);
   } catch (err) {
     if (err instanceof MemoryError) throw err;
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return undefined;
@@ -279,6 +292,7 @@ function metaForCreate(w: WriteMeta): Omit<BlockMeta, "created" | "updated" | "v
     ...(w.audience === undefined ? {} : { audience: w.audience }),
     ...(w.expires === undefined ? {} : { expires: w.expires }),
     ...(w.until === undefined ? {} : { until: w.until }),
+    ...(w.section === undefined ? {} : { section: w.section }),
     ...(tags === undefined ? {} : { tags }),
     ...(w.isPrivate === true ? { private: true as const } : {}),
     ...(w.title === undefined ? {} : { title: w.title }),
@@ -326,6 +340,9 @@ function mergeMeta(current: BlockMeta, w: WriteMeta): BlockMeta {
   delete next.until;
   const until = w.clearUntil === true ? undefined : (w.until ?? current.until);
   if (until !== undefined) next.until = until;
+  delete next.section;
+  const section = w.clearSection === true ? undefined : (w.section ?? current.section);
+  if (section !== undefined) next.section = section;
   delete next.tags;
   if (add.size > 0 || remove.size > 0) next.tags = { add: [...add], remove: [...remove] };
   return next;
@@ -732,7 +749,7 @@ export function createMemoryToolV3(deps: MemoryToolV3Deps): ToolDefinition {
         // else is tried as a topic name.
         if (BLOCK_ID_STEM_RE.test(normalized.path.replace(/\.md$/, "").replace(/^\/?(memories\/)?/, ""))) {
           const id = resolveBlockId(normalized.path);
-          const b = readBlockIfExists(realDir, id);
+          const b = readBlockIfExists(realDir, id, true);
           if (b === undefined) {
             throw new MemoryError(`E_NOT_FOUND: block ${id} does not exist — view (no path) lists topics`);
           }
@@ -783,7 +800,9 @@ export function createMemoryToolV3(deps: MemoryToolV3Deps): ToolDefinition {
         }
         const { meta, body } = parseWriteMeta(normalized.text);
         if (meta.errors.length > 0) {
-          throw new MemoryError(`refused: the inline comment has errors — ${meta.errors.join("; ")}`);
+          throw new MemoryError(`refused: the inline comment has errors — ${meta.errors.join("; ")}`, {
+            code: "E_META_INVALID",
+          });
         }
         const bytes = bodyBytes(body);
         if (bytes > BLOCK_BODY_MAX_BYTES) {
@@ -795,9 +814,12 @@ export function createMemoryToolV3(deps: MemoryToolV3Deps): ToolDefinition {
         const inlineErr = deps.jev?.checkInline(
           `${topic}.md`,
           undefined,
-          stripServerOwnedTokens(normalized.text, meta.ignored),
+          stripServerOwnedTokens(normalized.text, [
+            ...meta.ignored,
+            ...(meta.section !== undefined || meta.clearSection ? ["section"] : []),
+          ]),
         );
-        if (inlineErr !== undefined) throw new MemoryError(inlineErr);
+        if (inlineErr !== undefined) throw new MemoryError(inlineErr, { code: "E_META_INVALID" });
         const metaObj = metaForCreate(meta);
         // absent ⇒ first write creates blocks/ — the §4.7 explicit-path
         // protocol: bootstrap (verifies unlocked/mount/write-zone/ancestor
@@ -874,7 +896,9 @@ export function createMemoryToolV3(deps: MemoryToolV3Deps): ToolDefinition {
         }
         const { meta, body } = parseWriteMeta(normalized.text);
         if (meta.errors.length > 0) {
-          throw new MemoryError(`refused: the inline comment has errors — ${meta.errors.join("; ")}`);
+          throw new MemoryError(`refused: the inline comment has errors — ${meta.errors.join("; ")}`, {
+            code: "E_META_INVALID",
+          });
         }
         const bytes = bodyBytes(body);
         if (bytes > BLOCK_BODY_MAX_BYTES) {
@@ -893,9 +917,12 @@ export function createMemoryToolV3(deps: MemoryToolV3Deps): ToolDefinition {
         const inlineErr = deps.jev?.checkInline(
           `${id}.md`,
           current.raw,
-          stripServerOwnedTokens(normalized.text, meta.ignored),
+          stripServerOwnedTokens(normalized.text, [
+            ...meta.ignored,
+            ...(meta.section !== undefined || meta.clearSection ? ["section"] : []),
+          ]),
         );
-        if (inlineErr !== undefined) throw new MemoryError(inlineErr);
+        if (inlineErr !== undefined) throw new MemoryError(inlineErr, { code: "E_META_INVALID" });
         const updated = await withMemoryDirLock(real ?? display, () => {
           if (dirFormat(display) !== "blocks") throw new MemoryError("E_UNMIGRATED: directory is not in block layout");
           requireGate();
@@ -974,4 +1001,51 @@ export function createMemoryToolV3(deps: MemoryToolV3Deps): ToolDefinition {
       return text(lines.join("\n"));
     },
   } as ToolDefinition;
+}
+
+/** v4-only, read-only inspection. Legacy execute continues using readCorpus's fallback.
+ * The host binds this alongside the original project execute port; no new owner or store.
+ */
+export function createProjectInspectorV4(deps: MemoryToolV3Deps) {
+  return (call: MemoryV4Params, ctx: ExtensionContext | undefined): ReadInspection<ProjectReadGroup> => {
+    const cwd = resolveCwd(ctx);
+    const display = memoryDirFor(cwd, deps.paths);
+    let corpusFailed = false;
+    try {
+      const format = dirFormat(display);
+      if (format !== "blocks")
+        return {
+          status: { state: "absent" },
+          group:
+            call.command === "search"
+              ? { kind: "hits", hits: [] }
+              : {
+                  kind: "listing",
+                  text: `No block memory for ${cwd} yet${format === "files" ? " — run /mem migrate to convert the legacy files" : ""}.`,
+                },
+        };
+      const realDir = join(canonicalDir(display)?.real ?? display, "blocks");
+      const corpus = readCorpus(realDir, undefined, {
+        onError(error) {
+          corpusFailed = true;
+          throw error;
+        },
+      });
+      if (call.command === "search") {
+        const blocks = corpus.blocks.filter((b) => b.meta.status === "active" && b.meta.private !== true);
+        const revs = new Map(blocks.map((b) => [`${b.id}.md`, b.rev]));
+        const hits = searchMemory(
+          blocks.map((b) => ({ name: `${b.id}.md`, body: b.body })),
+          call.query ?? "",
+        ).map((h) => ({ path: h.file.replace(/\.md$/, ""), rev: revs.get(h.file)!, line: h.line, text: h.text }));
+        return { status: { state: hits.length ? "ok" : "empty" }, group: { kind: "hits", hits } };
+      }
+      return {
+        status: { state: corpus.blocks.length ? "ok" : "empty" },
+        group: { kind: "listing", text: renderListing(cwd, corpus, deps, localToday()) },
+      };
+    } catch (error) {
+      return { status: { state: corpusFailed ? "poisoned" : "error", ...projectError(error) } };
+    }
+  };
 }

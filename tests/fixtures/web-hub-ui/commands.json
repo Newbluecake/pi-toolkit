@@ -198,7 +198,7 @@
         {
           "name": "mem",
           "kind": "extension",
-          "description": "Project memory (list/doctor/tidy)",
+          "description": "Project memory (list/doctor)",
           "policy": "allow",
           "output": "captured"
         },

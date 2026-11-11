@@ -1,4 +1,4 @@
-/** One current observation/proof OR pending write. B (native thinking) is deliberately absent. */
+/** One current observation/proof or pending write; generation rate includes reasoning output. */
 import {
   generationOwnData as own,
   isGenerationId,
@@ -7,6 +7,26 @@ import {
   type GenerationCore,
 } from "../protocol/message-generation.js";
 import type { MessageSpeedBinding } from "./message-speed-binding.js";
+
+// Arrays need descriptor reads too: the shared own helper deliberately excludes arrays.
+function arrayOwn(value: unknown, key: string): unknown {
+  try {
+    if (!Array.isArray(value)) return undefined;
+    const d = Object.getOwnPropertyDescriptor(value, key);
+    return d !== undefined && Object.hasOwn(d, "value") ? d.value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+function arrayEveryOwn(value: unknown, predicate: (item: unknown) => boolean): boolean {
+  const length = arrayOwn(value, "length");
+  if (typeof length !== "number" || !Number.isSafeInteger(length) || length < 0 || length > 100_000) return false;
+  for (let i = 0; i < length; i++) {
+    const item = arrayOwn(value, String(i));
+    if (item === undefined || !predicate(item)) return false;
+  }
+  return true;
+}
 
 export interface MessageSpeedOwner {
   sessionId: string;
@@ -26,8 +46,33 @@ interface Observation {
   count: number;
   first?: number;
   last?: number;
+  tokens?: number;
+}
+interface ResponseCapture {
+  binding: MessageSpeedBinding;
+  created: boolean;
+  invalid: boolean;
   completed: boolean;
   tokens?: number;
+}
+interface ChatCapture {
+  provider: unknown;
+  model: unknown;
+  id?: string;
+  invalid: boolean;
+  finish?: string;
+  tokens?: number;
+}
+interface AnthropicLane {
+  provider: unknown;
+  model: unknown;
+  id: string;
+  external: boolean;
+  terminal: boolean;
+  closed: boolean;
+  invalid: boolean;
+  tokens?: number;
+  stop?: string;
 }
 interface Pending {
   identity: Identity;
@@ -56,14 +101,29 @@ export function createMessageSpeed<C>(deps: {
   let turnIndex: number | undefined;
   let observation: Observation | undefined;
   let pending: Pending | undefined;
+  let chat: ChatCapture | undefined;
+  let responses: ResponseCapture | undefined;
+  let messageStarted = false;
+  let lane: AnthropicLane | undefined;
+  let anthropicTainted = false;
+  let capture = false;
+  let captureOwner: MessageSpeedOwner | undefined;
+  const abandonLane = (): void => {
+    if (lane) lane.external = true;
+  };
   const clear = (): void => {
     observation = undefined;
     pending = undefined;
   };
   const reset = (): void => {
     clear();
+    abandonLane();
+    capture = false;
     armed = false;
     turnIndex = undefined;
+    chat = undefined;
+    responses = undefined;
+    messageStarted = false;
   };
   const owner = (): MessageSpeedOwner | undefined => {
     try {
@@ -127,7 +187,11 @@ export function createMessageSpeed<C>(deps: {
           reset();
           break;
         case "turn_start":
+          abandonLane();
           clear();
+          chat = undefined;
+          responses = undefined;
+          messageStarted = false;
           turnIndex =
             armed &&
             typeof event.turnIndex === "number" &&
@@ -135,25 +199,34 @@ export function createMessageSpeed<C>(deps: {
             event.turnIndex >= 0
               ? event.turnIndex
               : undefined;
+          capture = turnIndex !== undefined;
+          const current = owner();
+          captureOwner = current === undefined ? undefined : { ...current };
+          if (capture && lane && !lane.closed) anthropicTainted = true;
           break;
         case "message_start": {
           if (own(event.message, "role") !== "assistant") break;
+          const repeated = messageStarted;
+          messageStarted = true;
           clear();
           messageGeneration += 1;
           const o = owner();
           if (armed && turnIndex !== undefined && o !== undefined)
             observation = {
               identity: { ...o, loopGeneration, turnIndex, messageGeneration },
-              invalid: false,
+              invalid: repeated,
               count: 0,
-              completed: false,
             };
           break;
         }
         case "turn_end":
           persist(event);
           observation = undefined;
+          abandonLane();
+          capture = false;
           turnIndex = undefined;
+          chat = undefined;
+          responses = undefined;
           break;
       }
     },
@@ -164,71 +237,304 @@ export function createMessageSpeed<C>(deps: {
         clear();
         return;
       }
-      if (kind === "thinking_delta" || kind === "thinking_start" || kind === "thinking_end") o.invalid = true;
+      if (kind === "error" || kind === "aborted" || kind === "abort") o.invalid = true;
       if (kind !== "text_delta" && kind !== "thinking_delta" && kind !== "toolcall_delta") return;
       if (binding === undefined || (o.binding !== undefined && !sameBinding(o.binding, binding))) o.invalid = true;
-      else o.binding = { ...binding };
+      else {
+        o.binding = { ...binding };
+        if (binding.api === "openai-responses" || binding.api === "openai-codex-responses") {
+          if (responses === undefined)
+            responses = { binding: { ...binding }, created: false, invalid: false, completed: false };
+          else if (!sameBinding(responses.binding, binding)) responses.invalid = true;
+        }
+      }
       if (delta.length === 0) return;
       const t = now();
-      if (!Number.isFinite(t) || t < 0 || (o.last !== undefined && t < o.last) || o.completed) o.invalid = true;
+      if (!Number.isFinite(t) || t < 0 || (o.last !== undefined && t < o.last)) o.invalid = true;
       o.first ??= t;
       o.last = t;
       o.count += 1;
     },
     raw(event) {
-      const o = observation;
-      if (o === undefined) return;
-      if (!matches(o.identity)) {
-        clear();
+      const api = own(event, "api");
+      if (api === "anthropic-messages") {
+        const provider = own(event, "provider"),
+          model = own(event, "model");
+        const data = own(event, "data"),
+          type = own(data, "type");
+        const poison = (): void => {
+          anthropicTainted = true;
+          if (lane) lane.invalid = true;
+        };
+        const invalidate = (): void => {
+          if (lane && !lane.external) lane.invalid = true;
+          else poison();
+        };
+        if (type === "message_start") {
+          const id = own(own(data, "message"), "id");
+          if (
+            !isGenerationId(id) ||
+            typeof provider !== "string" ||
+            typeof model !== "string" ||
+            (lane && (!lane.closed || (capture && !lane.external)))
+          ) {
+            poison();
+            return;
+          }
+          lane = { provider, model, id, external: !capture, terminal: false, closed: false, invalid: anthropicTainted };
+          return;
+        }
+        if (type === "message_delta" || type === "message_stop") {
+          if (
+            !lane ||
+            lane.closed ||
+            lane.provider !== provider ||
+            lane.model !== model ||
+            (lane.external && capture)
+          ) {
+            poison();
+            return;
+          }
+          if (type === "message_stop") {
+            if (!lane.terminal) {
+              invalidate();
+              return;
+            }
+            lane.closed = true;
+            return;
+          }
+          const stop = own(own(data, "delta"), "stop_reason");
+          const tokens = own(own(data, "usage"), "output_tokens");
+          const mapped =
+            stop === "end_turn" || stop === "stop_sequence"
+              ? "stop"
+              : stop === "max_tokens"
+                ? "length"
+                : stop === "tool_use"
+                  ? "toolUse"
+                  : undefined;
+          if (
+            lane.terminal ||
+            mapped === undefined ||
+            typeof tokens !== "number" ||
+            !Number.isSafeInteger(tokens) ||
+            tokens < 1 ||
+            tokens > 10_000_000
+          ) {
+            invalidate();
+            return;
+          }
+          lane.terminal = true;
+          if (!lane.external) {
+            lane.stop = mapped;
+            lane.tokens = tokens;
+          }
+          return;
+        }
+        if (type === "ping" || type === "content_block_stop") return;
+        if (type === "content_block_delta") {
+          const deltaType = own(own(data, "delta"), "type");
+          if (deltaType === "signature_delta") return;
+          if (deltaType !== "text_delta" && deltaType !== "thinking_delta" && deltaType !== "input_json_delta") {
+            invalidate();
+            return;
+          }
+        } else if (type !== "content_block_start") {
+          invalidate();
+          return;
+        }
+        if (
+          !lane ||
+          lane.closed ||
+          lane.terminal ||
+          lane.provider !== provider ||
+          lane.model !== model ||
+          (lane.external && capture)
+        )
+          invalidate();
         return;
       }
-      if (o.binding === undefined) return;
-      const b = o.binding;
-      if (
-        own(event, "provider") !== b.provider ||
-        own(event, "api") !== b.api ||
-        own(event, "model") !== b.model ||
-        (b.api !== "openai-responses" && b.api !== "openai-codex-responses")
-      )
+      if (api === "openai-completions" && armed && turnIndex !== undefined) {
+        const provider = own(event, "provider"),
+          model = own(event, "model");
+        if (chat === undefined) chat = { provider, model, invalid: false };
+        const c = chat;
+        if (provider !== c.provider || model !== c.model) return;
+        const data = own(event, "data");
+        const id = own(data, "id");
+        if (!isGenerationId(id) || (c.id !== undefined && c.id !== id)) c.invalid = true;
+        else c.id ??= id;
+        const choices = own(data, "choices");
+        const length = arrayOwn(choices, "length");
+        if (!Array.isArray(choices) || typeof length !== "number" || length > 1) {
+          c.invalid = true;
+          return;
+        }
+        const choice = arrayOwn(choices, "0");
+        if (length === 1 && (choice === undefined || own(choice, "index") !== 0)) c.invalid = true;
+        const delta = own(choice, "delta");
+        if (c.finish !== undefined && delta !== undefined && delta !== null) {
+          if (
+            typeof delta !== "object" ||
+            Array.isArray(delta) ||
+            Object.keys(delta).some((k) => {
+              const d = Object.getOwnPropertyDescriptor(delta, k);
+              return d === undefined || !("value" in d) || (k !== "role" && d.value !== null && d.value !== "");
+            })
+          )
+            c.invalid = true;
+        }
+        const finish = own(choice, "finish_reason");
+        if (finish !== undefined && finish !== null) {
+          const mapped =
+            finish === "stop"
+              ? "stop"
+              : finish === "length"
+                ? "length"
+                : finish === "tool_calls" || finish === "function_call"
+                  ? "toolUse"
+                  : undefined;
+          if (mapped === undefined || c.finish !== undefined) c.invalid = true;
+          else c.finish = mapped;
+        }
+        const top = own(data, "usage"),
+          nested = own(choice, "usage");
+        const topPresent = top !== undefined && top !== null,
+          nestedPresent = nested !== undefined && nested !== null;
+        const valid = (value: unknown): value is number =>
+          typeof value === "number" && Number.isSafeInteger(value) && value >= 1 && value <= 10_000_000;
+        const t = own(top, "completion_tokens"),
+          n = own(nested, "completion_tokens");
+        if (topPresent || nestedPresent) {
+          if (
+            (topPresent && !valid(t)) ||
+            (nestedPresent && !valid(n)) ||
+            (topPresent && nestedPresent && t !== n) ||
+            c.finish === undefined ||
+            c.tokens !== undefined
+          )
+            c.invalid = true;
+          else c.tokens = (topPresent ? t : n) as number;
+        }
         return;
-      const data = own(event, "data");
-      const response = own(data, "response");
-      const type = own(data, "type");
+      }
+      if (!capture || (api !== "openai-responses" && api !== "openai-codex-responses")) return;
+      const provider = own(event, "provider"),
+        model = own(event, "model");
+      const data = own(event, "data"),
+        response = own(data, "response"),
+        type = own(data, "type");
       const id =
-        type === "response.completed" ? own(response, "id") : (own(response, "id") ?? own(data, "response_id"));
-      if (id !== b.responseId) return; // never cache/overwrite another request (including native warmer)
-      if (typeof type === "string" && /reasoning|summary|redact/.test(type)) o.invalid = true;
+        type === "response.completed" || type === "response.created"
+          ? own(response, "id")
+          : (own(response, "id") ?? own(data, "response_id"));
+      if (responses === undefined) {
+        if (type !== "response.created" || !isGenerationId(id) || !isGenerationId(provider) || !isGenerationId(model))
+          return;
+        responses = {
+          binding: { responseId: id, provider, api, model },
+          created: true,
+          invalid: false,
+          completed: false,
+        };
+        return;
+      }
+      const r = responses,
+        b = r.binding;
+      if (provider !== b.provider || api !== b.api || model !== b.model) return;
+      if (type === "response.created") {
+        if (r.created || r.completed || id !== b.responseId) r.invalid = true;
+        else r.created = true;
+        return;
+      }
+      if (r.completed && (id === b.responseId || !isGenerationId(id))) {
+        r.invalid = true;
+        return;
+      }
+      if (id !== b.responseId) return;
+      if (
+        type === "response.incomplete" ||
+        type === "response.failed" ||
+        type === "error" ||
+        type === "response.error"
+      ) {
+        r.invalid = true;
+        return;
+      }
       if (type !== "response.completed") return;
-      if (o.completed) o.invalid = true;
-      o.completed = true;
+      r.completed = true;
       const usage = own(response, "usage");
       const tokens = own(usage, "output_tokens");
-      const details = own(usage, "output_tokens_details");
       if (
         own(response, "status") !== "completed" ||
-        own(details, "reasoning_tokens") !== 0 ||
         typeof tokens !== "number" ||
         !Number.isSafeInteger(tokens) ||
         tokens < 1 ||
         tokens > 10_000_000
       )
-        o.invalid = true;
-      else o.tokens = tokens;
+        r.invalid = true;
+      else r.tokens = tokens;
       const output = own(response, "output");
-      if (
-        !Array.isArray(output) ||
-        output.some((item) => own(item, "type") === "reasoning" || own(item, "type") === "redacted_thinking")
-      )
-        o.invalid = true;
+      if (!Array.isArray(output) || !arrayEveryOwn(output, (item) => typeof own(item, "type") === "string"))
+        r.invalid = true;
     },
     end(message) {
       if (own(message, "role") !== "assistant") return undefined;
       const o = observation;
       clear();
-      if (o === undefined || !matches(o.identity) || o.invalid || !o.completed || o.binding === undefined)
-        return undefined;
+      capture = false;
+      if (o === undefined || !matches(o.identity) || o.invalid || o.binding === undefined) return undefined;
       const b = o.binding;
-      if (own(message, "stopReason") === "error" || own(message, "stopReason") === "aborted") return undefined;
+      if (b.api === "openai-completions") {
+        if (
+          chat === undefined ||
+          chat.invalid ||
+          chat.id !== b.responseId ||
+          chat.provider !== b.provider ||
+          chat.model !== b.model ||
+          chat.finish !== own(message, "stopReason") ||
+          chat.tokens === undefined
+        )
+          return undefined;
+        o.tokens = chat.tokens;
+      } else if (b.api === "anthropic-messages") {
+        if (
+          !captureOwner ||
+          captureOwner.sessionId !== o.identity.sessionId ||
+          captureOwner.sessionGeneration !== o.identity.sessionGeneration ||
+          captureOwner.activationGeneration !== o.identity.activationGeneration ||
+          captureOwner.ownerToken !== o.identity.ownerToken ||
+          !lane ||
+          lane.external ||
+          lane.invalid ||
+          anthropicTainted ||
+          !lane.terminal ||
+          lane.id !== b.responseId ||
+          lane.provider !== b.provider ||
+          lane.model !== b.model ||
+          lane.stop !== own(message, "stopReason") ||
+          lane.tokens === undefined
+        )
+          return undefined;
+        o.tokens = lane.tokens;
+      } else {
+        if (
+          !captureOwner ||
+          captureOwner.sessionId !== o.identity.sessionId ||
+          captureOwner.sessionGeneration !== o.identity.sessionGeneration ||
+          captureOwner.activationGeneration !== o.identity.activationGeneration ||
+          captureOwner.ownerToken !== o.identity.ownerToken ||
+          !responses ||
+          responses.invalid ||
+          !responses.completed ||
+          !sameBinding(responses.binding, b) ||
+          responses.tokens === undefined
+        )
+          return undefined;
+        o.tokens = responses.tokens;
+      }
+      const stopReason = own(message, "stopReason");
+      if (stopReason !== "stop" && stopReason !== "length" && stopReason !== "toolUse") return undefined;
       if (
         own(message, "responseId") !== b.responseId ||
         own(message, "provider") !== b.provider ||
@@ -240,7 +546,15 @@ export function createMessageSpeed<C>(deps: {
       const content = own(message, "content");
       if (
         !Array.isArray(content) ||
-        content.some((item) => own(item, "type") !== "text" && own(item, "type") !== "toolCall")
+        (b.api === "openai-completions" && arrayOwn(content, "length") === 0) ||
+        !arrayEveryOwn(
+          content,
+          (item) =>
+            own(item, "type") === "text" ||
+            own(item, "type") === "toolCall" ||
+            own(item, "type") === "thinking" ||
+            own(item, "type") === "redacted_thinking",
+        )
       )
         return undefined;
       const core = sanitizeGenerationCore({

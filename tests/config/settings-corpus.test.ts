@@ -276,6 +276,9 @@ function stripRetired(template: unknown, retiredPaths: readonly string[]): unkno
  * and all warns/files hashes, while checking the new block for every legacy input. The
  * generator continues to use the unprojected result; no corpus/template/hash is refreshed. */
 function withoutFast(settings: typeof DEFAULT_SETTINGS, input?: unknown) {
+  // #70 declares twelve sparse notification leaves: legacy inputs contain none.
+  // Assert absence instead of injecting defaults or projecting unrelated keys / refreshing hashes.
+  expect(Object.keys(settings.feishuNotify)).toEqual(["enabled"]);
   expect(settings.fast).toEqual({ enabled: true });
   // #39 declared additive keys only: every legacy case now parses both flags as true.
   // Preserve ALL old rows/fields/order; never regenerate or filter the frozen inputs.
@@ -288,12 +291,55 @@ function withoutFast(settings: typeof DEFAULT_SETTINGS, input?: unknown) {
   const { minTotalMs: _minTotal, ...oldBudget } = settings.budget;
   const normalizedInput =
     input !== null && typeof input === "object"
-      ? normalizeTimeUnits(input as Record<string, unknown>, ["budget.totalGraceMs"])
+      ? normalizeTimeUnits(input as Record<string, unknown>, [
+          "budget.totalGraceMs",
+          "budget.idleMs",
+          "budget.modelTurnMs",
+        ])
       : {};
   // Preserve explicit historical overrides (including 0); only the fallback default was 90s.
   if (getPath(normalizedInput, "budget.totalGraceMs") === undefined) oldBudget.totalGraceMs = 90_000;
+  // #87 changes only fallback defaults; keep every valid explicit historical override.
+  if (getPath(normalizedInput, "budget.idleMs") === undefined) oldBudget.idleMs = 240_000;
+  if (getPath(normalizedInput, "budget.modelTurnMs") === undefined) oldBudget.modelTurnMs = 900_000;
+  // Count-only archive adds exactly one parsed leaf; dedicated settings tests pin
+  // legacy alias and explicit-boolean precedence for the new behavior.
+  expect(typeof settings.webHub.archiveEnabled).toBe("boolean");
+  const { archiveEnabled: _archiveEnabled, ...oldWebHub } = settings.webHub;
+  // Preserve valid explicit cooldown overrides; only old fallback values project to 8.
+  const cooldown = getPath(normalizedInput, "todo.nudge.cooldownTurns");
+  const validCooldown =
+    typeof cooldown === "number" && Number.isFinite(cooldown) && Number.isInteger(cooldown) && cooldown > 0;
+  const oldTodo = {
+    ...settings.todo,
+    nudge: { ...settings.todo.nudge, cooldownTurns: validCooldown ? settings.todo.nudge.cooldownTurns : 8 },
+  };
   const { memory } = settings;
-  const { scopes: _scopes, ...oldMemory } = memory;
+  // #50 P50.1 declared additive block. Every frozen input predates it;
+  // assert all six defaults, then project ONLY this block (never regenerate).
+  expect(memory.incremental).toEqual({
+    enabled: true,
+    auto: false,
+    jobCostCapUsd: 0,
+    changeThreshold: 5,
+    quietMs: 15000,
+    idleMs: 2000,
+    cooldownMs: 300000,
+    taskDoneTrigger: true,
+  });
+  const { scopes: _scopes, incremental: _incremental, ...oldMemory } = memory;
+  // #68 adds a bounded background queue; legacy corpus inputs have no such leaf.
+  // Verify it explicitly, then project it out without changing frozen hashes/inputs.
+  expect(memory.jev.backgroundQueueLimit).toBe(32);
+  const { backgroundQueueLimit: _queueLimit, ...oldJev } = memory.jev;
+  // #36 F1: project only the changed fallback back to the historical tiered value.
+  // Explicit historical tiered/legacy values retain their original semantics.
+  const layoutInput = getPath(normalizedInput, "memory.layout");
+  const historicalLayout = layoutInput === "legacy" ? "legacy" : "tiered";
+  if (layoutInput !== "tiered" && layoutInput !== "legacy" && layoutInput !== "blocks") {
+    expect(memory.layout).toBe("blocks");
+  }
+  const legacyMemory = { ...oldMemory, layout: historicalLayout, jev: oldJev };
   const {
     fabric: {
       wake: { decisionRequests: _dr, ...oldWake },
@@ -304,7 +350,9 @@ function withoutFast(settings: typeof DEFAULT_SETTINGS, input?: unknown) {
     Object.entries(settings)
       .filter(([key]) => key !== "fast")
       .map(([key, value]) => [key, key === "budget" ? oldBudget : value])
-      .map(([key, value]) => [key, key === "memory" ? oldMemory : value])
+      .map(([key, value]) => [key, key === "webHub" ? oldWebHub : value])
+      .map(([key, value]) => [key, key === "todo" ? oldTodo : value])
+      .map(([key, value]) => [key, key === "memory" ? legacyMemory : value])
       .map(([key, value]) => [key, key === "fabric" ? { ...value, wake: oldWake } : value]),
   );
 }

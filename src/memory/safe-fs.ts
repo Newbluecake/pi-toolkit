@@ -22,6 +22,7 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
+  opendirSync,
   readdirSync,
   readFileSync,
   readSync,
@@ -170,7 +171,7 @@ export interface SkippedEntry {
 const V2_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.md$/;
 
 /** Same filename-acceptance regex the v2 tool surface / tiered renderer /
- *  doctor / tidy use. Exported so those layers share exactly one pattern. */
+ *  doctor use. Exported so those layers share exactly one pattern. */
 export function isV2Name(name: string): boolean {
   return V2_NAME_RE.test(name);
 }
@@ -199,6 +200,9 @@ export function listRegular(
   const files: RegularFileEntry[] = [];
   const skipped: SkippedEntry[] = [];
   for (const name of entries) {
+    // Removed tidy data is inert: do not stat, descend into, parse or recover it.
+    // Root archive/ is unrelated to the active blocks/archive/ namespace.
+    if (["archive", ".backup", ".tidy-run.json", ".tidy", "manifest.json", "journal.jsonl"].includes(name)) continue;
     if (!name.endsWith(".md")) continue;
     if (opts.names === "v2" && !isV2Name(name)) {
       skipped.push({ name, kind: "bad-name" });
@@ -228,6 +232,37 @@ export function listRegular(
     files.push({ name, path, size: st.size, mtimeMs: st.mtimeMs, nlink: st.nlink });
   }
   return { files, skipped };
+}
+
+// ─────────────────── exact session-file observation primitives ───────────────────
+// Internal use only: callers needing exact control of read semantics must validate
+// file type and identity themselves. These thin wrappers preserve raw fs errors.
+export function openSessionObservationFile(path: string): number {
+  return openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+}
+
+export function lstatSessionObservation(path: string) {
+  return lstatSync(path, { bigint: true });
+}
+
+export function lstatSessionObservationExists(path: string): void {
+  lstatSync(path);
+}
+
+export function fstatSessionObservation(fd: number) {
+  return fstatSync(fd, { bigint: true });
+}
+
+export function readSessionObservationChunk(fd: number, buffer: Buffer): number {
+  return readSync(fd, buffer, 0, buffer.length, null);
+}
+
+export function closeSessionObservation(fd: number): void {
+  closeSync(fd);
+}
+
+export function realpathSessionObservation(path: string): string {
+  return realpathSync(path);
 }
 
 // ───────────────────────────── regular-file open/read ─────────────────────────────
@@ -334,6 +369,62 @@ export function readRegular(dir: string, name: string): RegularRead {
     const st = fstatSync(fd);
     const buf = readFileSync(fd);
     return { text: buf.toString("utf8"), stat: toRegularStat(st) };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+export interface RegularBytesRead {
+  /** Caller-owned bytes, never decoded. Snapshot owners must copy on ingress
+   * and return copies on egress: readonly properties/freeze do NOT freeze a Buffer. */
+  bytes: Buffer;
+  stat: RegularStat;
+}
+
+/** Bounded raw read for revision snapshots; legacy readRegular stays unchanged.
+ * maxBytes defaults to the existing 64 MiB observation ceiling and may only
+ * tighten it. Rejects growth, short reads and observed identity/metadata changes;
+ * never truncates or performs UTF-8 replacement. UTF-8/parse admission belongs
+ * to the future revision freezer, not this byte reader. This is not an atomic
+ * snapshot against a writer changing bytes between arbitrary syscalls. */
+export function readRegularBytes(dir: string, name: string, opts: { maxBytes?: number } = {}): RegularBytesRead {
+  if (!isSafeName(name)) throw new MemoryError(`refused to read ${name}: bad-name`);
+  const maxBytes = opts.maxBytes === undefined ? MAX_OBSERVED_BYTES : opts.maxBytes;
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0 || maxBytes > MAX_OBSERVED_BYTES)
+    throw new MemoryError(`invalid raw read limit: ${maxBytes}`);
+  // Nonblocking open also lets openRegular reject a FIFO without waiting for a writer.
+  const fd = openRegular(dir, name, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+  try {
+    const before = fstatSync(fd);
+    if (!before.isFile()) throw new MemoryError(`refused to read ${name}: not a regular file`);
+    if (!Number.isSafeInteger(before.size) || before.size < 0 || before.size > maxBytes)
+      throw new MemoryError(`refused to read ${name}: exceeds raw read limit (${maxBytes} bytes)`);
+    // Allocation and every read are bounded BEFORE touching file contents. Even
+    // a concurrently growing file cannot make readFileSync allocate without bound.
+    const bytes = Buffer.alloc(before.size);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const n = readSync(fd, bytes, offset, Math.min(bytes.length - offset, 64 * 1024), offset);
+      if (n === 0) throw new MemoryError(`refused to read ${name}: changed during raw read (short read)`);
+      offset += n;
+    }
+    const extra = Buffer.alloc(1);
+    if (readSync(fd, extra, 0, 1, offset) !== 0)
+      throw new MemoryError(`refused to read ${name}: changed during raw read (growth)`);
+    const after = fstatSync(fd);
+    const current = lstatSync(join(dir, name));
+    const matches = (st: typeof before): boolean =>
+      st.isFile() &&
+      st.dev === before.dev &&
+      st.ino === before.ino &&
+      st.size === before.size &&
+      st.size <= maxBytes &&
+      st.mtimeMs === before.mtimeMs &&
+      st.ctimeMs === before.ctimeMs &&
+      st.mode === before.mode &&
+      st.nlink === before.nlink;
+    if (!matches(after) || !matches(current)) throw new MemoryError(`refused to read ${name}: changed during raw read`);
+    return { bytes, stat: toRegularStat(after) };
   } finally {
     closeSync(fd);
   }
@@ -451,7 +542,7 @@ export function createExclusive(dir: string, tmp: string, name: string): CreateR
   }
 }
 
-/** Atomic no-clobber rename (`rename` command / restore-from-trash), degrading
+/** Legacy no-clobber rename (`rename` command), degrading
  *  the same way `createExclusive` does. */
 export function renameNoClobber(dir: string, from: string, to: string): CreateResult {
   const fromPath = join(dir, from);
@@ -479,6 +570,50 @@ export function renameNoClobber(dir: string, from: string, to: string): CreateRe
   }
   unlinkSync(fromPath);
   return {};
+}
+
+/** Restore-only strict move: atomic link or refuse, NEVER check-then-rename.
+ * A failed source cleanup is a partial mutation, not an untouched failure;
+ * retain both names for inspection instead of risking an unsafe rollback.
+ * The legacy renameNoClobber fallback contract above intentionally stays unchanged.
+ */
+export function moveFileNoClobberStrict(dir: string, from: string, to: string): void {
+  const src = join(dir, from),
+    dst = join(dir, to);
+  const before = lstatRegular(src);
+  try {
+    linkSync(src, dst);
+  } catch (err) {
+    if (codeOf(err) === "EEXIST") throw txnErr("EXISTS", `${to} already exists; restore refused`);
+    if (noHardlink(err))
+      throw txnErr(
+        "NO_HARDLINK",
+        `Restore refused: atomic no-clobber link unavailable (${codeOf(err)}); no rename fallback, source retained.`,
+      );
+    throw txnErr("IO", `Restore link failed; source retained: ${String(err)}`);
+  }
+  try {
+    const source = lstatRegular(src),
+      target = lstatRegular(dst);
+    if (
+      source.dev !== before.dev ||
+      source.ino !== before.ino ||
+      source.size !== before.size ||
+      target.dev !== before.dev ||
+      target.ino !== before.ino ||
+      target.size !== before.size
+    )
+      throw new Error("source or destination identity changed after link");
+    unlinkSync(src);
+  } catch (err) {
+    // link already created a destination. Unlink may even have completed before
+    // an IO failure surfaced; never describe either partial state as effect:none.
+    throw txnErr(
+      "RESTORE_PARTIAL",
+      `Restore incomplete: destination may have changed; inspect both ${from} and ${to} before retrying. No automatic rollback: ${String(err)}`,
+      true,
+    );
+  }
 }
 
 // ───────────────────────────── legacy write/append (frozen semantics) ─────────────────────────────
@@ -595,7 +730,7 @@ function pickQuarantineName(dirParent: string): string {
  * Delete `<parent.real>/<childName>` ONLY if it is a real directory (never a
  * symlink) containing nothing but plain regular files (a "flat" directory) —
  * used to physically remove an old `.backup/<id>/` past the retention count
- * (P4 tidy). Any child entry that is itself a symlink, a subdirectory, or
+ * (shared filesystem cleanup). Any child entry that is itself a symlink, a subdirectory, or
  * any other non-regular type refuses the WHOLE operation: nothing is deleted,
  * not even the regular siblings. `parent` must already be canonicalized
  * (`canonicalDir`/`canonicalDirState`) — this never realpaths on its own.
@@ -743,7 +878,7 @@ export function removeFlatDir(
   return { removed: true, count: deleted };
 }
 
-// ───────────────────────────── transaction storage primitives (tidy P2a) ─────────────────────────────
+// ───────────────────────────── transaction storage primitives (shared filesystem helpers) ─────────────────────────────
 
 /** Errors from the transaction primitives carry whether a syscall may have
  * changed the directory.  Recovery uses this bit to decide whether an
@@ -1042,7 +1177,7 @@ function noHardlink(err: unknown): boolean {
 function hardlinkError(err: unknown, path = process.cwd(), mutated = false): TxnFsError {
   return txnErr(
     "NO_HARDLINK",
-    `memory dir ${path} is on a filesystem without hard-link support (${codeOf(err) ?? "unknown"}) — /mem tidy --batch and restore need link(2) for no-clobber moves; move ~/.pi/agent/memory to a local filesystem or use plain /mem tidy <file>`,
+    `memory dir ${path} is on a filesystem without hard-link support (${codeOf(err) ?? "unknown"}) — this operation needs link(2) for no-clobber moves; use a local filesystem with hard-link support`,
     mutated,
   );
 }
@@ -1751,6 +1886,236 @@ export function inspectDirNoFollow(path: string): { dev: number; ino: number; mt
   const st = lstatSync(path);
   if (st.isSymbolicLink() || !st.isDirectory()) throw new MemoryError(`not-dir: ${path} is not a real directory`);
   return { dev: st.dev, ino: st.ino, mtimeMs: st.mtimeMs, names: readdirSync(path) };
+}
+
+// ───────────────── P50-only strict, observed primitives (no legacy fallback) ─────────────────
+// The caller holds the memory lock. These narrow synchronous seams record the
+// actual syscall, NOT a post-hoc file read. No cleanup/compensation follows an
+// applied/unknown result; two-path evidence must survive inspection/restart.
+export interface RevisionObservedResult {
+  observation: import("./jev/contracts.js").ApplyObservation;
+  error?: string;
+}
+export interface RevisionObservedOptions {
+  /** Last gate/CAS/identity check, immediately before the data syscall. */
+  beforeSyscall?: () => void;
+  /** Trusted synchronous observer. Throwing here is a POST-apply failure. */
+  observe?: (observation: import("./jev/contracts.js").ApplyObservation) => void;
+}
+
+/** Bounded enumeration, including the overflow probe. Unlike listDirNames, I/O
+ * errors and incomplete enumeration are never collapsed to an empty list. */
+export function listRevisionNamesBounded(dir: string, maxEntries: number): string[] {
+  if (!Number.isSafeInteger(maxEntries) || maxEntries < 1 || maxEntries > 4096)
+    throw new MemoryError("invalid revision scan bound");
+  const handle = opendirSync(dir);
+  const names: string[] = [];
+  try {
+    for (;;) {
+      const entry = handle.readSync();
+      if (!entry) return names.sort();
+      if (names.length >= maxEntries) throw new MemoryError("revision scan incomplete: entry limit");
+      names.push(entry.name);
+    }
+  } finally {
+    handle.closeSync();
+  }
+}
+
+/** Single-level mkdir, never recursive/adopt/chmod. The owner validates the
+ * parent, and fsyncs it even after a prior interrupted creation. */
+export function ensureRevisionPrivateDir(parent: string, name: string, dev: number): void {
+  if (!isSafeName(name)) throw new MemoryError("revision bad-name");
+  try {
+    mkdirSync(join(parent, name), { mode: 0o700 });
+  } catch (err) {
+    if (codeOf(err) !== "EEXIST") throw err;
+  }
+  const st = inspectDirSecurityNoFollow(join(parent, name));
+  if (st.dev !== dev || st.uid !== process.getuid?.() || (st.mode & 0o077) !== 0)
+    throw new MemoryError("revision directory permission/device refused");
+  fsyncDir(parent);
+}
+
+export function inspectRevisionFileSecurity(
+  dir: string,
+  name: string,
+): { dev: number; ino: number; uid: number; mode: number } {
+  if (!isSafeName(name)) throw new MemoryError("revision bad-name");
+  const st = lstatSync(join(dir, name));
+  if (!st.isFile() || st.isSymbolicLink()) throw new MemoryError("revision non-regular file");
+  return { dev: st.dev, ino: st.ino, uid: st.uid, mode: st.mode };
+}
+
+/** Re-establish an existing evidence file's durability without rewriting it.
+ * The caller binds the no-follow fd to its already-inspected inode/device;
+ * fsync errors propagate, and observed swaps/metadata changes are refused. */
+export function fsyncRevisionFile(dir: string, name: string, expected: { dev: number; ino: number }): void {
+  if (!isSafeName(name)) throw new MemoryError("revision bad-name");
+  const fd = openRegular(dir, name, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+  try {
+    const before = fstatSync(fd);
+    if (
+      before.dev !== expected.dev ||
+      before.ino !== expected.ino ||
+      before.uid !== process.getuid?.() ||
+      (before.mode & 0o077) !== 0
+    )
+      throw new MemoryError("revision fsync file identity/permission changed");
+    fsyncSync(fd);
+    const matches = (st: typeof before): boolean =>
+      st.isFile() &&
+      st.dev === before.dev &&
+      st.ino === before.ino &&
+      st.uid === before.uid &&
+      st.mode === before.mode &&
+      st.size === before.size &&
+      st.mtimeMs === before.mtimeMs &&
+      st.ctimeMs === before.ctimeMs &&
+      st.nlink === before.nlink;
+    if (!matches(fstatSync(fd)) || !matches(lstatSync(join(dir, name))))
+      throw new MemoryError("revision evidence changed during file fsync");
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function revisionSource(dir: string, name: string, digest: string, maxBytes: number): void {
+  if (!isSafeName(name) || Buffer.byteLength(name) > 255 || !/^[a-f0-9]{64}$/.test(digest))
+    throw new MemoryError("revision bad source binding");
+  const read = readRegularBytes(dir, name, { maxBytes });
+  const st = inspectRevisionFileSecurity(dir, name);
+  if (
+    st.dev !== read.stat.dev ||
+    st.ino !== read.stat.ino ||
+    st.uid !== process.getuid?.() ||
+    (st.mode & 0o077) !== 0 ||
+    createHash("sha256").update(read.bytes).digest("hex") !== digest
+  )
+    throw new MemoryError("revision source digest/permission changed");
+}
+function revisionDest(name: string): void {
+  if (!isSafeName(name) || Buffer.byteLength(name) > 255) throw new MemoryError("revision bad destination");
+}
+function revisionError(err: unknown): string {
+  return `${codeOf(err) ?? "IO"}: ${String(err)}`.slice(0, 300);
+}
+
+export function replaceRevisionObserved(
+  dir: string,
+  tmp: string,
+  name: string,
+  expected: { readonly digest: string; readonly rev: string },
+  opts: RevisionObservedOptions = {},
+): RevisionObservedResult {
+  let observation: import("./jev/contracts.js").ApplyObservation = { kind: "not-applied" };
+  try {
+    revisionDest(name);
+    revisionSource(dir, tmp, expected.digest, MAX_OBSERVED_BYTES);
+    opts.beforeSyscall?.();
+    // Revalidate the exact prepared source AFTER any caller callback.
+    revisionSource(dir, tmp, expected.digest, MAX_OBSERVED_BYTES);
+    // Once the syscall is entered an opaque I/O failure cannot prove absence
+    // of an effect (e.g. transport/filesystem error after namespace change).
+    observation = { kind: "unknown", reason: "rename-outcome-unobserved" };
+    renameSync(join(dir, tmp), join(dir, name));
+    observation = {
+      kind: "applied",
+      expectedAfter: { kind: "file", digest: expected.digest, rev: expected.rev },
+      proof: "rename-observed",
+    };
+    opts.observe?.(observation);
+    return { observation };
+  } catch (err) {
+    return { observation, error: revisionError(err) };
+  }
+}
+
+export function createRevisionObserved(
+  dir: string,
+  tmp: string,
+  name: string,
+  expected: { readonly digest: string; readonly rev: string },
+  opts: RevisionObservedOptions = {},
+): RevisionObservedResult {
+  let observation: import("./jev/contracts.js").ApplyObservation = { kind: "not-applied" };
+  try {
+    revisionDest(name);
+    revisionSource(dir, tmp, expected.digest, MAX_OBSERVED_BYTES);
+    opts.beforeSyscall?.();
+    revisionSource(dir, tmp, expected.digest, MAX_OBSERVED_BYTES);
+    linkSync(join(dir, tmp), join(dir, name));
+    observation = {
+      kind: "applied",
+      expectedAfter: { kind: "file", digest: expected.digest, rev: expected.rev },
+      proof: "link-observed",
+      paths: [
+        { area: "temp", name: tmp },
+        { area: "blocks", name },
+      ],
+    };
+    opts.observe?.(observation);
+    unlinkSync(join(dir, tmp));
+    return { observation };
+  } catch (err) {
+    return { observation, error: revisionError(err) };
+  }
+}
+
+/** Delete proof is ONLY source unlink. A successful trash link followed by ANY
+ * failure is unknown, never applied-missing/not-applied; retain both paths. */
+export function deleteRevisionObserved(
+  blocks: string,
+  name: string,
+  trash: string,
+  trashName: string,
+  before: { readonly digest: string; readonly rev: string },
+  opts: RevisionObservedOptions = {},
+): RevisionObservedResult {
+  let observation: import("./jev/contracts.js").ApplyObservation = { kind: "not-applied" };
+  let linked = false;
+  try {
+    revisionDest(name);
+    revisionDest(trashName);
+    if (inspectDirSecurityNoFollow(blocks).dev !== inspectDirSecurityNoFollow(trash).dev)
+      throw new MemoryError("revision cross-device delete");
+    revisionSource(blocks, name, before.digest, MAX_OBSERVED_BYTES);
+    opts.beforeSyscall?.();
+    revisionSource(blocks, name, before.digest, MAX_OBSERVED_BYTES);
+    observation = { kind: "unknown", reason: "trash-link-outcome-unobserved" };
+    linkSync(join(blocks, name), join(trash, trashName));
+    linked = true;
+    observation = {
+      kind: "unknown",
+      reason: "trash-linked-source-not-unlinked",
+      paths: [
+        { area: "blocks", name },
+        { area: "trash", name: trashName },
+      ],
+    };
+    opts.beforeSyscall?.();
+    revisionSource(blocks, name, before.digest, MAX_OBSERVED_BYTES);
+    unlinkSync(join(blocks, name));
+    observation = {
+      kind: "applied",
+      expectedAfter: { kind: "missing" },
+      proof: "unlink-observed",
+      paths: [
+        { area: "blocks", name },
+        { area: "trash", name: trashName },
+      ],
+    };
+    opts.observe?.(observation);
+    return { observation };
+  } catch (err) {
+    if (
+      !linked &&
+      observation.kind === "unknown" &&
+      ["EPERM", "ENOTSUP", "EXDEV", "EEXIST"].includes(codeOf(err) ?? "")
+    )
+      observation = { kind: "not-applied" };
+    return { observation, error: revisionError(err) };
+  }
 }
 
 /** #39 read-only security metadata: no listing, following, creation or permission repair.

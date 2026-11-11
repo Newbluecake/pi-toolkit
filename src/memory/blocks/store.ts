@@ -14,7 +14,9 @@ import {
   writeTempRegular,
 } from "../safe-fs.js";
 import { MemoryError } from "../paths.js";
-import { newTidyId } from "../tidy/manifest.js";
+import { recordSoftMeta, softLegacyMetadata } from "../soft-meta.js";
+import { listTrashEntries, newMemoryId } from "../trash.js";
+import { withMemoryDirLock } from "../lock.js";
 import type { MemoryWriteGate } from "../contracts.js";
 import type { JevIndexV1 } from "../jev/contracts.js";
 import { entryHash } from "../jev/entries.js";
@@ -64,7 +66,7 @@ function verify(realDir: string, before: { dev: number; ino: number }): void {
 export function readCorpus(
   realDir: string,
   state?: CorpusReaderState,
-  hooks?: { afterRead?: (name: string) => void },
+  hooks?: { afterRead?: (name: string) => void; onError?: (error: unknown) => void },
 ): BlockCorpus {
   try {
     // Resolve the layout exactly once, never substitute the legacy root mid-read.
@@ -80,7 +82,10 @@ export function readCorpus(
       const stat = statRegularIfExists(realDir, file.name);
       if (!stat) throw new MemoryError("E_UNMIGRATED: file disappeared");
       stamps.push([file.name, stat.size, stat.mtimeMs, stat.ino]);
-      const b = parseBlockFile(file.name, readRegular(realDir, file.name).text);
+      const b = parseBlockFile(file.name, readRegular(realDir, file.name).text, {
+        softLimits: true,
+        onSoftLimit: (field, value) => recordSoftMeta(dirname(realDir), field, value),
+      });
       if ("stray" in b || !parseBlockName(file.name)) strays.push(file.name);
       else blocks.push(b);
       hooks?.afterRead?.(file.name);
@@ -101,12 +106,11 @@ export function readCorpus(
     const legacy: LegacyFingerprint = {
       files: listRegular(dirname(realDir), { names: "v2" })
         .files.sort((a, b) => a.name.localeCompare(b.name))
-        .map((f) => ({
-          name: f.name,
-          sha256: createHash("sha256")
-            .update(readRegular(dirname(realDir), f.name).text)
-            .digest("hex"),
-        })),
+        .map((f) => {
+          const raw = readRegular(dirname(realDir), f.name).text;
+          softLegacyMetadata(raw, dirname(realDir));
+          return { name: f.name, sha256: createHash("sha256").update(raw).digest("hex") };
+        }),
     };
     const result: BlockCorpus = {
       blocks,
@@ -120,6 +124,8 @@ export function readCorpus(
     if (state) state.previous = result;
     return result;
   } catch (err) {
+    // v4 read-only inspection observes failures BEFORE the legacy fallback.
+    hooks?.onError?.(err);
     if (state && !state.warned) {
       state.warned = true;
       state.warn?.("memory: blocks/ changed during read (rollback or migration in progress) — using previous result");
@@ -164,6 +170,26 @@ export function createBlockLocked(
   fsyncDir(realDir);
   return parsed(name, raw);
 }
+/** Pure serialization seam shared with the factory-only revision applier.
+ * It grants no permission and performs no filesystem mutation. */
+export function prepareBlockReplacement(
+  current: ParsedBlock,
+  next: { meta: BlockMeta; body: string },
+  now: Date,
+): string {
+  const meta: BlockMeta = {
+    ...next.meta,
+    kind: "block",
+    created: current.meta.created,
+    updated: now.toISOString(),
+    version: current.meta.version + 1,
+  };
+  delete meta.heading;
+  delete meta.residue;
+  delete meta.origin;
+  if (current.meta.heading !== undefined) meta.heading = current.meta.heading;
+  return serializeBlock(meta, next.body);
+}
 export function replaceBlockLocked(
   realDir: string,
   id: string,
@@ -178,18 +204,14 @@ export function replaceBlockLocked(
   const name = `${id}.md`,
     current = parsed(name, readRegular(realDir, name).text);
   if (current.rev !== expectRev) throw new MemoryError(`E_CONFLICT: current rev ${current.rev}\n${current.body}`);
-  const meta: BlockMeta = {
-    ...next.meta,
-    kind: "block",
-    created: current.meta.created,
-    updated: now.toISOString(),
-    version: current.meta.version + 1,
-  };
-  delete meta.heading;
-  delete meta.residue;
-  delete meta.origin;
-  if (current.meta.heading !== undefined) meta.heading = current.meta.heading;
-  const raw = serializeBlock(meta, next.body);
+  // A strict parser drops invalid scalar fields; never silently erase historical metadata on edit.
+  const invalidMeta = current.errors.find((error) => /^invalid (until|section|heading|title|when)$/.test(error));
+  if (invalidMeta) throw new MemoryError(`E_META: ${invalidMeta}`);
+  if (current.errors.includes("E_SECTION_TOO_LARGE") && next.meta.section === current.meta.section)
+    throw new MemoryError(
+      "E_SECTION_TOO_LARGE: section exceeds 120 UTF-8 bytes — use section= with a shorter value or section=none to clear it",
+    );
+  const raw = prepareBlockReplacement(current, next, now);
   checkWrite(realDir, opts);
   const tmp = writeTempRegular(realDir, name, Buffer.from(raw), 0o600);
   checkWrite(realDir, opts);
@@ -211,7 +233,7 @@ export function trashBlockLocked(
   const current = parsed(name, readRegular(realDir, name).text);
   if (expectRev !== undefined && current.rev !== expectRev)
     throw new MemoryError(`E_CONFLICT: current rev ${current.rev}\n${current.body}`);
-  const trashName = `${newTidyId(new Date(), process.pid, randomBytes(3).toString("hex"))}-${name}`;
+  const trashName = `${newMemoryId(new Date(), process.pid, randomBytes(3).toString("hex"))}-${name}`;
   checkWrite(realDir, opts);
   ensurePrivateDir(join(realDir, ".trash"));
   const trash = inspectDirNoFollow(join(realDir, ".trash"));
@@ -226,6 +248,37 @@ export function trashBlockLocked(
   checkWrite(realDir, opts);
   fsyncDir(join(realDir, ".trash"));
   return { trashName };
+}
+/** Restore a deleted project block using the same root lock and no-clobber
+ * primitives as deletion. The revision is over the original bytes and is not bumped. */
+export async function restoreTrashedBlock(memDir: string, id: string, opts: StoreWriteOptions = {}): Promise<string> {
+  if (opts.gate && !opts.gate.check(memDir).ok) throw new MemoryError("E_WRITE_GATE: memory write refused");
+  return withMemoryDirLock(memDir, () => {
+    const realDir = join(memDir, "blocks");
+    const check = () => {
+      if (dirFormat(memDir) !== "blocks") throw new MemoryError("E_UNMIGRATED: blocks layout required");
+      checkWrite(realDir, opts);
+    };
+    check();
+    const trashDir = join(realDir, ".trash");
+    const trash = inspectDirNoFollow(trashDir);
+    if (trash.dev !== inspectDirNoFollow(realDir).dev) throw new MemoryError("E_WRITE_GATE: trash device changed");
+    const entry = listTrashEntries(realDir).find((candidate) => candidate.id === id);
+    if (!entry || !parseBlockName(entry.name)) throw new MemoryError(`no trash entry ${id}`);
+    const before = parsed(entry.name, readRegular(trashDir, entry.fileName).text);
+    if (before.meta.storageScope === "hub") throw new MemoryError("E_BLOCK: invalid project trash block");
+    if (statRegularIfExists(realDir, entry.name))
+      throw new MemoryError(`restore conflict: ${entry.name} already exists`);
+    check();
+    const latest = parsed(entry.name, readRegular(trashDir, entry.fileName).text);
+    if (latest.rev !== before.rev) throw new MemoryError("E_CONFLICT: trash block changed");
+    renameNoClobber(realDir, `.trash/${entry.fileName}`, entry.name);
+    check();
+    fsyncDir(realDir);
+    check();
+    fsyncDir(trashDir);
+    return entry.name;
+  });
 }
 export function topicSummary(corpus: BlockCorpus, index: JevIndexV1 | undefined, topic: string): string {
   const blocks = corpus.blocks.filter((b) => b.topic === topic && b.meta.status === "active");

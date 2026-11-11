@@ -192,7 +192,7 @@ describe("spawn admission: strict provider/id existence", () => {
     expect(asked).toBe(0);
   });
 
-  it("spawnAndWait (nested Agent / workflow / goal verifier path) surfaces the same error", async () => {
+  it("spawnAndWait exposes sanitized admission facts instead of an internal message", async () => {
     const h = harness(known);
     await expect(
       h.service.spawnAndWait({
@@ -200,6 +200,6 @@ describe("spawn admission: strict provider/id existence", () => {
         prompt: "x",
         modelOverride: { provider: "cloudrouter-anthropic", id: "claude-opus-5-5" },
       }),
-    ).rejects.toThrow(/Unknown model "cloudrouter-anthropic\/claude-opus-5-5".*cr-anthropic\/claude-opus-5-5/);
+    ).rejects.toThrow("code=agent_admission_rejected kind=config reason=config retryable=false effect=none");
   });
 });

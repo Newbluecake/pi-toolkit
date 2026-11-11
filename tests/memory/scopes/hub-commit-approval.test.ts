@@ -17,6 +17,7 @@ import {
   hubHostFingerprint,
   type HubStoreIo,
 } from "../../../src/memory/scopes/hub-store.js";
+import { MemoryError } from "../../../src/memory/paths.js";
 import { lockCreate, lockRelease, readProcIdentity, type LockPayload } from "../../../src/memory/safe-fs.js";
 import { resolveHubSlot } from "../../../src/memory/scopes/hub-slot.js";
 import { createMemoryOpCapRegistry, createHumanTurnTracker } from "../../../src/memory/scopes/op-cap.js";
@@ -451,5 +452,90 @@ describe("review fixes: every observed permission failure permanently revokes it
       code: "E_HUB_CAP_STALE",
     });
     expect(existsSync(join(slot.effectiveStateDir, "hub-memory", "blocks", "general.001.md"))).toBe(false);
+  });
+});
+
+describe("fixed Hub capacity guidance through real approval/cap/store", () => {
+  it.each([
+    { limit: "items", count: 32, body: "small", next: "item 33" },
+    { limit: "bytes", count: 4, body: "界".repeat(341) + "x", next: "x" },
+    { limit: "item", count: 0, body: "", next: "界".repeat(342) },
+  ])("$limit limit rejects without truncation and keeps specific guidance", async ({ limit, count, body, next }) => {
+    const slot = resolveHubSlot({ launchHome: home(), env: {}, getuid: () => uid });
+    const who = mkOwner();
+    const { tracker, registry, port } = approvalStack("affirm");
+    const provider = createHubMemoryProvider({ capability: () => "ok", registry, owner: () => who, slot: () => slot });
+    const put = async (text: string) => {
+      tracker.noteInteractive(who);
+      const operation = { storageScope: "hub", authority: "user", op: "create", topic: "limits", text } as const;
+      const approval = await requestCap(port, tracker, who, operation);
+      if (!approval.approved) throw new Error("approval failed");
+      const result = await provider.enqueue({ operation, owner: who, cap: approval.cap });
+      return { result, cap: approval.cap };
+    };
+    for (let n = 0; n < count; n++) expect((await put(body)).result.ok).toBe(true);
+    const before = provider.view();
+    expect(before.items).toHaveLength(count);
+    if (limit === "bytes") expect(before.items.reduce((sum, item) => sum + Buffer.byteLength(item.text), 0)).toBe(4096);
+    const { result, cap } = await put(next);
+    expect(result).toMatchObject({
+      ok: false,
+      code: limit === "item" ? "E_TOO_LARGE" : "E_FULL",
+      message: expect.any(String),
+    });
+    if (result.ok) throw new Error("capacity accepted");
+    expect(result.message).toContain("32 items / 4096 UTF-8 body bytes");
+    expect(result.message).toContain("no capacity setting");
+    if (limit !== "item") {
+      expect(result.message).toContain("actual id/rev");
+      expect(result.message).toContain("approval");
+    } else expect(result.message).toContain("1024 UTF-8");
+    expect(registry.stateOf(cap)).toBe("revoked");
+    expect(provider.view()).toEqual(before);
+    provider.dispose();
+  });
+
+  it.each([
+    ["before", "E_FULL: secret-body-token-123", "E_FULL"],
+    ["before", "E_TOO_LARGE: secret-body-token-123", "E_TOO_LARGE"],
+    ["before", "private secret-body-token-123", "E_PERSIST"],
+    ["before", "E_FULL: hub has 32 active items secret-body-token-123", "E_FULL"],
+    ["before", "E_TOO_LARGE: hub item exceeds 1024 bytes secret-body-token-123", "E_TOO_LARGE"],
+    ["before", "E_FULL: hub body budget is 4096 bytes secret-body-token-123", "E_FULL"],
+    ["after", "E_FULL: hub has 32 active items", "E_PERSIST_UNKNOWN"],
+    ["after", "E_TOO_LARGE: hub item exceeds 1024 bytes", "E_PERSIST_UNKNOWN"],
+    ["after", "E_FULL: hub body budget is 4096 bytes", "E_PERSIST_UNKNOWN"],
+  ] as const)("%s mutation error %s never leaks or masks unknown", async (phase, diagnostic, code) => {
+    const slot = resolveHubSlot({ launchHome: home(), env: {}, getuid: () => uid });
+    const who = mkOwner();
+    const { tracker, registry, port } = approvalStack("affirm");
+    let inject = false;
+    const fault = () => {
+      if (inject) throw new MemoryError(diagnostic);
+    };
+    const provider = createHubMemoryProvider({
+      capability: () => "ok",
+      registry,
+      owner: () => who,
+      slot: () => slot,
+      faults: phase === "before" ? { beforeBlockWrite: fault } : { afterBlockWrite: fault },
+    });
+    // Initialize the namespace so the before-write failure is genuinely pre-mutation.
+    const put = async (text: string) => {
+      tracker.noteInteractive(who);
+      const operation = { storageScope: "hub", authority: "user", op: "create", topic: "general", text } as const;
+      const approved = await requestCap(port, tracker, who, operation);
+      if (!approved.approved) throw new Error("approval failed");
+      return provider.enqueue({ operation, owner: who, cap: approved.cap });
+    };
+    expect((await put("initial")).ok).toBe(true);
+    inject = true;
+    const result = await put("next");
+    expect(result).toEqual({ ok: false, code });
+    expect(JSON.stringify(result)).not.toContain("secret-body-token-123");
+    expect(result).not.toHaveProperty("message");
+    if (phase === "before") expect(provider.view().items.map((item) => item.text)).toEqual(["initial"]);
+    else expect(provider.view().state).toBe("inert");
+    provider.dispose();
   });
 });

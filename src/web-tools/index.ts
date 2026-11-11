@@ -32,7 +32,7 @@ import {
   tavilyExtract,
   type WebFetchResult,
 } from "./providers.js";
-import { HttpError, MAX_ATTEMPTS, backoffDelay, errorMessage, isRetryableError, sleep } from "./resilience.js";
+import { HttpError, MAX_ATTEMPTS, backoffDelay, webToolErrorSummary, isRetryableError, sleep } from "./resilience.js";
 
 const webSearchParameters = Type.Object({
   query: Type.String({ description: "The search query." }),
@@ -136,7 +136,7 @@ export function createWebSearchTool(): ToolDefinition<typeof webSearchParameters
           content: [
             {
               type: "text",
-              text: `Searching via ${providerLabel(provider)}: ${params.query}`,
+              text: `Searching via ${providerLabel(provider)}.`,
             },
           ],
           details: {},
@@ -181,7 +181,7 @@ export function createWebSearchTool(): ToolDefinition<typeof webSearchParameters
                 content: [
                   {
                     type: "text",
-                    text: `${providerLabel(provider)} attempt ${attempt} failed (${errorMessage(error, Object.values(keys))}); retrying in ${delay}ms...`,
+                    text: `${providerLabel(provider)} attempt ${attempt} failed (${webToolErrorSummary(error)}); retrying in ${delay}ms...`,
                   },
                 ],
                 details: {},
@@ -195,7 +195,7 @@ export function createWebSearchTool(): ToolDefinition<typeof webSearchParameters
         }
 
         if (providerFailed) {
-          const safeError = errorMessage(lastError, Object.values(keys));
+          const safeError = webToolErrorSummary(lastError);
           failures.push({ provider, error: safeError });
 
           const nextProvider = configuredProviders[failures.length];
@@ -252,14 +252,13 @@ export function createWebFetchTool(): ToolDefinition<typeof webFetchParameters> 
       try {
         parsed = new URL(params.url);
       } catch {
-        throw new Error(`Invalid URL: ${params.url}`);
+        throw new Error("Invalid URL. Provide an absolute http(s) URL.");
       }
       if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-        throw new Error(`Only http(s) URLs can be fetched: ${params.url}`);
+        throw new Error("Only http(s) URLs can be fetched.");
       }
 
       const { keys } = getSearchConfig();
-      const allKeys = Object.values(keys);
       const providers = WEB_FETCH_PROVIDER_ORDER.filter((provider) => Boolean(keys[provider]));
       if (providers.length === 0) {
         throw new Error(
@@ -278,9 +277,8 @@ export function createWebFetchTool(): ToolDefinition<typeof webFetchParameters> 
       const failures: Array<{ provider: WebFetchProvider; error: string }> = [];
       for (const provider of providers) {
         const label = WEB_FETCH_PROVIDER_LABEL[provider];
-        const providerKeys = [keys[provider]];
         onUpdate?.({
-          content: [{ type: "text", text: `Fetching via ${label}: ${params.url}` }],
+          content: [{ type: "text", text: `Fetching via ${label}.` }],
           details: {},
         });
 
@@ -319,7 +317,7 @@ export function createWebFetchTool(): ToolDefinition<typeof webFetchParameters> 
                 content: [
                   {
                     type: "text",
-                    text: `${label} fetch attempt ${attempt} failed (${errorMessage(error, providerKeys)}); retrying in ${delay}ms...`,
+                    text: `${label} fetch attempt ${attempt} failed (${webToolErrorSummary(error)}); retrying in ${delay}ms...`,
                   },
                 ],
                 details: {},
@@ -333,7 +331,7 @@ export function createWebFetchTool(): ToolDefinition<typeof webFetchParameters> 
         }
 
         if (providerFailed) {
-          failures.push({ provider, error: errorMessage(lastError, allKeys) });
+          failures.push({ provider, error: webToolErrorSummary(lastError) });
           const next = providers[failures.length];
           if (next) {
             onUpdate?.({

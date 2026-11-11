@@ -26,7 +26,7 @@
  *      reminder-line:<text>              启动提醒追加行
  *
  *    清单之外任何差异都让测试失败；每次追加必须在 commit message 写明理由（方案 §1.1）。
- *  - `render` / `doctor` / `tidyPrompt` 三个字段对 pi-api 同样逐字节（fixture 无行内
+ *  - `render` / `doctor` 三个字段对 pi-api 同样逐字节（fixture 无行内
  *    注释、primary 已触发 D02，D17–D19 不会出现——jev-plan J0 第 4 条）。
  */
 
@@ -295,10 +295,9 @@ describe("jev off golden (A′, jev-plan J0)", () => {
   it("pi-api: field-by-field comparison against the golden (PI_API_ALLOWED_DIFF is empty on dev)", async () => {
     const actual = await record("pi-api");
     const golden = goldenCase("pi-api");
-    // render / doctor / tidyPrompt：逐字节（方案 J0 第 4 条）。
+    // render / doctor：逐字节（方案 J0 第 4 条）。
     expect(serialized(actual.render)).toBe(serialized(golden.render));
     expect(serialized(actual.doctor)).toBe(serialized(golden.doctor));
-    expect(actual.tidyPrompt).toBe(golden.tidyPrompt);
     // registrations：子序列 + 允许差异清单。
     compareRegistrations(actual.registrations, golden.registrations);
     // command：notify 文本只允许声明过的追加行；补全只允许声明过的新条目。

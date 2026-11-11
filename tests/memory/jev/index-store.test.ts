@@ -615,3 +615,186 @@ describe("#36 P0 sanitizer increments (governance arch r5 §4.4)", () => {
     void allow;
   });
 });
+
+describe("#66 in-flight review", () => {
+  test("preserves concurrent suggestions and dismissal across a stale review result", async () => {
+    const dir = fixture();
+    const old: ReviewSuggestion = {
+      id: "old",
+      kind: "duplicate",
+      a: { hash: "a", anchor: "a" },
+      b: { hash: "b", anchor: "b" },
+      p: 0.9,
+      at: "2026-11-08T00:00:00.000Z",
+    };
+    const added: ReviewSuggestion = {
+      id: "added",
+      kind: "scope-check",
+      a: { hash: "c", anchor: "c" },
+      p: 1,
+      at: old.at,
+    };
+    const initial: ReviewState = { lastRunAt: "", corpusFp: "", suggestions: [old], dismissed: [] };
+    expect(await writeIndexPatch(dir, { review: initial })).toBe("ok");
+    const staleResult: ReviewState = { ...readIndex(dir).index.review!, lastRunAt: old.at, corpusFp: "fp" };
+    // Model call is in flight: governance appends, then the user dismisses old.
+    const current: ReviewState = {
+      ...initial,
+      suggestions: [added],
+      dismissed: [{ hashKey: "a+b", anchorKey: "a+b" }],
+    };
+    expect(await writeIndexPatch(dir, { review: current })).toBe("ok");
+    expect(await writeIndexPatch(dir, { review: staleResult })).toBe("ok");
+    const reloaded = readIndex(dir).index.review!;
+    expect(reloaded.suggestions.map((s) => s.id)).toEqual(["added"]);
+    expect(reloaded.dismissed).toEqual(current.dismissed);
+  });
+});
+
+test("manual and background review snapshots merge idempotently and respect resolve tombstones", async () => {
+  const dir = fixture();
+  const base: ReviewState = { lastRunAt: "", corpusFp: "", suggestions: [], dismissed: [] };
+  await writeIndexPatch(dir, { review: base });
+  const snapshot = readIndex(dir).index.review!;
+  const make = (id: string, anchor: string): ReviewSuggestion => ({
+    id,
+    kind: "obsolete",
+    a: { hash: anchor, anchor },
+    p: 0.9,
+    at: "2026-11-08",
+  });
+  const manual = { ...snapshot, lastRunAt: "2026-11-08T01:00:00Z", corpusFp: "m", suggestions: [make("o1", "one")] };
+  const background = {
+    ...snapshot,
+    lastRunAt: "2026-11-08T02:00:00Z",
+    corpusFp: "b",
+    suggestions: [make("o1", "two")],
+  };
+  await writeIndexPatch(dir, { review: manual });
+  await writeIndexPatch(dir, { review: background });
+  await writeIndexPatch(dir, { review: background });
+  expect(
+    readIndex(dir)
+      .index.review!.suggestions.map((s) => s.a.anchor)
+      .sort(),
+  ).toEqual(["one", "two"]);
+  const { updateIndexLocked, suggestionKey } = await import("../../../src/memory/jev/index-store.js");
+  await updateIndexLocked(dir, (index) => ({
+    ...index,
+    review: {
+      ...index.review!,
+      suggestions: index.review!.suggestions.filter((s) => s.a.anchor !== "one"),
+      resolved: [suggestionKey(manual.suggestions[0]!)],
+    },
+  }));
+  await writeIndexPatch(dir, { review: manual });
+  expect(readIndex(dir).index.review!.suggestions.map((s) => s.a.anchor)).toEqual(["two"]);
+  expect(readIndex(dir).index.review!.resolved).toHaveLength(1);
+});
+
+test("review snapshot cannot overwrite a newer update to the same stable suggestion", async () => {
+  const dir = fixture();
+  const suggestion: ReviewSuggestion = {
+    id: "p1",
+    kind: "duplicate",
+    a: { hash: "a", anchor: "entry-a" },
+    b: { hash: "b", anchor: "entry-b" },
+    p: 0.6,
+    at: "2026-11-01",
+  };
+  const base: ReviewState = { lastRunAt: "", corpusFp: "", suggestions: [suggestion], dismissed: [] };
+  await writeIndexPatch(dir, { review: base });
+  await writeIndexPatch(dir, { review: { ...base, suggestions: [{ ...suggestion, p: 0.8, at: "2026-11-02" }] } });
+  await writeIndexPatch(dir, {
+    reviewBase: base,
+    review: { ...base, suggestions: [{ ...suggestion, p: 0.99, at: "2026-11-03" }] },
+  });
+  expect(readIndex(dir).index.review!.suggestions[0]).toMatchObject({ p: 0.8, at: "2026-11-02" });
+});
+
+test("relation dismissal recognizes stable semantic duplicate and legacy block anchors after edits, ignoring until", async () => {
+  const { isDismissedRelation, suggestionKey } = await import("../../../src/memory/jev/index-store.js");
+  const a = { hash: "old-a", anchor: "a.001.md||old alpha" },
+    b = { hash: "old-b", anchor: "b.002.md||old beta" };
+  const freshA = { hash: "new-a", anchor: "a.001.md||rewritten alpha" },
+    freshB = { hash: "new-b", anchor: "b.002.md||rewritten beta" };
+  const semantic: ReviewSuggestion = { id: "r-old", kind: "duplicate", a, b, p: 1, at: "" };
+  const legacy = {
+    hashKey: [a.hash, b.hash].sort().join("+"),
+    anchorKey: [a.anchor, b.anchor].sort().join("+"),
+    until: "2000-01-01",
+  };
+  expect(
+    isDismissedRelation([{ ...legacy, suggestionKey: suggestionKey(semantic) }], freshA, freshB, "duplicate"),
+  ).toBe(true);
+  expect(isDismissedRelation([legacy], freshA, freshB)).toBe(true);
+  expect(isDismissedRelation([legacy], freshA, { hash: "other", anchor: "c.003.md||different" })).toBe(false);
+  expect(
+    isDismissedRelation(
+      [{ hashKey: "x+y", anchorKey: "legacy|a+legacy|b" }],
+      { hash: "x", anchor: "unrelated" },
+      { hash: "y", anchor: "also-unrelated" },
+    ),
+  ).toBe(true);
+});
+
+test("source-independent identities accept legacy source-prefixed dismissal and resolved keys", async () => {
+  const dir = fixture();
+  const a = { hash: "ha", anchor: "a.001.md|section|body" },
+    b = { hash: "hb", anchor: "b.002.md|section|body" };
+  const g: ReviewSuggestion = { id: "relation-a-b", kind: "conflict", a, b, p: 0.9, at: "2026-11-01" };
+  const s: ReviewSuggestion = { ...g, id: "r-123", at: "2026-11-02" };
+  const { suggestionKey } = await import("../../../src/memory/jev/index-store.js");
+  expect(suggestionKey(g)).toBe(suggestionKey(s));
+  const oldKey = JSON.stringify(["governance", "conflict", "a.001.md", "b.002.md"]);
+  const legacy: ReviewState = {
+    lastRunAt: "",
+    corpusFp: "",
+    suggestions: [],
+    dismissed: [{ hashKey: "stale", anchorKey: "stale", suggestionKey: oldKey }],
+  };
+  await writeIndexPatch(dir, { review: legacy });
+  await writeIndexPatch(dir, { review: { ...legacy, suggestions: [s] } });
+  expect(readIndex(dir).index.review!.suggestions).toEqual([]);
+  const other = { ...s, b: { hash: "hc", anchor: "c.003.md|section|body" } };
+  await writeIndexPatch(dir, { review: { ...legacy, suggestions: [other] } });
+  expect(readIndex(dir).index.review!.suggestions).toEqual([other]);
+  const dir2 = fixture();
+  await writeIndexPatch(dir2, { review: { ...legacy, dismissed: [], resolved: [oldKey] } });
+  await writeIndexPatch(dir2, { review: { ...legacy, dismissed: [], suggestions: [s] } });
+  expect(readIndex(dir2).index.review!.suggestions).toEqual([]);
+});
+
+test("undismissed governance and semantic results for one relation both merge normally", async () => {
+  const dir = fixture();
+  const a = { hash: "a", anchor: "a.001.md|first|old" },
+    b = { hash: "b", anchor: "b.002.md|first|old" };
+  const governance: ReviewSuggestion = { id: "relation-a-b", kind: "conflict", a, b, p: 0.6, at: "2026-11-01" };
+  const semantic: ReviewSuggestion = { ...governance, id: "r-new", p: 0.9, at: "2026-11-02" };
+  const state: ReviewState = { lastRunAt: "", corpusFp: "", suggestions: [governance], dismissed: [] };
+  await writeIndexPatch(dir, { review: state });
+  expect(readIndex(dir).index.review!.suggestions).toEqual([governance]);
+  await writeIndexPatch(dir, { review: { ...state, suggestions: [semantic] } });
+  expect(readIndex(dir).index.review!.suggestions).toEqual([semantic]);
+});
+
+test("typed keyed dismissal keeps other kinds even with identical hashes; same kind stays suppressed", async () => {
+  const { isDismissedRelation, suggestionKey } = await import("../../../src/memory/jev/index-store.js");
+  const a = { hash: "ha", anchor: "a.001.md||alpha" },
+    b = { hash: "hb", anchor: "b.002.md||beta" };
+  const conflict: ReviewSuggestion = { id: "relation-a-b", kind: "conflict", a, b, p: 0.9, at: "2026-11-08" };
+  const supersedes: ReviewSuggestion = { ...conflict, id: "r-sup", kind: "supersedes" };
+  const dismissal = {
+    hashKey: "ha+hb",
+    anchorKey: [a.anchor, b.anchor].sort().join("+"),
+    suggestionKey: suggestionKey(conflict),
+  };
+  expect(isDismissedRelation([dismissal], a, b)).toBe(false);
+  expect(isDismissedRelation([dismissal], a, b, "conflict")).toBe(true);
+  expect(isDismissedRelation([dismissal], a, b, "supersedes")).toBe(false);
+  const dir = fixture();
+  const state: ReviewState = { lastRunAt: "", corpusFp: "", suggestions: [], dismissed: [dismissal] };
+  await writeIndexPatch(dir, { review: state });
+  await writeIndexPatch(dir, { review: { ...state, suggestions: [conflict, supersedes] } });
+  expect(readIndex(dir).index.review!.suggestions).toEqual([supersedes]);
+});

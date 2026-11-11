@@ -8,6 +8,7 @@
  * （同 type 同内容的连续 custom 会撞键），只能配合 `reconcileRecent` /
  * `diffAppended` 的多重集对账使用 —— 持久化严格按事件顺序，尾部计数对账正确。
  */
+import { fabricWakeNotice } from "./fabric-wake-notice.js";
 import { generationOwnData, sanitizeGenerationMetadata, WEB_MESSAGE_SPEED_ENTRY_TYPE } from "./message-generation.js";
 import { Buffer } from "node:buffer";
 import { CMD_RECORD_ENTRY_TYPE, sanitizeCmdRecord } from "./cmd-record.js";
@@ -236,7 +237,15 @@ export function projectSessionEntry(raw: unknown): WireEntry | undefined {
       // outbox 每迁移一次状态就追加一条，非 delivered 状态维持墓碑投影，避免重复显示。
       if (r.customType === "subagent:fabric") {
         const d = r.data as
-          | { state?: unknown; kind?: unknown; from?: unknown; fromLabel?: unknown; payload?: unknown }
+          | {
+              state?: unknown;
+              kind?: unknown;
+              from?: unknown;
+              fromLabel?: unknown;
+              payload?: unknown;
+              wakeDowngraded?: unknown;
+              to?: unknown;
+            }
           | null
           | undefined;
         const payload = d !== null && typeof d === "object" ? d.payload : undefined;
@@ -251,6 +260,7 @@ export function projectSessionEntry(raw: unknown): WireEntry | undefined {
           const from = typeof d.from === "string" ? d.from : "";
           const fromLabel = typeof d.fromLabel === "string" && d.fromLabel !== "" ? d.fromLabel : undefined;
           const sender = from === "root" ? "root" : from === "" ? "unknown" : (fromLabel ?? from);
+          const notice = d.to === "root" ? fabricWakeNotice(d.wakeDowngraded) : "";
           return finish(
             {
               id: r.id,
@@ -258,7 +268,7 @@ export function projectSessionEntry(raw: unknown): WireEntry | undefined {
               type: "custom_message",
               timestamp: r.timestamp,
               customType: r.customType,
-              content: truncateDeep(`[@${sender}]\n${text}`, flag),
+              content: truncateDeep(`[@${sender}]${notice ? ` · ${notice}` : ""}\n${text}`, flag),
             },
             flag,
           );

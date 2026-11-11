@@ -253,7 +253,6 @@ const BASE_SETTINGS = {
   todo: { enabled: false },
   askUser: { enabled: true },
   quota: { enabled: false },
-  goal: { enabled: false },
   cacheTtl: { mode: "off" },
   fleetWidget: false,
 };

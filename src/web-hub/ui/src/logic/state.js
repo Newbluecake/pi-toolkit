@@ -127,7 +127,7 @@
  * }} State
  * @typedef {{ event: string, data: any, id?: number, at?: number }} Msg
  */
-import { acceptHeld, HELD_TOMB_CTL_STATES, pendingTransition } from "./control.js";
+import { acceptHeld, HELD_TOMB_CTL_STATES, pendingTransition, sameMemoryUiKey, memoryOwnerMatches } from "./control.js";
 import { isCmdRecordWire } from "./cmdRecord.ts";
 import { isLoadGateWireLike, isLoadWireLike, parseLoadTopWire } from "./load.js";
 import { SCHED_CAP, SCHED_EVENT, isSchedulesPayloadLike } from "./schedule.js";
@@ -518,7 +518,22 @@ export function reduce(s, msg) {
   // determinism; SSE dispatch leaves it undefined and takes Date.now() HERE — one read per
   // message, never inside eventCore, so the reducer stays a pure (state, msg, at) function).
   const at = typeof msg.at === "number" && Number.isFinite(msg.at) ? msg.at : Date.now();
-  const next = reduceInner(s, msg.event, d, at);
+  let next = reduceInner(s, msg.event, d, at);
+  // Sticky display invalidation: A→B→A in one render batch must not revive A's old key.
+  // Keep the original request/result as data; this flag conveys no service-side outcome.
+  for (const [key, a] of next.agents) {
+    if (a === s.agents.get(key)) continue;
+    const pendingCtl = transitionPending(a.pendingCtl, (it) =>
+      it.memoryUiKey && !it.memoryInvalidated && !memoryOwnerMatches(it.memoryUiKey, key, a)
+        ? { ...it, memoryInvalidated: true }
+        : it,
+    );
+    if (pendingCtl !== a.pendingCtl) {
+      const agents = new Map(next.agents);
+      agents.set(key, { ...a, pendingCtl });
+      next = { ...next, agents };
+    }
+  }
   if (typeof msg.id === "number" && Number.isFinite(msg.id) && next.lastEventId !== msg.id) {
     return { ...next, lastEventId: msg.id };
   }
@@ -901,7 +916,9 @@ function reduceInner(s, event, d, at) {
         }
         const pendingCtl = transitionPending(a.pendingCtl, (it) => {
           const entry = byCmdId.get(it.id);
-          return entry ? pendingTransition(it, { type: "ctl", entry }) : it;
+          return entry && (!it.memoryUiKey || (!it.memoryInvalidated && memoryOwnerMatches(it.memoryUiKey, key, a)))
+            ? pendingTransition(it, { type: "ctl", entry })
+            : it;
         });
         // steer-recall U-MERGE: a terminal hold outcome on the ctl slot (dispatched-and-later
         // handed states / recalled / returned / unconfirmed) tombstones the cmdId — the row
@@ -929,7 +946,7 @@ function reduceInner(s, event, d, at) {
       if (!key || typeof d.id !== "string") return s;
       return updateAgent(s, key, (a) => {
         const pendingCtl = transitionPending(a.pendingCtl, (it) =>
-          it.id === d.id
+          it.id === d.id && (!it.memoryUiKey || (!it.memoryInvalidated && memoryOwnerMatches(it.memoryUiKey, key, a)))
             ? pendingTransition(it, {
                 type: "late",
                 ok: d.ok === true,
@@ -1103,7 +1120,13 @@ function reduceInner(s, event, d, at) {
           }
         }
         const pendingCtl = transitionPending(a.pendingCtl, (it) =>
-          it.id === d.id ? pendingTransition(it, d.transition) : it,
+          it.id === d.id &&
+          (!it.memoryUiKey ||
+            (!it.memoryInvalidated &&
+              sameMemoryUiKey(it.memoryUiKey, d.expectedKey) &&
+              memoryOwnerMatches(it.memoryUiKey, key, a)))
+            ? pendingTransition(it, d.transition)
+            : it,
         );
         if (tombs === a.heldTombs && pendingCtl === a.pendingCtl) return a;
         return { ...a, pendingCtl, heldTombs: tombs, held };

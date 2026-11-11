@@ -10,7 +10,15 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-export class MemoryError extends Error {}
+export class MemoryError extends Error {
+  /** Explicit validation identity; legacy unclassified errors keep their original mapping. */
+  declare readonly code?: "E_META_INVALID";
+
+  constructor(message?: string, options?: ErrorOptions & { code?: "E_META_INVALID" }) {
+    super(message, options);
+    if (options?.code !== undefined) this.code = options.code;
+  }
+}
 
 export interface MemoryPaths {
   readonly memoryRoot: string;

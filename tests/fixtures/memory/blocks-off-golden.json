@@ -1,0 +1,4 @@
+{
+  "events": ["session_start", "session_start", "session_shutdown", "tool:memory", "command:mem"],
+  "rendered": "## Memory (<SLUG>) — 2 topic(s) · 2 block(s)\n\n### User rules (always on)\n- [rules.001] always check the gate\n\nTopics (relevant blocks are injected automatically; read one with memory view <topic>):\n- notes · 1 blocks\n- rules · 1 blocks\n\n<!-- pi-toolkit:memory <SLUG> -->"
+}

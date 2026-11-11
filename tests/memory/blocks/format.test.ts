@@ -57,9 +57,9 @@ describe("block format", () => {
   });
   it("migration preserves oversized body and section, while default writes stay strict", () => {
     const body = "中".repeat(341) + "ab";
-    const section = "中".repeat(34) + "a";
+    const section = "中".repeat(40) + "a";
     expect(bodyBytes(body)).toBe(1025);
-    expect(Buffer.byteLength(section)).toBe(103);
+    expect(Buffer.byteLength(section)).toBe(121);
     expect(() => serializeBlock(base, body)).toThrow("E_TOO_LARGE");
     expect(() => serializeBlock({ ...base, section }, "short")).toThrow("E_SECTION_TOO_LARGE");
     const raw = serializeBlock({ ...base, section }, body, { allowOversize: true });
@@ -110,4 +110,13 @@ describe("block format", () => {
       parseBlockFile("x.001.md", serializeBlock({ ...base, authority: "agent", scope: "global" }, "x")),
     ).toMatchObject({ meta: { authority: "agent" } });
   });
+});
+
+it("strict writes reject overlong title and when; structural failures remain stray", () => {
+  expect(() => serializeBlock({ ...base, title: "a".repeat(111) }, "x")).toThrow("E_META: invalid title");
+  expect(() => serializeBlock({ ...base, when: "a".repeat(95) }, "x")).toThrow("E_META: invalid when");
+  expect(
+    parseBlockFile("x.001.md", serializeBlock(base, "x").replace("kind: block\n", ""), { softLimits: true }),
+  ).toHaveProperty("stray", true);
+  expect(parseBlockFile("invalid.md", serializeBlock(base, "x"), { softLimits: true })).toHaveProperty("stray", true);
 });
