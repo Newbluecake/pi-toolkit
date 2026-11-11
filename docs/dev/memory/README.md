@@ -521,10 +521,12 @@ and continues using the phase-1 scoped-registration and effective child-settings
   getter is error/E_INTERNAL with originalMessage. Child Hub and disabled scopes never resolve
   their read ports. Assembly must not pre-collapse getter exceptions into an absent owner before
   the inspector can observe them (the old `wiring.current()` owner filter is not a diagnostic port).
-- Only v4 maps project exceptions: the ten declared project codes retain their code, normalized
-  message and complete originalCode/originalMessage. Other prefixed MemoryErrors become E_INTERNAL
-  with originalCode; unprefixed MemoryErrors and ordinary Errors become E_INTERNAL with the complete
-  originalMessage. The old project factory/dispatcher continues throwing the identical exception.
+- Only v4 maps project exceptions: the eleven declared project codes retain their code, normalized
+  message and complete originalCode/originalMessage. This includes explicitly typed inline validation
+  `E_META_INVALID` (0.12 contract update below); it is not inferred from refusal text. Other prefixed
+  MemoryErrors become E_INTERNAL with originalCode; unclassified unprefixed MemoryErrors and ordinary
+  Errors remain E_INTERNAL with the complete originalMessage. The old project factory/dispatcher
+  continues throwing the same exception, including its original message.
 - `createScopedMemoryTool` optionally takes a host-only `v4Registration()` returning active and
   registered. Both must be true, and the call must pass the unchanged old schema, before appending
   `{deprecation:{replacement:{tool:"memory",params}}}`. Success view replacements keep only
@@ -577,6 +579,31 @@ inactive-path differential baseline; no old text or schema was shortened to meet
   authority-before-unknown-field validation in both tools, Hub group omission with diagnostics-only status and
   zero Hub reads, and close/tree registration/write behavior. The actual registered child surface is compared
   to all four canonical blocksUnifiedChild fields in tool-surface.test.ts, never the Agent golden.
+
+### 0.12 inline authority guidance and validation contract (2026-11-11)
+
+This is an approved outward description/error-contract change, not a parser or authority-policy change.
+The actual v4 Jev main/child descriptions now show first-line `user|lesson` syntax and an executable
+`<!-- mem user -->` example. `authority: user` is stored frontmatter, not an inline key; project still
+rejects top-level `authority`, and inline `authority=` remains invalid (no new alias). The skill keeps
+selection/authority strategy and defers input spelling to the current tool's concrete examples.
+
+The B-level tool-surface fixture only adds complete `blocksUnifiedJevInlineAuthority` (2625B) and
+`blocksUnifiedChildJevInlineAuthority` (2689B) variants and their `bytes.*` counters. Production
+`wireMemory` selects these through `memoryV4Surface({jev:true})`, including child sessions; the old
+`blocksUnifiedJev` key is retained byte-for-byte as a historical contract, not republished. Non-Jev,
+v2/legacy and scoped alias descriptions/schemas remain unchanged. Per-key SHA-256 assertions cover
+**all** pre-fix keys and counters; registration tests cover main/child × Jev on/off × blocks/v2/legacy.
+
+V3 create/update attach `MemoryError.code = E_META_INVALID` only to parser-reported inline syntax
+refusals and the existing Jev `checkInline` validation refusal. Their original exception messages stay
+unchanged; v4 preserves this typed code with safe normalized message `invalid project memory inline
+metadata` and originalCode/originalMessage. The existing prefixed-code mapping and all other unclassified
+E_INTERNAL fallbacks are unchanged; no error-text heuristic classifies metadata. Rejection remains before
+the directory lock/bootstrap/store commit, with zero partial block or afterWrite callback. Tests use own
+temporary stores, prove unchanged snapshots for create and update, and exercise the real Jev guard's
+non-first-line refusal without classifier calls. Scope/child/approval gates and user-rule changes are not
+relaxed or automated. Source tests do not prove deployment into an existing session.
 
 ## #50 P50.1 增量触发与聚合（2026-11-09，fail-closed 交付）
 

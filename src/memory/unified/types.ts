@@ -17,6 +17,7 @@ export interface MemoryV4Params {
 }
 export type NormalizedMemoryCall = MemoryV4Params & { scope: MemoryScope | "all" };
 export type ProjectMemoryErrorCode =
+  | "E_META_INVALID"
   | "E_NOT_FOUND"
   | "E_REV_REQUIRED"
   | "E_CONFLICT"

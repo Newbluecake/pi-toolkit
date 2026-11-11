@@ -114,6 +114,29 @@ it.each([
 ])("validates field/scope rules: %j", (params, code) =>
   expect(normalizeMemoryV4(params)).toMatchObject({ ok: false, code }),
 );
+it.each(["create", "update"])(
+  "project %s rejects top-level authority before dispatch, even with valid inline user",
+  async (command) => {
+    const h = harness();
+    cleanups.push(h.close);
+    const before = snapshot(h.dir);
+    for (const authority of ["agent", "user"]) {
+      expect(
+        await h.registeredCall({
+          command,
+          scope: "project",
+          ...(command === "create" ? { topic: "fact" } : { path: "fact.001", rev: "actual" }),
+          authority,
+          text: "<!-- mem user -->\nuser order",
+        }),
+      ).toMatchObject({ ok: false, code: "E_META_INVALID" });
+    }
+    expect(h.projectRun).not.toHaveBeenCalled();
+    expect(h.select).not.toHaveBeenCalled();
+    expect(snapshot(h.dir)).toEqual(before);
+  },
+);
+
 it("child authority precedes every other validation and every scope", async () => {
   const h = harness({ child: true });
   cleanups.push(h.close);

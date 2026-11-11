@@ -3,6 +3,7 @@ import type { ProjectMemoryErrorCode, UnifiedError } from "./types.js";
 
 /** Only the declared project codes survive. Never use Hub's persistence mapper here. */
 export const PROJECT_ERROR_MESSAGES = {
+  E_META_INVALID: "invalid project memory inline metadata",
   E_NOT_FOUND: "project memory target not found",
   E_REV_REQUIRED: "project memory update requires rev",
   E_CONFLICT: "project memory revision conflict",
@@ -18,7 +19,7 @@ export const PROJECT_ERROR_MESSAGES = {
 export function projectError(error: unknown): UnifiedError {
   const originalMessage = error instanceof Error ? error.message : String(error);
   const originalCode =
-    error instanceof MemoryError ? /^(E_[A-Z0-9_]+)(?=:|$|\s)/.exec(originalMessage)?.[1] : undefined;
+    error instanceof MemoryError ? (error.code ?? /^(E_[A-Z0-9_]+)(?=:|$|\s)/.exec(originalMessage)?.[1]) : undefined;
   if (originalCode && Object.hasOwn(PROJECT_ERROR_MESSAGES, originalCode)) {
     return {
       code: originalCode as ProjectMemoryErrorCode,

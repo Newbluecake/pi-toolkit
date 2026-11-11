@@ -270,7 +270,7 @@ view 的 session/hub 只用 items 分支，search 只用 hits 分支。`SessionE
 
 阶段 1 旧 project 门面继续返回成功文本、抛 `MemoryError` 或普通 `Error`；旧 scoped 门面继续返回原 JSON 错误。阶段 2 仅 v4 使用 `{code,message,originalCode?,originalMessage?}`，其 code 是字符串并集，不再宣称全部属于 `ScopedMemoryErrorCode`。
 
-scoped 错误逐码原样保留；project 的 `E_NOT_FOUND/E_REV_REQUIRED/E_CONFLICT/E_TOO_LARGE/E_WRITE_GATE/E_READONLY/E_BAD_PATH/E_BAD_TOPIC/E_UNMIGRATED/E_UNSUPPORTED_COMMAND` 均映射同名 code，originalMessage 保留当前 rev、迁移、gate 等完整指引。其他带前缀 MemoryError 映射 `E_INTERNAL` + originalCode；无码 MemoryError、普通 Error 映射 `E_INTERNAL` + originalMessage。禁止把 project 异常送入 hub `asCode`，避免塌缩为 `E_PERSIST`。
+scoped 错误逐码原样保留；project 的 `E_NOT_FOUND/E_REV_REQUIRED/E_CONFLICT/E_TOO_LARGE/E_WRITE_GATE/E_READONLY/E_BAD_PATH/E_BAD_TOPIC/E_UNMIGRATED/E_UNSUPPORTED_COMMAND` 均映射同名 code，originalMessage 保留当前 rev、迁移、gate 等完整指引。**0.12 获批错误合同补充（2026-11-11）**：v3 create/update 的 inline parser errors 与 Jev `checkInline` 语法拒绝通过显式 `MemoryError.code: "E_META_INVALID"` 进入同名 v4 映射，规范 message 为 `invalid project memory inline metadata`，保留 originalCode/originalMessage，旧 v3 抛出 message 不变。拒绝仍在锁/bootstrap/store 提交之前，不从错误文本猜类型。其他带前缀 MemoryError 仍映射 `E_INTERNAL` + originalCode；无显式 code 的无码 MemoryError、普通 Error 仍映射 `E_INTERNAL` + originalMessage。禁止把 project 异常送入 hub `asCode`，避免塌缩为 `E_PERSIST`。
 
 | 环境              | project                                                                    | session                            | hub                                    |
 | ----------------- | -------------------------------------------------------------------------- | ---------------------------------- | -------------------------------------- |
@@ -286,7 +286,9 @@ child 交叉测试固定四格，每格都尝试 project create/update/delete：
 
 ### 5.1 fixture 处置
 
-`memory-tool-surface.json` 只新增 `blocksUnified`、`blocksUnifiedJev`、`blocksUnifiedChild` 三个完整 canonical variant，以及对应 `bytes.*` key；旧 `blocks/blocksJev/bytes.*` 字节不变。
+阶段 2 的 `memory-tool-surface.json` 只新增 `blocksUnified`、`blocksUnifiedJev`、`blocksUnifiedChild` 三个完整 canonical variant，以及对应 `bytes.*` key；旧 `blocks/blocksJev/bytes.*` 字节不变。
+
+**0.12 获批描述合同补充（2026-11-11）**：追加 `blocksUnifiedJevInlineAuthority` / `blocksUnifiedChildJevInlineAuthority` 完整 canonical variant 和对应 `bytes.*`（2625B / 2689B）。v4 实际 Jev main/child 注册使用新 variant，恢复 first-line 裸 `user|lesson` 与 `<!-- mem user -->` 示例，区分落盘 `authority: user`、非法 inline `authority=` 与 project 禁止的顶层 `authority`；parser 不加 alias。全部旧 key（含旧 `blocksUnifiedJev`）和已有 counter 字节保留；非 Jev、v2/legacy、scoped 描述/schema 不变。skill 仅保留策略与输入边界，不复制整份机制。生产注册矩阵和全旧 key SHA-256 同步断言。
 
 `scoped-memory-tool-surface.json` 在阶段 1/2 保持 description/schema 字节不变；弃用提示只进 blocks 的结果。阶段 1 先把该 fixture 登记到 AGENTS 的 B 级契约表，登记本身不重生文件。阶段 3 因非 blocks 仍保留别名，该 fixture 与测试也继续保留；只有未来获批的全局删除才能退役它们。
 

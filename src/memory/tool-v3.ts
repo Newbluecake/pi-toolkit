@@ -800,7 +800,9 @@ export function createMemoryToolV3(deps: MemoryToolV3Deps): ToolDefinition {
         }
         const { meta, body } = parseWriteMeta(normalized.text);
         if (meta.errors.length > 0) {
-          throw new MemoryError(`refused: the inline comment has errors — ${meta.errors.join("; ")}`);
+          throw new MemoryError(`refused: the inline comment has errors — ${meta.errors.join("; ")}`, {
+            code: "E_META_INVALID",
+          });
         }
         const bytes = bodyBytes(body);
         if (bytes > BLOCK_BODY_MAX_BYTES) {
@@ -817,7 +819,7 @@ export function createMemoryToolV3(deps: MemoryToolV3Deps): ToolDefinition {
             ...(meta.section !== undefined || meta.clearSection ? ["section"] : []),
           ]),
         );
-        if (inlineErr !== undefined) throw new MemoryError(inlineErr);
+        if (inlineErr !== undefined) throw new MemoryError(inlineErr, { code: "E_META_INVALID" });
         const metaObj = metaForCreate(meta);
         // absent ⇒ first write creates blocks/ — the §4.7 explicit-path
         // protocol: bootstrap (verifies unlocked/mount/write-zone/ancestor
@@ -894,7 +896,9 @@ export function createMemoryToolV3(deps: MemoryToolV3Deps): ToolDefinition {
         }
         const { meta, body } = parseWriteMeta(normalized.text);
         if (meta.errors.length > 0) {
-          throw new MemoryError(`refused: the inline comment has errors — ${meta.errors.join("; ")}`);
+          throw new MemoryError(`refused: the inline comment has errors — ${meta.errors.join("; ")}`, {
+            code: "E_META_INVALID",
+          });
         }
         const bytes = bodyBytes(body);
         if (bytes > BLOCK_BODY_MAX_BYTES) {
@@ -918,7 +922,7 @@ export function createMemoryToolV3(deps: MemoryToolV3Deps): ToolDefinition {
             ...(meta.section !== undefined || meta.clearSection ? ["section"] : []),
           ]),
         );
-        if (inlineErr !== undefined) throw new MemoryError(inlineErr);
+        if (inlineErr !== undefined) throw new MemoryError(inlineErr, { code: "E_META_INVALID" });
         const updated = await withMemoryDirLock(real ?? display, () => {
           if (dirFormat(display) !== "blocks") throw new MemoryError("E_UNMIGRATED: directory is not in block layout");
           requireGate();
