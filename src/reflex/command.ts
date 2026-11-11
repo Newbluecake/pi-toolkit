@@ -202,8 +202,37 @@ export function draftsText(deps: ReflexCommandDeps): string {
   return lines.join("\n");
 }
 
+export function completeReflexArguments(
+  prefix: string,
+  context: { readonly builtinScriptIds: readonly string[] },
+): Array<{ value: string; label: string; description: string }> {
+  try {
+    if (prefix.length > 1024 || /[\x00-\x08\x0a-\x1f\x7f]/.test(prefix)) return [];
+    const root = [
+      { value: "status", label: "status", description: "显示 reflex 状态" },
+      { value: "explain", label: "explain", description: "解释自由文本的匹配" },
+      { value: "reset", label: "reset", description: "清降级覆盖层，可能恢复既有 auto 配置" },
+      { value: "drafts", label: "drafts", description: "显示草案诊断；关闭时显示 disabled" },
+    ];
+    if (!/[ \t]/.test(prefix)) return root.filter((item) => item.value.startsWith(prefix));
+    const match = /^(reset)[ \t]+([^ \t]*)$/.exec(prefix);
+    if (match === null) return [];
+    const part = match[2] ?? "";
+    return context.builtinScriptIds
+      .filter((id) => id.startsWith(part))
+      .map((id) => ({ value: `reset ${id}`, label: id, description: "清降级覆盖层，可能恢复既有 auto 配置" }))
+      .filter((item) => Buffer.byteLength(item.value, "utf8") <= 512);
+  } catch {
+    return [];
+  }
+}
+
 export function createReflexCommand(deps: ReflexCommandDeps): Omit<RegisteredCommand, "name" | "sourceInfo"> {
+  const builtinScriptIds = [...new Set(deps.catalog.slice(0, 16).map((script) => script.id))].filter(
+    (id) => typeof id === "string" && /^[a-z][a-z0-9.-]{0,63}$/.test(id) && !id.startsWith("draft."),
+  );
   return {
+    getArgumentCompletions: (prefix) => completeReflexArguments(prefix, { builtinScriptIds }),
     description: "reflex：/reflex [status] | explain <文本> | reset [id] —— 只读自省问题的确定性作答层（shadow）。",
     handler: async (args: string, ctx: ExtensionCommandContext) => {
       try {

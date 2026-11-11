@@ -467,6 +467,8 @@ navigation (D2 拍板). `/webhub status` prints `cmd-args: <mode> · hub-cap on|
 (`agent/cmd-args-status.ts`). Conformance: `tests/conformance/slash-args.test.ts` (real pi
 rpc child + real InteractiveMode) before any pi peer bump.
 
+`/webhub` 原有一级、feishu 和 user 补全保持不变；静态补全另覆盖 token rotate、2fa 的七个操作、enroll --replace 和 feishu on/off。补全不读取 Hub、端口、身份或配置，不提供账号、秘密或 --confirm。recovery 作废旧恢复码，reset 清除因子，forget-ips 清除 IP 历史，repair 是破坏性修复；reset/repair 须手输确认。Web 默认 policy 逐项拒绝 token/2fa，显式 allow 仅影响候选可见性，不绕过原有 native 敏感操作的 TUI 硬门。
+
 ## Unknown slash text（#40）
 
 默认开启，无新设置：Composer 未在当前公布名单命中的 `/name` 只是 unresolved，不代表不存在（名单最多 400）。只有当前 agent 的 `StatusInfo.features` 含 `unknown-slash-text.v1` 且 Web commands 已开启时，才放行给权威 agent 分类。精确命中的 deny 不放行；Web commands 关闭仍沿用直接普通 prompt，无 A→B。旧 agent 无 token 保留旧命令拒绝；旧 hub 开放 status.features 透传即可，无 hub/hello cap、新字段、PromptArgs/result schema 或 PROTO bump。旧 UI 忽略 token。

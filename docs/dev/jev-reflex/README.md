@@ -45,6 +45,10 @@ R 层（Reflex）：在 `input` 阶段对只读自省问题（后台 job / subag
 - **`/reflex status`**：每个脚本一行 `<id> <state> strikes=n [demote=<reason>]`，`demote=` 即降级原因（`strikes|repeat|corrected`）；另打印本激活计数（含 `fallback.<kind>`）与本会话 record/answer/correction 汇总。`/reflex reset [id]` 清 strikes 与降级覆盖层（纯内存），reset 后该脚本下一条 input 即恢复 `auto`；`/reload` 同样清空覆盖层。
 - **手动冒烟（本机）**：`reflex.enabled=true`（pi-toolkit.json）→ `/reload` → 问「后台还有几个 job」→ 模型照常作答 → `/reflex status` 应显示 `candidates=1`、会话记录 `jobs.list@1 cand=1`；`/reflex explain 工作区干净吗` 应给出 `band=high script=git.status`。若 `agree` 长期全是 `unknown`，说明会话里用户消息文本与 input 文本不一致（被前序 handler 改写），需查 digest 口径。
 
+### `/reflex` 参数补全
+
+补全只在命令工厂创建时捕获 catalog 前 16 项的合法、去重 builtin ID；不读取模板、会话 branch 或运行时状态。一级提供 status、explain、reset、drafts；reset 可补全 ID，explain 自由文本和 drafts 参数不补全。drafts 关闭时仍可发现诊断入口，执行只显示 disabled；reset 清除降级覆盖层，可能恢复既有 auto 配置。补全不改变原注册门和执行权限。
+
 ## 威胁模型（#25，R-I14 的依据）
 
 同 UID 的 agent（pi 的 bash 工具、子 agent）可以执行任意 shell，能读写 `<agentDir>` 下所有文件、改 `pi-toolkit.json`、伪造任何评审 / 暴露 / 批次 / manifest / 修订记录。因此：

@@ -76,6 +76,14 @@
 - hub cap：`HubConfig.feishuBot.threads`（窗口/回帖限额，**clamp 后**的值）；agent cap：hello
   `thr.v1`（`threadsCapOn`，activate 级，不随栈重建漂移）。
 
+## `/thread` 静态补全
+
+已注册的命令始终提供纯静态参数补全：一级依次为 `status`、`help`、`sub`、`drop`，
+rebind 开启时追加 `rebind`、`acquire`。`sub <run> ` 的话题位置和 rebind/acquire 的首参数
+只建议 `origin`，保留用户已输入的完整参数前缀；不发现 run、订阅或 session。补全只读取
+冻结的 rebind 标志，不访问活跃栈或业务操作；无栈时仍可补全，执行仍按原规则拒绝。
+threads 关闭时命令本身不注册。输入及输出有界，非法控制字符、额外参数与自由正文不补全。
+
 ## 测试索引
 
 | 层        | 文件                                                                                                                                    | 钉住                                                                                                                            |
@@ -85,6 +93,7 @@
 | 设置      | `tests/fabric/threads-settings.test.ts`                                                                                                 | 六组窗口 clamp 组合、WARN 行、`windowClamped`、hub≡agent clamp                                                                  |
 | P2 单元   | `tests/web-hub/hub/feishu/thread-{hub,requests,runs,service,state}.test.ts`                                                             | routed 分支、S4b–S4d 幂等、S9 gap 竞争、S10 detach、T-state pin、/main、回执                                                    |
 | P3 接线   | `tests/integration/stack-teardown-matrix.test.ts`、`tests/tools/thread-tools.test.ts`、`tests/web-hub/agent/**`（wiring/commands 系列） | 三路 dispose 顺序、子工具降级表（含 REVOKED 的 display-only）                                                                   |
+| 命令补全  | `tests/commands/thread-completion.test.ts`                                                                                              | rebind 两态、候选位置/上界、补全不访问业务操作                                                                                  |
 | P4 E2E    | `tests/integration/fabric-thread-e2e.test.ts`                                                                                           | 真 hub 子进程 × fake 飞书 × 真 stack × 真 wireWebHub：S1/S1′/S2/S3/S3b/S4/S4b③/S5/S6/S7a-c/S9/S11/S12（见文件头注释的覆盖矩阵） |
 | status 行 | `tests/commands/status-thread.test.ts`                                                                                                  | `/agent status` thread 行缺席⇔字节一致                                                                                          |
 

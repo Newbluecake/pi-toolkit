@@ -1,8 +1,9 @@
 // web-hub plan §包 I: /webhub command — status/open 文案 + control 缺失时的提示。
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { createWebHubCommand, formatStatus } from "../../src/commands/webhub.js";
+import { resolveCommandPolicy } from "../../src/web-hub/agent/command-policy.js";
 import type { WebHubControl, WebHubStatusView } from "../../src/web-hub/agent/index.js";
 
 function fakeCtx() {
@@ -350,6 +351,83 @@ describe("getArgumentCompletions", () => {
     // Single-token first argument: applying it yields `/webhub unlock` byte-for-byte
     // (applyCompletion replaces the whole argument prefix with value).
     expect(`/webhub ${items![0]!.value}`).toBe("/webhub unlock");
+  });
+
+  it("completes only the static admin grammar with accurate destructive descriptions", () => {
+    const complete = cmd().getArgumentCompletions!;
+    const values = (s: string) => complete(s)!.map((item) => item.value);
+    expect(values("token r")).toEqual(["token rotate"]);
+    expect(values("2fa ")).toEqual([
+      "2fa status",
+      "2fa enroll",
+      "2fa feishu",
+      "2fa recovery",
+      "2fa reset",
+      "2fa forget-ips",
+      "2fa repair",
+    ]);
+    expect(values("2fa f")).toEqual(["2fa feishu", "2fa forget-ips"]);
+    expect(values("2fa\tfeishu\to")).toEqual(["2fa feishu on", "2fa feishu off"]);
+    expect(values("2fa enroll --r")).toEqual(["2fa enroll --replace"]);
+    for (const s of [
+      "2fa reset ",
+      "2fa repair --",
+      "2fa recovery code",
+      "2fa feishu on ",
+      "token rotate ",
+      "2fa\n",
+      "2fa \u007f",
+      "2fa " + "x".repeat(1025),
+    ]) {
+      expect(values(s)).toEqual([]);
+    }
+    const items = complete("2fa ")!;
+    expect(items.find((i) => i.label === "recovery")!.description).toContain("作废旧恢复码");
+    expect(items.find((i) => i.label === "reset")!.description).toContain("清除二次验证因子");
+    expect(items.find((i) => i.label === "forget-ips")!.description).toContain("清除 IP");
+    expect(items.find((i) => i.label === "repair")!.description).toContain("破坏性");
+    expect(
+      items.every(
+        (i) => Buffer.byteLength(i.value) <= 512 && i.label.length <= 120 && (i.description?.length ?? 0) <= 200,
+      ),
+    ).toBe(true);
+  });
+
+  it("keeps default Web policy denial on every sensitive candidate", () => {
+    const complete = cmd().getArgumentCompletions!;
+    const candidates = [
+      ...complete("")!.filter((item) => item.value === "2fa" || item.value === "token"),
+      ...complete("2fa ")!,
+      ...complete("token ")!,
+      ...complete("2fa enroll ")!,
+      ...complete("2fa feishu ")!,
+    ];
+    expect(candidates).toHaveLength(13);
+    for (const { value } of candidates) {
+      expect(resolveCommandPolicy({ name: "webhub", args: value, kind: "extension" }).policy).toBe("deny");
+      expect(
+        resolveCommandPolicy({ name: "webhub", args: value, kind: "extension", overrides: { webhub: "allow" } }).policy,
+      ).toBe("allow");
+    }
+  });
+
+  it("does not consult any admin dependencies when completing", () => {
+    const probe = vi.fn(() => {
+      throw new Error("unexpected read");
+    });
+    const command = createWebHubCommand({
+      control: probe,
+      twofaPort: probe,
+      usersPort: probe,
+      feishuPort: probe,
+      privateNs: probe,
+      open: probe,
+      now: probe,
+    });
+    for (const prefix of ["", "token ", "2fa ", "2fa enroll ", "2fa feishu ", "feishu ", "user "]) {
+      expect(command.getArgumentCompletions!(prefix)).not.toEqual([]);
+    }
+    expect(probe).not.toHaveBeenCalled();
   });
 
   it("returns an empty array for an unknown prefix and never throws", () => {

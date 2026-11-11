@@ -43,6 +43,10 @@
 - Source/default changes need `/reload` in existing sessions to load this code; no reload or user settings
   write is performed by this change. Once loaded, live floor edits apply only to newly admitted runs.
 
+## Agent command completion
+
+`/agent` completes the static `settings list/set/reset` and `reload now/cancel` actions independently of host ports or reload settings. Existing settings and budget set/reset key completion takes priority; budget gains no action suggestions. Completion does not discover run IDs or values and does not authorize execution. The existing handler gates and aliases remain unchanged.
+
 ## src/core/
 
 `src/core/` — pure domain: state machine, deadline budgets, ids, types, and the worktree-origin

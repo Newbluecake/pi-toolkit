@@ -832,6 +832,40 @@ const SUBCOMMAND_DESCRIPTIONS: Record<string, string> = {
   feishu: "飞书机器人管理：setup/status/cancel/allow/deny/repair/reset（仅 TUI）",
 };
 
+const ADMIN_2FA = [
+  { label: "status", description: "查看二次验证状态" },
+  { label: "enroll", description: "登记二次验证" },
+  { label: "feishu", description: "启用或关闭飞书二次验证" },
+  { label: "recovery", description: "重新生成恢复码并作废旧恢复码" },
+  { label: "reset", description: "清除二次验证因子；须手输 --confirm" },
+  { label: "forget-ips", description: "清除 IP 信任历史" },
+  { label: "repair", description: "破坏性修复二次验证；须手输 --confirm" },
+];
+
+export function completeWebHubAdminArguments(
+  prefix: string,
+): Array<{ value: string; label: string; description: string }> {
+  if (prefix.length > 1024 || /[\x00-\x08\x0a-\x1f\x7f]/.test(prefix)) return [];
+  const text = prefix.trimStart();
+  const tokens = text.trimEnd().split(/[ \t]+/);
+  const open = /[ \t]$/.test(text);
+  const depth = open ? tokens.length : tokens.length - 1;
+  const typed = open ? "" : (tokens[depth] ?? "");
+  let choices: Array<{ label: string; description: string }> = [];
+  if (depth === 1 && tokens[0] === "token") choices = [{ label: "rotate", description: "轮换访问 token" }];
+  if (depth === 1 && tokens[0] === "2fa") choices = ADMIN_2FA;
+  if (depth === 2 && tokens[0] === "2fa" && tokens[1] === "enroll") {
+    choices = [{ label: "--replace", description: "替换已有二次验证登记" }];
+  }
+  if (depth === 2 && tokens[0] === "2fa" && tokens[1] === "feishu") {
+    choices = ["on", "off"].map((label) => ({ label, description: "设置飞书二次验证" }));
+  }
+  return choices
+    .filter(({ label }) => label.startsWith(typed))
+    .map(({ label, description }) => ({ value: [...tokens.slice(0, depth), label].join(" "), label, description }))
+    .filter(({ value }) => Buffer.byteLength(value, "utf8") <= 512);
+}
+
 export function createWebHubCommand(deps: WebHubCommandDeps): Omit<RegisteredCommand, "name" | "sourceInfo"> {
   return {
     description:
@@ -843,9 +877,13 @@ export function createWebHubCommand(deps: WebHubCommandDeps): Omit<RegisteredCom
         // F9: `/webhub feishu <op>` completes the op vocabulary (and setup's --replace).
         // A trailing space means the user finished the previous token — trim() would erase
         // that boundary, so tokenize on trimStart/trimEnd separately.
+        if (argumentPrefix.length > 1024 || /[\x00-\x08\x0a-\x1f\x7f]/.test(argumentPrefix)) return [];
         const trimmed = argumentPrefix.trimStart();
         const tokens = trimmed.trimEnd().split(/\s+/);
         const cursorOpen = /\s$/.test(trimmed);
+        if ((tokens[0] === "token" || tokens[0] === "2fa") && (tokens.length > 1 || cursorOpen)) {
+          return completeWebHubAdminArguments(argumentPrefix);
+        }
         if (tokens[0] === "feishu" && (tokens.length > 1 || cursorOpen)) {
           // pi-tui's applyCompletion replaces the ENTIRE argument prefix with `value`,
           // so every completion past the first token must carry the already-typed tokens

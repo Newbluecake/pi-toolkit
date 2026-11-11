@@ -26,6 +26,26 @@ export interface ThreadCommandDeps {
   rebind?: boolean;
 }
 
+export function completeThreadArguments(
+  prefix: string,
+  context: { readonly rebind: boolean },
+): Array<{
+  value: string;
+  label: string;
+}> {
+  if (prefix.length > 1024 || /[\x00-\x08\x0a-\x1f\x7f]/.test(prefix)) return [];
+  const roots = context.rebind
+    ? ["status", "help", "sub", "drop", "rebind", "acquire"]
+    : ["status", "help", "sub", "drop"];
+  if (!/[ \t]/.test(prefix)) {
+    return roots.filter((value) => value.startsWith(prefix)).map((value) => ({ value, label: value }));
+  }
+  const match = /^(sub[ \t]+\S+[ \t]+|(?:rebind|acquire)[ \t]+)([^ \t]*)$/.exec(prefix);
+  if (match === null || (!match[1]!.startsWith("sub") && !context.rebind) || !"origin".startsWith(match[2]!)) return [];
+  const value = `${match[1]}origin`;
+  return Buffer.byteLength(value, "utf8") <= 512 ? [{ value, label: "origin" }] : [];
+}
+
 function notify(ctx: ExtensionCommandContext, message: string, level: "info" | "warning" | "error" = "info"): void {
   try {
     ctx.ui?.notify(message, level);
@@ -44,6 +64,7 @@ export function createThreadCommand(deps: ThreadCommandDeps): Omit<RegisteredCom
   const usage = deps.rebind === true ? USAGE_REBIND : USAGE;
   return {
     description: "Thread 订阅直通：查看/建立/解除「飞书群话题 → 直派 subagent」的事件订阅（fabric.threads）。",
+    getArgumentCompletions: (prefix) => completeThreadArguments(prefix, { rebind: deps.rebind === true }),
     handler: async (args: string, ctx: ExtensionCommandContext) => {
       const ops = deps.current();
       if (ops === undefined) {

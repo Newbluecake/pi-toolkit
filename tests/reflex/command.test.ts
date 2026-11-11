@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /** jev-reflex R2b: `/reflex status | explain | reset` (command.ts) — explain agrees with `match`, status text pinned inline. */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createReflexCommand, explainText, statusText, type ReflexCommandDeps } from "../../src/reflex/command.js";
 import { BUILTIN_SCRIPTS } from "../../src/reflex/core/catalog.js";
 import { evaluateGate } from "../../src/reflex/core/gate.js";
@@ -53,6 +53,83 @@ const rec = (over: Record<string, unknown>) => ({
     model: { agree: "agree", tools: [] },
     ...over,
   },
+});
+
+describe("/reflex completion", () => {
+  it("offers bounded static grammar and builtin IDs without touching runtime ports in all draft states", async () => {
+    for (const draftState of ["absent", "disabled", "enabled"] as const) {
+      const call = vi.fn(() => {
+        throw new Error("runtime port accessed");
+      });
+      const d = deps({
+        enabled: call,
+        autoResolve: call,
+        snapshot: call,
+        capabilities: call,
+        reset: call,
+        matcher: { match: call } as unknown as ReflexCommandDeps["matcher"],
+        ...(draftState === "absent"
+          ? {}
+          : { drafts: { enabled: call, dir: call, result: call, loading: call, counters: call } }),
+      });
+      const command = createReflexCommand(d);
+      const complete = async (s: string) => (await command.getArgumentCompletions?.(s)) ?? [];
+      expect((await complete("")).map((x) => x.value)).toEqual(["status", "explain", "reset", "drafts"]);
+      expect((await complete("dr"))[0]?.description).toContain("关闭时显示 disabled");
+      expect((await complete("reset q")).map((x) => x.value)).toEqual(["reset quota.summary"]);
+      expect((await complete("reset\tgit")).map((x) => x.value)).toEqual(["reset git.status"]);
+      expect((await complete("reset "))[0]?.description).toContain("可能恢复既有 auto 配置");
+      for (const s of ["explain ", "drafts ", "reset git.status extra", "status ", "a\n", "x".repeat(1025)]) {
+        expect(await complete(s)).toEqual([]);
+      }
+      expect(call).not.toHaveBeenCalled();
+    }
+  });
+
+  it("captures only first 16 catalog IDs, filters invalid and draft IDs, and deduplicates", async () => {
+    const ids = [
+      "ok",
+      "ok",
+      "draft.secret",
+      "A",
+      "1a",
+      "a_",
+      "a".repeat(65),
+      "a".repeat(64),
+      ...Array.from({ length: 9 }, (_, i) => `id${i}`),
+      "late",
+    ];
+    const catalog = ids.map((id) => ({ id }) as (typeof BUILTIN_SCRIPTS)[number]);
+    const command = createReflexCommand(deps({ catalog }));
+    const items = (await command.getArgumentCompletions?.("reset ")) ?? [];
+    expect(items.map((x) => x.value)).toEqual([
+      "reset ok",
+      `reset ${"a".repeat(64)}`,
+      ...Array.from({ length: 8 }, (_, i) => `reset id${i}`),
+    ]);
+    expect(items.length).toBeLessThanOrEqual(16);
+    expect(
+      items.every(
+        (x) => Buffer.byteLength(x.value) <= 512 && x.label.length <= 120 && (x.description?.length ?? 0) <= 200,
+      ),
+    ).toBe(true);
+    const empty = createReflexCommand(deps({ catalog: [] }));
+    expect(await empty.getArgumentCompletions?.("reset ")).toEqual([]);
+    const readOtherFields = vi.fn(() => {
+      throw new Error("unexpected catalog field read");
+    });
+    const guarded = new Proxy(
+      { id: "safe" },
+      {
+        get(target, key) {
+          return key === "id" ? target.id : readOtherFields();
+        },
+      },
+    ) as (typeof BUILTIN_SCRIPTS)[number];
+    const guardedCommand = createReflexCommand(deps({ catalog: [guarded] }));
+    expect((await guardedCommand.getArgumentCompletions?.("reset "))?.map((x) => x.value)).toEqual(["reset safe"]);
+    expect(readOtherFields).not.toHaveBeenCalled();
+  });
 });
 
 describe("/reflex explain", () => {

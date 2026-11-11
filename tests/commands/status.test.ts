@@ -71,6 +71,72 @@ describe("agent command recommendations", () => {
   });
 });
 
+describe("agent action completion", () => {
+  it("returns bounded static actions with full values and tail labels", () => {
+    const complete = createStatusCommand(deps([]) as never).getArgumentCompletions!;
+    expect(complete("settings ", 0)).toEqual([
+      { value: "settings list", label: "list", description: "List settings" },
+      { value: "settings set", label: "set", description: "Set a setting" },
+      { value: "settings reset", label: "reset", description: "Reset a setting" },
+    ]);
+    expect(complete("settings\ts", 0)?.map((x) => x.value)).toEqual(["settings set"]);
+    expect(complete("settings r", 0)?.map((x) => x.label)).toEqual(["reset"]);
+    expect(complete("reload ", 0)?.map((x) => x.value)).toEqual(["reload now", "reload cancel"]);
+    expect(complete("reload c", 0)?.map((x) => x.label)).toEqual(["cancel"]);
+    expect(complete("", 0)?.map((x) => x.value)).toEqual(["status", "costs", "settings", "reload"]);
+    for (const prefix of [
+      "budget ",
+      "settings x",
+      "reload fire",
+      "reload now ",
+      "settings list x",
+      "status r",
+      "settings set budget.idleS 1",
+      "settings \n",
+      "reload \u007f",
+      "settings " + "s".repeat(1025),
+    ]) {
+      expect(complete(prefix, 0), prefix).toEqual([]);
+    }
+  });
+
+  it("preserves key completion and does not access business ports, including absent ports", () => {
+    const list = vi.fn(() => []);
+    const resolveRun = vi.fn();
+    const persist = vi.fn();
+    const reload = vi.fn();
+    const d = {
+      ...deps([]),
+      query: { ...deps([]).query, list },
+      resolveRun,
+      settings: { current: DEFAULT_SETTINGS, persist, path: "/tmp/test" },
+      reload: { reload },
+    };
+    const deferOff = {
+      ...d,
+      settings: {
+        ...d.settings,
+        current: { ...DEFAULT_SETTINGS, reload: { ...DEFAULT_SETTINGS.reload, defer: false } },
+      },
+    };
+    for (const input of [d, deferOff, { ...d, settings: undefined, reload: undefined }]) {
+      const complete = createStatusCommand(input as never).getArgumentCompletions!;
+      expect(complete("settings s", 0)?.map((x) => x.value)).toEqual(["settings set"]);
+      expect(complete("reload n", 0)?.map((x) => x.value)).toEqual(["reload now"]);
+      expect(complete("settings set budget.idle", 0)?.[0]).toEqual({
+        value: "settings set budget.idleS",
+        label: "budget.idleS",
+        description: "default 1200",
+      });
+      expect(complete("budget reset maxE", 0)?.map((x) => x.value)).toEqual(["budget reset maxExtensions"]);
+    }
+    expect(list).not.toHaveBeenCalled();
+    expect(resolveRun).not.toHaveBeenCalled();
+    expect(persist).not.toHaveBeenCalled();
+    expect(reload).not.toHaveBeenCalled();
+  });
+});
+
 describe("external provider availability status", () => {
   it("shows the live droid reason; absent/disabled port preserves legacy output", () => {
     const d = deps([]) as never;

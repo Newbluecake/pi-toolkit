@@ -155,6 +155,23 @@ export function createStatusCommand(deps: StatusCommandDeps): Omit<RegisteredCom
             description: `default ${formatSettingValue(defaultOf(SETTING_SPECS[k]!))}`,
           }));
       }
+      if (argumentPrefix.length > 1024 || /[\x00-\x08\x0a-\x1f\x7f]/.test(argumentPrefix)) return [];
+      const actionPrefix = argumentPrefix.trimStart().match(/^(settings|reload)[ \t]+([^ \t]*)$/);
+      if (actionPrefix) {
+        const [, scope, partial = ""] = actionPrefix;
+        const actions =
+          scope === "settings"
+            ? [
+                { value: "settings list", label: "list", description: "List settings" },
+                { value: "settings set", label: "set", description: "Set a setting" },
+                { value: "settings reset", label: "reset", description: "Reset a setting" },
+              ]
+            : [
+                { value: "reload now", label: "now", description: "Force reload now" },
+                { value: "reload cancel", label: "cancel", description: "Cancel deferred reload" },
+              ];
+        return actions.filter((item) => item.label.startsWith(partial) && Buffer.byteLength(item.value, "utf8") <= 512);
+      }
       return [
         { value: "status", label: "status", description: "Text diagnostics (default)" },
         { value: "costs", label: "costs", description: "Per-run cost breakdown" },
