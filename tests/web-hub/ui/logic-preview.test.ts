@@ -2082,3 +2082,291 @@ describe("logic/preview.js previewScopeOf chunks key + clientTextStreamCap (chun
     expect(clientTextStreamCap()).toBeLessThanOrEqual(PREVIEW_TEXT_STREAM_HUB_MAX_BYTES);
   });
 });
+
+// #19: CJK interiors already work; ONLY plain HTTP(S) ownership is a production delta.
+// Expected segments/UTF-16 spans below are hand-authored, not derived from the lexer/oracle.
+describe("#19 preserved CJK interiors and authorized plain HTTP(S) ownership", () => {
+  type Scope = typeof SCOPE & { abs?: true; dirs?: true; tilde?: true };
+  type ExactSeg = Seg & { alt?: { text: string; path: string } };
+  const C = "/fixture/project";
+  const scopes: Array<[string, Scope]> = [
+    ["L", { ...SCOPE, cwd: C }],
+    ["A", { ...SCOPE, cwd: C, abs: true }],
+    ["D", { ...SCOPE, cwd: C, dirs: true }],
+    ["F", { ...SCOPE, cwd: C, abs: true, dirs: true, tilde: true }],
+  ];
+  const txt = (text: string): ExactSeg => ({ kind: "text", text });
+  const ref = (text: string, path: string, extra: Partial<ExactSeg> = {}): ExactSeg => ({
+    kind: "ref",
+    text,
+    path,
+    ...extra,
+  });
+  const spans = (segments: readonly Seg[]): number[][] => {
+    let offset = 0;
+    return segments.flatMap((seg) => {
+      const start = offset;
+      offset += seg.text.length; // UTF-16, never Array.from/codepoints or normalized CRLF
+      return seg.kind === "ref" ? [[start, offset]] : [];
+    });
+  };
+  const check = (text: string, scope: Scope, expected: ExactSeg[], positions: number[][]): void => {
+    const actual = findPathRefs(text, scope);
+    expect(actual, text).toEqual(expected);
+    expect(concat(actual), text).toBe(text);
+    expect(spans(actual), text).toEqual(positions);
+  };
+  const relativeCases: Array<[string, string, string, number, number, string?]> = [
+    ["见 ", "src/中文目录/报告.md", "", 2, 16, "src/"],
+    ["见 ", "src/中文目录/sub/报告.md", "", 2, 20, "src/"],
+    ['"', "src/中文/foo.ts", '"', 1, 14, "src/"],
+    ["见 ", "src/报告中文.md", "", 2, 13, "src/"],
+    ["请看", "src/a.ts", "", 2, 10],
+    ["中", "src/a.ts", "", 1, 9],
+    ["见 说明", "src/a.ts", "", 4, 12],
+    ["见 中文", "mix/sub/报告.md", "", 4, 17, "mix/sub/"],
+    ["\n", "src/中文目录/sub/报告.md", "", 1, 19, "src/"],
+  ];
+  it.each(scopes)("%s: preserves full relative text, path, CJK alt and UTF-16 positions", (_label, scope) => {
+    for (const [prefix, body, suffix, start, end, altText] of relativeCases) {
+      const alt = scope.dirs && altText ? { text: altText, path: `${C}/${altText.slice(0, -1)}` } : undefined;
+      check(
+        prefix + body + suffix,
+        scope,
+        [txt(prefix), ref(body, `${C}/${body}`, alt ? { alt } : {}), ...(suffix ? [txt(suffix)] : [])],
+        [[start, end]],
+      );
+    }
+    check(
+      "见 src/a.ts中文说明",
+      scope,
+      [
+        txt("见 "),
+        ref("src/a.ts中文说明", `${C}/src/a.ts中文说明`, { alt: { text: "src/a.ts", path: `${C}/src/a.ts` } }),
+      ],
+      [[2, 14]],
+    );
+    check(
+      "见 src/中文目录/报告.md:12:3。",
+      scope,
+      [
+        txt("见 "),
+        ref("src/中文目录/报告.md:12:3", `${C}/src/中文目录/报告.md`, {
+          line: 12,
+          col: 3,
+          ...(scope.dirs ? { alt: { text: "src/", path: `${C}/src` } } : {}),
+        }),
+        txt("。"),
+      ],
+      [[2, 21]],
+    );
+    check(
+      "见 src/中文目录/",
+      scope,
+      scope.dirs
+        ? [txt("见 "), ref("src/中文目录/", `${C}/src/中文目录`, { alt: { text: "src/", path: `${C}/src` } })]
+        : [txt("见 src/中文目录/")],
+      scope.dirs ? [[2, 11]] : [],
+    );
+  });
+  const absoluteCases: Array<[string, string, string, number, number]> = [
+    ["", "/tmp/中文目录/sub/报告.md", "", 0, 19],
+    ["", "/tmp/中文目录/报告.md", "", 0, 15],
+    ["见 打开", "/tmp/报告.md", "", 4, 14],
+    ["见 中文目录", "/sub/报告.md", "", 6, 16],
+    ["见 中文", "/英文/翻译", "", 4, 10],
+    ["见 src中文", "/sub/报告.md", "", 7, 17],
+    ["src/中文目录", "/sub/报告.md", "", 8, 18],
+    ["见 ./中文目录", "/sub/报告.md", "", 8, 18],
+    ["见 ../中文目录", "/sub/报告.md", "", 9, 19],
+    ["./中文目录", "/sub/报告.md", "", 6, 16],
+    ["../中文目录", "/sub/报告.md", "", 7, 17],
+    ["file:///tmp/中文", "/sub/a.md", "", 14, 23],
+    ["//e.test/中文", "/sub/a.md", "", 11, 20],
+    ["custom://e.test/中文", "/sub/a.md", "", 18, 27],
+  ];
+  it.each(scopes)("%s: preserves scope rejection AND old non-HTTP suffix risks (not fixes)", (_label, scope) => {
+    for (const [prefix, body, suffix, start, end] of absoluteCases) {
+      const text = prefix + body + suffix;
+      check(
+        text,
+        scope,
+        scope.abs ? [...(prefix ? [txt(prefix)] : []), ref(body, body), ...(suffix ? [txt(suffix)] : [])] : [txt(text)],
+        scope.abs ? [[start, end]] : [],
+      );
+    }
+    const tildeText = "~/中文目录/sub/报告.md";
+    check(
+      tildeText,
+      scope,
+      scope.tilde
+        ? [ref(tildeText, tildeText)]
+        : scope.abs
+          ? [txt("~/中文目录"), ref("/sub/报告.md", "/sub/报告.md")]
+          : [txt(tildeText)],
+      scope.tilde ? [[0, 16]] : scope.abs ? [[6, 16]] : [],
+    );
+    for (const text of [
+      "见 中文目录/报告.md",
+      "见 src中文/报告.md",
+      "见 src/中文目录/报告.md说明",
+      "见 ./src/a.md",
+      "见 ../src/a.md",
+      "见 ./中文目录/报告.md",
+      "见 ../中文目录/报告.md",
+      "见 src/a.中文",
+      "无slash.md",
+      "见 src/bare",
+      "见 C:\\中文\\a.md",
+    ]) {
+      check(text, scope, [txt(text)], []);
+    }
+  });
+  it("preserves null/root cwd, unsafe-prefix fallback and whole-code routing", () => {
+    for (const cwd of [null, "/"]) {
+      const scope = { ...SCOPE, cwd };
+      expect(findPathRefs("见 src/中文目录/报告.md", scope)).toEqual([txt("见 src/中文目录/报告.md")]);
+    }
+    const scope = scopes[0]![1];
+    check(
+      "/etc=/fixture/project/a.ts",
+      scope,
+      [txt("/etc="), ref("/fixture/project/a.ts", "/fixture/project/a.ts")],
+      [[5, 26]],
+    );
+    expect(pathRefOfCode("中文目录/报告.md", scope)).toEqual({
+      text: "中文目录/报告.md",
+      path: `${C}/中文目录/报告.md`,
+    });
+    expect(pathRefOfCode("https://e.test/?p=/tmp/a.ts", scope)).toBeNull();
+  });
+
+  // Explicit authorized ASCII query delta: old A/F emitted /tmp/a.ts; now the WHOLE
+  // HTTP(S) token is text. cwd query variants exercise L/D too (no scope-masked success).
+  const httpTokens = [
+    "https://example.test/?p=/tmp/a.ts",
+    "https://e.test/中文/sub/a.md",
+    "HTTPS://e.test/?p=/tmp/a.ts",
+    "hTtP://e.test/?p=/tmp/a.ts",
+    "path=https://e.test/中文/sub/a.md",
+    "前文https://e.test/中文/sub/a.md",
+    "https://e.test/?x=(/tmp/a.ts)",
+    "https://e.test/a?x=/tmp/a.ts:12:3",
+    "https://[::1]/?p=/tmp/a.ts",
+    "https://e.test/?x={/tmp/a.ts}",
+    "https://e.test/a,/tmp/a.ts",
+    "https://e.test/a;/tmp/a.ts",
+    "https://e.test/中文说明/tmp/a.ts",
+    "https://?p=/tmp/a.ts",
+    "https://e.test/?汉字=/tmp/a.ts",
+    "https://e.test/?x=[{/tmp/a.ts}]",
+    "https://e.test/?x=(/tmp/a.ts", // unmatched opener swallows to hard boundary
+    "`https://e.test/?p=/fixture/project/a.ts`",
+  ];
+  it.each(scopes)("%s: authorizedPlainHttpChanges + plain backticks yield one exact text segment", (_label, scope) => {
+    for (const text of httpTokens) {
+      check(text, scope, [txt(text)], []);
+      const cwdQuery = text
+        .replaceAll("/tmp/a.ts", "/fixture/project/a.ts")
+        .replaceAll("/sub/a.md", "/fixture/project/a.ts");
+      check(cwdQuery, scope, [txt(cwdQuery)], []);
+    }
+  });
+  it.each(scopes)("%s: hard URL boundaries preserve only external siblings", (_label, scope) => {
+    const prefixes = [
+      "(https://e.test/?x=(/tmp/a.ts)) ",
+      "https://[::1]/?p=/tmp/a.ts ",
+      '\"https://e.test/?p=/tmp/a.ts\" ',
+      "https://e.test/?x=(/tmp/a.ts\n",
+      "https://e.test/a\n",
+      "https://e.test/中文，",
+      "https://e.test/中文（提示）",
+      "https://e.test/?x=[/tmp/a.ts]] ",
+      "https://e.test/?x={/tmp/a.ts}} ",
+      "https://e.test/?p=/tmp/a.ts| ",
+      "https://e.test/?p=/tmp/a.ts> ",
+      "https://e.test/?p=/tmp/a.ts'",
+      "https://e.test/?p=/tmp/a.ts` ",
+      "https://e.test/?p=/tmp/a.ts\t",
+    ];
+    for (const prefix of prefixes) {
+      const text = `${prefix}/fixture/project/b.ts`;
+      check(
+        text,
+        scope,
+        [txt(prefix), ref("/fixture/project/b.ts", "/fixture/project/b.ts")],
+        [[prefix.length, text.length]],
+      );
+    }
+    const prefix = "https://e.test/?p=/tmp/a.ts，见 ";
+    check(
+      `${prefix}src/中文目录/报告.md`,
+      scope,
+      [
+        txt(prefix),
+        ref(
+          "src/中文目录/报告.md",
+          `${C}/src/中文目录/报告.md`,
+          scope.dirs ? { alt: { text: "src/", path: `${C}/src` } } : {},
+        ),
+      ],
+      [[prefix.length, prefix.length + 14]],
+    );
+    check(
+      "/fixture/project/b.ts https://e.test/?汉字=/tmp/a.ts",
+      scope,
+      [ref("/fixture/project/b.ts", "/fixture/project/b.ts"), txt(" https://e.test/?汉字=/tmp/a.ts")],
+      [[0, 21]],
+    );
+  });
+  it.each(scopes)("%s: CRLF + emoji exact UTF-16 matrix (external ref [31,40))", (_label, scope) => {
+    const text = "https://e.test/😀?p=/tmp/a.ts\r\n/tmp/b.ts";
+    expect(text.length).toBe(40);
+    check(
+      text,
+      scope,
+      scope.abs ? [txt("https://e.test/😀?p=/tmp/a.ts\r\n"), ref("/tmp/b.ts", "/tmp/b.ts")] : [txt(text)],
+      scope.abs ? [[31, 40]] : [],
+    );
+  });
+  it("non-opener scheme substrings remain byte-identical to the old scanner", () => {
+    for (const text of [
+      "xhttps://e.test/?p=/fixture/project/a.ts",
+      "/https://e.test/?p=/fixture/project/a.ts",
+      "file:///fixture/project/a.ts",
+      "custom://e.test/?p=/fixture/project/a.ts",
+      "//e.test/?p=/fixture/project/a.ts",
+    ]) {
+      // No Chinese here: the existing independent slow oracle covers all four fs scopes.
+      for (const [, scope] of scopes) expect(findPathRefs(text, scope)).toEqual(oracleFindPathRefs(text, scope));
+    }
+  });
+
+  it.each([
+    ["one long query", (n: number) => `https://e.test/?${"汉字=/tmp/中文/a.ts=".repeat(n)}`],
+    ["many URL prefixes in one body", (n: number) => `https://e.test/?${"https://e.test/?汉字=/tmp/a.ts=".repeat(n)}`],
+    ["many rejected scheme prefixes", (n: number) => `https://e.test/?${"xhttps://".repeat(n)}`],
+    ["many separate URLs", (n: number) => "https://e.test/?p=/tmp/a.ts ".repeat(n)],
+    ["unclosed parentheses", (n: number) => `https://e.test/${"([{=汉字/tmp/a.ts".repeat(n)}`],
+    ["balanced parentheses", (n: number) => `https://e.test/${"([{=/tmp/a.ts}])".repeat(n)}`],
+    ["long ASCII slash run (no URL)", (n: number) => "=/./".repeat(n)],
+    ["invalid leading contexts", (n: number) => "xhttps://e.test/a ".repeat(n)],
+  ] as const)("adversarial %s: honest scans ≤10n+10000 and growth [8,24]", (_label, make) => {
+    for (const [, scope] of scopes) {
+      const scans: number[] = [];
+      for (const size of [1024, 16384]) {
+        const body = make(size);
+        const text = `${body}\r\n😀 /fixture/project/b.ts`;
+        __resetPreviewScanStats();
+        const actual = findPathRefs(text, scope);
+        const count = __previewScanStats.charScans;
+        scans.push(count);
+        expect(actual).toEqual([txt(`${body}\r\n😀 `), ref("/fixture/project/b.ts", "/fixture/project/b.ts")]);
+        expect(count).toBeGreaterThanOrEqual(body.length); // search/body work cannot be hidden
+        expect(count).toBeLessThanOrEqual(10 * text.length + 10_000);
+      }
+      expect(scans[1]! / scans[0]!).toBeGreaterThanOrEqual(8);
+      expect(scans[1]! / scans[0]!).toBeLessThanOrEqual(24);
+    }
+  });
+});

@@ -454,6 +454,69 @@ export function findPathRefs(text, scope) {
   const uploads = scope.uploads === true;
   let markerNext = -2; // -2 = not computed yet; else first marker occurrence >= the last query
 
+  // #19 plain HTTP(S) ownership: lazy, non-overlapping ranges, O(1) metadata.
+  // Fixed EXT openers are deliberately independent of fs caps (plain backticks too).
+  // This is token exclusion, not URL validation; code/pathlinks retain their own routes.
+  const httpScheme = /https?:\/\//gi;
+  let httpSearchFrom = 0;
+  let httpExhausted = false;
+  /** @type {{ start: number, end: number } | null} */
+  let httpRange = null;
+  const nextPlainHttpRange = () => {
+    while (!httpExhausted) {
+      httpScheme.lastIndex = httpSearchFrom;
+      const match = httpScheme.exec(text);
+      const searchedEnd = match === null ? n : httpScheme.lastIndex;
+      // Account for the actual fixed-literal search advance, including rejected prefixes.
+      __previewScanStats.charScans += searchedEnd - httpSearchFrom;
+      httpSearchFrom = searchedEnd;
+      if (match === null) {
+        httpExhausted = true;
+        return null;
+      }
+      __previewScanStats.charScans += 1; // bounded opener check
+      if (!isStartContext(text, match.index, START_CHARS_EXT)) continue;
+      let end = searchedEnd;
+      let parens = 0;
+      let brackets = 0;
+      let braces = 0;
+      while (end < n) {
+        const ch = text[end];
+        __previewScanStats.charScans += 1; // body access AND hard-boundary check
+        if (
+          WS_RE.test(ch) ||
+          ch === '"' ||
+          ch === "'" ||
+          ch === "<" ||
+          ch === ">" ||
+          ch === "`" ||
+          ch === "|" ||
+          isCjkPunctuation(ch) ||
+          (ch.charCodeAt(0) > 0x7f && TERMINATOR_CHARS.has(ch))
+        )
+          break;
+        if (ch === "(") parens++;
+        else if (ch === "[") brackets++;
+        else if (ch === "{") braces++;
+        else if (ch === ")") {
+          if (parens === 0) break;
+          parens--;
+        } else if (ch === "]") {
+          if (brackets === 0) break;
+          brackets--;
+        } else if (ch === "}") {
+          if (braces === 0) break;
+          braces--;
+        }
+        end++;
+      }
+      // Never search again inside an owned body (including nested scheme strings).
+      httpSearchFrom = end;
+      return { start: match.index, end };
+    }
+    return null;
+  };
+
   // Per-run memo (§2.5.2 run level): valid only for start positions < `spanEnd`.
   let spanEnd = -1; // first terminator >= the run's first start (n when none)
   let spanStrippedEnd = -1; // spanEnd minus the trailing `. : ! ?` run (with the >1 guard)
@@ -476,6 +539,14 @@ export function findPathRefs(text, scope) {
   while (i < n && refs < PREVIEW_MAX_REFS_PER_NODE) {
     const slash = text.indexOf("/", i);
     if (slash === -1) break;
+    // Ownership MUST precede both run metadata and tilde/absolute/relative candidates:
+    // query `=` or a Han boundary must not restart fs recognition inside a URL.
+    while (!httpExhausted && (httpRange === null || httpRange.end <= slash)) httpRange = nextPlainHttpRange();
+    if (httpRange !== null && httpRange.start <= slash && slash < httpRange.end) {
+      i = httpRange.end;
+      spanEnd = -1;
+      continue; // textStart stays put: preserve every UTF-16 code unit verbatim
+    }
     if (slash >= spanEnd) {
       // ① New terminator-free run: scan its end once, then analyze its tail once (unchanged).
       let end = slash + 1;

@@ -55,10 +55,67 @@ The absolute route rejects overlong/`fastOk`-invalid candidates BEFORE evaluatin
 unchanged, pure start-context predicate. It still visits later slash positions, so an
 invalid long prefix cannot hide a valid nested candidate. Tilde → absolute → relative
 priority, relative's once-per-run attempt, unified end/trailing-slash/line:col rules,
-UTF-8 cap, URL/character/boundary definitions and CJK alternatives are unchanged; this is
-not a Unicode/path-recognition expansion. The original 24-case operation-count matrix,
+UTF-8 cap, path character/boundary definitions and CJK alternatives are unchanged; this is
+not a Unicode/path-recognition expansion. The subsequent #19 plain HTTP(S) ownership
+exception is documented below (including its deliberately changed ASCII query behavior). The original 24-case operation-count matrix,
 `[8,24]` growth gate and 5 s wall-clock sentinel remain intact (including the repeated
 matrix). Local offline throughput comparisons do not guarantee a CI runner's wall time.
+
+## #19 plain HTTP(S) ownership and CJK interior regression
+
+The sole production recognition change is in `findPathRefs`'s **plain-text** route:
+HTTP(S) tokens never produce filesystem candidates, even for the previously accepted
+ASCII false positive `https://example.test/?p=/tmp/a.ts`. Scheme matching is ASCII
+case-insensitive. A scheme starts at node offset 0 or under the existing
+`isStartContext(..., START_CHARS_EXT)` rule: this FIXED opener set includes literal
+backticks regardless of filesystem scope/caps. It does not widen filesystem openers.
+`xhttps://...` and `/https://...` are not new HTTP starts. This is lexical ownership,
+not URL validation (no host validation, decoding, normalization, DNS or network).
+
+The body ends before whitespace (CR and LF separately), ASCII `" ' < > \` |`, or
+existing CJK punctuation. Han characters themselves remain in the URL, including query
+text followed by `=`. Three scalar depths retain balanced ASCII `()`/`[]`/`{}`;
+a closer with no same-kind opener ends the token. Cross-kind nesting is not validated,
+and an unclosed opener conservatively consumes to the next hard boundary or node end.
+ASCII comma/semicolon, `?`, `=`, `#`, `:`and`/`stay inside; there is no path-style
+trailing punctuation or line:col trim. For example`https://e/a中文说明/tmp/x.ts` stays
+one token, whereas `https://e/a，/tmp/x.ts` ends at the CJK comma, permitting the
+external path under its unchanged scope/context rules. Percent-encoded punctuation is
+not decoded. These are explicit lexical tradeoffs, not a promise to infer prose words.
+
+A per-call, lazy HTTP range and monotone scheme cursor run BEFORE candidate routing
+and run metadata. Skipping an owned range invalidates the run memo without moving
+`textStart`, so URL text, CRLF and non-BMP surrogate pairs survive verbatim. There are
+no all-range/slash arrays or per-candidate backward URL searches: fixed-literal scheme
+search advances and non-overlapping body/boundary work are included in `charScans`;
+time is O(n), additional metadata O(1) (not a claim about output storage). The original
+24-cell matrix, repeated matrix, `10*n+10000`, growth `[8,24]`, 5 s sentinel, test timeout,
+frozen fixtures and preview performance baselines remain unchanged. Added URI stress
+cases cover long queries/prefixes, many URLs, rejected openers, parentheses and external
+siblings. Local timings are evidence for this machine, not CI performance guarantees.
+
+**CJK interiors were already supported**, given an existing legal ASCII first segment
+and start context: e.g. `见 src/中文目录/报告.md`, and cap-enabled absolute/tilde paths.
+This package adds full-segment/path/alt/line:col and UTF-16 regressions across legacy,
+abs, dirs and full scopes, not a new Chinese lexer. The user's actual original Chinese
+failure input/entrypoint has not been supplied/reproduced; this must NOT be reported as
+having found or fixed that original issue. Bare Chinese first segments, node-initial
+relative paths, plain `./` / `../` normalization, Windows, spaces, full Unicode expansion
+and prose-prefix word lists are out of scope. Existing non-HTTP unsafe-prefix fallback,
+CJK boundaries and main-missing/alt-confirmed behavior remain intact, including known
+suffix risks in unrecognized Chinese-first/dot-prefix/tilde-cap-off cases.
+
+`file://`, custom schemes and `//host` retain their prior behavior; this is NOT a
+whole-URI exclusion. Inline code (`pathRefOfCode`), explicit Markdown pathlinks and HTTP
+anchors/children `noRefs` retain their original routes. No backend/settings/cap/wire,
+probe authority, denylist or admission change is involved. Tests in
+`logic-preview.test.ts` and `preview-probe-path-text.test.ts` exercise the real
+PathText × usePreviewProbe recording-transport chain and settled TxAssistant Markdown:
+complete Chinese paths must survive probe, DOM and click/Enter/Space open; URL-internal
+paths never reach `ensure` or transport/open. The CRLF+emoji matrix preserves text and
+external `/tmp/b.ts` at exact UTF-16 `[31,40)` (abs/full only). This is an isolated
+happy-dom/component acceptance gate, not a real Hub/file-admission/browser deployment
+claim.
 
 ## Preview multi-windows
 

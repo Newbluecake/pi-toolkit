@@ -10,7 +10,7 @@
  * + recording transport — the same composable App.vue mounts.
  */
 import { mount } from "@vue/test-utils";
-import { effectScope, nextTick, ref, type Ref } from "vue";
+import { defineComponent, effectScope, h, nextTick, ref, type Ref } from "vue";
 import { describe, expect, it, vi } from "vitest";
 import { PREVIEW_CTX, type PreviewContext } from "../../../src/web-hub/ui/src/components/preview/previewContext.js";
 import PathText from "../../../src/web-hub/ui/src/components/preview/PathText.vue";
@@ -358,5 +358,257 @@ describe("PathText × probe — files scope (preview-download)", () => {
     expect(w.find(".path-ref").exists()).toBe(false);
     expect(r.probeHandle.kindOf?.("/p/bundle.zip")).toBe("missing");
     r.stop();
+  });
+});
+
+// #19 exercises REAL production PathText/usePreviewProbe and settled Markdown, not a
+// stub scanner or mocked existence controller. Only the transport/scheduler are fake.
+describe("#19 CJK fidelity and plain HTTP(S) exclusion through the production chain", () => {
+  const C = "/fixture/project";
+  const scopes: Array<[string, PreviewPathScope & { tilde?: true }]> = [
+    ["L", { ...SCOPE, cwd: C }],
+    ["A", { ...SCOPE, cwd: C, abs: true }],
+    ["D", { ...SCOPE, cwd: C, dirs: true }],
+    ["F", { ...SCOPE, cwd: C, abs: true, dirs: true, tilde: true }],
+  ];
+  const full = `${C}/src/中文目录/报告.md`;
+  const alt = `${C}/src`;
+  // A host gives fragment-root PathText a real DOM container: textContent must retain
+  // CRLF/emoji (VTU .text() trims; browsers/HTML source parsing may normalize CRLF).
+  function hostPath(r: ProbeRig, props: { text: string; code?: boolean; noRefs?: boolean }) {
+    return mount(defineComponent({ setup: () => () => h("div", [h(PathText, props)]) }), {
+      global: { provide: { [PREVIEW_CTX as symbol]: { handle: r.handle, plaintext: false } satisfies PreviewContext } },
+    });
+  }
+  function hostAssistant(r: ProbeRig, text: string, streaming = false) {
+    return mount(TxAssistant, {
+      props: { assistant: assistant({ blocks: [{ kind: "text", text }], streaming }), truncated: false },
+      global: { provide: { [PREVIEW_CTX as symbol]: { handle: r.handle, plaintext: false } satisfies PreviewContext } },
+    });
+  }
+  async function activate(w: ReturnType<typeof mount>, r: ProbeRig, text: string, path: string): Promise<void> {
+    const el = w.get(".path-ref");
+    expect(w.findAll(".path-ref")).toHaveLength(1);
+    expect(el.element.textContent).toBe(text);
+    expect(el.attributes("role")).toBe("button");
+    expect(el.attributes("tabindex")).toBe("0");
+    const open = vi.fn();
+    r.handle.open = open;
+    await el.trigger("click");
+    await el.trigger("keydown", { key: "Enter" });
+    await el.trigger("keydown", { key: " " });
+    expect(open.mock.calls).toEqual([[{ path }], [{ path }], [{ path }]]);
+  }
+
+  it.each(scopes)("%s: full Chinese interior is probed, rendered and opened intact", async (_label, scope) => {
+    const r = rig(ref(scope));
+    const text = "见 src/中文目录/报告.md:12:3";
+    const w = hostPath(r, { text });
+    try {
+      expect(w.element.textContent).toBe(text);
+      expect(w.find(".path-ref").exists()).toBe(false);
+      r.flush();
+      expect(r.calls.map((c) => c.paths)).toEqual([scope.dirs ? [full, alt] : [full]]);
+      r.answer(scope.dirs ? ["text", "missing"] : ["text"]);
+      await settleTick();
+      expect(w.element.textContent).toBe(text);
+      await activate(w, r, "src/中文目录/报告.md:12:3", full);
+    } finally {
+      w.unmount();
+      r.stop();
+    }
+  });
+
+  it.each([
+    ["text", "dir", "src/中文目录/报告.md:12:3", full],
+    ["missing", "dir", "src/", alt],
+    ["missing", "missing", null, null],
+  ] as const)(
+    "main=%s alt=%s preserves existing fallback (not lexer truncation)",
+    async (main, alternative, display, path) => {
+      for (const [, scope] of scopes.filter(([, s]) => s.dirs)) {
+        const r = rig(ref(scope));
+        const text = "见 src/中文目录/报告.md:12:3";
+        const w = hostPath(r, { text });
+        try {
+          r.flush();
+          expect(r.calls.map((c) => c.paths)).toEqual([[full, alt]]);
+          r.answer([main, alternative]);
+          await settleTick();
+          expect(w.element.textContent).toBe(text);
+          if (display !== null && path !== null) await activate(w, r, display, path);
+          else {
+            const open = vi.fn();
+            r.handle.open = open;
+            expect(w.find(".path-ref").exists()).toBe(false);
+            await w.trigger("click");
+            expect(open).not.toHaveBeenCalled();
+          }
+        } finally {
+          w.unmount();
+          r.stop();
+        }
+      }
+    },
+  );
+
+  it.each(scopes)(
+    "%s: HTTP token candidates never reach ensure/transport/open, including plain backticks",
+    async (_label, scope) => {
+      for (const text of [
+        "https://e.test/中文/sub/a.md",
+        "HTTPS://e.test/?p=/fixture/project/a.ts",
+        "https://e.test/?x=(/fixture/project/a.ts)",
+        "https://e.test/?汉字=/fixture/project/a.ts",
+        "`https://e.test/?p=/fixture/project/a.ts`",
+      ]) {
+        const r = rig(ref(scope));
+        const ensure = vi.spyOn(r.probeHandle, "ensure"); // call-through to the real controller
+        const open = vi.fn();
+        r.handle.open = open;
+        const w = hostPath(r, { text, code: false });
+        try {
+          await settleTick();
+          expect(ensure).not.toHaveBeenCalled();
+          expect(r.pending()).toBe(false);
+          r.flush();
+          expect(r.calls).toEqual([]); // even an existing internal path is never requested
+          expect(w.element.textContent).toBe(text);
+          expect(w.find(".path-ref").exists()).toBe(false);
+          await w.trigger("click");
+          await w.trigger("keydown", { key: "Enter" });
+          expect(open).not.toHaveBeenCalled();
+        } finally {
+          w.unmount();
+          r.stop();
+        }
+      }
+    },
+  );
+
+  it.each(scopes)("%s: mixed URL and Chinese sibling probes/opens only the full sibling", async (_label, scope) => {
+    const r = rig(ref(scope));
+    const ensure = vi.spyOn(r.probeHandle, "ensure");
+    const text = "https://e.test/?汉字=/fixture/project/fake.ts，见 src/中文目录/报告.md";
+    const w = hostPath(r, { text });
+    try {
+      const expectedPaths = scope.dirs ? [full, alt] : [full];
+      expect(ensure.mock.calls).toEqual([[expectedPaths]]);
+      r.flush();
+      expect(r.calls.map((c) => c.paths)).toEqual([expectedPaths]);
+      r.answer(scope.dirs ? ["text", "dir"] : ["text"]);
+      await settleTick();
+      expect(w.element.textContent).toBe(text);
+      await activate(w, r, "src/中文目录/报告.md", full);
+    } finally {
+      w.unmount();
+      r.stop();
+    }
+  });
+
+  it.each(scopes)("%s: CRLF/emoji DOM is verbatim; only external /tmp/b.ts is probed/opened", async (_label, scope) => {
+    const r = rig(ref(scope));
+    const ensure = vi.spyOn(r.probeHandle, "ensure");
+    const text = "https://e.test/😀?p=/tmp/a.ts\r\n/tmp/b.ts";
+    const w = hostPath(r, { text });
+    try {
+      expect(w.element.textContent).toBe(text);
+      r.flush();
+      expect(ensure.mock.calls).toEqual(scope.abs ? [[["/tmp/b.ts"]]] : []);
+      expect(r.calls.map((c) => c.paths)).toEqual(scope.abs ? [["/tmp/b.ts"]] : []);
+      if (scope.abs) {
+        r.answer(["text"]);
+        await settleTick();
+        expect(w.element.textContent).toBe(text);
+        await activate(w, r, "/tmp/b.ts", "/tmp/b.ts");
+      } else expect(w.find(".path-ref").exists()).toBe(false);
+    } finally {
+      w.unmount();
+      r.stop();
+    }
+  });
+
+  it("settled TxAssistant → MarkdownView → MdInline → PathText keeps full Chinese text and URL noRefs", async () => {
+    const r = rig(ref(scopes[3]![1]));
+    const text = "见 src/中文目录/报告.md:12:3，https://e.test/?p=/tmp/fake.ts";
+    const w = hostAssistant(r, text);
+    try {
+      expect(w.find(".path-ref").exists()).toBe(false);
+      r.flush();
+      expect(r.calls.map((c) => c.paths)).toEqual([[full, alt]]);
+      r.answer(["text", "dir"]);
+      await settleTick();
+      expect(w.element.textContent).toContain(text);
+      await activate(w, r, "src/中文目录/报告.md:12:3", full);
+    } finally {
+      w.unmount();
+      r.stop();
+    }
+  });
+
+  it("real Markdown code/pathlinks retain their old whole-span/normalize/href routes", async () => {
+    const r = rig(ref(scopes[3]![1]));
+    const open = vi.fn();
+    r.handle.open = open;
+    const text =
+      "`中文目录/报告.md` [报告](中文目录/报告.md) [上级](../中文目录/报告.md) " +
+      "[/tmp/fake.ts](https://e.test/中文/sub/a.md) `https://e.test/?p=/tmp/fake.ts`";
+    const w = hostAssistant(r, text);
+    try {
+      r.flush();
+      expect(r.calls.map((c) => c.paths)).toEqual([[`${C}/中文目录/报告.md`]]);
+      const anchor = w.get("a");
+      expect(anchor.attributes("href")).toBe("https://e.test/中文/sub/a.md");
+      expect(anchor.text()).toBe("/tmp/fake.ts");
+      expect(anchor.find(".path-ref").exists()).toBe(false);
+      r.answer(["text"]);
+      await settleTick();
+      expect(w.get("code.path-ref").element.textContent).toBe("中文目录/报告.md");
+      for (const el of w.findAll(".path-ref")) await el.trigger("click");
+      expect(open.mock.calls).toEqual([
+        [{ path: `${C}/中文目录/报告.md` }],
+        [{ path: `${C}/中文目录/报告.md` }],
+        [{ path: "/fixture/中文目录/报告.md" }],
+      ]);
+      expect(w.findAll("code").at(-1)?.classes()).not.toContain("path-ref");
+    } finally {
+      w.unmount();
+      r.stop();
+    }
+  });
+
+  it("Markdown literal URL code and fenced code do not generate internal fs probes", async () => {
+    const r = rig(ref(scopes[3]![1]));
+    const ensure = vi.spyOn(r.probeHandle, "ensure");
+    const w = hostAssistant(r, "`https://e.test/?p=/fixture/project/a.ts`\n\n```txt\n/fixture/project/fake.ts\n```");
+    try {
+      r.flush();
+      expect(r.calls).toEqual([]);
+      expect(ensure).not.toHaveBeenCalled();
+      expect(w.find(".path-ref").exists()).toBe(false);
+      expect(w.get("code.md-code").text()).toBe("https://e.test/?p=/fixture/project/a.ts");
+    } finally {
+      w.unmount();
+      r.stop();
+    }
+  });
+
+  it("noRefs, null scope and streaming keep Chinese candidates out of the real probe", async () => {
+    for (const mode of ["noRefs", "null", "streaming"] as const) {
+      const r = rig(ref(mode === "null" ? null : scopes[3]![1]));
+      const ensure = vi.spyOn(r.probeHandle, "ensure");
+      const text = "见 src/中文目录/报告.md";
+      const w = mode === "streaming" ? hostAssistant(r, text, true) : hostPath(r, { text, noRefs: mode === "noRefs" });
+      try {
+        r.flush();
+        expect(ensure).not.toHaveBeenCalled();
+        expect(r.calls).toEqual([]);
+        expect(w.find(".path-ref").exists()).toBe(false);
+        expect(w.element.textContent).toContain(text);
+      } finally {
+        w.unmount();
+        r.stop();
+      }
+    }
   });
 });
