@@ -515,29 +515,31 @@ export function findPathRefs(text, scope) {
       const p0 = hasLC ? spanLineColStart : spanStrippedEnd;
       spanTrailingSlash = text[p0 - 1] === "/";
       spanP = dirs && !hasLC && p0 - 1 > slash && spanTrailingSlash ? p0 - 1 : p0;
-      // ③ One forward pass collects the window's slashes and NUL; a second O(#slashes) pass
-      //    over the collected list marks the bad segments (their ends are just the NEXT slash).
-      const slashes = [];
+      // ③ Close each segment at the NEXT slash, or at the spanP sentinel for the last
+      //    segment. Only the last two slash positions are needed; no O(#slashes) array.
+      let lastSlash = -1;
+      secondLastSlash = -1;
+      lastBad = -1;
       lastNul = -1;
-      for (let q = slash; q < spanP; q++) {
-        const ch = text[q];
-        if (ch === "/") slashes.push(q);
-        else if (ch === "\0") lastNul = q;
+      for (let q = slash; q <= spanP; q++) {
+        const ch = q < spanP ? text[q] : undefined;
+        if (ch === "/" || q === spanP) {
+          if (lastSlash !== -1) {
+            const segLen = q - (lastSlash + 1);
+            let bad = segLen === 0;
+            if (!bad && segLen <= 2) {
+              __previewScanStats.charScans += segLen;
+              bad = text[lastSlash + 1] === "." && (segLen === 1 || text[lastSlash + 2] === ".");
+            }
+            if (bad) lastBad = lastSlash; // segments close in ascending order — the max
+          }
+          if (ch === "/") {
+            secondLastSlash = lastSlash;
+            lastSlash = q;
+          }
+        } else if (ch === "\0") lastNul = q;
       }
       __previewScanStats.charScans += spanP - slash;
-      lastBad = -1;
-      for (let k = 0; k < slashes.length; k++) {
-        const q = slashes[k];
-        const segEnd = k + 1 < slashes.length ? slashes[k + 1] : spanP;
-        const segLen = segEnd - (q + 1);
-        let bad = segLen === 0;
-        if (!bad && segLen <= 2) {
-          __previewScanStats.charScans += segLen;
-          bad = text[q + 1] === "." && (segLen === 1 || text[q + 2] === ".");
-        }
-        if (bad) lastBad = q; // slashes ascend — the last assignment is the max
-      }
-      secondLastSlash = slashes.length >= 2 ? slashes[slashes.length - 2] : -1;
       // ④ The byte-cap lower bound — O(1)-bounded per run (≤ ~4097 bytes, never past s0).
       minStart = minStartOf(text, slash, spanP);
     }
@@ -546,10 +548,9 @@ export function findPathRefs(text, scope) {
     // the suffix" guard; no start can sit inside the match — it has no `/`).
     const strippedEnd = Math.max(spanStrippedEnd, slash + 1);
     const hasLineCol = spanLineColStart !== -1 && slash < spanLineColStart;
-    const startOk = isStartContext(text, slash, startSet);
     // —— tilde route (tilde-expansion addendum, F1 EXCLUSIVE interpretation): `~/<rest>`
     // recognized when `scope.tilde` — triggered off the char immediately before `slash`
-    // being `~` (so `startOk` above is already false for this `slash` — a tilde is never a
+    // being `~` (so route 1's start context is false for this `slash` — a tilde is never a
     // whitespace/opener — route 1 below never fires for it, no ordering conflict). The gate
     // is the run memo's O(1) fastOk with the tilde-specific ONE-segment floor: the memo was
     // computed over `[spanFirstSlash, spanP)` and the tilde's slash is inside that window
@@ -600,11 +601,13 @@ export function findPathRefs(text, scope) {
       }
     }
     // —— §2.5.2 route 1: absolute candidates (each '/' start costs O(1)) ——
-    if (startOk && slash < spanP && spanP - slash <= PREVIEW_PATH_MAX_BYTES) {
+    if (slash < spanP && spanP - slash <= PREVIEW_PATH_MAX_BYTES) {
       // fastOk ⇔ validatePreviewPath(text.slice(slash, spanP)) minus the structurally
       // guaranteed leading-`/` and CR/LF items — see the plan's item-by-item derivation.
       const fastOk = slash > lastBad && slash > lastNul && slash <= secondLastSlash && slash >= minStart;
-      if (fastOk) {
+      // The context predicate is pure: reject length/invalid segments before paying for
+      // character classification. Tilde and relative routes keep their own contexts/order.
+      if (fastOk && isStartContext(text, slash, startSet)) {
         let route = false;
         if (abs) {
           route = true; // C4: under `abs`, isClickable(path) IS validatePreviewPath(path)
