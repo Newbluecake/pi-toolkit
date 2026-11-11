@@ -3,6 +3,12 @@ import { mount } from "@vue/test-utils";
 import { computed, nextTick, ref } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createMemCommand } from "../../../src/memory/command.js";
+import type { RegisteredCommand } from "@earendil-works/pi-coding-agent";
+import { createStatusCommand, type StatusCommandDeps } from "../../../src/commands/status.js";
+import { createThreadCommand } from "../../../src/commands/thread.js";
+import { createReflexCommand, type ReflexCommandDeps } from "../../../src/reflex/command.js";
+import { BUILTIN_SCRIPTS } from "../../../src/reflex/core/catalog.js";
+import { createWebHubCommand } from "../../../src/commands/webhub.js";
 import type { JevCommandPort } from "../../../src/memory/jev/contracts.js";
 import { wrapCommandApi } from "../../../src/commands/capture.js";
 import type { ArgCompleter } from "../../../src/web-hub/agent/command-complete.js";
@@ -712,6 +718,329 @@ async function memoryHttp(
   });
   return { commands, dispose, fetchImpl, answers, native, businessReads, own, capabilities, start, spawn };
 }
+
+/** V-2 uses the same offline socket transport as V-M, but registers all four real
+ * factories. HTTP only envelopes real complete_reply frames; it never supplies candidates. */
+async function governanceHttp(opts: { gate?: "off" | "old-agent" | "deny"; allowAdmin?: boolean } = {}) {
+  resetGlobals();
+  const box = tmpDir("v2-composer-");
+  let disposed = false;
+  const dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    resetGlobals();
+    box.cleanup();
+  };
+  memoryLinks.push(dispose);
+  const business = vi.fn((key: PropertyKey): never => {
+    throw Error(`unexpected UI backend: ${String(key)}`);
+  });
+  const commands = {
+    agent: createStatusCommand(new Proxy({} as StatusCommandDeps, { get: (_t, key) => business(key) })),
+    thread: createThreadCommand({ current: () => business("thread.current"), rebind: true }),
+    reflex: createReflexCommand(
+      new Proxy({ catalog: BUILTIN_SCRIPTS } as ReflexCommandDeps, {
+        get: (target, key) => (key === "catalog" ? target.catalog : business(key)),
+      }),
+    ),
+    webhub: createWebHubCommand({ control: () => business("webhub.control"), open: () => business("open") }),
+  };
+  type Command = Omit<RegisteredCommand, "name" | "sourceInfo">;
+  const records = new Map<string, Command>();
+  const { pi, fire, sentUserMessages } = fakePi();
+  pi.registerCommand = (name, c) => {
+    records.set(name, c);
+  };
+  Object.assign(pi, {
+    getCommands: () => [...records].map(([name, c]) => ({ name, source: "extension", description: c.description })),
+  });
+  const raw = new Map<string, ArgCompleter>();
+  const owned = new Set<string>();
+  const wrapped = wrapCommandApi(pi, () => undefined, owned, raw);
+  const natives = Object.values(commands).map((command) => vi.spyOn(command, "handler"));
+  for (const [name, command] of Object.entries(commands)) {
+    wrapped.registerCommand(name, command);
+    expect(raw.get(name)).toBe(command.getArgumentCompletions);
+    expect(records.get(name)?.getArgumentCompletions).toBe(command.getArgumentCompletions);
+  }
+  expect(owned).toEqual(new Set(Object.keys(commands)));
+  const own = vi.spyOn(raw, "get");
+  const spawn = vi.fn((): never => {
+    throw Error("offline socket must not launch Hub");
+  });
+  const n = fakeNet();
+  const { ctx } = fakeCtx({ mode: "rpc" });
+  const flushSocket = () => new Promise<void>((resolve) => setImmediate(resolve));
+  const d = {
+    settings: {
+      ...SETTINGS,
+      commandComplete: opts.gate === "off" ? ("off" as const) : ("toolkit" as const),
+      ...(opts.gate === "deny"
+        ? {
+            webCommandPolicy: {
+              agent: "deny" as const,
+              thread: "deny" as const,
+              reflex: "deny" as const,
+              webhub: "deny" as const,
+            },
+          }
+        : opts.allowAdmin
+          ? { webCommandPolicy: { webhub: "allow" as const } }
+          : {}),
+    },
+    fleet: () => [],
+    argCompleters: raw,
+    ownedCommandNames: owned,
+    env: { HOME: box.dir },
+    paths: pathsIn(box.dir),
+    netConnect: n.netConnect,
+    spawnImpl: spawn,
+    argv1: "/nonexistent/pi",
+    buildInfo: async () => ({ pluginVersion: "1.2.3", buildId: "v2-dom" }),
+  };
+  expect(d.argCompleters).toBe(raw);
+  expect(d.ownedCommandNames).toBe(owned);
+  wireWebHub(pi, d);
+  fire("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await flushSocket();
+  const socket = n.sockets[0]!;
+  socket.emit("connect");
+  socket.hub(ackFrame("agent-a", 4242, opts.gate === "old-agent" ? ["command.v1"] : ["command.v1", "cmd.args.v1"]));
+  const published = decodeAgentFrame(
+    socket
+      .frames()
+      .filter((row) => row.t === "commands")
+      .at(-1),
+  );
+  if (published?.t !== "commands") throw Error("real wire did not publish commands");
+  const hello = decodeAgentFrame(socket.frames().find((row) => row.t === "hello"));
+  expect(hello?.t).toBe("hello");
+  if (hello?.t !== "hello") throw Error("missing hello");
+  expect(hello.caps?.includes("cmd.args.v1")).toBe(opts.gate !== "off");
+  const answers: import("../../../src/web-hub/protocol/command-args.js").CompleteReplyFrame[] = [];
+  const fetchImpl = vi.fn<typeof fetch>(async (url, init) => {
+    expect(url).toBe("/api/command/complete");
+    expect(init?.method).toBe("POST");
+    const body = JSON.parse(String(init?.body)) as { agentKey: string; name: string; prefix: string };
+    expect(body.agentKey).toBe("agent-a");
+    expect(owned.has(body.name)).toBe(true);
+    const rid = `v2-dom-${answers.length}`;
+    socket.hub({
+      t: "complete_req",
+      rid,
+      name: body.name,
+      prefix: body.prefix,
+      deadlineMs: 2000,
+      origin: { listener: "loopback" },
+    });
+    await flushSocket();
+    const reply = decodeAgentFrame(socket.frames().find((row) => row.t === "complete_reply" && row.rid === rid));
+    if (reply?.t !== "complete_reply") throw Error("real completion service did not reply");
+    answers.push(reply);
+    expect(spawn).not.toHaveBeenCalled();
+    return reply.ok ? jsonResponse(reply) : jsonResponse({ error: reply.code }, { status: 403 });
+  });
+  return {
+    commands: published.items.map((row) => ({ ...row })),
+    fetchImpl,
+    answers,
+    natives,
+    business,
+    own,
+    spawn,
+    sentUserMessages,
+    dispose,
+  };
+}
+function expectNoGovernanceExecution(
+  f: Awaited<ReturnType<typeof governanceHttp>>,
+  control: ControlHandle,
+  w: ReturnType<typeof mount>,
+) {
+  expect(control.runCommand).not.toHaveBeenCalled();
+  expect(control.sendPrompt).not.toHaveBeenCalled();
+  expect(w.emitted("send")).toBeUndefined();
+  for (const native of f.natives) expect(native).not.toHaveBeenCalled();
+  expect(f.business).not.toHaveBeenCalled();
+  expect(f.spawn).not.toHaveBeenCalled();
+  expect(f.sentUserMessages).toEqual([]);
+}
+
+const GOVERNANCE_PICKS = [
+  ["agent", "settings s", "settings set", "set"],
+  ["agent", "settings set budget.idle", "settings set budget.idleS", "budget.idleS"],
+  ["thread", "sub r_v2-complete-run o", "sub r_v2-complete-run origin", "origin"],
+  ["reflex", "reset jobs", "reset jobs.list", "jobs.list"],
+] as const;
+
+describe("V-2 real four-factory RAW → socket → offline HTTP → Composer/child Palette", () => {
+  it.each(GOVERNANCE_PICKS)(
+    "/%s %s applies %s without duplicate/lost prefixes (%s)",
+    async (name, prefix, result, label) => {
+      const f = await governanceHttp();
+      const { wrapper: w, control } = mountComposer({ commands: f.commands, fetchImpl: f.fetchImpl });
+      vi.spyOn(control, "runCommand");
+      vi.spyOn(control, "sendPrompt");
+      await type(w, `/${name} ${prefix}`);
+      await soon();
+      expect(bodies(f.fetchImpl)).toEqual([{ agentKey: "agent-a", name, prefix }]);
+      expect(f.answers).toHaveLength(1);
+      expect(f.answers[0]).toMatchObject({
+        ok: true,
+        source: "own",
+        items: [{ value: result, label, policy: "confirm" }],
+      });
+      expect(argRows(w)).toHaveLength(1);
+      const row = argRows(w)[0]!;
+      expect(row.attributes("title")).toBe(result);
+      expect(row.find(".command-name").text()).toBe(label);
+      expect(row.find(".policy-chip").attributes("data-policy")).toBe("confirm");
+      if (name === "thread") await row.trigger("click");
+      else {
+        await press(w, { key: "ArrowDown" });
+        await press(w, { key: "Enter" });
+      }
+      expect(value(w)).toBe(`/${name} ${result}`);
+      expectNoGovernanceExecution(f, control, w);
+    },
+  );
+
+  it.each(["token ", "2fa ", "2fa enroll ", "2fa feishu "])(
+    "default /webhub %s has no sensitive DOM candidates",
+    async (prefix) => {
+      const f = await governanceHttp();
+      const { wrapper: w, control } = mountComposer({ commands: f.commands, fetchImpl: f.fetchImpl });
+      vi.spyOn(control, "runCommand");
+      vi.spyOn(control, "sendPrompt");
+      await type(w, `/webhub ${prefix}`);
+      await soon();
+      expect(bodies(f.fetchImpl)).toEqual([{ agentKey: "agent-a", name: "webhub", prefix }]);
+      expect(f.answers).toEqual([{ t: "complete_reply", rid: "v2-dom-0", ok: true, source: "own", items: [] }]);
+      expect(argRows(w)).toHaveLength(0);
+      expect(argPanel(w).find(".policy-chip").exists()).toBe(false);
+      expect(value(w)).toBe(`/webhub ${prefix}`);
+      expectNoGovernanceExecution(f, control, w);
+    },
+  );
+
+  it("default /webhub root hides token and 2fa candidates in the real DOM", async () => {
+    const f = await governanceHttp();
+    const { wrapper: w, control } = mountComposer({ commands: f.commands, fetchImpl: f.fetchImpl });
+    vi.spyOn(control, "runCommand");
+    vi.spyOn(control, "sendPrompt");
+    await type(w, "/webhub ");
+    await soon();
+    expect(bodies(f.fetchImpl)).toEqual([{ agentKey: "agent-a", name: "webhub", prefix: "" }]);
+    expect(f.answers[0]).toMatchObject({ ok: true, source: "own", items: [{ value: "status", label: "status" }] });
+    expect(argRows(w).map((row) => row.attributes("title"))).toEqual(["status"]);
+    expectNoGovernanceExecution(f, control, w);
+  });
+
+  it("offline allow token rotate only changes the textarea, never invokes the native admin delegate", async () => {
+    const f = await governanceHttp({ allowAdmin: true });
+    const { wrapper: w, control } = mountComposer({ commands: f.commands, fetchImpl: f.fetchImpl });
+    vi.spyOn(control, "runCommand");
+    vi.spyOn(control, "sendPrompt");
+    await type(w, "/webhub token ");
+    await soon();
+    expect(bodies(f.fetchImpl)).toEqual([{ agentKey: "agent-a", name: "webhub", prefix: "token " }]);
+    expect(f.answers[0]).toMatchObject({
+      ok: true,
+      source: "own",
+      items: [{ value: "token rotate", label: "rotate" }],
+    });
+    expect(argRows(w)).toHaveLength(1);
+    expect(argRows(w)[0]!.attributes("title")).toBe("token rotate");
+    expect(argRows(w)[0]!.find(".policy-chip").exists()).toBe(false);
+    await argRows(w)[0]!.trigger("click");
+    expect(value(w)).toBe("/webhub token rotate");
+    expectNoGovernanceExecution(f, control, w);
+  });
+
+  it("offline admin allow renders real side-effect descriptions but selection is never permission to execute", async () => {
+    const f = await governanceHttp({ allowAdmin: true });
+    const { wrapper: w, control } = mountComposer({ commands: f.commands, fetchImpl: f.fetchImpl });
+    vi.spyOn(control, "runCommand");
+    vi.spyOn(control, "sendPrompt");
+    await type(w, "/webhub 2fa ");
+    await soon();
+    expect(bodies(f.fetchImpl)).toEqual([{ agentKey: "agent-a", name: "webhub", prefix: "2fa " }]);
+    expect(argRows(w).map((row) => row.attributes("title"))).toEqual([
+      "2fa status",
+      "2fa enroll",
+      "2fa feishu",
+      "2fa recovery",
+      "2fa reset",
+      "2fa forget-ips",
+      "2fa repair",
+    ]);
+    const descriptions = new Map(argRows(w).map((row) => [row.attributes("title"), row.find(".command-desc").text()]));
+    expect(descriptions.get("2fa recovery")).toContain("作废旧恢复码");
+    expect(descriptions.get("2fa reset")).toContain("清除");
+    expect(descriptions.get("2fa forget-ips")).toContain("IP");
+    expect(descriptions.get("2fa repair")).toContain("破坏性");
+    expect(argPanel(w).find(".policy-chip").exists()).toBe(false);
+    expect(argRows(w).some((row) => row.attributes("title")?.includes("--confirm"))).toBe(false);
+    await argRows(w)[4]!.trigger("click");
+    expect(value(w)).toBe("/webhub 2fa reset");
+    expectNoGovernanceExecution(f, control, w);
+  });
+
+  it.each(GOVERNANCE_PICKS)("/%s %s Enter without navigation preserves original send (%s/%s)", async (name, prefix) => {
+    const f = await governanceHttp();
+    const { wrapper: w, control } = mountComposer({ commands: f.commands, fetchImpl: f.fetchImpl });
+    const run = vi.spyOn(control, "runCommand");
+    const send = vi.spyOn(control, "sendPrompt");
+    const original = `/${name} ${prefix}`;
+    await type(w, original);
+    await soon();
+    expect(argRows(w)).toHaveLength(1);
+    await press(w, { key: "Enter" });
+    expect(w.emitted("send")).toEqual([[original, "steer"]]);
+    expect(run).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
+    for (const native of f.natives) expect(native).not.toHaveBeenCalled();
+    expect(f.business).not.toHaveBeenCalled();
+  });
+
+  it("Escape closes the real child palette without modifying text or dispatching", async () => {
+    const f = await governanceHttp();
+    const { wrapper: w, control } = mountComposer({ commands: f.commands, fetchImpl: f.fetchImpl });
+    vi.spyOn(control, "runCommand");
+    vi.spyOn(control, "sendPrompt");
+    await type(w, "/thread sub r_v2-complete-run o");
+    await soon();
+    expect(argRows(w)).toHaveLength(1);
+    await press(w, { key: "Escape" });
+    expect(argPanel(w).exists()).toBe(false);
+    expect(value(w)).toBe("/thread sub r_v2-complete-run o");
+    expectNoGovernanceExecution(f, control, w);
+  });
+
+  it.each(["off", "old-agent", "deny", "offline", "commands-disabled"] as const)(
+    "%s gates the four real command rows without any HTTP/RAW/business work",
+    async (gate) => {
+      const f = await governanceHttp(gate === "off" || gate === "old-agent" || gate === "deny" ? { gate } : {});
+      const { wrapper: w, control } = mountComposer({
+        commands: f.commands,
+        fetchImpl: f.fetchImpl,
+        down: gate === "offline",
+        commandsEnabled: gate !== "commands-disabled",
+      });
+      vi.spyOn(control, "runCommand");
+      vi.spyOn(control, "sendPrompt");
+      for (const [name, prefix] of [...GOVERNANCE_PICKS, ["webhub", "2fa "]] as const) {
+        await type(w, `/${name} ${prefix}`);
+        await soon();
+        expect(argRows(w)).toHaveLength(0);
+      }
+      expect(f.fetchImpl).not.toHaveBeenCalled();
+      expect(f.own).not.toHaveBeenCalled();
+      expect(f.answers).toEqual([]);
+      expectNoGovernanceExecution(f, control, w);
+    },
+  );
+});
 
 describe("V-M real memory completion HTTP → Composer + real CommandArgPalette", () => {
   it.each(["ArrowDown", "ArrowUp", "click"])(

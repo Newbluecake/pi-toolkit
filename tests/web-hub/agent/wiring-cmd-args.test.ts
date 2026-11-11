@@ -7,6 +7,13 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createMemCommand } from "../../../src/memory/command.js";
+import type { RegisteredCommand } from "@earendil-works/pi-coding-agent";
+import { createStatusCommand, type StatusCommandDeps } from "../../../src/commands/status.js";
+import { createThreadCommand } from "../../../src/commands/thread.js";
+import { createReflexCommand, type ReflexCommandDeps } from "../../../src/reflex/command.js";
+import { BUILTIN_SCRIPTS } from "../../../src/reflex/core/catalog.js";
+import { createWebHubCommand } from "../../../src/commands/webhub.js";
+import { decodeAgentFrame } from "../../../src/web-hub/protocol/messages.js";
 import type { JevCommandPort } from "../../../src/memory/jev/contracts.js";
 import { wrapCommandApi } from "../../../src/commands/capture.js";
 import { executeMemoryRead } from "../../../src/memory/command-readonly.js";
@@ -68,6 +75,364 @@ async function liveConnect(
   s.hub(ackFrame("k1", 4242, caps));
   return n;
 }
+
+/** The host has already decided which commands to register. These conditional test
+ * registrations do NOT simulate activate's secure/child gates (covered by real trace/goldens). */
+function registerGovernance(
+  pi: ReturnType<typeof fakePi>["pi"],
+  flags: { rebind?: boolean; drafts?: boolean; registered?: boolean } = {},
+) {
+  type Command = Omit<RegisteredCommand, "name" | "sourceInfo">;
+  const business = vi.fn((key: PropertyKey): never => {
+    throw Error(`business read: ${String(key)}`);
+  });
+  const draftEnabled = vi.fn(() => flags.drafts === true);
+  const draftRead = vi.fn((): never => business("draft read"));
+  const reflex = new Proxy(
+    {
+      catalog: BUILTIN_SCRIPTS,
+      drafts: { enabled: draftEnabled, dir: draftRead, result: draftRead, loading: draftRead, counters: draftRead },
+    } as unknown as ReflexCommandDeps,
+    {
+      get: (target, key) => (key === "catalog" || key === "drafts" ? Reflect.get(target, key) : business(key)),
+    },
+  );
+  const factories = {
+    agent: createStatusCommand(new Proxy({} as StatusCommandDeps, { get: (_t, key) => business(key) })),
+    thread: createThreadCommand({ current: () => business("thread.current"), rebind: flags.rebind === true }),
+    reflex: createReflexCommand(reflex),
+    webhub: createWebHubCommand({ control: () => business("webhub.control"), open: () => business("open") }),
+  };
+  const records = new Map<string, Command>();
+  pi.registerCommand = (name, command) => {
+    records.set(name, command);
+  };
+  Object.assign(pi, {
+    getCommands: () =>
+      [...records].map(([name, command]) => ({ name, source: "extension", description: command.description })),
+  });
+  const raw = new Map<string, ArgCompleter>();
+  const owned = new Set<string>();
+  const wrapped = wrapCommandApi(pi, () => undefined, owned, raw);
+  const natives = Object.values(factories).map((command) => vi.spyOn(command, "handler"));
+  for (const [name, command] of Object.entries(factories)) {
+    if (flags.registered === false && (name === "thread" || name === "reflex")) continue;
+    wrapped.registerCommand(name, command);
+    expect(raw.get(name)).toBe(command.getArgumentCompletions);
+    expect(records.get(name)?.getArgumentCompletions).toBe(command.getArgumentCompletions);
+  }
+  return { raw, owned, records, business, draftEnabled, draftRead, natives };
+}
+
+function publishedCommands(socket: ReturnType<typeof fakeNet>["sockets"][number]) {
+  const frame = decodeAgentFrame(
+    socket
+      .frames()
+      .filter((row) => row.t === "commands")
+      .at(-1),
+  );
+  if (frame?.t !== "commands") throw Error("commands were not actually published");
+  return frame.items;
+}
+async function completeGovernance(socket: ReturnType<typeof fakeNet>["sockets"][number], name: string, prefix = "") {
+  const rid = `v2-${socket.frames().length}`;
+  socket.hub({ t: "complete_req", rid, name, prefix, deadlineMs: 2000, origin: { listener: "loopback" } });
+  await flush();
+  const reply = decodeAgentFrame(socket.frames().find((row) => row.t === "complete_reply" && row.rid === rid));
+  if (reply?.t !== "complete_reply") throw Error("real service did not reply");
+  return reply;
+}
+function expectStaticOnly(f: ReturnType<typeof registerGovernance>) {
+  expect(f.business).not.toHaveBeenCalled();
+  expect(f.draftEnabled).not.toHaveBeenCalled();
+  expect(f.draftRead).not.toHaveBeenCalled();
+  for (const native of f.natives) expect(native).not.toHaveBeenCalled();
+}
+
+describe("V-2 real factory/capture → wireWebHub publication matrix", () => {
+  it.each([
+    ["toolkit", "tui", 0],
+    ["all", "tui", 1],
+    ["all", "rpc", 0],
+  ] as const)(
+    "%s/%s installs %i wrapper(s), publishes four own completers and never uses S-tui",
+    async (commandComplete, mode, wrappers) => {
+      const { pi, fire, sentUserMessages } = fakePi();
+      const f = registerGovernance(pi);
+      const { ctx } = fakeCtx({ mode });
+      const registered: Array<(current: unknown) => unknown> = [];
+      Object.assign(ctx.ui, {
+        addAutocompleteProvider: (factory: (current: unknown) => unknown) => registered.push(factory),
+      });
+      const spawn = vi.fn((): never => {
+        throw Error("must not launch Hub");
+      });
+      const d = deps({
+        settings: { ...SETTINGS, commandComplete },
+        argCompleters: f.raw,
+        ownedCommandNames: f.owned,
+        spawnImpl: spawn,
+      });
+      expect(d.argCompleters).toBe(f.raw);
+      expect(d.ownedCommandNames).toBe(f.owned);
+      const n = await liveConnect(d, pi, fire, ["command.v1", "cmd.args.v1"], ctx);
+      const socket = n.sockets[0]!;
+      expect(socket.frames().find((row) => row.t === "hello")).toMatchObject({
+        caps: expect.arrayContaining(["cmd.args.v1"]),
+      });
+      const rows = publishedCommands(socket);
+      for (const name of f.owned)
+        expect(rows.find((row) => row.name === name)).toMatchObject({
+          name,
+          kind: "extension",
+          output: "captured",
+          args: { complete: true },
+        });
+      expect(registered).toHaveLength(wrappers);
+      const tui = vi.fn(async () => ({ items: [{ value: "wrong-source", label: "wrong-source" }], prefix: "" }));
+      if (registered[0]) {
+        const current = { getSuggestions: tui };
+        expect(registered[0](current)).toBe(current);
+      }
+      for (const [name, prefix, values] of [
+        ["agent", "settings s", ["settings set"]],
+        ["thread", "", ["status", "help", "sub", "drop"]],
+        ["reflex", "", ["status", "explain", "reset", "drafts"]],
+        ["webhub", "token ", []],
+      ] as const) {
+        const reply = await completeGovernance(socket, name, prefix);
+        expect(reply).toMatchObject({ ok: true, source: "own" });
+        if (!reply.ok) throw Error("own refused");
+        expect(reply.items.map((item) => item.value)).toEqual(values);
+        if (name !== "webhub") expect(reply.items.every((item) => item.policy === "confirm")).toBe(true);
+      }
+      // Same activation session change must not stack a second all/TUI wrapper.
+      fire("session_start", { type: "session_start", reason: "new" }, ctx);
+      await flush();
+      expect(registered).toHaveLength(wrappers);
+      expect(tui).not.toHaveBeenCalled();
+      expect(spawn).not.toHaveBeenCalled();
+      expect(sentUserMessages).toEqual([]);
+      expectStaticOnly(f);
+    },
+  );
+
+  it.each(["print", "json"] as const)(
+    "%s mode is wholly inert: no wrapper, socket or published frames",
+    async (mode) => {
+      const { pi, fire } = fakePi();
+      const f = registerGovernance(pi);
+      const { ctx } = fakeCtx({ mode });
+      const wrapper = vi.fn();
+      Object.assign(ctx.ui, { addAutocompleteProvider: wrapper });
+      const n = fakeNet();
+      wireWebHub(pi, deps({ netConnect: n.netConnect, argCompleters: f.raw, ownedCommandNames: f.owned }));
+      fire("session_start", { type: "session_start", reason: "startup" }, ctx);
+      await flush();
+      expect(wrapper).not.toHaveBeenCalled();
+      expect(n.sockets).toEqual([]);
+      expectStaticOnly(f);
+    },
+  );
+
+  it.each([false, true])(
+    "registered thread/reflex feature flags=%s retain complete=true and exact filtered roots",
+    async (enabled) => {
+      const { pi, fire } = fakePi();
+      const f = registerGovernance(pi, { rebind: enabled, drafts: enabled });
+      const { ctx } = fakeCtx({ mode: "rpc" });
+      const branch = vi.spyOn(ctx.sessionManager, "getBranch");
+      const n = await liveConnect(
+        deps({
+          settings: { ...SETTINGS, commandComplete: "toolkit" },
+          argCompleters: f.raw,
+          ownedCommandNames: f.owned,
+        }),
+        pi,
+        fire,
+        ["command.v1", "cmd.args.v1"],
+        ctx,
+      );
+      const socket = n.sockets[0]!;
+      branch.mockClear();
+      for (const name of ["thread", "reflex"])
+        expect(publishedCommands(socket).find((row) => row.name === name)?.args?.complete).toBe(true);
+      expect(await completeGovernance(socket, "thread")).toMatchObject({
+        ok: true,
+        source: "own",
+        items: (enabled
+          ? ["status", "help", "sub", "drop", "rebind", "acquire"]
+          : ["status", "help", "sub", "drop"]
+        ).map((value) => ({ value, label: value, policy: "confirm" })),
+      });
+      expect(await completeGovernance(socket, "thread", "sub r_v2-complete-run o")).toMatchObject({
+        ok: true,
+        items: [{ value: "sub r_v2-complete-run origin", label: "origin", policy: "confirm" }],
+      });
+      expect(await completeGovernance(socket, "thread", "rebind ")).toMatchObject({
+        ok: true,
+        items: enabled ? [{ value: "rebind origin", label: "origin", policy: "confirm" }] : [],
+      });
+      expect(await completeGovernance(socket, "thread", "acquire ")).toMatchObject({
+        ok: true,
+        items: enabled ? [{ value: "acquire origin", label: "origin", policy: "confirm" }] : [],
+      });
+      const reply = await completeGovernance(socket, "reflex", "d");
+      expect(reply).toMatchObject({
+        ok: true,
+        items: [{ value: "drafts", description: "显示草案诊断；关闭时显示 disabled", policy: "confirm" }],
+      });
+      expect(branch).not.toHaveBeenCalled();
+      expectStaticOnly(f);
+    },
+  );
+
+  it.each(["toolkit", "all"] as const)(
+    "%s no-RAW external control is not a factory-owned completer",
+    async (commandComplete) => {
+      const { pi, fire } = fakePi();
+      const f = registerGovernance(pi);
+      const native = vi.fn(async () => {});
+      // Deliberately outside wrapCommandApi, with no argument completer.
+      pi.registerCommand("external-v2", { description: "external no-completer control", handler: native });
+      expect(f.raw.has("external-v2")).toBe(false);
+      expect(f.owned.has("external-v2")).toBe(false);
+      const { ctx } = fakeCtx({ mode: "rpc" });
+      const n = await liveConnect(
+        deps({ settings: { ...SETTINGS, commandComplete }, argCompleters: f.raw, ownedCommandNames: f.owned }),
+        pi,
+        fire,
+        ["command.v1", "cmd.args.v1"],
+        ctx,
+      );
+      const socket = n.sockets[0]!;
+      expect(publishedCommands(socket).find((row) => row.name === "external-v2")?.args?.complete).toBe(
+        commandComplete === "all" ? true : undefined,
+      );
+      expect(await completeGovernance(socket, "external-v2")).toMatchObject({ ok: true, source: "own", items: [] });
+      expect(native).not.toHaveBeenCalled();
+      expectStaticOnly(f);
+    },
+  );
+
+  it.each(["off", "web-commands-off", "capless"] as const)(
+    "%s strips all four real registrations from the argument wire surface",
+    async (gate) => {
+      const { pi, fire } = fakePi();
+      const f = registerGovernance(pi);
+      const get = vi.spyOn(f.raw, "get");
+      const { ctx, registered } = tuiCtxWithAutocomplete();
+      const n = await liveConnect(
+        deps({
+          settings: {
+            ...SETTINGS,
+            commandComplete: gate === "off" ? "off" : "toolkit",
+            webCommands: gate !== "web-commands-off",
+          },
+          argCompleters: f.raw,
+          ownedCommandNames: f.owned,
+        }),
+        pi,
+        fire,
+        gate === "off" ? ["command.v1", "cmd.args.v1"] : ["command.v1"],
+        ctx,
+      );
+      const socket = n.sockets[0]!;
+      const hello = socket.frames().find((row) => row.t === "hello");
+      expect(hello).toMatchObject({ caps: expect.any(Array) });
+      expect((hello!.caps as string[]).includes("cmd.args.v1")).toBe(gate === "capless");
+      const rows = publishedCommands(socket);
+      for (const name of f.owned) expect(rows.some((row) => row.name === name)).toBe(true);
+      expect(rows.every((row) => row.args === undefined)).toBe(true);
+      expect(registered).toHaveLength(0);
+      if (gate === "off") {
+        socket.hub({
+          t: "complete_req",
+          rid: "v2-off",
+          name: "thread",
+          prefix: "",
+          deadlineMs: 2000,
+          origin: { listener: "loopback" },
+        });
+        await flush();
+        expect(socket.frames().some((row) => row.t === "complete_reply")).toBe(false);
+      }
+      expect(get).not.toHaveBeenCalled();
+      expectStaticOnly(f);
+    },
+  );
+
+  it("host-assembled absent registrations have no thread/reflex item or RAW (not an activate gate proof)", async () => {
+    const { pi, fire } = fakePi();
+    const f = registerGovernance(pi, { registered: false });
+    const { ctx } = fakeCtx({ mode: "rpc" });
+    const n = await liveConnect(
+      deps({ settings: { ...SETTINGS, commandComplete: "toolkit" }, argCompleters: f.raw, ownedCommandNames: f.owned }),
+      pi,
+      fire,
+      ["command.v1", "cmd.args.v1"],
+      ctx,
+    );
+    for (const name of ["thread", "reflex"]) {
+      expect(f.records.has(name)).toBe(false);
+      expect(f.raw.has(name)).toBe(false);
+      expect(f.owned.has(name)).toBe(false);
+      expect(publishedCommands(n.sockets[0]!).some((row) => row.name === name)).toBe(false);
+      expect(await completeGovernance(n.sockets[0]!, name)).toMatchObject({ ok: false, code: "E_UNKNOWN_COMMAND" });
+    }
+    expectStaticOnly(f);
+  });
+
+  it.each(["default", "allow", "deny"] as const)(
+    "%s policy is enforced on actual socket requests for each factory",
+    async (policy) => {
+      const { pi, fire } = fakePi();
+      const f = registerGovernance(pi);
+      const { ctx } = fakeCtx({ mode: "rpc" });
+      const n = await liveConnect(
+        deps({
+          settings: {
+            ...SETTINGS,
+            commandComplete: "toolkit",
+            ...(policy === "default"
+              ? {}
+              : { webCommandPolicy: { agent: policy, thread: policy, reflex: policy, webhub: policy } }),
+          },
+          argCompleters: f.raw,
+          ownedCommandNames: f.owned,
+        }),
+        pi,
+        fire,
+        ["command.v1", "cmd.args.v1"],
+        ctx,
+      );
+      const socket = n.sockets[0]!;
+      for (const name of ["agent", "thread", "reflex"]) {
+        const reply = await completeGovernance(socket, name, name === "agent" ? "settings s" : "");
+        if (policy === "deny") expect(reply).toMatchObject({ ok: false, code: "E_COMMAND_DENIED" });
+        else {
+          if (!reply.ok) throw Error("completion refused");
+          expect(reply.items.length).toBeGreaterThan(0);
+          expect(reply.items.every((item) => item.policy === (policy === "default" ? "confirm" : undefined))).toBe(
+            true,
+          );
+        }
+      }
+      for (const prefix of ["token ", "2fa ", "2fa enroll ", "2fa feishu "]) {
+        const reply = await completeGovernance(socket, "webhub", prefix);
+        if (policy === "deny") expect(reply).toMatchObject({ ok: false, code: "E_COMMAND_DENIED" });
+        else if (policy === "default") expect(reply).toMatchObject({ ok: true, source: "own", items: [] });
+        else {
+          if (!reply.ok) throw Error("override refused");
+          expect(reply.items.length).toBeGreaterThan(0);
+          expect(reply.items.every((item) => item.policy === undefined)).toBe(true);
+          expect(reply.items.some((item) => item.value.includes("--confirm"))).toBe(false);
+        }
+      }
+      expectStaticOnly(f);
+    },
+  );
+});
 
 describe("wireWebHub — cmd.args caps & commands slot args (P1)", () => {
   it("default settings: hello carries cmd.args.v1; commands replay carries args for the cap-carrying hub", async () => {

@@ -4,7 +4,13 @@ import { createMemCommand } from "../../../src/memory/command.js";
 import type { JevCommandPort } from "../../../src/memory/jev/contracts.js";
 import { parseMemorySettings } from "../../../src/memory/settings.js";
 import * as memoryFs from "../../../src/memory/safe-fs.js";
-import { wrapCommandApi } from "../../../src/commands/capture.js";
+import { createCommandCaptureEngine, wrapCommandApi } from "../../../src/commands/capture.js";
+import { createStatusCommand, type StatusCommandDeps } from "../../../src/commands/status.js";
+import { createThreadCommand } from "../../../src/commands/thread.js";
+import { createReflexCommand, type ReflexCommandDeps } from "../../../src/reflex/command.js";
+import { BUILTIN_SCRIPTS } from "../../../src/reflex/core/catalog.js";
+import { createWebHubCommand } from "../../../src/commands/webhub.js";
+import type { ExtensionCommandContext, RegisteredCommand } from "@earendil-works/pi-coding-agent";
 import { resolveCommandPolicy } from "../../../src/web-hub/agent/command-policy.js";
 import { parseRevisionFlowCommand } from "../../../src/memory/command-flow.js";
 import { executeMemoryRead } from "../../../src/memory/command-readonly.js";
@@ -52,6 +58,200 @@ const EXT_PORT = {
 function ownMap(entries: Record<string, ArgCompleter>): Map<string, ArgCompleter> {
   return new Map(Object.entries(entries));
 }
+
+/** V-2: the only RAW writers here are real registrations through the production proxy. */
+function capturedGovernance() {
+  type Command = Omit<RegisteredCommand, "name" | "sourceInfo">;
+  const business = vi.fn((key: PropertyKey): never => {
+    throw Error(`unexpected business access: ${String(key)}`);
+  });
+  const agentDeps = new Proxy({} as StatusCommandDeps, { get: (_t, key) => business(key) });
+  const reflexDeps = new Proxy({ catalog: BUILTIN_SCRIPTS } as ReflexCommandDeps, {
+    get: (target, key) => (key === "catalog" ? target.catalog : business(key)),
+  });
+  const commands = {
+    agent: createStatusCommand(agentDeps),
+    thread: createThreadCommand({ current: () => business("thread.current"), rebind: true }),
+    reflex: createReflexCommand(reflexDeps),
+    webhub: createWebHubCommand({ control: () => business("webhub.control"), open: () => business("open") }),
+  };
+  const records = new Map<string, Command>();
+  const pi = {
+    registerCommand: (name: string, command: Command) => records.set(name, command),
+    getCommands: () =>
+      [...records].map(([name, command]) => ({
+        name,
+        ...(command.description !== undefined ? { description: command.description } : {}),
+        source: "extension",
+      })),
+  };
+  const raw = new Map<string, ArgCompleter>();
+  const owned = new Set<string>();
+  const wrapped = wrapCommandApi(pi as unknown as ExtensionAPI, () => undefined, owned, raw);
+  const natives = Object.values(commands).map((command) => vi.spyOn(command, "handler"));
+  for (const [name, command] of Object.entries(commands)) {
+    wrapped.registerCommand(name, command);
+    expect(raw.get(name)).toBe(command.getArgumentCompletions);
+    expect(records.get(name)?.getArgumentCompletions).toBe(command.getArgumentCompletions);
+  }
+  expect(owned).toEqual(new Set(Object.keys(commands)));
+  return { pi, raw, owned, natives, business, commands };
+}
+
+describe("V-2 four real factories → capture RAW → policy/service", () => {
+  it.each(["toolkit", "all"] as const)("%s preserves own priority and action/key/generic confirm", async (mode) => {
+    const f = capturedGovernance();
+    const own = vi.fn(() => f.raw);
+    const tui = vi.fn(async () => ({ items: [], prefix: "" }));
+    const service = createCommandComplete({ commands: f.pi, own, tui: () => ({ getSuggestions: tui }), mode });
+    try {
+      for (const [name, prefix, values] of [
+        ["agent", "settings s", ["settings set"]],
+        ["agent", "settings set budget.idle", ["settings set budget.idleS"]],
+        ["agent", "reload c", ["reload cancel"]],
+        ["thread", "sub r_v2-complete-run o", ["sub r_v2-complete-run origin"]],
+        ["reflex", "reset jobs", ["reset jobs.list"]],
+      ] as const) {
+        const reply = await service.answer(req(name, prefix));
+        expect(reply).toMatchObject({ ok: true, source: "own" });
+        if (!reply.ok) throw Error("expected own completion");
+        expect(reply.items.map((item) => item.value)).toEqual(values);
+        expect(reply.items.map((item) => item.policy)).toEqual(values.map(() => "confirm"));
+        for (const item of reply.items)
+          expect(resolveCommandPolicy({ name, args: item.value, kind: "extension" }).policy).toBe("confirm");
+      }
+      expect(own).toHaveBeenCalled();
+      expect(own.mock.results.every((result) => result.value === f.raw)).toBe(true);
+      expect(tui).not.toHaveBeenCalled();
+      expect(f.business).not.toHaveBeenCalled();
+      for (const native of f.natives) expect(native).not.toHaveBeenCalled();
+    } finally {
+      service.dispose();
+    }
+  });
+
+  it.each(["default", "allow", "deny"] as const)(
+    "webhub %s filters each token/2fa candidate, not only command metadata",
+    async (policy) => {
+      const f = capturedGovernance();
+      const own = vi.fn(() => f.raw);
+      const service = createCommandComplete({
+        commands: f.pi,
+        own,
+        tui: () => undefined,
+        mode: "toolkit",
+        ...(policy === "default" ? {} : { overrides: { webhub: policy } }),
+      });
+      try {
+        for (const prefix of ["token ", "2fa ", "2fa enroll ", "2fa feishu "]) {
+          const native = (await f.commands.webhub.getArgumentCompletions!(prefix)) ?? [];
+          expect(native.length).toBeGreaterThan(0);
+          for (const item of native)
+            expect(resolveCommandPolicy({ name: "webhub", args: item.value, kind: "extension" }).policy).toBe("deny");
+          const reply = await service.answer(req("webhub", prefix));
+          if (policy === "deny") expect(reply).toMatchObject({ ok: false, code: "E_COMMAND_DENIED" });
+          else {
+            expect(reply).toMatchObject({ ok: true, source: "own" });
+            if (!reply.ok) throw Error("expected filtered answer");
+            expect(reply.items.map((item) => item.value)).toEqual(
+              policy === "allow" ? native.map((item) => item.value) : [],
+            );
+            expect(reply.items.every((item) => item.policy === undefined)).toBe(true);
+          }
+        }
+        if (policy === "deny") expect(own).not.toHaveBeenCalled();
+        expect(f.business).not.toHaveBeenCalled();
+        for (const native of f.natives) expect(native).not.toHaveBeenCalled();
+      } finally {
+        service.dispose();
+      }
+    },
+  );
+
+  it("explicit deny refuses all three non-admin factories before RAW lookup", async () => {
+    const f = capturedGovernance();
+    const own = vi.fn(() => f.raw);
+    const service = createCommandComplete({
+      commands: f.pi,
+      own,
+      tui: () => undefined,
+      mode: "toolkit",
+      overrides: { agent: "deny", thread: "deny", reflex: "deny" },
+    });
+    try {
+      for (const name of ["agent", "thread", "reflex"])
+        expect(await service.answer(req(name))).toMatchObject({ ok: false, code: "E_COMMAND_DENIED" });
+      expect(own).not.toHaveBeenCalled();
+      expect(f.business).not.toHaveBeenCalled();
+      for (const native of f.natives) expect(native).not.toHaveBeenCalled();
+    } finally {
+      service.dispose();
+    }
+  });
+
+  it("offline allow does not bypass real captured native sensitive TUI gates", async () => {
+    const capture = createCommandCaptureEngine();
+    type Command = Omit<RegisteredCommand, "name" | "sourceInfo">;
+    let registered: Command | undefined;
+    const pi = {
+      registerCommand: (_name: string, c: Command) => {
+        registered = c;
+      },
+    } as unknown as ExtensionAPI;
+    const raw = new Map<string, ArgCompleter>();
+    const owned = new Set<string>();
+    const request = vi.fn();
+    const admin = vi.fn();
+    const open = vi.fn();
+    const command = createWebHubCommand({
+      control: () => ({ admin: { rotateToken: admin } }) as never,
+      twofaPort: () => ({ hasCap: () => true, request }),
+      open,
+    });
+    wrapCommandApi(pi, () => capture, owned, raw).registerCommand("webhub", command);
+    expect(raw.get("webhub")).toBe(command.getArgumentCompletions);
+    expect(registered?.getArgumentCompletions).toBe(raw.get("webhub"));
+    const widget = vi.fn();
+    const custom = vi.fn();
+    const input = vi.fn();
+    // Token rotation has default Web deny, but no native TUI gate; do not invent one.
+    for (const [index, args] of [
+      "2fa enroll",
+      "2fa enroll --replace",
+      "2fa feishu on",
+      "2fa recovery",
+      "2fa reset --confirm",
+      "2fa forget-ips",
+      "2fa repair --confirm",
+    ].entries()) {
+      expect(
+        resolveCommandPolicy({ name: "webhub", args, kind: "extension", overrides: { webhub: "allow" } }).policy,
+      ).toBe("allow");
+      const cmdId = `v2-native-${index}`;
+      capture.arm({
+        cmdId,
+        reqId: cmdId,
+        name: "webhub",
+        args,
+        origin: { listener: "loopback", ip: "127.0.0.1", reqId: cmdId },
+        deadlineAt: Date.now() + 2000,
+      });
+      const notify = vi.fn();
+      await registered!.handler(args, {
+        mode: "tui",
+        ui: { notify, setWidget: widget, custom, input },
+      } as unknown as ExtensionCommandContext);
+      expect(JSON.stringify(capture.outputFor(cmdId))).toContain("TUI");
+      expect(JSON.stringify(capture.outputFor(cmdId))).not.toContain("otpauth:");
+    }
+    expect(request).not.toHaveBeenCalled();
+    expect(admin).not.toHaveBeenCalled();
+    expect(open).not.toHaveBeenCalled();
+    expect(widget).not.toHaveBeenCalled();
+    expect(custom).not.toHaveBeenCalled();
+    expect(input).not.toHaveBeenCalled();
+  });
+});
 
 describe("command-complete — validation & policy gates (§4.3 #1/#2)", () => {
   it("unknown command ⇒ E_UNKNOWN_COMMAND (not retryable)", async () => {
