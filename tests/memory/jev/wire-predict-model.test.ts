@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { FakeClock } from "../../../src/core/clock.js";
+import type { JevClientHandle } from "../../../src/memory/jev/client.js";
 import { jevConfigOf } from "../../../src/memory/jev/config.js";
 import type { JevConfig, JevQuestion, PredictModelConfig } from "../../../src/memory/jev/contracts.js";
 import { EntryIndex } from "../../../src/memory/jev/entries.js";
@@ -312,16 +313,22 @@ const flush = async (n = 10): Promise<void> => {
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 async function goStatus(h: Harness, kind: "full" | "partial"): Promise<void> {
-  await h.emit("session_start", { type: "session_start", reason: "startup" });
-  const deadline = Date.now() + 2000;
-  for (;;) {
-    const actual = h.wire.client.status().kind;
-    if (actual !== "probing") {
-      expect(actual).toBe(kind);
-      return;
-    }
-    if (Date.now() >= deadline) throw new Error(`probe did not settle: expected ${kind}, got ${actual}`);
-    await sleep(10);
+  // wire returns the real client handle, typed as the narrower JevClient port.
+  // Subscribe before startup so even a synchronous transition cannot be missed.
+  // Probe status follows the async registry/classifier chain, not the prediction
+  // FakeClock. Await its event instead of imposing a short wall-time deadline;
+  // Vitest's per-test timeout still bounds a probe that never settles.
+  const client = h.wire.client as JevClientHandle;
+  const settled = deferred<void>();
+  const unsubscribe = client.onStatusChange((_prev, next) => {
+    if (next.kind !== "probing") settled.resolve();
+  });
+  try {
+    await h.emit("session_start", { type: "session_start", reason: "startup" });
+    if (client.status().kind === "probing") await settled.promise;
+    expect(client.status().kind).toBe(kind);
+  } finally {
+    unsubscribe();
   }
 }
 
