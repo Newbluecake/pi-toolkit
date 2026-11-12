@@ -79,29 +79,37 @@ is blocked (`fold off` footnote). Plan: `docs/dev/worktree-graph/merged-plan.md`
 Design: `docs/dev/worktree-graph/plan.md`; device checklist:
 `docs/dev/worktree-graph/acceptance.md`.
 
-### E5 numeric configuration: current safe-failure contract
+### E5 numeric configuration: version-aware safety contract
 
 A legal local `core.bigFileThreshold=1` can change the unhardened patch-equivalence result; the
 fixed `512m` override must still succeed with the expected equivalent result. Malformed numeric
-configuration must instead fail safely: a later `-c` override need not rescue typed validation.
-E5 requires the specific fatal bad-numeric diagnostic, empty stdout and `git-failed` classification,
-with a successful external-command positive control and unchanged readable marker on the hardened
-and poisoned runs. A failed Gm yields unknown / `git-failed` and is not cached as a success;
-failures before Gm may instead produce admission or graph errors. This does not introduce an HTTP
-error code or guarantee every malformed repository reaches Gm.
+configuration has two permitted safe outcomes: exit 128 with the exact fatal bad-numeric diagnostic
+(including `/proc/self/fd/5/config`), empty stdout and `git-failed` classification; or, on Git with
+lazy typed validation, exit 0 with empty stderr, the exact clean stdout and the correct parsed
+patch-equivalence verdict. Both hardened and unhardened runs must preserve the readable external-diff
+marker after a successful positive control; capped output, spawn/kill errors, other exits, diagnostics
+or extra output fail the test. A failed Gm yields unknown / `git-failed` and is not cached as a
+success; failures before Gm may instead produce admission or graph errors. This does not introduce
+an HTTP error code or guarantee every malformed repository reaches Gm.
 
-This mandatory safe-failure contract **supersedes** the original E5 expectation that hardened
-`core.bigFileThreshold=bogus` must still answer `=`. The historical
+Upstream [7835ee75cdff](https://github.com/git/git/commit/7835ee75cdffbce925246cbacc83e8b4a932a681)
+(first released in Git 2.50) moved `core.bigFileThreshold` from eager `git_default_core_config`
+validation to an on-demand repository setting lookup, which validates only the final effective
+value. E5 dispatches on the actual exit, records the actual Git version in assertion diagnostics,
+and permits success only with that lazy-validation version family and full clean-result assertions;
+it does not skip unknown behaviour. A later `-c` override therefore need not rescue old Git, but
+may rescue new Git. This contract **supersedes** both the original unconditional hardened-success
+expectation and the subsequent unconditional malformed-config-failure expectation. The historical
 [merged plan](../worktree-graph/merged-plan.md) §2 E5 / §3.5 and
-[P1 report](../worktree-graph/merged-P1-report.md) preserve their Git 2.53 design and measurement
-provenance, not a current guarantee that malformed local numeric configuration succeeds. The legal
-numeric override and other R11 requirements are unchanged. The original test and the order-only
-candidate both failed (53/54); neither is evidence that the old contract passed.
+[P1 report](../worktree-graph/merged-P1-report.md) retain their Git 2.53 provenance, not a
+version-independent guarantee. The legal numeric override and other R11 requirements are unchanged.
 
-The isolated 2026-11-12 Git 2.47.3 probe observed valid overrides and malformed-config rejection;
-its eight Gm traces each had one `execve`. The revised integration file subsequently passed 54/54
-on Git 2.47.3 on 2026-11-12. No Git 2.53 execution was performed for this contract update, and no
-version boundary is inferred from these observations.
+The isolated 2026-11-12 Git 2.47.3 probe observed malformed-config rejection in both modes; its eight
+Gm traces each had one `execve`. CI run 43251735705 used `ubuntu-26.04` image `20261111.196.1` and
+Git 2.56.1 (checkout log and the image's pinned software manifest). A local source-built Git 2.56.1
+reproduced unhardened exit 128 and hardened exit 0 with exactly `=<topicTip>\n`, empty stderr and
+an unchanged marker. The CI failure line alone does not identify which loop iteration failed.
+No Git 2.53 execution was performed for either contract update.
 
 ## Worktree graph · commit files（`wtgraph.files.v1`）
 

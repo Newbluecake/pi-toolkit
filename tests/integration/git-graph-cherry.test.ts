@@ -691,8 +691,14 @@ describe.skipIf(!hasGit || !gitInFixedPath)("Gm config / attribute consumption (
     }
   });
 
-  it("E5: malformed core.bigFileThreshold fails closed with a bad numeric diagnostic", async () => {
+  it("E5: malformed core.bigFileThreshold is rejected precisely or preserves the clean verdict without execution", async () => {
     const { root, topicTip } = await wsFixture("pi-wgc-e5-bogus-");
+    const gitVersion = git(root, ["--version"]).trim();
+    const version = /^git version (\d+)\.(\d+)\.(\d+)(?:[.\w-]*)$/.exec(gitVersion);
+    expect(version, gitVersion).not.toBeNull();
+    // Upstream 7835ee75cdff (first released in 2.50) moved typed validation from the
+    // default-config callback to an on-demand lookup of the FINAL effective value.
+    const lazyThreshold = Number(version?.[1]) > 2 || (Number(version?.[1]) === 2 && Number(version?.[2]) >= 50);
     const pins = await pinWorktree(root);
     try {
       const head = rev(root, "main");
@@ -705,25 +711,42 @@ describe.skipIf(!hasGit || !gitInFixedPath)("Gm config / attribute consumption (
       git(root, ["diff", "--ext-diff", head, topicTip, "--"]);
       const marker = await readFile(markerFile, "utf8");
       expect(marker.split("\n").filter((line) => line === "x").length).toBeGreaterThan(0);
-      expect(verdictOf(await runPinned(pins, hardened), "sha1")).toMatchObject({ code: 0, eq: [topicTip], plus: [] });
+      const clean = await runPinned(pins, hardened);
+      expect(verdictOf(clean, "sha1")).toEqual({ code: 0, stderr: "", bad: false, eq: [topicTip], plus: [] });
+      expect(clean.stdout).toBe(`=${topicTip}\n`);
+      expect(clean.stdoutCapped).toBe(false);
+      expect(clean.spawnError).toBeUndefined();
+      expect(clean.killed).toBeUndefined();
       expect(await readFile(markerFile, "utf8")).toBe(marker);
 
       git(root, ["config", "core.bigFileThreshold", "bogus"]);
-      for (const argv of [unhardened, hardened]) {
+      for (const [mode, argv] of [
+        ["unhardened", unhardened],
+        ["hardened", hardened],
+      ] as const) {
         const result = await runPinned(pins, argv);
-        expect(result.code, result.stderr).toBe(128);
-        expect(result.spawnError).toBeUndefined();
-        expect(result.killed).toBeUndefined();
-        expect(result.stdoutCapped).toBe(false);
-        expect(result.stdout).toBe("");
-        const diagnostic =
-          /^fatal: bad numeric config value 'bogus' for 'core\.bigfilethreshold' in file ([^\r\n]+): invalid unit\r?\n?$/i.exec(
-            result.stderr,
-          );
-        expect(diagnostic, result.stderr).not.toBeNull();
-        expect(diagnostic?.[1]).toBe("/proc/self/fd/5/config");
-        expect(classifyGraphExit(result.code, result.stderr)).toBe("git-failed");
-        expect(await readFile(markerFile, "utf8")).toBe(marker);
+        const where = `${gitVersion} / ${mode}: ${result.stderr}`;
+        expect(result.spawnError, where).toBeUndefined();
+        expect(result.killed, where).toBeUndefined();
+        expect(result.stdoutCapped, where).toBe(false);
+        if (result.code === 128) {
+          expect(result.stdout, where).toBe("");
+          const diagnostic =
+            /^fatal: bad numeric config value 'bogus' for 'core\.bigfilethreshold' in file ([^\r\n]+): invalid unit\r?\n?$/i.exec(
+              result.stderr,
+            );
+          expect(diagnostic, where).not.toBeNull();
+          expect(diagnostic?.[1], where).toBe("/proc/self/fd/5/config");
+          expect(classifyGraphExit(result.code, result.stderr), where).toBe("git-failed");
+        } else {
+          // No skip or arbitrary nonzero exit: only the known lazy-validation success
+          // branch is safe, with an exact clean output (no paths/patches/extra lines).
+          expect(result.code, where).toBe(0);
+          expect(lazyThreshold, where).toBe(true);
+          expect(result.stdout, where).toBe(clean.stdout);
+          expect(verdictOf(result, "sha1"), where).toEqual(verdictOf(clean, "sha1"));
+        }
+        expect(await readFile(markerFile, "utf8"), where).toBe(marker);
       }
     } finally {
       await pins.close();
