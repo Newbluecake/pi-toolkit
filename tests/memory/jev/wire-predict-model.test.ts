@@ -161,6 +161,7 @@ function answersFor(questions: Record<string, JevQuestion>, rules: readonly (rea
 type UMode = "gate" | "hang" | "fail" | "fast";
 
 interface HarnessOpts {
+  probeGate?: Promise<void>;
   /** Recall-duty classify behavior; `gate` waits for resolveU (default `fast`). */
   uMode?: UMode;
   /** Classifiers fail with this message ⇒ Jev status partial(!inactive). */
@@ -217,6 +218,7 @@ function harness(opts: HarnessOpts = {}): Harness {
   const uGate = deferred<void>();
   const uScript = async (call: ClassifyCallRecord): Promise<ClassifyResult> => {
     if ("probe" in (call.state as Record<string, unknown>)) {
+      await opts.probeGate;
       return opts.fail !== undefined
         ? { stopReason: "error", errorMessage: opts.fail }
         : { stopReason: "stop", answers: { probe: { type: "bool", probability: 0.95 } } as never };
@@ -311,9 +313,16 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 
 async function goStatus(h: Harness, kind: "full" | "partial"): Promise<void> {
   await h.emit("session_start", { type: "session_start", reason: "startup" });
-  await sleep(30);
-
-  expect(h.wire.client.status().kind).toBe(kind);
+  const deadline = Date.now() + 2000;
+  for (;;) {
+    const actual = h.wire.client.status().kind;
+    if (actual !== "probing") {
+      expect(actual).toBe(kind);
+      return;
+    }
+    if (Date.now() >= deadline) throw new Error(`probe did not settle: expected ${kind}, got ${actual}`);
+    await sleep(10);
+  }
 }
 
 /** Records the fake-clock moment at which `p` settles (−1 until then). */
@@ -329,6 +338,31 @@ function settledAt(h: Harness, p: Promise<unknown>): { at: () => number } {
   );
   return { at: () => t };
 }
+
+test("startup waits for a gated classifier probe rather than 30ms", async () => {
+  const gate = deferred<void>();
+  const h = harness({ fail: "System One API error (451): blocked", probeGate: gate.promise });
+  let outcome: "pending" | "resolved" | "rejected" = "pending";
+  const started = goStatus(h, "partial").then(
+    () => {
+      outcome = "resolved";
+    },
+    () => {
+      outcome = "rejected";
+    },
+  );
+  try {
+    await flush();
+    await sleep(30); // The old fixed wait elapsed while the probe is explicitly held.
+    expect(h.wire.client.status().kind).toBe("probing");
+    expect(outcome).toBe("pending");
+  } finally {
+    gate.resolve();
+  }
+  await started;
+  expect(outcome).toBe("resolved");
+  expect(h.wire.client.status().kind).toBe("partial");
+});
 
 // ───────────────────── §8.3 wait window (fake clock) ─────────────────────
 
