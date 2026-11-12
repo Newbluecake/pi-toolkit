@@ -691,14 +691,40 @@ describe.skipIf(!hasGit || !gitInFixedPath)("Gm config / attribute consumption (
     }
   });
 
-  it("E5: core.bigFileThreshold=bogus makes unhardened exit 128; hardened still answers `=`", async () => {
+  it("E5: malformed core.bigFileThreshold fails closed with a bad numeric diagnostic", async () => {
     const { root, topicTip } = await wsFixture("pi-wgc-e5-bogus-");
-    git(root, ["config", "core.bigFileThreshold", "bogus"]);
     const pins = await pinWorktree(root);
     try {
-      const hardened = wtGraphArgs.cherry(rev(root, "main"), topicTip, "sha1", []);
-      expect((await runPinned(pins, unhardenedOf(hardened))).code).toBe(128);
+      const head = rev(root, "main");
+      const hardened = wtGraphArgs.cherry(head, topicTip, "sha1", []);
+      const unhardened = unhardenedOf(hardened);
+      const markerFile = join(root, "e5-marker.txt");
+      const script = join(root, "e5-external.sh");
+      await writeFile(script, `#!/bin/sh\nprintf 'x\\n' >> ${JSON.stringify(markerFile)}\nexit 0\n`, { mode: 0o755 });
+      git(root, ["config", "diff.external", script]);
+      git(root, ["diff", "--ext-diff", head, topicTip, "--"]);
+      const marker = await readFile(markerFile, "utf8");
+      expect(marker.split("\n").filter((line) => line === "x").length).toBeGreaterThan(0);
       expect(verdictOf(await runPinned(pins, hardened), "sha1")).toMatchObject({ code: 0, eq: [topicTip], plus: [] });
+      expect(await readFile(markerFile, "utf8")).toBe(marker);
+
+      git(root, ["config", "core.bigFileThreshold", "bogus"]);
+      for (const argv of [unhardened, hardened]) {
+        const result = await runPinned(pins, argv);
+        expect(result.code, result.stderr).toBe(128);
+        expect(result.spawnError).toBeUndefined();
+        expect(result.killed).toBeUndefined();
+        expect(result.stdoutCapped).toBe(false);
+        expect(result.stdout).toBe("");
+        const diagnostic =
+          /^fatal: bad numeric config value 'bogus' for 'core\.bigfilethreshold' in file ([^\r\n]+): invalid unit\r?\n?$/i.exec(
+            result.stderr,
+          );
+        expect(diagnostic, result.stderr).not.toBeNull();
+        expect(diagnostic?.[1]).toBe("/proc/self/fd/5/config");
+        expect(classifyGraphExit(result.code, result.stderr)).toBe("git-failed");
+        expect(await readFile(markerFile, "utf8")).toBe(marker);
+      }
     } finally {
       await pins.close();
     }

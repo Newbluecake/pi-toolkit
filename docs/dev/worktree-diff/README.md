@@ -79,6 +79,30 @@ is blocked (`fold off` footnote). Plan: `docs/dev/worktree-graph/merged-plan.md`
 Design: `docs/dev/worktree-graph/plan.md`; device checklist:
 `docs/dev/worktree-graph/acceptance.md`.
 
+### E5 numeric configuration: current safe-failure contract
+
+A legal local `core.bigFileThreshold=1` can change the unhardened patch-equivalence result; the
+fixed `512m` override must still succeed with the expected equivalent result. Malformed numeric
+configuration must instead fail safely: a later `-c` override need not rescue typed validation.
+E5 requires the specific fatal bad-numeric diagnostic, empty stdout and `git-failed` classification,
+with a successful external-command positive control and unchanged readable marker on the hardened
+and poisoned runs. A failed Gm yields unknown / `git-failed` and is not cached as a success;
+failures before Gm may instead produce admission or graph errors. This does not introduce an HTTP
+error code or guarantee every malformed repository reaches Gm.
+
+This mandatory safe-failure contract **supersedes** the original E5 expectation that hardened
+`core.bigFileThreshold=bogus` must still answer `=`. The historical
+[merged plan](../worktree-graph/merged-plan.md) §2 E5 / §3.5 and
+[P1 report](../worktree-graph/merged-P1-report.md) preserve their Git 2.53 design and measurement
+provenance, not a current guarantee that malformed local numeric configuration succeeds. The legal
+numeric override and other R11 requirements are unchanged. The original test and the order-only
+candidate both failed (53/54); neither is evidence that the old contract passed.
+
+The isolated 2026-11-12 Git 2.47.3 probe observed valid overrides and malformed-config rejection;
+its eight Gm traces each had one `execve`. The revised integration file subsequently passed 54/54
+on Git 2.47.3 on 2026-11-12. No Git 2.53 execution was performed for this contract update, and no
+version boundary is inferred from these observations.
+
 ## Worktree graph · commit files（`wtgraph.files.v1`）
 
 **What**: clicking a commit row in the graph (or Enter/Space on the focused row) expands ONE
