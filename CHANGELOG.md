@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-11-13
+
+### Added
+
+- **commands**: add bounded static completion for nested actions (`997ac8f9`)
+
+### Fixed
+
+- **feishu-notify**: hide status when webhook is unconfigured (`2ec734c6`)
+- **commands**: clarify slash navigation and readonly memory completion (`5aca3972`)
+- **preview**: suppress filesystem refs inside plain HTTP URLs (`6250bb25`)
+
+### Documentation
+
+- **memory**: retain recovery entrypoints in command tables (`ed9f579c`)
+
+### Tests
+
+- **memory**: wait for the predict probe status event instead of a 2s wall deadline (`1450d9ee`)
+- **secure**: make external-skip reporter assertions colour-independent (`f68f8e27`)
+- **graph**: accept Git 2.50+ lazy bigFileThreshold validation in E5 (`03c08048`)
+- **secure**: skip mount suites when only an external vault is mounted (`1617f4cc`)
+- **secure**: bind real tools across isolated test environments (`c47ff4a3`)
+- **graph**: declare malformed numeric safe-failure contract (`976639ef`)
+- **traffic**: support an explicit jq binary for validation (`22866c8c`)
+- **memory**: await prediction probe completion in startup tests (`9c051b86`)
+- **commands**: verify nested completion through real web wiring (`68c99c3a`)
+- **web-hub**: pin resume fixture mtimes for deterministic ordering (`d13eaa67`)
+
+Stats: 1 feat, 3 fix, 1 docs, 10 test
+
 ## [0.12.0] - 2026-11-11
 
 ### ⚠️ Breaking Changes
@@ -1995,7 +2026,8 @@ First public release: anti-hang subagent extension for pi — drop-in replacemen
 
 Stats: 30 feat, 12 fix, 1 refactor, 1 docs, 3 chore/test · 970+ tests (state-machine transition matrix, seeded property invariants, widget rendering)
 
-[Unreleased]: https://github.com/Newbluecake/pi-toolkit/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/Newbluecake/pi-toolkit/compare/v0.12.1...HEAD
+[0.12.1]: https://github.com/Newbluecake/pi-toolkit/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/Newbluecake/pi-toolkit/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/Newbluecake/pi-toolkit/compare/v0.10.6...v0.11.0
 [0.10.6]: https://github.com/Newbluecake/pi-toolkit/compare/v0.10.5...v0.10.6
