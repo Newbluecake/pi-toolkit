@@ -28,6 +28,9 @@ interface Options {
   collectionError?: boolean;
   workerHook?: boolean;
 }
+function stripAnsi(s: string): string {
+  return s.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, "");
+}
 function runCase(name: string, opts: Options = {}) {
   const dir = join(root, name);
   mkdirSync(dir);
@@ -78,6 +81,8 @@ function runCase(name: string, opts: Options = {}) {
     );
   }
   const reportFile = join(dir, "report.json");
+  const env = { ...process.env };
+  delete env.FORCE_COLOR;
   const r = spawnSync(
     process.execPath,
     [
@@ -93,7 +98,8 @@ function runCase(name: string, opts: Options = {}) {
     {
       cwd: dir,
       env: {
-        ...process.env,
+        ...env,
+        NO_COLOR: "1",
         NODE_OPTIONS: "",
         HOME: home,
         XDG_CACHE_HOME: join(dir, "cache"),
@@ -109,7 +115,7 @@ function runCase(name: string, opts: Options = {}) {
     },
   );
   expect(r.error, String(r.error)).toBeUndefined();
-  const out = `${r.stdout ?? ""}\n${r.stderr ?? ""}`;
+  const out = stripAnsi(`${r.stdout ?? ""}\n${r.stderr ?? ""}`);
   return {
     status: r.status,
     out,
