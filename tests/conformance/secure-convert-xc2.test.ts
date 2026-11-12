@@ -33,6 +33,8 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { acquireGocryptfsTestLock } from "../secure/gocryptfs-test-lock.js";
+import { DEFAULT_REAL_GOCRYPTFS, requireRealGocryptfs } from "../secure/real-tool-path.js";
+import { xc2VersionPolicy } from "../secure/xc2-policy.js";
 
 const REPO = join(import.meta.dirname, "..", "..");
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- plain-JS module, no typings by design
@@ -42,7 +44,11 @@ const FAKE_PW = "TESTPASS-fake-not-a-secret";
 const which = (b: string): boolean => spawnSync("sh", ["-c", `command -v ${b}`]).status === 0;
 const fuseOk = (): boolean =>
   spawnSync("sh", ["-c", "[ -c /dev/fuse ] && [ -r /dev/fuse ] && [ -w /dev/fuse ]"]).status === 0;
-const HAVE = process.platform === "linux" && ["gocryptfs", "fusermount3", "flock", "timeout"].every(which) && fuseOk();
+const HAVE =
+  process.platform === "linux" &&
+  !!DEFAULT_REAL_GOCRYPTFS.binding &&
+  ["fusermount3", "flock", "timeout"].every(which) &&
+  fuseOk();
 const HAVE_PY = which("python3");
 
 let root = "";
@@ -61,7 +67,7 @@ function mounted(mnt: string): boolean {
 }
 function init(cipher: string): void {
   mkdirSync(cipher, 0o700);
-  const r = run("gocryptfs", ["-init", "-q", "-passfile", join(root, "pf"), "--", cipher]);
+  const r = run(requireRealGocryptfs().realPath, ["-init", "-q", "-passfile", join(root, "pf"), "--", cipher]);
   expect(r.status, r.out).toBe(0);
 }
 function mount(cipher: string, mnt: string): void {
@@ -72,9 +78,13 @@ function mount(cipher: string, mnt: string): void {
   const fd = openSync(log, "a", 0o600);
   let status: number | null;
   try {
-    status = spawnSync("timeout", ["30", "gocryptfs", "-q", "-passfile", join(root, "pf"), "--", cipher, mnt], {
-      stdio: ["ignore", fd, fd],
-    }).status;
+    status = spawnSync(
+      "timeout",
+      ["30", requireRealGocryptfs().realPath, "-q", "-passfile", join(root, "pf"), "--", cipher, mnt],
+      {
+        stdio: ["ignore", fd, fd],
+      },
+    ).status;
   } finally {
     closeSync(fd);
   }
@@ -213,6 +223,7 @@ function expectMtimesClose(got: Map<string, bigint>, want: Map<string, bigint>):
 describe.skipIf(!HAVE)("XC2 — real gocryptfs cipher representation + package round trip", () => {
   let A: CEnt[] = [];
   let conf = "";
+  let versionPolicy: ReturnType<typeof xc2VersionPolicy>;
   let xattrPlain = false;
   let xattrCipher: string[] = [];
   const LONG = "L".repeat(250);
@@ -230,6 +241,8 @@ describe.skipIf(!HAVE)("XC2 — real gocryptfs cipher representation + package r
     chmodSync(root, 0o700);
     writeFileSync(join(root, OWNER_FILE), RUN_TOKEN, { mode: 0o600, flag: "wx" });
     writeFileSync(join(root, "pf"), `${FAKE_PW}\n`, { mode: 0o600 });
+
+    versionPolicy = xc2VersionPolicy(run(requireRealGocryptfs().realPath, ["-version"], 5));
 
     // ── vault A: everything, incl. things the package must refuse (FIFO, setuid, xattr) ──
     const cA = join(root, "cA");
@@ -288,7 +301,21 @@ describe.skipIf(!HAVE)("XC2 — real gocryptfs cipher representation + package r
 
   it("XC3: init writes the strict conf shape and exactly the allowed FeatureFlags", () => {
     const c = T.validateGocryptfsConf(conf);
-    expect(c.FeatureFlags).toEqual(T.CONF_FEATURE_FLAGS);
+    expect(new Set(c.FeatureFlags)).toEqual(new Set(T.CONF_FEATURE_FLAGS));
+    expect(c.FeatureFlags.length).toBe(new Set(c.FeatureFlags).size);
+    for (const [flags, reason] of [
+      [[...c.FeatureFlags, "XC2Unknown"], "conf-unknown-flag"],
+      [[...c.FeatureFlags, c.FeatureFlags[0]], "conf-flags"],
+      [[...c.FeatureFlags, "PlaintextNames"], "conf-plaintext-names"],
+    ]) {
+      try {
+        T.validateGocryptfsConf(JSON.stringify({ ...c, FeatureFlags: flags }));
+        throw new Error(`validator accepted ${reason}`);
+      } catch (e) {
+        expect(e).toBeInstanceOf(T.PkgError);
+        expect(e).toMatchObject({ exitCode: 65, reason });
+      }
+    }
     expect(c.Version).toBe(2);
   });
 
@@ -309,9 +336,23 @@ describe.skipIf(!HAVE)("XC2 — real gocryptfs cipher representation + package r
     }
     for (const d of A.filter((e) => e.kind === "d")) {
       const iv = A.find((e) => e.rel === (d.rel === "" ? "gocryptfs.diriv" : `${d.rel}/gocryptfs.diriv`));
-      expect(iv, d.rel).toMatchObject({ kind: "f", size: 16, mode: 0o440 });
+      expect(iv, d.rel).toMatchObject({ kind: "f", size: 16 });
     }
     expect(A.find((e) => e.rel === "gocryptfs.conf")).toMatchObject({ kind: "f", mode: 0o400 });
+  });
+
+  it("gocryptfs 1.8.x diriv mode is exactly 0440", (ctx) => {
+    if (!versionPolicy.exact0440) {
+      console.warn(versionPolicy.skipReason);
+      ctx.task.meta.xc2ModeSkip = versionPolicy.skipReason;
+      ctx.skip();
+    }
+    const dirs = A.filter((e) => e.kind === "d");
+    expect(dirs.length).toBeGreaterThan(0);
+    for (const d of dirs) {
+      const iv = A.find((e) => e.rel === (d.rel === "" ? "gocryptfs.diriv" : `${d.rel}/gocryptfs.diriv`));
+      expect(iv?.mode, d.rel).toBe(0o440);
+    }
   });
 
   it("a long plaintext name becomes a gocryptfs.longname.<hash> file + .name sidecar", () => {

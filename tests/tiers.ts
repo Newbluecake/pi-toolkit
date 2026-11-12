@@ -65,7 +65,7 @@ export const TIER2_FILES: readonly string[] = [
   "tests/reflex/drafts/load-fifo.test.ts",
 ];
 
-/** The 17 files with REAL gocryptfs mount blocks (plan D2a: each was read; judged by content,
+/** The 18 files with REAL gocryptfs mount blocks (plan D2a: each was read; judged by content,
  * not name) → the dedicated `secure` project, so P2 can hang the preflight setup on it. */
 export const SECURE_MOUNT_FILES: readonly string[] = [
   "tests/secure/memory-gate.test.ts",
@@ -153,6 +153,14 @@ export const TIER1_DECLARED: Readonly<Record<string, Tier1DeclaredEntry>> = {
   "tests/secure/settings-file-migrate.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/secure/settings-file-secure.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/secure/settings-lock.test.ts": { kind: "proc", why: "proc:node:child_process" },
+  "tests/secure/preflight-adapters.test.ts": {
+    kind: "false-positive",
+    why: "synthetic fs/spawn adapters and fake-clock mountguard only; no host probes",
+  },
+  "tests/secure/preflight.test.ts": {
+    kind: "false-positive",
+    why: "synthetic verdict/task trees and injected global setup only; no host probes",
+  },
   "tests/secure/tar.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/secure/tree.test.ts": { kind: "proc", why: 'proc:node:child_process; sock:".listen("; sock:"createServer("' },
   "tests/service/request-threading.test.ts": { kind: "proc", why: "proc:node:child_process" },

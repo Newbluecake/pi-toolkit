@@ -571,8 +571,9 @@ if [[ $SKIP_TESTS -eq 0 ]]; then
     err "test:tier2 failed — release aborted before commit/tag (no tag was created)."
     err "Triage (AGENTS.md 'Test tiers and flake triage'): rerun the failing file(s) alone — green ="
     err "flake (close it, re-run the release); still red = real bug. A [secure-preflight] failure is"
-    err "an environment problem, never a flake: unmount your own vaults first (pi-secure lock <name>,"
-    err "or fusermount3 -u <mount> — see the preflight output), fix the machine, then re-run."
+    err "an environment problem, never a flake: fix the reported condition, then re-run. Only an"
+    err "external-gocryptfs-only startup verdict explicitly skips secure (mount coverage NOT RUN)."
+    err "A mount appearing after a clean preflight still fails; no external mount is changed."
     exit 1
   fi
   ok "Pre-release checks passed"

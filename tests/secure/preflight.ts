@@ -1,39 +1,8 @@
-/**
- * Secure-project preflight — #27 P2 (docs/dev/test-speed/plan.md r3 §1 D8–D11).
- *
- * The `secure` vitest project (the 16 real-mount files) hangs its globalSetup/setupFiles on
- * this module via tests/setup/secure-preflight.{global,setup}.ts. The verdict contract (D9):
- *
- *   incapable — no FUSE stack (CI, non-linux): no lock, no checks, worker no-op (byte-identical
- *               with the pre-#27 behaviour; the real blocks keep self-skipping as before);
- *   disabled  — PI_TOOLKIT_SECURE_PREFLIGHT=0: startup preflight only is off (the in-run D14
- *               check is NOT switchable); no lock, no checks, worker no-op;
- *   clean     — fuse present and every check passed: the run lock is held until teardown;
- *   dirty     — any reason below: workers fail every secure file at the file-level beforeAll
- *               with a `[secure-preflight]` error carrying the fix commands.
- *
- * Every normal exit of the global setup provides the verdict FIRST (D9; r1 review #1); an
- * internal exception becomes a `preflight-error` dirty verdict — fail closed, never "no verdict".
- *
- * Checks run when ANY real block of the project may execute, i.e. at the D8 `fuse` level
- * (linux + gocryptfs + fusermount3 on PATH — deliberately wider than `private`, because
- * launcher-fuse / helper-v0-api / launcher-off-golden do not need unshare). At fuse level the
- * `gocryptfs-mounted` finding is only a NOTE; it is a dirty REASON only at the `private` level
- * (run --private refuses EVERY gocryptfs mount in the namespace, including the user's own
- * vaults — D10; the fix hint names `pi-secure lock` / `pi-secure status` / `fusermount3 -u`).
- *
- * The run lock (D11) lives at the literal /tmp — per machine, per uid — never derived from
- * TMPDIR or the scratch root: /tmp is validated (root-owned, sticky) and the lock file must be
- * a regular file owned by the current uid without group/other write, else `run-lock-unsafe`.
- * The per-suite GOCRYPTFS_TEST_LOCK (in tmpdir()) is untouched. Transition risk: rounds started
- * with pre-P2 code hold no run lock, so old × new concurrency is unprotected (README material).
- *
- * This file is test infrastructure only — never imported from src/**. It reads two env vars,
- * both test-side: PI_TOOLKIT_SECURE_PREFLIGHT (0 = disable the startup preflight) and
- * PI_TOOLKIT_SECURE_PREFLIGHT_FAKE (a JSON verdict injected by tests; never read elsewhere).
- * No new timers are created here (I5); the lock holder is a child process with pdeathsig.
- */
+/** Test-only secure preflight. No env bypass; explicit deps are the only synthetic seam. */
+import { spawnSync } from "node:child_process";
 import {
+  accessSync,
+  constants,
   closeSync,
   lstatSync,
   openSync,
@@ -45,13 +14,13 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { acquireGocryptfsTestLock } from "./gocryptfs-test-lock.js";
-import { realSkipReason, which } from "./private-real-harness.js";
+import { DEFAULT_REAL_GOCRYPTFS, type RealGocryptfsResolution } from "./real-tool-path.js";
 
 // ---------------------------------------------------------------------------
 // Verdict types (must stay JSON-serializable: they cross the provide/inject RPC boundary)
 // ---------------------------------------------------------------------------
 
-export type PreflightState = "incapable" | "disabled" | "clean" | "dirty";
+export type PreflightState = "incapable" | "clean" | "external-mounts" | "dirty";
 
 export interface SecureEnvVerdict {
   readonly state: PreflightState;
@@ -59,10 +28,11 @@ export interface SecureEnvVerdict {
   readonly fuse: boolean;
   /** D8 level 2: the real blocks with `--private`/unshare may run (level 1 ⊂ level 2). */
   readonly private: boolean;
-  /** Dirty only. "<code>: <detail>" — codes: run-lock-unsafe, concurrent-run, gocryptfs-mounted,
+  /** Dirty only. "<code>: <detail>" — codes: run-lock-unsafe, concurrent-run,
    *  symlinked-tmpdir, preflight-error. */
   readonly reasons: readonly string[];
   readonly notes: readonly string[];
+  readonly externalMountPoints: readonly string[];
 }
 
 declare module "vitest" {
@@ -76,11 +46,72 @@ export interface SecureCapability {
   readonly private: boolean;
 }
 
-/** The real D8 probe (spawns only `sh -c 'command -v …'` style checks; no side effects). */
-export function detectSecureCapability(): SecureCapability {
-  if (process.platform !== "linux") return { fuse: false, private: false };
-  if (!which("gocryptfs") || !which("fusermount3")) return { fuse: false, private: false };
-  return { fuse: true, private: realSkipReason() === "" };
+/** Missing/inaccessible FUSE is expected; unexpected filesystem errors are not unavailability. */
+export function probeFuseDevice(
+  deps = {
+    isCharacterDevice: () => statSync("/dev/fuse").isCharacterDevice(),
+    access: () => accessSync("/dev/fuse", constants.R_OK | constants.W_OK),
+  },
+): boolean {
+  try {
+    if (!deps.isCharacterDevice()) return false;
+    deps.access();
+    return true;
+  } catch (error) {
+    if (["ENOENT", "ENODEV", "EACCES", "EPERM"].includes((error as NodeJS.ErrnoException).code ?? "")) return false;
+    throw error;
+  }
+}
+
+/** Bounded real adapter. Expected unavailable capabilities are not probe failures. */
+export interface CapabilityProbeDeps {
+  platform: string;
+  gocryptfs: RealGocryptfsResolution;
+  fuseUsable(): boolean;
+  spawn(cmd: string, args: string[]): { status: number | null; signal: string | null; error?: Error; stderr?: string };
+}
+const capabilityProbeDeps: CapabilityProbeDeps = {
+  platform: process.platform,
+  gocryptfs: DEFAULT_REAL_GOCRYPTFS,
+  fuseUsable: probeFuseDevice,
+  spawn: (cmd, args) =>
+    spawnSync(cmd, args, {
+      encoding: "utf8",
+      timeout: 5_000,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, LC_ALL: "C" },
+    }),
+};
+export function detectSecureCapability(deps: CapabilityProbeDeps = capabilityProbeDeps): SecureCapability {
+  if (deps.platform !== "linux") return { fuse: false, private: false };
+  const probe = (cmd: string, args: string[]): { status: number; stderr: string } => {
+    const r = deps.spawn(cmd, args);
+    if (r.error || r.signal || r.status === null)
+      throw new Error(`capability probe ${cmd}: ${r.error?.message ?? r.signal ?? "no exit status"}`);
+    return { status: r.status, stderr: r.stderr ?? "" };
+  };
+  const has = (cmd: string): boolean => {
+    const r = probe("sh", ["-c", `command -v ${cmd}`]);
+    if (r.status === 0) return true;
+    if (r.status === 1 && !r.stderr.trim()) return false;
+    throw new Error(`capability lookup ${cmd}: exit ${r.status}: ${r.stderr}`);
+  };
+  if (!deps.gocryptfs.binding && deps.gocryptfs.reason !== "missing gocryptfs")
+    throw new Error(`capability binding: ${deps.gocryptfs.reason}`);
+  if (!deps.gocryptfs.binding || !has("fusermount3")) return { fuse: false, private: false };
+  const missingPrivate = ["flock", "script", "unshare", "umount"].map(has).some((found) => !found);
+  const fuse = deps.fuseUsable();
+  if (missingPrivate || !fuse) return { fuse: true, private: false };
+  const ns = probe("unshare", ["--user", "--map-root-user", "--mount", "--propagation", "private", "true"]);
+  if (ns.status === 0) return { fuse: true, private: true };
+  if (
+    ns.status === 1 &&
+    /^unshare: (?:unshare failed: )?(?:Operation not permitted|Permission denied|Operation not supported|Function not implemented)\s*$/.test(
+      ns.stderr,
+    )
+  )
+    return { fuse: true, private: false };
+  throw new Error(`capability namespace probe: exit ${ns.status}: ${ns.stderr}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -155,7 +186,6 @@ export type RunLockOutcome =
   | { readonly status: "unsafe"; readonly why: string };
 
 export interface PreflightInput {
-  readonly disabled: boolean;
   readonly capability: SecureCapability;
   readonly mountinfo: string;
   readonly tmp: { readonly tmpdir: string; readonly realTmpdir: string };
@@ -166,16 +196,8 @@ export interface PreflightInput {
 export function secureEnvVerdict(input: PreflightInput): SecureEnvVerdict {
   const fuse = input.capability.fuse;
   const priv = input.capability.private;
-  if (input.disabled) {
-    return {
-      state: "disabled",
-      fuse,
-      private: priv,
-      reasons: [],
-      notes: ["PI_TOOLKIT_SECURE_PREFLIGHT=0 — startup preflight off; in-run checks (plan D14) stay active"],
-    };
-  }
-  if (!fuse) return { state: "incapable", fuse: false, private: false, reasons: [], notes: [] };
+  if (!fuse)
+    return { state: "incapable", fuse: false, private: false, reasons: [], notes: [], externalMountPoints: [] };
 
   const reasons: string[] = [];
   const notes: string[] = [];
@@ -188,16 +210,6 @@ export function secureEnvVerdict(input: PreflightInput): SecureEnvVerdict {
     );
   }
   const mounts = gocryptfsMountPoints(input.mountinfo);
-  if (mounts.length > 0) {
-    if (priv) {
-      reasons.push(`gocryptfs-mounted: ${mounts.join(", ")}`);
-    } else {
-      notes.push(
-        `gocryptfs mounts present (${mounts.join(", ")}) — note only: private capability is absent, ` +
-          "so the run --private blocks self-skip anyway",
-      );
-    }
-  }
   if (input.tmp.realTmpdir !== input.tmp.tmpdir) {
     reasons.push(`symlinked-tmpdir: TMPDIR root ${input.tmp.tmpdir} resolves to ${input.tmp.realTmpdir}`);
   }
@@ -207,12 +219,26 @@ export function secureEnvVerdict(input: PreflightInput): SecureEnvVerdict {
         "unreadable-idle gate still applies in-run)",
     );
   }
-  return { state: reasons.length > 0 ? "dirty" : "clean", fuse, private: priv, reasons, notes };
+  return {
+    state: reasons.length > 0 ? "dirty" : mounts.length > 0 ? "external-mounts" : "clean",
+    fuse,
+    private: priv,
+    reasons,
+    notes,
+    externalMountPoints: mounts,
+  };
 }
 
 /** The `preflight-error` dirty verdict used whenever the probe itself fails (fail closed). */
 export function preflightErrorVerdict(message: string): SecureEnvVerdict {
-  return { state: "dirty", fuse: false, private: false, reasons: [`preflight-error: ${message}`], notes: [] };
+  return {
+    state: "dirty",
+    fuse: false,
+    private: false,
+    reasons: [`preflight-error: ${message}`],
+    notes: [],
+    externalMountPoints: [],
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -222,14 +248,6 @@ export function preflightErrorVerdict(message: string): SecureEnvVerdict {
 function fixHintFor(reason: string): string {
   if (reason.startsWith("concurrent-run")) {
     return "another secure test round holds the per-machine run lock — wait for it to finish, then rerun.";
-  }
-  if (reason.startsWith("gocryptfs-mounted")) {
-    return (
-      "before a release or a secure run, unmount every gocryptfs mount listed above: " +
-      "`pi-secure lock <name>` (run `pi-secure status` first if you do not know the name), or " +
-      "`fusermount3 -u <mountpoint>`. Your own vaults count too — run --private refuses EVERY " +
-      "gocryptfs mount in the current mount namespace; the preflight never unmounts anything itself."
-    );
   }
   if (reason.startsWith("symlinked-tmpdir")) {
     return "set TMPDIR to a physical path or unset it (the underlying launcher-root defect is #28).";
@@ -252,6 +270,8 @@ export function renderPreflightFailure(v: SecureEnvVerdict): string {
     lines.push(`  - ${r}`);
     lines.push(`    fix: ${fixHintFor(r)}`);
   }
+  if (v.externalMountPoints.length)
+    lines.push(`  external mounts (not the only error): ${JSON.stringify(v.externalMountPoints)}`);
   if (v.notes.length > 0) lines.push(`  notes: ${v.notes.join(" | ")}`);
   lines.push("  This is an environment failure, not a test flake — fix the environment, then rerun.");
   return lines.join("\n");
@@ -263,36 +283,45 @@ export function renderCleanLine(v: SecureEnvVerdict, lockPath: string): string {
   return `[secure-preflight] clean (fuse=${v.fuse}, private=${v.private}); run lock held: ${lockPath}${notes}`;
 }
 
-// ---------------------------------------------------------------------------
-// Fake injection (tests only; PI_TOOLKIT_SECURE_PREFLIGHT_FAKE is never read outside tests/)
-// ---------------------------------------------------------------------------
-
-export function parseFakeVerdict(raw: string): SecureEnvVerdict {
-  const parsed: unknown = JSON.parse(raw);
-  if (typeof parsed !== "object" || parsed === null) {
-    throw new Error("PI_TOOLKIT_SECURE_PREFLIGHT_FAKE: not an object");
-  }
-  const o = parsed as Record<string, unknown>;
-  const states: readonly PreflightState[] = ["incapable", "disabled", "clean", "dirty"];
-  if (typeof o.state !== "string" || !states.includes(o.state as PreflightState)) {
-    throw new Error("PI_TOOLKIT_SECURE_PREFLIGHT_FAKE: bad state");
-  }
-  if (typeof o.fuse !== "boolean" || typeof o.private !== "boolean") {
-    throw new Error("PI_TOOLKIT_SECURE_PREFLIGHT_FAKE: fuse/private must be booleans");
-  }
-  for (const key of ["reasons", "notes"] as const) {
-    const arr = o[key];
-    if (!Array.isArray(arr) || arr.some((x) => typeof x !== "string")) {
-      throw new Error(`PI_TOOLKIT_SECURE_PREFLIGHT_FAKE: ${key} must be a string array`);
-    }
-  }
-  return {
-    state: o.state as PreflightState,
-    fuse: o.fuse,
-    private: o.private,
-    reasons: [...(o.reasons as string[])],
-    notes: [...(o.notes as string[])],
+/** Validate the entire wire contract; never infer skip eligibility from prose. */
+export function validateSecureEnv(value: unknown): SecureEnvVerdict {
+  const bad = (why: string): never => {
+    throw new Error(`[secure-preflight] wiring error: ${why}`);
   };
+  if (value === undefined) return bad("`secureEnv` was not provided to this worker");
+  if (!value || typeof value !== "object") return bad("invalid secureEnv schema");
+  const o = value as Record<string, unknown>;
+  if (
+    typeof o.state !== "string" ||
+    !["incapable", "clean", "external-mounts", "dirty"].includes(o.state) ||
+    typeof o.fuse !== "boolean" ||
+    typeof o.private !== "boolean"
+  )
+    return bad("invalid secureEnv schema");
+  for (const key of ["reasons", "notes", "externalMountPoints"])
+    if (
+      !Array.isArray(o[key]) ||
+      (o[key] as unknown[]).some((x) => typeof x !== "string" || (key === "externalMountPoints" && !x))
+    )
+      return bad(`invalid secureEnv ${key}`);
+  const v = o as unknown as SecureEnvVerdict;
+  if (v.private && !v.fuse) return bad("private requires fuse");
+  if (v.state === "dirty" ? !v.reasons.length : v.reasons.length > 0) return bad("inconsistent reasons");
+  if (
+    v.state === "external-mounts"
+      ? !v.fuse || !v.externalMountPoints.length
+      : v.state !== "dirty" && v.externalMountPoints.length > 0
+  )
+    return bad("inconsistent externalMountPoints");
+  if (v.state === "incapable" ? v.fuse : v.state !== "dirty" && !v.fuse) return bad("inconsistent capability");
+  return v;
+}
+
+export function renderExternalSkip(v: SecureEnvVerdict): string {
+  return (
+    `[secure-preflight] SKIP secure project: external gocryptfs mount(s): ${JSON.stringify(v.externalMountPoints)}; ` +
+    "secure mount coverage NOT RUN; no mount was changed."
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -374,23 +403,32 @@ export function prepareRunLock(lockPath: string = runLockPath()): { ok: true } |
  * (EACCES/EPERM — non-dumpable), mirroring the launcher's unreadable-idle gate. Counted and
  * noted only — never a dirty reason, and no product switch is added for it.
  */
-export function countUnreadableSameUidProcesses(): number {
-  const myUid = process.getuid?.() ?? 0;
-  let names: string[];
-  try {
-    names = readdirSync("/proc");
-  } catch {
-    return 0;
-  }
+export interface CensusDeps {
+  uid: number;
+  names(): string[];
+  owner(path: string): number;
+  readlink(path: string): string;
+}
+export function countUnreadableSameUidProcesses(
+  deps: CensusDeps = {
+    uid: process.getuid?.() ?? 0,
+    names: () => readdirSync("/proc"),
+    owner: (path) => statSync(path).uid,
+    readlink: readlinkSync,
+  },
+): number {
+  // Enumeration failure is never a successful empty census.
+  const names = deps.names();
   let n = 0;
   for (const name of names) {
     if (!/^\d+$/.test(name)) continue;
     try {
-      if (statSync(`/proc/${name}`).uid !== myUid) continue;
-      readlinkSync(`/proc/${name}/ns/mnt`);
+      if (deps.owner(`/proc/${name}`) !== deps.uid) continue;
+      deps.readlink(`/proc/${name}/ns/mnt`);
     } catch (e) {
       const code = (e as NodeJS.ErrnoException).code;
-      if (code === "EACCES" || code === "EPERM") n++; // ENOENT = raced exit, not unreadable
+      if (code === "EACCES" || code === "EPERM") n++;
+      else if (code !== "ENOENT" && code !== "ESRCH") throw e;
     }
   }
   return n;
@@ -424,43 +462,29 @@ export interface PreflightResult {
   readonly release: (() => void) | undefined;
 }
 
-/**
- * The full preflight pipeline. NEVER throws: any failure (including a malformed
- * PI_TOOLKIT_SECURE_PREFLIGHT_FAKE) becomes a `preflight-error` dirty verdict — fail closed
- * (D9). Order: test fake → disabled switch → capability → (fuse only) run lock, mounts, TMPDIR,
- * unreadable census. Disabled and incapable never touch the run lock.
- */
+/** Full pipeline; env is deliberately ignored (legacy FAKE/disabled inputs are not authority). */
 export async function runPreflight(
-  env: NodeJS.ProcessEnv,
-  deps: Pick<
-    PreflightDeps,
-    "capability" | "probeRunLock" | "readMountinfo" | "tmpPair" | "countUnreadable"
-  > = realPreflightDeps,
+  _env: NodeJS.ProcessEnv,
+  deps: PreflightDeps = realPreflightDeps,
 ): Promise<PreflightResult> {
   let release: (() => void) | undefined;
   try {
-    const fake = env.PI_TOOLKIT_SECURE_PREFLIGHT_FAKE;
-    if (fake !== undefined && fake !== "") {
-      return { verdict: parseFakeVerdict(fake), release }; // test injection wins; never probes
-    }
-    const disabled = env.PI_TOOLKIT_SECURE_PREFLIGHT === "0";
     const capability = deps.capability();
-    if (disabled || !capability.fuse) {
-      // no lock, no checks (D9) — the skipped inputs are placeholders the verdict ignores
-      const verdict = secureEnvVerdict({
-        disabled,
-        capability,
-        mountinfo: "",
-        tmp: { tmpdir: "", realTmpdir: "" },
-        runLock: { status: "skipped" },
-        unreadableCount: 0,
-      });
-      return { verdict, release };
+    if (!capability.fuse) {
+      return {
+        verdict: secureEnvVerdict({
+          capability,
+          mountinfo: "",
+          tmp: { tmpdir: "", realTmpdir: "" },
+          runLock: { status: "skipped" },
+          unreadableCount: 0,
+        }),
+        release,
+      };
     }
     const lock = await deps.probeRunLock();
     release = lock.release;
     const verdict = secureEnvVerdict({
-      disabled,
       capability,
       mountinfo: deps.readMountinfo(),
       tmp: deps.tmpPair(),

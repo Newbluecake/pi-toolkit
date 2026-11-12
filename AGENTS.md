@@ -33,7 +33,7 @@ npm run check:web      # UI bundle gates (CSP/size/provenance/licences) · npm r
 npm test               # vitest run — ALL three projects (tier1+tier2+secure), 17,000+ tests; release-grade, not the daily gate
 npm run test:tier1     # tier1 project only — the DAILY dev gate (PI_TOOLKIT_TEST_WORKERS=N caps workers; CI uses 2, release.sh 4)
 npm run test:tier2     # tier2 + secure projects — env-sensitive; run before pushing integration/conformance/secure changes
-npm run test:secure    # secure project alone (real mounts; needs a clean mount table + an exclusive machine)
+npm run test:secure    # secure alone; external-only preflight explicitly skips (mount coverage NOT RUN)
 npm run typecheck      # TS 7 tsc --noEmit ×2 (strict; see tsconfig flags) + vue-tsc on TS 6; toolchain: docs/dev/toolchain/ts7-report.md
 npm run format         # prettier --write .
 npm run format:check   # CI gate
@@ -189,7 +189,7 @@ update the matrix/property tests in lockstep. Integration tests live in `tests/i
 ### Test tiers and flake triage (release gate policy)
 
 Ownership = the vitest workspace driven by `tests/tiers.ts` (single source): `tests/integration/**`,
-`tests/conformance/**` and the listed files are **tier2**, the 17 real-mount files are **secure**,
+`tests/conformance/**` and the listed files are **tier2**, the 18 real-mount files are **secure**,
 everything else is **tier1**. Partitioning reads explicit lists only — never names/markers. A new
 test that hits a lexical marker (child_process, socket, ≥1 s sleep, mount helpers) must be
 registered in `TIER1_DECLARED` / `TIER2_FILES` / `SECURE_MOUNT_FILES` (gate:
@@ -205,17 +205,18 @@ misses hidden waits — review slow / env-sensitive additions by hand (docs/dev/
   `schedule-fault-matrix`), and the self-gating conformance suites. Triage: CI red ⇒ `gh run rerun
 --failed`; rerun green ⇒ flake, closed. Still red ⇒ run the failing file alone locally: green ⇒
   record as flake and the release may proceed; red ⇒ real bug.
-- **secure — real gocryptfs mounts** (`npm run test:secure`; part of tier2). A `[secure-preflight]`
-  failure (leftover mounts incl. your OWN vault, concurrent secure run, symlinked TMPDIR) is an
-  environment problem: fix the machine and re-run — it is never triaged as flake. Unmount your own
-  vaults before a release or a secure run (`pi-secure lock <name>` / `fusermount3 -u <mnt>`).
+- **secure — real gocryptfs mounts** (`npm run test:secure`; part of tier2). Only an external-gocryptfs-only
+  formal startup verdict explicitly skips the secure project (mount coverage NOT RUN). Clean environments
+  run strictly; other/mixed preflight errors fail, never a flake. A mount appearing after clean startup
+  still fails. No env bypass; no automatic external unmount. See `docs/dev/test-speed/README.md`.
   Contends on locks under parallel workers — `PI_TOOLKIT_TEST_WORKERS=1` for a real local run.
+  Existing Tier1 tests may create isolated temporary Git fixtures; never mutate the main repo through them.
 - **Tier 3 — probes, never in CI** (`npm run probe:mermaid` and friends): run by hand.
 
 A release requires Tier 1 green on the release commit (release.sh runs `test:tier1` then
 `test:tier2`; either failing aborts before commit/tag — triage may reclassify a red as flake but
 never bypasses the abort) and every Tier 2 failure resolved by the triage above (rerun-green or
-local-standalone-green) — never by skipping.
+local-standalone-green) — never by skipping failures. The sole exception is the formal external-gocryptfs-only startup skip above; record secure coverage as NOT RUN.
 
 ## Releasing
 

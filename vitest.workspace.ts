@@ -42,6 +42,7 @@ export default defineWorkspace([
     test: {
       ...baseProject.test,
       name: "secure",
+      runner: "./tests/setup/secure-preflight.runner.ts",
       include: secureInclude(),
       exclude: [...configDefaults.exclude],
       // P2 (#27, plan r3 D3/D9): APPEND the secure preflight to the base hooks — global-tz

@@ -36,6 +36,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
+import { xc2VersionPolicy } from "./xc2-policy.js";
 
 const REPO = join(import.meta.dirname, "..", "..");
 /* eslint-disable @typescript-eslint/no-explicit-any -- plain-JS modules, no typings by design */
@@ -199,6 +200,7 @@ describe("budgets, mtime grammar, conf and helper parity", () => {
     const cases: [unknown, string][] = [
       [{ ...good, FeatureFlags: [...good.FeatureFlags, "PlaintextNames"] }, "conf-plaintext-names"],
       [{ ...good, FeatureFlags: ["XChaCha20Poly1305"] }, "conf-unknown-flag"],
+      [{ ...good, FeatureFlags: [...good.FeatureFlags, good.FeatureFlags[0]] }, "conf-flags"],
       [{ ...good, FeatureFlags: "GCMIV128" }, "conf-flags"],
       [{ ...good, Extra: 1 }, "conf-unknown-key"],
       [(({ Creator: _c, ...rest }) => rest)(good), "conf-missing-key"],
@@ -218,6 +220,44 @@ describe("budgets, mtime grammar, conf and helper parity", () => {
     expectPkgError(() => T.validateGocryptfsConf(Buffer.from([0xff])), ["non-utf8"]);
     expectPkgError(() => T.validateGocryptfsConf("{"), ["conf-json"]);
     expectPkgError(() => T.validateGocryptfsConf(" ".repeat(65 * 1024 + 1)), ["conf-too-large"]);
+  });
+  it("FeatureFlags are an unordered set: reversed positive and Buffer/string mutation negatives", () => {
+    const good = G.fakeConf();
+    const reversed = { ...good, FeatureFlags: [...good.FeatureFlags].reverse() };
+    for (const encode of [(s: string) => s, (s: string) => Buffer.from(s)]) {
+      const c = T.validateGocryptfsConf(encode(JSON.stringify(reversed)));
+      expect(new Set(c.FeatureFlags)).toEqual(new Set(T.CONF_FEATURE_FLAGS));
+      expect(c.FeatureFlags.length).toBe(new Set(c.FeatureFlags).size);
+      for (const [flags, reason] of [
+        [[...good.FeatureFlags, "SyntheticUnknown"], "conf-unknown-flag"],
+        [[...good.FeatureFlags, good.FeatureFlags[0]], "conf-flags"],
+        [[...good.FeatureFlags, "PlaintextNames"], "conf-plaintext-names"],
+      ] as const)
+        expectPkgError(
+          () => T.validateGocryptfsConf(encode(JSON.stringify({ ...good, FeatureFlags: flags }))),
+          [reason],
+        );
+    }
+  });
+  it("XC2 supported versions scope only the standalone 0440 assertion", () => {
+    for (const version of ["1.8.0", "1.8.9", "v1.8.1"]) {
+      const policy = xc2VersionPolicy({ status: 0, out: `gocryptfs ${version}` });
+      expect(policy.exact0440).toBe(true);
+      expect(policy.skipReason).toBe("");
+    }
+    for (const version of ["1.9.0", "1.80.0", "2.7.0"]) {
+      const policy = xc2VersionPolicy({ status: 0, out: `gocryptfs v${version}` });
+      expect(policy.exact0440).toBe(false);
+      expect(policy.skipReason).toContain(version);
+      expect(policy.skipReason).toContain("1.8.x");
+    }
+    for (const result of [
+      { status: 0, out: "unknown" },
+      { status: 1, out: "gocryptfs 1.8.0" },
+      { status: null, out: "timeout" },
+      { status: 0, out: "gocryptfs 1.7.9" },
+    ])
+      expect(() => xc2VersionPolicy(result)).toThrow(/\[XC2\]/);
   });
   it("memberHeaders: ≥8^11 sizes ride pax with ustar size 0; parsePax round-trips; ustar path split at /", () => {
     const h = T.memberHeaders({ path: "pi-secure-vault/cipher/x", type: "0", mode: 0o600, size: 8 ** 11, mtime: "5" });

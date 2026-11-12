@@ -485,6 +485,11 @@ describe("scripts/release/release.sh", () => {
       expect(stdout).toMatch(/Triage/);
       expect(stdout).toMatch(/rerun the failing file\(s\) alone/);
       expect(stdout).toMatch(/environment problem, never a flake/);
+      expect(stdout).toContain(
+        "external-gocryptfs-only startup verdict explicitly skips secure (mount coverage NOT RUN)",
+      );
+      expect(stdout).toContain("A mount appearing after a clean preflight still fails");
+      expect(stdout).not.toContain("unmount your own vaults first");
       expect(git(dir, "log", "-1", "--format=%s")).not.toMatch(/chore\(release\)/);
       expect(git(dir, "tag")).not.toMatch(/v0\.1\.1/);
     });
