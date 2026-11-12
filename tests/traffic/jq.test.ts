@@ -4,10 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createJqRunner, JqError } from "../../src/traffic/jq.js";
+import { selectTestJqPath } from "./jq-path.js";
 
 // T2a：jq 执行器归 engine（无模块级状态）；本文件共享一个执行器，等价于源实现的模块单例。
 const jq = createJqRunner();
-const runJq = jq.run;
+const overrideJqPath = selectTestJqPath(process.env.PI_TOOLKIT_TEST_JQ_PATH);
+const testJqPath = overrideJqPath ?? "/usr/bin/jq";
+const runJq: typeof jq.run = (filter, input, opts) =>
+  jq.run(filter, input, overrideJqPath === undefined ? opts : { ...opts, jqPath: opts?.jqPath ?? overrideJqPath });
 const probeJq = jq.probe;
 const shutdownJq = jq.shutdown;
 const resetJqEngine = jq.reset;
@@ -16,7 +20,7 @@ const getSpawnCount = jq.spawnCount;
 const getActiveChildCount = jq.activeChildCount;
 const cleanupJqTempDir = jq.cleanupTempDir;
 
-const jqAvailable = existsSync("/usr/bin/jq");
+const jqAvailable = existsSync(testJqPath);
 const jqDescribe = jqAvailable ? describe : describe.skip;
 
 /**
@@ -25,7 +29,7 @@ const jqDescribe = jqAvailable ? describe : describe.skip;
  *  - `--version` prints "jq-1.6" / "jq-1.7" / "jq-1.7.1" — probeJq must report exactly that.
  */
 const jqVersionText = jqAvailable
-  ? (spawnSync("/usr/bin/jq", ["--version"], { encoding: "utf8" }).stdout ?? "").trim()
+  ? (spawnSync(testJqPath, ["--version"], { encoding: "utf8" }).stdout ?? "").trim()
   : "";
 const jqVersionMatch = jqVersionText.match(/jq-(\d+)\.(\d+)(?:\.(\d+))?/i);
 const jqMajor = Number(jqVersionMatch?.[1] ?? 0);
@@ -36,6 +40,16 @@ const jqExpectedVersion = jqVersionMatch
 const jqInputParseExit = jqMajor > 1 || (jqMajor === 1 && jqMinor >= 7) ? 5 : 4;
 
 if (!jqAvailable) console.warn("跳过 jq 测试：/usr/bin/jq 不存在");
+
+describe("test jq path selection", () => {
+  it("preserves defaults, accepts an executable override and rejects invalid overrides", () => {
+    expect(selectTestJqPath(undefined)).toBeUndefined();
+    expect(selectTestJqPath(process.execPath)).toBe(process.execPath);
+    expect(() => selectTestJqPath("")).toThrow();
+    expect(() => selectTestJqPath("relative/jq")).toThrow();
+    expect(() => selectTestJqPath("/nonexistent/jq")).toThrow();
+  });
+});
 
 function makeStubJq(script: string): { jqPath: string; cleanup: () => void } {
   const dir = mkdtempSync(join(tmpdir(), "pi-record-jq-stub-"));
@@ -132,9 +146,9 @@ jqDescribe("runJq（真 jq）", () => {
   it("probeJq 解析已安装 jq 的版本并缓存同一路径结果", async () => {
     expect(jqExpectedVersion).not.toBe(""); // `jq --version` must be parsable at all
     const before = getSpawnCount();
-    await expect(probeJq("/usr/bin/jq")).resolves.toMatchObject({ ok: true, version: jqExpectedVersion });
+    await expect(probeJq(testJqPath)).resolves.toMatchObject({ ok: true, version: jqExpectedVersion });
     const afterFirst = getSpawnCount();
-    await expect(probeJq("/usr/bin/jq")).resolves.toMatchObject({ ok: true, version: jqExpectedVersion });
+    await expect(probeJq(testJqPath)).resolves.toMatchObject({ ok: true, version: jqExpectedVersion });
     expect(afterFirst).toBeGreaterThan(before);
     expect(getSpawnCount()).toBe(afterFirst);
   });

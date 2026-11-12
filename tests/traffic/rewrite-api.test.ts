@@ -10,6 +10,10 @@ import type { TrafficEngine } from "../../src/traffic/engine.js";
 import { createTrafficServer, type TrafficServer } from "../../src/traffic/server.js";
 import { makeEngine, teardownEngine } from "./helpers/engine.js";
 import { installTap, retireTap } from "../../src/traffic/tap.js";
+import { selectTestJqPath } from "./jq-path.js";
+
+const overrideJqPath = selectTestJqPath(process.env.PI_TOOLKIT_TEST_JQ_PATH);
+const testJqPath = overrideJqPath ?? "/usr/bin/jq";
 
 let state: TrafficEngine;
 let web: TrafficServer;
@@ -98,6 +102,11 @@ beforeAll(async () => {
   web = createTrafficServer(state);
   port = await web.startServer();
   sourceId = addSource();
+  if (overrideJqPath !== undefined) {
+    const configured = await sendJson("/api/rewrite/settings", "PUT", { jq_path: overrideJqPath });
+    expect(configured.response.status).toBe(200);
+    expect(configured.body).toMatchObject({ jq_path: overrideJqPath, jq_available: true });
+  }
   // T2a：重放绕过 trampoline，用活动 wrapper 的固定下游——把探针装成该下游（源实现的 state.originalFetch）。
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     if (!String(input instanceof Request ? input.url : input).includes(`:${port}/`)) lastFetchInit = init;
@@ -259,7 +268,7 @@ describe("rewrite API", () => {
 
   it("persists settings across closing and reopening the database", async () => {
     const saved = await sendJson("/api/rewrite/settings", "PUT", {
-      jq_path: "/usr/bin/jq",
+      jq_path: testJqPath,
       timeout_ms: 3210,
       serialize_handoff_ms: 1200,
       serialize_retry_grace_ms: 2300,
@@ -268,7 +277,7 @@ describe("rewrite API", () => {
     });
     expect(saved.response.status).toBe(200);
     expect(saved.body).toMatchObject({
-      jq_path: "/usr/bin/jq",
+      jq_path: testJqPath,
       timeout_ms: 3210,
       serialize_handoff_ms: 1200,
       serialize_retry_grace_ms: 2300,
@@ -296,7 +305,7 @@ describe("rewrite API", () => {
     ensureDb(state);
     const reopened = await api("/api/rewrite/settings");
     expect(reopened.body).toMatchObject({
-      jq_path: "/usr/bin/jq",
+      jq_path: testJqPath,
       timeout_ms: 3210,
       serialize_handoff_ms: 1200,
     });
