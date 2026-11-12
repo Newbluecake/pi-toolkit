@@ -464,10 +464,8 @@ export default function (pi: ExtensionAPI) {
     // Capability-gated (graceful degradation): bare/rpc test contexts may
     // carry hasUI without a functional status bridge.
     const setStatus = typeof ctx.ui?.setStatus === "function" ? ctx.ui.setStatus.bind(ctx.ui) : undefined;
-    if (!config.webhookUrl && setStatus) {
-      setStatus("feishu-notify", "飞书通知: 未配置 webhook");
-    } else if (setStatus) {
-      setStatus("feishu-notify", watched ? "✨ watching" : "");
+    if (setStatus) {
+      setStatus("feishu-notify", config.webhookUrl && watched ? "✨ watching" : "");
     }
   });
 

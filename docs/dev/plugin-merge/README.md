@@ -29,7 +29,7 @@ of `activate()`).
 
 ## src/feishu-notify/
 
-`src/feishu-notify/` — merged Feishu notification cards (passive triggers only: `@notify` keyword, `/watch` and `/feishu-test`); completion-class cards are background-idle gated — suppressed (never deferred) while subagents/background bash are still running, since a stopped main session with busy background is not task end.
+`src/feishu-notify/` — merged Feishu notification cards (passive triggers only: `@notify` keyword, `/watch` and `/feishu-test`); completion-class cards are background-idle gated — suppressed (never deferred) while subagents/background bash are still running, since a stopped main session with busy background is not task end. On session start an unconfigured webhook clears the notification status, including a previous session's status; `/feishu-test` still reports configuration errors.
 
 ### #70 统一通知设置与敏感面
 

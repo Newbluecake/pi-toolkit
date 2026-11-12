@@ -1059,6 +1059,29 @@ describe("26. baseline regression", () => {
 // 27. watchDefault: new session starts watched
 // ---------------------------------------------------------------------------
 
+describe("webhook status", () => {
+  it("clears status when no webhook is configured, even with watchDefault", async () => {
+    writeTestConfigFile({ webhookUrl: "", watchDefault: true });
+    const { emit, commands } = setup();
+    const ctx = makeCtx();
+    await emit("session_start", {}, ctx);
+    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith("feishu-notify", "");
+    await commands.get("feishu-test").handler("", ctx);
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("未配置 webhook"), "error");
+  });
+
+  it("clears a previously configured watching status when the webhook is removed", async () => {
+    writeTestConfigFile({ watchDefault: true });
+    const { emit } = setup();
+    const ctx = makeCtx();
+    await emit("session_start", {}, ctx);
+    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith("feishu-notify", "✨ watching");
+    writeTestConfigFile({ webhookUrl: "", watchDefault: true });
+    await emit("session_start", {}, ctx);
+    expect(ctx.ui.setStatus).toHaveBeenLastCalledWith("feishu-notify", "");
+  });
+});
+
 describe("27. watchDefault config", () => {
   it("watchDefault:true -> session starts watched; result card sent without /watch and status shows watching", async () => {
     writeTestConfigFile({ watchDefault: true });
