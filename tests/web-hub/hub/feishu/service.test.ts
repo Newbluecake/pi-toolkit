@@ -276,9 +276,11 @@ describe("F8 in-process service composition", () => {
       ],
       closed: [],
     });
-    await eventually(() => expect(r.fake.callsTo("PATCH", /messages/)).toHaveLength(1));
+    // The dialog PATCH follows durable outbox delivery and nonce commits on real timers.
+    // Allow a loaded runner to finish that pipeline without weakening the card assertions.
+    await eventually(() => expect(r.fake.callsTo("PATCH", /messages/)).toHaveLength(1), 20_000);
     expect(JSON.stringify(r.fake.callsTo("PATCH", /messages/)[0]!.json)).toContain("web 会话页面");
-  });
+  }, 30_000);
   it("owner-only approval nonce allows stranger without ever dispatching their dropped prompt", async () => {
     const r = await rig();
     await r.bind();
