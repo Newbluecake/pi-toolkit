@@ -57,6 +57,21 @@ outcome == 'failure')` —— 只有 tier1 确实执行过才跑；npm ci / 构�
 - **旧进程残留挂载**：kill 全量测试后检查 `/proc/self/mountinfo` 的 gocryptfs 残留并对测试自己的
   临时目录精确 `fusermount3 -u`；残留会让下一轮预检直接 dirty（这是设计行为，不是误报）。
 
+## 测试工具绑定的无挂载门
+
+`tests/secure/real-tool-path.test.ts` 显式列入 `TIER2_FILES`：只执行自有临时 marker 程序，
+不属于真实挂载 `SECURE_MOUNT_FILES`；原有文件归属不变。覆盖 per-file 不可变 gocryptfs binding、
+独立 0700 单名 bridge、fake-pi 优先、显式 PATH/坏 binding 无自动补齐，以及 fake-sync 和隔离
+missing-getfattr。真实 fixture 的固定 PATH 只桥接选定 gocryptfs，不能把整个用户工具目录带入，
+也不能把 bridge 失败改为依赖 skip；详见 [secure README](../data-encryption/README.md#真实挂载测试的工具路径绑定测试侧)。
+
+受限无挂载验收仅运行 marker 与纯合成治理门、typecheck、定向 format；`convert-preflight` 的
+产品 69 用例虽是注入 ports/context，其共用 fixture 在 import 时仍扫描真实 `/proc`，不能靠
+`-t` 当作纯合成门。`private-real-harness.test.ts` 的 cleanup 遍历真实 `/proc`，也不能当作
+仅访问 self/自建子进程的门。本轮可静态核对既有断言及未改文件，不能报告为本轮执行 PASS。
+`test-tiers-actual` 只启动 `vitest list --filesOnly` 检查三个分区，不收集/运行真实挂载文件。
+无挂载门通过不替代另行授权、独占机器上的正式 secure 项目运行。
+
 ## 日常命令
 
 ```sh

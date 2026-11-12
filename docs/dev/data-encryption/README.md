@@ -14,6 +14,14 @@
 - **挂载拼写契约**：普通 launcher（非 private 模式）以挂载前一次性算出的物理 cipher 路径（`physicalPaths(v).realCipher`，即 `realpath(<dir>)/cipher`）与物理挂载点传给 gocryptfs，与 private 模式一致；mount 归属判定（`source === realCipher`）不放宽——两种模式、插件 `judgeVaultMount` 与 launcher 复检使用同一物理口径。设计：`docs/dev/secure-symlink/plan.md`（r3）。
 - **威胁模型残留（R2，检测边界）**：fsname（mountinfo source）只是挂载者自填的标签，内核不校验。**cipher 的物理祖先可被可写父目录的属主替换 ⇒ 检测不到**（R2，realpath 串不变、fsname 相同 ⇒ 判 mounted）。它只影响可用性与目录级完整性，机密性由挂载点祖先链规则、cipher 的 0700 与口令兜住；该缺口在本修复前就存在。用户侧建议：把 `<dir>` 放在只有本人和 root 可写的链下。同在 `<dir>` 的 `mount.lock`/`lease` 也属这一信任面。
 
+## 真实挂载测试的工具路径绑定（测试侧）
+
+- `tests/secure/real-tool-path.ts` 在每个 Vitest 文件实例内保存不可变的 gocryptfs 元数据快照（显式 parent PATH，忽略空项、拒绝相对目录；不执行工具）。真实 capability 与 fixture 共用该快照；机器原本缺依赖仍按原门跳过，已 capable 后绑定失效、权限改变或 bridge 创建失败必须 fail，不能变成 skip 或重新选工具。
+- 共用 `RealHarness`（可显式注入 binding）和 fuse / off-golden real / N1 / N2 的局部 fixture 各在 owned、物理、0700 scratch 下新建独立 `real-tools/`，只允许 `gocryptfs` 一个 symlink，指向选中的绝对 realpath。它与可写假脚本的 `bin/` 分离，避免覆盖 fake 时沿链接写坏真实 binary；冲突、断链、非 owner/权限异常不覆盖、不修复、不清理其它目录。
+- 默认子 PATH 仅为 fake bin → node-only bin（如单列）→ real-tools → `/usr/bin:/bin`，绝不携带整个 parent `.local/bin`、nvm 或 `/usr/local/bin`。初建时做文件系统级 gocryptfs/fake-pi 可达性检查；真实 direct init/mount（含 convert 内层 cipher、N1 额外 cipher、N2 独立 init fixture）显式使用同一 binding 或受控 env。`tty` / `plain` / spawn 不重建 bridge、不重新 resolve；显式完整 PATH override 完全由调用方控制。
+- fake 模式不建 bridge；fake pi 始终优先，fake sync `-f`、fake fusermount 和 missing-getfattr 注入不补真实工具。bridge 白名单不含 sync/getfattr/node/pi；普通 execvp 对非可执行候选仍可能继续查尾部，路径绑定不承诺 inode 级可信执行（快照后的同路径文件替换仍有 TOCTOU）。
+- `real-tool-path.test.ts` 是无挂载 Tier 2 proc 测试，仅执行自有 marker（包括 RealHarness 注入 binding 的 init 参数模拟），验证 A 快照后 parent 换 B、direct/child 仍 A、B 零调用，以及隔离/错误/并发策略。隔离 PATH 缺 getfattr 只证明不补回 parent，**不代表产品 69**；产品 69 静态复用 `convert-preflight.test.ts` 的既有 ports/context 用例（missing getfattr、错误文本、锁/flow 前零副作用）。该文件 import 会扫描真实 `/proc`，受限无挂载验收不运行它；既有 harness ownership 测试的 cleanup 也会遍历 `/proc`，同样不满足仅 self/自建进程访问的验收边界。此门不证明真实 FUSE、密码、namespace 或实际挂载生命周期通过；真实验证仍需另获授权并走正式 secure 预检/锁，不改 timeout、XC2 或 golden。
+
 ## 旧版本楔死保险库的恢复（人工，无自动化脚本）
 
 症状：旧版本以词法拼写挂上的挂载，升级后仍读作 `foreign`（全局明文挂载残留、`mount.lease` 被占 ⇒ unlock/run/lock/export 卡死）。

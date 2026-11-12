@@ -25,6 +25,13 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { acquireGocryptfsTestLock } from "./gocryptfs-test-lock.js";
 import { awaitNoForeignGocryptfs } from "./private-real-harness.js";
 
+import {
+  DEFAULT_REAL_GOCRYPTFS,
+  composeRealPath,
+  createRealToolBridge,
+  requireRealGocryptfs,
+} from "./real-tool-path.js";
+
 const REPO = join(import.meta.dirname, "..", "..");
 const HELPER = join(REPO, "src", "secure", "bin", "helper.mjs");
 const BIN = join(REPO, "src", "secure", "bin", "pi-secure");
@@ -759,7 +766,8 @@ describe.skipIf(!HAVE_FLOCK || !HAVE_USERNS || !which("script"))(
 
 const HAVE_REAL =
   process.platform === "linux" &&
-  ["gocryptfs", "fusermount3", "flock", "script", "unshare", "umount"].every(which) &&
+  DEFAULT_REAL_GOCRYPTFS.binding !== undefined &&
+  ["fusermount3", "flock", "script", "unshare", "umount"].every(which) &&
   spawnSync("sh", ["-c", "[ -c /dev/fuse ] && [ -r /dev/fuse ] && [ -w /dev/fuse ]"]).status === 0 &&
   spawnSync("unshare", ["--user", "--map-root-user", "--mount", "--propagation", "private", "true"]).status === 0;
 
@@ -824,6 +832,8 @@ setTimeout(() => process.exit(Number(process.env.FAKE_PI_EXIT ?? 0)), Number(pro
     const h = join(r, "home");
     mkdirSync(h, { mode: 0o700 });
     const { bin, rec } = fakePi(r);
+    const binding = requireRealGocryptfs();
+    const controlledPath = composeRealPath(bin, undefined, createRealToolBridge(r, binding), binding);
     const dir = join(h, ".local", "share", "pi-toolkit-secure", "acme");
     const mnt = join(h, "secure", "acme");
     mkdirSync(join(dir, "cipher"), { recursive: true, mode: 0o700 });
@@ -836,7 +846,7 @@ setTimeout(() => process.exit(Number(process.env.FAKE_PI_EXIT ?? 0)), Number(pro
       chmodSync(join(mnt, n), 0o400);
     }
     writeFileSync(join(r, "pf"), `${PW}\n`, { mode: 0o600 });
-    const gi = spawnSync("gocryptfs", [
+    const gi = spawnSync(requireRealGocryptfs().realPath, [
       "-init",
       "-q",
       "-scryptn",
@@ -851,7 +861,7 @@ setTimeout(() => process.exit(Number(process.env.FAKE_PI_EXIT ?? 0)), Number(pro
     writeFileSync(join(dir, "mount.lease"), "", { mode: 0o600 });
     mkdirSync(join(h, ".pi", "agent"), { recursive: true });
     writeFileSync(join(h, ".pi", "agent", "pi-subagent.json"), JSON.stringify({ secure: { vaults: { acme: {} } } }));
-    return { r, h, dir, mnt, rec, env: { PATH: `${bin}:/usr/bin:/bin`, HOME: h, LANG: "C.UTF-8", TMPDIR: tmpdir() } };
+    return { r, h, dir, mnt, rec, env: { PATH: controlledPath, HOME: h, LANG: "C.UTF-8", TMPDIR: tmpdir() } };
   }
   type Env = { r: string; h: string; dir: string; mnt: string; rec: string; env: Record<string, string> };
 
@@ -1059,13 +1069,15 @@ setTimeout(() => process.exit(Number(process.env.FAKE_PI_EXIT ?? 0)), Number(pro
     const h = join(r, "home");
     mkdirSync(h, { mode: 0o700 });
     const { bin } = fakePi(r);
+    const binding = requireRealGocryptfs();
+    const controlledPath = composeRealPath(bin, undefined, createRealToolBridge(r, binding), binding);
     const e: Env = {
       r,
       h,
       dir: join(h, ".local", "share", "pi-toolkit-secure", "acme"),
       mnt: join(h, "secure", "acme"),
       rec: "",
-      env: { PATH: `${bin}:/usr/bin:/bin`, HOME: h, LANG: "C.UTF-8", TMPDIR: tmpdir() },
+      env: { PATH: controlledPath, HOME: h, LANG: "C.UTF-8", TMPDIR: tmpdir() },
     };
     await awaitNoForeignGocryptfs(ctx, e.r);
     const i = await tty(e, "init acme --private", {}, 120_000);
@@ -1085,9 +1097,10 @@ setTimeout(() => process.exit(Number(process.env.FAKE_PI_EXIT ?? 0)), Number(pro
     writeFileSync(join(r, "pf"), `${PW}\n`, { mode: 0o600 });
     const look = join(r, "look");
     mkdirSync(look, { mode: 0o700 });
-    expect(spawnSync("gocryptfs", ["-q", "-passfile", join(r, "pf"), "--", join(e.dir, "cipher"), look]).status).toBe(
-      0,
-    );
+    expect(
+      spawnSync(requireRealGocryptfs().realPath, ["-q", "-passfile", join(r, "pf"), "--", join(e.dir, "cipher"), look])
+        .status,
+    ).toBe(0);
     try {
       const ps = JSON.parse(readFileSync(join(look, "work", ".pi", "settings.json"), "utf8"));
       expect(ps.sessionDir).toBe(join(e.mnt, "state", "sessions", "default"));

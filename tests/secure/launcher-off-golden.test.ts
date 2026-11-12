@@ -39,6 +39,13 @@ import { pathToFileURL } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { acquireGocryptfsTestLock } from "./gocryptfs-test-lock.js";
 
+import {
+  DEFAULT_REAL_GOCRYPTFS,
+  composeRealPath,
+  createRealToolBridge,
+  requireRealGocryptfs,
+} from "./real-tool-path.js";
+
 const REPO = join(import.meta.dirname, "..", "..");
 const BIN = join(REPO, "src", "secure", "bin", "pi-secure");
 const PI_ARGS = join(REPO, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli", "args.js");
@@ -53,7 +60,7 @@ const which = (b: string) => {
 const HAVE_DEV_FUSE = spawnSync("sh", ["-c", "[ -c /dev/fuse ] && [ -r /dev/fuse ] && [ -w /dev/fuse ]"]).status === 0;
 const HAVE_FAKE =
   process.platform === "linux" && ["script", "flock"].every((b) => which(b) !== undefined) && HAVE_DEV_FUSE;
-const HAVE_REAL = HAVE_FAKE && ["gocryptfs", "fusermount3"].every((b) => which(b) !== undefined);
+const HAVE_REAL = HAVE_FAKE && DEFAULT_REAL_GOCRYPTFS.binding !== undefined && which("fusermount3") !== undefined;
 
 interface GoldenCase {
   name: string;
@@ -189,8 +196,11 @@ function makeEnv(opts: { fakeGocryptfs: boolean; gocryptfsExit?: number; initExi
   const nodeBin = join(root, "nodebin");
   mkdirSync(nodeBin);
   symlinkSync(process.execPath, join(nodeBin, "node"));
+  const controlledPath = opts.fakeGocryptfs
+    ? `${bin}:${nodeBin}:/usr/bin:/bin`
+    : composeRealPath(bin, nodeBin, createRealToolBridge(root, requireRealGocryptfs()), requireRealGocryptfs());
   const env: NodeJS.ProcessEnv = {
-    PATH: `${bin}:${nodeBin}:/usr/bin:/bin`,
+    PATH: controlledPath,
     HOME: home,
     LANG: "C.UTF-8",
     TMPDIR: tmpdir(),
@@ -224,10 +234,14 @@ function layout(e: Env, { realCipher = false } = {}): { dir: string; mnt: string
   if (realCipher) {
     const pf = join(e.root, "pf");
     writeFileSync(pf, `${FAKE_PW}\n`, { mode: 0o600 });
-    const r = spawnSync("gocryptfs", ["-init", "-q", "-scryptn", "10", "-passfile", pf, "--", join(dir, "cipher")], {
-      encoding: "utf8",
-      timeout: 30_000,
-    });
+    const r = spawnSync(
+      requireRealGocryptfs().realPath,
+      ["-init", "-q", "-scryptn", "10", "-passfile", pf, "--", join(dir, "cipher")],
+      {
+        encoding: "utf8",
+        timeout: 30_000,
+      },
+    );
     if (r.status !== 0) throw new Error(`gocryptfs -init failed: ${r.stderr}`);
   } else writeFileSync(join(dir, "cipher", "gocryptfs.conf"), "{}");
   writeFileSync(join(dir, "mount.lock"), "", { mode: 0o600 });
@@ -613,7 +627,7 @@ describe.skipIf(!HAVE_REAL)("N0 golden — real gocryptfs (test-side mounts, fak
   function mountDirect(e: Env, dir: string, mnt: string): void {
     if (mountedAt(mnt)) return;
     const r = spawnSync(
-      "gocryptfs",
+      requireRealGocryptfs().realPath,
       ["-q", "-nonempty", "-passfile", join(e.root, "pf"), "--", join(dir, "cipher"), mnt],
       {
         encoding: "utf8",

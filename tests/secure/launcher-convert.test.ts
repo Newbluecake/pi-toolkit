@@ -43,6 +43,7 @@ import {
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
+import { requireRealGocryptfs } from "./real-tool-path.js";
 import { snapshot } from "./convert-fixtures.js";
 import { acquireGocryptfsTestLock } from "./gocryptfs-test-lock.js";
 import {
@@ -880,7 +881,10 @@ describe.skipIf(SKIP !== "")("V7 launcher e2e — convert / export / import (rea
     const c = join(f.e.r, "inner-cipher");
     mkdirSync(c, { mode: 0o700 });
     const pf = join(f.e.r, "pf");
-    expect(spawnSync("gocryptfs", ["-init", "-q", "-scryptn", "10", "-passfile", pf, "--", c]).status).toBe(0);
+    expect(
+      spawnSync(requireRealGocryptfs(T.gocryptfs).realPath, ["-init", "-q", "-scryptn", "10", "-passfile", pf, "--", c])
+        .status,
+    ).toBe(0);
     const m = join(f.proj, "sub", "m");
     mkdirSync(m);
     expect(spawnSync("gocryptfs", ["-q", "-passfile", pf, "--", c, m], { env: f.e.env }).status).toBe(0);

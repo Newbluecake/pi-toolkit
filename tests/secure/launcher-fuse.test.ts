@@ -27,6 +27,13 @@ import { pathToFileURL } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { acquireGocryptfsTestLock } from "./gocryptfs-test-lock.js";
 
+import {
+  DEFAULT_REAL_GOCRYPTFS,
+  composeRealPath,
+  createRealToolBridge,
+  requireRealGocryptfs,
+} from "./real-tool-path.js";
+
 const REPO = join(import.meta.dirname, "..", "..");
 const BIN = join(REPO, "src", "secure", "bin", "pi-secure");
 const PI_ARGS = join(REPO, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli", "args.js");
@@ -38,7 +45,8 @@ const which = (b: string) => {
 };
 const HAVE_FUSE =
   process.platform === "linux" &&
-  ["gocryptfs", "fusermount3", "flock", "script"].every((b) => which(b) !== undefined) &&
+  DEFAULT_REAL_GOCRYPTFS.binding !== undefined &&
+  ["fusermount3", "flock", "script"].every((b) => which(b) !== undefined) &&
   spawnSync("sh", ["-c", "[ -c /dev/fuse ] && [ -r /dev/fuse ] && [ -w /dev/fuse ]"]).status === 0;
 
 function exe(path: string, body: string): void {
@@ -117,10 +125,14 @@ describe.skipIf(!HAVE_FUSE)("pi-secure against real gocryptfs", () => {
   /** Test-side setup only: mount with the fake passfile, bypassing the launcher. */
   function mountDirect(): void {
     if (mounted()) return;
-    const r = spawnSync("gocryptfs", ["-q", "-nonempty", "-passfile", passfile, "--", join(dir, "cipher"), mnt], {
-      encoding: "utf8",
-      timeout: 20_000,
-    });
+    const r = spawnSync(
+      requireRealGocryptfs().realPath,
+      ["-q", "-nonempty", "-passfile", passfile, "--", join(dir, "cipher"), mnt],
+      {
+        encoding: "utf8",
+        timeout: 20_000,
+      },
+    );
     expect(r.status, r.stderr).toBe(0);
     expect(mounted()).toBe(true);
   }
@@ -164,8 +176,11 @@ process.exit(Number(e.FAKE_PI_EXIT ?? 0));
     );
     mkdirSync(join(root, "bin"));
     symlinkSync(join(pkg, "dist", "cli.js"), join(root, "bin", "pi"));
+    symlinkSync(process.execPath, join(root, "bin", "node"));
+    const binding = requireRealGocryptfs();
+    const realTools = createRealToolBridge(root, binding);
     env = {
-      PATH: `${join(root, "bin")}:${dirname(process.execPath)}:/usr/local/bin:/usr/bin:/bin`,
+      PATH: composeRealPath(join(root, "bin"), undefined, realTools, binding),
       HOME: home,
       LANG: "C.UTF-8",
       TMPDIR: tmpdir(),

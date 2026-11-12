@@ -34,6 +34,13 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
+import {
+  DEFAULT_REAL_GOCRYPTFS,
+  composeRealPath,
+  createRealToolBridge,
+  requireRealGocryptfs,
+} from "./real-tool-path.js";
+
 export const REPO = join(import.meta.dirname, "..", "..");
 export const HELPER = join(REPO, "src", "secure", "bin", "helper.mjs");
 export const BIN = join(REPO, "src", "secure", "bin", "pi-secure");
@@ -46,7 +53,8 @@ export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 /** Why the real block is skipped ("" ⇔ it runs). */
 export function realSkipReason(): string {
   if (process.platform !== "linux") return "not linux";
-  const miss = ["gocryptfs", "fusermount3", "flock", "script", "unshare", "umount"].filter((b) => !which(b));
+  const miss = ["fusermount3", "flock", "script", "unshare", "umount"].filter((b) => !which(b));
+  if (!DEFAULT_REAL_GOCRYPTFS.binding) miss.unshift("gocryptfs");
   if (miss.length) return `missing ${miss.join(", ")}`;
   if (spawnSync("sh", ["-c", "[ -c /dev/fuse ] && [ -r /dev/fuse ] && [ -w /dev/fuse ]"]).status !== 0)
     return "/dev/fuse unusable";
@@ -138,8 +146,18 @@ export class RealHarness {
   /** Leftovers that mention a scratch path but are not provably ours: reported, never signalled. */
   readonly reports: string[] = [];
   private readonly signal: Signal;
+  readonly gocryptfs: import("./real-tool-path.js").RealGocryptfsBinding | undefined;
 
-  constructor({ signal, runStart }: { signal?: Signal; runStart?: number } = {}) {
+  constructor({
+    signal,
+    runStart,
+    gocryptfs = DEFAULT_REAL_GOCRYPTFS.binding,
+  }: {
+    signal?: Signal;
+    runStart?: number;
+    gocryptfs?: import("./real-tool-path.js").RealGocryptfsBinding;
+  } = {}) {
+    this.gocryptfs = gocryptfs;
     this.signal = signal ?? ((pid, sig) => process.kill(pid, sig));
     if (runStart !== undefined) this.runStart = runStart;
     else {
@@ -266,6 +284,9 @@ export class RealHarness {
     mkdirSync(join(r, "bin"));
     symlinkSync(join(pkg, "dist", "cli.js"), join(r, "bin", "pi"));
     symlinkSync(process.execPath, join(r, "bin", "node"));
+    const binding = requireRealGocryptfs(this.gocryptfs);
+    const realTools = createRealToolBridge(r, binding);
+    const controlledPath = composeRealPath(join(r, "bin"), undefined, realTools, binding);
     writeFileSync(join(r, "pf"), `${PW}\n`, { mode: 0o600 });
     for (const p of [join(h, ".local"), join(h, ".local", "share"), join(h, ".local", "share", "pi-toolkit-secure")])
       mkdirSync(p, { mode: 0o700 });
@@ -286,7 +307,7 @@ export class RealHarness {
       lease: join(dir, "mount.lease"),
       rec: join(r, "pi.json"),
       env: {
-        PATH: `${join(r, "bin")}:/usr/bin:/bin`,
+        PATH: controlledPath,
         HOME: h,
         LANG: "C.UTF-8",
         TMPDIR: tmpdir(),
@@ -307,7 +328,7 @@ export class RealHarness {
       writeFileSync(join(mnt, n), "");
       chmodSync(join(mnt, n), 0o400);
     }
-    const gi = spawnSync("gocryptfs", [
+    const gi = spawnSync(requireRealGocryptfs(this.gocryptfs).realPath, [
       "-init",
       "-q",
       "-scryptn",

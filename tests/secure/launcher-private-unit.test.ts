@@ -27,6 +27,13 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { acquireGocryptfsTestLock } from "./gocryptfs-test-lock.js";
 import { awaitNoForeignGocryptfs } from "./private-real-harness.js";
 
+import {
+  DEFAULT_REAL_GOCRYPTFS,
+  composeRealPath,
+  createRealToolBridge,
+  requireRealGocryptfs,
+} from "./real-tool-path.js";
+
 const require = createRequire(import.meta.url);
 
 const REPO = join(import.meta.dirname, "..", "..");
@@ -1677,7 +1684,8 @@ describe.skipIf(!HAVE_FLOCK || !which("script"))(
 
 const HAVE_REAL =
   process.platform === "linux" &&
-  ["gocryptfs", "fusermount3", "flock", "script", "unshare", "umount"].every(which) &&
+  DEFAULT_REAL_GOCRYPTFS.binding !== undefined &&
+  ["fusermount3", "flock", "script", "unshare", "umount"].every(which) &&
   spawnSync("sh", ["-c", "[ -c /dev/fuse ] && [ -r /dev/fuse ] && [ -w /dev/fuse ]"]).status === 0 &&
   spawnSync("unshare", ["--user", "--map-root-user", "--mount", "--propagation", "private", "true"]).status === 0;
 
@@ -1721,6 +1729,8 @@ setTimeout(() => process.exit(Number(process.env.FAKE_PI_EXIT ?? 0)), Number(pro
     mkdirSync(join(r, "bin"));
     symlinkSync(join(pkg, "dist", "cli.js"), join(r, "bin", "pi"));
     symlinkSync(process.execPath, join(r, "bin", "node"));
+    const binding = requireRealGocryptfs();
+    const controlledPath = composeRealPath(join(r, "bin"), undefined, createRealToolBridge(r, binding), binding);
     const dir = join(h, ".local", "share", "pi-toolkit-secure", "acme");
     const mnt = join(h, "secure", "acme");
     mkdirSync(join(dir, "cipher"), { recursive: true, mode: 0o700 });
@@ -1733,7 +1743,7 @@ setTimeout(() => process.exit(Number(process.env.FAKE_PI_EXIT ?? 0)), Number(pro
       chmodSync(join(mnt, n), 0o400);
     }
     writeFileSync(join(r, "pf"), `${PW}\n`, { mode: 0o600 });
-    const gi = spawnSync("gocryptfs", [
+    const gi = spawnSync(requireRealGocryptfs().realPath, [
       "-init",
       "-q",
       "-scryptn",
@@ -1754,7 +1764,7 @@ setTimeout(() => process.exit(Number(process.env.FAKE_PI_EXIT ?? 0)), Number(pro
       dir,
       mnt,
       rec,
-      env: { PATH: `${join(r, "bin")}:/usr/bin:/bin`, HOME: h, LANG: "C.UTF-8", TMPDIR: tmpdir() },
+      env: { PATH: controlledPath, HOME: h, LANG: "C.UTF-8", TMPDIR: tmpdir() },
     };
   }
   function runPrivate(
@@ -1846,7 +1856,7 @@ setTimeout(() => process.exit(Number(process.env.FAKE_PI_EXIT ?? 0)), Number(pro
     chmodSync(bdir, 0o700);
     mkdirSync(bmnt, { mode: 0o700 });
     expect(
-      spawnSync("gocryptfs", [
+      spawnSync(requireRealGocryptfs().realPath, [
         "-init",
         "-q",
         "-scryptn",
@@ -1857,9 +1867,10 @@ setTimeout(() => process.exit(Number(process.env.FAKE_PI_EXIT ?? 0)), Number(pro
         join(bdir, "cipher"),
       ]).status,
     ).toBe(0);
-    expect(spawnSync("gocryptfs", ["-q", "-passfile", join(e.r, "pf"), "--", join(bdir, "cipher"), bmnt]).status).toBe(
-      0,
-    );
+    expect(
+      spawnSync(requireRealGocryptfs().realPath, ["-q", "-passfile", join(e.r, "pf"), "--", join(bdir, "cipher"), bmnt])
+        .status,
+    ).toBe(0);
     try {
       writeFileSync(
         join(e.h, ".pi", "agent", "pi-subagent.json"),
@@ -1883,7 +1894,7 @@ setTimeout(() => process.exit(Number(process.env.FAKE_PI_EXIT ?? 0)), Number(pro
     mkdirSync(join(cdir, "cipher"), { recursive: true, mode: 0o700 });
     mkdirSync(cmnt, { mode: 0o700 });
     expect(
-      spawnSync("gocryptfs", [
+      spawnSync(requireRealGocryptfs().realPath, [
         "-init",
         "-q",
         "-scryptn",
@@ -1894,9 +1905,10 @@ setTimeout(() => process.exit(Number(process.env.FAKE_PI_EXIT ?? 0)), Number(pro
         join(cdir, "cipher"),
       ]).status,
     ).toBe(0);
-    expect(spawnSync("gocryptfs", ["-q", "-passfile", join(e.r, "pf"), "--", join(cdir, "cipher"), cmnt]).status).toBe(
-      0,
-    );
+    expect(
+      spawnSync(requireRealGocryptfs().realPath, ["-q", "-passfile", join(e.r, "pf"), "--", join(cdir, "cipher"), cmnt])
+        .status,
+    ).toBe(0);
     try {
       const r = await runPrivate(e, {});
       expect(r.code, r.text).toBe(76);

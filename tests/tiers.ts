@@ -55,6 +55,8 @@ export const TIER2_FILES: readonly string[] = [
   "tests/secure/gocryptfs-test-lock.test.ts",
   // plain child processes, no gocryptfs mount
   "tests/secure/private-real-harness.test.ts",
+  // owned executable markers only: PATH binding/bridge checks, no real init or mount
+  "tests/secure/real-tool-path.test.ts",
   // real tsx/loader child processes ×matrix, needs dist/bundle (147 s)
   "tests/governance/bundle-parity.test.ts",
   // actually runs scripts/release/package.sh (36 s)
