@@ -122,6 +122,18 @@ export const TerminalReapProofSchema = closed({
   outcome: Type.Literal("reaped"),
 });
 export type TerminalReapProof = Static<typeof TerminalReapProofSchema>;
+/** r4.1: H sends ONLY after the exact identities' resolved journal commit is durable.
+ * revision is the INVENTORY snapshot revision; journalRevision is the successful durable
+ * CAS commit revision, not a close ACK, transport write, or a caller's proposed revision.
+ * It acknowledges metadata receipts, never grants authority or releases a physical slot.
+ */
+export const TerminalResolvedAckSchema = closed({
+  ...evidenceScope,
+  journalRevision: pos,
+  identities: Type.Array(TerminalResourceIdentitySchema, { minItems: 1, maxItems: 32 }),
+});
+export type TerminalResolvedAck = Static<typeof TerminalResolvedAckSchema>;
+
 export const TerminalInventorySchema = closed({
   v,
   ...evidenceScope,
@@ -446,6 +458,8 @@ export const TermReqSchema = Type.Union([
     closeId: id,
     expectedRevision: uint,
   }),
+  // Resource-only ready channel, dedicated transport ONLY; never a command or HTTP operation.
+  closed({ ...req, ...channel, op: Type.Literal("resolved_ack"), resolved: TerminalResolvedAckSchema }),
 ]);
 export type TermReq = Static<typeof TermReqSchema>;
 export const TERMINAL_ERROR_CODES = [
@@ -490,6 +504,7 @@ const ops = [
   "renew",
   "state",
   "close",
+  "resolved_ack",
 ] as const;
 // Error vocabulary is op-local; a UI must not infer an effect from a string alone.
 const commonErrors = [
@@ -513,6 +528,7 @@ export const TERMINAL_OP_ERROR_CODES = {
   protocol_ready: commonErrors,
   bind: [...commonErrors, "E_EXPIRED"],
   inventory: commonErrors,
+  resolved_ack: commonErrors,
   open: [...commonErrors, "E_LIMIT", "E_EXPIRED", "E_STALE_CREATION", "E_UNKNOWN_EFFECT", "E_BACKEND_CAPABILITY"],
   list: commonErrors,
   attach: [...commonErrors, "E_WRITER_BUSY", "E_LEASE_EXPIRED", "E_REPLAY_BUSY", "E_REPLAY_DEADLINE"],
@@ -779,6 +795,7 @@ export function hasReservedTerminalResult(raw: unknown): boolean {
       o.outcome === "handshake-required" ||
       Object.hasOwn(o, "terminalOutcome") ||
       o.op === "__terminal" ||
+      o.op === "resolved_ack" ||
       (o.v === 1 &&
         ["prepare_protocol", "protocol_challenge", "protocol_ready", "bind", "inventory"].includes(String(o.op))) ||
       (o.v === 1 && ["negotiate", "resource_inventory"].includes(String(o.action))) ||
@@ -847,4 +864,98 @@ export function canonicalTerminalInventory(entries: readonly TerminalResourceEnt
       state: e.state,
     })),
   });
+}
+
+/** Trusted agent-local context, NEVER reconstructed from cmd/HTTP/ack fields.
+ * A derives channel from its successfully established resource-only ready CAS, live
+ * from current main/plain/domain/connection guards, challenge+inventoryId+revision from
+ * the exact snapshot it sent on that channel, and receipts ONLY from locally proven reaped
+ * records (sealed spawn future, closed PTY, exited identities). Old resource owner epochs
+ * may differ from current sender scope: compare the full known identity, not just termId.
+ */
+export interface TerminalResolvedAckAuthority {
+  readonly live: boolean;
+  readonly current: Pick<
+    TerminalProtocolReadyProof,
+    "localConnectionInstance" | "sessionId" | "epoch" | "ownerInstance"
+  >;
+  /** Minimal bound scope only: do NOT retain/reuse bootstrap grant/nonces/expired ready proof. */
+  readonly channel: Pick<
+    TerminalProtocolReadyProof,
+    "localConnectionInstance" | "sessionId" | "epoch" | "ownerInstance" | "mode"
+  > & { readonly channelId: string };
+  readonly challenge: TerminalChallenge;
+  readonly inventoryId: string;
+  readonly revision: number;
+  readonly lastJournalRevision: number;
+  readonly receipts: readonly TerminalResourceIdentity[];
+  readonly now: number;
+}
+/** Preflight for A's synchronous/atomic forgetResolvedReceipts operation. Validate the
+ * entire batch before deleting ANY receipt; then forget exactly these identities and
+ * advance lastJournalRevision in the same guarded tick. An unknown/duplicate identity,
+ * stale scope/challenge/deadline/revision or a replay after forget is a no-effect rejection.
+ * Recheck the current private authority immediately before the caller's deletion CAS.
+ *
+ * The bootstrap proof is consumed at channel establishment; it is not reused after expiry.
+ * Bound channel authority comes from the current live record + inventory challenge deadline.
+ * H cannot prove fsync cryptographically here; its trusted dedicated port MUST enqueue
+ * only AFTER durable resolved commit. Lost ACK leaves receipts pinned; no TTL/missing-
+ * record/login/epoch change is permission to forget, reopen or lift global quarantine.
+ */
+export function terminalResolvedAckMatches(
+  raw: unknown,
+  authority: TerminalResolvedAckAuthority,
+): raw is Extract<TermReq, { op: "resolved_ack" }> {
+  try {
+    if (!terminalFrameOk(raw)) return false;
+    const f = raw as TermReq;
+    if (f.op !== "resolved_ack") return false;
+    const a = authority,
+      channel = a.channel,
+      resolved = f.resolved;
+    if (
+      a.live !== true ||
+      channel.mode !== "resource-only" ||
+      !Value.Check(TerminalIdSchema, channel.localConnectionInstance) ||
+      a.current.localConnectionInstance !== channel.localConnectionInstance ||
+      a.current.sessionId !== channel.sessionId ||
+      a.current.epoch !== channel.epoch ||
+      a.current.ownerInstance !== channel.ownerInstance ||
+      !Value.Check(TerminalChallengeSchema, a.challenge) ||
+      f.channelId !== channel.channelId ||
+      f.sessionId !== channel.sessionId ||
+      f.epoch !== channel.epoch ||
+      f.ownerInstance !== channel.ownerInstance ||
+      !Number.isSafeInteger(a.now) ||
+      a.now < 0 ||
+      a.now >= a.challenge.deadlineAt ||
+      resolved.hubBootId !== a.challenge.hubBootId ||
+      resolved.challengeId !== a.challenge.challengeId ||
+      resolved.linkGen !== a.challenge.linkGen ||
+      resolved.inventoryId !== a.inventoryId ||
+      resolved.revision !== a.revision ||
+      !Number.isSafeInteger(a.lastJournalRevision) ||
+      a.lastJournalRevision < 0 ||
+      resolved.journalRevision < a.lastJournalRevision ||
+      a.receipts.length > TERMINAL_LIMITS.unresolvedResources
+    )
+      return false;
+    const known = new Set<string>();
+    for (const identity of a.receipts) {
+      if (!Value.Check(TerminalResourceIdentitySchema, identity)) return false;
+      const key = terminalIdentityKey(identity);
+      if (known.has(key)) return false;
+      known.add(key);
+    }
+    const seen = new Set<string>();
+    for (const identity of resolved.identities) {
+      const key = terminalIdentityKey(identity);
+      if (!known.has(key) || seen.has(key)) return false;
+      seen.add(key);
+    }
+    return true;
+  } catch {
+    return false;
+  }
 }

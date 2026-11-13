@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import childProcess from "node:child_process";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -7,7 +8,16 @@ import { createQueueMirror } from "../../src/web-hub/agent/queue-mirror.js";
 import { createTerminalCommandIngress } from "../../src/web-hub/hub/commands.js";
 import { NdjsonDecoder } from "../../src/web-hub/protocol/ndjson.js";
 import type { CmdFrame, CmdResultFrame, CmdLateFrame } from "../../src/web-hub/protocol/messages.js";
-import type { TermRes, TerminalNegotiation } from "../../src/web-hub/protocol/terminal.js";
+import {
+  canonicalTerminalInventory,
+  terminalIdentityKey,
+  terminalResolvedAckMatches,
+  type TermRes,
+  type TerminalNegotiation,
+  type TerminalResolvedAckAuthority,
+  type TerminalChallenge,
+} from "../../src/web-hub/protocol/terminal.js";
+import { decodeHubFrame } from "../../src/web-hub/protocol/messages.js";
 import { fakeCtx, fakePi, fakeTimerQueue } from "../web-hub/agent/helpers.js";
 import { postJson } from "../web-hub/http/helpers.js";
 import { waitFor } from "../web-hub/hub/helpers.js";
@@ -23,6 +33,13 @@ afterEach(async () => {
 const limits = { maxPerSession: 2, maxPerPrincipal: 2, maxTotal: 8, inputIdleMs: 3600000, maxLifetimeMs: 28800000 };
 const secret = "PRIVATE-GRANT-MARKER";
 const inventory = "PRIVATE-INVENTORY-MARKER";
+const receiptIdentity = {
+  agentSessionId: "old-receipt-session",
+  termId: "old-receipt-term",
+  epoch: "old-receipt-epoch",
+  ownerInstance: "old-receipt-owner",
+  reservationId: "old-receipt-reservation",
+};
 function agent(h: TerminalHarness) {
   const { ctx, state } = fakeCtx({ mode: "tui" });
   state.sessionId = "session";
@@ -44,6 +61,13 @@ function agent(h: TerminalHarness) {
   const dedicated: TermRes[] = [];
   const cmdReplies: Array<CmdResultFrame | CmdLateFrame> = [];
   const incoming: CmdFrame[] = [];
+  const receiptRows = new Map([[terminalIdentityKey(receiptIdentity), receiptIdentity]]);
+  const resourceChannels = new Map<string, TerminalResolvedAckAuthority["channel"]>();
+  const inventoryScopes = new Map<string, { challenge: TerminalChallenge; inventoryId: string; revision: number }>();
+  const forgetResolvedReceipts = vi.fn((identities: (typeof receiptIdentity)[]) => {
+    for (const identity of identities) receiptRows.delete(terminalIdentityKey(identity));
+  });
+  let journalFloor = 7;
   const scope = {
     localConnectionInstance: "live-connection",
     sessionId: "session",
@@ -61,7 +85,17 @@ function agent(h: TerminalHarness) {
       h.client.send(f);
     },
     onBound: (_channel, proof) => {
-      if (proof.mode === "resource-only") readInventory();
+      if (proof.mode === "resource-only") {
+        resourceChannels.set(_channel, {
+          channelId: _channel,
+          mode: proof.mode,
+          localConnectionInstance: proof.localConnectionInstance,
+          sessionId: proof.sessionId,
+          epoch: proof.epoch,
+          ownerInstance: proof.ownerInstance,
+        });
+        readInventory();
+      }
     },
   });
   const ledger = createCommandLedger();
@@ -93,7 +127,104 @@ function agent(h: TerminalHarness) {
         incoming.push(f);
         if (defer) waiting.push(f);
         else handler.handle(f);
-      } else if ((raw as { t?: string }).t === "term_req") negotiator.receive(raw);
+      } else if ((raw as { t?: string }).t === "term_req") {
+        const request = decodeHubFrame(raw);
+        if (request?.t !== "term_req") return;
+        if (request.op === "resolved_ack") {
+          const proof = resourceChannels.get(request.channelId),
+            snapshot = inventoryScopes.get(request.channelId);
+          if (
+            proof &&
+            snapshot &&
+            terminalResolvedAckMatches(request, {
+              live: true,
+              current: scope,
+              channel: proof,
+              ...snapshot,
+              lastJournalRevision: journalFloor,
+              receipts: [...receiptRows.values()],
+              now: Date.now(),
+            })
+          ) {
+            forgetResolvedReceipts(request.resolved.identities);
+            journalFloor = request.resolved.journalRevision;
+          }
+        } else if (request.op === "inventory") {
+          const proof = resourceChannels.get(request.channelId);
+          if (
+            !proof ||
+            proof.mode !== "resource-only" ||
+            request.sessionId !== scope.sessionId ||
+            request.epoch !== scope.epoch ||
+            request.ownerInstance !== scope.ownerInstance
+          )
+            return;
+          const snapshot = { challenge: request.challenge, inventoryId: "receipt-inventory", revision: 1 };
+          inventoryScopes.set(request.channelId, snapshot);
+          // Metadata-only receipt source fixture, not a real OS reaper/journal implementation.
+          const evidence = {
+            hubBootId: request.challenge.hubBootId,
+            challengeId: request.challenge.challengeId,
+            linkGen: request.challenge.linkGen,
+            inventoryId: snapshot.inventoryId,
+            revision: snapshot.revision,
+          };
+          const processIdentity = { bootId: "fixture-linux-boot", pid: 7, starttime: "100", uid: 1000 };
+          const digest = createHash("sha256").update(canonicalTerminalInventory([])).digest("hex");
+          const pages = [
+            {
+              ...evidence,
+              phase: "begin",
+              sender: {
+                agentSessionId: scope.sessionId,
+                epoch: scope.epoch,
+                ownerInstance: scope.ownerInstance,
+                processIdentity,
+              },
+              totalCount: 0,
+              chunkCount: 1,
+              digest,
+            },
+            {
+              ...evidence,
+              phase: "chunk",
+              chunkIndex: 0,
+              entries: [],
+              proofs: [
+                {
+                  ...evidence,
+                  identity: receiptIdentity,
+                  agentProcessIdentity: processIdentity,
+                  proofId: "receipt-proof",
+                  spawnSettled: true,
+                  ptyClosed: true,
+                  helperReaped: true,
+                  managedGroupsGone: true,
+                  identitiesChecked: [],
+                  outcome: "reaped",
+                },
+              ],
+            },
+            { ...evidence, phase: "end", chunkCount: 1, totalCount: 0, digest, complete: true },
+          ];
+          for (const page of pages) {
+            const reply = {
+              t: "term_res",
+              v: 1,
+              rid: request.rid,
+              sessionId: scope.sessionId,
+              epoch: scope.epoch,
+              ownerInstance: scope.ownerInstance,
+              channelId: request.channelId,
+              op: "inventory",
+              ok: true,
+              page,
+            } as TermRes;
+            dedicated.push(reply);
+            h.client.send(reply);
+          }
+        } else negotiator.receive(raw);
+      }
     },
     onError: (e) => {
       throw new Error(e.code);
@@ -107,6 +238,8 @@ function agent(h: TerminalHarness) {
     builtin,
     mint,
     readInventory,
+    receiptRows,
+    forgetResolvedReceipts,
     dedicated,
     cmdReplies,
     incoming,
@@ -177,6 +310,20 @@ describe("T-OLD-HUB r4 (§4.1.1 Major): unpatched /api/cmd/LRU/waiters/registry/
       { v: 1, action: "resource_inventory", requestNonce: "resource-nonce", page: 1 },
       { v: 1, action: "protocol_ready", offerId: "forged", hubNonce: "forged", agentChallenge: "forged" },
       { v: 1, action: "negotiate", requestNonce: "nonce", ready: { t: "term_req", op: "protocol_ready" } },
+      {
+        v: 1,
+        action: "resolved_ack",
+        channelId: "forged",
+        resolved: {
+          hubBootId: "forged",
+          challengeId: "forged",
+          linkGen: 1,
+          inventoryId: "forged",
+          revision: 1,
+          journalRevision: 8,
+          identities: [receiptIdentity],
+        },
+      },
     ];
     for (const [i, action] of actions.entries()) {
       const id = String(i + 1).repeat(16),
@@ -237,6 +384,9 @@ describe("T-OLD-HUB r4 (§4.1.1 Major): unpatched /api/cmd/LRU/waiters/registry/
     expect(a.dedicated).toEqual([]);
     expect(a.mint).toHaveBeenCalledTimes(0);
     expect(a.readInventory).toHaveBeenCalledTimes(0);
+    expect(a.forgetResolvedReceipts).toHaveBeenCalledTimes(0);
+    expect(a.receiptRows.size).toBe(1);
+    expect(a.incoming.some((f) => f.cmd.op === "command" && f.cmd.args.includes('"action":"resolved_ack"'))).toBe(true);
     expect(spawn).toHaveBeenCalledTimes(0);
     expect(fork).toHaveBeenCalledTimes(0);
     expect(execFile).toHaveBeenCalledTimes(0);
@@ -382,5 +532,62 @@ describe("T-OLD-HUB r4 (§4.1.1 Major): unpatched /api/cmd/LRU/waiters/registry/
     expect(resourceReady).toMatchObject({ op: "protocol_ready", mode: "resource-only", ok: true });
     expect(resourceReady).not.toHaveProperty("grant");
     expect(JSON.stringify(a.cmdReplies)).not.toContain(inventory);
+    if (
+      !resourceReady ||
+      resourceReady.op !== "protocol_ready" ||
+      !resourceReady.ok ||
+      resourceReady.mode !== "resource-only"
+    )
+      throw new Error("missing resource channel");
+    const challenge = {
+      hubBootId: "receipt-hub",
+      challengeId: "receipt-challenge",
+      linkGen: meta.linkGen,
+      deadlineAt: Date.now() + 5000,
+    };
+    h.registry.send(h.agentKey, {
+      t: "term_req",
+      v: 1,
+      rid: "receipt-inventory",
+      sessionId: "session",
+      epoch: "epoch-1",
+      ownerInstance: "owner",
+      channelId: resourceReady.channelId,
+      op: "inventory",
+      challenge,
+    });
+    await waitFor(() => privateFrames.some((f) => f.op === "inventory" && f.ok && f.page.phase === "end"));
+    const resolvedAck = {
+      t: "term_req" as const,
+      v: 1 as const,
+      rid: "receipt-ack",
+      sessionId: "session",
+      epoch: "epoch-1",
+      ownerInstance: "owner",
+      channelId: resourceReady.channelId,
+      op: "resolved_ack" as const,
+      resolved: {
+        hubBootId: challenge.hubBootId,
+        challengeId: challenge.challengeId,
+        linkGen: challenge.linkGen,
+        inventoryId: "receipt-inventory",
+        revision: 1,
+        journalRevision: 8,
+        identities: [receiptIdentity],
+      },
+    };
+    // H's fixture represents an already durable commit; disk durability/OS proof are H/A/P3 gates.
+    h.registry.send(h.agentKey, { ...resolvedAck, resolved: { ...resolvedAck.resolved, challengeId: "stale" } });
+    await h.barrier();
+    expect(a.forgetResolvedReceipts).toHaveBeenCalledTimes(0);
+    expect(a.receiptRows.size).toBe(1);
+    h.registry.send(h.agentKey, resolvedAck);
+    await waitFor(() => a.forgetResolvedReceipts.mock.calls.length === 1);
+    await h.barrier();
+    expect(a.receiptRows.size).toBe(0);
+    h.registry.send(h.agentKey, resolvedAck);
+    await h.barrier();
+    expect(a.forgetResolvedReceipts).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(h.bus)).not.toContain(receiptIdentity.termId);
   });
 });
