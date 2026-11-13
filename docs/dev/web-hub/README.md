@@ -1438,3 +1438,41 @@ still becomes lost at that deadline; completing A cannot leave absent B outside 
 barrier. Expiring a challenge never removes its journal reservation. Recovery/release
 bookkeeping is pruned only when a later durable journal revision no longer contains
 that identity, keeping the in-memory metadata bounded without TTL permission to open.
+
+#### P1-H lifecycle reclamation and control-queue bounds (rework)
+
+A normal close ACK, internal close, or current dedicated exit/closing/reaped fact now
+starts a bounded resource-only collection, including when the browser writer has
+already detached or its authentication has been revoked. A UI `exit/reaped` is still
+not physical proof: unproven retiring rows remain `reap_incomplete` with a fixed audit
+reason. Collection authority is a private current plain/main agent/link guard, never
+an interactive grant or an HTTP bypass. It cannot admit input, attach, or open.
+Lifecycle, startup and quota-full retries share one in-flight attempt per current
+agent incarnation (at most 32); the 2s control budget aborts its signal, all timers are
+unref'd, and dispose aborts outstanding attempts. Complete current inventory + local
+receipt/OS verification + durable resolved CAS + final non-aborted current fence CAS
+are still the only slot-release path. Only then is private `resolved_ack` emitted on
+that resource-only channel; its context is discarded when collection finishes.
+
+A new issued-ticket open at hot physical quota retries bounded collection before
+returning `E_LIMIT`. It never allocates/spawns on unproven cleanup. Accepted-ticket
+idempotency is checked first, and cold journal quarantine with no known H slots keeps
+its existing `E_RESOURCE_QUARANTINED` semantics. No deadline/TTL or logical exit frees
+capacity. Failed inventory, withheld proof, failed durable commit and collector timeout
+all retain physical slots; no retry loop or timer-based release is introduced.
+
+Forwarding queues now have three independent per-terminal budgets: 64KiB raw staging,
+128 items, and 128KiB actual serialized directed SSE frames (including JSON metadata
+and SSE envelope). Raw-byte rate credits remain separate. Only adjacent state events
+for the same writer may coalesce to the latest state; output, gap, cutover and other
+barriers never coalesce or reorder. Overflow drops that writer/queue, not the shell.
+Tests exhaust rate credit through real agent frames and rendered ACKs, then flood
+zero-raw-byte controls, checking exact serialized charging and writer-only detachment.
+Unit tests additionally flood 20,000 controls and assert item/byte bounds, latest-state
+coalescing and barrier order. Public HTTP/agent-frame tests run six open/close and six
+open/detach/exit cycles past the two-slot quota without manually starting quarantine.
+
+`bounded()` always handles an already-started promise even when its signal/deadline
+rejects before installing the wait. The real missing-directory journal load with an
+already-aborted signal runs in an isolated Node process and asserts no unhandled
+filesystem rejection. This is not an ENOENT-to-empty-store exception.
