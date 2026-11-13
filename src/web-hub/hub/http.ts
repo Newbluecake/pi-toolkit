@@ -14,7 +14,7 @@
  * Every JSON body leaves through ONE exit — `sendJson` (delegating to `gzip.ts`'s negotiation):
  * a ≥2 KiB body for a client offering gzip (q>0) is compressed on the thread pool and answered
  * with `Content-Encoding: gzip` + `Vary: Accept-Encoding`; everything else is byte-identical
- * identity. SSE frames never pass through it (flush semantics), and the static UI keeps its own
+ * identity. SSE uses its own streaming gzip + per-frame flush in sse.ts, and the static UI keeps its own
  * compress-once cache in `static.ts`.
  *
  * SSE payload shapes (`event` → `data`), for the frontend mirror:
@@ -355,7 +355,7 @@ export function sendJson(
   // injected into the spawn/preview/file-search/agent-remove/upload route modules below): identity
   // responses are byte-identical to the pre-gzip behavior; a ≥2 KiB body for a client offering
   // gzip (q>0) is compressed on the thread pool with Content-Encoding/Vary and a post-compression
-  // Content-Length. SSE (`sse.ts`) never passes through here — its flush semantics stay untouched.
+  // Content-Length. SSE (`sse.ts`) uses a separate streaming compressor with per-frame flush.
   sendJsonNegotiated(res, status, body, headers);
 }
 
@@ -841,6 +841,8 @@ function createRouteSet(
   function openEvents(req: IncomingMessage, res: ServerResponse, auth?: SseClient["auth"]): SseClient {
     const raw = req.headers["last-event-id"];
     const lastEventId = typeof raw === "string" && /^\d{1,16}$/.test(raw.trim()) ? Number(raw.trim()) : undefined;
+    // attach owns encoding negotiation and the ordered output queue on BOTH listeners (LAN
+    // delegates here). Bootstrap and runSnapshot sends therefore cannot bypass backpressure.
     const client = sse.attach(req, res, lastEventId, auth);
     client.send("hub", { ...routeDeps.info(), port: routeDeps.port() });
     // web-hub-privacy plan v2.1 (P1): the locked-set snapshot rides the connect burst BEFORE

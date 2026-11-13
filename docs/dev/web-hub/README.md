@@ -1126,3 +1126,59 @@ capability、末跳 pure-witness trusted-CODE 边界及 stock tokenizer/template
 详见 memory README；synthetic 本地协议和 loopback TLS 不可当生产证书。旧客户端仍读人类摘要，
 不承诺旧 UI 新的结构化展示。同步 syscall 不可抢占、同 uid 竞态、无全局回滚、unknown 不重试及
 不保证 elsewhere SDK flush/fsync 的既有限界保持；未连接真实 Hub/用户数据或执行运行中 reload。
+
+## SSE 输出管线（`/api/events`，#36 包 A）
+
+两个 listener 共享 `openEvents → sse.attach → sse-output.ts`。显式 `Accept-Encoding: gzip`
+（既有 parser，大小写无关且 q>0）协商每连接 `createGzip`；每个完整 SSE 帧写入后
+`flush(Z_SYNC_FLUSH)`，hello、replay、定向 send、publish、ping、auth 都不等待下一帧。
+无 header、q=0、br-only、wildcard-only 仍用原 identity SSE body；事件格式、id、PROTO
+不变。两种编码均带 `Vary: Accept-Encoding`（合并已有 Vary），原 `Cache-Control: no-store`、
+`X-Accel-Buffering: no`、keep-alive 不变；原 SSE 没有 `no-transform`，不删除其他路径的该指令。
+压缩中途出错只能断开重连，不能在已发 gzip header 后混入 identity 字节。
+
+所有帧进入同一 FIFO；identity write=false 后等 socket drain，gzip 一次只处理一帧，
+flush 完成且下游可写才继续。bootstrap、Last-Event-ID replay、history→status/ctl→缓冲帧
+自动走此队列，后来的 live 更新不能超车。既有 replay 超预算→resync 策略保留。publish
+仍先写入有 count/byte 双限的 ring，再向各客户端入队；ping 也入队，不跳过、不插队。
+`send=true` 表示接收入队，不代表已送达浏览器。
+
+慢消费者的保守计量为 **未写队列 UTF-8 bytes + 正在压缩的完整输入帧 bytes +
+zlib readableLength + response writableLength**。输入直到 flush callback 才扣除，避免
+把 zlib 吞入误当作已送达。**每连接固定 24 MiB 准入硬上限**，与软阈值配置独立：
+`send` 在入队前检查上述 pending + 新帧 UTF-8 bytes，超限立即 destroy 并返回 false，
+客户端重连后 resync/重新快照；单个超大帧也不能绕过。终止 auth 替换队列时也检查
+剩余在途 bytes + 终止帧。未写 FIFO + 正在压缩的输入始终 ≤24 MiB；在途帧转换时
+zlib 输出/response 可暂时与输入重复计量，因此它不是整个连接/native/JS heap 的精确内存帽。
+选择 24 MiB = 完整 replay ring 的 16 MiB + bootstrap/history 的 8 MiB 突发余量：
+覆盖显式放大 replay 软预算的既有全 ring 回放测试，同时容纳 40 agents 普通 fleet（约
+2.48 MB）、10 agents 大 fleet（约 4.49 MB）及约 2 MiB history→status/ctl 合成突发。
+不是承诺任意大小快照均可一次送达，ring 本身的上限不约束连接 FIFO，因此仍需独立准入。
+
+默认软阈值仍为 2 MiB；超限时启动**最长 5 s 的净进展窗口**。窗口结束时比较上述
+pending 字节：**严格少于本窗口起点**则以当前值为下一窗口基线继续等待；持平或增长
+即 destroy。只有回落到软阈值以内才直接撤销窗口；单次 socket drain、enqueue/ping/
+压缩回调本身不重置期限，不能用“有 drain”替代净下降。这样有限的 8 MiB 快照即使
+每 200 ms 才消费 128 KiB、总时长 12.8 s，仍可完成；持续生产快于消费的连接则有界断开。
+首次超限可能发生在同步 bootstrap/history 突发的中间，因此首窗口基线在本轮同步突发
+结束后的 microtask 采样，**不推迟 deadline**；后续窗口直接使用前一窗口终点。
+基线采样以 timer 身份检查隔离，取消/替换窗口后的 microtask 不影响新窗口。
+正常 close 排空已接收帧，revoke 丢弃尚未写出队列后发 auth（已交给 socket/zlib 的帧
+不可撤回），停止新发送；终止排空也按相同净进展窗口等待（不因低于软阈值直接撤销）。
+deadline 经本地 `clampSpanMs` 镜像校验（不扩大 hub 导入白名单），
+所有 timer unref；断连/error/finish 清空队列与 timer、unpipe/destroy compressor 并卸载
+自有 listeners，native zlib error guard 保留到 close 后移除，最后一连接清掉 hub ping。
+
+边界与风险：2 MiB 是带宽限的软阈值，24 MiB 是发送准入硬帽，健康大快照需要暂存；
+每连接 compressor 增加内存和 thread-pool CPU，逐帧 flush 会降低压缩比；只要每窗口
+仍净下降就允许慢链路继续，并非绝对 5 s 截止；持平/增长的积压在窗口结束时断开。
+这衡量的是本地保守 pending 字节，不是浏览器已处理证明。
+gzip 会跨帧保留字典，压缩长度侧信道及明文 LAN
+本身不因本优化消失；未实测真实代理/TLS/浏览器，合成重复字符压缩比不代表现场收益。
+门禁：`tests/web-hub/hub/sse-output.test.ts`（backpressure、timer/listener/error 清理，
+128 KiB 帧每轮生产 8 个/只 drain 1 个的有界字节准入与无净进展期限；有限 8 MiB
+快照跨窗口缓慢排空、净下降后停滞、生产恰好抵消消费，防止硬帽移除/绝对期限误杀/
+任意 drain 续期回归）、
+`tests/web-hub/http/{sse,gzip-negotiation}.test.ts`、
+`tests/integration/web-hub-sse-output.test.ts`（真实 socket、逐帧可解码/精确字节、bootstrap
+突发、真实 runSnapshot 顺序、LAN 协商、真不读客户端有界断开）。fixtures 不重生。

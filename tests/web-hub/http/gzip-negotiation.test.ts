@@ -6,7 +6,7 @@
  *   client ⇒ `Content-Encoding: gzip` + `Vary: Accept-Encoding` + post-compression
  *   `Content-Length`, gunzip round-trips to the exact original bytes; every non-eligible
  *   combination (no header, `gzip;q=0`, sub-floor body) stays byte-identical identity.
- * - SSE (`/api/events`) never carries `Content-Encoding` (flush semantics are out of scope).
+ * - SSE (`/api/events`) negotiates streaming gzip independently of JSON size thresholds.
  * - `/api/preview`: TEXT responses compress post-verify with the metadata headers still
  *   describing the original bytes; IMAGES (already-compressed formats) never compress.
  */
@@ -188,10 +188,11 @@ describe("api json gzip negotiation", () => {
     expect(r.body.toString("utf8")).toBe(JSON.stringify(small));
   });
 
-  it("never compresses SSE responses, even for a gzip client", async () => {
+  it("negotiates streaming gzip for SSE responses", async () => {
     const headers = await sseResponseHeaders(port, cookie);
     expect(headers["content-type"]).toBe("text/event-stream; charset=utf-8");
-    expect(headers["content-encoding"]).toBeUndefined();
+    expect(headers["content-encoding"]).toBe("gzip");
+    expect(headers.vary).toBe("Accept-Encoding");
   });
 });
 

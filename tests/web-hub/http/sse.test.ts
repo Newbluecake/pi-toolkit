@@ -148,8 +148,8 @@ describe("SseHub", () => {
     expect(late.events.slice(1).map((e) => e.id)).toEqual([1, 2]);
   });
 
-  it("slow consumer (writableLength > budget) is closed", async () => {
-    const { hub: h, port, attached } = await setup({ maxBufferedBytes: 256 * 1024 });
+  it("slow consumer (sustained >budget without drain) is closed", async () => {
+    const { hub: h, port, attached } = await setup({ maxBufferedBytes: 256 * 1024, stallMs: 100 });
     const slow = await connect(port);
     slow.pause();
     const fast = await connect(port);

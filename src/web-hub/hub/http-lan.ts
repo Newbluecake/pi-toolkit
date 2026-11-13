@@ -1348,6 +1348,8 @@ async function handleLanRequestInner(
     if (path === "/api/events") {
       const session = await requireLanSession(rt, req, res, ctx, true, lease);
       if (session === undefined) return;
+      // Forward the original request, including Accept-Encoding/Last-Event-ID; the shared
+      // openEvents → sse.attach transport owns streaming gzip and drain-aware ordering.
       const client = rt.routes.openEvents(req, res, {
         sidHash: session.sidHash,
         userId: session.userId,

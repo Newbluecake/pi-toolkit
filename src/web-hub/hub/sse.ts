@@ -13,12 +13,14 @@
  * - Directed frames (`SseClient.send`: hello/hub/agents/history/ping …) carry
  *   no `id:` field, never enter the ring and never consume an id.
  * - `publish(..., agentKey)` reaches only clients subscribed to that agent.
- * - Slow consumer: `res.writableLength > maxBufferedBytes` after a write ⇒ the
- *   client is destroyed (it reconnects and re-snapshots).
+ * - All writes share an ordered, drain-aware output queue, with optional streaming gzip.
+ *   Queue + compressor input + socket bytes over budget get a bounded no-drain grace.
  * - Ping every `pingMs` (unref'd interval, only while clients exist).
  */
 import { randomBytes } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { acceptsGzip } from "./gzip.js";
+import { createSseOutput, type SseOutput } from "./sse-output.js";
 import type { SSE_EVENTS, SseAuthPayload } from "../protocol/http-contract.js";
 
 export type SseEventName = (typeof SSE_EVENTS)[number];
@@ -56,6 +58,7 @@ export const SSE_DEFAULTS = {
   ringMaxBytes: 16 * 1024 * 1024,
   maxBufferedBytes: 2 * 1024 * 1024,
   pingMs: 15_000,
+  stallMs: 5_000,
 } as const;
 
 interface RingEntry {
@@ -67,7 +70,7 @@ interface RingEntry {
 
 interface ClientState {
   client: SseClient;
-  res: ServerResponse;
+  output: SseOutput;
   closed: boolean;
 }
 
@@ -82,6 +85,7 @@ export function createSseHub(opts: {
   ringMaxBytes?: number /* 16 MiB，按已序列化 SSE 帧字节计 */;
   maxBufferedBytes?: number /* 2 MiB */;
   pingMs?: number /* 15s */;
+  stallMs?: number /* net-progress window (also while finishing), ≤5s */;
   now: () => number;
 }): SseHub {
   const ringSize = opts.ringSize ?? SSE_DEFAULTS.ringSize;
@@ -118,29 +122,14 @@ export function createSseHub(opts: {
 
   function write(state: ClientState, frame: string): boolean {
     if (state.closed || state.client.revoked === true) return false;
-    try {
-      state.res.write(frame);
-    } catch {
-      drop(state, true);
-      return false;
-    }
-    if (state.res.writableLength > maxBufferedBytes) {
-      drop(state, true); // slow consumer
-      return false;
-    }
-    return true;
+    return state.output.send(frame);
   }
 
-  function drop(state: ClientState, destroy: boolean): void {
+  function drop(state: ClientState, terminal?: string): void {
     if (state.closed) return;
     state.closed = true;
     clients.delete(state.client.id);
-    try {
-      if (destroy) state.res.destroy();
-      else state.res.end();
-    } catch {
-      /* already gone */
-    }
+    state.output.finish(terminal);
     if (clients.size === 0) stopPing();
   }
 
@@ -197,23 +186,41 @@ export function createSseHub(opts: {
       id,
       subscribed,
       send: (event, data) => write(state, formatSseFrame(event, data)),
-      close: () => drop(state, false),
+      close: () => drop(state),
       ...(auth === undefined ? {} : { auth }),
     };
-    const state: ClientState = { client, res, closed: false };
+    const rawEncoding = req.headers["accept-encoding"];
+    const gzip = acceptsGzip(typeof rawEncoding === "string" ? rawEncoding : undefined);
+    const output = createSseOutput(req, res, {
+      gzip,
+      maxBufferedBytes,
+      stallMs: opts.stallMs ?? SSE_DEFAULTS.stallMs,
+      onClose: () => {
+        state.closed = true;
+        clients.delete(id);
+        if (clients.size === 0) stopPing();
+      },
+    });
+    const state: ClientState = { client, output, closed: false };
     clients.set(id, state);
 
+    const previousVary = res.getHeader?.("Vary");
+    const vary =
+      previousVary === undefined
+        ? []
+        : String(previousVary)
+            .split(",")
+            .map((v) => v.trim());
+    if (!vary.some((v) => v === "*" || v.toLowerCase() === "accept-encoding")) vary.push("Accept-Encoding");
     res.writeHead(200, {
       "Content-Type": "text/event-stream; charset=utf-8",
       "Cache-Control": "no-store",
       Connection: "keep-alive",
       "X-Accel-Buffering": "no",
+      Vary: vary.join(", "),
+      ...(gzip ? { "Content-Encoding": "gzip" } : {}),
     });
     req.socket.setNoDelay(true);
-    const onGone = (): void => drop(state, false);
-    res.on("close", onGone);
-    res.on("error", onGone);
-    req.on("error", onGone);
 
     write(state, formatSseFrame("hello", { clientId: id }));
     if (lastEventId !== undefined) {
@@ -246,12 +253,7 @@ export function createSseHub(opts: {
       if (state.closed || state.client.revoked === true || !pred(state.client)) continue;
       state.client.revoked = true; // stop publish/send before anything else observes this client
       n++;
-      try {
-        state.res.write(frame);
-      } catch {
-        // best effort — falling through to drop() below regardless
-      }
-      drop(state, false);
+      drop(state, frame);
     }
     return n;
   }
@@ -264,7 +266,7 @@ export function createSseHub(opts: {
     revoke,
     list: () => [...clients.values()].filter((s) => !s.closed).map((s) => s.client),
     closeAll: () => {
-      for (const state of [...clients.values()]) drop(state, false);
+      for (const state of [...clients.values()]) drop(state);
       stopPing();
     },
   };
