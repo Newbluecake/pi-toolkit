@@ -10,3 +10,13 @@
   width: 960px;
   height: 480px;
 }
+
+.terminal-spike-viewport {
+  width: 100%;
+  height: 100%;
+}
+.terminal-spike-viewport.is-initializing {
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+}

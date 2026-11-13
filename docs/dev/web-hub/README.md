@@ -125,73 +125,71 @@ Fleet grid 模板及子树对齐方程。Happy DOM 不执行 calc 布局运算�
 回归在 `tests/web-hub/ui/activity-rail.test.ts`：真实 header 点击验证选中 class、ARIA、
 切换及关闭后的未选中状态；CSS 契约覆盖 token 与 reduced-motion。
 
-## Terminal P0 spike：严格 CSP / WebGL 主路径与 DOM 兜底阻塞（2026-11-13）
+## Terminal P0 spike：WebGL-only 收口（2026-11-13 r3）
 
-**P0 仍未整体放行：Chromium WebGL 主路径通过，强制 DOM 兜底的 detached cell style
-写入仍触发 CSP。不得将主路径 PASS 当作完整 P0 PASS，不得据此开始 P1/P2。**
-本实验不接 PTY、登录、设置、cap 或用户入口。`terminal-spike.ts` 是 production 中的
-独立实验 entry，不从 SPA import、无主 UI DOM；只有本地 probe 显式载入它。
+用户已裁定仅支持 WebGL：不支持/禁用 WebGL2、getContext 失败或 addon 初始化失败时，
+终端不启动并给出中文原因；**没有可见 DOM fallback，也没有 renderer:dom 选项**。
+P0 不接 PTY、登录、设置、cap 或用户入口，production 的独立 terminal-spike entry 不被
+SPA import；只有本地 probe 显式加载、点击后才请求终端 lazy JS/CSS。
+core 6.0.0 / fit 0.11.0 / webgl 0.19.0 精确锁定为 UI devDependencies，均 MIT、同上游
+commit，无 runtime dependencies；主 UI CSP、node_modules 均未改。
 
-UI devDependencies 精确锁定 core `@xterm/xterm@6.0.0`、fit `0.11.0`、webgl `0.19.0`；
-三包均 MIT、无生产传递依赖、同一上游 commit。WebGL 为首选，DOM 仅实验性兜底。
-minimumContrastRatio 保持 7，包含 truecolor 样本；不通过关闭颜色/对比度路径假绿。
-WebGL context loss 终止本次 renderer，提示重新打开，不在异步回调中偷偷构造未桥接的
-DOM renderer。所有 addon 及兼容层均在终端懒 chunk，主 UI CSP 一字未改。
+### 隐藏初始化与仍需保留的最小桥接
 
-### 构造样式表兼容层的精确契约
+xterm 6.0.0 在公开 open() 中仍先初始化 DomRenderer 的 dimensions/theme 两段样式及
+Viewport scrollbar 样式。保留 constructed-styles.ts 的 **已知三注入点 + 精确版本**
+检查：仅在同步 open 栈临时截获 document.createElement(style)，返回隐藏的非 style
+placeholder，textContent 同步转 CSSStyleSheet.replaceSync / document.adoptedStyleSheets。
+未知/重复注入点、集合变化或版本不匹配均拒启；finally 恢复原 descriptor。Viewport
+selector 加实例 root 前缀，dispose 只清理本实例 sheets/placeholder，不动其他 owner。
+选择 document 而非 Shadow DOM 是为保留 xterm 的 light-DOM 字体度量与焦点语义。
 
-`components/terminal/constructed-styles.ts` 仅在同步 `terminal.open()` 栈内临时截获
-`document.createElement('style')`，返回隐藏的 **非 style** placeholder。真实空 style
-节点即使设置 text/plain，在 Chromium 中仍可能触发 CSP，因此不插入任何真实 style。
-受控 `textContent` accessor 同步转发至 `CSSStyleSheet.replaceSync()`；不写 DOM 文本。
-使用 `document.adoptedStyleSheets`，保留 xterm 原有 light-DOM 度量与 focus 行为；
-Viewport 的全局 scrollbar selector 另外加本实例 root class 前缀，防止多终端主题串色。
-finally 恢复原 createElement descriptor；失败/dispose 仅撤本实例的 sheets 和节点，
-不覆盖其他 adopted sheets。没有 MutationObserver 或常驻 document factory patch。
+临时 stage 使用外部 CSS visibility:hidden / opacity:0 / pointer-events:none，并设 inert
+和 aria-hidden。同步安装 WebGL 后，以公开 canvas.getContext(webgl2) 找到真正的 GPU
+canvas（**不能用第一个 canvas：link layer 是 2D**），确认 context 未丢失、canvas 尺寸
+有效且公开 onRender 已返回首帧才展示。失败或超时直接 dispose 隐藏 stage，不能让
+DomRenderer 接管。恢复时也完整销毁旧 UI 实例、重新走同样的隐藏 WebGL 初始化。
+先 dispose core，再 dispose addon，避免上游 WebglAddon.dispose 自动构造 DOM renderer。
 
-不调用 xterm 私有 API，但依赖 **6.0.0 已知注入集合**：DomRenderer 的 dimensions、theme
-及 Viewport 的 scrollbar 三段样式均在 open 同步创建，此后仅 textContent 更新。
-版本不匹配、缺构造样式表能力、未知/重复注入点或集合变化，均拒启并显示原因。
-升级依赖必须重审该契约。WebGL 在 open 后替换 DOM renderer 时，两个 DOM placeholder
-被上游释放，其无匹配元素的 constructed sheets 仍由本次 owner 持有，最终 dispose
-统一撤销（三段上界），无观察者遗留。
+为 DOM 行样式而加的 style-attributes.ts / Element.prototype.setAttribute 适配器和
+对应测试已删除；任何终端外/内元素的 setAttribute 都不再被全局包装。仅保留初始化
+所必需的三段 stylesheet 桥接；无永久 document patch、无 MutationObserver 适配。
 
-### 有界作用域 attribute 适配与已知阻塞
+### 有界恢复与 P1 端口边界
 
-`style-attributes.ts` 只在至少一个登记终端存活期间包装所在 document 的
-Element.prototype.setAttribute。仅精确 name===style 且目标已位于登记 root 子树时，
-转为 element.style.cssText；其他元素、detached 元素及其他属性原样透传。root 引用计数、
-重复登记及多实例清理有单测；最后 owner 释放恢复原 descriptor，不永久修改全局方法。
-根登记最多 32 个，状态仅保存在对应 DOM prototype 的具名 Symbol，最后释放即清除。
+webgl-lifecycle.ts 仅拥有 renderer UI，状态为 starting / ready / recovering / unavailable /
+reopen-required / disposed，通过 mountTerminalSpike 的 onStateChange({phase,rebuilds,reason})
+回调交付；reason 是中文提示。每个 mount 生命周期最多自动重建 **1 次**，每次初始化/
+重建等待首帧硬界 **3s**。超时会 abort，迟到实例立即 dispose；重复/旧代 loss 不能续命，
+第二次 loss 不再尝试，失败明确提示“请重开终端”。用户主动重开是新的 mount，不是
+自动 retry。CSS 加载仍为 5s，host lazy import 5s，UI write callback 2s，均有清理。
 
-**未解决：** xterm 的 DomRendererRowFactory 在 cell span 尚未 append 到 root 时就执行
-setAttribute(style)。这不在上述已授权作用域中，必须原样透传；强制 DOM + truecolor /
-minimumContrastRatio 7 实测有 style-src-attr 违规。没有把所有 detached span 纳入全局
-适配、没有假设未来归属、更没有禁掉 truecolor/对比度。继续修复需 root 再裁定边界。
+用 GPU canvas 的公开 webglcontextlost capture listener 接管事件，避免 addon 自带的
+延迟恢复 timer/logging；恢复代次和超时由本 controller 统一控制，不调用私有字段。
+回调仅报告 UI 状态，不提供后台 close/restart 操作；**P1 不能把 renderer.dispose 当作
+shell close**，需自行保留后台 shell 和 replay 源。P0 host 在 ready 时只重放固定样本，
+不声称完整终端历史/屏幕恢复。minimumContrastRatio 7 与 truecolor 路径始终启用。
 
-### 资源、许可证和回归门
+### 资源、许可证与真实门
 
-cssCodeSplit:false 不变。xterm CSS / terminal.css 使用 ?url 生成同源 hash asset，点击
-打开才加载，5s deadline，失败/取消/dispose 清理 links。provenance 从模块图计算
-terminal-exclusive 集合：mixed/escaped module 构建失败；仅 exclusive JS 命名 term-*；
-JS SHA256、CSS emitted/source SHA256 均验证，CSS 来源由 Rollup originalFileNames 与
-exclusive ?url module 绑定；禁止未解析 import/url。独立总预算：JS 256KiB gzip、
-CSS 16KiB、host 4KiB，不挪 mermaid/ordinary lazy 额度；host 同时保守计入 ordinary lazy。
-首屏不得请求 terminal 资源，首屏 CSS 增量为零。
+cssCodeSplit:false 不变。xterm CSS / terminal.css 以 ?url 成为同源 hash 外部 asset，
+不进入首屏 CSS。图中 terminal-exclusive JS 才能命名 term-*；mixed/escaped module
+构建失败。JS SHA256、CSS 的 Rollup originalFileNames/source SHA 和最终 emitted SHA
+均校验，禁止未解析 import/url/首屏 preload。独立总报警线 JS 256KiB gzip、CSS 16KiB、
+host 4KiB，不挪普通 lazy / mermaid 额度；host 仍保守计入 ordinary lazy。首屏 CSS 增量 0。
 
-LICENSE 全文依现有 generator 收录；core CSS/ESM 与 webgl ESM 保留的 Microsoft MIT /
-历史 terminal 版权头，以 vendored-bundled.json 的 artifact SHA256 pin 一并收录，不能
-因无生产 dependencies 就跳过 embedded attribution。build:web 后运行
-`tsx scripts/web-hub/gen-third-party-notices.ts`，再 check:web。
+LICENSE 全文依现有 generator，core CSS/ESM 与 WebGL ESM 的 Microsoft MIT / 历史
+terminal 版权头依 vendored-bundled.json artifact SHA256 pin 收录。build:web 后
+`tsx scripts/web-hub/gen-third-party-notices.ts --check` 和 check:web 均须通过。
 
-`npm run probe:csp -- --suite terminal --browser chromium --renderer auto` 使用实际
-production 产物及 hub 导入的原 CSP，验证点击前无资源请求、截图/布局、truecolor、
-对比度、resize、主题/字体、OSC、dispose/remount、原属性方法恢复及连接节点 CSSOM
-适配；negative 页去掉兼容层，必须抓到 style-src 违规。
-`--renderer dom` 单独验证兜底，当前预期 FAIL（上述未解决阻塞），不能忽略该红门。
-报告/截图在 node_modules/.cache/pwh-terminal-probe/。本次 root 已裁定仅要求 Chromium，
-Firefox 因缺 GTK3 / NSS 版本需求记 NOT RUN、不升级系统；可用 --browser both 另测。
-精确数字、命令结果及整体未放行结论见本次 `/tmp/webhub-terminal-p0-report-20261113.md` r2。
+`npm run probe:csp -- --suite terminal --browser chromium` 在实际 production 产物和
+hub 导入的原 CSP 下验证：正常真彩色/对比度/布局/主题/字体/重放、一次真实 context
+loss 重建、第二次 loss 上限、重建失败、getContext null/throw、addon 激活失败及
+--disable-webgl 启动参数；每条正例零 CSP violation / console error，且全程无可见 DOM
+fallback。negative control 注入真正动态 style，必须检出并拦截。报告与截图在
+node_modules/.cache/pwh-terminal-probe/report-r3.json 及 r3-*.png。旧 --renderer auto/webgl
+仅是 WebGL alias，--renderer dom 被拒绝。Firefox 按 root 裁定 NOT RUN（GTK3/NSS
+条件未满足，不升级系统）；最终 P0 数字与结论见 `/tmp/webhub-terminal-p0-report-20261113.md` r3。
 
 ## UI serving 与 LAN access
 

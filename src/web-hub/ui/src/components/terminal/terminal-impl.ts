@@ -1,45 +1,214 @@
-import { Terminal } from "@xterm/xterm";
+import { Terminal, type ITheme } from "@xterm/xterm";
 import { WebglAddon } from "@xterm/addon-webgl";
-import { installTerminalStyleAttributes } from "./style-attributes.js";
 import { FitAddon } from "@xterm/addon-fit";
 import { version } from "@xterm/xterm/package.json";
 import xtermCss from "@xterm/xterm/css/xterm.css?url";
 import terminalCss from "./terminal.css?url";
 import { captureTerminalStyles } from "./constructed-styles.js";
+import { createWebglLifecycle, type WebglUiState } from "./webgl-lifecycle.js";
 
-/** P0 only: local test bytes, no transport, shell, settings or capability changes. */
-export async function mountTerminalSpike(container: HTMLElement, compatible = true, preferWebgl = true) {
+export type { WebglUiState } from "./webgl-lifecycle.js";
+
+function requireWebgl2(doc: Document): void {
+  try {
+    const gl = doc.createElement("canvas").getContext("webgl2");
+    if (!gl || gl.isContextLost()) throw new Error("unavailable");
+    gl.getExtension("WEBGL_lose_context")?.loseContext();
+  } catch {
+    throw new Error("当前浏览器不支持或无法使用 WebGL2，终端未启动。请启用 WebGL 后重试。");
+  }
+}
+
+/** P0 renderer only. State callbacks never close/restart a future P1 background shell. */
+export async function mountTerminalSpike(
+  container: HTMLElement,
+  options: {
+    onStateChange?(state: WebglUiState): void;
+  } = {},
+) {
   const doc = container.ownerDocument;
+  try {
+    requireWebgl2(doc);
+  } catch (error) {
+    try {
+      options.onStateChange?.({ phase: "unavailable", rebuilds: 0, reason: (error as Error).message });
+    } catch {
+      /* UI port only */
+    }
+    throw error;
+  } // No xterm instance, CSS, transient DOM renderer or fallback when unavailable.
   const links: HTMLLinkElement[] = [];
   const abort = new AbortController();
-  const terminal = new Terminal({
-    allowProposedApi: false,
-    fontSize: 14,
-    cursorBlink: false,
-    minimumContrastRatio: 7,
-    scrollback: 100,
-    linkHandler: { activate() {} },
-    theme: { background: "#102030", foreground: "#e0e8f0" },
-  });
-  let releaseAttributes: (() => void) | undefined;
-  let styles: { dispose(): void } | undefined;
-  const fit = new FitAddon();
+  let fontSize = 14;
+  let theme: ITheme = { background: "#102030", foreground: "#e0e8f0" };
   let disposed = false;
+  let suppressState = false;
+
+  const lifecycle = createWebglLifecycle({
+    onStateChange(state) {
+      container.dataset["renderer"] = state.phase === "ready" ? "webgl" : "none";
+      if (!suppressState) options.onStateChange?.(state);
+    },
+    async create(signal, onLoss) {
+      if (signal.aborted) throw new Error("终端初始化已取消。");
+      requireWebgl2(doc);
+      const stage = doc.createElement("div");
+      stage.className = "terminal-spike-viewport is-initializing";
+      stage.setAttribute("aria-hidden", "true");
+      stage.inert = true;
+      container.appendChild(stage);
+      const terminal = new Terminal({
+        allowProposedApi: false,
+        fontSize,
+        minimumContrastRatio: 7,
+        cursorBlink: false,
+        scrollback: 100,
+        linkHandler: { activate() {} },
+        theme,
+      });
+      const fit = new FitAddon();
+      let bridge: { dispose(): void } | undefined;
+      let addon: WebglAddon | undefined;
+      let stopped = false;
+      let rendererCanvas: HTMLCanvasElement | undefined;
+      let rendererContext: WebGL2RenderingContext | undefined;
+      const writes = new Set<(error: Error) => void>();
+      let cancelReady = () => {};
+      let removeContextLoss = () => {};
+      const dispose = () => {
+        if (stopped) return;
+        stopped = true;
+        signal.removeEventListener("abort", cancelled);
+        cancelReady();
+        removeContextLoss();
+        for (const reject of writes) reject(new Error("终端界面已重建或关闭，写入已取消。"));
+        // Each cleanup is isolated: a failed third-party disposer must not leave a
+        // hidden stage or constructed sheet behind. Core must precede addon cleanup.
+        for (const cleanup of [
+          () => terminal.dispose(),
+          () => addon?.dispose(),
+          () => bridge?.dispose(),
+          () => stage.remove(),
+        ]) {
+          try {
+            cleanup();
+          } catch {
+            /* best-effort UI resource cleanup */
+          }
+        }
+      };
+      const session = {
+        terminal,
+        fit: () => fit.fit(),
+        dispose,
+        write(bytes: string) {
+          return new Promise<void>((resolve, reject) => {
+            if (stopped) {
+              reject(new Error("终端界面已关闭。"));
+              return;
+            }
+            const finish = (error?: Error) => {
+              clearTimeout(timer);
+              writes.delete(fail);
+              if (error) reject(error);
+              else resolve();
+            };
+            const fail = (error: Error) => finish(error);
+            const timer = setTimeout(() => fail(new Error("终端界面写入超时。")), 2_000);
+            writes.add(fail);
+            try {
+              terminal.write(bytes, () => finish());
+            } catch {
+              fail(new Error("终端界面写入失败。"));
+            }
+          });
+        },
+      };
+      let rejectReady: (error: Error) => void = () => {};
+      const cancelled = () => {
+        dispose();
+        rejectReady(new Error("WebGL 初始化已取消。"));
+      };
+      signal.addEventListener("abort", cancelled, { once: true });
+      try {
+        return await new Promise<typeof session>((resolve, reject) => {
+          rejectReady = reject;
+          const rendered = terminal.onRender(() => {
+            if (stopped || signal.aborted) return;
+            const canvas = rendererCanvas;
+            const gl = rendererContext;
+            if (!canvas || !gl || gl.isContextLost() || canvas.width < 1 || canvas.height < 1) return;
+            rendered.dispose();
+            signal.removeEventListener("abort", cancelled);
+            stage.classList.remove("is-initializing");
+            stage.removeAttribute("aria-hidden");
+            stage.inert = false;
+            resolve(session);
+          });
+          cancelReady = () => rendered.dispose();
+          terminal.loadAddon(fit);
+          for (const osc of [0, 1, 2, 8, 52]) terminal.parser.registerOscHandler(osc, () => true);
+          terminal.attachCustomKeyEventHandler((event) => {
+            if (
+              event.ctrlKey &&
+              event.shiftKey &&
+              !event.altKey &&
+              !event.metaKey &&
+              !event.isComposing &&
+              event.keyCode !== 229 &&
+              event.key === "F6"
+            ) {
+              event.preventDefault();
+              doc.querySelector<HTMLButtonElement>("[data-terminal-focus]")?.focus();
+              return false;
+            }
+            return true;
+          });
+          // xterm 6.0.0 transiently initializes DOM styles during open. Never expose that renderer:
+          // the stage is hidden, and WebGL is synchronously installed before the first render frame.
+          bridge = captureTerminalStyles(stage, version, () => terminal.open(stage));
+          addon = new WebglAddon(true);
+          addon.onContextLoss(onLoss);
+          terminal.loadAddon(addon); // Any throw disposes the hidden stage; never returns a DOM fallback.
+          // Link decoration is a separate 2D canvas. Identify the actual WebGL canvas
+          // through the public context API, not a private addon field or canvas ordering.
+          for (const candidate of stage.querySelectorAll<HTMLCanvasElement>(".xterm-screen canvas")) {
+            const context = candidate.getContext("webgl2");
+            if (context && !context.isContextLost()) {
+              rendererCanvas = candidate;
+              rendererContext = context;
+              break;
+            }
+          }
+          const canvas = rendererCanvas;
+          if (!canvas) throw new Error("WebGL 渲染器未建立，终端未启动。");
+          canvas.dataset["terminalWebglCanvas"] = "true";
+          const lost = (event: Event) => {
+            event.preventDefault();
+            // Own the native event before the addon's delayed restoration timer/logging.
+            event.stopImmediatePropagation();
+            onLoss();
+          };
+          canvas.addEventListener("webglcontextlost", lost, true);
+          removeContextLoss = () => canvas.removeEventListener("webglcontextlost", lost, true);
+          fit.fit();
+          terminal.refresh(0, terminal.rows - 1); // Public onRender excludes redraw-only startup frames.
+        });
+      } catch (error) {
+        dispose();
+        throw new Error(`WebGL 初始化失败，终端未启动。${error instanceof Error ? error.message : ""}`);
+      }
+    },
+  });
   const dispose = () => {
     if (disposed) return;
     disposed = true;
     abort.abort();
-    try {
-      terminal.dispose();
-    } finally {
-      styles?.dispose();
-      releaseAttributes?.();
-      for (const link of links) link.remove();
-      container.replaceChildren();
-    }
+    lifecycle.dispose();
+    for (const link of links) link.remove();
+    container.replaceChildren();
   };
   try {
-    // ?url keeps both stylesheets out of the first-screen CSS despite cssCodeSplit:false.
     await Promise.all(
       [xtermCss, terminalCss].map(
         (href) =>
@@ -57,9 +226,9 @@ export async function mountTerminalSpike(container: HTMLElement, compatible = tr
               else resolve();
             };
             const loaded = () => finish();
-            const failed = () => finish(new Error("Terminal stylesheet failed to load"));
-            const cancelled = () => finish(new Error("Terminal stylesheet load cancelled"));
-            const timer = setTimeout(() => finish(new Error("Terminal stylesheet deadline exceeded")), 5_000);
+            const failed = () => finish(new Error("终端样式表加载失败，终端未启动。"));
+            const cancelled = () => finish(new Error("终端样式表加载已取消。"));
+            const timer = setTimeout(() => finish(new Error("终端样式表加载超时，终端未启动。")), 5_000);
             link.addEventListener("load", loaded, { once: true });
             link.addEventListener("error", failed, { once: true });
             abort.signal.addEventListener("abort", cancelled, { once: true });
@@ -67,69 +236,33 @@ export async function mountTerminalSpike(container: HTMLElement, compatible = tr
           }),
       ),
     );
-    if (disposed) throw new Error("Terminal disposed before open");
-    terminal.loadAddon(fit);
-    // Suppress clipboard/title/hyperlink side effects for controlled spike sequences.
-    for (const osc of [0, 1, 2, 8, 52]) terminal.parser.registerOscHandler(osc, () => true);
-    terminal.attachCustomKeyEventHandler((event) => {
-      if (
-        event.ctrlKey &&
-        event.shiftKey &&
-        !event.altKey &&
-        !event.metaKey &&
-        !event.isComposing &&
-        event.keyCode !== 229 &&
-        event.key === "F6"
-      ) {
-        event.preventDefault();
-        doc.querySelector<HTMLButtonElement>("[data-terminal-focus]")?.focus();
-        return false;
-      }
-      return true;
-    });
-    if (compatible) {
-      releaseAttributes = installTerminalStyleAttributes(container);
-      styles = captureTerminalStyles(container, version, () => terminal.open(container));
-    } else terminal.open(container); // Explicit browser negative control only (P0 entry, not a user feature).
-    container.dataset["renderer"] = "dom";
-    if (compatible && preferWebgl) {
-      // Public addon, exact same upstream commit as core. DOM is the initial fallback.
-      const canvas = doc.createElement("canvas");
-      const gl = canvas.getContext("webgl2");
-      if (gl) {
-        gl.getExtension("WEBGL_lose_context")?.loseContext();
-        const webgl = new WebglAddon(true);
-        try {
-          terminal.loadAddon(webgl);
-          container.dataset["renderer"] = "webgl";
-          webgl.onContextLoss(() => {
-            // Do not silently recreate an unbridged DOM renderer after open.
-            dispose();
-            container.textContent = "Terminal unavailable: WebGL context lost; reopen required";
-          });
-        } catch (error) {
-          dispose();
-          webgl.dispose();
-          throw new Error(`Terminal unavailable: WebGL activation failed (${String(error)})`);
-        }
-      }
-    }
-    fit.fit();
+    await lifecycle.start();
     return {
-      terminal,
-      fit: () => fit.fit(),
-      write: (bytes: string) => new Promise<void>((resolve) => terminal.write(bytes, resolve)),
+      get terminal() {
+        return lifecycle.current?.terminal;
+      },
+      get state() {
+        return lifecycle.state;
+      },
+      fit: () => lifecycle.current?.fit(),
+      write: (bytes: string) =>
+        lifecycle.current?.write(bytes) ?? Promise.reject(new Error("WebGL 终端未就绪，请稍后重试或重开终端。")),
       theme: () => {
-        terminal.options.theme = { background: "#f0e0d0", foreground: "#203040" };
+        theme = { background: "#f0e0d0", foreground: "#203040" };
+        if (lifecycle.current) lifecycle.current.terminal.options.theme = theme;
       },
       font: () => {
-        terminal.options.fontSize = 18;
-        fit.fit();
+        fontSize = 18;
+        if (lifecycle.current) {
+          lifecycle.current.terminal.options.fontSize = fontSize;
+          lifecycle.current.fit();
+        }
       },
-      focus: () => terminal.focus(),
+      focus: () => lifecycle.current?.terminal.focus(),
       dispose,
     };
   } catch (error) {
+    suppressState = true;
     dispose();
     throw error;
   }

@@ -1,5 +1,5 @@
-/** Isolated P0 host entry. Never imported by the SPA; only the local probe loads it. */
-import type { mountTerminalSpike } from "./terminal-impl.js";
+/** Isolated P0 WebGL-only host. Never imported by the SPA; no shell/transport. */
+import type { mountTerminalSpike, WebglUiState } from "./terminal-impl.js";
 
 type Spike = Awaited<ReturnType<typeof mountTerminalSpike>>;
 const root = document.querySelector<HTMLElement>("[data-terminal-spike]");
@@ -8,7 +8,7 @@ if (root) {
   surface.className = "terminal-spike-surface";
   const status = document.createElement("p");
   status.setAttribute("role", "status");
-  status.textContent = "P0 local bytes only. Ctrl+Shift+F6: leave terminal input focus.";
+  status.textContent = "P0 本地测试数据；仅支持 WebGL。Ctrl+Shift+F6：退出终端输入焦点。";
   let current: Spike | undefined;
   let pending = false;
   let generation = 0;
@@ -20,49 +20,86 @@ if (root) {
       void Promise.resolve()
         .then(action)
         .catch((error: unknown) => {
-          status.textContent = error instanceof Error ? error.message : "Terminal spike failed";
+          status.textContent = `终端未启动或操作未完成：${error instanceof Error ? error.message : "请重开终端。"}`;
           root.dataset["error"] = "true";
+          if (!current) root.dataset["state"] = "unavailable";
         });
     });
     root.appendChild(control);
     return control;
   };
   const publish = () => {
-    if (!current) return;
-    root.dataset["rows"] = String(current.terminal.rows);
-    root.dataset["cols"] = String(current.terminal.cols);
-    root.dataset["fontSize"] = String(current.terminal.options.fontSize);
+    const terminal = current?.terminal;
+    if (!terminal) return;
+    root.dataset["rows"] = String(terminal.rows);
+    root.dataset["cols"] = String(terminal.cols);
+    root.dataset["fontSize"] = String(terminal.options.fontSize);
+    root.dataset["contrast"] = String(terminal.options.minimumContrastRatio);
     root.dataset["bufferText"] = Array.from(
-      { length: current.terminal.buffer.active.length },
-      (_, i) => current!.terminal.buffer.active.getLine(i)?.translateToString(true) ?? "",
+      { length: terminal.buffer.active.length },
+      (_, i) => terminal.buffer.active.getLine(i)?.translateToString(true) ?? "",
     ).join("\n");
   };
+  const seed = async (instance: Spike, mine: number) => {
+    await instance.write(
+      "P0 terminal ready\r\n\x1b[31mRED\x1b[0m 中文\r\n\x1b[38;2;12;34;56mTRUECOLOR\x1b[48;2;210;200;190mBG\x1b[0m\r\n",
+    );
+    if (mine !== generation) return;
+    publish();
+    root.dataset["ready"] = "true";
+    root.dataset["error"] = "false";
+  };
+  const stateChanged = (state: WebglUiState, mine: number) => {
+    if (mine !== generation) return;
+    status.textContent = state.reason;
+    root.dataset["state"] = state.phase;
+    root.dataset["rebuilds"] = String(state.rebuilds);
+    if (state.phase !== "ready") {
+      delete root.dataset["ready"];
+      delete root.dataset["bufferText"];
+    }
+    open.disabled = state.phase === "starting" || state.phase === "recovering" || state.phase === "ready";
+    if (state.phase === "ready" && state.rebuilds > 0 && current) {
+      void seed(current, mine).catch((error: unknown) => {
+        if (mine === generation) {
+          status.textContent = `界面重放失败，请重开终端。${String(error)}`;
+          root.dataset["error"] = "true";
+        }
+      });
+    }
+  };
   const open = button(
-    "Open terminal spike",
+    "Open WebGL terminal spike",
     async () => {
-      if (pending || current) return;
+      if (pending || current?.terminal) return;
+      current?.dispose();
+      current = undefined;
       pending = true;
       open.disabled = true;
+      root.dataset["state"] = "starting";
+      root.dataset["rebuilds"] = "0";
       const mine = ++generation;
+      let timer: ReturnType<typeof setTimeout> | undefined;
       try {
-        const { mountTerminalSpike } = await import("./terminal-impl.js");
-        const query = new URL(location.href).searchParams;
-        const instance = await mountTerminalSpike(surface, !query.has("negative"), query.get("renderer") !== "dom");
+        const module = await Promise.race([
+          import("./terminal-impl.js"),
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new Error("终端组件加载超时，请重试。")), 5_000);
+          }),
+        ]);
+        const instance = await module.mountTerminalSpike(surface, {
+          onStateChange: (state) => stateChanged(state, mine),
+        });
         if (mine !== generation) {
           instance.dispose();
           return;
         }
         current = instance;
-        await instance.write(
-          "P0 terminal ready\r\n\x1b[31mRED\x1b[0m \u4e2d\u6587\r\n\x1b[38;2;12;34;56mTRUECOLOR\x1b[48;2;210;200;190mBG\x1b[0m\r\n",
-        );
-        publish();
-        root.dataset["ready"] = "true";
-        root.dataset["error"] = "false";
-        status.textContent = "P0 ready. Ctrl+Shift+F6: leave terminal input focus.";
+        await seed(instance, mine);
       } finally {
+        clearTimeout(timer);
         pending = false;
-        open.disabled = !!current;
+        open.disabled = !!current?.terminal;
       }
     },
     "data-terminal-open",
@@ -104,8 +141,10 @@ if (root) {
       current?.dispose();
       current = undefined;
       delete root.dataset["ready"];
+      root.dataset["state"] = "disposed";
       open.disabled = pending;
       root.dataset["disposed"] = "true";
+      status.textContent = "终端界面已关闭。";
     },
     "data-terminal-dispose",
   );
