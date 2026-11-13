@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createTerminalNegotiator } from "../../../src/web-hub/agent/commands.js";
 import type { CmdFrame } from "../../../src/web-hub/protocol/messages.js";
 import { type TermRes, type TerminalProtocolReadyProof } from "../../../src/web-hub/protocol/terminal.js";
@@ -10,6 +10,12 @@ const command = (id = "command"): CmdFrame => ({
   deadlineMs: 3000,
   origin: { listener: "loopback", ip: "127.0.0.1", reqId: "req" },
   cmd: { op: "command", name: "webhub", args: "__terminal" },
+});
+const gates: ReturnType<typeof createTerminalNegotiator>[] = [];
+afterEach(() => {
+  for (const gate of gates.splice(0)) gate.dispose();
+  vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 function harness() {
   let time = 0,
@@ -30,6 +36,7 @@ function harness() {
     send: (f) => sent.push(f),
     onBound: (channel, proof) => bound.push({ channel, proof }),
   });
+  gates.push(gate);
   return {
     gate,
     sent,
@@ -81,10 +88,7 @@ describe("terminal agent sending-side ready gate (§4.1(6), T-BIND/T-CACHE)", ()
     expect(h.gate.receive(ready)).toBe(true);
     expect(h.minted).toBe(1);
     expect(h.bound).toEqual([]);
-    expect(h.gate.receive(ready)).toBe(false);
-    expect(h.minted).toBe(1);
     const bind = { ...ready, rid: "bind", op: "bind", proposedChannelId: "channel", grant: "private-grant" };
-    expect(h.gate.receive({ ...bind, grant: "forged" })).toBe(false);
     expect(h.gate.receive(bind)).toBe(true);
     expect(h.gate.receive(bind)).toBe(false);
     expect(h.bound).toHaveLength(1);
@@ -141,5 +145,129 @@ describe("terminal agent sending-side ready gate (§4.1(6), T-BIND/T-CACHE)", ()
         hubNonce: "hub",
       }),
     ).toBe(false);
+  });
+});
+
+/** Observe the actual private Map, not a production debug surface or a fake registry.
+ * Retain detached rows too: the cleanup must erase their capability fields, not just keys. */
+function observeOffers() {
+  const rows: Record<string, unknown>[] = [];
+  let offers: Map<unknown, unknown> | undefined;
+  const set = Map.prototype.set;
+  vi.spyOn(Map.prototype, "set").mockImplementation(function (this: Map<unknown, unknown>, key, value) {
+    if (
+      value &&
+      typeof value === "object" &&
+      value.phase === "offered" &&
+      typeof value.offerId === "string" &&
+      value.scope
+    ) {
+      offers = this;
+      rows.push(value as Record<string, unknown>);
+    }
+    return set.call(this, key, value);
+  });
+  return {
+    rows,
+    get map() {
+      if (!offers) throw new Error("offer Map not observed");
+      return offers;
+    },
+  };
+}
+function scrubbed(row: Record<string, unknown>) {
+  for (const key of ["timer", "grant", "proof", "hubNonce", "agentChallenge"]) expect(row).not.toHaveProperty(key);
+  expect(row.phase).toBe("closed");
+}
+function readyWithGrant() {
+  const h = harness(),
+    ready = challenge(h);
+  expect(h.gate.receive(ready)).toBe(true);
+  const bind = { ...ready, rid: "bind", op: "bind", proposedChannelId: "channel", grant: "private-grant" };
+  return { ...h, ready, bind };
+}
+describe("terminal offer expiry/material reclamation (r_TJ5QEN3F Major)", () => {
+  it.each(["offered", "challenged", "ready"])("%s expires without any later offer or receive", (phase) => {
+    vi.useFakeTimers();
+    const observed = observeOffers();
+    const h = harness();
+    if (phase === "offered")
+      expect(h.gate.offer(command(), { v: 1, action: "negotiate", requestNonce: "nonce" })).toBeDefined();
+    else {
+      const ready = challenge(h);
+      if (phase === "ready") expect(h.gate.receive(ready)).toBe(true);
+    }
+    const row = observed.rows[0]!;
+    if (phase === "ready") expect(row.grant).toBe("private-grant");
+    h.setTime(3000);
+    vi.advanceTimersByTime(3000); // No gate method/next request performs cleanup.
+    expect(observed.map.size).toBe(0);
+    scrubbed(row);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  it("expired bind prunes and scrubs even before the expiry callback is dispatched", () => {
+    vi.useFakeTimers();
+    const observed = observeOffers();
+    const h = readyWithGrant();
+    h.setTime(10001); // Wall-clock has advanced; deliberately do not run the scheduled timer.
+    expect(h.gate.receive(h.bind)).toBe(false);
+    expect(observed.map.size).toBe(0);
+    scrubbed(observed.rows[0]!);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  it.each(["allowed", "scope"])("invalid receive prunes revoked %s entries before schema validation", (fault) => {
+    vi.useFakeTimers();
+    const observed = observeOffers();
+    const h = readyWithGrant();
+    if (fault === "allowed") h.disable();
+    else h.replaceConnection();
+    expect(h.gate.receive({ t: "invalid" })).toBe(false);
+    expect(observed.map.size).toBe(0);
+    scrubbed(observed.rows[0]!);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  it.each(["bind-success", "bind-rejected", "ready-replayed", "invalid-correlated", "invalidate", "dispose"])(
+    "%s clears the row, timer and private material",
+    (outcome) => {
+      vi.useFakeTimers();
+      const observed = observeOffers();
+      const h = readyWithGrant();
+      if (outcome === "bind-success") expect(h.gate.receive(h.bind)).toBe(true);
+      if (outcome === "bind-rejected") expect(h.gate.receive({ ...h.bind, grant: "wrong" })).toBe(false);
+      if (outcome === "ready-replayed") expect(h.gate.receive(h.ready)).toBe(false);
+      if (outcome === "invalid-correlated") expect(h.gate.receive({ ...h.bind, extra: true })).toBe(false);
+      if (outcome === "invalidate") h.gate.invalidate();
+      if (outcome === "dispose") h.gate.dispose();
+      expect(observed.map.size).toBe(0);
+      scrubbed(observed.rows[0]!);
+      expect(vi.getTimerCount()).toBe(0);
+      expect(h.gate.receive(h.bind)).toBe(false);
+    },
+  );
+  it("unrefs every timer and dispose clears all timers, including more than one offer", () => {
+    vi.useFakeTimers();
+    const timers = vi.spyOn(globalThis, "setTimeout");
+    const observed = observeOffers();
+    const h = harness();
+    for (let n = 0; n < 3; n++)
+      expect(h.gate.offer(command(`command-${n}`), { v: 1, action: "negotiate", requestNonce: "nonce" })).toBeDefined();
+    expect(vi.getTimerCount()).toBe(3);
+    expect(timers.mock.results).toHaveLength(3);
+    for (const result of timers.mock.results) expect((result.value as NodeJS.Timeout).hasRef()).toBe(false);
+    h.gate.dispose();
+    expect(vi.getTimerCount()).toBe(0);
+    expect(observed.map.size).toBe(0);
+    for (const row of observed.rows) scrubbed(row);
+  });
+  it("resource-only successful ready clears bootstrap timer and proof row before handing off the channel", () => {
+    vi.useFakeTimers();
+    const observed = observeOffers();
+    const h = harness(),
+      ready = challenge(h, "resource_inventory");
+    expect(h.gate.receive(ready)).toBe(true);
+    expect(h.bound).toHaveLength(1);
+    expect(observed.map.size).toBe(0);
+    scrubbed(observed.rows[0]!);
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

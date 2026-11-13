@@ -15,7 +15,7 @@ import {
 } from "../protocol/terminal.js";
 import type { HumanDispatchBridge } from "./human-dispatch-proof.js";
 import { clampSpanMs } from "../../core/deadline.js";
-import { createSegmentedClock } from "../../core/clock.js";
+import { createSegmentedClock, type TimerHandle } from "../../core/clock.js";
 import { isXsWebCommand, parseXsWebAction } from "../protocol/xs-web-command.js";
 import { randomUUID } from "node:crypto";
 import { noteHumanWebDispatch, revokeHumanWebDispatch } from "../../fabric/xs/human-grant.js";
@@ -1792,7 +1792,7 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
 }
 
 /** P1-C sending-side gate. P1-A supplies trusted live scope/guard and dedicated transport.
- * No timers, PTY or backend factory; callbacks run ONLY after same-connection ready CAS.
+ * One unref’d expiry timer per offer, no PTY/backend factory; callbacks require ready CAS.
  * Offers expire with the ORIGINAL bootstrap deadline. Failed/lost sends are not replayed.
  */
 export interface TerminalNegotiatorDeps {
@@ -1813,27 +1813,56 @@ export function createTerminalNegotiator(deps: TerminalNegotiatorDeps) {
     mode: "interactive" | "resource-only";
     scope: NonNullable<ReturnType<TerminalNegotiatorDeps["current"]>>;
     expiresAt: number;
-    phase: "offered" | "challenged" | "ready" | "bound";
+    phase: "offered" | "challenged" | "ready" | "closed";
+    timer?: TimerHandle;
     hubNonce?: string;
     agentChallenge?: string;
     proof?: TerminalProtocolReadyProof;
     grant?: string;
   };
   const offers = new Map<string, Offer>();
+  const clock = createSegmentedClock({
+    now: deps.now,
+    set: (ms, fn) => {
+      const timer = setTimeout(fn, ms);
+      timer.unref();
+      return timer;
+    },
+    clear: (timer) => clearTimeout(timer as ReturnType<typeof setTimeout>),
+  });
   let disposed = false;
+  function forget(o: Offer): void {
+    if (o.timer !== undefined) clock.clearTimer(o.timer);
+    delete o.timer;
+    if (offers.get(o.offerId) === o) offers.delete(o.offerId);
+    // Also scrub the detached row: an expiry/callback must not retain private material.
+    delete o.grant;
+    delete o.proof;
+    delete o.hubNonce;
+    delete o.agentChallenge;
+    o.phase = "closed";
+  }
   function live(o: Offer): boolean {
-    const c = deps.current();
-    return (
-      !disposed &&
-      deps.allowed() &&
-      deps.now() < o.expiresAt &&
-      c !== undefined &&
-      Object.keys(o.scope).every((k) => c[k as keyof typeof c] === o.scope[k as keyof typeof c])
-    );
+    try {
+      const c = deps.current();
+      return (
+        !disposed &&
+        deps.allowed() &&
+        deps.now() < o.expiresAt &&
+        c !== undefined &&
+        Object.keys(o.scope).every((k) => c[k as keyof typeof c] === o.scope[k as keyof typeof c])
+      );
+    } catch {
+      return false;
+    }
   }
   function prune(): void {
-    for (const [k, o] of offers) if (!live(o)) offers.delete(k);
+    for (const o of offers.values()) if (!live(o)) forget(o);
   }
+  function clear(): void {
+    for (const o of offers.values()) forget(o);
+  }
+
   return {
     offer(frame: CmdFrame, request: TerminalNegotiation): TerminalOffer | undefined {
       prune();
@@ -1853,115 +1882,141 @@ export function createTerminalNegotiator(deps: TerminalNegotiatorDeps) {
       if (budget === undefined || !Number.isSafeInteger(at) || at < 0 || !Number.isSafeInteger(at + budget))
         return undefined;
       const offerId = randomUUID();
-      offers.set(offerId, {
+      const o: Offer = {
         commandId: frame.id,
         offerId,
         mode: request.action === "negotiate" ? "interactive" : "resource-only",
         scope: { ...scope },
         expiresAt: at + budget,
         phase: "offered",
-      });
+      };
+      offers.set(offerId, o);
+      const remaining = clampSpanMs(o.expiresAt - deps.now());
+      if (remaining === undefined) {
+        forget(o);
+        return undefined;
+      }
+      try {
+        o.timer = clock.setTimer(remaining, () => forget(o));
+      } catch {
+        forget(o);
+        return undefined;
+      }
       return { v: 1, outcome: "handshake-required", offerId };
     },
     /** ONLY the connection's dedicated term_req branch may call this. cmd JSON cannot. */
     receive(raw: unknown): boolean {
-      if (!terminalFrameOk(raw) || !Value.Check(TermReqSchema, raw)) return false;
+      prune();
+      if (!terminalFrameOk(raw) || !Value.Check(TermReqSchema, raw)) {
+        const offerId = raw && typeof raw === "object" ? (raw as Record<string, unknown>).offerId : undefined;
+        const o = typeof offerId === "string" ? offers.get(offerId) : undefined;
+        if (o !== undefined) forget(o);
+        return false;
+      }
       const f = raw as TermReq;
       if (f.op !== "prepare_protocol" && f.op !== "protocol_ready" && f.op !== "bind") return false;
       const o = offers.get(f.offerId);
-      if (!o || !live(o) || f.sessionId !== o.scope.sessionId || f.epoch !== o.scope.epoch) return false;
-      const common = {
-        t: "term_res" as const,
-        v: 1 as const,
-        rid: f.rid,
-        sessionId: o.scope.sessionId,
-        epoch: o.scope.epoch,
-        ownerInstance: o.scope.ownerInstance,
-      };
-      if (f.op === "prepare_protocol") {
-        if (o.phase !== "offered") return false;
-        o.phase = "challenged";
-        o.hubNonce = f.hubNonce;
-        o.agentChallenge = randomUUID();
-        deps.send({
-          ...common,
-          op: "protocol_challenge",
-          ok: true,
-          offerId: o.offerId,
-          hubNonce: o.hubNonce,
-          agentChallenge: o.agentChallenge,
-        });
-        return true;
-      }
-      if (
-        f.ownerInstance !== o.scope.ownerInstance ||
-        f.hubNonce !== o.hubNonce ||
-        f.agentChallenge !== o.agentChallenge
-      )
+      if (!o) return false;
+      const reject = (): false => {
+        forget(o);
         return false;
-      if (f.op === "protocol_ready") {
-        if (o.phase !== "challenged") return false;
-        o.phase = "ready";
-        const proof: TerminalProtocolReadyProof = {
-          offerId: o.offerId,
-          ...o.scope,
-          mode: o.mode,
-          hubNonce: f.hubNonce,
-          agentChallenge: f.agentChallenge,
-          expiresAt: o.expiresAt,
+      };
+      if (!live(o) || f.sessionId !== o.scope.sessionId || f.epoch !== o.scope.epoch) return reject();
+      try {
+        const common = {
+          t: "term_res" as const,
+          v: 1 as const,
+          rid: f.rid,
+          sessionId: o.scope.sessionId,
+          epoch: o.scope.epoch,
+          ownerInstance: o.scope.ownerInstance,
         };
-        o.proof = Object.freeze(proof);
-        // Mint occurs AFTER CAS and a fresh guard, exclusively on dedicated transport.
-        if (!live(o)) return false;
-        if (o.mode === "interactive") {
-          const grant = (deps.mintGrant ?? randomUUID)();
-          o.grant = grant;
-          if (!live(o)) {
-            delete o.grant;
-            return false;
-          }
+        if (f.op === "prepare_protocol") {
+          if (o.phase !== "offered") return reject();
+          o.phase = "challenged";
+          o.hubNonce = f.hubNonce;
+          o.agentChallenge = randomUUID();
           deps.send({
             ...common,
-            op: "protocol_ready",
+            op: "protocol_challenge",
             ok: true,
             offerId: o.offerId,
-            hubNonce: f.hubNonce,
-            agentChallenge: f.agentChallenge,
-            mode: "interactive",
-            grant,
-            expiresAt: Math.min(deps.now() + clampSpanMs(TERMINAL_LIMITS.grantMs)!, o.expiresAt),
-            backend: "linux-pty-v1",
-            limits: deps.limits,
+            hubNonce: o.hubNonce,
+            agentChallenge: o.agentChallenge,
           });
-        } else {
-          const channelId = randomUUID();
-          deps.send({
-            ...common,
-            op: "protocol_ready",
-            ok: true,
-            offerId: o.offerId,
-            hubNonce: f.hubNonce,
-            agentChallenge: f.agentChallenge,
-            mode: "resource-only",
-            channelId,
-          });
-          if (live(o)) deps.onBound?.(channelId, proof);
+          return true;
         }
+        if (
+          f.ownerInstance !== o.scope.ownerInstance ||
+          f.hubNonce !== o.hubNonce ||
+          f.agentChallenge !== o.agentChallenge
+        )
+          return reject();
+        if (f.op === "protocol_ready") {
+          if (o.phase !== "challenged") return reject();
+          o.phase = "ready";
+          const proof: TerminalProtocolReadyProof = {
+            offerId: o.offerId,
+            ...o.scope,
+            mode: o.mode,
+            hubNonce: f.hubNonce,
+            agentChallenge: f.agentChallenge,
+            expiresAt: o.expiresAt,
+          };
+          o.proof = Object.freeze(proof);
+          // Mint occurs AFTER CAS and a fresh guard, exclusively on dedicated transport.
+          if (!live(o)) return reject();
+          if (o.mode === "interactive") {
+            const grant = (deps.mintGrant ?? randomUUID)();
+            o.grant = grant;
+            if (!live(o)) return reject();
+            deps.send({
+              ...common,
+              op: "protocol_ready",
+              ok: true,
+              offerId: o.offerId,
+              hubNonce: f.hubNonce,
+              agentChallenge: f.agentChallenge,
+              mode: "interactive",
+              grant,
+              expiresAt: Math.min(deps.now() + clampSpanMs(TERMINAL_LIMITS.grantMs)!, o.expiresAt),
+              backend: "linux-pty-v1",
+              limits: deps.limits,
+            });
+          } else {
+            const channelId = randomUUID();
+            forget(o);
+            deps.send({
+              ...common,
+              op: "protocol_ready",
+              ok: true,
+              offerId: o.offerId,
+              hubNonce: f.hubNonce,
+              agentChallenge: f.agentChallenge,
+              mode: "resource-only",
+              channelId,
+            });
+            if (live(o)) deps.onBound?.(channelId, proof);
+          }
+          return true;
+        }
+        if (o.mode !== "interactive" || o.phase !== "ready" || !o.grant || f.grant !== o.grant || !o.proof)
+          return reject();
+        const proof = o.proof;
+        forget(o); // Consume and clear timer/material BEFORE transport or callback re-entry.
+        deps.send({ ...common, op: "bind", ok: true, channelId: f.proposedChannelId, bound: true });
+        if (live(o)) deps.onBound?.(f.proposedChannelId, proof);
         return true;
+      } catch {
+        return reject();
       }
-      if (o.mode !== "interactive" || o.phase !== "ready" || !o.grant || f.grant !== o.grant || !o.proof) return false;
-      o.phase = "bound";
-      delete o.grant;
-      deps.send({ ...common, op: "bind", ok: true, channelId: f.proposedChannelId, bound: true });
-      if (live(o)) deps.onBound?.(f.proposedChannelId, o.proof);
-      return true;
     },
     invalidate(): void {
-      offers.clear();
+      clear();
     },
     dispose(): void {
       disposed = true;
-      offers.clear();
+      clear();
     },
   };
 }

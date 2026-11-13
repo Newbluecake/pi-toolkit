@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { projectOf } from "../../tiers.js";
 import { createRegistry } from "../../../src/web-hub/hub/registry.js";
 import { hello, memLog } from "./helpers.js";
@@ -124,4 +124,44 @@ it("T-CACHE hub defense-in-depth sanitizes reserved result BEFORE LRU/duplicate/
     ok: true,
     data: { op: "query", state: "failed", result: { ok: false, code: "E_UNSUPPORTED" } },
   });
+});
+
+it("receiver rejection/expiry retains only non-capability correlation tombstones until link retirement", () => {
+  const original = Map.prototype.set;
+  let links: Map<unknown, unknown> | undefined, row: Record<string, unknown> | undefined;
+  const spy = vi.spyOn(Map.prototype, "set").mockImplementation(function (this: Map<unknown, unknown>, key, value) {
+    if (key === JSON.stringify([meta.agentKey, meta.linkGen]) && value instanceof Map) links = this;
+    if (
+      value &&
+      typeof value === "object" &&
+      value.commandId === "a".repeat(16) &&
+      value.meta?.agentKey === meta.agentKey
+    )
+      row = value;
+    return original.call(this, key, value);
+  });
+  try {
+    let current = true;
+    const port = createTerminalCommandIngress({ current: () => current, onOffer: () => {}, onDedicated: () => {} });
+    const id = "a".repeat(16);
+    expect(port.register(meta, { commandId: id, rid: "rid" })).toBe(true);
+    expect(port.bindOwner(meta, id, "owner")).toBe(true);
+    port.consumeAgentFrame(meta, {
+      t: "cmd_result",
+      id,
+      rid: "rid",
+      ok: true,
+      data: { op: "command", terminal: { grant: "SENSITIVE-MARKER", inventory: ["SENSITIVE-MARKER"] } },
+    });
+    current = false;
+    port.expire(meta, id);
+    expect(port.ownsCommand(meta, { t: "cmd_late", id })).toBe(true); // F1 requires correlation after denial/deadline.
+    expect(row).toEqual({ commandId: id, rid: "rid", ownerInstance: "owner", meta, pending: false });
+    expect(JSON.stringify(row)).not.toContain("SENSITIVE-MARKER");
+    expect(links!.size).toBe(1);
+    port.retireLink(meta);
+    expect(links!.size).toBe(0);
+  } finally {
+    spy.mockRestore();
+  }
 });

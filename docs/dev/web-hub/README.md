@@ -1199,6 +1199,13 @@ cmd_result exception. `createTerminalNegotiator` is the ready CAS gate for the l
 connection branch: offer → dedicated prepare/challenge/ready → dedicated grant → bind.
 It does not create backend/PTY or read inventory. No dedicated callback is wired while
 A is absent. Losing a frame never authorizes re-mint or command-cache recovery.
+Each bootstrap offer has one unref'd segmented-clock timer at its original deadline;
+expiry/rejection/bind/invalidate/dispose remove the row and scrub grant/challenge/proof
+fields. Receive prunes revoked/stale scope before even validating the frame. A must
+call invalidate on authority/connection transitions (the guard getter is not a subscription).
+The hub correlation table is intentionally different: its bounded rows contain only
+non-capability ids/scope/pending state, never grant/offer payload/proof; those tombstones
+MUST remain until link retirement to keep late private cmd frames out of the legacy bus.
 
 F2 schemas are evidence envelopes, not OS proof verification. H must implement bounded
 owned-0600 atomic journal commits and current challenge/identity/digest/coverage checks;
