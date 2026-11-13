@@ -317,7 +317,7 @@ export interface CommandCompleteResult {
 
 // Feature-local, direct-send only. Do not add these to legacy SSE_EVENTS/ring dispatch.
 export const TERMINAL_SSE_EVENTS = ["terminal_connection", "terminal"] as const;
-export { TERMINAL_HTTP_PATHS } from "./terminal.js";
+export { TERMINAL_HTTP_PATHS } from "./terminal-paths.js";
 export type {
   TerminalHttpRequests,
   TerminalHttpResults,

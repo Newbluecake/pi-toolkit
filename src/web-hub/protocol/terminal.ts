@@ -659,18 +659,7 @@ export const TERMINAL_AGENT_FRAME_SCHEMAS = { term_res: TermResSchema, term_even
 export const TERMINAL_HUB_FRAME_SCHEMAS = { term_req: TermReqSchema };
 
 const http = { agentKey: id, expect: closed({ sessionId: id, epoch: id }), ...TerminalSseIdentitySchema.properties };
-export const TERMINAL_HTTP_PATHS = Object.freeze(
-  Object.fromEntries(
-    ["prepare", ...ops.filter((op) => !["prepare_protocol", "protocol_ready", "bind", "inventory"].includes(op))].map(
-      (op) => [op, `/api/terminal/${op}`],
-    ),
-  ),
-) as Readonly<
-  Record<
-    "prepare" | "open" | "list" | "attach" | "detach" | "input" | "resize" | "ack" | "renew" | "state" | "close",
-    string
-  >
->;
+export { TERMINAL_HTTP_PATHS } from "./terminal-paths.js";
 export const TERMINAL_HTTP_SCHEMAS = {
   prepare: closed({ ...http, ...dimensions }),
   list: closed(http),

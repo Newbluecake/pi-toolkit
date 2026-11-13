@@ -1226,3 +1226,11 @@ omit them (in particular list never returns cwd). Secure/locked, privacy marked 
 locally unlocked), unknown/degraded privacy or revoked auth/binding deny the operation
 and omit/clear all metadata, not a masked row. No journal/audit/history/global SSE copies;
 UI renders text, not HTML/links. These are contracts for A/H/P2, not new runtime producers.
+
+### Eager terminal path constants
+
+`protocol/terminal-paths.ts` is zero-import/schema-free and preserves the original HTTP
+path object/order. Both `http-contract.ts` (eager UI) and `terminal.ts` re-export that
+same object. Do not add a runtime `http-contract.ts` dependency on `terminal.ts`: doing
+so eagerly executes TypeBox terminal schemas through `logic/contract.js`'s SSE_EVENTS
+import. The transitive static-import graph test pins this boundary, without widening I8.
