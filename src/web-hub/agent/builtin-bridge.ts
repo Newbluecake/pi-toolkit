@@ -1,3 +1,4 @@
+import { isReservedTerminalCommand } from "../protocol/terminal.js";
 import type { XsActivationPort } from "../../fabric/xs/session-activation.js";
 import { isXsWebCommand, parseXsWebAction } from "../protocol/xs-web-command.js";
 /**
@@ -834,6 +835,7 @@ export function createBuiltinBridge(deps: BuiltinBridgeDeps = {}): BuiltinBridge
   return {
     execute(frame: CmdFrame, admission?: MemoryBridgeAdmission): CmdResultBody | Promise<CmdResultBody> {
       const cmd = commandArgs(frame);
+      if (isReservedTerminalCommand(cmd)) return errResult("E_UNSUPPORTED", false, "none");
       if (cmd === undefined) return errResult("E_UNSUPPORTED", false, "none");
       if (!/^[A-Za-z0-9:_.-]{1,64}$/.test(cmd.name))
         return errResult("E_BAD_REQUEST", false, "none", "bad command name");
@@ -981,7 +983,10 @@ export function createBuiltinBridge(deps: BuiltinBridgeDeps = {}): BuiltinBridge
     },
     isQuiet(frame: CmdFrame): boolean {
       const cmd = commandArgs(frame);
-      return cmd !== undefined && (isResumeListArgs(cmd) || isXsWebCommand(cmd.name, cmd.args));
+      return (
+        cmd !== undefined &&
+        (isReservedTerminalCommand(cmd) || isResumeListArgs(cmd) || isXsWebCommand(cmd.name, cmd.args))
+      );
     },
   };
 }

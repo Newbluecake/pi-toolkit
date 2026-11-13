@@ -43,6 +43,7 @@ import type {
   LanResFrame,
   SessionInfo,
 } from "../protocol/messages.js";
+import { TERMINAL_LIMITS, terminalFrameOk, type TermReq } from "../protocol/terminal.js";
 import type { TfaReqFrame, TfaResFrame } from "../protocol/lan-2fa.js";
 import type { FsbReqFrame, FsbResFrame } from "../protocol/feishu.js";
 import { decodeHubFrame, LIMITS, TIMING } from "../protocol/messages.js";
@@ -100,6 +101,10 @@ function isAgentId(v: unknown): v is AgentId {
 }
 
 export interface BindingPort {
+  /** Dedicated terminal transport; never routed to command/model/history handling. */
+  onTerminalReq?(frame: TermReq): void;
+  /** Synchronous capability fence before the old socket is retired. */
+  onTerminalLinkLost?(): void;
   onSnapshotReq(rid: string): void;
   onBranchReq(rid: string, maxBytes: number): void;
   onStateChange(v: WebHubStatusView): void;
@@ -165,6 +170,7 @@ export interface BindingPort {
 export type SendResult = "written" | "dropped" | "not_live" | "failed";
 
 export interface HubConnection {
+  readonly terminalConnectionInstance?: string | undefined;
   readonly implVersion: string; // = `${buildId}#${MODULE_INSTANCE}`
   attach(binding: BindingPort, session: SessionInfo): void;
   detach(reason: "quit" | "reload" | "new" | "resume" | "fork"): void;
@@ -325,6 +331,7 @@ class Connection implements HubConnection {
   private readonly connectImpl: typeof import("node:net").connect;
   private link: LinkState = "idle";
   private socket: Socket | undefined;
+  private terminalInstance: string | undefined;
   private readonly slots = new Map<SlotKind, { frame: AgentFrame; flush?: SlotFlush }>();
   private seqValue = 0;
   private gapFrom: number | undefined;
@@ -374,6 +381,10 @@ class Connection implements HubConnection {
     return this.seqValue;
   }
 
+  get terminalConnectionInstance(): string | undefined {
+    return this.link === "live" ? this.terminalInstance : undefined;
+  }
+
   get bufferedBytes(): number {
     return this.socket?.writableLength ?? 0;
   }
@@ -414,6 +425,12 @@ class Connection implements HubConnection {
 
   send(frame: AgentFrame, opts?: { droppable?: boolean }): void {
     try {
+      if (
+        (frame.t === "term_res" || frame.t === "term_event") &&
+        (!terminalFrameOk(frame) ||
+          this.bufferedBytes + Buffer.byteLength(JSON.stringify(frame), "utf8") + 1 > TERMINAL_LIMITS.udsPendingBytes)
+      )
+        return;
       const isEv = frame.t === "ev";
       if (this.link !== "live" || this.socket === undefined) {
         if (isEv) this.markGap(frame.seq);
@@ -432,6 +449,12 @@ class Connection implements HubConnection {
 
   trySend(frame: AgentFrame, opts?: { droppable?: boolean }): SendResult {
     try {
+      if (
+        (frame.t === "term_res" || frame.t === "term_event") &&
+        (!terminalFrameOk(frame) ||
+          this.bufferedBytes + Buffer.byteLength(JSON.stringify(frame), "utf8") + 1 > TERMINAL_LIMITS.udsPendingBytes)
+      )
+        return "dropped";
       if (this.link !== "live" || this.socket === undefined) return "not_live";
       if (opts?.droppable === true && this.bufferedBytes > LIMITS.writeQueueBytes) return "dropped";
       const r = this.writeRaw(frame);
@@ -654,6 +677,7 @@ class Connection implements HubConnection {
         }
         this.clearTimer("helloTimer");
         this.link = "live";
+        this.terminalInstance = randomUUID();
         this.agentKey = frame.agentKey;
         this.hubVersion = frame.hubVersion;
         this.httpPort = frame.http.port;
@@ -718,6 +742,9 @@ class Connection implements HubConnection {
         }
         return;
       }
+      case "term_req":
+        if (this.link === "live") this.callBinding((b) => b.onTerminalReq?.(frame));
+        return;
       case "cmd":
         if (this.link !== "live") return;
         if (this.binding?.onCmd !== undefined) this.callBinding((b) => b.onCmd?.(frame));
@@ -859,6 +886,8 @@ class Connection implements HubConnection {
 
   /** Drop the socket and everything buffered on it; seq never rewinds. */
   private teardownSocket(): void {
+    if (this.terminalInstance !== undefined) this.callBinding((b) => b.onTerminalLinkLost?.());
+    this.terminalInstance = undefined;
     const sock = this.socket;
     this.socket = undefined;
     this.helloCaps = [];
