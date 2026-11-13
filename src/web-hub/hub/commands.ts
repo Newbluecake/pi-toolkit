@@ -771,10 +771,12 @@ export function createTerminalCommandIngress(deps: {
   onOffer(meta: TerminalIngressMeta, commandId: string, offer: TerminalOffer | undefined): void;
   onDedicated(meta: TerminalIngressMeta, raw: unknown): void;
 }): TerminalIngressPort & {
-  register(meta: TerminalIngressMeta, ids: { rid: string; commandId: string }): boolean;
+  register(meta: TerminalIngressMeta, ids: { rid: string; commandId: string; ownerInstance?: string }): boolean;
+  /** r4: public offers cannot identify owner; lock it exactly once from the dedicated challenge. */
+  bindOwner(meta: TerminalIngressMeta, commandId: string, ownerInstance: string): boolean;
   expire(meta: TerminalIngressMeta, commandId: string): void;
 } {
-  type Row = { rid: string; commandId: string; meta: TerminalIngressMeta; pending: boolean };
+  type Row = { rid: string; commandId: string; ownerInstance?: string; meta: TerminalIngressMeta; pending: boolean };
   const links = new Map<string, Map<string, Row>>();
   const key = (m: TerminalIngressMeta) => JSON.stringify([m.agentKey, m.linkGen]);
   const row = (m: TerminalIngressMeta, raw: unknown): Row | undefined => {
@@ -797,6 +799,20 @@ export function createTerminalCommandIngress(deps: {
       if (table.has(ids.commandId) || [...table.values()].some((e) => e.rid === ids.rid)) return false;
       if (table.size >= TERMINAL_LIMITS.privateCommandsPerLink) return false;
       table.set(ids.commandId, { ...ids, meta: { ...meta }, pending: true });
+      return true;
+    },
+    bindOwner(meta, commandId, ownerInstance) {
+      const e = links.get(key(meta))?.get(commandId);
+      if (
+        !e ||
+        !deps.current(meta) ||
+        e.meta.sessionId !== meta.sessionId ||
+        e.meta.epoch !== meta.epoch ||
+        !Value.Check(TerminalPrivateCommandIdentitySchema, { ...meta, rid: e.rid, commandId, ownerInstance })
+      )
+        return false;
+      if (e.ownerInstance !== undefined) return e.ownerInstance === ownerInstance;
+      e.ownerInstance = ownerInstance;
       return true;
     },
     expire(meta, commandId) {

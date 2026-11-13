@@ -1191,7 +1191,8 @@ F1 is synchronous `agent-server` ingress BEFORE registry (including malformed/un
 `term_*`, private command tombstones and forged nested reserved command results).
 Service absence/throw never falls through to bus or SSE ring. `createTerminalCommandIngress`
 reserves bounded per-link command identities before send, keeps non-capability tombstones
-through deadlines and retires only with the socket link. Public command routing refuses
+through deadlines and retires only with the socket link. `bindOwner` locks the owner once
+from the dedicated challenge (the public offer deliberately has no owner). Public command routing refuses
 reserved negotiation prefixes. The agent constructs only an allowlisted public offer or
 fixed refusal, before its ledger, duplicate/query/late paths; there is NO sensitive first
 cmd_result exception. `createTerminalNegotiator` is the ready CAS gate for the later A

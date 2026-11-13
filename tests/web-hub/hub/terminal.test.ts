@@ -17,6 +17,11 @@ describe("private command tombstones (§4.1.2 F1)", () => {
     });
     for (let i = 0; i < TERMINAL_LIMITS.privateCommandsPerLink; i++)
       expect(port.register(meta, { commandId: `cmd-${i}`.padEnd(16, "_"), rid: `rid-${i}` })).toBe(true);
+    expect(port.bindOwner(meta, "cmd-0".padEnd(16, "_"), "owner-1")).toBe(true);
+    expect(port.bindOwner(meta, "cmd-0".padEnd(16, "_"), "owner-1")).toBe(true);
+    expect(port.bindOwner(meta, "cmd-0".padEnd(16, "_"), "owner-2")).toBe(false);
+    expect(port.bindOwner({ ...meta, linkGen: 2 }, "cmd-0".padEnd(16, "_"), "owner-1")).toBe(false);
+    expect(port.bindOwner({ ...meta, sessionId: "wrong" }, "cmd-0".padEnd(16, "_"), "owner-1")).toBe(false);
     port.expire(meta, "cmd-0".padEnd(16, "_"));
     expect(port.register(meta, { commandId: "overflow".padEnd(16, "_"), rid: "overflow" })).toBe(false);
     const late = {
