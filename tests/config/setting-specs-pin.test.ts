@@ -40,6 +40,14 @@ if (process.env.GOV_SPECS_GENERATE === "1") {
   // task55 /fast, task39 scopes and task61 decision-wake scopes are declared additive
   // features, not baseline refreshes. Project exactly these NEW keys; old specs/order/content
   // remain pinned.
+  const terminalKeys = [
+    "webHub.terminal.enabled",
+    "webHub.terminal.maxPerSession",
+    "webHub.terminal.maxPerPrincipal",
+    "webHub.terminal.maxTotal",
+    "webHub.terminal.inputIdleS",
+    "webHub.terminal.maxLifetimeS",
+  ];
   const declaredAdditions = [
     "budget.minTotalS",
     // #70: only the seven safe new notification leaves; credentials remain JSON-only.
@@ -58,6 +66,7 @@ if (process.env.GOV_SPECS_GENERATE === "1") {
     "memory.scopes.hub",
     "fabric.wake.decisionRequests",
     "fast.enabled",
+    ...terminalKeys,
   ];
   // F1 deliberately changes just the layout description; keep the baseline hash
   // and order as evidence rather than rewriting the historical pin.
@@ -82,7 +91,10 @@ if (process.env.GOV_SPECS_GENERATE === "1") {
     it("adds exactly declared Fast/scopes/decision keys with non-live defaults and keeps old ordering", () => {
       const oldKeys = pin.specs.map(([key]) => key);
       const minAnchor = oldKeys.indexOf("budget.totalS");
-      expect(Object.keys(SETTING_SPECS).filter((key) => !oldKeys.includes(key))).toEqual(declaredAdditions);
+      expect(Object.keys(SETTING_SPECS).filter((key) => !oldKeys.includes(key) && !terminalKeys.includes(key))).toEqual(
+        declaredAdditions.filter((key) => !terminalKeys.includes(key)),
+      );
+      expect(Object.keys(SETTING_SPECS).filter((key) => terminalKeys.includes(key))).toEqual(terminalKeys);
       const notifyAnchor = oldKeys.indexOf("feishuNotify.enabled");
       const notifyKeys = declaredAdditions.filter((key) => key.startsWith("feishuNotify."));
       const incAnchor = oldKeys.indexOf("memory.incremental.enabled");
@@ -92,7 +104,7 @@ if (process.env.GOV_SPECS_GENERATE === "1") {
       expect(anchor).toBeGreaterThan(0);
       const wake = oldKeys.indexOf("fabric.wake.parkCapPerTarget");
       expect(wake).toBeGreaterThan(0);
-      expect(Object.keys(SETTING_SPECS)).toEqual([
+      expect(Object.keys(SETTING_SPECS).filter((key) => !terminalKeys.includes(key))).toEqual([
         ...oldKeys.slice(0, minAnchor + 1),
         "budget.minTotalS",
         ...oldKeys.slice(minAnchor + 1, notifyAnchor + 1),

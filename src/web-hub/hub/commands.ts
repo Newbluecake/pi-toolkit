@@ -20,6 +20,15 @@
  * ever sees an already-fully-formed `CmdFrame` (with `deadlineMs` already derived) plus the
  * `agentKey` to send it to.
  */
+import {
+  isReservedTerminalCommand,
+  hasReservedTerminalResult,
+  TERMINAL_LIMITS,
+  TerminalCommandResultDataSchema,
+  TerminalPrivateCommandIdentitySchema,
+  type TerminalOffer,
+} from "../protocol/terminal.js";
+import type { TerminalIngressMeta, TerminalIngressPort } from "./ports.js";
 import { createHash } from "node:crypto";
 import { Value } from "@sinclair/typebox/value";
 import type {
@@ -157,6 +166,8 @@ function toResultFrame(frame: CmdFrame, body: CmdResultBody): CmdResultFrame {
 }
 
 function toBody(reply: CmdResultFrame): CmdResultBody {
+  if (hasReservedTerminalResult(reply))
+    return { ok: false, code: "E_UNSUPPORTED", retryable: false, effect: "unknown" };
   return reply.ok
     ? { ok: true, data: reply.data, ...(reply.dup === true ? { dup: true as const } : {}) }
     : {
@@ -285,6 +296,7 @@ export function createCommandRouter(deps: { registry: Registry; log: HubLog; now
   });
 
   registry.setLateResultHandler((agentKey, frame) => {
+    if (hasReservedTerminalResult(frame)) return;
     // Precise match: the LRU key format `${principal}|${agentKey}|${id}` always ends with the
     // frame's own `id` (globally unique per browser action), so a suffix match is exact even
     // though a late frame carries no `principal`/origin of its own.
@@ -541,6 +553,10 @@ export function createCommandRouter(deps: { registry: Registry; log: HubLog; now
         return toResultFrame(frame, body);
       }
 
+      // Public /api/cmd (including queryOnly/alias forms) cannot negotiate a private channel.
+      // H dispatches registered internal offers directly through its own bounded pending port.
+      if (isReservedTerminalCommand(frame.cmd))
+        return toResultFrame(frame, { ok: false, code: "E_COMMAND_DENIED", retryable: false, effect: "none" });
       if (frame.queryOnly === true) return handleQueryOnly(frame, agentKey, key);
 
       const digest = digestOf(frame.cmd);
@@ -744,4 +760,84 @@ function outputBytes(data: Extract<CmdData, { op: "command" }>): number | null {
   let total = 0;
   for (const e of data.output.entries) total += Buffer.byteLength(e.text, "utf8");
   return total;
+}
+
+/** F1 private command correlation. Bounded per-live-link tombstones, no capability values.
+ * H registers BEFORE sending cmd. expire cancels a waiter but DOES NOT forget its identity;
+ * entries survive deadlines until retireLink. A full table refuses NEW negotiation.
+ */
+export function createTerminalCommandIngress(deps: {
+  current(meta: TerminalIngressMeta): boolean;
+  onOffer(meta: TerminalIngressMeta, commandId: string, offer: TerminalOffer | undefined): void;
+  onDedicated(meta: TerminalIngressMeta, raw: unknown): void;
+}): TerminalIngressPort & {
+  register(meta: TerminalIngressMeta, ids: { rid: string; commandId: string }): boolean;
+  expire(meta: TerminalIngressMeta, commandId: string): void;
+} {
+  type Row = { rid: string; commandId: string; meta: TerminalIngressMeta; pending: boolean };
+  const links = new Map<string, Map<string, Row>>();
+  const key = (m: TerminalIngressMeta) => JSON.stringify([m.agentKey, m.linkGen]);
+  const row = (m: TerminalIngressMeta, raw: unknown): Row | undefined => {
+    if (!raw || typeof raw !== "object") return undefined;
+    const r = raw as Record<string, unknown>;
+    if (r.t !== "cmd_result" && r.t !== "cmd_late") return undefined;
+    const table = links.get(key(m));
+    // Either id OR rid claims the reserved command: malformed mixed correlations still consume.
+    return table?.get(String(r.id)) ?? [...(table?.values() ?? [])].find((e) => e.rid === r.rid);
+  };
+  return {
+    register(meta, ids) {
+      if (!deps.current(meta) || !Value.Check(TerminalPrivateCommandIdentitySchema, { ...meta, ...ids })) return false;
+      let table = links.get(key(meta));
+      if (!table) {
+        if (links.size >= 2048) return false;
+        table = new Map();
+        links.set(key(meta), table);
+      }
+      if (table.has(ids.commandId) || [...table.values()].some((e) => e.rid === ids.rid)) return false;
+      if (table.size >= TERMINAL_LIMITS.privateCommandsPerLink) return false;
+      table.set(ids.commandId, { ...ids, meta: { ...meta }, pending: true });
+      return true;
+    },
+    expire(meta, commandId) {
+      const e = links.get(key(meta))?.get(commandId);
+      if (e) e.pending = false;
+    },
+    ownsCommand(meta, raw) {
+      return row(meta, raw) !== undefined;
+    },
+    consumeAgentFrame(meta, raw) {
+      const e = row(meta, raw);
+      if (!e) {
+        if (!hasReservedTerminalResult(raw) && deps.current(meta)) deps.onDedicated(meta, raw);
+        return;
+      }
+      if (!e.pending) return;
+      e.pending = false; // consume BEFORE callback (including synchronous throw/reentry)
+      const r = raw as Record<string, unknown>;
+      let offer: TerminalOffer | undefined;
+      if (
+        deps.current(meta) &&
+        e.meta.sessionId === meta.sessionId &&
+        e.meta.epoch === meta.epoch &&
+        r.t === "cmd_result" &&
+        r.id === e.commandId &&
+        r.rid === e.rid &&
+        r.ok === true
+      ) {
+        const d = r.data as Record<string, unknown> | undefined;
+        if (d && Value.Check(TerminalCommandResultDataSchema, d)) {
+          const o = d.terminal as TerminalOffer;
+          offer = { v: 1, outcome: "handshake-required", offerId: o.offerId };
+        }
+      }
+      deps.onOffer(meta, e.commandId, offer);
+    },
+    onIngressFailure(meta) {
+      for (const e of links.get(key(meta))?.values() ?? []) e.pending = false;
+    },
+    retireLink(meta) {
+      links.delete(key(meta));
+    },
+  };
 }

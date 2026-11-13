@@ -228,6 +228,7 @@ export function parseWebHubSettings(input: unknown): WebHubSettings {
     lan: lanParsed.lan,
     spawn: parseWebHubSpawnBlock(record.spawn),
     proxy: parseWebHubProxyBlock(record.proxy, resolvedPort, lanParsed.lan.port).proxy,
+    ...(record.terminal === undefined ? {} : { terminal: parseWebHubTerminalBlock(record.terminal).terminal }),
   };
 }
 
@@ -692,3 +693,48 @@ export const DEFAULT_WEBHUB_SETTINGS: WebHubSettings = {
   // web-hub-proxy plan v2 §5 (X0): off by default, non-live.
   proxy: DEFAULT_WEBHUB_PROXY_SETTINGS,
 };
+
+/** Terminal settings use sparse defaults (I9); durations have already passed normalizeTimeUnits. */
+export const DEFAULT_WEBHUB_TERMINAL_SETTINGS = Object.freeze({
+  enabled: false,
+  maxPerSession: 2,
+  maxPerPrincipal: 2,
+  maxTotal: 8,
+  inputIdleMs: 3_600_000,
+  maxLifetimeMs: 28_800_000,
+});
+export type WebHubTerminalWarning = { key: string; reason: "invalid-terminal-setting" };
+export function parseWebHubTerminalBlock(input: unknown): {
+  terminal: NonNullable<WebHubSettings["terminal"]>;
+  warnings: WebHubTerminalWarning[];
+} {
+  const warnings: WebHubTerminalWarning[] = [];
+  if (input !== undefined && (input === null || typeof input !== "object" || Array.isArray(input)))
+    warnings.push({ key: "webHub.terminal", reason: "invalid-terminal-setting" });
+  const r =
+    input !== null && typeof input === "object" && !Array.isArray(input) ? (input as Record<string, unknown>) : {};
+  const numeric = (
+    key: "maxPerSession" | "maxPerPrincipal" | "maxTotal" | "inputIdleMs" | "maxLifetimeMs",
+    min: number,
+    max: number,
+  ): number => {
+    const n = r[key];
+    if (n === undefined) return DEFAULT_WEBHUB_TERMINAL_SETTINGS[key];
+    if (typeof n === "number" && Number.isSafeInteger(n) && n >= min && n <= max) return n;
+    warnings.push({ key: `webHub.terminal.${key}`, reason: "invalid-terminal-setting" });
+    return DEFAULT_WEBHUB_TERMINAL_SETTINGS[key];
+  };
+  if (r.enabled !== undefined && typeof r.enabled !== "boolean")
+    warnings.push({ key: "webHub.terminal.enabled", reason: "invalid-terminal-setting" });
+  return {
+    terminal: {
+      enabled: r.enabled === true,
+      maxPerSession: numeric("maxPerSession", 1, 4),
+      maxPerPrincipal: numeric("maxPerPrincipal", 1, 8),
+      maxTotal: numeric("maxTotal", 1, 32),
+      inputIdleMs: numeric("inputIdleMs", 300_000, 86_400_000),
+      maxLifetimeMs: numeric("maxLifetimeMs", 900_000, 86_400_000),
+    },
+    warnings,
+  };
+}

@@ -1,3 +1,4 @@
+import type { TerminalHubConfig } from "../protocol/terminal.js";
 import type { HumanDispatchBridge } from "./human-dispatch-proof.js";
 import type { XsActivationPort, XsActivationHubPort } from "../../fabric/xs/session-activation.js";
 /**
@@ -202,6 +203,8 @@ export interface WebHubSpawnSettings extends HubSpawnConfig {
 }
 
 export interface WebHubSettings {
+  /** Non-live, sparse: absent means default-off without changing legacy JSON. */
+  terminal?: TerminalHubConfig & { enabled: boolean };
   enabled: boolean;
   autoStart: boolean;
   port: number;
@@ -324,6 +327,8 @@ export interface ThreadAgentPort extends ThreadPromptPort {
   threadClosed(h: string, reason: ThreadCloseReason): void;
 }
 export interface WebHubDeps {
+  /** Trusted activate-frozen domain plus live recheck; absent is never plain authority. */
+  terminalGuard?: (ctx: ExtensionContext) => boolean;
   memoryRead?: import("../../memory/index.js").MemoryReadPort;
   memoryWrite?: import("../../memory/scopes/web-write-port.js").MemoryWebWritePort;
   /** P4 owns/wires ONE bridge independent of webHub.enabled; this client only dispatches. */
@@ -1740,6 +1745,17 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     // `control`, it is a control-plane feature). The range crosses the wire as the `[lo, hi]`
     // tuple; an unparsable range (cannot happen after `parseWebHubProxyBlock`, but hand-built
     // settings objects exist in tests) omits the whole key rather than inventing a default.
+    if (
+      settings.terminal?.enabled === true &&
+      settings.control !== false &&
+      settings.webCommands !== false &&
+      ctx !== undefined &&
+      deps.terminalGuard?.(ctx) === true &&
+      (ctx.mode === "tui" || ctx.mode === "rpc")
+    ) {
+      const { enabled: _enabled, ...terminal } = settings.terminal;
+      config.terminal = terminal;
+    }
     if (settings.proxy?.enabled === true && settings.control !== false) {
       const portRange = parseProxyPortRange(settings.proxy.portRange);
       if (portRange !== undefined) config.proxy = { portRange, maxProxies: settings.proxy.maxProxies };

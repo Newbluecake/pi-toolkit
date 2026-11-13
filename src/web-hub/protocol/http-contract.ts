@@ -314,3 +314,14 @@ export interface CommandCompleteResult {
   truncated?: true;
   source: "own" | "tui";
 }
+
+// Feature-local, direct-send only. Do not add these to legacy SSE_EVENTS/ring dispatch.
+export const TERMINAL_SSE_EVENTS = ["terminal_connection", "terminal"] as const;
+export { TERMINAL_HTTP_PATHS } from "./terminal.js";
+export type {
+  TerminalHttpRequests,
+  TerminalHttpResults,
+  TerminalHttpResponse,
+  TerminalSseEvent,
+  TerminalFailure,
+} from "./terminal.js";

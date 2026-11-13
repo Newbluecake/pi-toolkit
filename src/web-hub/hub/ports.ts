@@ -1,6 +1,6 @@
 /**
  * hub internal ports (plan §1.4.1 / §2.3 / §4 / §5.1 / §6.2 / §9.2 — frozen
- * interface, S1-W1 接口包). Types only, no runtime code: package B implements
+ * interface, S1-W1 接口包). Types plus an explicit terminal-Unavailable refusal: package B implements
  * these (hub core + history), package C consumes them (HTTP/SSE frontend),
  * LD/LS/LC (W2/W3) implement the LAN ports — this file is what lets every
  * package compile in parallel against a frozen surface.
@@ -519,6 +519,7 @@ export interface HubConfig {
    * (Q2 — the proxy has no LAN switch of its own). `hub/main.ts`'s `normalizeHubProxyConfig`
    * drops the whole key when malformed. */
   proxy?: HubProxyConfig;
+  terminal?: import("../protocol/terminal.js").TerminalHubConfig;
   /** Feishu bot: absence is off; credentials never cross this config boundary. */
   feishuBot?: FeishuBotHubConfig;
   /** fabric phase-2 §4.6 (X1): the cross-session relay's hub-global limits, present ONLY when
@@ -774,6 +775,7 @@ export interface CommandRouter {
 }
 
 export interface FrontendDeps {
+  terminal?: TerminalRoutesPort;
   config: HubConfig;
   paths: HubPaths;
   registry: RegistryView;
@@ -1435,4 +1437,71 @@ export interface LanSessionsDeps {
   log: HubLog;
   authRevoke: AuthRevokeBus;
   revokeSse(sidHash: string): void;
+}
+
+// Terminal P1-C r4. Optional ALL the way to assembly; absent is Unavailable, never fallback.
+export interface TerminalIngressMeta {
+  agentKey: string;
+  linkGen: number;
+  sessionId: string;
+  epoch: string;
+}
+export interface TerminalIngressPort {
+  /** Hub-owned registration/tombstones, NOT a frame's self-reported marker. Must be synchronous. */
+  ownsCommand(meta: TerminalIngressMeta, raw: unknown): boolean;
+  /** Already isolated from registry/bus/ring. A throw is consumed, not legacy fallback. */
+  consumeAgentFrame(meta: TerminalIngressMeta, raw: unknown): void;
+  retireLink(meta: TerminalIngressMeta): void;
+  /** Fixed, body-free failure path: cancel private pending; never fall through or log raw. */
+  onIngressFailure?(meta: TerminalIngressMeta): void;
+}
+export interface TerminalResourceJournalPort {
+  /** owned 0600 bounded atomic+fsync metadata store. Missing/corrupt old store is unknown, NOT []. */
+  load(
+    signal: AbortSignal,
+  ): Promise<
+    | { kind: "trusted-new" }
+    | { kind: "loaded"; journal: import("../protocol/terminal.js").TerminalJournal }
+    | { kind: "unavailable" }
+  >;
+  /** Open must await reservation commit before sending. Resolution commit precedes release CAS. */
+  commit(
+    expectedRevision: number,
+    next: import("../protocol/terminal.js").TerminalJournal,
+    signal: AbortSignal,
+  ): Promise<"committed" | "conflict" | "unavailable">;
+}
+export interface TerminalResourceFencePort {
+  snapshot(): import("../protocol/terminal.js").TerminalQuarantine;
+  /** P1-H validates completeness, canonical SHA256, expected-set coverage and current challenge. */
+  inventory(
+    meta: TerminalIngressMeta,
+    snapshot: import("../protocol/terminal.js").TerminalInventory,
+    signal: AbortSignal,
+  ): Promise<"accepted" | "rejected" | "unavailable">;
+  /** This port verifies actual OS facts; schema booleans alone are NOT a proof. */
+  localProof(
+    proof: import("../protocol/terminal.js").TerminalReapProof,
+    signal: AbortSignal,
+  ): Promise<"accepted" | "rejected" | "unavailable">;
+}
+export interface TerminalSseBinding {
+  readonly metadata: import("../protocol/terminal.js").TerminalSseBindingMetadata;
+  /** Exact original socket/identity object, never reconstructed from POST. Per-enqueue live/fence check. */
+  send(event: "terminal_connection" | "terminal", payload: unknown): boolean;
+  revoke(): void;
+}
+export interface TerminalRoutesPort {
+  /** H owns auth, strict POST CSRF, binding, deadline and no-store. No legacy command fallback. */
+  handle(
+    req: IncomingMessage,
+    res: ServerResponse,
+    ctx: RequestContext,
+    identity: AuthIdentity,
+    signal: AbortSignal,
+  ): Promise<boolean>;
+  dispose(): Promise<void>;
+}
+export function terminalUnavailable(): import("../protocol/terminal.js").TerminalFailure {
+  return { ok: false, code: "E_UNAVAILABLE", effect: "none" };
 }

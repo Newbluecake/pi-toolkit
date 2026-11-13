@@ -80,3 +80,12 @@ verdict，并直接返回 disabled；显式统一 enabled:true、旧文件或环
   FeatureFlags 按集合相等且无重复判定，反序合法；未知/重复/PlaintextNames 拒绝合同保留，Buffer/string 均验证。
 - 无挂载门：`preflight.test.ts`、`preflight-adapters.test.ts`、`tar.test.ts`、tiers 治理和合成 Vitest wiring；
   这些绿不代表真实 FUSE/namespace/密码/挂载生命周期通过。不得为验收 skip 而在没采到外部挂载时擅跑真实 fixtures。
+
+## WebHub terminal D8 (P1-C)
+
+Both settings loaders clone an explicitly present `webHub.terminal` block and force
+`enabled:false` in secure AND locked domains; absent defaults remain absent (I9).
+Explicit true/editor writes cannot override the frozen verdict. A trusted plain-domain
+closure is passed only inside existing post-guard `wireWebHub` wiring; missing guard is
+not authority. Terminal assembly/requests/async completions/output must recheck it.
+This does not isolate a plain same-uid shell from files or an already mounted vault.

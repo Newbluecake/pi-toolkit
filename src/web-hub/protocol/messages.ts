@@ -7,6 +7,15 @@
  * literal plus total serialized size (≤ MAX_FRAME_BYTES). Unknown frame types —
  * including RESERVED_FRAME_TYPES — decode to `undefined` and are ignored.
  */
+import {
+  TERMINAL_AGENT_FRAME_SCHEMAS,
+  TERMINAL_HUB_FRAME_SCHEMAS,
+  terminalFrameOk,
+  type TermReq,
+  type TermRes,
+  type TermEvent,
+  type TerminalOffer,
+} from "./terminal.js";
 import { Type, type TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { MAX_FRAME_BYTES } from "./ndjson.js";
@@ -1131,6 +1140,8 @@ export type CmdData =
   | {
       op: "command";
       kind: "extension" | "template" | "builtin";
+      /** Terminal r4: public offer only. Grant/inventory/proofs NEVER enter CmdData. */
+      terminal?: TerminalOffer;
       completion: "sync" | "async" | "unknown" | "timeout";
       captured?: boolean;
       output?: CommandOutputWire;
@@ -1276,6 +1287,8 @@ export interface SupersededFrame {
 
 // agent→hub
 export type AgentFrame =
+  | TermRes
+  | TermEvent
   | {
       t: "hello";
       proto: { major: number; minor: number };
@@ -1383,6 +1396,7 @@ export type LanResFrame =
 
 // hub→agent
 export type HubFrame =
+  | TermReq
   | {
       t: "hello_ack";
       hubVersion: string;
@@ -2572,6 +2586,7 @@ const agentFrameSchemas: Readonly<Record<string, TSchema>> = {
   ...SCHED_AGENT_FRAME_SCHEMAS,
   // fabric-thread P0 (arch §7.3): schemas from protocol/thread.ts
   ...THREAD_AGENT_FRAME_SCHEMAS,
+  ...TERMINAL_AGENT_FRAME_SCHEMAS,
 };
 
 const hubFrameSchemas: Readonly<Record<string, TSchema>> = {
@@ -2602,6 +2617,7 @@ const hubFrameSchemas: Readonly<Record<string, TSchema>> = {
   ...SCHED_HUB_FRAME_SCHEMAS,
   // fabric-thread P0 (arch §7.2): schemas from protocol/thread.ts
   ...THREAD_HUB_FRAME_SCHEMAS,
+  ...TERMINAL_HUB_FRAME_SCHEMAS,
 };
 
 // ---------------------------------------------------------------------------
@@ -2630,6 +2646,7 @@ function decodeWith(schemas: Readonly<Record<string, TSchema>>, raw: unknown): o
   // STRICTER 12 KiB serialized-JSON budget, and thr_req{op:"post"} the byte-precise 8 KiB text
   // cap — same posture as xs_*; inert until P2/P3 route the frames.
   if (t.startsWith("thr_") && !thrFrameOk(raw)) return undefined;
+  if (t.startsWith("term_") && !terminalFrameOk(raw)) return undefined;
   const schema = schemas[t];
   if (schema === undefined) return undefined; // unknown t + RESERVED_FRAME_TYPES
   return Value.Check(schema, raw) ? (raw as object) : undefined;

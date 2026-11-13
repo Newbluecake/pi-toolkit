@@ -22,6 +22,8 @@
  * `caps` here makes every hub look like a pre-P2 hub to every agent.
  */
 import type net from "node:net";
+import { isTerminalNamespace, hasReservedTerminalResult, terminalFrameOk } from "../protocol/terminal.js";
+import type { TerminalIngressPort, TerminalIngressMeta } from "./ports.js";
 import { decodeAgentFrame, LIMITS, TIMING, type AgentFrame, type HubFrame } from "../protocol/messages.js";
 import { encodeFrame, NdjsonDecoder } from "../protocol/ndjson.js";
 import {
@@ -60,6 +62,7 @@ export function createAgentServer(
   server: import("node:net").Server,
   deps: {
     registry: Registry;
+    terminal?: TerminalIngressPort;
     config: HubConfig;
     log: HubLog;
     now: () => number;
@@ -116,6 +119,7 @@ export function createAgentServer(
     sock.unref();
     let agentKey: string | undefined;
     let agentPid: number | undefined;
+    let terminalMeta: TerminalIngressMeta | undefined;
     let hadBye = false;
     let superseded = false;
     let finished = false;
@@ -188,6 +192,7 @@ export function createAgentServer(
         } catch (err) {
           log.error("web-hub agent-server: hello recovery hook failed", { error: String(err) });
         }
+        terminalMeta = { agentKey, linkGen: registry.getLinkGen(agentKey) ?? 0, sessionId: "", epoch: hello.epoch };
         agentPid = hello.agentId.pid;
         write({
           t: "hello_ack",
@@ -223,6 +228,37 @@ export function createAgentServer(
           ],
         });
         return;
+      }
+      // F1: isolate BEFORE decoder fallback/registry and synchronously. No service or a
+      // throwing service never licenses terminal traffic to enter ordinary pending/bus/ring.
+      if (superseded) return;
+      if (terminalMeta !== undefined) {
+        const meta = { ...terminalMeta, sessionId: registry.get(agentKey)?.session?.sessionId ?? "" };
+        let privateCommand = false;
+        try {
+          privateCommand = deps.terminal?.ownsCommand(meta, raw) === true;
+        } catch {
+          try {
+            deps.terminal?.onIngressFailure?.(meta);
+          } catch {
+            /* fixed fail-closed */
+          }
+          return;
+        } // no raw/error body logging
+        if (isTerminalNamespace(raw) || hasReservedTerminalResult(raw) || privateCommand) {
+          if (!isTerminalNamespace(raw) || (terminalFrameOk(raw) && rawType(raw) !== "term_req")) {
+            try {
+              deps.terminal?.consumeAgentFrame(meta, raw);
+            } catch {
+              try {
+                deps.terminal?.onIngressFailure?.(meta);
+              } catch {
+                /* consumed, no fallback */
+              }
+            }
+          }
+          return;
+        }
       }
       const frame: AgentFrame | undefined = decodeAgentFrame(raw);
       if (frame === undefined) {
@@ -374,6 +410,13 @@ export function createAgentServer(
     const teardown = (): void => {
       if (finished) return;
       finished = true;
+      if (terminalMeta !== undefined) {
+        try {
+          deps.terminal?.retireLink(terminalMeta);
+        } catch {
+          /* isolated cleanup */
+        }
+      }
       clearTimeout(helloTimer);
       clearTimeout(silenceTimer);
       clearInterval(pingTimer);

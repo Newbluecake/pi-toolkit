@@ -1,0 +1,17 @@
+{
+  "baseline": "2d802f1f HTTP/router/ingress + new agent ordinary command",
+  "normalization": ["HTTP Date"],
+  "status": 200,
+  "headers": {
+    "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'",
+    "x-frame-options": "DENY",
+    "x-content-type-options": "nosniff",
+    "referrer-policy": "no-referrer",
+    "cache-control": "no-store",
+    "content-type": "application/json; charset=utf-8",
+    "content-length": "129",
+    "date": "<DATE>",
+    "connection": "close"
+  },
+  "body": "{\"ok\":true,\"id\":\"zzzzzzzzzzzzzzzz\",\"data\":{\"op\":\"command\",\"kind\":\"builtin\",\"completion\":\"sync\",\"captured\":true,\"history\":\"none\"}}"
+}

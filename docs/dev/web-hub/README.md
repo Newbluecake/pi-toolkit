@@ -1175,3 +1175,34 @@ capability、末跳 pure-witness trusted-CODE 边界及 stock tokenizer/template
 详见 memory README；synthetic 本地协议和 loopback TLS 不可当生产证书。旧客户端仍读人类摘要，
 不承诺旧 UI 新的结构化展示。同步 syscall 不可抢占、同 uid 竞态、无全局回滚、unknown 不重试及
 不保证 elsewhere SDK flush/fsync 的既有限界保持；未连接真实 Hub/用户数据或执行运行中 reload。
+
+## Terminal contract (P1-C, r4; backend/UI not assembled yet)
+
+`protocol/terminal.ts` freezes strict v1 frames, HTTP, limits, creation tickets, SSE
+identity, fences, inventory/pages/reap proofs and metadata-only journal. Terminal is
+sparse/default-off/non-live (`webHub.terminal`; `/reload` + `/webhub restart`), D8 forced-off.
+No hello cap/PROTO change. `terminal.ui.v1` is browser-only; P1-H owns advertising it.
+The optional ports return explicit Unavailable until A/H implement them; no PTY factory
+is installed here. `wireWebHub` alone owns future cleanup, within its existing hooks;
+Stack must not own a second terminal lifecycle. Trusted plain-domain guard is injected
+post-HOST_KEY only, and absent guard must refuse.
+
+F1 is synchronous `agent-server` ingress BEFORE registry (including malformed/unknown
+`term_*`, private command tombstones and forged nested reserved command results).
+Service absence/throw never falls through to bus or SSE ring. `createTerminalCommandIngress`
+reserves bounded per-link command identities before send, keeps non-capability tombstones
+through deadlines and retires only with the socket link. Public command routing refuses
+reserved negotiation prefixes. The agent constructs only an allowlisted public offer or
+fixed refusal, before its ledger, duplicate/query/late paths; there is NO sensitive first
+cmd_result exception. `createTerminalNegotiator` is the ready CAS gate for the later A
+connection branch: offer → dedicated prepare/challenge/ready → dedicated grant → bind.
+It does not create backend/PTY or read inventory. No dedicated callback is wired while
+A is absent. Losing a frame never authorizes re-mint or command-cache recovery.
+
+F2 schemas are evidence envelopes, not OS proof verification. H must implement bounded
+owned-0600 atomic journal commits and current challenge/identity/digest/coverage checks;
+A must provide actual helper/waitpid/group/PTY/spawn-future facts. `lost` always means
+unknown physical effect + `E_RESOURCE_QUARANTINED`, never TTL permission to open. Q1–Q4
+contract tests and explicit dependency TODOs distinguish this from full integration gates.
+Legacy trace code in `tests/web-hub/terminal-legacy/` preserves unpatched baseline ingress
+and LRU/waiter behavior for old-hub and mixed-version tests; never add terminal guards there.

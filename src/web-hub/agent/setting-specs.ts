@@ -3,10 +3,43 @@
  * keep their original text and order; `config/setting-specs.ts` spreads the record at the same position, so the
  * listing order of `/agent settings` and the TUI editor is unchanged (pinned by tests/config/setting-specs-pin.test.ts).
  */
-import { count, bool, choice, csvString } from "../../config/spec-helpers.js";
+import { count, bool, choice, csvString, seconds } from "../../config/spec-helpers.js";
 import type { SettingSpec } from "../../config/spec-helpers.js";
 
 export const WEBHUB_SETTING_SPECS: Record<string, SettingSpec> = {
+  "webHub.terminal.enabled": {
+    ...bool("webHub.terminal.enabled", "Session terminal (default off; /reload and /webhub restart required)"),
+    fallback: false,
+  },
+  "webHub.terminal.maxPerSession": {
+    kind: "number",
+    path: "webHub.terminal.maxPerSession",
+    integer: true,
+    min: 1,
+    max: 4,
+    fallback: 2,
+  },
+  "webHub.terminal.maxPerPrincipal": {
+    kind: "number",
+    path: "webHub.terminal.maxPerPrincipal",
+    integer: true,
+    min: 1,
+    max: 8,
+    fallback: 2,
+  },
+  "webHub.terminal.maxTotal": {
+    kind: "number",
+    path: "webHub.terminal.maxTotal",
+    integer: true,
+    min: 1,
+    max: 32,
+    fallback: 8,
+  },
+  "webHub.terminal.inputIdleS": { ...seconds("webHub.terminal.inputIdleMs", { min: 300, max: 86400 }), fallback: 3600 },
+  "webHub.terminal.maxLifetimeS": {
+    ...seconds("webHub.terminal.maxLifetimeMs", { min: 900, max: 86400 }),
+    fallback: 28800,
+  },
   // web-hub (plan 包 I): five keys, all non-live (captured at activate; change → /reload).
   "webHub.enabled": bool(
     "webHub.enabled",

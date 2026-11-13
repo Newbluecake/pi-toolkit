@@ -1,3 +1,18 @@
+import { Value } from "@sinclair/typebox/value";
+import {
+  isReservedTerminalCommand,
+  TerminalNegotiationSchema,
+  TerminalOfferSchema,
+  TERMINAL_LIMITS,
+  terminalFrameOk,
+  TermReqSchema,
+  type TerminalOffer,
+  type TerminalNegotiation,
+  type TerminalProtocolReadyProof,
+  type TermReq,
+  type TermRes,
+  type TerminalHubConfig,
+} from "../protocol/terminal.js";
 import type { HumanDispatchBridge } from "./human-dispatch-proof.js";
 import { clampSpanMs } from "../../core/deadline.js";
 import { createSegmentedClock } from "../../core/clock.js";
@@ -70,6 +85,8 @@ export interface Timer {
 }
 
 export interface CommandHandlerDeps {
+  /** No sensitive result return type. Dedicated protocol owns mint/read/send after ready. */
+  terminal?: { offer(frame: CmdFrame, request: TerminalNegotiation): TerminalOffer | undefined };
   /** P4's shared source bridge. Never derive it from ledger text/XS attribution. */
   memoryProof?: () => HumanDispatchBridge | undefined;
   pi: ExtensionAPI;
@@ -290,6 +307,7 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
     deps.send(toResultFrame(frame, result));
   }
   function settleLate(frame: CmdFrame, result: LedgerResult): void {
+    if (isReservedTerminalCommand(frame.cmd)) result = errResult("E_UNSUPPORTED", false, "none");
     const at = deps.now();
     deps.ledger.settle(frame.id, result, at, { late: true });
     deps.onChanged();
@@ -475,6 +493,7 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
   function handlePrompt(frame: CmdFrame): void {
     if (frame.cmd.op !== "prompt") return;
     const cmd = frame.cmd;
+    if (isReservedTerminalCommand(cmd)) return replyOnly(frame, errResult("E_COMMAND_DENIED", false, "none"));
     if (!beginOrReply(frame, { text: cmd.text })) return;
     const ctx = deps.getCtx();
     if (ctx === undefined) return settleAndReply(frame, errResult("E_STALE_CTX", true, "none"));
@@ -1251,6 +1270,51 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
     if (frame.cmd.op !== "command") return;
     const cmd = frame.cmd;
     if (!beginOrReply(frame)) return;
+    if (isReservedTerminalCommand(cmd)) {
+      // r4: command transport can NEVER prove a ready receiver, including real Web origin.
+      // Construct public result from an allowlist BEFORE ledger/dup/query/late/history.
+      let ctx: ExtensionContext | undefined;
+      try {
+        ctx = deps.getCtx();
+      } catch {
+        return settleAndReply(frame, errResult("E_STALE_CTX", false, "none"));
+      }
+      if (
+        !ctx ||
+        (ctx.mode !== "tui" && ctx.mode !== "rpc") ||
+        frame.origin.ip === "feishu" ||
+        cmd.name !== "webhub" ||
+        !cmd.args.trim().startsWith("__terminal ")
+      ) {
+        return settleAndReply(frame, errResult("E_COMMAND_DENIED", false, "none"));
+      }
+      let request: unknown;
+      try {
+        request = JSON.parse(cmd.args.trim().slice("__terminal ".length));
+      } catch {
+        return settleAndReply(frame, errResult("E_BAD_REQUEST", false, "none"));
+      }
+      if (!Value.Check(TerminalNegotiationSchema, request))
+        return settleAndReply(frame, errResult("E_COMMAND_DENIED", false, "none"));
+      let offer: TerminalOffer | undefined;
+      try {
+        offer = deps.terminal?.offer(frame, request);
+      } catch {
+        /* no fallback */
+      }
+      if (!offer || !Value.Check(TerminalOfferSchema, offer))
+        return settleAndReply(frame, errResult("E_UNSUPPORTED", false, "none"));
+      return settleAndReply(frame, {
+        ok: true,
+        data: {
+          op: "command",
+          kind: "builtin",
+          completion: "sync",
+          history: "none",
+          terminal: { v: 1, outcome: "handshake-required", offerId: offer.offerId },
+        } as CmdData,
+      });
+    }
     // Direct memory reads must see the same live session admission as resume/prompt,
     // before the synchronous bridge can touch the filesystem.
     if (cmd.name === "mem") {
@@ -1723,6 +1787,181 @@ export function createCommandHandler(deps: CommandHandlerDeps): CommandHandler {
       idleWatch.clear();
       pendingSteerByRun.clear();
       pendingThreadFrames.clear();
+    },
+  };
+}
+
+/** P1-C sending-side gate. P1-A supplies trusted live scope/guard and dedicated transport.
+ * No timers, PTY or backend factory; callbacks run ONLY after same-connection ready CAS.
+ * Offers expire with the ORIGINAL bootstrap deadline. Failed/lost sends are not replayed.
+ */
+export interface TerminalNegotiatorDeps {
+  now(): number;
+  current(): { localConnectionInstance: string; sessionId: string; epoch: string; ownerInstance: string } | undefined;
+  allowed(): boolean;
+  limits: TerminalHubConfig;
+  /** Private mint port; invoked only after the dedicated ready CAS. */
+  mintGrant?(): string;
+  send(frame: TermRes): void;
+  /** Resource-only establishes a cleanup channel; does not read inventory or grant interaction. */
+  onBound?(channelId: string, proof: TerminalProtocolReadyProof): void;
+}
+export function createTerminalNegotiator(deps: TerminalNegotiatorDeps) {
+  type Offer = {
+    commandId: string;
+    offerId: string;
+    mode: "interactive" | "resource-only";
+    scope: NonNullable<ReturnType<TerminalNegotiatorDeps["current"]>>;
+    expiresAt: number;
+    phase: "offered" | "challenged" | "ready" | "bound";
+    hubNonce?: string;
+    agentChallenge?: string;
+    proof?: TerminalProtocolReadyProof;
+    grant?: string;
+  };
+  const offers = new Map<string, Offer>();
+  let disposed = false;
+  function live(o: Offer): boolean {
+    const c = deps.current();
+    return (
+      !disposed &&
+      deps.allowed() &&
+      deps.now() < o.expiresAt &&
+      c !== undefined &&
+      Object.keys(o.scope).every((k) => c[k as keyof typeof c] === o.scope[k as keyof typeof c])
+    );
+  }
+  function prune(): void {
+    for (const [k, o] of offers) if (!live(o)) offers.delete(k);
+  }
+  return {
+    offer(frame: CmdFrame, request: TerminalNegotiation): TerminalOffer | undefined {
+      prune();
+      const scope = deps.current();
+      if (disposed || !deps.allowed() || !scope) return undefined;
+      if (
+        frame.origin.ip === "feishu" ||
+        frame.cmd.op !== "command" ||
+        !Value.Check(TerminalNegotiationSchema, request)
+      )
+        return undefined;
+      const existing = [...offers.values()].find((o) => o.commandId === frame.id);
+      if (existing) return { v: 1, outcome: "handshake-required", offerId: existing.offerId };
+      if (offers.size >= TERMINAL_LIMITS.offers) return undefined;
+      const budget = clampSpanMs(Math.min(TERMINAL_LIMITS.bootstrapMs, frame.deadlineMs));
+      const at = deps.now();
+      if (budget === undefined || !Number.isSafeInteger(at) || at < 0 || !Number.isSafeInteger(at + budget))
+        return undefined;
+      const offerId = randomUUID();
+      offers.set(offerId, {
+        commandId: frame.id,
+        offerId,
+        mode: request.action === "negotiate" ? "interactive" : "resource-only",
+        scope: { ...scope },
+        expiresAt: at + budget,
+        phase: "offered",
+      });
+      return { v: 1, outcome: "handshake-required", offerId };
+    },
+    /** ONLY the connection's dedicated term_req branch may call this. cmd JSON cannot. */
+    receive(raw: unknown): boolean {
+      if (!terminalFrameOk(raw) || !Value.Check(TermReqSchema, raw)) return false;
+      const f = raw as TermReq;
+      if (f.op !== "prepare_protocol" && f.op !== "protocol_ready" && f.op !== "bind") return false;
+      const o = offers.get(f.offerId);
+      if (!o || !live(o) || f.sessionId !== o.scope.sessionId || f.epoch !== o.scope.epoch) return false;
+      const common = {
+        t: "term_res" as const,
+        v: 1 as const,
+        rid: f.rid,
+        sessionId: o.scope.sessionId,
+        epoch: o.scope.epoch,
+        ownerInstance: o.scope.ownerInstance,
+      };
+      if (f.op === "prepare_protocol") {
+        if (o.phase !== "offered") return false;
+        o.phase = "challenged";
+        o.hubNonce = f.hubNonce;
+        o.agentChallenge = randomUUID();
+        deps.send({
+          ...common,
+          op: "protocol_challenge",
+          ok: true,
+          offerId: o.offerId,
+          hubNonce: o.hubNonce,
+          agentChallenge: o.agentChallenge,
+        });
+        return true;
+      }
+      if (
+        f.ownerInstance !== o.scope.ownerInstance ||
+        f.hubNonce !== o.hubNonce ||
+        f.agentChallenge !== o.agentChallenge
+      )
+        return false;
+      if (f.op === "protocol_ready") {
+        if (o.phase !== "challenged") return false;
+        o.phase = "ready";
+        const proof: TerminalProtocolReadyProof = {
+          offerId: o.offerId,
+          ...o.scope,
+          mode: o.mode,
+          hubNonce: f.hubNonce,
+          agentChallenge: f.agentChallenge,
+          expiresAt: o.expiresAt,
+        };
+        o.proof = Object.freeze(proof);
+        // Mint occurs AFTER CAS and a fresh guard, exclusively on dedicated transport.
+        if (!live(o)) return false;
+        if (o.mode === "interactive") {
+          const grant = (deps.mintGrant ?? randomUUID)();
+          o.grant = grant;
+          if (!live(o)) {
+            delete o.grant;
+            return false;
+          }
+          deps.send({
+            ...common,
+            op: "protocol_ready",
+            ok: true,
+            offerId: o.offerId,
+            hubNonce: f.hubNonce,
+            agentChallenge: f.agentChallenge,
+            mode: "interactive",
+            grant,
+            expiresAt: Math.min(deps.now() + clampSpanMs(TERMINAL_LIMITS.grantMs)!, o.expiresAt),
+            backend: "linux-pty-v1",
+            limits: deps.limits,
+          });
+        } else {
+          const channelId = randomUUID();
+          deps.send({
+            ...common,
+            op: "protocol_ready",
+            ok: true,
+            offerId: o.offerId,
+            hubNonce: f.hubNonce,
+            agentChallenge: f.agentChallenge,
+            mode: "resource-only",
+            channelId,
+          });
+          if (live(o)) deps.onBound?.(channelId, proof);
+        }
+        return true;
+      }
+      if (o.mode !== "interactive" || o.phase !== "ready" || !o.grant || f.grant !== o.grant || !o.proof) return false;
+      o.phase = "bound";
+      delete o.grant;
+      deps.send({ ...common, op: "bind", ok: true, channelId: f.proposedChannelId, bound: true });
+      if (live(o)) deps.onBound?.(f.proposedChannelId, o.proof);
+      return true;
+    },
+    invalidate(): void {
+      offers.clear();
+    },
+    dispose(): void {
+      disposed = true;
+      offers.clear();
     },
   };
 }
