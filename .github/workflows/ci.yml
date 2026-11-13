@@ -48,12 +48,16 @@ jobs:
           # tests (real hub children, perf ratios) flake under CPU contention.
           PI_TOOLKIT_TEST_WORKERS: "2"
 
-      # Terminal tier 2 covers bash/zsh login shells; the runner image does not include zsh.
-      - name: Install zsh (terminal PTY tier 2)
+      # The runner image lacks zsh, and some /etc/profile.d targets are world-writable;
+      # the terminal fixture rejects those targets under its threat model.
+      - name: Prepare terminal tier 2 runner (zsh, system rc permissions)
         if: ${{ !cancelled() && (steps.tier1.outcome == 'success' || steps.tier1.outcome == 'failure') }}
         run: |
           sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends zsh
           command -v zsh
+          ls -lL /etc/profile /etc/bash.bashrc /etc/zsh/* /etc/profile.d/ 2>/dev/null || true
+          sudo find -L /etc/profile /etc/bashrc /etc/bash.bashrc /etc/zsh /etc/zshenv /etc/zshrc /etc/zprofile /etc/zlogin /etc/locale.conf /etc/profile.d -maxdepth 1 -type f -perm /022 -print -exec chmod go-w {} + 2>/dev/null || true
+          ! sudo find -L /etc/profile.d -maxdepth 1 -type f -perm /002 | grep -q .
 
       # test-speed plan D7: tier 2 (env-sensitive: integration, conformance, real mounts) runs only
       # once tier 1 actually executed — if npm ci or a build step failed, tier 1 was skipped and
