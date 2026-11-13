@@ -121,6 +121,12 @@ try {
   });
   page = await context.newPage();
   const consoleErrors: string[] = [];
+  const documentCsp: unknown[][] = [];
+  const captureDocumentCsp = async () => {
+    const violations = await page.evaluate(() => (window as any).__terminalEvidence.violations);
+    documentCsp.push(violations);
+    assert.deepEqual(violations, []);
+  };
   page.on("pageerror", (e: Error) => consoleErrors.push(e.message));
   page.on("console", (m: any) => {
     if (m.type() === "error") consoleErrors.push(m.text());
@@ -205,6 +211,7 @@ try {
   const cookiesBefore = await context.cookies();
   await button("放到后台").click();
   await page.waitForSelector(".terminal-panel", { state: "detached" });
+  await captureDocumentCsp();
   await page.reload();
   result.sameCookies = JSON.stringify(cookiesBefore) === JSON.stringify(await context.cookies());
   await page.waitForSelector('[aria-controls="terminal-panel"]');
@@ -252,6 +259,7 @@ try {
     });
     if (!r.ok) throw new Error("unlock fixture failed");
   }, card.agentKey);
+  await captureDocumentCsp();
   await page.reload();
   await page.locator('[aria-controls="terminal-panel"]').click();
   await page.locator("[data-terminal-create]").click();
@@ -276,7 +284,10 @@ try {
   steps.push("real logout/revoke immediately invalidates panel and reaps shell");
   const evidence = await page.evaluate(() => (window as any).__terminalEvidence);
   assert.deepEqual(evidence.violations, []);
-  result.cspViolations = evidence.violations;
+  documentCsp.push(evidence.violations);
+  result.cspByDocument = documentCsp;
+  result.cspViolations = documentCsp.flat();
+  assert.deepEqual(result.cspViolations, []);
   result.consoleErrors = consoleErrors;
   assert.deepEqual(consoleErrors, []);
   // Expected auth HTTP errors are preserved; CSP and uncaught exceptions are separately asserted.
