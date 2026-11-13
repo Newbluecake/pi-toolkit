@@ -8,7 +8,11 @@ import { localPlainEnvironment } from "../../../src/web-hub/protocol/terminal-lo
 import { resolveHubPaths } from "../../../src/web-hub/protocol/paths.js";
 import { fakePi, fakeCtx, SETTINGS } from "../../web-hub/agent/helpers.js";
 import type { TerminalTestFixture } from "../../../src/web-hub/agent/terminal/environment.js";
-const input = JSON.parse(readFileSync(process.argv[2]!, "utf8")) as { home: string; fixture: TerminalTestFixture };
+const input = JSON.parse(readFileSync(process.argv[2]!, "utf8")) as {
+  home: string;
+  fixture: TerminalTestFixture;
+  pluginVersion?: string;
+};
 const a = fakePi(),
   c = fakeCtx({ sessionId: "child-terminal-session", mode: "rpc" });
 Object.assign(c.ctx, { cwd: input.fixture.cwd });
@@ -30,7 +34,7 @@ const control = wireWebHub(a.pi, {
   env: { HOME: input.home },
   paths: resolveHubPaths({ home: input.home, uid: process.getuid!() }),
   argv1: "/nonexistent/pi",
-  buildInfo: async () => ({ pluginVersion: "1.2.3", buildId: "child-terminal-integration" }),
+  buildInfo: async () => ({ pluginVersion: input.pluginVersion ?? "1.2.3", buildId: "child-terminal-integration" }),
   terminalOwnerFactory: async (options) => {
     owner = await createTerminalOwner({
       ...options,

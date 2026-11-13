@@ -13,7 +13,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { expect } from "vitest";
+import assert from "node:assert/strict";
 import { assertTerminalFixture, type TerminalTestFixture } from "../../src/web-hub/agent/terminal/environment.js";
 function systemRcPreflight(): void {
   const files = [
@@ -77,7 +77,7 @@ export function makeTerminalFixture(): { fixture: TerminalTestFixture; cleanup()
     'export RC_COUNT=$(( ${RC_COUNT:-0} + 1 ))\nexport RC_API_KEY=from-fixture-rc\nPS1="fixture> "\nHISTFILE=/dev/null\nprintf "RC_READY\\n"\n',
   );
   const shell = join(root, kind);
-  expect(existsSync(`/usr/bin/${kind}`), `real ${kind} required; no fallback/skip`).toBe(true);
+  assert(existsSync(`/usr/bin/${kind}`), `real ${kind} required; no fallback/skip`);
   const binary = realpathSync(`/usr/bin/${kind}`);
   writeFileSync(
     shell,

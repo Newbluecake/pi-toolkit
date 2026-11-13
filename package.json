@@ -100,6 +100,7 @@
     "dev:web": "vite build --watch --config src/web-hub/ui/vite.config.ts",
     "check:web": "tsx scripts/web-hub/check-ui-dist.ts",
     "probe:csp": "tsx scripts/web-hub/csp-probe.ts",
+    "probe:terminal-e2e": "tsx scripts/web-hub/terminal-e2e-probe.ts",
     "probe:mermaid": "tsx scripts/web-hub/csp-probe.ts --suite mermaid",
     "probe:preview-perf": "tsx scripts/web-hub/preview-perf-probe.ts",
     "dev:hub": "tsx scripts/web-hub/dev-hub.ts",

@@ -108,6 +108,7 @@ import { TERMINAL_LOCAL_DIR } from "../../src/web-hub/protocol/terminal-local.js
 import { resolveHubPaths } from "../../src/web-hub/protocol/paths.js";
 import {
   TERMINAL_JOURNAL_FILE,
+  TERMINAL_LIMITS,
   terminalIdentityKey,
   type TerminalJournal,
   type TerminalHttpRequests,
@@ -714,24 +715,66 @@ describe("separate-process production authority and physical receipt release cha
       const beforeClose = JSON.parse(readFileSync(journalPath, "utf8")) as TerminalJournal;
       expect(beforeClose.resources.some((row) => row.entry.identity.termId === a.termId)).toBe(true);
       await post("close", { termId: a.termId, closeId: `child-close-${round}`, expectedRevision: attached.revision });
-      await waitUntil(
-        () => {
-          const j = JSON.parse(readFileSync(journalPath, "utf8")) as TerminalJournal;
-          return j.revision >= beforeClose.revision + 2 && j.resources.length === 0;
-        },
-        8000,
-        "real cross-process durable resolution",
-      );
-      await waitUntil(
-        () => readdirSync(join(root, "receipts")).length === 0,
-        5000,
-        "ACK deletes exact persisted receipt",
-      );
+      let stage = "durable resolve/prune";
+      try {
+        // Physical completion can take the production escalating-reaper budget (60s).
+        // A close/exit event is NOT a durable-release barrier: retain both journal
+        // assertions and the separate exact-receipt ACK assertion below.
+        await waitUntil(
+          () => {
+            const j = JSON.parse(readFileSync(journalPath, "utf8")) as TerminalJournal;
+            return j.revision >= beforeClose.revision + 2 && j.resources.length === 0;
+          },
+          TERMINAL_LIMITS.reapRetryMs,
+          "real cross-process durable resolution",
+        );
+        stage = "receipt ACK/delete";
+        await waitUntil(
+          () => readdirSync(join(root, "receipts")).length === 0,
+          5000,
+          "ACK deletes exact persisted receipt",
+        );
+      } catch (error) {
+        const journal = JSON.parse(readFileSync(journalPath, "utf8")) as TerminalJournal;
+        const receipts = readdirSync(join(root, "receipts")).map((file) => {
+          const receipt = JSON.parse(readFileSync(join(root, "receipts", file), "utf8"));
+          // Body-free physical diagnostics only; never print capabilities/nonces.
+          return { identity: receipt.identity, physical: receipt.physical };
+        });
+        const processState = existsSync(`/proc/${pid}/stat`) ? readFileSync(`/proc/${pid}/stat`, "utf8") : "gone";
+        throw new Error(
+          `${String(error)}; ${JSON.stringify({
+            stage,
+            round,
+            pid,
+            reaper: {
+              budgetMs: TERMINAL_LIMITS.reapRetryMs,
+              shell: processState,
+              managed: journal.resources
+                .flatMap((row) => row.entry.managed)
+                .map((identity) => {
+                  try {
+                    return { identity, stat: readFileSync(`/proc/${identity.pid}/stat`, "utf8") };
+                  } catch {
+                    return { identity, stat: "gone-or-unreadable" };
+                  }
+                }),
+            },
+            journal: { revision: journal.revision, resources: journal.resources },
+            receipts,
+            agentExit: child.exitCode,
+            agentDiagnostics: errors,
+            lifecycle: sse.events
+              .filter((e) => e.event === "terminal" && e.data.event.kind === "exit")
+              .map((e) => ({ kind: e.data.event.kind, reap: e.data.event.reap, reason: e.data.event.reason })),
+          })}`,
+        );
+      }
       expect(() => process.kill(pid, 0)).toThrow();
       expect(sse.events.filter((e) => e.event === "terminal").every((e) => e.id === undefined)).toBe(true);
     }
     expect(await readdir(join(root, "authority"))).toHaveLength(1);
-  }, 40000);
+  }, 300000);
 });
 
 import { chmodSync, writeFileSync, unlinkSync, symlinkSync } from "node:fs";
