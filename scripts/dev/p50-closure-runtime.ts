@@ -12,6 +12,8 @@ import {
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import type { CredentialStore, ModelsStore } from "@earendil-works/pi-ai";
+// Already pinned by the pi 1.5 SDK in package-lock; standalone dev probe only.
+import { Agent, fetch as directFetch } from "undici";
 import { readSettingsNoMigrate, loadSettings } from "../../src/config/settings.js";
 import type { MemorySettings } from "../../src/memory/settings.js";
 import { serializeBlock, parseBlockFile } from "../../src/memory/blocks/format.js";
@@ -40,6 +42,7 @@ import {
   type ClosureManifest,
   type ClosureRunnerContext,
   type ProbeStage,
+  type ProbeTransport,
 } from "./p50-closure-live-probe.js";
 
 export const SYNTHETIC_BODIES = [
@@ -64,7 +67,12 @@ export function payloadTemplateHash(payload: Record<string, unknown>): string {
   const { store: _store, stream_options: _usage, ...semantic } = payload;
   return manifestSha256(revisionCanonicalJson(semantic));
 }
-export function buildClosureManifest(settings: MemorySettings, registry: ModelRegistry, root: string): ClosureManifest {
+export function buildClosureManifest(
+  settings: MemorySettings,
+  registry: ModelRegistry,
+  root: string,
+  transport: ProbeTransport = "proxy",
+): ClosureManifest {
   const r = settings.jev.classifiers[0],
     g = settings.jev.predict.model.models[0];
   const view = registryOf({ modelRegistry: registry });
@@ -145,6 +153,7 @@ export function buildClosureManifest(settings: MemorySettings, registry: ModelRe
   const absolute = resolve(root);
   return {
     contract: "p50-stock-estimate-suggest-only-v1",
+    transport,
     root: absolute,
     paths: {
       home: join(absolute, "home"),
@@ -170,7 +179,9 @@ export function buildClosureManifest(settings: MemorySettings, registry: ModelRe
       clientCallSlots: 5,
       httpAttemptLimit: 4,
       proxyConfigured: settings.jev.proxy !== "",
-      executionGate: settings.jev.proxy ? "PROXY_UNAVAILABLE" : "READY_FOR_APPROVAL",
+      proxyBypassed: settings.jev.proxy !== "" && transport === "direct-user-approved",
+      executionGate:
+        settings.jev.proxy && transport !== "direct-user-approved" ? "PROXY_UNAVAILABLE" : "READY_FOR_APPROVAL",
       callPlan: "2R+1G+1C",
       retries: 0,
       fallback: false,
@@ -285,6 +296,55 @@ export async function requireProbeAuth(
     }
   } catch {
     throw Error("AUTH_UNAVAILABLE");
+  }
+}
+
+/** Only the standalone CLI calls this, after hash/transport/route/auth admission.
+ * Stock G/C guards capture global fetch while the host is built; pin its final
+ * dispatcher here too, without replacing those guards or the SDK serializers.
+ * A fresh plain Agent uses direct Pool/Client connectors, never EnvHttpProxyAgent
+ * or the ambient global dispatcher (even if SDK code configured one). The
+ * explicit per-request dispatcher wins over caller init and environment proxies.
+ * No settings/env writes; restore fetch and destroy sockets even on failure. */
+export async function withDirectProbeTransport<T>(run: () => Promise<T>): Promise<T> {
+  const original = globalThis.fetch;
+  const dispatchers: Agent[] = [];
+  globalThis.fetch = async (url, init) => {
+    // Only the SHA-checked SDK JSON POST shape is needed here. Pair the Agent
+    // with its own undici fetch: Node 22's bundled undici has a different major
+    // dispatcher-handler protocol. No unsafe cross-version dispatcher cast.
+    if ((typeof url !== "string" && !(url instanceof URL)) || init?.method !== "POST" || typeof init.body !== "string")
+      throw Error("PROVIDER_FAILED");
+    const dispatcher = new Agent({ connections: 1, allowH2: false, maxOrigins: 1 });
+    dispatchers.push(dispatcher);
+    const dispatch = dispatcher.dispatch.bind(dispatcher);
+    let attempts = 0;
+    dispatcher.dispatch = (options, handler) => {
+      // fetch itself can replay a 421 even with SDK maxRetries=0. Permit one
+      // low-level dispatch per SHA-approved POST, never that hidden replay.
+      if (++attempts !== 1) throw Error("PROBE_STOPPED");
+      return dispatch({ ...options, idempotent: false }, handler);
+    };
+    const response = await directFetch(url, {
+      method: "POST",
+      body: init.body,
+      headers: Object.fromEntries(new Headers(init.headers)),
+      ...(init.signal ? { signal: init.signal } : {}),
+      dispatcher,
+      redirect: "error",
+    });
+    // Bridge the standard streaming body/headers, not nominal SDK/Node types.
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: Object.fromEntries(response.headers),
+    });
+  };
+  try {
+    return await run();
+  } finally {
+    globalThis.fetch = original;
+    await Promise.all(dispatchers.map((dispatcher) => dispatcher.destroy()));
   }
 }
 
@@ -412,6 +472,9 @@ export async function runClosureHost(ctx: ClosureRunnerContext, registry: ModelR
         },
         jev: {
           ...source.jev,
+          // One-shot, SHA-approved probe-local copy ONLY. Production/stock I2
+          // still refuses missing proxy capability; never persist this override.
+          proxy: m.transport === "direct-user-approved" ? "" : source.jev.proxy,
           maxCalls: 5,
           maxCostUsd: m.budgetUsd,
           predict: { ...source.jev.predict, enabled: false },

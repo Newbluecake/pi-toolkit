@@ -5,6 +5,11 @@ import { formatWithOptions } from "node:util";
 import { afterEach, expect, it, vi } from "vitest";
 import { classify } from "@earendil-works/pi-ai/api/typesafe-system-one";
 import * as sdk from "@earendil-works/pi-coding-agent";
+import { Agent, fetch as directFetch, getGlobalDispatcher } from "undici";
+vi.mock("undici", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("undici")>();
+  return { ...actual, fetch: vi.fn() };
+});
 import { clearHealthTable } from "../../../src/memory/jev/health.js";
 import { loadSettings } from "../../../src/config/settings.js";
 import {
@@ -14,6 +19,7 @@ import {
   requireQuote,
   ProbeRegistry,
   runClosureHost,
+  withDirectProbeTransport,
 } from "../../../scripts/dev/p50-closure-runtime.js";
 import {
   closureManifestBytes,
@@ -79,6 +85,8 @@ afterEach(() => {
   clearHealthTable();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
+  vi.mocked(directFetch).mockReset();
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 function root() {
@@ -372,6 +380,158 @@ it("valid CLI manifest still refuses missing auth, route drift and unsupported p
   expect(auth).toHaveBeenCalledTimes(1);
   expect(run).not.toHaveBeenCalled();
   expect(fetch).not.toHaveBeenCalled();
+});
+it("direct transport is SHA-bound and requires matching explicit print/LIVE approval before auth or HTTP", async () => {
+  const c = await catalog();
+  const settings = { ...c.settings, jev: { ...c.settings.jev, proxy: "http://127.0.0.1:9" } };
+  const open = vi.fn(async () => ({ ...c, settings })),
+    auth = vi.fn(),
+    run = vi.fn();
+  const fetch = http();
+  vi.stubGlobal("fetch", fetch);
+  const ports = { open, auth, run };
+  const printed = await probeMain(
+    ["--print-manifest", "--root", c.manifest.root, "--transport", "direct-user-approved"],
+    ports,
+  );
+  expect(printed.code).toBe(0);
+  const approved = JSON.parse(printed.output);
+  expect(approved.manifest.transport).toBe("direct-user-approved");
+  expect(approved.manifest.approval).toMatchObject({
+    proxyConfigured: true,
+    proxyBypassed: true,
+    executionGate: "READY_FOR_APPROVAL",
+  });
+  const bytes = closureManifestBytes(approved.manifest);
+  expect(approved.manifestSha256).toBe(manifestSha256(bytes));
+  // Change ONLY transport, not the gate/approval metadata: it must affect SHA.
+  expect(manifestSha256(closureManifestBytes({ ...approved.manifest, transport: "proxy" }))).not.toBe(
+    approved.manifestSha256,
+  );
+  const file = join(root(), "approved.json");
+  writeFileSync(file, printed.output);
+  const args = ["--live", "--manifest", file, "--manifest-sha", approved.manifestSha256];
+  for (const option of [[], ["--transport", "proxy"]])
+    expect(await probeMain([...args, ...option], ports)).toEqual({ code: 2, output: "PROXY_UNAVAILABLE\n" });
+  // Explicit direct LIVE cannot use a different SHA, even with matching transport.
+  expect(await probeMain([...args.slice(0, -1), "f".repeat(64), "--transport", "direct-user-approved"], ports)).toEqual(
+    { code: 2, output: "APPROVAL_HASH_MISMATCH\n" },
+  );
+  const stock = await probeMain(["--print-manifest", "--root", c.manifest.root], ports);
+  expect(stock.code).toBe(0);
+  const stockApproval = JSON.parse(stock.output);
+  expect(stockApproval.manifest).toMatchObject({
+    transport: "proxy",
+    approval: { proxyConfigured: true, proxyBypassed: false, executionGate: "PROXY_UNAVAILABLE" },
+  });
+  writeFileSync(file, stock.output);
+  expect(
+    await probeMain(
+      [
+        "--live",
+        "--manifest",
+        file,
+        "--manifest-sha",
+        stockApproval.manifestSha256,
+        "--transport",
+        "direct-user-approved",
+      ],
+      ports,
+    ),
+  ).toEqual({ code: 2, output: "PROXY_UNAVAILABLE\n" });
+  expect(auth).not.toHaveBeenCalled();
+  expect(run).not.toHaveBeenCalled();
+  expect(fetch).not.toHaveBeenCalled();
+  expect(readdirSync(c.manifest.root)).toEqual([]);
+});
+it("explicit direct print → LIVE mock closure uses a private plain direct dispatcher on exactly four bottom requests", async () => {
+  const c = await catalog();
+  const settings = { ...c.settings, jev: { ...c.settings.jev, proxy: "http://127.0.0.1:9" } };
+  Object.freeze(settings.jev);
+  const source = JSON.stringify(settings);
+  const fetch = http();
+  vi.mocked(directFetch).mockImplementation(fetch as unknown as typeof directFetch);
+  vi.stubGlobal("fetch", fetch);
+  for (const name of ["https_proxy", "http_proxy", "HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY"])
+    vi.stubEnv(name, "http://127.0.0.1:9");
+  const ambient = getGlobalDispatcher();
+  const ports = { open: async () => ({ ...c, settings }), auth: requireProbeAuth, run: runClosureHost };
+  const printed = await probeMain(
+    ["--print-manifest", "--root", c.manifest.root, "--transport", "direct-user-approved"],
+    ports,
+  );
+  expect(printed.code).toBe(0);
+  expect(fetch).not.toHaveBeenCalled();
+  const approved = JSON.parse(printed.output);
+  const file = join(root(), "approved.json");
+  writeFileSync(file, printed.output);
+  const result = await probeMain(
+    ["--live", "--manifest", file, "--manifest-sha", approved.manifestSha256, "--transport", "direct-user-approved"],
+    ports,
+  );
+  expect(result.code).toBe(0);
+  const outcome = JSON.parse(result.output);
+  expect(outcome).toMatchObject({
+    verdict: "PASS",
+    live: "RUN",
+    effect: {
+      suggestions: 1,
+      autoEligible: false,
+      automaticCommitCalls: 0,
+      targetRawUnchanged: true,
+      contextRawUnchanged: true,
+      auditState: "prepared",
+      usage: { calls: 4 },
+    },
+  });
+  expect(outcome.events.map((e: { stage: string }) => e.stage)).toEqual(["R1", "R2", "G1", "C1"]);
+  expect(fetch).toHaveBeenCalledTimes(4);
+  expect(directFetch).toHaveBeenCalledTimes(4);
+  const dispatchers = fetch.mock.calls.map(([, init]) => {
+    expect(init?.redirect).toBe("error");
+    const dispatcher = (init as RequestInit & { dispatcher: Agent }).dispatcher;
+    expect(Object.getPrototypeOf(dispatcher)).toBe(Agent.prototype); // NOT ProxyAgent/EnvHttpProxyAgent
+    expect(dispatcher).not.toBe(ambient);
+    return dispatcher;
+  });
+  expect(new Set(dispatchers).size).toBe(4);
+  for (const dispatcher of dispatchers) expect(dispatcher.destroyed).toBe(true);
+  expect(globalThis.fetch).toBe(fetch);
+  expect(getGlobalDispatcher()).toBe(ambient);
+  expect(JSON.stringify(settings)).toBe(source);
+  expect(result.output + printed.output).not.toContain(SECRET);
+}, 15000);
+it("direct transport forbids fetch-internal replay at the dispatcher seam, independently of SDK retries", async () => {
+  // No sockets: stand in for Agent's real dispatch, below the one-shot guard.
+  const dispatch = vi.spyOn(Agent.prototype, "dispatch").mockReturnValue(true);
+  vi.mocked(directFetch).mockImplementation(async (url, init) => {
+    const request = { origin: new URL(String(url)).origin, path: "/", method: "POST" };
+    expect(init!.dispatcher!.dispatch(request, {})).toBe(true);
+    expect(() => init!.dispatcher!.dispatch(request, {})).toThrow("PROBE_STOPPED");
+    return new Response("offline") as unknown as Awaited<ReturnType<typeof directFetch>>;
+  });
+  const text = await withDirectProbeTransport(async () =>
+    (await globalThis.fetch("https://p50.invalid/", { method: "POST", body: "{}" })).text(),
+  );
+  expect(text).toBe("offline");
+  expect(dispatch).toHaveBeenCalledTimes(1);
+  expect(dispatch.mock.calls[0]![0]).toMatchObject({ method: "POST", idempotent: false });
+});
+it("direct fetch scope restores the original fetch and destroys its private dispatcher on failure too", async () => {
+  const fetch = vi.fn<typeof globalThis.fetch>(async () => new Response("offline"));
+  vi.stubGlobal("fetch", fetch);
+  vi.mocked(directFetch).mockImplementation(fetch as unknown as typeof directFetch);
+  await expect(
+    withDirectProbeTransport(async () => {
+      await globalThis.fetch("https://p50.invalid/", { method: "POST", body: "{}" });
+      throw Error("synthetic-stop");
+    }),
+  ).rejects.toThrow("synthetic-stop");
+  expect(fetch).toHaveBeenCalledTimes(1);
+  const init = fetch.mock.calls[0]![1] as RequestInit & { dispatcher: Agent };
+  expect(Object.getPrototypeOf(init.dispatcher)).toBe(Agent.prototype);
+  expect(init.dispatcher.destroyed).toBe(true);
+  expect(globalThis.fetch).toBe(fetch);
 });
 it("public SDK stored-credential reader is used only by LIVE auth, never print; OAuth refuses without refresh or writes", async () => {
   const reader = vi.fn(sdk.readStoredCredential);

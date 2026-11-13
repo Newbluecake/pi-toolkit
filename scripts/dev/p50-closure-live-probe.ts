@@ -14,13 +14,16 @@ import {
   requireProbeAuth,
   ProbeRegistry,
   runClosureHost,
+  withDirectProbeTransport,
 } from "./p50-closure-runtime.js";
 import { estimatePayload, STOCK_ESTIMATE_PROFILE } from "../../src/memory/jev/p50-estimate.js";
 import { memoryDirFor } from "../../src/memory/paths.js";
 
 export type ProbeStage = "R1" | "R2" | "G1" | "C1";
+export type ProbeTransport = "proxy" | "direct-user-approved";
 export interface ClosureManifest {
   readonly contract: "p50-stock-estimate-suggest-only-v1";
+  readonly transport: ProbeTransport;
   readonly root: string;
   readonly paths: {
     readonly home: string;
@@ -93,6 +96,7 @@ export function validateClosureManifest(
   requireQuote(m);
   if (
     m.contract !== "p50-stock-estimate-suggest-only-v1" ||
+    (m.transport !== "proxy" && m.transport !== "direct-user-approved") ||
     m.maxAttempts !== 4 ||
     !Number.isFinite(m.budgetUsd) ||
     m.budgetUsd <= 0 ||
@@ -290,13 +294,23 @@ export async function probeMain(
     };
     // No implicit legacy LIVE path, and no auth/catalog work without one mode.
     if (flag("--live") === flag("--print-manifest")) throw Error("APPROVAL_REQUIRED");
-    const allowed = new Set(["--live", "--print-manifest", "--manifest", "--manifest-sha", "--root", "--agent-dir"]);
+    const allowed = new Set([
+      "--live",
+      "--print-manifest",
+      "--manifest",
+      "--manifest-sha",
+      "--root",
+      "--agent-dir",
+      "--transport",
+    ]);
     for (let i = 0; i < args.length; i++) {
       const arg = args[i]!;
       if (!allowed.has(arg) || args.indexOf(arg) !== i) throw Error("APPROVAL_REQUIRED");
       if (arg !== "--live" && arg !== "--print-manifest" && (!args[++i] || args[i]!.startsWith("--")))
         throw Error("APPROVAL_REQUIRED");
     }
+    const transport = value("--transport") ?? "proxy";
+    if (transport !== "proxy" && transport !== "direct-user-approved") throw Error("APPROVAL_REQUIRED");
     const agentDir = resolve(value("--agent-dir") ?? process.env.PI_CODING_AGENT_DIR ?? joinAgentHome());
     if (flag("--print-manifest")) {
       if (flag("--manifest") || flag("--manifest-sha")) throw Error("APPROVAL_REQUIRED");
@@ -305,6 +319,7 @@ export async function probeMain(
         catalog.settings,
         catalog.registry,
         value("--root") ?? resolve(tmpdir(), `p50-live-${process.getuid?.() ?? "user"}`),
+        transport,
       );
       requireQuote(manifest);
       return {
@@ -323,15 +338,18 @@ export async function probeMain(
     const approved = JSON.parse(readFileSync(file, "utf8")) as { manifest: ClosureManifest };
     const bytes = closureManifestBytes(approved.manifest);
     validateClosureManifest(bytes, value("--manifest-sha"));
+    if (approved.manifest.transport !== transport) throw Error("PROXY_UNAVAILABLE");
     const catalog = await ports.open(agentDir, true);
-    const current = buildClosureManifest(catalog.settings, catalog.registry, approved.manifest.root);
+    const current = buildClosureManifest(catalog.settings, catalog.registry, approved.manifest.root, transport);
     if (closureManifestBytes(current) !== bytes) throw Error("MANIFEST_CHANGED");
-    if (catalog.settings.jev.proxy) throw Error("PROXY_UNAVAILABLE");
+    if (catalog.settings.jev.proxy && transport !== "direct-user-approved") throw Error("PROXY_UNAVAILABLE");
     await ports.auth(catalog.runtime, catalog.registry, current);
-    const result = await runApprovedClosureProbe(bytes, value("--manifest-sha"), async (context) => {
-      const registry = new ProbeRegistry(catalog.runtime, context.beforeHttp);
-      return ports.run(context, registry, catalog.settings);
-    });
+    const run = () =>
+      runApprovedClosureProbe(bytes, value("--manifest-sha"), async (context) => {
+        const registry = new ProbeRegistry(catalog.runtime, context.beforeHttp);
+        return ports.run(context, registry, catalog.settings);
+      });
+    const result = await (transport === "direct-user-approved" ? withDirectProbeTransport(run) : run());
     return { code: 0, output: JSON.stringify({ ...result, live: "RUN" }) + "\n" };
   } catch (error) {
     return { code: 2, output: probeErrorCode(error) + "\n" };

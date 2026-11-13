@@ -1592,6 +1592,22 @@ R 与 G/C direct/支持的 proxy 最后 fetch 均先执行可重入 callback，�
   不继承 ARMORY_MEMORY_ROOT/CC_PROJECTS_ROOT；secure env 拒绝。配置 Jev proxy 时不清空后直连，也不自证 I2
   streaming capability：manifest 仍可离线打印，但标 `executionGate:PROXY_UNAVAILABLE`，LIVE 发网前拒绝。
   不支持的 proxy 需要另包可信 CODE 能力，不得改真实设置为本次测量开路。trusted runner seam 不是 sandbox。
+- **仅本次 standalone probe 的一次性用户许可例外**：print 与 LIVE 都显式传
+  `--transport direct-user-approved`，且完整 manifest SHA 一致，才允许绕过已配置的 Jev proxy；
+  manifest 的 `transport` 进入 SHA，`approval.proxyConfigured:true/proxyBypassed:true` 与
+  `executionGate:READY_FOR_APPROVAL` 明示旁路，缺选项/transport 不匹配仍 `PROXY_UNAVAILABLE`。
+  只对本次 runner 的内存设置副本置空 proxy，不写真实设置，不改变生产/stock 的 I2 规则。
+  末跳仍是同一 SDK/fetch 注入口：使用 pi 1.5 已锁定的 undici 8.12.3 的 `fetch` 配套独立 plain `Agent`
+  （直接 Pool/Client connector，不是 ProxyAgent/EnvHttpProxyAgent），逐请求显式 dispatcher 覆盖
+  ambient global dispatcher 与环境代理；stock G/C 捕获的 global fetch 只在 standalone 执行范围内
+  临时包装，每个 JSON POST 各有一个只许一次 dispatch 的私有 Agent（同时强制 idempotent:false，
+  防止 fetch 自带的 421 replay 绕过 SDK retries=0）；finally 恢复并销毁私有 Agent，不修改全局 dispatcher。
+  Node 22 内置 fetch 默认不读
+  环境代理；本例仍显式 pin dispatcher，并使用同版 undici fetch（Node 22 bundled undici 的
+  dispatcher-handler major 不同，不能把 8.x Agent 强转交给它），标准流式 Response 桥接回 SDK。
+  这避免 SDK/全局代理配置影响；路由/认证/预算/四次/零重试/
+  redirect:error 门全保留。此例证明力**弱于生产代理链路**，不证明 proxy streaming 能力、生产可用性
+  或部署；当前仅离线 mock 验证，真实 LIVE 仍 NOT RUN，后续真实执行须另行确认本次 SHA。
 - 专用类型门（含 estimate+`maxTokensEnforced:true` / `serverEnforced:true` 等负向用例）：
   `timeout 180s node node_modules/typescript-7/bin/tsc --noEmit -p tests/memory/jev/p50-closure.tsconfig.json`。
   Vitest 擦除类型不代替此门。新 fakeHTTP 用例 tier1，无外网、real provider 或付费请求。

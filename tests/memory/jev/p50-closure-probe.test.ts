@@ -24,6 +24,7 @@ function manifest(
   ) as unknown as ClosureManifest["paths"];
   return {
     contract: "p50-stock-estimate-suggest-only-v1",
+    transport: "proxy",
     root,
     paths,
     maxAttempts: 4,
