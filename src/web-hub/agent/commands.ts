@@ -1802,6 +1802,8 @@ export interface TerminalNegotiatorDeps {
   limits: TerminalHubConfig;
   /** Private mint port; invoked only after the dedicated ready CAS. */
   mintGrant?(): string;
+  /** Only guarded local producers advertise the optional dedicated authority query. */
+  authorityAvailable?(): boolean;
   send(frame: TermRes): void;
   /** Resource-only establishes a cleanup channel; does not read inventory or grant interaction. */
   onBound?(channelId: string, proof: TerminalProtocolReadyProof): void;
@@ -1940,6 +1942,7 @@ export function createTerminalNegotiator(deps: TerminalNegotiatorDeps) {
             ...common,
             op: "protocol_challenge",
             ok: true,
+            ...(deps.authorityAvailable?.() === true ? { authorityAvailable: true as const } : {}),
             offerId: o.offerId,
             hubNonce: o.hubNonce,
             agentChallenge: o.agentChallenge,

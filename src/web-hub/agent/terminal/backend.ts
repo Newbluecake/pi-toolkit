@@ -1,5 +1,7 @@
 /** Agent-owned PTY transport. Production factory has no shell/env/cwd override wire surface.
  * A reservation must already exist before constructing a backend. */
+import { writePhysicalReceipt, type TerminalReceiptContext } from "../../protocol/terminal-local.js";
+import type { TerminalLocalReference } from "../../protocol/terminal.js";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { accessSync, constants, realpathSync } from "node:fs";
 import { Buffer } from "node:buffer";
@@ -34,10 +36,12 @@ export interface TerminalBackendOptions {
   maxLifetimeMs: number;
   /** Trusted host snapshot; not request data. */
   environment?: Readonly<Record<string, unknown>>;
+  receiptContext?: TerminalReceiptContext;
   onData(bytes: Buffer): void;
   onManaged?(): void;
 }
 export interface TerminalPhysicalResult {
+  receipt?: TerminalLocalReference;
   outcome: "reaped" | "reap_incomplete";
   spawnSettled: boolean;
   ptyClosed: boolean;
@@ -107,6 +111,8 @@ class PythonTerminalBackend implements TerminalBackend {
   private stdout = "";
   private invalid = false;
   private result: TerminalPhysicalResult | undefined;
+  private receipt: TerminalLocalReference | undefined;
+  private receiptWork: Promise<void> | undefined;
   private metadata: TerminalAgentDisplayMetadata = {};
   private resizeActive = false;
   private resizeQueued:
@@ -531,7 +537,7 @@ class PythonTerminalBackend implements TerminalBackend {
     this.doneResolve(this.result);
   }
   private async finish(): Promise<void> {
-    const deadline = this.timer(250, () => this.resolveIncomplete());
+    const deadline = this.timer(this.options.receiptContext ? 2250 : 250, () => this.resolveIncomplete());
     try {
       const r = await this.retryReap();
       if (!this.result) {
@@ -556,8 +562,30 @@ class PythonTerminalBackend implements TerminalBackend {
       report.managedGroupsGone === true &&
       gone;
     const signal = report?.signal;
+    if (proven && this.options.receiptContext && !this.receipt) {
+      this.receiptWork ??= writePhysicalReceipt(this.options.receiptContext, {
+        outcome: "reaped",
+        spawnSettled: true,
+        ptyClosed: true,
+        helperReaped: true,
+        managedGroupsGone: true,
+        identitiesChecked: [...this.managed],
+        waited: Array.isArray(report?.waited) ? (report.waited as number[]) : [],
+      })
+        .then(
+          (reference) => {
+            this.receipt = reference;
+          },
+          () => {},
+        )
+        .finally(() => {
+          this.receiptWork = undefined;
+        });
+      await this.receiptWork;
+    }
     return {
-      outcome: proven ? "reaped" : "reap_incomplete",
+      outcome: proven && (!this.options.receiptContext || this.receipt) ? "reaped" : "reap_incomplete",
+      ...(this.receipt ? { receipt: { ...this.receipt } } : {}),
       spawnSettled: this.settled,
       ptyClosed: report?.ptyClosed === true,
       helperReaped: this.childReaped,

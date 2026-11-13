@@ -1,5 +1,14 @@
 /** Per-activation/session owner (r4 §§5–6). No live shell in the process-global connection.
  * wireWebHub owns dispose; Stack and pi hooks must NOT acquire a second owner. */
+import {
+  createLocalAuthority,
+  deletePhysicalReceipt,
+  processNamespaces,
+  readPhysicalReceipts,
+  localBounded,
+  type TerminalReceiptContext,
+} from "../../protocol/terminal-local.js";
+import { ensurePrivateDir, STATE_DIR_POLICY } from "../../protocol/paths.js";
 import { createHash, randomUUID } from "node:crypto";
 import { Buffer } from "node:buffer";
 import { Value } from "@sinclair/typebox/value";
@@ -79,6 +88,8 @@ export interface TerminalOwnerOptions {
   sessionId: string;
   epoch: string;
   cwd: string;
+  /** Guarded wireWebHub only; never HTTP/settings/env/backend user overrides. */
+  local?: { stateDir: string; agentNonce: string };
   limits: TerminalHubConfig;
   /** Actual plain/main/live secure-domain check. Missing/throw ⇒ false. */
   allowed(): boolean;
@@ -207,7 +218,15 @@ export function createTerminalOwner(options: TerminalOwnerOptions): Promise<Term
           settled = true;
           pendingOptions = undefined;
           clock.clearTimer(timer);
-          resolve(owner);
+          if (options.local) {
+            void localBounded(() => owner.initializeLocal()).then(
+              () => resolve(owner),
+              (error: unknown) => {
+                void owner.dispose();
+                reject(error);
+              },
+            );
+          } else resolve(owner);
         } catch {
           fail("E_BACKEND_CAPABILITY");
         }
@@ -230,6 +249,57 @@ export class TerminalOwner {
   private frozenInventory = 0;
   private revision = 0;
   private linkInstance: string | undefined;
+  private localAuthority: Awaited<ReturnType<typeof createLocalAuthority>> | undefined;
+  async initializeLocal(): Promise<void> {
+    const local = this.options.local;
+    if (!local) return;
+    if (!this.options.allowed()) throw new TerminalBackendError("E_BACKEND_CAPABILITY");
+    await ensurePrivateDir(local.stateDir, STATE_DIR_POLICY);
+    if (this.disposed || !this.options.allowed()) throw new TerminalBackendError("E_BACKEND_CAPABILITY");
+    const authority = await createLocalAuthority(
+      local.stateDir,
+      {
+        agentNonce: local.agentNonce,
+        sessionId: this.options.sessionId,
+        epoch: this.options.epoch,
+        ownerInstance: this.ownerInstance,
+        process: this.processIdentity,
+        namespaces: processNamespaces(process.pid),
+        domain: "plain",
+        main: true,
+        active: true,
+      },
+      () => !this.disposed && this.options.allowed(),
+    );
+    if (this.disposed || !this.options.allowed()) {
+      authority.revoke();
+      throw new TerminalBackendError("E_BACKEND_CAPABILITY");
+    }
+    this.localAuthority = authority;
+    try {
+      const recovered = await readPhysicalReceipts(authority.store);
+      for (const { record, reference } of recovered) {
+        const known = receiptStore().find(
+          (r) => terminalIdentityKey(r.entry.identity) === terminalIdentityKey(record.identity),
+        );
+        if (known) continue;
+        if (receiptStore().length >= L.unresolvedResources) throw new TerminalBackendError("E_LIMIT");
+        receiptStore().push({
+          entry: {
+            identity: { ...record.identity },
+            agentProcessIdentity: { ...record.agentProcessIdentity },
+            managed: structuredClone(record.physical.identitiesChecked),
+            spawnState: "settled",
+            state: "closing",
+          },
+          physical: { ...structuredClone(record.physical), receipt: reference },
+        });
+      }
+    } catch (error) {
+      authority.revoke();
+      throw error;
+    }
+  }
   constructor(
     private readonly options: TerminalOwnerOptions,
     readonly processIdentity: TerminalProcessIdentity,
@@ -238,6 +308,7 @@ export class TerminalOwner {
     this.negotiator = createTerminalNegotiator({
       now: () => this.clock.now(),
       limits: options.limits,
+      authorityAvailable: () => this.localAuthority?.active === true,
       allowed: () => this.allowed(),
       current: () => {
         const c = this.current();
@@ -279,7 +350,12 @@ export class TerminalOwner {
   }
   private allowed(): boolean {
     try {
-      return !this.disposed && this.options.allowed() && !!this.current();
+      return (
+        !this.disposed &&
+        (!this.options.local || this.localAuthority?.active === true) &&
+        this.options.allowed() &&
+        !!this.current()
+      );
     } catch {
       return false;
     }
@@ -321,6 +397,19 @@ export class TerminalOwner {
     if (!this.allowed()) {
       this.revoke();
       return false;
+    }
+    if (f.op === "authority") {
+      if (this.localAuthority?.active)
+        this.options.send({
+          t: "term_res",
+          v: 1,
+          rid: f.rid,
+          ...this.scope(),
+          op: "authority",
+          ok: true,
+          authority: this.localAuthority.reference,
+        });
+      return true;
     }
     if (["prepare_protocol", "protocol_ready", "bind"].includes(f.op)) return this.negotiator.receive(f);
     if (
@@ -585,6 +674,16 @@ export class TerminalOwner {
         rows: f.rows,
         inputIdleMs: this.options.limits.inputIdleMs,
         maxLifetimeMs: this.options.limits.maxLifetimeMs,
+        ...(this.localAuthority === undefined
+          ? {}
+          : {
+              receiptContext: {
+                store: this.localAuthority.store,
+                ownerRecordId: this.localAuthority.recordId,
+                identity: { ...r.identity },
+                agentProcessIdentity: { ...this.processIdentity },
+              } satisfies TerminalReceiptContext,
+            }),
         onData: (bytes) => this.output(r, bytes),
         onManaged: () => this.persistUnresolved(r),
       });
@@ -997,6 +1096,8 @@ export class TerminalOwner {
       return 0;
     for (const key of keys) {
       const index = store.findIndex((r) => terminalIdentityKey(r.entry.identity) === key);
+      const reference = store[index]?.physical.receipt;
+      if (reference && this.localAuthority) deletePhysicalReceipt(this.localAuthority.store, reference);
       store[index]!.confirmed = true; // Seals late old-owner metadata observers before removal.
       store.splice(index, 1);
       for (const row of this.rows.values()) if (terminalIdentityKey(row.identity) === key) row.resolved = true;
@@ -1063,6 +1164,7 @@ export class TerminalOwner {
       identity: { ...identity },
       agentProcessIdentity: { ...(local ? this.processIdentity : retained!.entry.agentProcessIdentity) },
       proofId: randomUUID(),
+      ...(p.receipt === undefined ? {} : { receipt: { ...p.receipt } }),
       spawnSettled: true,
       ptyClosed: true,
       helperReaped: true,
@@ -1254,6 +1356,7 @@ export class TerminalOwner {
   /** Host privacy/secure/auth-domain transition: synchronous revocation, not a detach.
    * This is not a new pi hook; the existing wireWebHub owner must call it. */
   revoke(): void {
+    this.localAuthority?.revoke();
     this.negotiator.invalidate();
     this.clearChannels();
     for (const r of this.rows.values()) {
@@ -1266,6 +1369,7 @@ export class TerminalOwner {
   dispose(): Promise<void> {
     if (this.disposal) return this.disposal;
     this.disposed = true;
+    this.localAuthority?.revoke();
     this.negotiator.dispose();
     this.clearChannels();
     if (this.tickTimer) this.clock.clearTimer(this.tickTimer);

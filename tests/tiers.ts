@@ -36,8 +36,10 @@ export const BASE_TEST_INCLUDE: readonly string[] = ["tests/**/*.test.ts", "test
 // The opt-in real-browser probe lives in scripts/, never the daily test project.
 // Schedule interval P1: schedule-secure-activate and schedule-interval-lock are integration/
 // (actual activate / real kernel lock), hence covered by this prefix, never the secure mount project.
-// Terminal r4: web-hub-terminal-{ingress,old-hub,quarantine,http,journal,pty,wiring}.test.ts
+// Terminal r4: web-hub-terminal-{ingress,old-hub,quarantine,http,journal,pty,wiring,local}.test.ts
 // are explicitly owned by this integration/ prefix (real sockets/durable IO/PTY).
+// Local authority/receipt tamper/deadline tests and the separate-process terminal-agent
+// fixture are real IO/process coverage, not tier1 mocks or secure-mount skips.
 // Agent terminal-{owner,owner-factory,connection,environment,wiring} and UI controller/
 // authority tests use isolated fake backend/socket/clock ports, hence remain tier1;
 // their subprocess/physical counterparts must stay here, never secure-mount-skipped.

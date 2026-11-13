@@ -19,7 +19,7 @@
  * The listening socket server stays ref'd (the hub is meant to live until the
  * idle monitor fires); every timer here is unref'd.
  */
-import { assembleTerminal, type TerminalLocalAuthority } from "./assembly-terminal.js";
+import { assembleTerminal } from "./assembly-terminal.js";
 import type { TerminalRevocationFence } from "./terminal/revocation-fence.js";
 import { TERMINAL_UI_CAP } from "../protocol/version.js";
 import { randomBytes } from "node:crypto";
@@ -140,8 +140,6 @@ const HISTORY_SERVICE_DISPOSE_MS = 2_500;
  */
 export const RESTORE_REASONS: ReadonlySet<string> = new Set(["restart", "superseded", "crash"]);
 export interface StartHubDeps {
-  /** Internal local authority. Absent refuses; never inferred from HTTP/status/ENOENT. */
-  terminalAuthority?: TerminalLocalAuthority;
   now?: () => number;
   uid?: number;
   xdgRuntimeDir?: string;
@@ -480,10 +478,10 @@ export async function startHub(
         ? {}
         : {
             terminal: {
-              ownsCommand: (meta, raw) => terminal?.service.ingress.ownsCommand(meta, raw) ?? false,
-              consumeAgentFrame: (meta, raw) => terminal?.service.ingress.consumeAgentFrame(meta, raw),
-              retireLink: (meta) => terminal?.service.ingress.retireLink(meta),
-              onIngressFailure: (meta) => terminal?.service.ingress.onIngressFailure?.(meta),
+              ownsCommand: (meta, raw) => terminal?.ingress.ownsCommand(meta, raw) ?? false,
+              consumeAgentFrame: (meta, raw) => terminal?.ingress.consumeAgentFrame(meta, raw),
+              retireLink: (meta) => terminal?.ingress.retireLink(meta),
+              onIngressFailure: (meta) => terminal?.ingress.onIngressFailure?.(meta),
             },
           }),
       config,
@@ -659,7 +657,7 @@ export async function startHub(
     ctx.lanClosedByRotateScan = false;
 
     if (config.privacy === true || config.terminal !== undefined) await loadPrivacyStore(ctx);
-    if (config.terminal !== undefined) terminal = await assembleTerminal(ctx, deps.terminalAuthority);
+    if (config.terminal !== undefined) terminal = await assembleTerminal(ctx);
     const commandRouter = createCommandRouter({ registry, log, now });
     ctx.commandRouter = commandRouter;
     const cmdLimit = createCmdLimit(now);
@@ -954,6 +952,7 @@ export async function startHub(
       ...(initialLan === undefined ? {} : { lan: initialLan }),
       ...(initialSpawn === undefined ? {} : { spawn: initialSpawn }),
       ...(initialPrivacy === undefined ? {} : { privacy: initialPrivacy }),
+      ...(terminal === undefined ? {} : { terminal: terminal.status }),
       ...(initialProxy === undefined ? {} : { proxy: initialProxy }),
       ...(initialAlias === undefined ? {} : { alias: initialAlias }),
       ui: initialUi,

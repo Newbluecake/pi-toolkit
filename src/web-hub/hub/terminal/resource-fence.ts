@@ -1,7 +1,7 @@
 /** F2: atomic inventory collection, durable reservation/reap CAS and sticky lost isolation. */
 import { createHash, randomBytes } from "node:crypto";
 import { constants } from "node:fs";
-import { open } from "node:fs/promises";
+import { open, readdir } from "node:fs/promises";
 import { Value } from "@sinclair/typebox/value";
 import {
   TerminalInventorySchema,
@@ -22,6 +22,12 @@ import {
 } from "../../protocol/terminal.js";
 import type { TerminalResourceJournalPort, TerminalIngressMeta, TerminalResourceFencePort } from "../ports.js";
 import { TerminalFault, bounded, sameTerminalMeta } from "./limits.js";
+/** The local filesystem capability is verified in memory, never retained in the
+ * resource journal (which persists identity/outcome metadata, not credentials). */
+function durableProof(proof: TerminalReapProof): TerminalReapProof {
+  const { receipt: _receipt, ...metadata } = structuredClone(proof);
+  return metadata;
+}
 export const inventoryDigest = (entries: readonly TerminalResourceEntry[]) =>
   createHash("sha256").update(canonicalTerminalInventory(entries), "utf8").digest("hex");
 const sameProcess = (a: TerminalProcessIdentity, b: TerminalProcessIdentity) =>
@@ -54,7 +60,9 @@ export class TerminalResourceFence implements TerminalResourceFencePort {
     this.state = "collecting";
   }
   private collections = new Map<string, Collect>();
-  private released = new Set<string>();
+  // ACK may be lost after durable pruning. Keep bounded same-boot release receipts;
+  // only a complete later inventory from the SAME process can prove them forgotten.
+  private released = new Map<string, TerminalResourceEntry>();
   private recovery = new Set<string>();
   private resolvedListeners = new Set<
     (ack: TerminalResolvedAck, meta: TerminalIngressMeta, ownerInstance: string) => void
@@ -135,7 +143,8 @@ export class TerminalResourceFence implements TerminalResourceFencePort {
     return this.journal.resources.filter((r) => r.status === "unresolved");
   }
   physicalUsed() {
-    return this.unresolved().length;
+    // A resolved-but-not-yet-consumed row still pins allocation until durable prune.
+    return this.journal.resources.length;
   }
   snapshot(): TerminalQuarantine {
     this.expire();
@@ -183,8 +192,6 @@ export class TerminalResourceFence implements TerminalResourceFencePort {
       const r = await this.deps.journal.commit(old.revision, next, signal);
       if (r !== "committed" || this.journal !== old) return false;
       this.journal = next;
-      for (const id of this.released)
-        if (!next.resources.some((r) => r.entry.identity.reservationId === id)) this.released.delete(id);
       for (const key of this.recovery)
         if (!next.resources.some((r) => terminalIdentityKey(r.entry.identity) === key)) this.recovery.delete(key);
       return true;
@@ -193,6 +200,43 @@ export class TerminalResourceFence implements TerminalResourceFencePort {
     } finally {
       this.busy = false;
     }
+  }
+  private async pruneConfirmed(
+    identities: readonly TerminalReapProof["identity"][],
+    c: Collect,
+    scope: { hubBootId: string; challengeId: string; linkGen: number },
+    signal: AbortSignal,
+  ): Promise<"accepted" | "rejected" | "unavailable"> {
+    if (!identities.length) return "accepted";
+    if (signal.aborted || this.current(c.meta, scope) !== c) return "rejected";
+    const keys = new Set(identities.map(terminalIdentityKey));
+    if (
+      keys.size !== identities.length ||
+      identities.some(
+        (identity) =>
+          !this.journal.resources.some(
+            (row) =>
+              row.status === "resolved" && terminalIdentityKey(row.entry.identity) === terminalIdentityKey(identity),
+          ),
+      )
+    )
+      return "rejected";
+    if (this.released.size + identities.filter((identity) => !this.released.has(identity.reservationId)).length > 2048)
+      return "unavailable";
+    const next = structuredClone(this.journal);
+    next.resources = next.resources.filter((row) => !keys.has(terminalIdentityKey(row.entry.identity)));
+    // Consumed fact is the durable absence of exactly these already-resolved rows.
+    if (!(await this.commit(next, signal))) {
+      this.state = "reap_incomplete";
+      this.failed = true;
+      return "unavailable";
+    }
+    if (signal.aborted || this.current(c.meta, scope) !== c) {
+      this.state = "lost";
+      this.failed = true;
+      return "rejected";
+    }
+    return "accepted";
   }
   begin(meta: TerminalIngressMeta, ownerInstance: string, processIdentity: TerminalProcessIdentity): TerminalChallenge {
     if (!this.loaded || this.failed) throw new TerminalFault("E_RESOURCE_QUARANTINED", "unknown");
@@ -239,6 +283,7 @@ export class TerminalResourceFence implements TerminalResourceFencePort {
     meta: TerminalIngressMeta,
     scope: { hubBootId: string; challengeId: string; linkGen: number },
   ): Collect | undefined {
+    if (this.failed) return undefined;
     this.expire();
     const c = this.collections.get(meta.agentKey);
     return c &&
@@ -410,6 +455,13 @@ export class TerminalResourceFence implements TerminalResourceFencePort {
       }
       if (this.current(meta, s) !== c) return "rejected";
     }
+    for (const [id, entry] of this.released)
+      if (
+        sameProcess(entry.agentProcessIdentity, s.sender.processIdentity) &&
+        !entries.has(terminalIdentityKey(entry.identity)) &&
+        !proofs.has(terminalIdentityKey(entry.identity))
+      )
+        this.released.delete(id);
     const next = structuredClone(this.journal);
     const discovered: string[] = [];
     for (const [k, e] of entries) {
@@ -429,7 +481,7 @@ export class TerminalResourceFence implements TerminalResourceFencePort {
       const r = next.resources.find((r) => terminalIdentityKey(r.entry.identity) === k);
       if (r?.status === "unresolved") {
         r.status = "resolved";
-        r.proof = structuredClone(p);
+        r.proof = durableProof(p);
         release.push(r.entry.identity.reservationId);
       }
     }
@@ -444,6 +496,14 @@ export class TerminalResourceFence implements TerminalResourceFencePort {
       this.failed = true;
       return "rejected";
     }
+    const confirmed = [...proofs.values()].map((proof) => proof.identity);
+    const releasedEntries = new Map(
+      next.resources
+        .filter((row) => release.includes(row.entry.identity.reservationId))
+        .map((row) => [row.entry.identity.reservationId, row.entry]),
+    );
+    const pruned = await this.pruneConfirmed(confirmed, c, s, signal);
+    if (pruned !== "accepted") return pruned;
     c.begin ??= {
       hubBootId: s.hubBootId,
       challengeId: s.challengeId,
@@ -457,10 +517,16 @@ export class TerminalResourceFence implements TerminalResourceFencePort {
       digest: s.digest,
     };
     c.complete = true;
-    for (const k of discovered) this.recovery.add(k);
+    for (const k of discovered)
+      if (
+        this.journal.resources.some(
+          (row) => row.status === "unresolved" && terminalIdentityKey(row.entry.identity) === k,
+        )
+      )
+        this.recovery.add(k);
     for (const id of release)
       if (!this.released.has(id)) {
-        this.released.add(id);
+        this.released.set(id, structuredClone(releasedEntries.get(id)!));
         try {
           this.deps.onRelease?.(id);
           for (const fn of this.releaseListeners) fn(id);
@@ -560,7 +626,7 @@ export class TerminalResourceFence implements TerminalResourceFencePort {
     const next = structuredClone(this.journal),
       target = next.resources.find((r) => terminalIdentityKey(r.entry.identity) === key)!;
     target.status = "resolved";
-    target.proof = structuredClone(p);
+    target.proof = durableProof(p);
     if (!(await this.commit(next, signal))) {
       this.state = "reap_incomplete";
       return "unavailable";
@@ -570,8 +636,10 @@ export class TerminalResourceFence implements TerminalResourceFencePort {
       this.state = "lost";
       return "rejected";
     }
+    const pruned = await this.pruneConfirmed([p.identity], c, p, signal);
+    if (pruned !== "accepted") return pruned;
     if (!this.released.has(p.identity.reservationId)) {
-      this.released.add(p.identity.reservationId);
+      this.released.set(p.identity.reservationId, structuredClone(row.entry));
       try {
         this.deps.onRelease?.(p.identity.reservationId);
         for (const fn of this.releaseListeners) fn(p.identity.reservationId);
@@ -650,6 +718,29 @@ export function createLocalTerminalProofVerifier(deps: {
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== "ENOENT" && (err as NodeJS.ErrnoException).code !== "ESRCH")
           return false;
+      }
+    }
+    if (p.receipt) {
+      // Production receipts require independent absence of the recorded sessions/groups,
+      // not just absence of their original leaders (a descendant may outlive its leader).
+      const ids = p.identitiesChecked.filter((id) => id.bootId === boot);
+      const groups = new Set(ids.map((id) => id.pgid)),
+        sessions = new Set(ids.map((id) => id.sid));
+      const names = await readdir(root);
+      if (names.length > 16384) return false;
+      for (const name of names) {
+        if (signal.aborted) return false;
+        if (!/^\d+$/.test(name)) continue;
+        try {
+          const stat = await read(`${root}/${name}/stat`, 8192);
+          const fields = stat
+            .slice(stat.lastIndexOf(")") + 2)
+            .trim()
+            .split(/\s+/);
+          if (groups.has(Number(fields[2])) || sessions.has(Number(fields[3]))) return false;
+        } catch (error) {
+          if (!["ENOENT", "ESRCH"].includes((error as NodeJS.ErrnoException).code ?? "")) return false;
+        }
       }
     }
     return !signal.aborted;

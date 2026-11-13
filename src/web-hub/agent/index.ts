@@ -82,6 +82,7 @@ import {
 import type { LanStatus } from "../protocol/lan.js";
 import {
   acquireConnection,
+  processAgentId,
   currentConnection,
   MODULE_INSTANCE,
   newAdminRid,
@@ -745,7 +746,8 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
         settings.control !== false &&
         settings.webCommands !== false &&
         (ctx.mode === "tui" || ctx.mode === "rpc") &&
-        deps.terminalGuard?.(ctx) === true,
+        deps.terminalGuard?.(ctx) === true &&
+        privateNsVerdict().gate === "not-ns",
       false,
     );
 
@@ -2028,6 +2030,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
           sessionId,
           epoch: MODULE_INSTANCE,
           cwd: safe(() => c.cwd, ""),
+          local: { stateDir: paths.stateDir, agentNonce: processAgentId().nonce },
           limits,
           allowed: () =>
             gen === generation &&
@@ -2182,6 +2185,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     lan?: LanStatus;
     ui?: UiStatus;
     privacy?: PrivacyHubStatus;
+    terminal?: { state: "unavailable"; reason: string };
     proxy?: ProxyHubStatus;
     alias?: XsAliasHubStatus;
   }
@@ -2202,6 +2206,13 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       if (isStructurallyUiStatus(parsed.ui)) rec.ui = parsed.ui as UiStatus;
       // privacy (plan v2.1 P3): same structural-only treatment — malformed ⇒ absent.
       if (isStructurallyPrivacyStatus(parsed.privacy)) rec.privacy = parsed.privacy;
+      const terminal = parsed.terminal as Record<string, unknown> | undefined;
+      if (
+        terminal?.state === "unavailable" &&
+        typeof terminal.reason === "string" &&
+        /^[a-z-]{1,64}$/.test(terminal.reason)
+      )
+        rec.terminal = { state: "unavailable", reason: terminal.reason };
       // proxy (plan v2 §5 X1c): same structural-only treatment — malformed ⇒ absent.
       if (isStructurallyProxyStatus(parsed.proxy)) rec.proxy = parsed.proxy;
       // alias (plan §3.3 AL6): structural-only — malformed ⇒ absent.
@@ -2261,7 +2272,10 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     const version = packageVersionSync();
     const pkgDir = pkgRoot ?? packageUiDistDir();
     const hasLocalDist = existsSync(join(packageUiDistDir(), "build-info.json"));
-    return formatUiStatusLines(rec?.ui, { pkgDir, version, hasLocalDist });
+    const lines = formatUiStatusLines(rec?.ui, { pkgDir, version, hasLocalDist });
+    if (settings.terminal?.enabled === true && rec?.terminal?.state === "unavailable")
+      lines.push(`终端不可用：${rec.terminal.reason}。保留已有状态，不会自动重置；修复本地状态后 /webhub restart。`);
+    return lines;
   };
 
   /** §9.3 LAN status lines, straight off `hub.json` — no admin RPC needed. */

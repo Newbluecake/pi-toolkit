@@ -174,12 +174,16 @@ async function resourceFixture(n = 2, independent = false) {
   ).toBe("committed");
   // New instance really reloads the persisted journal; ENOENT is not a new-store proof.
   const disk = createTerminalResourceJournal({ stateDir: dir, now: () => now });
-  let failCommit = false;
+  let failCommit = false,
+    failPrune = false;
   const release: string[] = [],
     receipts = new Set<string>();
   const journal: TerminalResourceJournalPort = {
     load: (s) => disk.load(s),
-    commit: (rev, next, s) => (failCommit ? Promise.resolve("unavailable") : disk.commit(rev, next, s)),
+    commit: (rev, next, s) =>
+      failCommit || (failPrune && next.resources.length === 0)
+        ? Promise.resolve("unavailable")
+        : disk.commit(rev, next, s),
   };
   const local = createLocalTerminalProofVerifier({ receipt: (p) => receipts.has(JSON.stringify(p)) });
   const fence = new TerminalResourceFence({
@@ -265,6 +269,9 @@ async function resourceFixture(n = 2, independent = false) {
     return results;
   }
   return {
+    failPrune: (value: boolean) => {
+      failPrune = value;
+    },
     dir,
     entries,
     fence,
@@ -342,6 +349,26 @@ describe("F2 Q1–Q4 actual H journal/fence/proof chain (§5.5.1)", () => {
       await q.cleanup();
     }
   }, 20000);
+  it("lost ACK reproof on a fresh challenge prunes again without double physical release", async () => {
+    const q = await resourceFixture(1);
+    try {
+      const first = q.fence.begin(q.meta, "owner", q.currentProcess);
+      expect(await q.send(q.pages(first))).toEqual(["accepted", "accepted", "accepted"]);
+      expect(q.fence.records().resources).toEqual([]);
+      expect(q.release).toEqual(["reservation-0"]);
+      expect(q.acks).toHaveLength(1);
+      // Simulate a lost one-way ACK: producer still includes the same immutable receipt.
+      const second = q.fence.begin(q.meta, "owner", q.currentProcess);
+      expect(second.challengeId).not.toBe(first.challengeId);
+      expect(await q.send(q.pages(second))).toEqual(["accepted", "accepted", "accepted"]);
+      expect(q.fence.records().resources).toEqual([]);
+      expect(q.fence.physicalUsed()).toBe(0);
+      expect(q.release).toEqual(["reservation-0"]);
+      expect(q.acks).toHaveLength(2);
+    } finally {
+      await q.cleanup();
+    }
+  });
   it("Q2 count/digest/duplicate/missing/out-of-order/expected-set coverage: no partial release", async () => {
     const q = await resourceFixture();
     try {
@@ -407,9 +434,12 @@ describe("F2 Q1–Q4 actual H journal/fence/proof chain (§5.5.1)", () => {
         q.fence
           .records()
           .resources.find((r) => terminalIdentityKey(r.entry.identity) === terminalIdentityKey(a.identity))?.status,
-      ).toBe("resolved");
+      ).toBeUndefined();
       const persisted = JSON.parse(await readFile(join(q.dir, "terminal-resource-fence-v1.json"), "utf8"));
-      expect(persisted.resources[0].status).toBe("resolved");
+      expect(
+        persisted.resources.find((r: any) => r.entry.identity.reservationId === a.identity.reservationId),
+      ).toBeUndefined();
+      expect(persisted.resources).toHaveLength(1);
       expect(q.release).toEqual([a.identity.reservationId]);
       expect(q.acks).toHaveLength(1);
       expect(q.acks[0]!.identities).toEqual([a.identity]);
@@ -492,12 +522,19 @@ describe("F2 Q1–Q4 actual H journal/fence/proof chain (§5.5.1)", () => {
   it("pure-data unresolved handoff unions with resolved disk facts instead of resetting to zero", async () => {
     const q = await resourceFixture(1);
     try {
+      q.failPrune(true); // explicit failure between durable resolution and consumption
       expect(await q.send(q.pages(q.fence.begin(q.meta, "owner", q.currentProcess)))).toEqual([
         "accepted",
         "accepted",
-        "accepted",
+        "unavailable",
       ]);
-      expect(q.fence.physicalUsed()).toBe(0);
+      expect(q.fence.physicalUsed()).toBe(1);
+      expect(q.release).toEqual([]);
+      expect(q.acks).toEqual([]);
+      expect(q.fence.records().resources[0]?.status).toBe("resolved");
+      expect(
+        JSON.parse(await readFile(join(q.dir, "terminal-resource-fence-v1.json"), "utf8")).resources[0].status,
+      ).toBe("resolved");
       const f = new TerminalResourceFence({
         journal: createTerminalResourceJournal({ stateDir: q.dir, now: q.getTime }),
         now: q.getTime,
@@ -554,7 +591,7 @@ describe("F2 Q1–Q4 actual H journal/fence/proof chain (§5.5.1)", () => {
       expect(q.release).toHaveLength(1);
       expect(q.fence.physicalUsed()).toBe(0);
       const persisted = JSON.parse(await readFile(join(q.dir, "terminal-resource-fence-v1.json"), "utf8"));
-      expect(persisted.resources[0].status).toBe("resolved");
+      expect(persisted.resources).toEqual([]);
     } finally {
       await q.cleanup();
     }
@@ -629,6 +666,24 @@ describe("F2 Q1–Q4 actual H journal/fence/proof chain (§5.5.1)", () => {
       await q.cleanup();
     }
   }, 20000);
+  it("challenge expires after real durable prune: final CAS cannot release or ACK", async () => {
+    const q = await resourceFixture(1);
+    const commit = q.journal.commit;
+    q.journal.commit = async (rev, next, signal) => {
+      const result = await commit(rev, next, signal);
+      if (next.resources.length === 0 && result === "committed") q.setTime(q.getTime() + 5000);
+      return result;
+    };
+    try {
+      expect((await q.send(q.pages(q.fence.begin(q.meta, "owner", q.currentProcess)))).at(-1)).toBe("rejected");
+      expect(JSON.parse(await readFile(join(q.dir, "terminal-resource-fence-v1.json"), "utf8")).resources).toEqual([]);
+      expect(q.release).toEqual([]);
+      expect(q.acks).toEqual([]);
+      expect(q.fence.snapshot().state).toBe("lost");
+    } finally {
+      await q.cleanup();
+    }
+  });
   it("aborted collector cannot release after a real disk CAS returns late through an ignoring port", async () => {
     const q = await resourceFixture(1);
     const commit = q.journal.commit;
@@ -668,7 +723,10 @@ describe("F2 Q1–Q4 actual H journal/fence/proof chain (§5.5.1)", () => {
         "accepted",
         "accepted",
       ]);
-      expect(q.fence.records().resources[0]?.status).toBe("resolved");
+      expect(
+        q.fence.records().resources.find((row) => row.entry.identity.reservationId === a.identity.reservationId),
+      ).toBeUndefined();
+      expect(q.fence.records().resources).toHaveLength(1);
       expect(q.release).toEqual([a.identity.reservationId]);
       // No B socket, handshake or begin(): the persisted expected set, not online peers, owns this barrier.
       q.setTime(q.getTime() + 5000);

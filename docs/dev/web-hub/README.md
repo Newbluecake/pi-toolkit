@@ -1182,8 +1182,8 @@ capability、末跳 pure-witness trusted-CODE 边界及 stock tokenizer/template
 identity, fences, inventory/pages/reap proofs and metadata-only journal. Terminal is
 sparse/default-off/non-live (`webHub.terminal`; `/reload` + `/webhub restart`), D8 forced-off.
 No hello cap/PROTO change. `terminal.ui.v1` is browser-only; P1-H owns advertising it.
-The enabled agent owner and H ports are now assembled (integration notes below), but
-missing local process/receipt authority still returns explicit Unavailable.
+The enabled agent owner and H ports use the guarded local authority/receipt channel
+and first-use store initialization described below; unknown prerequisites return Unavailable.
 `wireWebHub` alone owns cleanup within its existing hooks;
 Stack must not own a second terminal lifecycle. Trusted plain-domain guard is injected
 post-HOST_KEY only, and absent guard must refuse.
@@ -1240,8 +1240,9 @@ import. The transitive static-import graph test pins this boundary, without wide
 ### r4.1 resolved receipt acknowledgement
 
 `term_req{op:"resolved_ack",channelId,resolved}` is private/resource-only and has no HTTP
-path or command form. H sends it only after the exact identities' resolved journal CAS
-is durably committed; it binds hub boot/challenge/link, inventoryId/snapshot revision and
+path or command form. H sends it only after the exact identities' resolved journal CAS,
+current challenge check, second durable CAS pruning those resolved rows, and a final
+current/non-abort check; it binds hub boot/challenge/link, inventoryId/snapshot revision and
 a separate journalRevision. A uses its current post-ready bound channel/snapshot/local reaped receipt
 records with `terminalResolvedAckMatches`, validates the whole batch, then synchronously
 forgets exactly those receipts and advances the revision floor. Unknown/duplicate/stale
@@ -1377,9 +1378,9 @@ tail cap `terminal.ui.v1`; agent hello_ack does not change.
   fail-soft with bounded `auditHealth().failures`, not an output-amplifying logger loop.
 
 Production owner/ingress/routes and direct privacy store wiring now live in the P1-C
-integration assembly described below. First-use and cross-process OS/receipt authority
-remain unavailable until separately approved; never substitute status/UI strings or
-wire booleans. Disposal stays within the existing lifecycle. No new top-level hook
+integration assembly described below. Cross-process authority is a guarded owned local
+record plus independent OS checks; never substitute status/UI strings or wire booleans.
+Disposal stays within the existing lifecycle. No new top-level hook
 or Stack owner is introduced. Tests explicitly distinguish this integration dependency
 from an already assembled production terminal: dual real HTTP/SSE listeners + real
 socket/production ready gate use a bounded agent operation fixture, not a fake PTY;
@@ -1397,7 +1398,15 @@ clears it. This does not revive a shell or release a physical slot. Historical p
 metadata can remain as evidence, but never serves as a current challenge response.
 
 The resource fence publishes `onResolved` only after OS/receipt verification, successful
-durable resolution, and final current challenge/link/owner CAS. H retains a bounded
+durable resolution, current challenge/link/owner CAS, a second durable CAS removing
+exactly those resolved identities, and a final current/non-abort check. Normal success
+therefore leaves no consumed journal rows to be re-quarantined at the next cold boot.
+If the process crashes between resolve and prune, retained resolved rows follow the
+conservative rule above. If it crashes between prune and ACK, at most32 legitimate
+immutable receipt files are cold-loaded as plain handoff metadata and unioned into
+unresolved quarantine. Neither journal absence nor a producer's consumed declaration
+confirms release: only a fresh complete inventory plus independently verified real
+receipt/OS proof can resolve, prune and ACK these rows again. H retains a bounded
 resource-only channel context through its original challenge deadline and emits the
 private `resolved_ack` there, including exact identities, snapshot revision and actual
 committed journal revision. Full-frame byte validation splits long batches without
@@ -1418,8 +1427,10 @@ The explicit user-triggered collection also starts one global inventory deadline
 contacting peers. A journal-expected agent with **no online socket or ready channel**
 still becomes lost at that deadline; completing A cannot leave absent B outside the
 barrier. Expiring a challenge never removes its journal reservation. Recovery/release
-bookkeeping is pruned only when a later durable journal revision no longer contains
-that identity, keeping the in-memory metadata bounded without TTL permission to open.
+bookkeeping keeps bounded release-once tombstones even after durable prune: a lost
+ACK and fresh reproof cannot double-release in the same boot. Only a later complete
+inventory from that same process omitting the identity removes its tombstone. There
+is no TTL permission to open.
 
 #### P1-H lifecycle reclamation and control-queue bounds (rework)
 
@@ -1480,16 +1491,55 @@ Detached terminals retain only a dedicated lifecycle control channel: real backe
 completion seals its receipt before sending exit, allowing H to collect without a
 browser writer. Exit itself is still not a physical-release proof.
 
-**Pending authority decision:** `StartHubDeps.terminalAuthority` is a local-only port;
-production currently has no approved cross-process producer implementation. Its absence
-returns `E_UNAVAILABLE`, issues no private binding, and cannot open a PTY. Journal load
-never infers `trustedNew` from first boot/settings/ENOENT. Missing or corrupt old stores
-remain unavailable; the first-use initializer and local process/receipt authority must
-be approved before production terminal use. The contract integration test supplies a
-trusted in-process port backed by the **real** owner's physical receipts and independent
-OS verifier, with an explicitly initialized fixture journal and isolated real PTY/rc;
-it is not evidence of a deployed cross-process authority. The optional backend factory
-is an internal test seam only, with no settings/env/HTTP route.
+**Production local trust channel (1A/2A, 2026-11-14):** guarded `wireWebHub` creates
+one owned0600 immutable authority record per owner in owned0700 `terminal-v1/authority/`.
+It binds process nonce, session/epoch/owner, the producer's plain/main verdict and actual
+boot/pid/starttime/uid/namespaces. A private challenge optionally advertises the new
+private `authority` query; missing support stops before ready/grant/backend. Capability
+id/nonce/SHA256 travel only in its dedicated response, never public hello/status/cmd/SSE.
+H reads the record itself, checks exact scope/capability/hash/ownership/mode/no-symlink,
+and independently reads current `/proc` identity and PID/mount/user namespaces against
+its own. Every admission/enqueue rechecks the record; revoke unlinks it synchronously.
+H caches at most64 current authorities and32 discovery flights, each bounded to2s.
+
+Only the production backend's sealed future + closed PTY + reaped helper + gone managed
+processes barrier can publish an immutable owned0600 receipt in `terminal-v1/receipts/`.
+It includes the exact resource tuple, agent incarnation, managed identities, bounded
+physical result and random nonce/hash. Inventory proof's optional `receipt` reference is
+private and append-only. H loads the owned file independently, matches the complete
+witness, then verifies both original process identities **and recorded groups/sessions**
+are gone. Wire booleans are never a receipt. Durable resolve → current challenge check
+→ durable exact-row prune → current/non-abort check precedes `resolved_ack`; only the
+exact ACK forgets/deletes those files. Until prune, the journal retains identity/outcome
+proof metadata, not the receipt capability/nonce. Missing, corrupt,
+late or forged receipts retain quota. Old retained receipt files can be read as plain
+handoff data by a new owner, but every proof still needs a fresh current challenge and
+independent H OS verification. Publication has a2s logical deadline and seals late IO.
+
+**First-use rule:** terminal-off creates nothing. When enabled in a trusted plain domain,
+only a never-existing `terminal-v1/` root may initialize automatically: exclusive durable
+parent witness `.terminal-initialized-v1`, atomic700 root, O_EXCL/O_NOFOLLOW600 empty
+journal and `initialized` marker, fsync files/root/parent. Existing root without a valid
+journal/marker, unknown versions, unsafe permissions/symlinks, stale authority or malformed/
+conflicting receipt state, an older flat journal, or a surviving witness after root deletion is Unavailable;
+there is no ENOENT-to-empty fallback or production `trustedNew`. Concurrent first claim
+losers fail closed; after the winning initializer completes, `/reload` + `/webhub restart`
+can revalidate without resetting anything. `hub.json.terminal` carries only ready or a
+fixed prerequisite reason; `/webhub status` explains unavailable state and never offers
+an automatic reset. No capability/path/process identity is published there.
+
+A newer physical exit while an older inventory fsync is pending marks that snapshot
+dirty. The single flight drains only verified newer lifecycle revisions, at most32 rounds
+inside its **original2s** budget; no timer polling, deadline extension or failure retry.
+This prevents dropping the completion signal while preserving conservative failure.
+Real integration covers separate Node agent/hub processes, isolated real PTY/rc, repeated
+same-PID attach/close/receipt/durable ACK quota release, privacy/auth signal order, and
+hostile owned-file/proc claims. Three normal cold restarts plus both real fsync crash
+windows (resolved-before-prune and pruned-before-ACK) retain quota until fresh proof,
+then allow repeated open/close beyond the quota count. A forged consumed op or ACK on
+the real channel with a wrong challenge cannot forget a receipt. No authority or
+receipt-verifier replacement is used.
+The backend fixture factory remains internal-only, with no settings/env/HTTP surface.
 
 Off retains no terminal owner/transport/service/maps/timers, reads no terminal journal
 or privacy store because of terminal wiring, advertises no terminal cap and keeps every

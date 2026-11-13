@@ -1,5 +1,6 @@
 /** Real wireWebHub/commands/connection; only physical owner factory replaced.
  * True PTY plus real hub belongs to integration/web-hub-terminal-wiring. */
+import { writeFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { TerminalOwnerOptions } from "../../../src/web-hub/agent/terminal/owner.js";
 const factory = vi.hoisted(() => ({ create: vi.fn() }));
@@ -41,7 +42,7 @@ function setup(on: boolean, guard?: () => boolean) {
     dispose: vi.fn(async () => {}),
   };
   factory.create.mockResolvedValue(o);
-  wireWebHub(a.pi, {
+  const control = wireWebHub(a.pi, {
     settings: { ...SETTINGS, ...(on ? { terminal: limits } : {}) },
     ...(guard === undefined ? {} : { terminalGuard: guard }),
     fleet: () => [],
@@ -61,7 +62,7 @@ function setup(on: boolean, guard?: () => boolean) {
     await vi.advanceTimersByTimeAsync(0);
     return s;
   };
-  return { ...a, ...c, n, o, start };
+  return { ...a, ...c, n, o, start, control };
 }
 describe("production terminal owner wiring", () => {
   it("off retains exact hook registration shape and never invokes physical factory", async () => {
@@ -144,5 +145,18 @@ describe("production terminal owner wiring", () => {
     s.fail("ECONNRESET");
     expect(a.o.linkLost).toHaveBeenCalledTimes(1);
     a.fire("session_shutdown", { reason: "quit" }, a.ctx);
+  });
+});
+
+describe("enabled-only unavailable-store status", () => {
+  it("shows a fixed actionable prerequisite reason without adding an off status line", () => {
+    const on = setup(true, () => true);
+    writeFileSync(
+      pathsIn(tmp.dir).hubJson,
+      JSON.stringify({ terminal: { state: "unavailable", reason: "journal-missing" } }),
+    );
+    expect(on.control.ui.statusLines().join("\n")).toContain("终端不可用：journal-missing");
+    const off = setup(false);
+    expect(off.control.ui.statusLines().join("\n")).not.toContain("终端不可用");
   });
 });

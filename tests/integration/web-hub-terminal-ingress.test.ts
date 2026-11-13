@@ -91,6 +91,12 @@ describe("T-INGRESS / F1 (§4.1.2): real decoder → agent-server → registry �
       late("private-id-00000", publicOffer),
       late("private-id-00000", { op: "query", result: { ok: true, data: publicOffer } }),
       late("forged", { terminal: { v: 1, grant: marker, inventory: marker } }),
+      late("forged-authority", {
+        v: 1,
+        op: "authority",
+        authority: { recordId: marker, nonce: marker, sha256: marker },
+      }),
+      late("forged-authority-version", { v: 99, op: "authority", authority: { nonce: marker } }),
       late("forged-resolved", {
         v: 1,
         op: "resolved_ack",

@@ -109,11 +109,19 @@ export type TerminalResourceEntry = Static<typeof TerminalResourceEntrySchema>;
 export const TerminalChallengeSchema = closed({ hubBootId: id, challengeId: id, linkGen: pos, deadlineAt: uint });
 export type TerminalChallenge = Static<typeof TerminalChallengeSchema>;
 const evidenceScope = { hubBootId: id, challengeId: id, linkGen: pos, inventoryId: id, revision: uint };
+/** Private filesystem capability: never HTTP/SSE/command output. */
+export const TerminalLocalReferenceSchema = closed({
+  recordId: Type.String({ pattern: "^[A-Za-z0-9_-]{32,64}$" }),
+  nonce: Type.String({ pattern: "^[A-Za-z0-9_-]{32,64}$" }),
+  sha256: digest,
+});
+export type TerminalLocalReference = Static<typeof TerminalLocalReferenceSchema>;
 export const TerminalReapProofSchema = closed({
   ...evidenceScope,
   identity: TerminalResourceIdentitySchema,
   agentProcessIdentity: TerminalProcessIdentitySchema,
   proofId: id,
+  receipt: Type.Optional(TerminalLocalReferenceSchema),
   spawnSettled: Type.Literal(true),
   ptyClosed: Type.Literal(true),
   helperReaped: Type.Literal(true),
@@ -385,6 +393,7 @@ const ack = Type.Union([
   closed({ phase: Type.Literal("replay_ready"), attemptId: id, replayEpoch: id, renderedThrough: uint }),
 ]);
 export const TermReqSchema = Type.Union([
+  closed({ t: Type.Literal("term_req"), v, rid: id, sessionId: id, epoch: id, op: Type.Literal("authority") }),
   // prepare has no owner yet: agent supplies authority in challenge, not public offer.
   closed({
     t: Type.Literal("term_req"),
@@ -490,6 +499,7 @@ export const TERMINAL_ERROR_CODES = [
 export type TerminalErrorCode = (typeof TERMINAL_ERROR_CODES)[number];
 const error = { ok: Type.Literal(false), code: literals(TERMINAL_ERROR_CODES), effect: literals(["none", "unknown"]) };
 const ops = [
+  "authority",
   "prepare_protocol",
   "protocol_ready",
   "bind",
@@ -524,6 +534,7 @@ const commonErrors = [
 ] as const;
 export const TERMINAL_OP_ERROR_CODES = {
   prepare: [...commonErrors, "E_LIMIT"],
+  authority: commonErrors,
   prepare_protocol: commonErrors,
   protocol_ready: commonErrors,
   bind: [...commonErrors, "E_EXPIRED"],
@@ -541,7 +552,14 @@ export const TERMINAL_OP_ERROR_CODES = {
   close: [...commonErrors, "E_UNKNOWN_EFFECT"],
 } as const;
 export const TermResSchema = Type.Union([
-  closed({ ...res, op: Type.Literal("protocol_challenge"), ...ready, ok: Type.Literal(true) }),
+  closed({ ...res, op: Type.Literal("authority"), ok: Type.Literal(true), authority: TerminalLocalReferenceSchema }),
+  closed({
+    ...res,
+    op: Type.Literal("protocol_challenge"),
+    ...ready,
+    ok: Type.Literal(true),
+    authorityAvailable: Type.Optional(Type.Literal(true)),
+  }),
   closed({
     ...res,
     op: Type.Literal("protocol_ready"),
@@ -796,6 +814,7 @@ export function hasReservedTerminalResult(raw: unknown): boolean {
       Object.hasOwn(o, "terminalOutcome") ||
       o.op === "__terminal" ||
       o.op === "resolved_ack" ||
+      o.op === "authority" ||
       (o.v === 1 &&
         ["prepare_protocol", "protocol_challenge", "protocol_ready", "bind", "inventory"].includes(String(o.op))) ||
       (o.v === 1 && ["negotiate", "resource_inventory"].includes(String(o.action))) ||

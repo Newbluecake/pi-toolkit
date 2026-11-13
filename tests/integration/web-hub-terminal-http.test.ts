@@ -1289,9 +1289,7 @@ describe("T-REV/T-SSE/T-ID/T-BIND dual listener terminal (§3/4)", () => {
         expect(h.fence.physicalUsed()).toBe(0);
         expect(h.fence.snapshot().state).toBe("cleared");
         const durable = JSON.parse(await readFile(join(h.tmp.dir, "state", "terminal-resource-fence-v1.json"), "utf8"));
-        expect(durable.resources.find((r: any) => r.entry.identity.reservationId === o.reservationId).status).toBe(
-          "resolved",
-        );
+        expect(durable.resources.find((r: any) => r.entry.identity.reservationId === o.reservationId)).toBeUndefined();
       }
       expect(h.counts().opens).toBe(6);
       expect(h.frames.filter((f) => f.op === "inventory")).toHaveLength(6);
@@ -1523,7 +1521,7 @@ describe("T-REV/T-SSE/T-ID/T-BIND dual listener terminal (§3/4)", () => {
     expect(h.service.limits.physicalUsed).toBe(0);
     expect(h.fence.physicalUsed()).toBe(0);
     const bytes = await readFile(join(h.tmp.dir, "state", "terminal-resource-fence-v1.json"), "utf8");
-    expect(JSON.parse(bytes).resources[0].status).toBe("resolved");
+    expect(JSON.parse(bytes).resources).toEqual([]);
     const ownEvents = JSON.stringify(c.stream.events);
     expect(ownEvents).not.toContain("resolved_ack");
     expect(ownEvents).not.toContain("journalRevision");

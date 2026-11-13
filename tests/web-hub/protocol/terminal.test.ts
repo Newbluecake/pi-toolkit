@@ -155,6 +155,8 @@ describe("terminal r4 exact v1 contract (§4.3 / I10)", () => {
       { terminal: { v: 88, grant: "x" } },
       { terminalOutcome: "unknown" },
       { v: 1, op: "protocol_ready", grant: "x" },
+      { v: 1, op: "authority", authority: { nonce: "x" } },
+      { v: 99, op: "authority", authority: { nonce: "x" } },
       { v: 1, action: "resource_inventory", entries: [] },
       { op: "query", result: { ok: true, data: { terminal: { unknown: true } } } },
       {
@@ -425,5 +427,34 @@ describe("terminal optional display metadata (§7.1 / §7.3, append-only)", () =
         field,
       ).toBeUndefined();
     }
+  });
+});
+
+describe("append-only local authority and receipt references", () => {
+  it("accepts closed private authority variants, never a path-bearing or extensible capability", () => {
+    const reference = { recordId: "r".repeat(32), nonce: "n".repeat(32), sha256: "a".repeat(64) };
+    const request = { t: "term_req", v: 1, rid: "rid", sessionId: "session", epoch: "epoch", op: "authority" };
+    const response = {
+      t: "term_res",
+      v: 1,
+      rid: "rid",
+      sessionId: "session",
+      epoch: "epoch",
+      ownerInstance: "owner",
+      op: "authority",
+      ok: true,
+      authority: reference,
+    };
+    expect(terminalFrameOk(request)).toBe(true);
+    expect(terminalFrameOk(response)).toBe(true);
+    for (const bad of [
+      { ...reference, recordId: "../receipt" },
+      { ...reference, path: "/tmp/private" },
+      { ...reference, nonce: "short" },
+      { ...reference, sha256: "unknown" },
+    ])
+      expect(terminalFrameOk({ ...response, authority: bad })).toBe(false);
+    expect(terminalFrameOk({ ...request, ownerInstance: "browser-chosen" })).toBe(false);
+    expect(terminalFrameOk({ ...response, cwd: "/private" })).toBe(false);
   });
 });

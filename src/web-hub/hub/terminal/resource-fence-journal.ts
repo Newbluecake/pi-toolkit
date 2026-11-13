@@ -41,7 +41,8 @@ export function createTerminalResourceJournal(deps: {
   let current: TerminalJournal | undefined,
     loaded = false,
     poisoned = false,
-    busy = false;
+    busy = false,
+    existed = false;
   const uid = process.getuid?.();
   async function directory() {
     const s = await lstat(deps.stateDir);
@@ -97,6 +98,7 @@ export function createTerminalResourceJournal(deps: {
           deps.now() + 2000,
           signal,
         );
+        existed = out.kind === "loaded";
         current = out.kind === "loaded" ? structuredClone(out.journal) : { v: 1, revision: 0, resources: [] };
         loaded = true;
         return out;
@@ -118,7 +120,7 @@ export function createTerminalResourceJournal(deps: {
           (async () => {
             await directory();
             // Refuse outside-writer changes; a missing previously committed store is unknown.
-            if (current!.revision > 0) {
+            if (existed || current!.revision > 0) {
               const disk = await read();
               if (JSON.stringify(disk) !== JSON.stringify(current)) throw new Error("E_STORE");
             }
@@ -153,6 +155,7 @@ export function createTerminalResourceJournal(deps: {
           signal,
         );
         current = copy;
+        existed = true;
         return "committed";
       } catch {
         poisoned = true;

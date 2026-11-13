@@ -30,6 +30,7 @@ export type TerminalAgentTarget = {
   meta: TerminalIngressMeta;
   processIdentity: TerminalProcessIdentity;
   allowed: boolean;
+  ownerInstance?: string;
 };
 type Scope = {
   limits: TerminalHubConfig;
@@ -81,6 +82,7 @@ export interface TerminalServiceDeps {
   now: () => number;
   /** Trusted assembly closure, not status/UI strings. Includes current plain/main guard. */
   target: (agentKey: string) => TerminalAgentTarget | undefined;
+  resolveTarget?: (agentKey: string, signal: AbortSignal) => Promise<void>;
   targets?: () => readonly TerminalAgentTarget[];
   send: (meta: TerminalIngressMeta, frame: TermReq | CmdFrame) => boolean;
   /** Actual current UDS userland pending bytes, NOT trySend acknowledgement. */
@@ -387,6 +389,7 @@ export function createTerminalService(deps: TerminalServiceDeps) {
         challenge.op !== "protocol_challenge" ||
         challenge.offerId !== offerId ||
         challenge.hubNonce !== hubNonce ||
+        (target.ownerInstance !== undefined && challenge.ownerInstance !== target.ownerInstance) ||
         !commandIngress.bindOwner(meta, commandId, challenge.ownerInstance)
       )
         throw new TerminalFault("E_UNSUPPORTED");
@@ -614,15 +617,19 @@ export function createTerminalService(deps: TerminalServiceDeps) {
       e.revision < r.revision
     )
       return;
+    const lifecycleChanged =
+      e.revision > r.revision ||
+      (e.kind === "exit" && r.state !== "reap_incomplete" && r.state !== "exited") ||
+      (e.kind === "state" && r.state !== e.state);
     r.revision = e.revision;
     if (e.kind === "state") {
       r.state = e.state === "exited" ? "reap_incomplete" : e.state;
-      if (["closing", "exited", "reap_incomplete"].includes(e.state)) void reclaim(r);
+      if (["closing", "exited", "reap_incomplete"].includes(e.state) && lifecycleChanged) void reclaim(r, true);
     }
     // exit is a UI fact, NEVER a physical resource proof or reservation release.
     if (e.kind === "exit") {
       r.state = "reap_incomplete";
-      void reclaim(r);
+      if (lifecycleChanged) void reclaim(r, true);
       note({
         op: e.reap === "reaped" ? "exit" : "reap-incomplete",
         ok: e.reap === "reaped",
@@ -742,12 +749,9 @@ export function createTerminalService(deps: TerminalServiceDeps) {
         records.delete(r.termId);
         continue;
       }
-      if (
-        now() >= r.expiresAt ||
-        now() >= r.idleAt ||
-        privacyDenied(r.scope.owner.sessionId) ||
-        !current(r.scope.target.meta)
-      ) {
+      const trustedTarget = current(r.scope.target.meta);
+      if (now() >= r.expiresAt || now() >= r.idleAt || privacyDenied(r.scope.owner.sessionId) || !trustedTarget) {
+        if (!trustedTarget) r.scope.binding.revoke();
         if (r.state !== "closing" && r.state !== "exited") {
           clearDisplay(r);
           closeRow(r);
@@ -773,6 +777,8 @@ export function createTerminalService(deps: TerminalServiceDeps) {
     b: LiveTerminalBinding,
     signal: AbortSignal,
   ): Promise<TerminalHttpResults[K]> {
+    if (privacyDenied(body.expect.sessionId)) throw new TerminalFault("E_PRIVACY_LOCKED");
+    await deps.resolveTarget?.(body.agentKey, signal);
     const liveTarget = safeTarget(body.agentKey);
     const target = liveTarget === undefined ? undefined : structuredClone(liveTarget);
     if (!target?.allowed) throw new TerminalFault("E_UNSUPPORTED");
@@ -1108,18 +1114,26 @@ export function createTerminalService(deps: TerminalServiceDeps) {
     );
   }
   // One bounded attempt per current agent: lifecycle, hot quota retry and startup share challenges.
-  const collections = new Map<string, { controller: AbortController; work: Promise<void> }>();
-  async function reclaim(r: RecordRow) {
-    await collectShared(r.scope.binding.identity, r.scope.binding, r.scope.target);
+  const collections = new Map<string, { controller: AbortController; work: Promise<void>; dirty: boolean }>();
+  async function reclaim(r: RecordRow, lifecycleChanged = false) {
+    await collectShared(r.scope.binding.identity, r.scope.binding, r.scope.target, lifecycleChanged);
     if (r.cleanupAt === undefined && (r.state === "closing" || r.state === "reap_incomplete")) {
       r.state = "reap_incomplete";
       note({ op: "reap-incomplete", ok: false, code: "E_RESOURCE_QUARANTINED", reap: "reap_incomplete" });
     }
   }
-  function collectShared(id: AuthIdentity, b: LiveTerminalBinding, target: TerminalAgentTarget): Promise<void> {
+  function collectShared(
+    id: AuthIdentity,
+    b: LiveTerminalBinding,
+    target: TerminalAgentTarget,
+    lifecycleChanged = false,
+  ): Promise<void> {
     const key = JSON.stringify(target.meta);
     const existing = collections.get(key);
-    if (existing) return existing.work;
+    if (existing) {
+      if (lifecycleChanged) existing.dirty = true;
+      return existing.work;
+    }
     if (disposed || collections.size >= 32) return Promise.resolve();
     const controller = new AbortController();
     const expiry = clock.setTimer(2000, () => controller.abort());
@@ -1127,7 +1141,19 @@ export function createTerminalService(deps: TerminalServiceDeps) {
       if (controller.signal.aborted || disposed) throw new TerminalFault("E_DEADLINE");
       if (!current(target.meta)) throw new TerminalFault("E_SESSION_CHANGED");
     };
-    const work = collectRaw(id, b, target, controller.signal, guard)
+    const entry = { controller, work: Promise.resolve(), dirty: false };
+    // A later verified physical revision invalidates an in-flight older snapshot.
+    // Drain only those event-driven invalidations: no polling/retry after failure,
+    // at most32 rounds inside the ORIGINAL2s budget, never another timer window.
+    const work = Promise.resolve()
+      .then(async () => {
+        for (let round = 0; round < 32; round++) {
+          entry.dirty = false;
+          await collectRaw(id, b, target, controller.signal, guard);
+          if (!entry.dirty) break;
+          guard();
+        }
+      })
       .catch(() => {
         controller.abort();
       })
@@ -1135,7 +1161,8 @@ export function createTerminalService(deps: TerminalServiceDeps) {
         clock.clearTimer(expiry);
         collections.delete(key);
       });
-    collections.set(key, { controller, work });
+    entry.work = work;
+    collections.set(key, entry);
     return work;
   }
   async function collect(id: AuthIdentity, b: LiveTerminalBinding, target: TerminalAgentTarget, signal: AbortSignal) {
