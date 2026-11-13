@@ -22,6 +22,8 @@
 | `maxLifetimeS`                |   28800 | 900–86400 秒 |
 
 只有非空、实际用户输入更新 idle；输出、自动终端 response、attach、ACK、renew 不续命。硬寿命不可续期。
+
+首次 open 在 reservation 后创建全新 Python backend，并明确 await exec-ready；agent/protocol READY 不代表尚未创建的 backend 已就绪。capability probe、全局有界 proc scan、shell/exec 失败不能靠补一个测试前置 READY 消除。`E_BACKEND_CAPABILITY` 可能是暂态启动检查失败；UI 提示先从列表确认原请求再手动重试，绝不自动换票据重开 `effect:unknown` 的 shell。内部 body-free diagnostic 区分 capable/ready、probe/startup deadline、helper error/closing 等固定原因，不扩 HTTP/wire、不带环境/正文/路径。
 两条 settings loader 对 secure **及 locked** 的显式 block clone 后强制 `enabled:false`；默认对象和原文件不 mutation。
 
 ## 威胁模型：不是沙盒，也不是安全传输
@@ -84,7 +86,7 @@ publication 2s logical deadline、late-write seal；同步文件系统调用不�
 - 页面后台/导航/刷新/renderer dispose 只撤 writer，不 close shell；列表接回原 termId/同 PID。**不跨 agent session/reload/hub restart 保活**；边界退出按身份有界清理，不能自动开新 shell 冒充接回。
 - 单 writer CAS，15s lease/5s renew；stream epoch、raw-byte offset、input seq 幂等，未知已接受输入只查原 seq，不重打命令。creation ticket 10min、live/closing/poison pin，不因票据 TTL 重复 fork。
 - raw ring 1MiB/term，scrollback1000；output8KiB、input4KiB、input pending32KiB、live64KiB、helper/UDS128KiB。hub 同时限制 raw64KiB、128项、实际序列化 frame128KiB，零 raw 控制帧也计费；只合并同 writer 相邻 state，不跨 output/gap/cutover。
-- replay 固定≤16KiB suffix、0 live staging、最多8 attempts、绝对3s，write callback→replay_ready→cutover barrier 后可写，明确 gap。总512KiB/s 内预留 replay128KiB/s；慢 viewer≤2s detach，shell 继续。不能追满 ring 或声称 screen snapshot/完整 VT 历史恢复；同尺寸 resize/SIGWINCH 促重绘。
+- replay 固定≤16KiB suffix、0 live staging、最多8 attempts、绝对3s，write callback→replay_ready→cutover barrier 后可写，明确 gap。ResizeObserver 的 resize 在 writable 前不发送；cutover 统一发送当前最新尺寸，避免抢在 replay_ready 前被 agent 正确拒为 E_LEASE_EXPIRED 后 UI 误 detach。总512KiB/s 内预留 replay128KiB/s；慢 viewer≤2s detach，shell 继续。不能追满 ring 或声称 screen snapshot/完整 VT 历史恢复；同尺寸 resize/SIGWINCH 促重绘。
 - UI bottom panel 位于 body 后/dock 前；页面内最大化，不用 Fullscreen API；**Esc 不关闭、不退出最大化**。Ctrl+Shift+F6 退出输入焦点；其他按键归 TTY，高层确认框优先。多行 paste/drop 确认，4KiB 上限；确认先移 modal、恢复焦点再 paste。原生 keyboard capture/bubble 门不能卸载宿主热键。
 - optional metadata 来自 hub/validated uid/login shell/host/initial ctx，不来自 OSC/title/output；list/state 无 cwd/user/host/shell，panel 文本渲染。缺省内联英文 `unknown`；撤权清所有 metadata/屏幕/pending。
 - controller 每个 HTTP/action await 前后绑定不可变 authority snapshot（认证、writer代、原 connection 对象/instance/token/expiry、client/session/epoch、AbortSignal）；迟到成功/错误/finally 不能写后继状态。忽略 abort 的 transport 也必须被挡住。卸载 detach 使用独立旧 lease 快照，不恢复 UI。
@@ -147,3 +149,5 @@ timeout 240s npm run probe:terminal-e2e
 ## 残留风险
 
 同 uid 文件/凭据访问、LAN明文劫持、rc 副作用与 shell 自行 history 不在隔离保证内；无完整历史/VT像素恢复；恶意 uid/namespace/组脱逃、内核D-state、agent/helper同时被杀可能残留。大 managed identity 集合超过16KiB页/64KiB库存预算时保守拒绝，不裁证明或伪造空库存。未知磁盘/authority状态刻意 fail-closed，无自动 reset。逻辑 IO 截止不等于可抢占 fsync。reload/重启是清理边界，不是后台保活承诺。门禁日志里的已有 skip/环境限制都要在证据包单列。
+
+2026-11-14 曾有一次旧 probe「刷新后列表为空、整 cookie 对象 JSON 不同」；当时缺 SID/journal，无法回溯为真正 SID 轮换或独立 shell 退出，不宣称已证明那次具体原因。root 接受以强化可证伪回归+明确残留交付：新 probe 对同一 Page/Context 的真实 SID 做仅内存非秘密序号对比并断言，记录 context-wide login/Set-Cookie/SSE/list 序号及失败 journal/固定 backend 诊断；已有45次同 SID 刷新反证与真实 hub/PTY 三次 SSE 替换同 cookie/同 PID 回归。若再出现必须用这些新证据归因，不能只以「重跑绿」结案，也不把整 cookie 属性/数组比较误报成 SID 轮换。

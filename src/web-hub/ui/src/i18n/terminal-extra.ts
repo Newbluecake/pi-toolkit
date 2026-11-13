@@ -4,7 +4,8 @@ const en = {
   largerFont: "Larger terminal font",
   unsupported:
     "This agent does not support the terminal protocol, or its backend is not available. No shell was started.",
-  backendUnavailable: "Linux PTY, Python 3 or a usable login shell is unavailable on this agent. No shell was started.",
+  backendUnavailable:
+    "Terminal startup checks are temporarily unavailable (Linux PTY, Python 3, or login shell). Check the terminal list for the original request before manually retrying. A shell is never reopened automatically.",
   writerBusy: "Another tab owns this terminal. Put it in the background there, or wait for its lease to expire.",
   quarantined: "Resource cleanup has not been confirmed. New terminals remain blocked; do not retry creating a shell.",
   loginRequired: "Please sign in again to enable terminal access.",
@@ -39,7 +40,8 @@ const zh = {
   smallerFont: "缩小终端字号",
   largerFont: "放大终端字号",
   unsupported: "此 agent 不支持终端协议，或终端后端尚不可用。未启动 shell。",
-  backendUnavailable: "目标 agent 的 Linux PTY、Python 3 或可用登录 shell 能力不可用。未启动 shell。",
+  backendUnavailable:
+    "终端启动检查暂不可用（Linux PTY、Python 3 或登录 shell）。请先查看终端列表确认原请求状态，再手动重试新建；不会自动重开 shell。",
   writerBusy: "此终端正由另一个标签页使用。请在原标签页放到后台，或等待 writer lease 到期。",
   quarantined: "资源回收尚未确认，暂时禁止新建终端。请勿反复创建 shell。",
   loginRequired: "请重新登录以启用终端。",

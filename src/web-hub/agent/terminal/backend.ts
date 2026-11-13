@@ -52,7 +52,15 @@ export interface TerminalPhysicalResult {
   exitCode?: number;
   signal?: "SIGHUP" | "SIGTERM" | "SIGKILL" | "SIGINT" | "SIGQUIT";
 }
+/** Body-free startup evidence, internal only; never a terminal wire/result field. */
+export interface TerminalBackendDiagnostic {
+  capable: boolean;
+  ready: boolean;
+  failure?: string;
+  closing?: string;
+}
 export interface TerminalBackend {
+  readonly diagnostic?: TerminalBackendDiagnostic;
   readonly ready: Promise<void>;
   readonly done: Promise<TerminalPhysicalResult>;
   readonly managed: readonly ManagedIdentity[];
@@ -93,6 +101,7 @@ export function createTerminalTestBackend(
 class PythonTerminalBackend implements TerminalBackend {
   readonly ready: Promise<void>;
   readonly done: Promise<TerminalPhysicalResult>;
+  readonly diagnostic: TerminalBackendDiagnostic = { capable: false, ready: false };
   private readyResolve!: () => void;
   private readyReject!: (error: TerminalBackendError) => void;
   private doneResolve!: (result: TerminalPhysicalResult) => void;
@@ -194,11 +203,13 @@ class PythonTerminalBackend implements TerminalBackend {
       if (this.closed) this.write({ op: "close" });
     });
     this.child.on("error", () => {
+      this.diagnostic.failure ??= "child-error";
       this.invalid = true;
       this.failReady("E_BACKEND_CAPABILITY");
       this.close();
     });
     this.child.on("close", () => {
+      if (!this.diagnostic.ready) this.diagnostic.failure ??= "child-close-before-ready";
       this.childReaped = true;
       this.settled = true; // OS child wait completed; no further fork/exec can occur.
       this.clearAll();
@@ -211,15 +222,18 @@ class PythonTerminalBackend implements TerminalBackend {
     // Fixed, body-free diagnostics only. No traceback or forwarded stderr.
     this.child.stderr.on("data", (b: Buffer) => {
       if (b.length) {
+        this.diagnostic.failure ??= "helper-stderr";
         this.invalid = true;
         this.close();
       }
     });
     this.probe = this.timer(L.probeMs, () => {
+      this.diagnostic.failure ??= "capability-deadline";
       this.failReady("E_BACKEND_CAPABILITY");
       this.close();
     });
     this.startup = this.timer(L.startupMs, () => {
+      this.diagnostic.failure ??= "startup-deadline";
       this.failReady("E_DEADLINE");
       this.close();
     });
@@ -342,6 +356,7 @@ class PythonTerminalBackend implements TerminalBackend {
       if (Array.isArray(f.managed)) this.remember(f.managed);
       switch (f.t) {
         case "capable":
+          this.diagnostic.capable = true;
           if (f.version !== 1 || f.subreaper !== true || f.adoptionExit !== 23) {
             this.invalid = true;
             this.close();
@@ -349,6 +364,7 @@ class PythonTerminalBackend implements TerminalBackend {
           this.clear(this.probe);
           break;
         case "ready":
+          this.diagnostic.ready = true;
           this.metadata = terminalDisplayMetadata(f.display, this.options.cwd);
           this.settled = true;
           if (!this.closed && !this.readySettled) {
@@ -359,7 +375,19 @@ class PythonTerminalBackend implements TerminalBackend {
           break;
         case "spawn":
         case "managed":
+          break;
         case "closing":
+          if (
+            [
+              "identity-unavailable",
+              "spawn-failed",
+              "unsupported-shell",
+              "startup-deadline",
+              "requested",
+              "exec-failed",
+            ].includes(String(f.reason))
+          )
+            this.diagnostic.closing = String(f.reason);
           break;
         case "data": {
           if (typeof f.bytesB64 !== "string" || (canonicalBase64Bytes(f.bytesB64) ?? Infinity) > L.outputChunkBytes) {
@@ -392,6 +420,15 @@ class PythonTerminalBackend implements TerminalBackend {
           this.report = f;
           break;
         case "error":
+          this.diagnostic.failure ??= [
+            "scan-vanished",
+            "scan-denied",
+            "scan-budget",
+            "scan-invalid",
+            "subreaper",
+          ].includes(String(f.reason))
+            ? String(f.reason)
+            : "helper-error";
           this.failReady("E_BACKEND_CAPABILITY");
           this.close();
           break;

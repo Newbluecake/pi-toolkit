@@ -321,6 +321,20 @@ async function physicalHub(degraded = false) {
     get sse() {
       return sse;
     },
+    async refreshStream() {
+      sse.close();
+      sse = await openSse(hub.httpPort, { cookie }); // Deliberately NO login call or cookie replacement.
+      const stream = sse;
+      cleanups.push(() => stream.close());
+      const connection = await sse.waitFor((e) => e.event === "terminal_connection"),
+        hello = await sse.waitFor((e) => e.event === "hello");
+      scope = {
+        ...scope,
+        clientId: hello.data.clientId,
+        connectionInstance: connection.data.connectionInstance,
+        connectionToken: connection.data.connectionToken,
+      };
+    },
     async restart() {
       await hub.close("terminal-cold-restart-test");
       hub = await launch();
@@ -394,6 +408,55 @@ async function openPhysical(h: NonNullable<Awaited<ReturnType<typeof physicalHub
   return { attachment: opened.body, streamEpoch };
 }
 describe("terminal real hub + real connection + physical PTY with production local filesystem authority", () => {
+  it("same login cookie survives three real SSE replacements and lists/reattaches the same physical shell", async () => {
+    const h = (await physicalHub())!;
+    let { attachment } = await openPhysical(h);
+    const originalCookie = h.cookie;
+    const pid = h.backends[0]!.managed.find((id) => id.role === "shell")!.pid;
+    for (let round = 0; round < 3; round++) {
+      expect((await h.post("detach", writer(attachment))).status).toBe(200);
+      const oldConnection = h.scope.connectionInstance;
+      await h.refreshStream();
+      expect(h.cookie).toBe(originalCookie);
+      expect(h.scope.connectionInstance).not.toBe(oldConnection);
+      const listed = await h.post("list");
+      expect(listed.status).toBe(200);
+      expect(listed.body.rows.map((r) => r.termId)).toEqual([attachment.termId]);
+      const attached = await h.post("attach", {
+        termId: attachment.termId,
+        attachId: `refresh-${round}`,
+        tabId: "refresh-tab",
+        cols: 80,
+        rows: 24,
+      });
+      expect(attached.status).toBe(200);
+      attachment = attached.body;
+      const streamEpoch = await h.writable(attachment);
+      expect(
+        (
+          await h.post("input", {
+            ...writer(attachment),
+            inputSeq: attachment.nextInputSeq,
+            inputKind: "user",
+            streamEpoch,
+            bytesB64: Buffer.from('printf "REFRESH_PID=%s\\n" "$$"\n').toString("base64"),
+          })
+        ).status,
+      ).toBe(200);
+      await waitUntil(() => h.output(attachment.termId).includes(`REFRESH_PID=${pid}`), 5000);
+      expect(h.backends).toHaveLength(1);
+    }
+    expect(
+      (
+        await h.post("close", {
+          termId: attachment.termId,
+          closeId: "refresh-close",
+          expectedRevision: attachment.revision,
+        })
+      ).status,
+    ).toBe(200);
+    await waitUntil(() => h.receipts().resolvedAcks === 1, TERMINAL_LIMITS.reapRetryMs);
+  }, 90000);
   it("HTTP prepare/open → directed output/input echo → detach/attach same PID → close/reap/durable ACK → quota reusable", async () => {
     const h = (await physicalHub())!;
     const observerCookie = await login(h.hub.httpPort, h.hub.paths.tokenFile);
@@ -640,7 +703,7 @@ describe("separate-process production authority and physical receipt release cha
     const headers = { Cookie: cookie, Origin: `http://127.0.0.1:${hub.httpPort}` };
     const post = async (op: keyof TerminalHttpRequests, extra: object) => {
       const response = await postJson(hub.httpPort, TERMINAL_HTTP_PATHS[op], { ...scope, ...extra }, headers);
-      expect(response.status, response.body).toBe(200);
+      expect(response.status, `${response.body}; op=${op}; agent=${errors}`).toBe(200);
       return JSON.parse(response.body);
     };
     const root = join(hub.paths.stateDir, TERMINAL_LOCAL_DIR),

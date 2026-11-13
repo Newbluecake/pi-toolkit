@@ -383,7 +383,9 @@ export function createTerminalController(deps: {
     await refreshList(authority);
   }
   async function resize() {
-    if (attachment) {
+    // A mounted renderer can resize before replay/cutover; the agent correctly refuses
+    // controls in that phase. Cutover sends the latest dimensions once writable.
+    if (attachment && state.writable) {
       const authority = capture();
       await call("resize", { ...writer(), resizeSeq: ++resizeSeq, ...deps.renderer.dimensions() }, authority);
       assertAuthority(authority);

@@ -42,6 +42,14 @@ let page: any;
 let stage = "offline loader";
 const ops: Array<{ op: string; status: number }> = [];
 const listResponses: unknown[] = [];
+const authTrace: unknown[] = [];
+const cookieIds = new Map<string, number>();
+const cookieId = (raw: string | undefined) => {
+  const value = /(?:^|;\s*)pwh_sid=([^;]+)/.exec(raw ?? "")?.[1];
+  if (!value) return 0;
+  if (!cookieIds.has(value)) cookieIds.set(value, cookieIds.size + 1);
+  return cookieIds.get(value)!;
+};
 let errors = "";
 try {
   const pw = await loadPlaywright();
@@ -92,6 +100,18 @@ try {
   browser = await pw.chromium.launch({ headless: true, executablePath: pw.executablePath });
   result.browser = browser.version();
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, locale: "zh-CN" });
+  context.on("response", (response: any) => {
+    const path = new URL(response.url()).pathname;
+    if (!["/api/login", "/api/events", "/api/terminal/list"].includes(path)) return;
+    void Promise.all([response.allHeaders(), response.request().allHeaders()]).then(([headers, sent]) => {
+      authTrace.push({
+        path,
+        status: response.status(),
+        requestSid: cookieId(sent.cookie),
+        setSid: cookieId(headers["set-cookie"]),
+      });
+    });
+  });
   // No external requests, even if an accidental UI path tries them.
   await context.route("**/*", (route: any) =>
     route
@@ -121,15 +141,24 @@ try {
   });
   page = await context.newPage();
   const consoleErrors: string[] = [];
+  const pageErrors: string[] = [];
+  const expectedRevocationErrors: string[] = [];
+  let invalidating = false;
   const documentCsp: unknown[][] = [];
   const captureDocumentCsp = async () => {
     const violations = await page.evaluate(() => (window as any).__terminalEvidence.violations);
     documentCsp.push(violations);
     assert.deepEqual(violations, []);
   };
-  page.on("pageerror", (e: Error) => consoleErrors.push(e.message));
+  page.on("pageerror", (e: Error) => pageErrors.push(e.message));
   page.on("console", (m: any) => {
-    if (m.type() === "error") consoleErrors.push(m.text());
+    if (m.type() === "error") {
+      const text = m.text();
+      const path = new URL(m.location().url || url).pathname;
+      if (invalidating && /^\/api\/terminal\/(ack|input|renew|resize)$/.test(path) && /status of (401|409)/.test(text))
+        expectedRevocationErrors.push(`${path}: ${text}`);
+      else consoleErrors.push(text);
+    }
   });
   page.on("response", (r: any) => {
     const path = new URL(r.url()).pathname;
@@ -209,11 +238,16 @@ try {
   steps.push("real context loss → renderer rebuild → attach same PID; zero prepare/open/close");
   stage = "background refresh same PID";
   const cookiesBefore = await context.cookies();
+  result.cookieBefore = cookieId(cookiesBefore.map((c: any) => `${c.name}=${c.value}`).join("; "));
   await button("放到后台").click();
   await page.waitForSelector(".terminal-panel", { state: "detached" });
   await captureDocumentCsp();
   await page.reload();
-  result.sameCookies = JSON.stringify(cookiesBefore) === JSON.stringify(await context.cookies());
+  const cookiesAfter = await context.cookies();
+  result.cookieAfter = cookieId(cookiesAfter.map((c: any) => `${c.name}=${c.value}`).join("; "));
+  result.sameCookies = result.cookieBefore === result.cookieAfter;
+  assert.equal(result.cookieAfter, result.cookieBefore, "same Page reload must retain the original login SID");
+  assert.equal(browser.contexts().length, 1, "reload must not create a new BrowserContext");
   await page.waitForSelector('[aria-controls="terminal-panel"]');
   await page.locator('[aria-controls="terminal-panel"]').click();
   await page.locator(".terminal-list").getByRole("button", { name: "接回", exact: true }).click();
@@ -234,6 +268,7 @@ try {
   await writable();
   steps.push("explicit close confirmation → process gone → durable quota/receipt release → reopen");
   stage = "privacy lock immediate invalidation";
+  invalidating = true;
   const lockAt = Date.now();
   const locked = await page.evaluate(async (agentKey: string) => {
     const response = await fetch("/api/privacy/lock", {
@@ -251,6 +286,7 @@ try {
   await shot("06-privacy-invalidated");
   await waitRelease();
   steps.push("authoritative privacy lock immediately freezes/clears panel and reaps shell");
+  invalidating = false;
   await page.evaluate(async (agentKey: string) => {
     const r = await fetch("/api/privacy/lock", {
       method: "POST",
@@ -265,6 +301,7 @@ try {
   await page.locator("[data-terminal-create]").click();
   await writable();
   stage = "auth revoke immediate invalidation";
+  invalidating = true;
   const revokeAt = Date.now();
   await page.evaluate(async () => {
     localStorage.removeItem("pwh_token"); // prevent the ordinary token client's automatic fresh login
@@ -289,6 +326,9 @@ try {
   result.cspViolations = documentCsp.flat();
   assert.deepEqual(result.cspViolations, []);
   result.consoleErrors = consoleErrors;
+  result.expectedRevocationErrors = expectedRevocationErrors;
+  result.pageErrors = pageErrors;
+  assert.deepEqual(pageErrors, []);
   assert.deepEqual(consoleErrors, []);
   // Expected auth HTTP errors are preserved; CSP and uncaught exceptions are separately asserted.
   stage = "WebGL unavailable Chinese refusal, zero shell open";
@@ -345,6 +385,12 @@ try {
   result.stage = stage;
   result.error = String(error);
   result.agentDiagnostics = errors;
+  if (hub && !("exists" in hub)) {
+    result.hubDiagnostics = readFileSync(hub.paths.logFile, "utf8").slice(-12000);
+    result.journal = JSON.parse(
+      readFileSync(join(hub.paths.stateDir, TERMINAL_LOCAL_DIR, TERMINAL_JOURNAL_FILE), "utf8"),
+    );
+  }
   result.ops = ops;
   result.listResponses = listResponses;
   if (page) {
@@ -373,6 +419,7 @@ try {
   await browser?.close();
   fixture.cleanup();
   rmSync(root, { recursive: true, force: true });
+  result.authTrace = authTrace;
   result.cleanup = "owned agent/hub/browser stopped; scratch removed";
   writeFileSync(join(out, "e2e-report.json"), JSON.stringify(result, null, 2) + "\n");
   console.log(JSON.stringify(result, null, 2));

@@ -57,6 +57,7 @@ reason = 'exit'
 known = {}
 waited = []
 scan_ok = True
+scan_reason = None
 shell_exit_at = None
 shell_code = None
 shell_signal = None
@@ -98,15 +99,15 @@ def close(why):
     emit(dict(t='closing', reason=why))
 
 def scan():
-    global scan_ok
+    global scan_ok, scan_reason
     begin = time.monotonic()
     rows = []
     try:
         names = os.listdir('/proc')
         pids = [int(n) for n in names if n.isdigit()]
-        if len(pids) > 8192: raise RuntimeError()
+        if len(pids) > 8192: raise RuntimeError("scan-budget")
         for pid in pids:
-            if time.monotonic()-begin > .1: raise RuntimeError()
+            if time.monotonic()-begin > .1: raise RuntimeError("scan-budget")
             row = identity(pid)
             if row: rows.append(row)
         descendants = {os.getpid()}
@@ -131,7 +132,10 @@ def scan():
                 alive.append((i, state))
         if len(known) > 255: raise RuntimeError()
         return alive
-    except Exception:
+    except Exception as error:
+        scan_reason = ('scan-vanished' if isinstance(error, (FileNotFoundError, ProcessLookupError)) else
+                       'scan-denied' if isinstance(error, PermissionError) else
+                       'scan-budget' if isinstance(error, RuntimeError) and str(error) == 'scan-budget' else 'scan-invalid')
         scan_ok = False
         return None
 
@@ -215,7 +219,7 @@ def command(c):
     if op == 'start' and config is None:
         config = c
         if not scan_ok:
-            emit(dict(t='error', code='E_BACKEND_CAPABILITY')); close('identity-unavailable'); return
+            emit(dict(t='error', code='E_BACKEND_CAPABILITY', reason=scan_reason)); close('identity-unavailable'); return
         emit(dict(t='capable', version=VERSION, subreaper=True, adoptionExit=23))
         return
     if op == 'close': close('requested'); return
@@ -241,7 +245,7 @@ def command(c):
 try:
     capability()
 except BaseException:
-    try: os.write(1, b'{"t":"error","code":"E_BACKEND_CAPABILITY"}\n')
+    try: os.write(1, b'{"t":"error","code":"E_BACKEND_CAPABILITY","reason":"subreaper"}\n')
     except OSError: pass
     os._exit(70)
 
@@ -278,7 +282,7 @@ while True:
     if now-last_scan >= .1 or closing is not None:
         rows = scan(); last_scan = now
         if rows is None and closing is None:
-            emit(dict(t='error', code='E_BACKEND_CAPABILITY')); close('identity-unavailable')
+            emit(dict(t='error', code='E_BACKEND_CAPABILITY', reason=scan_reason)); close('identity-unavailable')
         if now-last_meta >= 1 and closing is None:
             emit(dict(t='managed', managed=list(known.values()))); last_meta = now
         if closing is not None:

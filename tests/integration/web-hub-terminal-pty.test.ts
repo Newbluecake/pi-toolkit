@@ -202,6 +202,18 @@ async function waitRc(h: ReturnType<typeof backend>) {
 const evidence = { hubBootId: "boot", challengeId: "challenge", linkGen: 1, inventoryId: "inventory", revision: 1 };
 
 describe("Linux agent-owned terminal §§5.1–5.4, T-ISO/T-SUBREAPER", () => {
+  it("distinguishes a completed capability probe from a not-yet-ready exec without exposing secrets", async () => {
+    const h = backend(fixture("bash", { startDelayMs: 4000 }));
+    await expect(h.b.ready).rejects.toMatchObject({ code: "E_DEADLINE" });
+    expect(h.b.diagnostic).toMatchObject({ capable: true, ready: false, failure: "startup-deadline" });
+    const physical = await h.b.done;
+    expect(physical.outcome).toBe("reaped");
+    expect(physical.spawnSettled).toBe(true);
+    const text = JSON.stringify(h.b.diagnostic);
+    expect(text).not.toContain("FAKE_PI_KEY");
+    expect(text).not.toContain("FAKE_TOKEN");
+    expect(text).not.toContain("/tmp/");
+  }, 12000);
   it.each(["bash", "zsh"] as const)(
     "native interactive login %s loads profile+rc exactly once; secret inheritance is absent, rc may reset its own secret",
     async (kind) => {

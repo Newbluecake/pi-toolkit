@@ -110,6 +110,33 @@ describe("terminal attachment controller (§4.2 / §6.2 / §7.3)", () => {
     expect(request.mock.calls[2]?.[1].target.openId).toBe("ticket");
     c.dispose();
   });
+  it("defers ResizeObserver controls until replay cutover, then uses the latest dimensions", async () => {
+    const { c, request, renderer, event } = setup();
+    await c.attach(fact as any);
+    const dimensions = { cols: 120, rows: 35 };
+    renderer.dimensions = () => dimensions;
+    await c.resize(); // Observer fires immediately after HTTP attachment adoption.
+    event({ kind: "replay_begin", attemptId: "attempt", replayEpoch: "replay", S: 0, N0: 0, deadlineAt: 13000 });
+    await turn();
+    await c.resize(); // Still replaying: the agent would reject E_LEASE_EXPIRED.
+    expect(request.mock.calls.filter(([op]) => op === "resize")).toEqual([]);
+    dimensions.cols = 132;
+    event({
+      kind: "cutover",
+      attemptId: "attempt",
+      newLiveEpoch: "live",
+      replayEnd: 0,
+      liveFrom: 0,
+      gap: { from: 0, to: 0 },
+      resetParser: true,
+    });
+    await turn();
+    expect(c.state.writable).toBe(true);
+    expect(request.mock.calls.filter(([op]) => op === "resize")).toHaveLength(1);
+    expect(request.mock.calls.find(([op]) => op === "resize")?.[1]).toMatchObject({ cols: 132, rows: 35 });
+    expect(c.state.error).toBe("");
+    c.dispose();
+  });
   it("gates replay input/auto-responses and ACKs raw bytes only after renderer completion; cutover enables input", async () => {
     const { c, request, renderer, event } = setup();
     await c.attach(fact as any);

@@ -159,6 +159,51 @@ describe("TerminalPanel / Chrome / List (§7.1–7.4)", () => {
     expect(w.get('[role="alert"]').text()).toContain("WebGL2");
     expect(request.mock.calls.map((c) => c[0])).toEqual(["list"]);
   });
+  it.each(["zh", "en"] as const)(
+    "%s startup capability failure explains safe manual retry without an automatic shell open",
+    async (lang) => {
+      const { w, request } = setup();
+      setLangOverride(lang);
+      await flushPromises();
+      const ticket = {
+        v: 1,
+        bootId: "boot",
+        ticketId: "ticket",
+        issuedAt: Date.now(),
+        expiresAt: Date.now() + 60000,
+        ownerBinding: {
+          listener: "loopback",
+          principal: "principal",
+          sidTag: "sid",
+          agentKey: "agent",
+          sessionId: "session",
+          epoch: "epoch",
+          ownerInstance: "owner",
+        },
+        payloadDigest: "a".repeat(64),
+        mac: "b".repeat(64),
+      };
+      request.mockImplementation(
+        async (op) =>
+          (op === "prepare"
+            ? { ok: true, openId: "ticket", createTicket: ticket }
+            : op === "open"
+              ? { ok: false, code: "E_BACKEND_CAPABILITY", effect: "unknown" }
+              : op === "state"
+                ? { ok: true, fact: { state: "unknown", effect: "unknown" } }
+                : { ok: true, revision: 2 }) as any,
+      );
+      w.getComponent(TerminalList).vm.$emit("create");
+      await flushPromises();
+      const text = w.get('[role="alert"]').text();
+      expect(text).toContain(lang === "zh" ? "手动重试" : "manually retrying");
+      expect(text).toContain(lang === "zh" ? "确认原请求状态" : "original request");
+      expect(text).not.toContain(lang === "zh" ? "未启动 shell" : "No shell was started");
+      expect(request.mock.calls.filter(([op]) => op === "open")).toHaveLength(1);
+      expect(request.mock.calls.filter(([op]) => op === "prepare")).toHaveLength(1);
+      expect(request.mock.calls.filter(([op]) => op === "state")).toHaveLength(1);
+    },
+  );
   it("requires explicit terminate confirmation; Escape cancels only that modal", async () => {
     const { w, request } = setup();
     await flushPromises();

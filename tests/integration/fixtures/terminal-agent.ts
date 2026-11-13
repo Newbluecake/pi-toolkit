@@ -38,7 +38,17 @@ const control = wireWebHub(a.pi, {
   terminalOwnerFactory: async (options) => {
     owner = await createTerminalOwner({
       ...options,
-      backend: (opts) => createTerminalTestBackend(opts, input.fixture),
+      backend: (opts) => {
+        const backend = createTerminalTestBackend(opts, input.fixture);
+        void backend.ready.catch(() =>
+          process.stderr.write(`BACKEND_READY_FAILURE ${JSON.stringify(backend.diagnostic)}\n`),
+        );
+        void backend.done.then(() => {
+          if (backend.diagnostic?.failure)
+            process.stderr.write(`BACKEND_DONE_DIAGNOSTIC ${JSON.stringify(backend.diagnostic)}\n`);
+        });
+        return backend;
+      },
     });
     return owner;
   },

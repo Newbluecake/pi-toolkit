@@ -32,7 +32,8 @@
 - [ ] 键盘输入 `echo` 得到真实输出；`printf`/`echo $$` 获取数值 PID，避免把终端输入回显误判为执行结果。
 - [ ] 最大化后 TTY 原生 Esc 不关闭、不退出最大化、不 close shell；截图。
 - [ ] 真实 WEBGL_lose_context →重建renderer→attach原termId；再次输出同PID；prepare/open/close计数不增。
-- [ ] 点击「放到后台」，等待 action 真完成/面板消失，再真实 reload →列表→接回；输出同PID，open总数仍1。
+- [ ] 点击「放到后台」，等待 action 真完成/面板消失，再真实 reload →列表→接回；输出同PID，open总数仍1；对 SID（不是整个 cookie 对象属性）和同一 Page/Context 做断言。context-wide auth trace 只记录 SID 序号，不记录值/hash。
+- [ ] 验证 ResizeObserver 在 replay/cutover 前零 resize；cutover 后恰一次 latest dimensions，修复前该回归必须红。启动 capability 失败显示安全手动重试提示，不自动重开未知 shell。
 - [ ] 点击终止先见确认框，确认前无 close；确认后原PID消失、journal零资源、receipt exact ACK删除。
 - [ ] 释放后可再开；循环次数超过默认 quota2，不能手工 fence.begin/reset 代替回收。
 - [ ] privacy lock、真实 logout/revoke后≤2s面板失效（记录实测毫秒），旧writer不能输入；shell真实清理。
