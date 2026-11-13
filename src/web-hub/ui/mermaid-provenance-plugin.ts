@@ -253,6 +253,7 @@ export function mermaidProvenancePlugin(options: MermaidProvenanceOptions): Merm
   let terminalExclusive = new Set<string>();
   let terminalCss: NonNullable<UiProvenance["terminal"]>["css"] = {};
   let outDir = "";
+  let bundleGenerated = false;
   let elkVersion = "unknown";
   const embeddedByModule = new Map<string, { pkgKey: string; file: string; components: string[] }>();
   const pkgCache = new Map<string, ProvenancePackage | null>();
@@ -303,6 +304,9 @@ export function mermaidProvenancePlugin(options: MermaidProvenanceOptions): Merm
     },
     configResolved(config) {
       outDir = resolve(config.root, config.build.outDir);
+    },
+    buildStart() {
+      bundleGenerated = false;
     },
     async buildEnd(err) {
       if (err) return;
@@ -364,6 +368,7 @@ export function mermaidProvenancePlugin(options: MermaidProvenanceOptions): Merm
       return chunk.moduleIds.some((id) => ELK_MODULE_RE.test(id)) ? banner() : undefined;
     },
     async generateBundle(_o, bundle: OutputBundle) {
+      bundleGenerated = false;
       chunkMeta.clear();
       terminalCss = {};
       // ?url assets must identify an exclusive module as their original source.
@@ -433,11 +438,12 @@ export function mermaidProvenancePlugin(options: MermaidProvenanceOptions): Merm
           moduleIds: rendered,
         });
       }
+      bundleGenerated = true;
     },
     closeBundle: {
       order: "post",
       async handler() {
-        if (outDir === "") return;
+        if (outDir === "" || !bundleGenerated) return;
         const files = await walkJs(outDir, outDir);
         const chunks: Record<string, ProvenanceChunk> = {};
         const rendered = new Set<string>();

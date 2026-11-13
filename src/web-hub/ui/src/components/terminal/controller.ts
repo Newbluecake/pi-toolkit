@@ -1,16 +1,32 @@
 import { reactive } from "vue";
-import { Value } from "@sinclair/typebox/value";
-import {
-  TerminalConnectionEventSchema,
-  TerminalSseEventSchema,
-  TERMINAL_HTTP_SUCCESS_SCHEMAS,
-  TERMINAL_OP_ERROR_CODES,
-  terminalHttpRequestOk,
-  type TerminalHttpRequests,
-  type TerminalHttpResults,
-  type TerminalSseEvent,
-  type TerminalAgentDisplayMetadata,
+import { TERMINAL_UI_SCHEMAS } from "./protocol-schema.js";
+import { terminalSchemaCheck } from "./schema-check.js";
+import type {
+  TerminalHttpRequests,
+  TerminalHttpResults,
+  TerminalSseEvent,
+  TerminalAgentDisplayMetadata,
 } from "@protocol/terminal.js";
+const TerminalConnectionEventSchema = TERMINAL_UI_SCHEMAS.connection;
+const TerminalSseEventSchema = TERMINAL_UI_SCHEMAS.event;
+const TERMINAL_HTTP_SUCCESS_SCHEMAS = TERMINAL_UI_SCHEMAS.results;
+const TERMINAL_OP_ERROR_CODES = TERMINAL_UI_SCHEMAS.errors;
+function terminalHttpRequestOk<K extends keyof TerminalHttpRequests>(
+  op: K,
+  raw: unknown,
+): raw is TerminalHttpRequests[K] {
+  if (!terminalSchemaCheck(TERMINAL_UI_SCHEMAS.requests[op], raw)) return false;
+  if (new TextEncoder().encode(JSON.stringify(raw)).length > 16384) return false;
+  if (op === "input") {
+    const b64 = (raw as TerminalHttpRequests["input"]).bytesB64;
+    try {
+      if (btoa(atob(b64)) !== b64) return false;
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
 import type { TerminalTransport } from "../../transport/terminal.js";
 export type TerminalRow = TerminalHttpResults["list"]["rows"][number];
 export interface TerminalScope {
@@ -103,7 +119,7 @@ export function createTerminalController(deps: {
       }
       throw new Error(`${result.code}${result.effect === "unknown" ? " · effect unknown" : ""}`);
     }
-    if (!Value.Check(TERMINAL_HTTP_SUCCESS_SCHEMAS[op], result)) throw new Error("E_BAD_RESPONSE");
+    if (!terminalSchemaCheck(TERMINAL_HTTP_SUCCESS_SCHEMAS[op], result)) throw new Error("E_BAD_RESPONSE");
     return result as TerminalHttpResults[K];
   }
   function writer() {
@@ -243,7 +259,13 @@ export function createTerminalController(deps: {
       return;
     }
     if (name === "terminal_connection") {
-      if (!Value.Check(TerminalConnectionEventSchema, raw)) return;
+      if (
+        !terminalSchemaCheck<{ connectionInstance: string; connectionToken: string; expiresAt: number }>(
+          TerminalConnectionEventSchema,
+          raw,
+        )
+      )
+        return;
       if (connection && connection.connectionInstance !== raw.connectionInstance) revoke();
       connection = raw;
       clearTimeout(expiryTimer);
@@ -265,7 +287,7 @@ export function createTerminalController(deps: {
       revoke();
       return;
     }
-    if (name !== "terminal" || !Value.Check(TerminalSseEventSchema, raw)) return;
+    if (name !== "terminal" || !terminalSchemaCheck<TerminalSseEvent>(TerminalSseEventSchema, raw)) return;
     if (!attachment && accepting) {
       const size = new TextEncoder().encode(JSON.stringify(raw)).length;
       if (earlyEvents.length >= 16 || earlyBytes + size > 65536) {

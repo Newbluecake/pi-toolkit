@@ -214,7 +214,7 @@ watch(
     unmountTerminal();
     if (!available || !open) return;
     if (!hub?.terminal) {
-      terminalLoadError.value = "当前连接不支持终端传输，请重新登录并检查 WebHub 版本。";
+      terminalLoadError.value = "终端连接不可用，请重新登录。";
       terminalOpen.value = false;
       return;
     }

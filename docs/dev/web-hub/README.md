@@ -1293,3 +1293,12 @@ Firefox NOT RUN。真实 PTY/登录鉴权/同 pid 后台、OS IME 与移动键�
 Playwright loader 不再尝试 online fallback。provenance 把 symlink 依赖 CSS 绑定到逻辑
 `node_modules/<package>/...` 路径，同时继续校验源/产物 SHA 与锁版本，不放宽 source gate。
 主 CSP 与首屏 CSS 不变；terminal JS/CSS/host 独立预算仍为 256KiB/16KiB/4KiB gzip。
+
+P2 浏览器校验不运行 TypeBox 构造器/registry：从冻结 `protocol/terminal.ts` 显式生成
+JSON-only UI projection（`scripts/web-hub/gen-terminal-ui-schema.ts --write`，默认 `--check`），
+只含 HTTP request/result、定向 SSE 及固定错误词汇。tier1 把产物与权威 schema 深比较，
+并用同组正反例和 Value.Check 对比；受限 checker 对未知关键词/组合 fail-closed。
+这不是第二套 wire 定义。原因：移除 eager path→schema 边后，Rollup 会把 TypeBox 的
+图共享/实际终端才用模块和 exclusive UI 合并，原 mixed gate 正确拒绝；使用纯数据消费者
+避免这一混合，不放宽 E=M\A 分类、budget 或 shared-module 例外。构建失败时 provenance
+不再尝试读取未写出的 CSS 而遮蔽真正的 mixed 错误（只在完整 generateBundle 后写 sidecar）。
