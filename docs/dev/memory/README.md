@@ -1479,7 +1479,7 @@ flush 与单 activation 非绝对费用上限等既有限界保持。离线源�
 
 ## #50 stock-estimate suggest-only 收口（2026-11-13，离线）
 
-**状态：READY_FOR_APPROVAL / LIVE NOT RUN。** 本节覆盖上文 stock 必须先满足 certified
+**状态：认证桥已就绪，LIVE 待用户确认（READY_FOR_APPROVAL / LIVE NOT RUN）。** 本节覆盖上文 stock 必须先满足 certified
 能力才可生成建议的阻塞，不覆盖任何 provider 认证、Q2 自动或部署证明。三个维度分报：
 
 | 维度            | 当前证据与状态                                                                                                                       |
@@ -1549,23 +1549,68 @@ host 在首个 R 前从**原 client 生命周期**领取 bounded 128 项不可�
 R 与 G/C direct/支持的 proxy 最后 fetch 均先执行可重入 callback，再做 factory/client 私有纯 witness
 与 signal 检查，之后立即调用捕获的既有 fetch；不在检查后再调 host callback。
 
-### 离线证据与 LIVE 认证桥缺口
+### 离线证据、LIVE 认证桥与 manifest 冻结
 
 - `revision-stock-wire.test.ts`：实际默认装配、2R+G+C、prepared audit/raw 零变更、auto=true 仍只建议；
   C500/非法JSON、G validator/length/lease、R1坏digest、下一pair零HTTP/零save、同client fresh-host拒重领，
   direct/proxy payload callback 后撤权/源模型改变零底层HTTP，prepare/payload/HTTP三阶段实际 calls/费用。
 - `p50-stock-binding.test.ts`、`p50-estimate.test.ts`：稳定首档绑定、native invalid 不降级、certified全链、
   UTF8/emoji/escape/模板/越界/无 getter 执行。既有 budget/fallback/provenance/SDK/off 与 C/D/E/integration 回归保留。
-- `scripts/dev/p50-closure-live-probe.ts` 默认拒绝执行，审批绑定原 manifest bytes SHA256；read-only 校验
-  私有 root/物理解析路径在任何 runner/数据创建前，覆盖或清除 ARMORY_MEMORY_ROOT/CC_PROJECTS_ROOT，
-  不复制继承凭据/env。受控 host-runner seam 的 fakeHTTP 验收使用真实 SDK/wire/D/C/audit，不伪造结果；
-  exact R/G hash、C 估算包络、最多4请求、额外/漂移请求与超包络均拒绝。该 seam 是 trusted CODE，不是 sandbox。
-- **root 已裁定本包不实现 CLI 自装真实认证**：即使 manifest 合格仍返回 `AUTH_UNAVAILABLE`，C13 NOT RUN。
-  认证桥在未来 LIVE 审批后另起小包，复用 pi 既有凭据加载/请求时解析；probe 不自读 key/auth 文件。
-  不存在因 manifest hash 正确就自动获付费/网络权限的路径。
+- `scripts/dev/p50-closure-live-probe.ts` 默认拒绝执行。`--print-manifest` 是纯离线 catalog 路径：
+  SDK `ModelRuntime.create` 禁止 catalog refresh，CredentialStore 为空；不调用 availability/auth/model/fetch，
+  不解析环境密钥、不执行配置 key 命令、不读取 auth 文件。只通过现有只读 settings loader 与 SDK 读取当前
+  classifier 首档 R、`predict.model.models` 首档 G/C，输出 provider/id/API/endpoint、有效 catalog 单价与来源/hash、
+  R/G semantic-template hash/字节数/估算、C 最大 1024B 候选的 JSON 转义包络（非已知候选正文），不输出 payload 正文。
+- **认证桥已就绪、未执行真实认证/LIVE**：`p50-closure-runtime.ts` 只调用 pi 1.5 **公开**
+  `readStoredCredential(provider, authPath)`，经 SDK `CredentialStore → ModelRuntime.getAuth → ModelRegistry.classify/complete`
+  原 request-time auth 通路；与唯一 Jev client 现有 registry 端口相同。probe 不自行解析 auth/key 文件或环境密钥，
+  不复制 auth、不落盘凭据。只接 api-key 路径；pi 1.5 未公开导出 AuthStorage 类，公开 one-off reader 不解析
+  stored `!command` / `$template`，这些形式与 OAuth/refresh/login/credential write 均 fail closed，绝不把未解析引用
+  当 token 发出或自行补 resolver。models 配置/ambient auth 仍由 SDK 原 getAuth 解析。缺凭据或 auth 错误均
+  `AUTH_UNAVAILABLE`，在第一个 provider HTTP 前核对两条路由。上游异常不输出 message/stack/cause/header，
+  SDK/provider 错误在进入 Jev diagnostics 前归一为固定码；合成凭据串测试覆盖输出、错误、report/audit 文件不泄漏。
+- `p50-probe-bridge.test.ts` 的失败证据分两层：保留真实 host 全链，另以真实 SDK 直接调用
+  `ProbeRegistry.classify/complete`，绕开 stock binding 的一次性 fetch guard，令含合成密钥的异常
+  从最底层 fake fetch 抛出；断言 before 成功、原始 rejection 身份、底层总请求为1且失败后再调用零增量。
+  泄漏扫描捕获 console 的 log/info/warn/error/debug 及 stdout/stderr.write，渲染 Error message/stack/cause
+  而非 JSON.stringify(Error)，捕获器自测覆盖七通道与分片 write；另在 SDK runtime 边界独立断言两个
+  API 收到 maxRetries=0（含覆盖非零 caller option）。M1 泄漏、M3 额外 fallback、非零 retries 的临时副本
+  mutation 均必须红（根因：JSON.stringify 丢弃 Error 的非枚举 message/stack；stock binding 的一次性
+  guard 会在底层 fake fetch 之前挡住第二次 fallback，掩盖额外请求）。
+- CLI LIVE 必须同时有 `--live --manifest <print输出的JSON> --manifest-sha <manifestSha256>`。
+  SHA 绑定 `JSON.stringify(manifest, null, 2) + "\\n"`；执行前重读当前 route/price/template/真实设置摘要并逐字复核，
+  变更必须重新打印和请求确认。list 目标 ≤US$0.01、正预留上限 ≤US$1，超限/解析失败/认证缺失均在发网前拒绝；
+  `serverEnforced:false`、可能超本地预留、provenance unknown、Q2 自动关闭、billing UNKNOWN 不变。
+- standalone runner 只在批准的私有物理目录创建两块固定合成数据：实际 SDK scopes/proof owner → 原
+  `wireJev` 唯一 client/host → 原 incremental scheduler 的 external-write/quiet/idle → D/C/review。
+  不安装 Jev startup health-check/tagging/title/predict producer，不调用真实 memory tool，最多一个自然机会，
+  不绕 scheduler 手调 handler；真实输出若不走目标分支/失败/超额即停止，不能补打凑足四次。
+  SDK maxRetries=0、stock 单档无 split/fallback，末跳强制顺序 R1/R2/G1/C1、payload/hash/估算包络与最多4 HTTP，
+  HTTP redirect 拒绝。原 host 的 post-C `calls < maxCalls` 复核需要第5个**逻辑记账槽**，manifest 明示
+  `clientCallSlots:5/httpAttemptLimit:4`；不是第5次网络许可。只保存 prepared 建议，target/context raw 必须零变化。
+- read-only 私有 root/物理路径校验先于 auth/runner/数据创建，隔离 HOME/XDG/TMPDIR/agent/cwd/memory/CC roots，
+  不继承 ARMORY_MEMORY_ROOT/CC_PROJECTS_ROOT；secure env 拒绝。配置 Jev proxy 时不清空后直连，也不自证 I2
+  streaming capability：manifest 仍可离线打印，但标 `executionGate:PROXY_UNAVAILABLE`，LIVE 发网前拒绝。
+  不支持的 proxy 需要另包可信 CODE 能力，不得改真实设置为本次测量开路。trusted runner seam 不是 sandbox。
 - 专用类型门（含 estimate+`maxTokensEnforced:true` / `serverEnforced:true` 等负向用例）：
   `timeout 180s node node_modules/typescript-7/bin/tsc --noEmit -p tests/memory/jev/p50-closure.tsconfig.json`。
   Vitest 擦除类型不代替此门。新 fakeHTTP 用例 tier1，无外网、real provider 或付费请求。
 
+用户确认用命令（第一条只打印离线清单，不是 LIVE 许可；确认前绝不执行第二条）：
+
+```sh
+# ROOT 选未使用的绝对目录；print 本身不创建目录、不解析凭据、不发网络。
+ROOT=/tmp/p50-live-approved
+AGENT_DIR="$HOME/.pi/agent"
+timeout 30s node --import tsx scripts/dev/p50-closure-live-probe.ts \
+  --print-manifest --agent-dir "$AGENT_DIR" --root "$ROOT" > /tmp/p50-approved-manifest.json
+# 把输出的 manifestSha256、完整 route/price/风险与 executionGate 交用户再次确认。
+# 仅用户明确批准后，在 plain 环境执行（不改真实 enabled/auto/jobCostCapUsd/proxy）：
+install -d -m 0700 "$ROOT"
+timeout --signal=TERM --kill-after=10s 180s node --import tsx scripts/dev/p50-closure-live-probe.ts \
+  --live --agent-dir "$AGENT_DIR" --manifest /tmp/p50-approved-manifest.json --manifest-sha '<approved manifestSha256>'
+```
+
 未验证：真实 provider/auth/价目有效性、tokenizer 准确率、server 输出硬限、backend identity/Q2 independence、
-invoice、生产部署与物理UI。既有同步 syscall 不可抢占、同uid竞态、fsync非掉电事务限界不变。
+invoice、生产部署与物理UI。C13 仍 **LIVE NOT RUN**，认证桥的离线实现不等于真实凭据可用或用户批准。
+既有同步 syscall 不可抢占、同uid竞态、fsync非掉电事务限界不变。

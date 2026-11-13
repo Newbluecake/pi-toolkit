@@ -6,6 +6,7 @@
     "p50-estimate.test.ts",
     "p50-stock-binding.test.ts",
     "p50-closure-probe.test.ts",
+    "p50-probe-bridge.test.ts",
     "../govern/revision-stock-wire.test.ts",
     "../../../scripts/dev/p50-closure-live-probe.ts"
   ],

@@ -1,11 +1,20 @@
-/** Approval-bound P50 probe contract. Default CLI is deliberately non-executable:
- * no credential loader, network, data creation or LIVE path is installed here.
- * A future approved host auth bridge must reuse pi's request-time credential path.
- * The controlled runner seam is exercised OFFLINE with the real wire/SDK and fake HTTP. */
+/** Approval-bound P50 probe. --print-manifest is offline; provider execution
+ * requires --live AND an unchanged SHA-approved manifest. Never run LIVE without
+ * separate human approval. Authentication is delegated to the public pi SDK. */
 import { createHash } from "node:crypto";
 import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
+import { tmpdir, homedir } from "node:os";
+import {
+  buildClosureManifest,
+  payloadTemplateHash,
+  requireQuote,
+  openProbeCatalog,
+  requireProbeAuth,
+  ProbeRegistry,
+  runClosureHost,
+} from "./p50-closure-runtime.js";
 import { estimatePayload, STOCK_ESTIMATE_PROFILE } from "../../src/memory/jev/p50-estimate.js";
 import { memoryDirFor } from "../../src/memory/paths.js";
 
@@ -27,7 +36,15 @@ export interface ClosureManifest {
   readonly budgetUsd: number;
   readonly plannedReserveUsd: number;
   readonly cEnvelopeEstimatedInputTokens: number;
+  readonly approval?: Readonly<Record<string, unknown>>;
   readonly routes: readonly {
+    readonly provider?: string;
+    readonly route?: string;
+    readonly api?: string;
+    readonly priceSource?: string;
+    readonly priceSnapshotSha256?: string;
+    readonly payload?: Readonly<Record<string, unknown>>;
+    readonly payloadTemplateSha256?: string;
     readonly stage: ProbeStage;
     readonly endpoint: string;
     readonly model: string;
@@ -67,7 +84,13 @@ export function validateClosureManifest(
   if (!approvedHash || !/^[a-f0-9]{64}$/.test(approvedHash) || manifestSha256(bytes) !== approvedHash)
     throw Error("APPROVAL_HASH_MISMATCH");
   if (Buffer.byteLength(bytes) > 65536) throw Error("MANIFEST_BOUNDS");
-  const m = JSON.parse(bytes) as ClosureManifest;
+  let m: ClosureManifest;
+  try {
+    m = JSON.parse(bytes) as ClosureManifest;
+  } catch {
+    throw Error("MANIFEST_CONTRACT");
+  }
+  requireQuote(m);
   if (
     m.contract !== "p50-stock-estimate-suggest-only-v1" ||
     m.maxAttempts !== 4 ||
@@ -140,7 +163,7 @@ export function validateClosureManifest(
       r.estimatedInputTokens <= 0 ||
       r.outputAllowance !== (i < 2 ? 128 : 384) ||
       ![r.inputUsdPerMillion, r.outputUsdPerMillion].every((n) => Number.isFinite(n) && n >= 0) ||
-      (i < 3 && !/^[a-f0-9]{64}$/.test(r.payloadSha256 ?? ""))
+      (i < 3 && !/^[a-f0-9]{64}$/.test(r.payloadSha256 ?? r.payloadTemplateSha256 ?? ""))
     )
       throw Error("MANIFEST_ROUTE");
     if (i === 3 && r.estimatedInputTokens !== m.cEnvelopeEstimatedInputTokens) throw Error("C_ENVELOPE");
@@ -193,6 +216,8 @@ export async function runApprovedClosureProbe(
         if (
           estimated > r.estimatedInputTokens ||
           (r.payloadSha256 !== undefined && digest !== r.payloadSha256) ||
+          (r.payloadTemplateSha256 !== undefined &&
+            payloadTemplateHash(payload as Record<string, unknown>) !== r.payloadTemplateSha256) ||
           (payload as { model?: unknown }).model !== r.model
         )
           throw Error(stage === "C1" ? "C_ENVELOPE" : "PAYLOAD_MISMATCH");
@@ -202,6 +227,13 @@ export async function runApprovedClosureProbe(
         throw error;
       }
     },
+  }).catch((error: unknown) => {
+    const code = error instanceof Error ? error.message : "";
+    throw Error(
+      ["PROBE_STOPPED", "EXTRA_OR_UNAPPROVED_REQUEST", "PAYLOAD_DATA", "PAYLOAD_MISMATCH", "C_ENVELOPE"].includes(code)
+        ? code
+        : "INCOMPLETE_CLOSURE",
+    );
   });
   if (
     stopped ||
@@ -216,18 +248,100 @@ export async function runApprovedClosureProbe(
     throw Error("INCOMPLETE_CLOSURE");
   return { verdict: "PASS" as const, assurance: STOCK_ESTIMATE_PROFILE, events, effect, live: "NOT_RUN" as const };
 }
-// Default CLI refuses before creating any data; manifest approval alone does not
-// supply authentication. No dynamic imports/eval, key-file reads or network fallback.
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  const args = process.argv.slice(2);
+export const closureManifestBytes = (manifest: ClosureManifest): string => JSON.stringify(manifest, null, 2) + "\n";
+/** Fixed-code errors only: never serialize an SDK error, stack, cause, request,
+ * response, auth result, headers or model descriptor. Also used by tests. */
+export function probeErrorCode(error: unknown): string {
+  const code = error instanceof Error ? error.message : "";
+  return new Set([
+    "APPROVAL_REQUIRED",
+    "APPROVAL_HASH_MISMATCH",
+    "AUTH_UNAVAILABLE",
+    "MANIFEST_BOUNDS",
+    "MANIFEST_CONTRACT",
+    "MANIFEST_ROUTES",
+    "MANIFEST_ROUTE",
+    "MANIFEST_CHANGED",
+    "ROUTE_UNAVAILABLE",
+    "QUOTE_UNAVAILABLE",
+    "PROXY_UNAVAILABLE",
+    "RESERVATION_LIMIT",
+    "LIST_TARGET_EXCEEDED",
+    "ISOLATION_ROOT",
+    "ISOLATION_ESCAPE",
+    "ISOLATION_UNAVAILABLE",
+    "SECURE_UNAVAILABLE",
+    "INCOMPLETE_CLOSURE",
+  ]).has(code)
+    ? code
+    : "PROBE_FAILED";
+}
+export async function probeMain(
+  args: readonly string[],
+  ports = { open: openProbeCatalog, auth: requireProbeAuth, run: runClosureHost },
+) {
   try {
-    if (args.length !== 4 || args[0] !== "--manifest" || args[2] !== "--confirm-approved-manifest-sha256")
-      throw Error("APPROVAL_REQUIRED");
-    const file = args[1]!;
+    if (Object.keys(process.env).some((k) => k.startsWith("PI_SECURE_") && process.env[k]))
+      throw Error("SECURE_UNAVAILABLE");
+    const flag = (name: string) => args.includes(name);
+    const value = (name: string) => {
+      const i = args.indexOf(name);
+      return i < 0 ? undefined : args[i + 1];
+    };
+    // No implicit legacy LIVE path, and no auth/catalog work without one mode.
+    if (flag("--live") === flag("--print-manifest")) throw Error("APPROVAL_REQUIRED");
+    const allowed = new Set(["--live", "--print-manifest", "--manifest", "--manifest-sha", "--root", "--agent-dir"]);
+    for (let i = 0; i < args.length; i++) {
+      const arg = args[i]!;
+      if (!allowed.has(arg) || args.indexOf(arg) !== i) throw Error("APPROVAL_REQUIRED");
+      if (arg !== "--live" && arg !== "--print-manifest" && (!args[++i] || args[i]!.startsWith("--")))
+        throw Error("APPROVAL_REQUIRED");
+    }
+    const agentDir = resolve(value("--agent-dir") ?? process.env.PI_CODING_AGENT_DIR ?? joinAgentHome());
+    if (flag("--print-manifest")) {
+      if (flag("--manifest") || flag("--manifest-sha")) throw Error("APPROVAL_REQUIRED");
+      const catalog = await ports.open(agentDir, false);
+      const manifest = buildClosureManifest(
+        catalog.settings,
+        catalog.registry,
+        value("--root") ?? resolve(tmpdir(), `p50-live-${process.getuid?.() ?? "user"}`),
+      );
+      requireQuote(manifest);
+      return {
+        code: 0,
+        output:
+          JSON.stringify(
+            { manifest, manifestSha256: manifestSha256(closureManifestBytes(manifest)), live: "NOT_RUN" },
+            null,
+            2,
+          ) + "\n",
+      };
+    }
+    if (!value("--manifest") || !value("--manifest-sha") || flag("--root")) throw Error("APPROVAL_REQUIRED");
+    const file = value("--manifest")!;
     if (lstatSync(file).size > 65536) throw Error("MANIFEST_BOUNDS");
-    await runApprovedClosureProbe(readFileSync(file, "utf8"), args[3]);
+    const approved = JSON.parse(readFileSync(file, "utf8")) as { manifest: ClosureManifest };
+    const bytes = closureManifestBytes(approved.manifest);
+    validateClosureManifest(bytes, value("--manifest-sha"));
+    const catalog = await ports.open(agentDir, true);
+    const current = buildClosureManifest(catalog.settings, catalog.registry, approved.manifest.root);
+    if (closureManifestBytes(current) !== bytes) throw Error("MANIFEST_CHANGED");
+    if (catalog.settings.jev.proxy) throw Error("PROXY_UNAVAILABLE");
+    await ports.auth(catalog.runtime, catalog.registry, current);
+    const result = await runApprovedClosureProbe(bytes, value("--manifest-sha"), async (context) => {
+      const registry = new ProbeRegistry(catalog.runtime, context.beforeHttp);
+      return ports.run(context, registry, catalog.settings);
+    });
+    return { code: 0, output: JSON.stringify({ ...result, live: "RUN" }) + "\n" };
   } catch (error) {
-    console.error((error as Error).message);
-    process.exitCode = 2;
+    return { code: 2, output: probeErrorCode(error) + "\n" };
   }
+}
+function joinAgentHome() {
+  return resolve(homedir(), ".pi/agent");
+}
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  const result = await probeMain(process.argv.slice(2));
+  (result.code ? process.stderr : process.stdout).write(result.output);
+  process.exitCode = result.code;
 }
