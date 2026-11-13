@@ -336,37 +336,53 @@ export function capEntriesByBytes(
 }
 
 /**
- * Build the final `HistoryPayload` for `snapshot()`/`page()`, trimming `entries` (already
- * `-tailEntries`/page-limit sliced, newest last) so that the ACTUAL wire unit fits `maxBytes`
- * (§P1-2 regression: `capEntriesByBytes` above only sums each entry's own serialized bytes — it
- * has no idea about the JSON array's own brackets/commas, `HistoryPayload`'s other fields
- * (`tailMessages`/`inflight`/`agentKey`/`fromSeq`/`hasMore`/`source`/`oldestEntryId`), or, for
- * `snapshot()` specifically, the SSE `event: history\ndata: ...\n\n` frame wrapper that payload
- * actually goes out inside — `page()`'s payload instead goes out as a bare `sendJson` HTTP body,
- * a DIFFERENT real unit with no SSE wrapper at all. `build` renders the full payload for a
- * candidate entries array (so `hasMore`/`oldestEntryId` are always correct for THAT candidate,
- * not stale from before trimming) and `frame` renders the exact string the caller will actually
- * send for it (an SSE frame vs. a bare JSON body) — both are call-site-supplied so this stays
- * agnostic to which layer applies the budget. `capEntriesByBytes`'s per-entry pass runs first as
- * a cheap common-case fast path (avoids re-serializing the whole payload once per removed entry
- * for the overwhelmingly common case of already-well-under-budget histories); the loop below then
- * verifies against the real wire string and keeps trimming from the oldest end — keeping the
- * single newest entry unconditionally, exactly like `capEntriesByBytes` — if the first pass's
- * narrower budget still undershot (large `tailMessages`/`inflight`, many-entry separator
- * overhead, frame-wrapper bytes, ...).
+ * Budget the complete snapshot SSE frame / page JSON body in linear time. `build` may
+ * vary ONLY entries, hasMore and oldestEntryId with the candidate suffix (the two call
+ * sites below own that invariant). Each entry is measured once, including UTF-8 escapes;
+ * the fixed payload is measured once through the caller's real wire renderer. Array
+ * commas, the optional cursor property and false → true's one-byte saving are exact.
+ *
+ * Preserve the old two-stage admission: first the entries-only cap, then the FIRST
+ * suffix whose full wire unit fits. Cursor lengths need not be monotone. Never discard
+ * the newest entry, nor trim tailMessages/inflight, even if the result cannot fit.
+ * No serialized data or byte cache outlives this call; the returned payload retains its
+ * original property order and the final real wire unit is serialized/validated once.
  */
-function buildCappedHistoryPayload(
+export function buildCappedHistoryPayload(
   entries: readonly WireEntry[],
   maxBytes: number,
   build: (entries: WireEntry[]) => HistoryPayload,
   frame: (payload: HistoryPayload) => string,
 ): HistoryPayload {
-  const first = capEntriesByBytes(entries, maxBytes);
-  let capped = first.entries;
-  let payload = build(capped);
-  while (capped.length > 1 && Buffer.byteLength(frame(payload), "utf8") > maxBytes) {
-    capped = capped.slice(1);
-    payload = build(capped);
+  const sizes = entries.map((entry) => Buffer.byteLength(JSON.stringify(entry), "utf8"));
+  let cut = entries.length;
+  let entryBytes = 0;
+  for (let i = entries.length - 1; i >= 0; i--) {
+    if (i !== entries.length - 1 && entryBytes + sizes[i]! > maxBytes) break;
+    entryBytes += sizes[i]!;
+    cut = i;
+  }
+
+  const initial = build(entries.slice(cut));
+  const fixed = { ...initial, entries: [] };
+  delete fixed.oldestEntryId;
+  const fixedBytes = Buffer.byteLength(frame(fixed), "utf8");
+  const initialCut = cut;
+  while (entries.length - cut > 1) {
+    // [] is already included in fixedBytes; each additional entry adds one comma.
+    const cursorBytes = Buffer.byteLength(',"oldestEntryId":' + JSON.stringify(entries[cut]!.id), "utf8");
+    const hasMoreDelta = cut > initialCut && !initial.hasMore ? -1 : 0;
+    const bytes = fixedBytes + entryBytes + (entries.length - cut - 1) + cursorBytes + hasMoreDelta;
+    if (bytes <= maxBytes) break;
+    entryBytes -= sizes[cut]!;
+    cut++;
+  }
+  const payload = cut === initialCut ? initial : build(entries.slice(cut));
+  const actualBytes = Buffer.byteLength(frame(payload), "utf8");
+  if (payload.entries.length > 1 && actualBytes > maxBytes) {
+    // Plain wire data and the build invariant above make accounting exact. Fail closed
+    // on a future call-site contract violation rather than reintroduce a stringify loop.
+    throw new Error("History wire byte accounting mismatch");
   }
   return payload;
 }

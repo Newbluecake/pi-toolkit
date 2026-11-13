@@ -663,6 +663,23 @@ Deliberate relaxations vs the old whole-file reader, all local to this section:
   make the reader's carried `rest` quadratic in `Buffer.concat` — bounded by the sub-deadline
   and the 256 MiB scan cap (busy/too_large), a pre-existing reader limitation.
 
+**Complete-wire history byte budget (#36 package B):** `buildCappedHistoryPayload` measures
+and caches each candidate entry's serialized UTF-8 bytes once, preserves the legacy entries-only
+admission, then scans oldest-first for the first fitting suffix. The fixed payload is serialized
+once through the real wire renderer (snapshot SSE wrapper vs page bare JSON); array commas,
+`oldestEntryId`'s escaped UTF-8 property value and `hasMore:false → true`'s one-byte saving are
+accounted exactly. Cursor lengths need not be monotone. The final complete wire unit is serialized
+and validated once, not once per dropped entry (two payload serializations total, independent of
+entry count). The local `build` callbacks may vary only `entries`, `hasMore` and `oldestEntryId`
+with the suffix; a future violation that overruns the budget fails closed rather than restoring an
+unbounded stringify loop. The newest entry is always kept, and tailMessages/inflight are never
+trimmed: empty/newest-only payloads may legitimately exceed the nominal 2 MiB budget. No transport
+cache or wire change; SSE still serializes the returned payload normally. Tests:
+`tests/web-hub/hub/history-budget.test.ts` (seeded byte parity against the old algorithm, exact
+budget ±1, small-entry separators, variable UTF-8 cursor sizes, per-entry measurement counts,
+production snapshots with 0 / 600,000 / 1,200,000 inflight characters and constant serialization
+counts); existing oversize-newest regressions stay unchanged.
+
 `FileCache` is now used only by `runTail`'s full-reader fallback; its unbounded parsed-index
 memory on big files is a known residual (refresh-slow plan §8 follow-up — the ≤32 MiB cache cap
 proposed in plan §2.5 was dropped by main-session ruling). Test seams on `createHistoryService`
