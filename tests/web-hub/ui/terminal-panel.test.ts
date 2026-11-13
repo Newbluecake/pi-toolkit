@@ -260,6 +260,23 @@ describe("TerminalPanel / Chrome / List (§7.1–7.4)", () => {
     expect((w.element as HTMLElement).style.height).toBe("340px");
     expect(mocks.mount).not.toHaveBeenCalled();
   });
+  it.each(["zh", "en"])(
+    "uses English compact unknown markers in %s and keeps missing-metadata advice in a separate paragraph",
+    (lang) => {
+      setLangOverride(lang as "zh" | "en");
+      const w = mount(TerminalList, { props: { rows: [fact as any], busy: false } });
+      wrappers.push(w);
+      expect(w.get("li strong").text()).toBe("unknown");
+      expect(w.get("li span").text()).toBe("unknown");
+      expect(
+        w
+          .findAll("p")
+          .some((p) =>
+            lang === "zh" ? p.text().includes("元数据不可用") : p.text().includes("metadata is unavailable"),
+          ),
+      ).toBe(true);
+    },
+  );
   it("adds the jobs symbol only with the hub feature prop; off markup is byte-identical after toggling", async () => {
     const w = mount(IconSprite);
     wrappers.push(w);

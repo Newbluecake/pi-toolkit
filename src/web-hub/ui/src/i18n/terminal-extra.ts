@@ -29,7 +29,9 @@ const en = {
   cancel: "Cancel",
   confirm: "Confirm",
   pasteTooLarge: "Paste exceeds the 4 KiB input limit.",
-  metadataUnavailable: "Metadata unavailable",
+  metadataUnavailable: "unknown",
+  metadataHint:
+    "Some terminal metadata is unavailable. Missing values are not inferred from output or terminal identifiers.",
   recovery: "Only a bounded output suffix is replayed. Missing output and VT state cannot be recovered exactly.",
 };
 
@@ -61,7 +63,8 @@ const zh = {
   cancel: "取消",
   confirm: "确认",
   pasteTooLarge: "粘贴内容超出 4 KiB 输入上限。",
-  metadataUnavailable: "元数据不可用",
+  metadataUnavailable: "unknown",
+  metadataHint: "部分终端元数据不可用；缺失信息不会从输出或终端标识中推断。",
   recovery: "仅重放有界输出尾流。丢失的输出及 VT 状态无法精确恢复。",
 } satisfies Record<keyof typeof en, string>;
 

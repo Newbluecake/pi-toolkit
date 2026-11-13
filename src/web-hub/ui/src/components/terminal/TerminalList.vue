@@ -10,7 +10,20 @@ const emit = defineEmits<{ attach: [row: TerminalRow]; terminate: [row: Terminal
 <template>
   <section class="terminal-list" :aria-label="t('terminal.list')" :aria-busy="busy">
     <p v-if="!rows.length">{{ t("terminal.empty") }}</p>
-    <ul v-else>
+    <p
+      v-if="
+        rows.some(
+          (row) =>
+            row.sessionOrdinal === undefined ||
+            row.writerPresent === undefined ||
+            row.createdAt === undefined ||
+            !row.ownerLabel,
+        )
+      "
+    >
+      {{ t("terminal.metadataHint") }}
+    </p>
+    <ul v-if="rows.length">
       <li v-for="row in rows" :key="row.termId">
         <strong>{{
           row.sessionOrdinal !== undefined ? `#${row.sessionOrdinal}` : t("terminal.metadataUnavailable")

@@ -1302,3 +1302,13 @@ JSON-only UI projection（`scripts/web-hub/gen-terminal-ui-schema.ts --write`，
 图共享/实际终端才用模块和 exclusive UI 合并，原 mixed gate 正确拒绝；使用纯数据消费者
 避免这一混合，不放宽 E=M\A 分类、budget 或 shared-module 例外。构建失败时 provenance
 不再尝试读取未写出的 CSS 而遮蔽真正的 mixed 错误（只在完整 generateBundle 后写 sidecar）。
+
+P2 B1 返工：所有 HTTP operation 绑定不可变 authority snapshot（认证 revision、writer
+代次、原 connection 对象/instance/token/expiry、clientId、session/epoch、代次 AbortSignal）。
+call 在发起、resolve/reject 后、结果错误撤权前检查；list/current/adopt/renew timer 与
+prepare→open→state 的每次继续提交也检查同一 snapshot，不在 await 后改用“当前”连接。
+撤销会 abort 旧代 pending；即使 transport 忽略 abort，旧成功/失败/finally 都不能污染后继。
+RequestFailure 的 authority 是私有字段，不能被错误对象序列化投影。UI renderer 等额外
+await 使用 action guard，取消的 action 不会清后继 busy 或触发后台/终止后的旧 UI 继续。
+卸载 detach 使用独立的权限/lease 快照且不复用已取消 signal；它不授予重新 attach/open。
+metadata 缺省紧凑标记统一 `unknown`，中文解释只在独立提示段，不改变按钮/警告文案。

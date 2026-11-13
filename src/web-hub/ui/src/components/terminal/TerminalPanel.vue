@@ -252,26 +252,31 @@ async function ensureRenderer() {
   return rendererPending;
 }
 function create() {
-  void controller.action(async () => {
+  void controller.action(async (guard) => {
     await ensureRenderer();
+    guard();
     if (!disposed) {
       await controller.open();
+      guard();
       renderer?.focus();
     }
   });
 }
 function attach(row: TerminalRow) {
-  void controller.action(async () => {
+  void controller.action(async (guard) => {
     await ensureRenderer();
+    guard();
     if (!disposed) {
       await controller.attach(row);
+      guard();
       renderer?.focus();
     }
   });
 }
 async function showList() {
-  await controller.action(async () => {
+  await controller.action(async (guard) => {
     await controller.detach();
+    guard();
     listing.value = true;
     await controller.list();
   });
@@ -286,8 +291,8 @@ function focus() {
   }
 }
 async function background() {
-  await controller.action(() => controller.detach());
-  if (!state.error) emit("background");
+  const completed = await controller.action(() => controller.detach());
+  if (completed && !state.error) emit("background");
 }
 async function maximize() {
   maximized.value = !maximized.value;
@@ -308,8 +313,8 @@ async function kill() {
   const row = confirmRow.value;
   if (!row) return;
   confirmRow.value = null;
-  await controller.action(() => controller.close(row));
-  if (!state.error) await showList();
+  const completed = await controller.action(() => controller.close(row));
+  if (completed && !state.error) await showList();
 }
 function onPaste(event: ClipboardEvent) {
   if (!inputAllowed()) {
@@ -451,6 +456,18 @@ onBeforeUnmount(() => {
     </p>
     <p v-if="state.error" role="alert">{{ errorText }}</p>
     <p v-if="state.gap" role="status">{{ state.gap }}</p>
+    <p
+      v-if="
+        state.current &&
+        (state.current.sessionOrdinal === undefined ||
+          !state.current.userLabel ||
+          !state.current.hostLabel ||
+          !state.current.cwd)
+      "
+      class="terminal-warning"
+    >
+      {{ t("terminal.metadataHint") }}
+    </p>
     <TerminalList
       v-if="listing"
       :rows="state.rows"

@@ -75,41 +75,124 @@ export function createTerminalController(deps: {
   let expiryTimer: ReturnType<typeof setTimeout> | undefined;
   let expiryGeneration = 0;
   let replayTimer: ReturnType<typeof setTimeout> | undefined, renewTimer: ReturnType<typeof setInterval> | undefined;
-  const abort = new AbortController();
+  let generationAbort = new AbortController();
+  let authorityRevision = 0,
+    actionRevision = 0;
+  let attachmentAuthority: Authority | undefined;
   const id = () =>
     Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, "0")).join("");
   const tabId = id();
+  type Authority = {
+    generation: number;
+    revision: number;
+    connection: NonNullable<typeof connection>;
+    clientId: string;
+    scope: TerminalScope;
+    signal: AbortSignal;
+  };
+  class StaleAuthority extends Error {
+    constructor() {
+      super("E_TERMINAL_AUTHORITY_CHANGED");
+    }
+  }
+  class RequestFailure extends Error {
+    readonly #authority: Authority;
+    constructor(message: string, authority: Authority) {
+      super(message);
+      this.#authority = authority;
+    }
+    current(): boolean {
+      return owns(this.#authority);
+    }
+  }
+  function owns(a: Authority, writerGeneration = true): boolean {
+    return (
+      !disposed &&
+      a.revision === authorityRevision &&
+      connection === a.connection &&
+      deps.clientId() === a.clientId &&
+      now() < a.connection.expiresAt &&
+      deps.scope.agentKey === a.scope.agentKey &&
+      deps.scope.expect.sessionId === a.scope.expect.sessionId &&
+      deps.scope.expect.epoch === a.scope.expect.epoch &&
+      (!writerGeneration || (generation === a.generation && !a.signal.aborted))
+    );
+  }
+  function assertAuthority(a: Authority, writerGeneration = true): void {
+    if (!owns(a, writerGeneration)) {
+      // A delayed expiry timer is not permission to commit. Expire only the same authority,
+      // never a successor that happened to receive an old response.
+      if (
+        !disposed &&
+        a.revision === authorityRevision &&
+        connection === a.connection &&
+        now() >= a.connection.expiresAt
+      ) {
+        state.error = "登录授权已到期，请重新登录。";
+        connection = undefined;
+        clearTimeout(expiryTimer);
+        expiryGeneration++;
+        revoke();
+      }
+      throw new StaleAuthority();
+    }
+  }
+  function capture(): Authority {
+    if (disposed) throw new StaleAuthority();
+    const identity = connection,
+      clientId = deps.clientId();
+    if (!identity || now() >= identity.expiresAt || !clientId) throw new StaleAuthority();
+    return {
+      generation,
+      revision: authorityRevision,
+      connection: identity,
+      clientId,
+      scope: { agentKey: deps.scope.agentKey, expect: { ...deps.scope.expect } },
+      signal: generationAbort.signal,
+    };
+  }
   async function call<K extends keyof TerminalHttpRequests>(
     op: K,
     fields: Omit<
       TerminalHttpRequests[K],
       "agentKey" | "expect" | "clientId" | "connectionInstance" | "connectionToken"
     >,
+    authority: Authority = capture(),
   ): Promise<TerminalHttpResults[K]> {
-    if (disposed) throw new Error("E_UNAVAILABLE");
-    if (!connection || now() >= connection.expiresAt || !deps.clientId())
-      throw new Error("请重新登录并连接 WebHub 以启用终端。");
+    assertAuthority(authority);
     const body = {
-      ...deps.scope,
-      clientId: deps.clientId(),
-      connectionInstance: connection.connectionInstance,
-      connectionToken: connection.connectionToken,
+      ...authority.scope,
+      clientId: authority.clientId,
+      connectionInstance: authority.connection.connectionInstance,
+      connectionToken: authority.connection.connectionToken,
       ...fields,
     } as TerminalHttpRequests[K];
-    if (!terminalHttpRequestOk(op, body)) throw new Error("E_BAD_REQUEST");
-    const result = await deps.transport.request(op, body, abort.signal);
-    if (!result || typeof result !== "object" || !("ok" in result)) throw new Error("E_BAD_RESPONSE");
+    if (!terminalHttpRequestOk(op, body)) throw new RequestFailure("E_BAD_REQUEST", authority);
+    let result: Awaited<ReturnType<TerminalTransport["request"]>>;
+    try {
+      result = await deps.transport.request(op, body, authority.signal);
+    } catch (error) {
+      assertAuthority(authority); // A rejected old request cannot revoke/report into a successor.
+      throw new RequestFailure(error instanceof Error ? error.message : "E_UNAVAILABLE", authority);
+    }
+    assertAuthority(authority); // POST_AWAIT_AUTHORITY_GUARD — required even when transport ignores abort.
+    if (!result || typeof result !== "object" || !("ok" in result))
+      throw new RequestFailure("E_BAD_RESPONSE", authority);
     if (!result.ok) {
       if (
         !(TERMINAL_OP_ERROR_CODES[op] as readonly unknown[]).includes(result.code) ||
         !["none", "unknown"].includes(result.effect)
       )
-        throw new Error("E_BAD_RESPONSE");
+        throw new RequestFailure("E_BAD_RESPONSE", authority);
+      const message = `${result.code}${result.effect === "unknown" ? " · effect unknown" : ""}`;
       if (
         ["E_AUTH", "E_AUTH_REVOKING", "E_SESSION_CHANGED", "E_PRIVACY_LOCKED", "E_SECURE", "E_LEASE_EXPIRED"].includes(
           result.code,
         )
       ) {
+        // Only this still-current authority may revoke. No writes after the revoke callback.
+        state.error = message;
+        assertAuthority(authority);
         if (result.code !== "E_LEASE_EXPIRED") {
           connection = undefined;
           clearTimeout(expiryTimer);
@@ -117,16 +200,23 @@ export function createTerminalController(deps: {
         }
         revoke();
       }
-      throw new Error(`${result.code}${result.effect === "unknown" ? " · effect unknown" : ""}`);
+      throw new RequestFailure(message, authority);
     }
-    if (!terminalSchemaCheck(TERMINAL_HTTP_SUCCESS_SCHEMAS[op], result)) throw new Error("E_BAD_RESPONSE");
+    if (!terminalSchemaCheck(TERMINAL_HTTP_SUCCESS_SCHEMAS[op], result))
+      throw new RequestFailure("E_BAD_RESPONSE", authority);
     return result as TerminalHttpResults[K];
   }
   function writer() {
     if (!attachment) throw new Error("E_LEASE_EXPIRED");
     return { termId: attachment.termId, attachmentId: attachment.attachmentId, writerLease: attachment.writerLease };
   }
+  function cancelAction() {
+    actionRevision++;
+    state.busy = false;
+  }
   function revoke() {
+    authorityRevision++;
+    cancelAction();
     invalidate();
     state.rows = [];
     state.current = null;
@@ -135,10 +225,13 @@ export function createTerminalController(deps: {
   }
   function invalidate() {
     generation++;
+    const oldAbort = generationAbort;
+    generationAbort = new AbortController();
     output = Promise.resolve();
     inputs = Promise.resolve();
     state.writable = false;
     attachment = undefined;
+    attachmentAuthority = undefined;
     replay = undefined;
     stream = "";
     queued = inputBytes = 0;
@@ -148,77 +241,153 @@ export function createTerminalController(deps: {
     earlyBytes = 0;
     accepting = false;
     replayReady = false;
+    oldAbort.abort();
+  }
+  function beginDetach() {
+    const before = capture(),
+      old = attachment;
+    invalidate();
+    assertAuthority(before, false); // Same identity, intentional local writer-generation change.
+    const authority = capture();
+    return {
+      authority,
+      done: old
+        ? call(
+            "detach",
+            { termId: old.termId, attachmentId: old.attachmentId, writerLease: old.writerLease },
+            authority,
+          )
+        : Promise.resolve(),
+    };
   }
   async function detach() {
-    const old = attachment;
-    invalidate();
-    if (old) await call("detach", { termId: old.termId, attachmentId: old.attachmentId, writerLease: old.writerLease });
+    const pending = beginDetach();
+    await pending.done;
+    assertAuthority(pending.authority);
   }
   async function fail(error: unknown) {
+    if (disposed || error instanceof StaleAuthority || (error instanceof RequestFailure && !error.current())) return;
+    // Every asynchronous request failure carries its original authority; renderer failures
+    // enter synchronously and are guarded by the renderer/write generation at their caller.
+    let authority: Authority;
+    try {
+      authority = capture();
+    } catch {
+      return;
+    }
     state.error = error instanceof Error ? error.message : "终端连接已中断，请接回原终端。";
     try {
+      assertAuthority(authority);
       await detach();
     } catch {
-      /* lease expires server-side; never close shell */
+      /* no retry/close; the old lease expires server-side */
     }
   }
-  async function list() {
-    state.rows = (await call("list", {})).rows;
+  async function refreshList(authority: Authority) {
+    const result = await call("list", {}, authority);
+    assertAuthority(authority);
+    state.rows = result.rows;
   }
-  function adopt(a: TerminalHttpResults["attach"]) {
+  async function list() {
+    await refreshList(capture());
+  }
+  function adopt(a: TerminalHttpResults["attach"], authority: Authority) {
+    assertAuthority(authority);
     accepting = false;
     attachment = a;
+    attachmentAuthority = authority;
     state.current = a;
     offset = a.baseOffset;
     state.writable = false;
+    assertAuthority(authority);
     clearInterval(renewTimer);
     renewTimer = setInterval(() => {
-      void call("renew", writer()).catch(fail);
+      if (owns(authority)) void call("renew", writer(), authority).catch(fail);
     }, 5000);
     const pending = earlyEvents;
     earlyEvents = [];
     earlyBytes = 0;
-    for (const message of pending) event("terminal", message);
+    for (const message of pending) {
+      assertAuthority(authority);
+      event("terminal", message);
+    }
+  }
+  function finishAccepting(authority: Authority) {
+    if (!owns(authority)) return; // An old finally must not erase a new attach's early events.
+    accepting = false;
+    earlyEvents = [];
+    earlyBytes = 0;
   }
   async function attach(row: TerminalRow) {
-    await detach();
+    const pending = beginDetach(),
+      authority = pending.authority;
+    await pending.done;
+    assertAuthority(authority);
     accepting = true;
     try {
-      adopt(await call("attach", { termId: row.termId, attachId: id(), tabId, ...deps.renderer.dimensions() }));
+      const result = await call(
+        "attach",
+        { termId: row.termId, attachId: id(), tabId, ...deps.renderer.dimensions() },
+        authority,
+      );
+      assertAuthority(authority);
+      adopt(result, authority);
     } finally {
-      accepting = false;
-      earlyEvents = [];
-      earlyBytes = 0;
+      finishAccepting(authority);
     }
   }
   async function open() {
-    await detach();
+    const pending = beginDetach(),
+      authority = pending.authority;
+    await pending.done;
+    assertAuthority(authority);
     const dimensions = deps.renderer.dimensions();
-    const ticket = await call("prepare", dimensions);
+    const ticket = await call("prepare", dimensions, authority);
+    assertAuthority(authority);
     accepting = true;
     try {
-      adopt(await call("open", { openId: ticket.openId, createTicket: ticket.createTicket, tabId, ...dimensions }));
+      const result = await call(
+        "open",
+        { openId: ticket.openId, createTicket: ticket.createTicket, tabId, ...dimensions },
+        authority,
+      );
+      assertAuthority(authority);
+      adopt(result, authority);
     } catch (error) {
-      // A timeout is never a second create. Query the original server-signed operation.
-      const fact = await call("state", { target: { openId: ticket.openId, createTicket: ticket.createTicket } });
+      assertAuthority(authority); // A stale prepare/open can never query/retry on a new connection.
+      const fact = await call(
+        "state",
+        { target: { openId: ticket.openId, createTicket: ticket.createTicket } },
+        authority,
+      );
+      assertAuthority(authority);
       if ("termId" in fact.fact) {
         state.current = fact.fact;
-        await list();
+        await refreshList(authority);
+        assertAuthority(authority);
       }
       throw error;
     } finally {
-      accepting = false;
-      earlyEvents = [];
-      earlyBytes = 0;
+      finishAccepting(authority);
     }
   }
   async function close(row: TerminalRow) {
-    if (attachment?.termId === row.termId) invalidate();
-    await call("close", { termId: row.termId, closeId: id(), expectedRevision: row.revision });
-    await list();
+    let authority = capture();
+    if (attachment?.termId === row.termId) {
+      invalidate();
+      assertAuthority(authority, false);
+      authority = capture();
+    }
+    await call("close", { termId: row.termId, closeId: id(), expectedRevision: row.revision }, authority);
+    assertAuthority(authority);
+    await refreshList(authority);
   }
   async function resize() {
-    if (attachment) await call("resize", { ...writer(), resizeSeq: ++resizeSeq, ...deps.renderer.dimensions() });
+    if (attachment) {
+      const authority = capture();
+      await call("resize", { ...writer(), resizeSeq: ++resizeSeq, ...deps.renderer.dimensions() }, authority);
+      assertAuthority(authority);
+    }
   }
   function input(bytes: Uint8Array, kind: "user" | "terminal_response" = "user") {
     if (!state.writable || !attachment || !stream || inputBytes + bytes.length > 32768) return;
@@ -226,30 +395,38 @@ export function createTerminalController(deps: {
       for (let start = 0; start < bytes.length; start += 4096) input(bytes.slice(start, start + 4096), kind);
       return;
     }
+    const authority = capture();
     const mine = generation,
       epoch = stream;
     inputBytes += bytes.length;
     inputs = inputs
       .then(async () => {
         if (mine !== generation || !state.writable || epoch !== stream || !attachment) return;
+        assertAuthority(authority);
         const inputSeq = attachment.nextInputSeq;
-        const result = await call("input", {
-          ...writer(),
-          inputSeq,
-          bytesB64: btoa(String.fromCharCode(...bytes)),
-          inputKind: kind,
-          streamEpoch: epoch,
-        });
+        const result = await call(
+          "input",
+          {
+            ...writer(),
+            inputSeq,
+            bytesB64: btoa(String.fromCharCode(...bytes)),
+            inputKind: kind,
+            streamEpoch: epoch,
+          },
+          authority,
+        );
+        assertAuthority(authority);
         if (mine === generation && attachment) attachment.nextInputSeq = result.acceptedThrough + 1;
       })
       .catch((error) => {
-        if (mine === generation) return fail(error);
+        if (owns(authority)) return fail(error);
       })
       .finally(() => {
         if (mine === generation) inputBytes -= bytes.length;
       });
   }
   function event(name: string, raw: unknown) {
+    if (disposed) return;
     if (name === "disconnected") {
       connection = undefined;
       clearTimeout(expiryTimer);
@@ -266,8 +443,17 @@ export function createTerminalController(deps: {
         )
       )
         return;
-      if (connection && connection.connectionInstance !== raw.connectionInstance) revoke();
-      connection = raw;
+      if (
+        connection &&
+        connection.connectionInstance === raw.connectionInstance &&
+        connection.connectionToken === raw.connectionToken &&
+        connection.expiresAt === raw.expiresAt &&
+        now() < connection.expiresAt
+      )
+        return;
+      if (connection) revoke();
+      authorityRevision++;
+      connection = { ...raw };
       clearTimeout(expiryTimer);
       const mine = ++expiryGeneration;
       expiryTimer = setTimeout(
@@ -322,8 +508,9 @@ export function createTerminalController(deps: {
       offset = e.S;
       stream = e.replayEpoch;
       replay = e;
+      const authority = capture();
       replayTimer = setTimeout(() => {
-        void fail(new Error("E_REPLAY_DEADLINE"));
+        if (owns(authority)) void fail(new RequestFailure("E_REPLAY_DEADLINE", authority));
       }, e.deadlineAt - now());
       if (e.S === e.N0) enqueueReady();
     } else if (e.kind === "output") {
@@ -345,19 +532,22 @@ export function createTerminalController(deps: {
       }
       offset += bytes.length;
       queued += bytes.length;
+      const authority = capture();
       const mine = generation,
         renderedThrough = offset;
       output = output
         .then(async () => {
           if (mine !== generation) return;
+          assertAuthority(authority);
           await deps.renderer.write(bytes);
+          assertAuthority(authority);
           if (mine !== generation) return;
           if (replay) {
-            if (renderedThrough === replay.N0) await ready();
-          } else await call("ack", { ...writer(), ack: { phase: "live", renderedThrough } });
+            if (renderedThrough === replay.N0) await ready(authority);
+          } else await call("ack", { ...writer(), ack: { phase: "live", renderedThrough } }, authority);
         })
         .catch((error) => {
-          if (mine === generation) return fail(error);
+          if (owns(authority)) return fail(error);
         })
         .finally(() => {
           if (mine === generation) queued -= bytes.length;
@@ -404,22 +594,29 @@ export function createTerminalController(deps: {
       if (e.state !== "live" || !e.writerPresent) invalidate();
     }
   }
-  async function ready() {
-    if (!replay || now() >= replay.deadlineAt) throw new Error("E_REPLAY_DEADLINE");
+  async function ready(authority: Authority) {
+    assertAuthority(authority);
+    if (!replay || now() >= replay.deadlineAt) throw new RequestFailure("E_REPLAY_DEADLINE", authority);
     if (replayReady) return;
     replayReady = true;
-    await call("ack", {
-      ...writer(),
-      ack: {
-        phase: "replay_ready",
-        attemptId: replay.attemptId,
-        replayEpoch: replay.replayEpoch,
-        renderedThrough: replay.N0,
+    await call(
+      "ack",
+      {
+        ...writer(),
+        ack: {
+          phase: "replay_ready",
+          attemptId: replay.attemptId,
+          replayEpoch: replay.replayEpoch,
+          renderedThrough: replay.N0,
+        },
       },
-    });
+      authority,
+    );
+    assertAuthority(authority);
   }
   function enqueueReady() {
-    output = output.then(ready).catch(fail);
+    const authority = capture();
+    output = output.then(() => ready(authority)).catch(fail);
   }
   return {
     state,
@@ -433,44 +630,68 @@ export function createTerminalController(deps: {
     resize,
     fail,
     invalidate,
-    async action(run: () => Promise<void>) {
-      if (state.busy) return;
+    async action(run: (guard: () => void) => Promise<void>) {
+      if (state.busy || disposed) return false;
+      let authority: Authority;
+      try {
+        authority = capture();
+      } catch {
+        state.error = "请重新登录并连接 WebHub 以启用终端。";
+        return false;
+      }
+      const mine = ++actionRevision;
       state.busy = true;
       state.error = "";
+      const guard = () => {
+        if (mine !== actionRevision) throw new StaleAuthority();
+        assertAuthority(authority, false);
+      };
       try {
-        await run();
-      } catch (e) {
-        state.error = e instanceof Error ? e.message : "E_UNAVAILABLE";
+        await run(guard);
+        guard();
+        return true;
+      } catch (error) {
+        if (
+          mine === actionRevision &&
+          owns(authority, false) &&
+          !(error instanceof StaleAuthority) &&
+          (!(error instanceof RequestFailure) || error.current())
+        )
+          state.error = error instanceof Error ? error.message : "E_UNAVAILABLE";
+        return false;
       } finally {
-        state.busy = false;
+        if (mine === actionRevision) state.busy = false;
       }
     },
     dispose() {
+      if (disposed) return;
       const old = attachment,
-        identity = connection,
-        clientId = deps.clientId();
+        authority = attachmentAuthority;
+      const release =
+        old && authority && owns(authority)
+          ? {
+              ...authority.scope,
+              clientId: authority.clientId,
+              connectionInstance: authority.connection.connectionInstance,
+              connectionToken: authority.connection.connectionToken,
+              termId: old.termId,
+              attachmentId: old.attachmentId,
+              writerLease: old.writerLease,
+            }
+          : undefined;
       disposed = true;
+      authorityRevision++;
+      cancelAction();
       invalidate();
+      generationAbort.abort();
       clearTimeout(expiryTimer);
       expiryGeneration++;
       state.rows = [];
       state.current = null;
       state.gap = "";
-      abort.abort();
       connection = undefined;
-      // Unmount cancels pending input/replay, but must not cancel its own best-effort detach.
-      if (old && identity && clientId && now() < identity.expiresAt)
-        void deps.transport
-          .request("detach", {
-            ...deps.scope,
-            clientId,
-            connectionInstance: identity.connectionInstance,
-            connectionToken: identity.connectionToken,
-            termId: old.termId,
-            attachmentId: old.attachmentId,
-            writerLease: old.writerLease,
-          })
-          .catch(() => {});
+      // Separate immutable permission snapshot, deliberately no generation-aborted signal.
+      if (release) void deps.transport.request("detach", release).catch(() => {});
     },
   };
 }
