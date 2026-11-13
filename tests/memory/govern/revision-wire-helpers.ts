@@ -167,6 +167,11 @@ export async function wireFixture(
     invalidPayload: false,
     onHTTP: undefined as ((kind: string) => void) | undefined,
   };
+  const httpWaiters = new Map<string, (() => void)[]>();
+  const whenHTTP = (kind: string) =>
+    new Promise<void>((resolve) => {
+      httpWaiters.set(kind, [...(httpWaiters.get(kind) ?? []), resolve]);
+    });
   const fakeFetch: typeof fetch = async (url, init) => {
     expect(String(url)).toMatch(/^https:\/\/p50-wire.invalid\/v1\/(systemone|chat\/completions)$/);
     const p = JSON.parse(String(init?.body)),
@@ -176,6 +181,8 @@ export async function wireFixture(
           ? "coverage"
           : String(p.model);
     calls.push({ kind, payload: p, headers: new Headers(init?.headers) });
+    for (const resolve of httpWaiters.get(kind) ?? []) resolve();
+    httpWaiters.delete(kind);
     state.onHTTP?.(kind);
     expect(new Headers(init?.headers).get("authorization")).toBe("Bearer offline-synthetic-key-not-a-secret");
     if (state.heldKind === kind) await state.hold;
@@ -426,11 +433,13 @@ export async function wireFixture(
   const observed: jevWire.WireJevResult[] = [];
   let hostDeps: revisionHostModule.RevisionHostDeps | undefined;
   let host: ReturnType<typeof revisionHostModule.createRevisionHost> | undefined;
+  let batchDone: Promise<revisionHostModule.RevisionHostResult> | undefined;
   const realCreateHost = revisionHostModule.createRevisionHost;
   vi.spyOn(revisionHostModule, "createRevisionHost").mockImplementation((deps) => {
     hostDeps = deps;
     host = realCreateHost(deps);
-    vi.spyOn(host, "handle");
+    const handle = host.handle;
+    vi.spyOn(host, "handle").mockImplementation((...args) => (batchDone = handle(...args)));
     return host;
   });
   const realWire = jevWire.wireJev;
@@ -519,6 +528,7 @@ export async function wireFixture(
     state,
     calls,
     proxyRequests,
+    whenHTTP,
     emit,
     create,
     writePair,
@@ -526,7 +536,12 @@ export async function wireFixture(
     warning,
     ctx,
     natural: async () => {
+      // Advancing the scheduler clock is not a completion barrier for the SDK's
+      // real async auth/I/O. Held-flight tests stop at the actual HTTP start;
+      // ordinary opportunities wait for the original host task to settle.
+      const started = state.heldKind ? whenHTTP(state.heldKind) : undefined;
       await vi.advanceTimersByTimeAsync(1000);
+      await (started ?? batchDone);
     },
   };
 }

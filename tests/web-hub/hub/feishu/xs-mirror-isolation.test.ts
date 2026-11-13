@@ -164,6 +164,9 @@ describe("xs-mirror isolation (§4.4)", () => {
         if (!r.ok) return;
       }
   }
+  // These two cases durably fill a real ~4 MiB state via hundreds of atomic
+  // writes/fsyncs. This is not a 10 s performance contract on shared CI runners;
+  // keep every byte/refusal/headroom assertion and allow bounded I/O headroom.
   it("near the byte budget every mirror is bytes-refused; the guarded headroom stays available to non-mirror notices", async () => {
     const a = await build(3);
     await fillToEdge(a);
@@ -182,7 +185,7 @@ describe("xs-mirror isolation (§4.4)", () => {
       });
       expect(r.ok).toBe(true);
     }
-  });
+  }, 30_000);
   it("mirror stops once the 256 KiB headroom would be violated: queued mirrors never push free bytes below it", async () => {
     const r = await build(2);
     await fillToEdge(r);
@@ -194,7 +197,7 @@ describe("xs-mirror isolation (§4.4)", () => {
       Math.max(u.budget, before.bytes + before.reserve + XSM_BYTE_HEADROOM),
     );
     expect(mirrorQueued(r.state)).toBe(0);
-  });
+  }, 30_000);
   it("same-tick interleave: a non-mirror enqueue issued between mirror cards never sees a broken bound", async () => {
     const { state, outbox, m } = await build(6);
     const limit = FEISHU_CAPS.outboxParts - FEISHU_OUTBOX_FINAL_RESERVE - 128;

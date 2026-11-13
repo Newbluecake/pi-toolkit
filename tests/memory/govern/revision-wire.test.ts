@@ -182,6 +182,46 @@ it.each(["registry", "manager", "tree", "abort", "shutdown", "reload"] as const)
   },
 );
 
+it("quiet-clock expiry is not an SDK completion barrier: delayed discovery still reaches generation before reload", async () => {
+  const h = await wireFixture();
+  await h.writePair();
+  let releaseRelation!: () => void;
+  h.state.heldKind = "relation";
+  h.state.hold = new Promise<void>((resolve) => {
+    releaseRelation = resolve;
+  });
+  const relationStarted = h.whenHTTP("relation");
+  // Replay an async SDK/auth/transport continuation that the fake scheduler
+  // clock cannot drain. This was the old natural()'s entire implementation.
+  await vi.advanceTimersByTimeAsync(1000);
+  await relationStarted;
+  expect(h.ask!.mock.calls.filter(([r]) => r.jobId)).toHaveLength(1);
+  expect(h.generate).not.toHaveBeenCalled();
+  expect(h.host!.inspect().jobs).toMatchObject([{ state: "running", generateClaims: 0 }]);
+
+  let releaseGeneration!: () => void;
+  h.state.heldKind = "generation";
+  h.state.hold = new Promise<void>((resolve) => {
+    releaseGeneration = resolve;
+  });
+  const generationStarted = h.whenHTTP("generation");
+  releaseRelation();
+  await generationStarted;
+  expect(h.generate).toHaveBeenCalledTimes(1);
+  expect(h.client!.usage().budget?.outstanding).toBe(1);
+  expect(h.host!.inspect().jobs).toMatchObject([{ state: "running", generateClaims: 1 }]);
+  await h.emit("session_shutdown", { reason: "reload" });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(h.client!.usage().budget?.zombies).toBe(1);
+  releaseGeneration();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(h.client!.usage().budget).toMatchObject({ outstanding: 0, zombies: 0, disposed: true });
+  expect(h.suggestions()).toEqual([]);
+  expect(h.coverage).not.toHaveBeenCalled();
+  expect(fs.existsSync(join(h.blocks, ".jev/revisions"))).toBe(false);
+  expect(h.client!.usage().costUsd).toBeGreaterThan(0);
+});
+
 it("same registry with changed model mapping invalidates the binding before a scheduled dispatch", async () => {
   const h = await wireFixture();
   await h.writePair();
