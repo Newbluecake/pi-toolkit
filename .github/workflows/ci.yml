@@ -48,6 +48,13 @@ jobs:
           # tests (real hub children, perf ratios) flake under CPU contention.
           PI_TOOLKIT_TEST_WORKERS: "2"
 
+      # Terminal tier 2 covers bash/zsh login shells; the runner image does not include zsh.
+      - name: Install zsh (terminal PTY tier 2)
+        if: ${{ !cancelled() && (steps.tier1.outcome == 'success' || steps.tier1.outcome == 'failure') }}
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends zsh
+          command -v zsh
+
       # test-speed plan D7: tier 2 (env-sensitive: integration, conformance, real mounts) runs only
       # once tier 1 actually executed — if npm ci or a build step failed, tier 1 was skipped and
       # tier 2 must not run either; !cancelled() keeps it from starting on cancellation. The

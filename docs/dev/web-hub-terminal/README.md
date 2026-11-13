@@ -126,7 +126,7 @@ terminal binding token只驻当前页面私有内存，不进URL/storage/history
 - `npm run typecheck`、`npm run build`、`npm run build:web`、`npm run check:web`。
 - `tsx scripts/web-hub/gen-third-party-notices.ts --check`、`tsx scripts/web-hub/gen-terminal-ui-schema.ts --check`。
 - tier1：显式文件参数覆盖 `tests/web-hub/** tests/governance tests/boundary tests/config`；`tests/web-hub/hub/spawn/golden.test.ts` 单独 `TMPDIR=/tmp`。
-- tier2：`tests/integration/web-hub-terminal-*.test.ts` 全部。F1 ingress/旧hub、F2 Q1–Q4、real PTY/local/wiring/journal/HTTP 不借 secure skip。
+- tier2：`tests/integration/web-hub-terminal-*.test.ts` 全部。F1 ingress/旧hub、F2 Q1–Q4、real PTY/local/wiring/journal/HTTP 不借 secure skip。CI 安装 zsh，以覆盖 bash/zsh login shell。
 - off golden、activate-trace、boundary；不变更 I8 白名单/注册 trace/旧 fixtures。`git diff --quiet 2d802f1f -- tests/fixtures/`、`git diff --check`、Prettier 精确路径检查。
 - separate-process durable-release 用例保留 revision≥before+2、零 journal rows、exact receipt ACK 删除、真实 PID gone 断言；等待对齐生产 reaper 上限60s，不以 close/exit 代替。失败输出 stage/round/journal/receipt物理字段/PID stat/agent固定诊断/lifecycle，不输出秘密；四轮总界300s。重复10次记录不能当 full-file 其余用例通过。
 
