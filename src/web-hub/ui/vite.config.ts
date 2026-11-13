@@ -53,17 +53,15 @@ export default defineConfig(async ({ command, mode }): Promise<UserConfig> => {
   // naming for mermaid-exclusive chunks, mixed-chunk build failure, ELK EPL banner, and the
   // sha256-bound sidecar `check:web` verifies. Same plugin in both build modes (the probe tests
   // the exact pipeline the shipped bundle uses).
+  const cacheDir = process.env["PWH_UI_CACHE_DIR"] ?? resolve(here, "../../../node_modules/.cache");
   const provenance = mermaidProvenancePlugin({
-    outFile: resolve(
-      here,
-      "../../../node_modules/.cache",
-      cspProbe ? "pwh-csp-probe-provenance.json" : "pwh-ui-provenance.json",
-    ),
+    outFile: resolve(cacheDir, cspProbe ? "pwh-csp-probe-provenance.json" : "pwh-ui-provenance.json"),
   });
 
   return {
     root: cspProbe ? resolve(here, "csp-probe") : here,
     base: "/",
+    ...(process.env["PWH_UI_CACHE_DIR"] ? { cacheDir: resolve(cacheDir, "vite") } : {}),
     publicDir: cspProbe ? false : "public",
     plugins: [vue(), provenance, ...(cspProbe ? [] : [buildInfoPlugin({ builtAt })])],
     resolve: {
@@ -97,9 +95,7 @@ export default defineConfig(async ({ command, mode }): Promise<UserConfig> => {
       __PWH_UI_BUILD__: JSON.stringify({ version, proto: { major: PROTO.major }, commit, builtAt }),
     },
     build: {
-      outDir: cspProbe
-        ? resolve(here, "../../../node_modules/.cache/pwh-csp-probe")
-        : resolve(here, "../../../dist/web-hub-ui"),
+      outDir: cspProbe ? resolve(cacheDir, "pwh-csp-probe") : resolve(here, "../../../dist/web-hub-ui"),
       emptyOutDir: true,
       target: "es2020",
       sourcemap: false, // no .map file, no sourceMappingURL comment

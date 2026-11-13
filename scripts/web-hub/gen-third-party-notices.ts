@@ -29,10 +29,8 @@ import {
 } from "./lib/ui-provenance.js";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const PROVENANCE_FILES = [
-  resolve(REPO_ROOT, "node_modules/.cache/pwh-ui-provenance.json"),
-  resolve(REPO_ROOT, "node_modules/.cache/pwh-csp-probe-provenance.json"),
-];
+const CACHE = process.env["PWH_UI_CACHE_DIR"] ?? resolve(REPO_ROOT, "node_modules/.cache");
+const PROVENANCE_FILES = [resolve(CACHE, "pwh-ui-provenance.json"), resolve(CACHE, "pwh-csp-probe-provenance.json")];
 const OUT = resolve(REPO_ROOT, "THIRD_PARTY_NOTICES.md");
 
 const INTRO = `# Third-Party Notices

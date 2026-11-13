@@ -175,7 +175,8 @@ function runNpxProbe(offline: boolean): Promise<ChildProbeResult> {
  */
 export async function loadPlaywright(): Promise<LoadPlaywrightResult> {
   const offlineResult = await runNpxProbe(true);
-  const result = offlineResult.ok ? offlineResult : await runNpxProbe(false);
+  const offlineOnly = process.env["npm_config_offline"] === "true";
+  const result = offlineResult.ok || offlineOnly ? offlineResult : await runNpxProbe(false);
   const source: "offline" | "online" = offlineResult.ok ? "offline" : "online";
   if (!result.ok || result.entry === undefined || result.version === undefined || result.executablePath === undefined) {
     return { ok: false, reason: result.reason ?? "playwright unavailable (offline and online resolution both failed)" };

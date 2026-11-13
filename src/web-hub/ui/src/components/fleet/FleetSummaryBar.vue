@@ -1,7 +1,9 @@
 <!-- #41/#42 supersede the 2026-10-15 merged badge: independent agent/bash counts.
      Both buttons remain usable while docked; AgentDetail owns the common split anchor. -->
 <script setup lang="ts">
-import { computed } from "vue";
+import { terminalUiEnabled } from "../../logic/terminalCapability.js";
+import { HUB_CTX } from "../control/controlContext.js";
+import { computed, inject } from "vue";
 import type { FleetSummaryBarEmits, FleetSummaryBarProps } from "../../contracts.js";
 import "../../styles/fleet.css";
 import { formatUsd } from "../../format.js";
@@ -9,6 +11,11 @@ import { useI18n } from "../../composables/useI18n.js";
 import AppIcon from "../../icons/AppIcon.vue";
 import { fleetSummary } from "./summary.js";
 import { summaryCounts } from "../detail/bashJobsView.js";
+
+const terminalHub = inject(HUB_CTX, null);
+const jobsIcon = computed(() =>
+  terminalUiEnabled(terminalHub?.state.value.hub) ? ("jobs-list" as const) : ("terminal" as const),
+);
 
 const props = defineProps<FleetSummaryBarProps>();
 const emit = defineEmits<FleetSummaryBarEmits>();
@@ -46,7 +53,7 @@ const buttons = computed(() => {
     },
     {
       kind: "bash" as const,
-      icon: "terminal" as const,
+      icon: jobsIcon.value,
       running: bash?.running ?? 0,
       available: bash !== null && bash.running + bash.done + bash.failed > 0,
       label: [

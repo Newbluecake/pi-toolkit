@@ -25,6 +25,7 @@
   tab-local html-cap FIFO ledger every window's PreviewHtml shares.
 -->
 <script setup lang="ts">
+import { terminalOwnsKey } from "../../logic/terminalFocus.js";
 import { computed, inject, nextTick, onUnmounted, provide, ref, watch } from "vue";
 import type { PreviewRect, PreviewResizeDir } from "@logic/previewWindowGeom.js";
 import { asWindowsHandle } from "../../composables/usePreviewWindows.js";
@@ -313,6 +314,7 @@ function onRootKeydown(ev: KeyboardEvent): void {
     trapTab(ev);
     return;
   }
+  if (terminalOwnsKey(ev)) return;
   if (ev.key !== "Escape" || ev.defaultPrevented || ev.isComposing) return;
   const target = ev.target;
   const sec = target instanceof Element ? target.closest(".preview-window") : null;

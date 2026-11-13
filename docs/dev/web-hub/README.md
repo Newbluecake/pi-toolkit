@@ -1246,3 +1246,50 @@ forgets exactly those receipts and advances the revision floor. Unknown/duplicat
 identities reject without partial deletion. A lost ACK pins receipts until a fresh valid
 challenge/commit-bound acknowledgement; it never clears physical slots/quarantine or
 revives shells. The helper checks shape/current private context, not OS proof/fsync itself.
+
+## Terminal P2 UI（2026-11-13）
+
+`terminal.ui.v1` 只读 browser HubInfo；无 cap 不探测 agent，不创建 entry/panel/sprite symbol，
+旧 header/rail/card DOM 保留原字节。bash 语义图标统一由这个 hub cap 切为 jobs-list，
+与目标 agent 是否支持/协商是否成功无关。`headerFold` 有独立 enabled 顺序，旧顺序不变。
+为避免 off 分支新增 Vue comment anchor，DetailHeader 的 feature button 与 AgentDetail
+的 lazy panel 使用 Vue `render` 在 enabled-only 宿主挂载；后者按真实 scope primitive 变化
+而非每次 agent/status 对象更新重建。宿主放在 body 之后、原 dock/composer 之前。
+
+`TerminalPanel/TerminalChrome/TerminalList` 与 controller 共享唯一 lazy `terminal-impl.ts`
+入口（feature root 为 `terminal-feature.ts`、GPU root 为 `terminal-impl.ts`）；list 首次点击才请求，刷新无需已有 renderer 就能列出并接回。只有新建/接回才加载
+WebGL renderer 和 xterm CSS；新建严格先 renderer ready 再 prepare→open。open unknown
+只查原 server ticket/openId，不换 id 重开。元数据消费 P1-C optional 字段；缺失显示未知，
+list 不包含 cwd/user/host/shell，panel 不解析 OSC title，不猜测 termId 序号。
+
+独立定向 SSE sink 不进高频 transcript reducer；binding token 仅驻当前页面私有内存，
+不进 URL/storage/history。重连/身份变更、401/revoke、privacy 标记/未知、session/epoch
+变化会撤输入与 pending replay、清展示数据并 dispose UI。无直接 shell close 权限的路径
+（后台/导航/renderer loss）只 detach writer；显式终止必须确认。新 renderer 会按已有
+termId 接回，不再 open；WebGL 仍每 mount 最多一次、每次 3s，无 DOM fallback。
+
+controller 的 raw-byte output queue ≤64KiB、输入 pending ≤32KiB、单 input ≤4KiB；
+xterm scrollback=1000。early SSE 在 HTTP attachment 返回前也有 64KiB/16-event 上界。
+replay 固定 suffix ≤16KiB、absolute 3s，write callback 后 replay_ready，精确 cutover
+reset/gap 后才 writable；旧代 ACK/response 不会接到新 writer。任何失序/超窗/慢 renderer
+明确 detach 到后台，不无限重放或替换 shell。HTTP budget 含 streaming body，≤16KiB；
+无自动登录/POST replay，token/password 共用这一窄客户端。
+
+输入原生事件用 eventPhase 标记同步用户 dispatch（不能在 capture 中用 queueMicrotask
+清标记：Chromium 会在 listener 间跑 microtask，导致真正按键丢失）；IME 229/compositionend
+容许 xterm 6 公共路径的一次延迟。自动 response 只在当前 live write barrier 内可发送，
+replay/reset/旧 renderer 永久丢弃，不用 response 更新 input-idle。多行 paste/文本 drop
+需确认，保留 xterm bracketed paste，超限不写入。Ctrl+Shift+F6 唯一宿主保留键，退出到
+本 panel focus 按钮；document-capture HoldStop、window Preview cycle/Dashboard、
+PreviewHost/FleetDrawer 均用同一 feature-local composedPath + activeElement 窄门。
+
+P0 probe 现在挂载同一个正式 SFC，HTTP 为明确 contract fake，不调用 backend；七案例
+与 negative control 不删。正常案例另有 Chromium 原生 Esc/Tab/Ctrl+C/Ctrl+Z、保留退出、
+页面内最大化/还原证据，记录到假 input sink，不宣称真实 PTY/T-KEY e2e 已验收。
+Firefox NOT RUN。真实 PTY/登录鉴权/同 pid 后台、OS IME 与移动键盘仍由 P3 跨层复跑。
+
+构建缓存可设 `PWH_UI_CACHE_DIR`（build/check/notices/probe 同用），默认路径不变；
+只读 node_modules symlink 的 worktree 必须指向私有目录。`npm_config_offline=true` 时
+Playwright loader 不再尝试 online fallback。provenance 把 symlink 依赖 CSS 绑定到逻辑
+`node_modules/<package>/...` 路径，同时继续校验源/产物 SHA 与锁版本，不放宽 source gate。
+主 CSP 与首屏 CSS 不变；terminal JS/CSS/host 独立预算仍为 256KiB/16KiB/4KiB gzip。

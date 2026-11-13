@@ -1,6 +1,6 @@
-/** WebGL-only P0: actual production artifacts, unchanged hub CSP, no transport/backend. */
+/** Real TerminalPanel SFC + production WebGL renderer; contract fake HTTP, no backend. */
 import { createServer } from "node:http";
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { readFile, readdir, writeFile, mkdir } from "node:fs/promises";
 import { resolve, extname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CSP } from "../../src/web-hub/hub/http.js";
@@ -9,7 +9,8 @@ import type { UiProvenance } from "./lib/ui-provenance.js";
 
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const DIST = resolve(ROOT, "dist/web-hub-ui");
-const OUT = resolve(ROOT, "node_modules/.cache/pwh-terminal-probe");
+const CACHE = process.env["PWH_UI_CACHE_DIR"] ?? resolve(ROOT, "node_modules/.cache");
+const OUT = resolve(CACHE, "pwh-terminal-probe");
 const INIT = `
 window.__violations = []; window.__states = []; window.__visibleDomFallbacks = 0;
 window.__originalAttribute = Element.prototype.setAttribute;
@@ -49,9 +50,15 @@ async function metrics(page: PwPage) {
     const width = screen?.getBoundingClientRect().width ?? 0,
       height = screen?.getBoundingClientRect().height ?? 0;
     return {
+      writable: document.querySelector<HTMLElement>(".terminal-panel")?.dataset["writable"],
+      input: document.querySelector<HTMLElement>(".terminal-probe")?.dataset["probeInput"],
+      ops: document.querySelector<HTMLElement>(".terminal-probe")?.dataset["probeOps"],
+      panelError: document.querySelector(".terminal-panel [role=alert]")?.textContent,
+      activeElement: document.activeElement?.outerHTML.slice(0, 300),
       phase: host?.dataset["state"],
       rebuilds: Number(host?.dataset["rebuilds"] ?? 0),
-      renderer: surface?.dataset["renderer"],
+      renderer:
+        document.querySelector<HTMLElement>(".terminal-surface")?.dataset["renderer"] ?? surface?.dataset["renderer"],
       ready: host?.dataset["ready"],
       text: host?.dataset["bufferText"] ?? "",
       rows: Number(host?.dataset["rows"] ?? 0),
@@ -67,7 +74,7 @@ async function metrics(page: PwPage) {
       xterms: document.querySelectorAll(".xterm").length,
       styles: document.querySelectorAll("style").length,
       sheets: document.adoptedStyleSheets.length,
-      links: document.querySelectorAll('link[rel="stylesheet"]').length,
+      links: document.querySelectorAll('link[rel="stylesheet"]:not([data-probe-shell-css])').length,
       violations: w.__violations,
       states: w.__states,
       visibleDomFallbacks: w.__visibleDomFallbacks,
@@ -97,9 +104,9 @@ async function loseContext(page: PwPage, failRebuild = false) {
 export async function runTerminalProbe(selected = "chromium"): Promise<void> {
   check(selected === "chromium", "Terminal P0 uses Chromium; Firefox is explicitly NOT RUN by root ruling");
   await mkdir(OUT, { recursive: true });
-  const prov = JSON.parse(
-    await readFile(resolve(ROOT, "node_modules/.cache/pwh-ui-provenance.json"), "utf8"),
-  ) as UiProvenance;
+  const prov = JSON.parse(await readFile(resolve(CACHE, "pwh-ui-provenance.json"), "utf8")) as UiProvenance;
+  const mainCss = (await readdir(resolve(DIST, "assets"))).find((name) => /^style-.*\.css$/.test(name));
+  check(mainCss, "production shell CSS missing");
   const host = Object.entries(prov.chunks).find(([, c]) => c.terminalHost)?.[0];
   check(host, "production host missing; run build:web");
   const terminalAssets = new Set([
@@ -121,7 +128,7 @@ export async function runTerminalProbe(selected = "chromium"): Promise<void> {
     if (path === "/terminal-spike.html") {
       res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
       res.end(
-        `<!doctype html><html><head><title>Terminal P0</title></head><body><main data-terminal-spike></main><script type="module" src="/${host}"></script></body></html>`,
+        `<!doctype html><html><head><title>Terminal P0</title><link data-probe-shell-css rel="stylesheet" href="/assets/${mainCss}"></head><body><main data-terminal-spike></main><script type="module" src="/${host}"></script></body></html>`,
       );
       return;
     }
@@ -305,6 +312,58 @@ export async function runTerminalProbe(selected = "chromium"): Promise<void> {
         "alternate screen/OSC guard failed",
       );
       await screenshot(page, "r3-chromium-themed");
+      // Native Chromium key events drive the real SFC/xterm and contract input transport.
+      // This is NOT a real PTY assertion (the same bytes must be checked against PTY in P3).
+      const keyboard = (page as PwPage & { keyboard: { press(key: string): Promise<void> } }).keyboard;
+      await page.click(".terminal-chrome [data-terminal-focus]");
+      for (const key of ["Escape", "Tab", "Control+c", "Control+z", "Control+Backquote"]) await keyboard.press(key);
+      await wait(
+        page,
+        () =>
+          JSON.parse(document.querySelector<HTMLElement>(".terminal-probe")?.dataset["probeInput"] ?? "[]").length >= 4,
+      );
+      const inputBeforeExit = await page.evaluate(
+        () =>
+          JSON.parse(document.querySelector<HTMLElement>(".terminal-probe")!.dataset["probeInput"] ?? "[]") as number[],
+      );
+      check(
+        [27, 9, 3, 26].every((byte) => inputBeforeExit.includes(byte)),
+        "native TTY keys did not reach the contract input sink",
+      );
+      await keyboard.press("Control+Shift+F6");
+      check(
+        await page.evaluate(
+          () => document.activeElement === document.querySelector(".terminal-chrome [data-terminal-focus]"),
+        ),
+        "reserved exit did not focus this panel chrome",
+      );
+      await keyboard.press("Tab");
+      await keyboard.press("Shift+Tab");
+      await keyboard.press("Enter");
+      check(
+        await page.evaluate(() => !!document.activeElement?.closest("[data-terminal-input]")),
+        "keyboard re-entry failed",
+      );
+      const afterExit = await page.evaluate(
+        () =>
+          JSON.parse(document.querySelector<HTMLElement>(".terminal-probe")!.dataset["probeInput"] ?? "[]") as number[],
+      );
+      check(
+        JSON.stringify(afterExit) === JSON.stringify(inputBeforeExit),
+        "reserved host exit leaked to the TTY input sink",
+      );
+      await page.click(".terminal-chrome [aria-pressed]");
+      await page.click(".terminal-chrome [data-terminal-focus]");
+      await keyboard.press("Escape");
+      check(
+        await page.evaluate(() => !!document.querySelector(".terminal-panel.is-maximized")),
+        "Escape closed/restored the terminal",
+      );
+      await page.click(".terminal-chrome [aria-pressed]");
+      check(
+        await page.evaluate(() => document.querySelector("canvas[data-terminal-webgl-canvas]") !== null),
+        "maximize rebuilt or disposed the renderer",
+      );
       await loseContext(page);
       await wait(page, () => {
         const host = document.querySelector<HTMLElement>("[data-terminal-spike]");
@@ -342,7 +401,18 @@ export async function runTerminalProbe(selected = "chromium"): Promise<void> {
       check(disposed.sheets === 0 && disposed.links === 0 && disposed.styles === 0, "dispose leaked resources");
       await open(page);
       await page.click("[data-terminal-dispose]");
-      return { before, initial, resized, themed, font, replay, recovered, exhausted, disposed };
+      return {
+        before,
+        initial,
+        resized,
+        themed,
+        font,
+        replay,
+        keyboardInput: inputBeforeExit,
+        recovered,
+        exhausted,
+        disposed,
+      };
     });
     await run(browser, "recovery-fails-no-dom-fallback", "", async (page) => {
       await open(page);

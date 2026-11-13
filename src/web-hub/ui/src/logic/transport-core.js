@@ -149,6 +149,16 @@ export function createStreamLifecycle(deps, hooks) {
       deps.onConn("reconnecting");
       scheduleReopen();
     }, CONNECT_TIMEOUT_MS);
+    let terminalListeners = false;
+    const receiveTerminal = (/** @type {string} */ name, /** @type {any} */ ev) => {
+      if (es !== source || typeof ev.data !== "string" || ev.data.length > 16384) return;
+      lastFrameAt = deps.now();
+      try {
+        deps.onMessage({ event: name, data: JSON.parse(ev.data) });
+      } catch {
+        /* private malformed frame */
+      }
+    };
     for (const name of SSE_EVENTS) {
       source.addEventListener(name, (/** @type {any} */ ev) => {
         if (es !== source) return; // stale stream
@@ -162,6 +172,13 @@ export function createStreamLifecycle(deps, hooks) {
         // Mode-specific frame interception (password's `event: auth`) sits exactly where its
         // in-line branch used to: BEFORE the hello bookkeeping and before onMessage.
         if (hooks.handleFrame !== undefined && hooks.handleFrame(name, data, source) === true) return;
+        if (name === "hub") {
+          if (!terminalListeners && Array.isArray(data?.caps) && data.caps.includes("terminal.ui.v1")) {
+            terminalListeners = true;
+            for (const privateName of ["terminal_connection", "terminal"])
+              source.addEventListener(privateName, (ev) => receiveTerminal(privateName, ev));
+          }
+        }
         if (name === "hello") {
           clearConnectTimer();
           hooks.onHello?.();

@@ -14,8 +14,32 @@
   visibly at the top of the placeholder `App.vue` — harmless during P0–P2 (the hub still serves
   the old frontend; this only ever appears under `dev:web`/`vitest`/`visual:web`).
 -->
+<script setup lang="ts">
+import { onBeforeUnmount, onMounted, ref, watch } from "vue";
+const props = defineProps<{ terminalEnabled?: boolean }>();
+const sprite = ref<SVGSVGElement>();
+let jobs: SVGSymbolElement | undefined;
+function updateJobs() {
+  if (!props.terminalEnabled) {
+    jobs?.remove();
+    jobs = undefined;
+    return;
+  }
+  if (jobs || !sprite.value) return;
+  jobs = document.createElementNS("http://www.w3.org/2000/svg", "symbol");
+  jobs.id = "i-jobs-list";
+  jobs.setAttribute("viewBox", "0 0 24 24");
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("d", "M9 6h12M9 12h12M9 18h12M3 6h1M3 12h1M3 18h1");
+  jobs.appendChild(path);
+  sprite.value.appendChild(jobs);
+}
+onMounted(updateJobs);
+watch(() => props.terminalEnabled, updateJobs);
+onBeforeUnmount(() => jobs?.remove());
+</script>
 <template>
-  <svg class="sprite" aria-hidden="true" focusable="false">
+  <svg ref="sprite" class="sprite" aria-hidden="true" focusable="false">
     <symbol id="i-alert" viewBox="0 0 24 24">
       <path d="M12 3.8 2.9 19.5h18.2L12 3.8z" />
       <path d="M12 10v4.2M12 17.1v.1" />

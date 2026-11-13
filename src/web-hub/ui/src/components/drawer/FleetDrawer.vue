@@ -83,6 +83,7 @@ export function useFleetDrawerOpen(mode: Readonly<Ref<FleetDrawerMode>>): FleetD
 </script>
 
 <script setup lang="ts">
+import { terminalOwnsKey } from "../../logic/terminalFocus.js";
 /** #41/#42: production passes an explicit panel and effective mode; undefined panel
  * preserves legacy combined callers. Keyboard/outside/focus remain owned here, while
  * open intent belongs to AgentDetail's useActivityRail. */
@@ -467,6 +468,7 @@ function onBackToTree(): void {
 // §6.4 键盘/指针契约(唯一 owner)
 // ---------------------------------------------------------------------------
 function onKey(ev: KeyboardEvent): void {
+  if (terminalOwnsKey(ev)) return;
   if (ev.key === "Tab" && props.mode === "fullscreen") {
     const elements = Array.from(
       rootEl.value?.querySelectorAll<HTMLElement>(

@@ -56,7 +56,8 @@ import {
 const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const DIST_DIR = resolve(REPO_ROOT, "dist/web-hub-ui");
 const PROVENANCE_FILE =
-  process.env["PWH_UI_PROVENANCE"] ?? resolve(REPO_ROOT, "node_modules/.cache/pwh-ui-provenance.json");
+  process.env["PWH_UI_PROVENANCE"] ??
+  resolve(process.env["PWH_UI_CACHE_DIR"] ?? resolve(REPO_ROOT, "node_modules/.cache"), "pwh-ui-provenance.json");
 const NOTICES_FILE = resolve(REPO_ROOT, "THIRD_PARTY_NOTICES.md");
 const OVERRIDES_FILE = resolve(REPO_ROOT, "scripts/web-hub/third-party-overrides.json");
 const VENDORED_FILE = resolve(REPO_ROOT, "src/web-hub/ui/vendored-bundled.json");

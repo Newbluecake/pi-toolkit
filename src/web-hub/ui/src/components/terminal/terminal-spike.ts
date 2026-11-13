@@ -1,14 +1,14 @@
 /** Isolated P0 WebGL-only host. Never imported by the SPA; no shell/transport. */
-import type { mountTerminalSpike, WebglUiState } from "./terminal-impl.js";
+import type { mountTerminalPanelProbe, WebglUiState } from "./terminal-feature.js";
 
-type Spike = Awaited<ReturnType<typeof mountTerminalSpike>>;
+type Spike = Awaited<ReturnType<typeof mountTerminalPanelProbe>>;
 const root = document.querySelector<HTMLElement>("[data-terminal-spike]");
 if (root) {
   const surface = document.createElement("div");
   surface.className = "terminal-spike-surface";
   const status = document.createElement("p");
   status.setAttribute("role", "status");
-  status.textContent = "P0 本地测试数据；仅支持 WebGL。Ctrl+Shift+F6：退出终端输入焦点。";
+  status.textContent = "正式组件契约探针（无后端）；仅支持 WebGL。Ctrl+Shift+F6：退出终端输入焦点。";
   let current: Spike | undefined;
   let pending = false;
   let generation = 0;
@@ -69,7 +69,7 @@ if (root) {
     }
   };
   const open = button(
-    "Open WebGL terminal spike",
+    "Open WebGL terminal panel",
     async () => {
       if (pending || current?.terminal) return;
       current?.dispose();
@@ -82,12 +82,12 @@ if (root) {
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
         const module = await Promise.race([
-          import("./terminal-impl.js"),
+          import("./terminal-feature.js"),
           new Promise<never>((_, reject) => {
             timer = setTimeout(() => reject(new Error("终端组件加载超时，请重试。")), 5_000);
           }),
         ]);
-        const instance = await module.mountTerminalSpike(surface, {
+        const instance = await module.mountTerminalPanelProbe(surface, {
           onStateChange: (state) => stateChanged(state, mine),
         });
         if (mine !== generation) {

@@ -315,8 +315,10 @@ export function mermaidProvenancePlugin(options: MermaidProvenanceOptions): Merm
         exclusive = computeExclusiveSets(lookup, ids, implId).exclusive;
       }
       terminalImplId = ids.find((id) => id.endsWith(`components${sep}terminal${sep}terminal-impl.ts`)) ?? null;
-      terminalExclusive = terminalImplId
-        ? computeExclusiveSets((id) => this.getModuleInfo(id), ids, terminalImplId).exclusive
+      const terminalFeatureId =
+        ids.find((id) => id.endsWith(`components${sep}terminal${sep}terminal-feature.ts`)) ?? terminalImplId;
+      terminalExclusive = terminalFeatureId
+        ? computeExclusiveSets((id) => this.getModuleInfo(id), ids, terminalFeatureId).exclusive
         : new Set();
       const elkId = ids.find((id) => ELK_MODULE_RE.test(id));
       if (elkId) {
@@ -382,7 +384,9 @@ export function mermaidProvenancePlugin(options: MermaidProvenanceOptions): Merm
         terminalCss[path] = {
           sha256: outputHash,
           sourceSha256: hash,
-          sourceModule: relative(resolve(outDir, "../../"), id).split(sep).join("/"),
+          sourceModule: packageDirOfModuleId(id)
+            ? `node_modules/${packageDirOfModuleId(id)!.name}/${relative(packageDirOfModuleId(id)!.dir, id).split(sep).join("/")}`
+            : relative(resolve(outDir, "../../"), id).split(sep).join("/"),
           packages: p ? [p] : [],
         };
       }
@@ -420,7 +424,9 @@ export function mermaidProvenancePlugin(options: MermaidProvenanceOptions): Merm
           exclusive: cls.exclusive,
           terminalHost: rendered.some((id) => id.endsWith(`components${sep}terminal${sep}terminal-spike.ts`)),
           terminalExclusive: term.exclusive,
-          containsTerminalImpl: terminalImplId !== null && rendered.includes(terminalImplId),
+          containsTerminalImpl:
+            terminalImplId !== null &&
+            rendered.some((id) => id === terminalImplId || id.endsWith(`components${sep}terminal${sep}renderer.ts`)),
           containsImpl: implId !== null && rendered.includes(implId),
           containsElk: rendered.some((id) => ELK_MODULE_RE.test(id)),
           packages: [...pkgs.values()].sort((a, b) => (a.name + a.version).localeCompare(b.name + b.version)),

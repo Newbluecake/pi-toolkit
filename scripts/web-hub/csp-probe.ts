@@ -37,9 +37,10 @@ import { runMermaidSuite } from "./mermaid-probe-suite.js";
 
 const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const VITE_CONFIG = resolve(REPO_ROOT, "src/web-hub/ui/vite.config.ts");
-const PROBE_OUT_DIR = resolve(REPO_ROOT, "node_modules/.cache/pwh-csp-probe");
+const CACHE = process.env["PWH_UI_CACHE_DIR"] ?? resolve(REPO_ROOT, "node_modules/.cache");
+const PROBE_OUT_DIR = resolve(CACHE, "pwh-csp-probe");
 const PORT = 42111;
-const MERMAID_REPORT = resolve(REPO_ROOT, "node_modules/.cache/pwh-mermaid-probe-report.json");
+const MERMAID_REPORT = resolve(CACHE, "pwh-mermaid-probe-report.json");
 /** Paths the mermaid suite's pages request on purpose to prove they are NEVER fetched (plan §10.4 N group). */
 const SINK_PREFIX = "/probe-sink/";
 const sinkHits: string[] = [];

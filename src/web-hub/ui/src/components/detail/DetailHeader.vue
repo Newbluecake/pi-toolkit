@@ -39,6 +39,8 @@
 <script setup lang="ts">
 import {
   computed,
+  h,
+  render,
   defineAsyncComponent,
   inject,
   nextTick,
@@ -48,6 +50,7 @@ import {
   ref,
   watch,
 } from "vue";
+import { TERMINAL_ENTRY } from "../../logic/terminalContext.js";
 import AppIcon from "../../icons/AppIcon.vue";
 import { agentVisualState } from "../../composables/visual-state.js";
 import { useI18n } from "../../composables/useI18n.js";
@@ -59,6 +62,7 @@ import { classifyRemoveError, removalTargetForAgent } from "../../logic/remove.j
 import {
   foldTitlebar,
   TITLEBAR_FOLD_ORDER,
+  TITLEBAR_TERMINAL_FOLD_ORDER,
   TITLEBAR_ICON_TIER_MAX_PX,
   type TitlebarFoldId,
   type TitlebarFoldState,
@@ -133,6 +137,7 @@ const showBack = computed(() => props.narrow || drawer?.active.value === true);
 // API-only in `usePrivacyLock`; route/idle/tab-hidden still relock). Desktop band +
 // `privacy.v1` cap only; no provider / no cap / phone band ⇒ no button at all.
 // ---------------------------------------------------------------------------
+const terminalEntry = inject(TERMINAL_ENTRY, null);
 const privacy = inject(PRIVACY_LOCK_CTX, null);
 const privacyMarked = computed(() => privacy?.isMarked(props.agent.key) ?? false);
 const privacyButton = computed(
@@ -510,6 +515,7 @@ function isFolded(id: TitlebarFoldId): boolean {
 function presentFoldIds(): TitlebarFoldId[] {
   const present = new Set<TitlebarFoldId>();
   if (privacyButton.value) present.add("privacy");
+  if (terminalEntry?.available.value) present.add("terminal");
   if (schedUsable.value) present.add("schedule");
   if (resumeUsable.value) present.add("resume");
   if (channelsUsable.value) present.add("channels");
@@ -520,7 +526,9 @@ function presentFoldIds(): TitlebarFoldId[] {
   // first (TITLEBAR_FOLD_ORDER). Coarse pointers keep it menu-only, exactly like idle stop.
   if (removeTarget.value !== null && !delArmed.value && !delRemoving.value && !coarsePointer.value)
     present.add("delete"); // coarse: always folded, nothing to measure
-  return TITLEBAR_FOLD_ORDER.filter((id) => present.has(id));
+  return (terminalEntry?.available.value ? TITLEBAR_TERMINAL_FOLD_ORDER : TITLEBAR_FOLD_ORDER).filter((id) =>
+    present.has(id),
+  );
 }
 
 function measureTitlebar(): void {
@@ -596,6 +604,54 @@ function measureTitlebar(): void {
   }
 }
 
+// No off-branch Vue comment/anchor: keep the old titlebar bytes when the cap is absent.
+let terminalButtonMount: HTMLDivElement | undefined;
+function updateTerminalButton() {
+  const bar = titlebarEl.value;
+  if (!bar || !terminalEntry?.available.value || isFolded("terminal")) {
+    if (terminalButtonMount) render(null, terminalButtonMount);
+    return;
+  }
+  terminalButtonMount ??= document.createElement("div");
+  const vnode = h(
+    "button",
+    {
+      class: "btn btn-ghost detail-resume-btn",
+      style: { minWidth: "44px", minHeight: "44px" },
+      type: "button",
+      "data-fold": "terminal",
+      "aria-controls": "terminal-panel",
+      "aria-expanded": terminalEntry.open.value,
+      "aria-label": t("terminal.title"),
+      onClick: () => terminalEntry.show(),
+    },
+    [
+      h(AppIcon, { name: "terminal", class: "icon" }),
+      h("span", { class: "head-btn-label", "aria-hidden": "true" }, t("terminal.title")),
+    ],
+  );
+  render(vnode, terminalButtonMount);
+  const button = (terminalButtonMount.firstChild ?? vnode.el) as Node | null;
+  if (button && button.parentNode !== bar) {
+    const privacyButtonEl = bar.querySelector('[data-fold="privacy"]');
+    bar.insertBefore(
+      button,
+      privacyButtonEl?.nextSibling ?? bar.querySelector('[data-fold="stop"], [data-fold="delete"], .detail-head-more'),
+    );
+  }
+}
+watch(
+  () => [terminalEntry?.available.value, terminalEntry?.open.value, isFolded("terminal"), t("terminal.title")],
+  () => {
+    updateTerminalButton();
+    void nextTick(measureTitlebar);
+  },
+  { flush: "post" },
+);
+onMounted(updateTerminalButton);
+onBeforeUnmount(() => {
+  if (terminalButtonMount) render(null, terminalButtonMount);
+});
 let titlebarRO: ResizeObserver | null = null;
 onMounted(() => {
   measureTitlebar();
@@ -651,6 +707,8 @@ const overflowItems = computed<HeaderOverflowItem[]>(() => {
       label: privacyMarked.value ? t("privacy.unlockLabel") : t("privacy.markLabel"),
       checked: privacyMarked.value,
     });
+  if (terminalEntry?.available.value && isFolded("terminal"))
+    out.push({ id: "terminal", icon: "terminal", label: t("terminal.title") });
   if (managed.value !== undefined && !stopArmed.value && !stopStopping.value && isFolded("stop"))
     out.push({
       id: "stop",
@@ -688,6 +746,9 @@ function onOverflowRun(id: string): void {
       break;
     case "resume":
       resumeHost?.open({ scope: "recent" });
+      break;
+    case "terminal":
+      terminalEntry?.show();
       break;
     case "privacy":
       onPrivacyClick();
