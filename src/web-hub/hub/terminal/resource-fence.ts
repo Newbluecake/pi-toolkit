@@ -47,6 +47,12 @@ export class TerminalResourceFence implements TerminalResourceFencePort {
   private loaded = false;
   private failed = false;
   private busy = false;
+  private collectionDeadlineAt: number | undefined;
+  startCollection() {
+    if (!this.loaded || this.failed) throw new TerminalFault("E_RESOURCE_QUARANTINED", "unknown");
+    this.collectionDeadlineAt = this.deps.now() + L.inventoryMs;
+    this.state = "collecting";
+  }
   private collections = new Map<string, Collect>();
   private released = new Set<string>();
   private recovery = new Set<string>();
@@ -179,6 +185,8 @@ export class TerminalResourceFence implements TerminalResourceFencePort {
       this.journal = next;
       for (const id of this.released)
         if (!next.resources.some((r) => r.entry.identity.reservationId === id)) this.released.delete(id);
+      for (const key of this.recovery)
+        if (!next.resources.some((r) => terminalIdentityKey(r.entry.identity) === key)) this.recovery.delete(key);
       return true;
     } catch {
       return false;
@@ -189,6 +197,7 @@ export class TerminalResourceFence implements TerminalResourceFencePort {
   begin(meta: TerminalIngressMeta, ownerInstance: string, processIdentity: TerminalProcessIdentity): TerminalChallenge {
     if (!this.loaded || this.failed) throw new TerminalFault("E_RESOURCE_QUARANTINED", "unknown");
     this.expire();
+    if (this.collectionDeadlineAt === undefined || this.deps.now() >= this.collectionDeadlineAt) this.startCollection();
     if (this.collections.size >= 32 && !this.collections.has(meta.agentKey)) throw new TerminalFault("E_LIMIT");
     const challenge = {
       hubBootId: this.bootId,
@@ -212,6 +221,12 @@ export class TerminalResourceFence implements TerminalResourceFencePort {
     return challenge;
   }
   private expire() {
+    if (
+      this.collectionDeadlineAt !== undefined &&
+      this.deps.now() >= this.collectionDeadlineAt &&
+      this.unresolved().some((r) => this.recovery.has(terminalIdentityKey(r.entry.identity)))
+    )
+      this.state = "lost";
     for (const [key, c] of this.collections)
       if (this.deps.now() >= c.challenge.deadlineAt) {
         if (!c.invalid && !c.complete) this.state = "lost";

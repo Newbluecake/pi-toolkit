@@ -1431,3 +1431,10 @@ releases/acknowledges once. A separate real socket/production ready-gate path co
 H inventory verification and disk commit to `terminalResolvedAckMatches` and exact agent
 receipt forgetting; its terminal operations are explicitly non-PTY fixtures, not the
 P1-A physical/process-group gate.
+
+The explicit user-triggered collection also starts one global inventory deadline before
+contacting peers. A journal-expected agent with **no online socket or ready channel**
+still becomes lost at that deadline; completing A cannot leave absent B outside the
+barrier. Expiring a challenge never removes its journal reservation. Recovery/release
+bookkeeping is pruned only when a later durable journal revision no longer contains
+that identity, keeping the in-memory metadata bounded without TTL permission to open.

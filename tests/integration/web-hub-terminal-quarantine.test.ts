@@ -627,4 +627,26 @@ describe("F2 Q1–Q4 actual H journal/fence/proof chain (§5.5.1)", () => {
       await q.cleanup();
     }
   }, 20000);
+  it("Q3 an expected B without any online/ready channel becomes lost at the global collection deadline", async () => {
+    const q = await resourceFixture(2, true);
+    try {
+      const a = q.entries[0]!;
+      expect(await q.send(q.pages(q.fence.begin(q.meta, "owner", q.currentProcess), [a]))).toEqual([
+        "accepted",
+        "accepted",
+        "accepted",
+      ]);
+      expect(q.fence.records().resources[0]?.status).toBe("resolved");
+      expect(q.release).toEqual([a.identity.reservationId]);
+      // No B socket, handshake or begin(): the persisted expected set, not online peers, owns this barrier.
+      q.setTime(q.getTime() + 5000);
+      expect(q.fence.snapshot()).toMatchObject({ state: "lost", physicalUsed: 1 });
+      expect(() => q.fence.assertOpen()).toThrow("E_RESOURCE_QUARANTINED");
+      q.setTime(q.getTime() + 60000);
+      expect(q.fence.snapshot()).toMatchObject({ state: "lost", physicalUsed: 1 });
+      expect(q.release).toHaveLength(1);
+    } finally {
+      await q.cleanup();
+    }
+  }, 20000);
 });

@@ -766,6 +766,7 @@ export function createTerminalService(deps: TerminalServiceDeps) {
       throw new TerminalFault("E_SESSION_CHANGED");
     admit(id, b, target, signal);
     if (deps.resourceFence.snapshot().state !== "cleared" && (op === "prepare" || op === "open")) {
+      deps.resourceFence.startCollection();
       await Promise.all(
         (deps.targets?.() ?? [target])
           .slice(0, 32)
