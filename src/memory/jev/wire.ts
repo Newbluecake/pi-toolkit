@@ -1,6 +1,6 @@
 import { createRevisionHost, type RevisionHostCustody } from "../govern/revision-host.js";
 import type { IncrementalBatch } from "../govern/incremental.js";
-import { resolveNativeP50Binding, type P50BindingResolver, type P50SdkBinding } from "./p50-binding.js";
+import { createDefaultP50BindingResolver, type P50BindingResolver, type P50SdkBinding } from "./p50-binding.js";
 import type { MemoryActivityRecorder } from "../govern/activity.js";
 // `wireJev` — the Jev recall runtime (jev-plan §4 J6; jev-arch §5.3,
 // §6.1.1–§6.1.6, §6.2.3, §6.3.1, §8, §9.2).
@@ -848,6 +848,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
   let p50Context: unknown;
   let p50Closed = false;
   let p50Binding: P50SdkBinding | undefined;
+  const defaultP50Resolver = createDefaultP50BindingResolver(config.predict.model.models[0]);
   const p50Diagnostics = new Set<string>();
   // P50 diagnostics NEVER use the existing persistent Jev log sink. No new
   // sidecar/popup/turn; fixed reason set, once per reason per natural session.
@@ -871,12 +872,13 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
       else if (!deps.p50!.available(p50Context)) reason = "activity-owner-unavailable";
       else if (!r) reason = "current-registry-missing";
       else {
-        const result = (deps.p50?.resolveBinding ?? resolveNativeP50Binding)(r, config.classifiers);
+        const result = (deps.p50?.resolveBinding ?? defaultP50Resolver)(r, config.classifiers);
         if (
           result.kind === "ready" &&
           result.binding.registry === r &&
           result.binding.isCurrent() &&
-          result.binding.classifiers.length === config.classifiers.length &&
+          result.binding.classifiers.length ===
+            (result.binding.accountingProfile ? Math.min(1, config.classifiers.length) : config.classifiers.length) &&
           result.binding.classifiers.every((id, i) => id === config.classifiers[i])
         ) {
           const stream = result.binding.revision.transport.streamingProxy;
@@ -938,7 +940,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
             (config.maxCostUsd <= 0 || u.costUsd + (u.budget?.reservedCostUsd ?? 0) < config.maxCostUsd)
           );
         },
-        autoEnabled: () => deps.settings.incremental.auto === true,
+        autoEnabled: () => !currentP50Binding()?.accountingProfile && deps.settings.incremental.auto === true,
         ...(deps.p50?.custody ? { custody: (batch: IncrementalBatch) => deps.p50!.custody!(batch, p50Context) } : {}),
         ...(deps.writeGate === undefined ? {} : { gate: deps.writeGate }),
         now: () => new Date(now()),

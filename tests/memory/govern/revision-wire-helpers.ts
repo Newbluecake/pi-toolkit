@@ -14,11 +14,18 @@ import { loadSettings } from "../../../src/config/settings.js";
 import { memoryDirFor } from "../../../src/memory/paths.js";
 import { wireMemory } from "../../../src/memory/index.js";
 import { wireMemoryScopes } from "../../../src/memory/scopes/wire.js";
+import * as streamProxyModule from "../../../src/memory/jev/proxy-stream-fetch.js";
 import * as proxyModule from "../../../src/memory/jev/proxy-fetch.js";
+import * as revisionHostModule from "../../../src/memory/govern/revision-host.js";
 import * as jevWire from "../../../src/memory/jev/wire.js";
 import type { JevClientHandle } from "../../../src/memory/jev/client.js";
 import { clearHealthTable } from "../../../src/memory/jev/health.js";
-import { createSdkP50Binding, P50_SDK_BINDING, type P50SdkBinding } from "../../../src/memory/jev/p50-binding.js";
+import {
+  createSdkP50Binding,
+  createStockEstimateP50Binding,
+  P50_SDK_BINDING,
+  type P50SdkBinding,
+} from "../../../src/memory/jev/p50-binding.js";
 import { readIndex } from "../../../src/memory/jev/index-store.js";
 import { classify as sdkClassify } from "@earendil-works/pi-ai/api/typesafe-system-one";
 import activate from "../../../src/index.js";
@@ -51,6 +58,10 @@ export async function wireFixture(
     scopesOff?: boolean;
     proxy?: string;
     noQuote?: boolean;
+    stock?: boolean;
+    stockProxy?: boolean;
+    secondClassifier?: boolean;
+    missingFirst?: boolean;
   } = {},
 ) {
   resetGlobals();
@@ -91,8 +102,16 @@ export async function wireFixture(
       jev: {
         enabled: true,
         proxy: options.proxy ?? "",
-        classifiers: [`${provider}/relation`],
-        predict: { enabled: false },
+        classifiers: [
+          `${provider}/${options.missingFirst ? "missing" : "relation"}`,
+          ...(options.secondClassifier ? [`${provider}/relation2`] : []),
+        ],
+        predict: {
+          enabled: false,
+          ...(options.stock || options.noBinding
+            ? { model: { models: [options.noBinding ? "missing/unavailable" : `${provider}/generation`] } }
+            : {}),
+        },
         maxCalls: 10000,
         maxCostUsd: 10,
       },
@@ -131,23 +150,39 @@ export async function wireFixture(
   const state = {
     underquote: false,
     classifierStatus: 200,
+    classifierError: "offline transient",
     relation: "conflict",
     missingRaw: false,
     missingUsage: false,
+    rawUsage: undefined as unknown,
+    chatUsage: undefined as unknown,
+    finishReason: "stop",
     heldKind: "",
     hold: undefined as Promise<void> | undefined,
+    coverageStatus: 200,
+    invalidCoverage: false,
+    coverageVerdict: "complete",
+    invalidGeneration: false,
+    afterPayload: undefined as ((kind: string) => void) | undefined,
+    invalidPayload: false,
+    onHTTP: undefined as ((kind: string) => void) | undefined,
   };
   const fakeFetch: typeof fetch = async (url, init) => {
     expect(String(url)).toMatch(/^https:\/\/p50-wire.invalid\/v1\/(systemone|chat\/completions)$/);
     const p = JSON.parse(String(init?.body)),
-      kind = p.model === "relation" ? "relation" : String(p.model);
+      kind = ["relation", "relation2"].includes(p.model)
+        ? "relation"
+        : options.stock && String(p.messages?.[0]?.content).includes('"verdict"')
+          ? "coverage"
+          : String(p.model);
     calls.push({ kind, payload: p, headers: new Headers(init?.headers) });
+    state.onHTTP?.(kind);
     expect(new Headers(init?.headers).get("authorization")).toBe("Bearer offline-synthetic-key-not-a-secret");
     if (state.heldKind === kind) await state.hold;
     if (kind === "relation") {
       const bounded = p.max_output_tokens !== undefined;
-      if (bounded && state.classifierStatus !== 200)
-        return new Response("offline transient", { status: state.classifierStatus });
+      if ((bounded || options.stock) && state.classifierStatus !== 200)
+        return new Response(state.classifierError, { status: state.classifierStatus });
       if (bounded) {
         expect(p.max_output_tokens).toBe(128);
         expect(p).not.toHaveProperty("max_tokens");
@@ -180,23 +215,31 @@ export async function wireFixture(
       return new Response(
         JSON.stringify({
           answers,
-          ...(!state.missingUsage ? { usage: { input_tokens: 10, output_tokens: 5 } } : {}),
+          ...(!state.missingUsage ? { usage: state.rawUsage ?? { input_tokens: 10, output_tokens: 5 } } : {}),
           ...(!state.missingRaw ? { p50: { provider, model: "backend-relation" } } : {}),
         }),
         { headers: { "Content-Type": "application/json" } },
       );
     }
-    expect(p.max_tokens).toBe(2048);
+    expect(p.max_tokens).toBe(options.stock ? 384 : 2048);
+    if (kind === "coverage" && state.coverageStatus !== 200)
+      return new Response("offline coverage failure", { status: state.coverageStatus });
     expect(p).not.toHaveProperty("max_output_tokens");
     expect(p).not.toHaveProperty("max_completion_tokens");
     const body =
-      kind === "coverage" ? '{"verdict":"complete"}' : "Keep the budget and directory lock. Preserve both valid rules.";
+      kind === "coverage"
+        ? state.invalidCoverage
+          ? "not json"
+          : JSON.stringify({ verdict: state.coverageVerdict })
+        : state.invalidGeneration
+          ? "delete: rules.001"
+          : "Keep the budget and directory lock. Preserve both valid rules.";
     const frames = [
       {
         id: "offline",
         object: "chat.completion.chunk",
         ...(!state.missingRaw ? { model: `backend-${kind}` } : {}),
-        choices: [{ index: 0, delta: { content: body }, finish_reason: "stop" }],
+        choices: [{ index: 0, delta: { content: body }, finish_reason: state.finishReason }],
       },
       ...(!state.missingUsage
         ? [
@@ -205,7 +248,7 @@ export async function wireFixture(
               object: "chat.completion.chunk",
               model: `backend-${kind}`,
               choices: [],
-              usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+              usage: state.chatUsage ?? { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
             },
           ]
         : []),
@@ -221,6 +264,11 @@ export async function wireFixture(
       proxyRequests.push(proxy);
       return fakeFetch(url, init);
     });
+  if (options.stockProxy)
+    vi.spyOn(streamProxyModule, "createProxyStreamFetch").mockImplementation(() => async (url, init) => {
+      proxyRequests.push(options.proxy!);
+      return fakeFetch(url, init);
+    });
   const runtime = await ModelRuntime.create({
     modelsPath: join(agentDir, "models.json"),
     authPath: join(agentDir, "auth.json"),
@@ -234,6 +282,19 @@ export async function wireFixture(
     apiKey: "offline-synthetic-key-not-a-secret",
     classifiers: { "typesafe-system-one": { classify: sdkClassify } },
     models: [
+      ...(options.secondClassifier
+        ? [
+            {
+              id: "relation2",
+              name: "relation2",
+              type: "classifier",
+              api: "typesafe-system-one",
+              input: ["text"],
+              contextWindow: 32000,
+              cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+            },
+          ]
+        : []),
       ...JSON.parse(fs.readFileSync(join(agentDir, "models.json"), "utf8")).providers[provider].models,
       {
         id: "relation",
@@ -247,10 +308,35 @@ export async function wireFixture(
     ],
   });
   await runtime.refresh({ allowNetwork: false });
+  const realComplete = registry.complete;
+  vi.spyOn(registry, "complete").mockImplementation((model, ctx, opts) =>
+    realComplete.call(registry, model, ctx, {
+      ...opts,
+      async onPayload(payload, model) {
+        const replacement = await opts?.onPayload?.(
+          state.invalidPayload ? { ...(payload as object), tools: [] } : payload,
+          model,
+        );
+        state.afterPayload?.("revision");
+        return replacement;
+      },
+    }),
+  );
+  const realClassify = registry.classify;
+  vi.spyOn(registry, "classify").mockImplementation((model, ctx, opts) =>
+    realClassify.call(registry, model, ctx, {
+      ...opts,
+      async onPayload(payload, model) {
+        const replacement = await opts?.onPayload?.(payload, model);
+        state.afterPayload?.("relation");
+        return replacement;
+      },
+    }),
+  );
   let binding: P50SdkBinding | undefined;
   const native = registry.getProvider(provider)!;
   const extended = { ...native, [P50_SDK_BINDING]: () => binding };
-  if (!options.noBinding) registry.registerProvider(extended);
+  if (!options.noBinding && !options.stock) registry.registerProvider(extended);
   await runtime.refresh({ allowNetwork: false });
   const route = (id: string) => ({
     provider,
@@ -278,43 +364,50 @@ export async function wireFixture(
     modelRegistry: registry,
   })! as import("../../../src/memory/jev/p50-binding.js").SdkP50BindingSpec["registry"];
   expect(registryView).toBe(registry);
-  binding = createSdkP50Binding({
-    registry: registryView,
-    adapterVersion: "offline-certified-v1",
-    budgetMs: 3000,
-    maxOutputTokens: 2048,
-    classifyMaxOutputTokens: 128,
-    classifiers: [
-      {
-        requestChainId: `${provider}/relation`,
-        model: registry.getModelOfType("classifier", provider, "relation")!,
-        route: route("relation"),
-        tokens: {
-          protocolEvidence:
-            "offline bounded SystemOne extension v1; max_output_tokens + raw p50 identity, authenticated fixture service",
-          tokenizerEvidence: "fixture exact byte-token vocabulary for JSON(state, wire questions)",
-          priceUsdPerMillion: { input: 1, output: 1 },
-          quoteInput: (ctx) =>
-            options.noQuote
-              ? undefined
-              : state.underquote
-                ? 1
-                : bytes({
-                    state: ctx.state,
-                    questions: Object.fromEntries(
-                      Object.entries(ctx.questions).map(([id, q]) => [
-                        id,
-                        q.type === "bool" ? { ...q, type: "noul" } : q,
-                      ]),
-                    ),
-                  }),
-          countPayload: (p) => bytes({ state: p.state, questions: p.questions }),
-        },
-      },
-    ],
-    generation: [chatRoute("generation")],
-    coverage: [chatRoute("coverage")],
-  });
+  binding = options.stock
+    ? createStockEstimateP50Binding({
+        registry: registryView,
+        classifier: `${provider}/relation`,
+        revisionModel: `${provider}/generation`,
+        ...(options.stockProxy ? { streamingProxy: { proxy: options.proxy! } } : {}),
+      })
+    : createSdkP50Binding({
+        registry: registryView,
+        adapterVersion: "offline-certified-v1",
+        budgetMs: 3000,
+        maxOutputTokens: 2048,
+        classifyMaxOutputTokens: 128,
+        classifiers: [
+          {
+            requestChainId: `${provider}/relation`,
+            model: registry.getModelOfType("classifier", provider, "relation")!,
+            route: route("relation"),
+            tokens: {
+              protocolEvidence:
+                "offline bounded SystemOne extension v1; max_output_tokens + raw p50 identity, authenticated fixture service",
+              tokenizerEvidence: "fixture exact byte-token vocabulary for JSON(state, wire questions)",
+              priceUsdPerMillion: { input: 1, output: 1 },
+              quoteInput: (ctx) =>
+                options.noQuote
+                  ? undefined
+                  : state.underquote
+                    ? 1
+                    : bytes({
+                        state: ctx.state,
+                        questions: Object.fromEntries(
+                          Object.entries(ctx.questions).map(([id, q]) => [
+                            id,
+                            q.type === "bool" ? { ...q, type: "noul" } : q,
+                          ]),
+                        ),
+                      }),
+              countPayload: (p) => bytes({ state: p.state, questions: p.questions }),
+            },
+          },
+        ],
+        generation: [chatRoute("generation")],
+        coverage: [chatRoute("coverage")],
+      });
   expect(binding?.isCurrent()).toBe(true);
   const f = fakePi();
   const manager = SessionManager.inMemory(cwd);
@@ -331,6 +424,15 @@ export async function wireFixture(
   f.pi.appendEntry = (type, data) => manager.appendCustomEntry(type, data);
   const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
   const observed: jevWire.WireJevResult[] = [];
+  let hostDeps: revisionHostModule.RevisionHostDeps | undefined;
+  let host: ReturnType<typeof revisionHostModule.createRevisionHost> | undefined;
+  const realCreateHost = revisionHostModule.createRevisionHost;
+  vi.spyOn(revisionHostModule, "createRevisionHost").mockImplementation((deps) => {
+    hostDeps = deps;
+    host = realCreateHost(deps);
+    vi.spyOn(host, "handle");
+    return host;
+  });
   const realWire = jevWire.wireJev;
   vi.spyOn(jevWire, "wireJev").mockImplementation((...args) => {
     const result = realWire(...args);
@@ -363,6 +465,7 @@ export async function wireFixture(
       ...(scopes ? { scopes } : {}),
       secureDomainKind: options.domain ?? "plain",
       isChildSession: options.child ?? false,
+      ...(options.stockProxy ? { p50BindingResolver: () => ({ kind: "ready" as const, binding: binding! }) } : {}),
       sections,
     });
   }
@@ -373,6 +476,7 @@ export async function wireFixture(
   await emit("session_start", { reason: "startup" });
   await vi.advanceTimersByTimeAsync(0);
   const client = observed[0]?.client as JevClientHandle | undefined;
+  const originalAsk = client?.ask.bind(client);
   const ask = client ? vi.spyOn(client, "ask") : undefined;
   const generate = client ? vi.spyOn(client, "generateRevision") : undefined;
   const coverage = client ? vi.spyOn(client, "judgeRevisionCoverage") : undefined;
@@ -391,6 +495,7 @@ export async function wireFixture(
   const suggestions = () => readIndex(dir).index.review?.suggestions.filter((s) => s.revision) ?? [];
   return {
     ...f,
+    root,
     cwd,
     dir,
     blocks,
@@ -399,8 +504,15 @@ export async function wireFixture(
     memoryScopes,
     binding: binding!,
     observed,
+    get host() {
+      return host;
+    },
+    get hostDeps() {
+      return hostDeps;
+    },
     client,
     ask,
+    originalAsk,
     generate,
     coverage,
     settings,

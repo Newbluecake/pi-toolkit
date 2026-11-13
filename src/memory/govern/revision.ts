@@ -1,5 +1,6 @@
 /** #50 D factory-only proposal custody. No data applier, production wiring or
  * second client/ledger. Locked functions are synchronous and never take a lock. */
+import { STOCK_ESTIMATE_PROFILE, type StockEstimateProfile } from "../jev/p50-estimate.js";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { BLOCK_BODY_MAX_BYTES, MAX_FRONTMATTER_BYTES, parseBlockFile } from "../blocks/format.js";
@@ -1106,6 +1107,7 @@ export interface RevisionRelationResult {
   readonly outcome: JevOutcome;
 }
 export interface RevisionPrepareDeps {
+  readonly accountingProfile?: StockEstimateProfile;
   readonly client?: JevClientHandle;
   readonly requestBudget?: RevisionRequestBudget;
   readonly attempt: IncrementalAttemptContext;
@@ -1141,7 +1143,12 @@ export async function prepareRevisionProposal(
 ): Promise<RevisionPrepareResult> {
   const current = () => {
     try {
-      return !deps.attempt.signal.aborted && !deps.requestBudget?.signal?.aborted && deps.attempt.isCurrent() === true;
+      return (
+        !deps.attempt.signal.aborted &&
+        !deps.requestBudget?.signal?.aborted &&
+        deps.attempt.isCurrent() === true &&
+        (deps.accountingProfile !== STOCK_ESTIMATE_PROFILE || deps.attempt.leaseValid())
+      );
     } catch {
       return false;
     }
@@ -1197,6 +1204,12 @@ export async function prepareRevisionProposal(
     const generated = await client.generateRevision(request);
     if (!current()) return { kind: "stale" };
     if (generated.kind !== "ok") return { kind: "unavailable" };
+    if (
+      deps.accountingProfile === STOCK_ESTIMATE_PROFILE &&
+      (generated.provenance.requestDigest !== expected.generation!.requestDigest ||
+        generated.provenance.inputDigest !== expected.generation!.inputDigest)
+    )
+      return { kind: "unavailable" };
     if (!budgetAvailable(client)) {
       deps.attempt.capReached();
       return { kind: "unavailable" };
@@ -1248,6 +1261,18 @@ export async function prepareRevisionProposal(
         (expected as { coverage?: typeof binding }).coverage = binding;
         const result = await client.judgeRevisionCoverage(coverageRequest);
         if (!current()) return { kind: "stale" };
+        if (
+          deps.accountingProfile === STOCK_ESTIMATE_PROFILE &&
+          (result.kind !== "ok" ||
+            !result.inputComplete ||
+            result.targetRev !== input.target.rev ||
+            result.beforeDigest !== sha(input.target.block.body) ||
+            result.candidateDigest !== checked.outputDigest ||
+            result.promptVersion !== REVISION_PROMPT_VERSION ||
+            result.provenance.requestDigest !== binding.requestDigest ||
+            result.provenance.inputDigest !== binding.inputDigest)
+        )
+          return { kind: "unavailable" };
         if (!budgetAvailable(client)) {
           deps.attempt.capReached();
           return { kind: "unavailable" };
@@ -1382,9 +1407,10 @@ async function prepareRetireProposal(
     sources[0]!.provenance.requestDigest !== binding.requestDigest ||
     sources[0]!.provenance.inputDigest !== binding.inputDigest
   )
-    return plain();
+    return deps.accountingProfile === STOCK_ESTIMATE_PROFILE ? { kind: "unavailable" } : plain();
   const p = answer.probabilities[answer.choice];
-  if (p === undefined || !Number.isFinite(p) || p < 0 || p > 1) return plain();
+  if (p === undefined || !Number.isFinite(p) || p < 0 || p > 1)
+    return deps.accountingProfile === STOCK_ESTIMATE_PROFILE ? { kind: "unavailable" } : plain();
   const relation: RelationEvidence = {
     kind: answer.choice,
     p,
@@ -1405,6 +1431,18 @@ async function prepareRetireProposal(
   const coverageBinding = revisionRequestDigests(dto.outbound, coverageRequest.maxOutputTokens);
   const result = await client.judgeRevisionCoverage(request);
   if (!current()) return { kind: "stale" };
+  if (
+    deps.accountingProfile === STOCK_ESTIMATE_PROFILE &&
+    (result.kind !== "ok" ||
+      !result.inputComplete ||
+      result.targetRev !== input.target.rev ||
+      result.beforeDigest !== sha(input.target.block.body) ||
+      result.candidateDigest !== source.base.outputDigest ||
+      result.promptVersion !== coverageRequest.promptVersion ||
+      result.provenance.requestDigest !== coverageBinding.requestDigest ||
+      result.provenance.inputDigest !== coverageBinding.inputDigest)
+  )
+    return { kind: "unavailable" };
   if (!budgetAvailable(client)) {
     deps.attempt.capReached();
     return { kind: "unavailable" };

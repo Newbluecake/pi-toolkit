@@ -2,7 +2,15 @@
  * Stock pi 1.5 has no tokenizer/canonical route/classifier output-cap contract.
  * Without a native provider supplying this port, resolution is unsupported, NOT
  * permission to guess limits, routes, prices or to disable legacy Jev.
- * No client/ledger/global mutable registry; all authority is activation-local. */
+ * The separately named stock-estimate factory below is suggest-only, NOT that
+ * certification. No client/ledger/global mutable registry; authority is activation-local. */
+import {
+  STOCK_ESTIMATE_PROFILE,
+  estimatePayload,
+  stockClassifyPayload,
+  stockRevisionPayload,
+  stockRevisionPayloadSupported,
+} from "./p50-estimate.js";
 import type {
   CanonicalClassifyRoute,
   ClassifierRegistryLike,
@@ -50,6 +58,7 @@ export const resolveNativeP50Binding: P50BindingResolver = (registry, classifier
       const provider = r.getRegisteredNativeProvider(id.slice(0, id.indexOf("/")));
       if (provider) {
         const port = (provider as { [P50_SDK_BINDING]?: unknown })[P50_SDK_BINDING];
+        if (port !== undefined && typeof port !== "function") return { kind: "unsupported", reason: "binding-invalid" };
         if (typeof port === "function") ports.add(port);
       }
     }
@@ -216,6 +225,9 @@ function dataField(value: object, key: PropertyKey): unknown {
  * tokenizer; this factory enforces/recounts the last payload and observes raw
  * identity/usage. It cannot conjure missing provider capabilities. */
 export function createSdkP50Binding(spec: SdkP50BindingSpec): P50SdkBinding | undefined {
+  return createBinding(spec, false);
+}
+function createBinding(spec: SdkP50BindingSpec, stock: boolean): P50SdkBinding | undefined {
   const chains = [spec.classifiers, spec.generation, spec.coverage];
   if (
     !text(spec.adapterVersion) ||
@@ -336,7 +348,8 @@ export function createSdkP50Binding(spec: SdkP50BindingSpec): P50SdkBinding | un
         [...generation, ...coverage].every((r) => {
           const m = modelIdentity(r.model);
           return modelSignature(find.call(registry, String(m.provider), String(m.id))) === modelSignature(r.model);
-        })
+        }) &&
+        (!stock || terminalBindingCurrent())
       );
     } catch {
       return false;
@@ -357,7 +370,8 @@ export function createSdkP50Binding(spec: SdkP50BindingSpec): P50SdkBinding | un
         (r) => r.requestChainId === input.requestChainId && modelSignature(r.model) === modelSignature(input.model),
       );
       if (!r) return undefined;
-      const bounds = quote(r, input.context, classifyMaxOutputTokens);
+      const q = quote(r, input.context, classifyMaxOutputTokens);
+      const bounds = q && (stock ? Object.freeze({ ...q, accountingProfile: STOCK_ESTIMATE_PROFILE }) : q);
       if (!bounds) return undefined;
       const exactInput = JSON.stringify({
         state: input.context.state,
@@ -370,11 +384,11 @@ export function createSdkP50Binding(spec: SdkP50BindingSpec): P50SdkBinding | un
       });
       const observations = new WeakMap<ClassifyResult, RevisionResultEvidence>();
       return {
-        adapterId: "p50-sdk-systemone-bounded-v1",
+        adapterId: stock ? "p50-stock-estimate-v1" : "p50-sdk-systemone-bounded-v1",
         chainVersion: adapterVersion,
         bounds,
         resultEvidence: (result) => observations.get(result) ?? {},
-        resolveRoute: () => r.route,
+        resolveRoute: () => (stock ? undefined : r.route),
         dispatch(opts) {
           if (!isCurrent() || opts.signal.aborted) throw Error("P50 binding revoked");
           let raw: unknown;
@@ -390,9 +404,10 @@ export function createSdkP50Binding(spec: SdkP50BindingSpec): P50SdkBinding | un
               if (!p || !isCurrent()) throw Error("P50 invalid classifier payload");
               const copy = { ...p };
               for (const key of ["max_tokens", "max_completion_tokens", "max_output_tokens"]) delete copy[key];
-              copy.max_output_tokens = bounds.maxOutputTokens;
+              if (!stock) copy.max_output_tokens = bounds.maxOutputTokens;
               if (
-                Object.keys(copy).sort().join(",") !== "max_output_tokens,model,questions,state" ||
+                Object.keys(copy).sort().join(",") !==
+                  (stock ? "model,questions,state" : "max_output_tokens,model,questions,state") ||
                 JSON.stringify({ state: copy.state, questions: copy.questions }) !== exactInput ||
                 !payloadFits(r, copy, bounds)
               )
@@ -401,7 +416,14 @@ export function createSdkP50Binding(spec: SdkP50BindingSpec): P50SdkBinding | un
               return copy;
             },
             fetch: async (url, init) => {
-              if (++requests !== 1 || !payloadVerified || !isCurrent()) throw Error("P50 hidden classifier retry");
+              const live = isCurrent();
+              if (
+                ++requests !== 1 ||
+                !payloadVerified ||
+                !live ||
+                (stock && (!terminalBindingCurrent() || opts.terminalCurrent?.() === false || opts.signal.aborted))
+              )
+                throw Error("P50 hidden classifier retry");
               const response = await request(url, init);
               return {
                 status: response.status,
@@ -434,7 +456,7 @@ export function createSdkP50Binding(spec: SdkP50BindingSpec): P50SdkBinding | un
               observations.set(
                 result,
                 Object.freeze({
-                  ...(text(actual?.provider) && text(actual?.model)
+                  ...(!stock && text(actual?.provider) && text(actual?.model)
                     ? { actual: { provider: actual.provider, model: actual.model } }
                     : {}),
                   ...(finite(cost) &&
@@ -459,9 +481,9 @@ export function createSdkP50Binding(spec: SdkP50BindingSpec): P50SdkBinding | un
       ...(streamingProxy === undefined ? {} : { streamingProxy }),
       model: r.model,
       requestChainId: r.requestChainId,
-      adapterId: "p50-sdk-openai-completions-v1",
+      adapterId: stock ? "p50-stock-estimate-v1" : "p50-sdk-openai-completions-v1",
       chainVersion: adapterVersion,
-      maxTokensEnforced: true as const,
+      ...(stock ? { accountingProfile: STOCK_ESTIMATE_PROFILE } : { maxTokensEnforced: true as const }),
       outputLimitField: "max_tokens" as const,
       maxOutputTokens: maxOutputTokens,
       resultEvidence: "openai-completions" as const,
@@ -477,17 +499,19 @@ export function createSdkP50Binding(spec: SdkP50BindingSpec): P50SdkBinding | un
         ];
         return (
           isCurrent() &&
+          (!stock || stockRevisionPayloadSupported(payload)) &&
           JSON.stringify(payload.messages) === JSON.stringify(expected) &&
           payloadFits(r, payload, bounds) &&
           isCurrent()
         );
       },
-      resolveRoute: () => r.route,
+      resolveRoute: () => (stock ? undefined : r.route),
     })),
     terminalBindingCurrent,
   );
   return Object.freeze({
     registry,
+    ...(stock ? { accountingProfile: STOCK_ESTIMATE_PROFILE } : {}),
     classifiers: Object.freeze(classifiers.map((r) => r.requestChainId)),
     transport,
     revision: Object.freeze({
@@ -499,4 +523,82 @@ export function createSdkP50Binding(spec: SdkP50BindingSpec): P50SdkBinding | un
     maxOutputTokens: maxOutputTokens,
     isCurrent,
   });
+}
+
+/** Stock CODE profile. Same registry/SDK/ledger, honest local estimates and
+ * unknown identity. No provider result can promote this profile to certified. */
+export function createStockEstimateP50Binding(spec: {
+  readonly registry: SdkP50BindingSpec["registry"];
+  readonly classifier: string;
+  readonly revisionModel: string;
+  readonly streamingProxy?: SdkP50BindingSpec["streamingProxy"];
+}): P50SdkBinding | undefined {
+  try {
+    const route = <T>(id: string, classifier: boolean): SdkRoute<T> | undefined => {
+      const slash = id.indexOf("/"),
+        provider = id.slice(0, slash),
+        name = id.slice(slash + 1);
+      if (slash < 1 || !name) return undefined;
+      const model = classifier
+        ? spec.registry.getModelOfType?.("classifier", provider, name)
+        : spec.registry.find?.(provider, name);
+      if (!model) return undefined;
+      const price = record((model as { cost?: unknown }).cost);
+      if (!price || ![price.input, price.output, price.cacheRead, price.cacheWrite].every(finite)) return undefined;
+      return {
+        requestChainId: id,
+        model,
+        // Internal placeholder ONLY to reuse descriptor validation. Never exposed as evidence.
+        route: { provider, model: name, routeIdentity: "0".repeat(64), routeAliases: [id] },
+        tokens: {
+          protocolEvidence: "stock-estimate-v1: local estimate, serverEnforced:false",
+          tokenizerEvidence: STOCK_ESTIMATE_PROFILE.estimatorId,
+          priceUsdPerMillion: {
+            input: Math.max(price.input as number, price.cacheRead as number, price.cacheWrite as number),
+            output: price.output as number,
+          },
+          quoteInput: (ctx, output) =>
+            estimatePayload(
+              classifier
+                ? stockClassifyPayload(name, ctx as ClassifyContext)
+                : stockRevisionPayload(name, ctx as RevisionTransportContext, output),
+            ),
+          countPayload: estimatePayload,
+        },
+      };
+    };
+    const r = route<ClassifyContext>(spec.classifier, true),
+      g = route<RevisionTransportContext>(spec.revisionModel, false);
+    if (!r || !g) return undefined;
+    return createBinding(
+      {
+        registry: spec.registry,
+        classifiers: [r],
+        generation: [g],
+        coverage: [g],
+        adapterVersion: "stock-estimate-v1",
+        maxOutputTokens: 384,
+        classifyMaxOutputTokens: 128,
+        budgetMs: 30000,
+        ...(spec.streamingProxy ? { streamingProxy: spec.streamingProxy } : {}),
+      },
+      true,
+    );
+  } catch {
+    return undefined;
+  }
+}
+/** Activation-local default fallback. Native invalid/ambiguous is never downgraded. */
+export function createDefaultP50BindingResolver(revisionModel: string | undefined): P50BindingResolver {
+  let cached: P50SdkBinding | undefined;
+  return (registry, classifiers) => {
+    const native = resolveNativeP50Binding(registry, classifiers);
+    if (native.kind === "ready" || native.reason !== "provider-contract-missing") return native;
+    if (cached?.registry === registry && cached.classifiers[0] === classifiers[0] && cached.isCurrent())
+      return { kind: "ready", binding: cached };
+    // Never renew a revoked binding in this activation or try a second model.
+    if (cached || !classifiers[0] || !revisionModel) return { kind: "unsupported", reason: "binding-invalid" };
+    cached = createStockEstimateP50Binding({ registry, classifier: classifiers[0], revisionModel });
+    return cached ? { kind: "ready", binding: cached } : { kind: "unsupported", reason: "provider-contract-missing" };
+  };
 }

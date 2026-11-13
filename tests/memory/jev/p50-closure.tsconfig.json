@@ -1,0 +1,13 @@
+{
+  "extends": "../../../tsconfig.json",
+  "compilerOptions": { "noEmit": true, "declaration": false, "sourceMap": false },
+  "include": [
+    "p50-stock-types.ts",
+    "p50-estimate.test.ts",
+    "p50-stock-binding.test.ts",
+    "p50-closure-probe.test.ts",
+    "../govern/revision-stock-wire.test.ts",
+    "../../../scripts/dev/p50-closure-live-probe.ts"
+  ],
+  "exclude": []
+}

@@ -1,6 +1,7 @@
 /** P50 F host kernel. Construct ONCE in the existing activation/client owner.
  * Consumes that owner's sole client, C/D/review/E. No hooks/timers/client/ledger
  * construction. Production wire, trusted binding and settings remain separate. */
+import { STOCK_ESTIMATE_PROFILE, type StockEstimateProfile } from "../jev/p50-estimate.js";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import type { MemoryWriteGate } from "../contracts.js";
@@ -58,6 +59,7 @@ import {
 
 export const REVISION_HOST_POLICY_VERSION = "p50-selection-v1/selector-v1/action-v2";
 export interface RevisionHostBinding {
+  readonly accountingProfile?: StockEstimateProfile;
   readonly registry: ClassifierRegistryLike & RevisionRegistryLike;
   readonly budgetMs: number;
   readonly maxOutputTokens: number;
@@ -162,6 +164,7 @@ function validBudget(client: JevClientHandle): boolean {
 export function verifyRevisionPairDirection(
   outcome: JevOutcome,
   expected: { readonly requestDigest: string; readonly inputDigest: string },
+  profile?: StockEstimateProfile,
 ): FreshPairDirection | undefined {
   if (
     !outcome.ok ||
@@ -173,25 +176,45 @@ export function verifyRevisionPairDirection(
   const s = outcome.sources[0]!,
     p = s.provenance,
     a = outcome.answers.revisionRelation;
+  const stock = profile === STOCK_ESTIMATE_PROFILE;
+  const identity = stock
+    ? !p.trusted &&
+      p.provider === "" &&
+      p.model === "" &&
+      p.routeIdentity === "unknown" &&
+      p.routeAliases.length === 0 &&
+      p.canonicalProvider === undefined &&
+      p.canonicalModel === undefined &&
+      p.adapterId === "p50-stock-estimate-v1" &&
+      p.chainVersion === "stock-estimate-v1"
+    : p.trusted &&
+      !!p.provider &&
+      !!p.model &&
+      /^[a-f0-9]{64}$/.test(p.routeIdentity) &&
+      p.routeAliases.includes(`${p.provider}/${p.model}`) &&
+      p.routeAliases.includes(p.requestChainId);
   if (
+    !identity ||
     s.questionIds.length !== 1 ||
     s.questionIds[0] !== "revisionRelation" ||
-    !p.trusted ||
-    !p.provider ||
-    !p.model ||
     !p.adapterId ||
     !p.chainVersion ||
     !p.requestChainId ||
     (p.canonicalProvider !== undefined && p.canonicalProvider !== p.provider) ||
     (p.canonicalModel !== undefined && p.canonicalModel !== p.model) ||
-    !/^[a-f0-9]{64}$/.test(p.routeIdentity) ||
-    !p.routeAliases.includes(`${p.provider}/${p.model}`) ||
-    !p.routeAliases.includes(p.requestChainId) ||
     p.requestDigest !== expected.requestDigest ||
     p.inputDigest !== expected.inputDigest ||
     !a ||
     a.type !== "choice" ||
     !["conflict", "supersedes", "unrelated"].includes(a.choice)
+  )
+    return undefined;
+  if (
+    stock &&
+    (Object.values(a.probabilities).some((p) => !Number.isFinite(p) || p < 0 || p > 1) ||
+      !Number.isFinite(a.confidence) ||
+      a.confidence < 0 ||
+      a.confidence > 1)
   )
     return undefined;
   const probability = a.probabilities[a.choice];
@@ -363,6 +386,8 @@ export function createRevisionHost(deps: RevisionHostDeps) {
     if (!binding || !current(batch, binding, generation, attempt)) return unavailable("pending");
     // Capture exact registry and request limits, not just a potentially mutable
     // binding container. In-place remaps revoke this execution as well.
+    const stock = binding.accountingProfile === STOCK_ESTIMATE_PROFILE;
+    const profile = binding.accountingProfile;
     const registry = binding.registry,
       maxOutputTokens = binding.maxOutputTokens,
       budgetMs = binding.budgetMs;
@@ -370,6 +395,7 @@ export function createRevisionHost(deps: RevisionHostDeps) {
     let execution: JobExecution | undefined, snapshot: Snapshot | undefined, page: SelectorPage | undefined;
     const isCurrent = () =>
       current(batch, binding, generation, attempt) &&
+      binding.accountingProfile === profile &&
       binding.registry === registry &&
       binding.maxOutputTokens === maxOutputTokens &&
       binding.budgetMs === budgetMs &&
@@ -544,6 +570,10 @@ export function createRevisionHost(deps: RevisionHostDeps) {
         return { ...unavailable("blocked-job"), batchId: jobId };
       }
       if (jobs.size >= 128) return unavailable("capacity");
+      if (stock && deps.client.claimStockJob?.(jobId) !== true) {
+        mark("blocked-job");
+        return { ...unavailable("blocked-job"), batchId: jobId };
+      }
       execution = { capUsd: batch.limits.jobCostCapUsd, binding, state: "running", generateClaims: 0 };
       jobs.set(jobId, execution);
       mark("in-flight");
@@ -602,7 +632,7 @@ export function createRevisionHost(deps: RevisionHostDeps) {
       }[] = [];
       // DISCOVERY: entire menu already frozen. Compute both expectations locally
       // before their dispatch. Source prepare owns its own R/C, never pre-ask it.
-      for (const pair of plan.pairs) {
+      const discover = async (pair: SelectorPlan["pairs"][number]) => {
         const l = raw.get(pair.sides[0].id)!,
           r = raw.get(pair.sides[1].id)!;
         const dtos = [revisionRelationContextForBlocks(l, r), revisionRelationContextForBlocks(r, l)] as const;
@@ -610,7 +640,7 @@ export function createRevisionHost(deps: RevisionHostDeps) {
         const outcomes: JevOutcome[] = [],
           fresh: (FreshPairDirection | undefined)[] = [];
         for (let i = 0; i < 2; i++) {
-          if (!isCurrent() || !budget(batch)) throw new Error("job unavailable");
+          if (!isCurrent() || (stock && !leaseValid()) || !budget(batch)) throw new Error("job unavailable");
           const out = await deps.client.ask({
             ...dtos[i]!,
             registry,
@@ -623,14 +653,17 @@ export function createRevisionHost(deps: RevisionHostDeps) {
           });
           if (!isCurrent() || !out.ok || !budget(batch)) throw new Error("relation failed");
           outcomes.push(out);
-          fresh.push(verifyRevisionPairDirection(out, expected[i]!));
+          const direction = verifyRevisionPairDirection(out, expected[i]!, profile);
+          if (stock && (!leaseValid() || !direction)) throw new Error("stock terminal relation failure");
+          fresh.push(direction);
         }
-        ordinary.push({
+        return {
           pair,
           outcomes: outcomes as [JevOutcome, JevOutcome],
           fresh: fresh as [FreshPairDirection | undefined, FreshPairDirection | undefined],
-        });
-      }
+        };
+      };
+      if (!stock) for (const pair of plan.pairs) ordinary.push(await discover(pair));
       // PREPARE everything, including all source R/C, before any save/commit.
       for (const source of plan.sourceRetires) {
         const f = frozen.get(rowKey(source.action))!,
@@ -639,12 +672,12 @@ export function createRevisionHost(deps: RevisionHostDeps) {
               (s) => rowKey({ action: "retire", target: s.old, context: s.survivor }) === rowKey(source.action),
             )!,
           );
-        if (!isCurrent()) throw new Error("stale");
+        if (!isCurrent() || (stock && !leaseValid())) throw new Error("stale");
         if (await suppressed(f, "supersedes")) {
           snapshot.sources.set(key, "dismissed");
           continue;
         }
-        if (!isCurrent()) throw new Error("stale");
+        if (!isCurrent() || (stock && !leaseValid())) throw new Error("stale");
         const result = leaseValid()
           ? await prepareRevisionProposal(f, {
               client: deps.client,
@@ -652,7 +685,8 @@ export function createRevisionHost(deps: RevisionHostDeps) {
               attempt: guardedAttempt,
               isSuppressed: suppressed,
               reason: "supersedes",
-              autoEnabled: deps.autoEnabled(),
+              ...(profile ? { accountingProfile: profile } : {}),
+              autoEnabled: !stock && deps.autoEnabled(),
             })
           : {
               kind: "ok" as const,
@@ -671,7 +705,8 @@ export function createRevisionHost(deps: RevisionHostDeps) {
         pending.push({ frozen: f, proposal: result.proposal, key, source: true });
       }
       let plannedGenerations = 0;
-      for (const item of ordinary) {
+      for (const initial of stock ? plan.pairs.map((pair) => ({ pair })) : ordinary) {
+        const item = stock ? await discover(initial.pair) : (initial as (typeof ordinary)[number]);
         const { pair } = item,
           outcome = selectPairOutcome(pair, snapshot.input.blocks, item.fresh);
         if (outcome.kind === "none") {
@@ -683,12 +718,12 @@ export function createRevisionHost(deps: RevisionHostDeps) {
           continue;
         }
         const f = frozen.get(rowKey(outcome.action))!;
-        if (!isCurrent()) throw new Error("stale");
+        if (!isCurrent() || (stock && !leaseValid())) throw new Error("stale");
         if (await suppressed(f, outcome.reason)) {
           snapshot.ordinary.set(pair.pairKey, "dismissed");
           continue;
         }
-        if (!isCurrent()) throw new Error("stale");
+        if (!isCurrent() || (stock && !leaseValid())) throw new Error("stale");
         const direction = f.target.id === pair.sides[0].id ? 0 : 1,
           fresh = item.fresh[direction]!;
         const dto = revisionRelationContextForBlocks(f.target, f.context),
@@ -714,6 +749,7 @@ export function createRevisionHost(deps: RevisionHostDeps) {
             isSuppressed: suppressed,
             ...(rel ? { relation: { kind: rel.kind, p: rel.p, outcome: item.outcomes[direction] } } : {}),
             reason: outcome.reason,
+            ...(profile ? { accountingProfile: profile } : {}),
             autoEnabled: false,
           });
           if (!isCurrent() || !budget(batch)) throw new Error("prepare failed");
@@ -744,7 +780,7 @@ export function createRevisionHost(deps: RevisionHostDeps) {
       let saved = 0,
         effects = 0;
       for (const p of pending) {
-        if (!isCurrent() || !budget(batch)) throw new Error("save revoked");
+        if (!isCurrent() || (stock && !leaseValid()) || !budget(batch)) throw new Error("save revoked");
         const result = await upsertRevisionSuggestion(
           mem,
           { frozen: p.frozen, proposal: p.proposal, origin: "p50-suggestion" },
@@ -816,7 +852,7 @@ export function createRevisionHost(deps: RevisionHostDeps) {
       // one actual/unknown effect; after that no model or second automatic write.
       const targets = new Set<string>();
       for (const [actionId, o] of [...owned].sort(([a], [b]) => compareRevisionKeys(a, b))) {
-        if (!isCurrent() || !leaseValid() || !deps.autoEnabled()) break;
+        if (stock || !isCurrent() || !leaseValid() || !deps.autoEnabled()) break;
         if (
           o.proposal.action !== "retire" ||
           !o.proposal.retireEvidence ||
@@ -839,7 +875,7 @@ export function createRevisionHost(deps: RevisionHostDeps) {
             runtime: () => ({
               plainMain: true,
               enabled: true,
-              autoEnabled: deps.autoEnabled(),
+              autoEnabled: !stock && deps.autoEnabled(),
               sessionEpoch: batch.directory.sessionEpoch,
               policyVersion,
               dateRuleVersion: "",

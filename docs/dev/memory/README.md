@@ -1476,3 +1476,96 @@ Web mem 独立结果从不依赖 recorder：history off 不构造 recorder；on 
 未对真实 Hub、用户数据/配置或运行中会话 reload；不做 LIVE/付费、安装、commit/push。
 未知不重试，无全局回滚；同步 I/O 不可抢占、同 uid syscall 间竞态、fsync 非掉电事务、SDK elsewhere
 flush 与单 activation 非绝对费用上限等既有限界保持。离线源码/组件闭环不能证明已部署。
+
+## #50 stock-estimate suggest-only 收口（2026-11-13，离线）
+
+**状态：READY_FOR_APPROVAL / LIVE NOT RUN。** 本节覆盖上文 stock 必须先满足 certified
+能力才可生成建议的阻塞，不覆盖任何 provider 认证、Q2 自动或部署证明。三个维度分报：
+
+| 维度            | 当前证据与状态                                                                                                                       |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| 源码与离线闭环  | 新 stock profile 经真实默认 resolver → wire/scopes/scheduler → 唯一 SDK client → D/C/review，离线 fake HTTP 验证；READY_FOR_APPROVAL |
+| 真实运行 / LIVE | NOT RUN；未读取真实密钥、用户数据或修改真实设置，未部署、reload、执行真实请求或付费                                                  |
+| 能力 / 财务认证 | 后端 identity UNKNOWN、服务端硬输出 cap NOT PROVEN、账单 UNKNOWN；本地 list-price estimate 不等于 invoice，Q2 自动不启用             |
+
+### 两个互斥合同与实际装配
+
+- `createSdkP50Binding` 保留原 certified 工厂语义（完整 classifier 链、已核输入/输出、来源与失败策略）。
+  新 `createStockEstimateP50Binding` 返回冻结的 `stock-estimate-v1 / suggest-only` profile；不是向旧
+  attestation 填假 `maxTokensEnforced:true`。`RegistryRevisionBinding` 判别联合禁止同时带估算与认证。
+- stock 只在原 activation 私有 resolver 内、原正预算/plain-main/scopes/current-owner 门通过后构造；
+  先查原 native port，invalid/ambiguous 不降级。无 native contract 时，只冻结当前 classifier 首档及
+  `predict.model.models` 首档（G/C 复用同一路由），不采用 session model、第二档或新默认值。
+  stock profile 的普通无 job Jev 保留完整 classifier 链，不裁剪共享 config；certified 仍核全链。
+  同 activation 重用稳定 binding，registry/provider/method/model/价目/model-source 改变撤权，不重开旧 job。
+- 没有新增 setting、审计/提案/wire schema 或默认路由。`enabled=true / auto=false / jobCostCapUsd=0`
+  保持；cap0 不构造 P50 能力，不代表授权付费。stock 在 wire 与 host 两处有效 auto 均 false；
+  原 `independentCoverageSources`、E 的自动来源校验、历史恢复权限和 human-confirmed 链不变。
+- 默认 stock 不推断 streaming proxy 能力：配置 proxy 时仍需 trusted CODE 给出精确 capability，
+  不能清 proxy 后直连。支持的 transport 仍走同 SDK/auth/fetch 注入口，无第二 HTTP client/ledger/pool。
+
+### 诚实估算、来源与计账
+
+`p50-estimate.ts` 使用版本 `p50-utf8-div3-margin2-v1` / `pi-1.5-systemone/openai-text-v1`：
+对完整允许 payload 的 JSON 做 `2 * ceil(UTF8Bytes / 3) + 256`。这是**本地估算与工程裕量**，
+不是数学 token 上界、audited tokenizer 或 server hidden-template 认证。serializer 有节点/深度/
+131072B 界，拒 getter/toJSON/cycle/超界而不截断。R 报价与最终 state/questions/model 模板相同，
+bool→noul；G/C 报价保守包含可选 `store:false` 与 `stream_options` framing，最后 allowlist/recount
+允许它们缺省，但不接受其它 sampling/cache/reasoning/tool 模板或未知字段。报价前冻结，HTTP 末跳
+复算超预留、模板/模型/引用漂移均拒绝，不补预留。
+
+R 输出额度 128、G/C 384 均为 **local allowance / serverEnforced:false**。R 不发非 stock 伪 cap；
+G/C 设置 SDK 最后 `max_tokens` 请求提示，不证明服务端执行。1024B 正文 validator 是独立门。
+raw/result/request alias/p50 自签字段均不能授 stock 实际来源；R/G/C provenance 始终
+`trusted:false, provider:"", model:"", routeIdentity:"unknown", routeAliases:[]`，requested 只诊断。
+
+费用复用 A 原账本、semaphore、原 Promise settle/zombie/late adjustment。有效 raw usage × catalog
+只是 list estimate，usage 缺失/损坏（含 SDK 默认0）按 reserve，完整合法零计数可记0，但 **billing
+始终 UNKNOWN**。观察到超 reserve 全额入账并闭锁后续两个通道；不裁到预算，不伪造 server enforced。
+
+**保守预留计账，不实现退款路径，也不承诺「HTTP 前拒绝释放未用预留」**：
+
+| 拒绝阶段                                         | `client.calls` 增量 | 记账                                                   |
+| ------------------------------------------------ | ------------------- | ------------------------------------------------------ |
+| prepare/quote/输入准入拒绝，尚未进入 SDK attempt | 0                   | 0，未开始 attempt 的 reservation capacity 按原路径释放 |
+| SDK attempt 已开始，onPayload/末跳拒绝，HTTP=0   | 1                   | 未知 usage 按本 attempt reserve 入账                   |
+| HTTP 后失败 / 输出非法                           | 1                   | 有效 usage 全额计价，否则 reserve；不会退款或重发      |
+
+这是单 client 生命周期内的条件性本地准入，不保证跨进程、server 超报或未知 invoice 的绝对金额。
+
+### 终止错误、合法 unknown 与不可重执行
+
+stock host 对完整 R 的单问题/单source/完整answer/有限概率与独立 DTO digest 全校验，仅不要求
+certified actual identity；原严格 parser 默认语义不变。HTTP/非法 JSON/validator/坏 digest/lease 丢失/
+撤权均终止**整个 job**，不保存失败项，不发后续请求或处理同页后续 pair。为保持这个边界，stock
+在首模型前仍冻结整个固定菜单，但各 pair 的 R1/R2/G/C 串行；certified 保留原全 discovery→prepare。
+D 对 stock 在每 await 后把 lease 丢失视为终止，C error 不再冒充合法 verdict unknown；合法 unknown
+可保存建议，但不发布 complete coverage / auto 资格。全部 prepare 成功才经原 C barrier 保存 review，
+只保存 prepared 与精确 before bytes，不写 target/context。无自动执行效果冒充审计成功。
+
+host 在首个 R 前从**原 client 生命周期**领取 bounded 128 项不可淘汰 job claim。同一执行 R1/R2/G/C
+允许，失败后即使预算有余、新建 host 也不能重领；reset 不清 claim，没有持久 fence，**不承诺跨进程
+防重执行**。named stock 每高层最多1 provider attempt、单档、无 context split/fallback、SDK retries=0。
+R 与 G/C direct/支持的 proxy 最后 fetch 均先执行可重入 callback，再做 factory/client 私有纯 witness
+与 signal 检查，之后立即调用捕获的既有 fetch；不在检查后再调 host callback。
+
+### 离线证据与 LIVE 认证桥缺口
+
+- `revision-stock-wire.test.ts`：实际默认装配、2R+G+C、prepared audit/raw 零变更、auto=true 仍只建议；
+  C500/非法JSON、G validator/length/lease、R1坏digest、下一pair零HTTP/零save、同client fresh-host拒重领，
+  direct/proxy payload callback 后撤权/源模型改变零底层HTTP，prepare/payload/HTTP三阶段实际 calls/费用。
+- `p50-stock-binding.test.ts`、`p50-estimate.test.ts`：稳定首档绑定、native invalid 不降级、certified全链、
+  UTF8/emoji/escape/模板/越界/无 getter 执行。既有 budget/fallback/provenance/SDK/off 与 C/D/E/integration 回归保留。
+- `scripts/dev/p50-closure-live-probe.ts` 默认拒绝执行，审批绑定原 manifest bytes SHA256；read-only 校验
+  私有 root/物理解析路径在任何 runner/数据创建前，覆盖或清除 ARMORY_MEMORY_ROOT/CC_PROJECTS_ROOT，
+  不复制继承凭据/env。受控 host-runner seam 的 fakeHTTP 验收使用真实 SDK/wire/D/C/audit，不伪造结果；
+  exact R/G hash、C 估算包络、最多4请求、额外/漂移请求与超包络均拒绝。该 seam 是 trusted CODE，不是 sandbox。
+- **root 已裁定本包不实现 CLI 自装真实认证**：即使 manifest 合格仍返回 `AUTH_UNAVAILABLE`，C13 NOT RUN。
+  认证桥在未来 LIVE 审批后另起小包，复用 pi 既有凭据加载/请求时解析；probe 不自读 key/auth 文件。
+  不存在因 manifest hash 正确就自动获付费/网络权限的路径。
+- 专用类型门（含 estimate+`maxTokensEnforced:true` / `serverEnforced:true` 等负向用例）：
+  `timeout 180s node node_modules/typescript-7/bin/tsc --noEmit -p tests/memory/jev/p50-closure.tsconfig.json`。
+  Vitest 擦除类型不代替此门。新 fakeHTTP 用例 tier1，无外网、real provider 或付费请求。
+
+未验证：真实 provider/auth/价目有效性、tokenizer 准确率、server 输出硬限、backend identity/Q2 independence、
+invoice、生产部署与物理UI。既有同步 syscall 不可抢占、同uid竞态、fsync非掉电事务限界不变。

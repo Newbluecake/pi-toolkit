@@ -1093,7 +1093,9 @@ arch r5 §7.2 的 X1–X6：
 | 12  | 离线门禁调参归属        | P5a/P6b 常量声明、PG 表格与「不得只改评测脚本」、P6a G3 八用例、V38                             | G1 → P5a-fix，G2 → P6b-fix，重跑 PG；G3 3a/3b/3c                                                    |
 | 13  | 门禁口径与旧验收        | P2 冻结面与门禁、P5a 文件域「tidy/command.ts 的唯一改动」、V05/V06/V15/V30/V31                  | 零 diff 限 P2 提交范围；P5a 唯一一处 tidy 改动；旧验收换成新模型验收                                |
 
-## 后续子包：#50 增量后台修正（未启动）
+## 后续子包：#50 增量后台修正（历史设计；当前状态见下）
+
+> 2026-11-13：原 scheduler/client/D/C/E/wire/native/Web/startup 已离线实现；本轮互斥 stock-estimate suggest-only 为 READY_FOR_APPROVAL / LIVE NOT RUN。源码离线闭环、真实运行、能力/账单认证三维分报见 [memory README 最新节](../memory/README.md#50-stock-estimate-suggest-only-收口2026-11-13离线) 和 [P50 当前合同](p50-design.md)。Q1/Q2/Q3 已批准不代表 auto 已打开，默认仍 enabled=true/auto=false/jobCostCapUsd=0；stock identity unknown、serverEnforced:false、billing UNKNOWN。CLI 认证桥另待 LIVE 审批，本包无真实请求。
 
 #50 是 #36 子项，保留编号与独立验收；#36 原 P5b/P7 继续收尾，不得用 #50 掩盖原欠账。共同前置：优先修复 #66（建议覆盖）和 #67（判定与提交 rev 不一致），其次修复 #68（Jev 超时 abort 与队列上限），作为作业级 abort 的基础。三项前置已于 2026-11-08 修完（`c3364fca`、`3be7522d`、`50cbb50b`）；权限表已由 root 于 2026-11-08 拍板（见下）。复用边界见 arch §4.5.1。
 

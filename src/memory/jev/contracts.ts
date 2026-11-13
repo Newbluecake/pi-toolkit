@@ -14,6 +14,8 @@
 // pi-ai's classifier API (jev-arch §5.1) so the jev directory never has to
 // import pi. No module-scope mutable state (I4).
 
+import type { StockEstimateProfile } from "./p50-estimate.js";
+
 import type { ProxyStreamFetch } from "./proxy-stream-fetch.js";
 import type { MemoryWriteGate } from "../contracts.js";
 import type { IncrementalDirectory } from "../govern/incremental.js";
@@ -424,7 +426,8 @@ export interface CanonicalClassifyRoute {
 }
 
 export interface ClassifyBounds {
-  /** Verified bound including provider formatting/prompt overhead, not bytes/4. */
+  readonly accountingProfile?: StockEstimateProfile;
+  /** Certified bound, or local estimate ONLY when accountingProfile is stock-estimate-v1. */
   readonly maxInputTokens: number;
   readonly maxOutputTokens: number;
   readonly priceUsdPerMillion: { readonly input: number; readonly output: number };
@@ -439,8 +442,9 @@ export interface ClassifyBounds {
  * A provider ignoring bounds can still overbill: client records all actual cost.
  * resolveRoute must use canonical registry/adapter evidence, never simply copy
  * result.provider/model or split the requested id. Missing proof => untrusted.
- * No default implementation: passing an arbitrary maxTokens option to the SDK
- * is NOT proof that the provider enforces it. */
+ * The explicit stock-estimate profile is a separate suggest-only accounting
+ * contract: its numeric allowances are LOCAL ESTIMATES, serverEnforced:false.
+ * Passing maxTokens is NOT proof that the provider enforces it. */
 export interface ControlledClassifyTransport {
   prepare(input: {
     readonly registry: ClassifierRegistryLike;
@@ -453,7 +457,11 @@ export interface ControlledClassifyTransport {
         readonly adapterId: string;
         readonly chainVersion: string;
         readonly bounds: ClassifyBounds;
-        dispatch(opts: { readonly signal: AbortSignal; readonly fetch?: FetchLike }): Promise<ClassifyResult>;
+        dispatch(opts: {
+          readonly signal: AbortSignal;
+          readonly fetch?: FetchLike;
+          readonly terminalCurrent?: () => boolean;
+        }): Promise<ClassifyResult>;
         /** When supplied, raw evidence replaces SDK default identity/usage. */
         resultEvidence?(result: ClassifyResult): RevisionResultEvidence;
         resolveRoute(result: ClassifyResult): CanonicalClassifyRoute | undefined;
@@ -594,14 +602,13 @@ export interface ControlledRevisionTransport {
  * heuristic. maxTokensEnforced certifies the actual provider serializer and
  * no-hidden-retry behavior, not just the presence of an SDK option. Unknown
  * capabilities must not be bound. Production conformance is still required. */
-export interface RegistryRevisionBinding {
+interface RegistryRevisionBindingBase {
   readonly streamingProxy?: RevisionStreamProxyCapability;
   readonly registry: RevisionRegistryLike;
   readonly requestChainId: string;
   readonly model: object;
   readonly adapterId: string;
   readonly chainVersion: string;
-  readonly maxTokensEnforced: true;
   /** Verified last-hop onPayload support for this exact provider adapter. */
   readonly outputLimitField: "max_tokens" | "max_completion_tokens" | "max_output_tokens";
   readonly maxOutputTokens: number;
@@ -625,6 +632,12 @@ export interface RegistryRevisionBinding {
   ): boolean;
   resolveRoute(result: RevisionTransportResult): CanonicalClassifyRoute | undefined;
 }
+/** Mutually exclusive assurances: an estimate can NEVER attest a server hard cap. */
+export type RegistryRevisionBinding = RegistryRevisionBindingBase &
+  (
+    | { readonly maxTokensEnforced: true; readonly accountingProfile?: never }
+    | { readonly maxTokensEnforced?: never; readonly accountingProfile: StockEstimateProfile }
+  );
 export interface RevisionRequestBudget {
   readonly registry: RevisionRegistryLike;
   readonly mode: "sync" | "background";
@@ -1114,6 +1127,8 @@ export type JevOutcome =
     };
 
 export interface JevUsage {
+  readonly billingStatus?: "UNKNOWN";
+  readonly priceBasis?: "catalog-list-estimate";
   readonly costUsd: number;
   readonly calls: number;
   /** P50 only; absent off, so legacy reports remain byte-identical. */

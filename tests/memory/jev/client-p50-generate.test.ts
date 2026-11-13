@@ -94,7 +94,7 @@ function harness(
     ) => Promise<RevisionTransportResult> | RevisionTransportResult;
     quote?: RegistryRevisionBinding["quoteInput"];
     route?: (chain: string, result: RevisionTransportResult) => CanonicalClassifyRoute | undefined;
-    bindingPatch?: Partial<RegistryRevisionBinding>;
+    bindingPatch?: Partial<Extract<RegistryRevisionBinding, { readonly maxTokensEnforced: true }>>;
   } = {},
 ) {
   const calls: {

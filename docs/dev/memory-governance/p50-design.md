@@ -1,7 +1,17 @@
 # #50 增量后台修正设计稿（v4）
 
 > 基线：`9e1a83d0`；2026-11-09。本文只设计 #50，不修改源码、测试或 fixture。
-> Q2、Q3 已于 2026-11-09 获批；Q1 仍为**有条件待批**。Q1 未批准前不得实现或接线 generate，更不得提交模型生成正文；Q2/Q3 不构成对 generate 的独立授权。
+> **当前状态（2026-11-13）：READY_FOR_APPROVAL / LIVE NOT RUN。** Q1/Q2/Q3 均已获批（Q1 的 allowlist/redact/validator 已落地）；下文 v4 的待批/未接线措辞只记历史，不代表当前源代码。
+> 本轮是互斥 `stock-estimate-v1` 的 suggest-only 离线收口，不是 certified stock-provider 认证或 Q2 自动启用。完整现状/测试/限界见 [memory README 最新节](../memory/README.md#50-stock-estimate-suggest-only-收口2026-11-13离线)。
+> 三维分报：源码/离线闭环 READY_FOR_APPROVAL；真实 LIVE/部署 NOT RUN；backend identity/server hard cap/invoice NOT PROVEN（billing UNKNOWN）。`enabled=true / auto=false / jobCostCapUsd=0` 及真实设置均不改。
+
+### 2026-11-13 收窄合同（优先于下文 certified 强合同）
+
+- §4.1/4.3：保留 certified 工厂/严格来源校验；另加 stock estimate，只由原 wire activation 构造，R 冻结 classifier 首档，G/C 冻结 predict.model.models 首档，不增加 setting。普通无 job Jev 仍用原完整链。
+- §7：完整 JSON UTF8/3×2+256 是本地估算裕量，不是 tokenizer/template 上界；R128、G/C384 是 local allowance，`serverEnforced:false`。G/C `max_tokens` 仅请求提示，R不发伪 cap；来源 unknown，Q2/E 自动规则不放宽，账单 UNKNOWN。
+- §7：不再承诺 HTTP 前拒绝退款。prepare 失败未开始 SDK attempt 是 calls0/成本0；SDK attempt 一旦开始即 calls1，onPayload/HTTP 前拒绝且未知 usage 仍按 reserve。HTTP 后错误同样 usage 或 reserve；超 reserve 全额计并闭锁。
+- §9：新增 stock binding/estimate/wire/fakeHTTP probe/负向类型门，原 certified/budget/queue/late/off/C/D/E/native/Web/startup/proxy 回归。stock 每 pair 串行；任何终止错误停整 job，不保存/续 pair，合法 C unknown 才可建议。client bounded128 claim 防同 client fresh-host重放，不承诺跨进程 fence。
+- §10/附录：独立 probe 默认拒绝，SHA256审批、物理隔离/环境覆盖、4请求/额外请求/C包络 fail-closed；root 明确本包不装真实 auth bridge，即使合法 manifest 仍 `AUTH_UNAVAILABLE`。认证桥留待 LIVE 用户审批后另包复用 pi 既有凭据路径；C13 NOT RUN，绝不由离线 PASS 冒充 LIVE、账单或生产上线。
 
 ## 1. 一页摘要
 
@@ -545,7 +555,7 @@ releaseClientAttempt(reservation: ClientAttemptReservation): void;
 
 有界队列、zombie 阻止 failover、calls 改按 dispatch 计数、费用改预留结算，都可能改变既有 classify 的可观察行为，不能只凭“未新增 hook”宣称 P50 off 满足 I9。门控如下：
 
-- **P50 off（`memory.governance.incremental.enabled=false` 或未接 owner）时，classify 保留原可观察行为**：无界队列、超时后按原语义 failover、原 calls 计数口径、原费用结算口径、原工具回显均不变；P50 的新预算通道不被 classify 触及。
+- **P50 off（`memory.incremental.enabled=false` 或未接 owner）时，classify 保留原可观察行为**：无界队列、超时后按原语义 failover、原 calls 计数口径、原费用结算口径、原工具回显均不变；P50 的新预算通道不被 classify 触及。
 - **P50 on 时**，classify 与 generate 才共同进入新预算通道（有界队列、dispatch 前复核、zombie 门、dispatch 计数、预留结算）。
 - 若要把共享 client 行为改造独立于 P50 全局启用，必须另行申报契约变更，不得隐含在“P50 off”里。
 - 除既有 golden 外，新增 **“Jev 开、P50 关”对照验收**：饱和队列、超时 failover、调用/费用上限、工具回显四项与 P50 未引入前的既有行为一致；P50 on 后再验证新通道生效。
@@ -599,7 +609,7 @@ releaseClientAttempt(reservation: ClientAttemptReservation): void;
 - **关系恢复**：继续 `/mem restore --block <id>`；本版 archived 只建议，不级联恢复其他块。
 - **批次恢复**：按 audit 逐动作逆序执行，不提供跨文件“一键原子回滚”假象。
 - **全局关闭**：`memory.governance.enabled=false` 停止 sweep 写盘、P50 生成/自动动作与建议；新增 P50 设置关闭必须满足 I9 byte-identical。
-- **紧急停止自动提交**：`memory.governance.incremental.auto=false`（建议默认 false）只保留建议。Q1 未批准时 generate 永远不可用；Q2/Q3 获批不覆盖 Q1 与该开关。
+- **紧急停止自动提交**：`memory.incremental.auto=false`（建议默认 false）只保留建议。Q1 已批准；该开关仍不授权 unknown provenance 的 stock 自动动作（最新合同见页首）。
 - **代码回滚**：关闭设置后保留每动作审计与快照，不删除用户唯一恢复证据。
 
 已知取舍：zombie>0 停新准入可能让不遵守 abort 的 provider 使本 activation 后续调用不可用，但避免实际 provider 并发失控；真实费用可能超估算 cap，选择如实入账并停后续而不是裁账；directory fsync 增加写成本，仍是进程崩溃顺序保证而非所有掉电场景的绝对证明。

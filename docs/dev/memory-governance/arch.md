@@ -1232,7 +1232,11 @@ export function planSweep(
 - **中止**：`session_shutdown`（含 reload）时 abort，每个操作之间检查 signal。
 - **闸门**：每个写操作之前调用 `memoryWriteGate.check(memDir)`（§4.7）。
 
-#### 4.5.1 #50 增量后台修正（子项，未启动）
+<a id="p50-current-state"></a>
+
+#### 4.5.1 #50 增量后台修正（子项，历史设计；当前状态见下）
+
+> 2026-11-13：原 scheduler/client/D/C/E/wire/native/Web/startup 已离线实现；本轮互斥 stock-estimate suggest-only 为 READY_FOR_APPROVAL / LIVE NOT RUN。源码离线闭环、真实运行、能力/账单认证三维分报见 [memory README 最新节](../memory/README.md#50-stock-estimate-suggest-only-收口2026-11-13离线) 和 [P50 当前合同](p50-design.md)。Q1/Q2/Q3 已批准不代表 auto 已打开，默认仍 enabled=true/auto=false/jobCostCapUsd=0；stock identity unknown、serverEnforced:false、billing UNKNOWN。CLI 认证桥另待 LIVE 审批，本包无真实请求。
 
 #50 合并为 #36 的子项，保留编号与独立验收。#36 已覆盖策略、确定性执行、同步关系判定和周期建议；#50 只新增增量聚合调度、模型修订正文及受控提交/撤销：
 
@@ -1699,7 +1703,7 @@ blocks 目录下 `/mem tidy`（交互式和 `--batch`）直接返回 `not availa
 
 ### 9.2 需用户确认的问题
 
-**#36 原范围无待确认项。** #50 的六类权限（用户令、删除、跨主题合并、低置信冲突、expires、跨 project/Hub）仍待正式设计时通过 `ask_user` 确认；见 [§4.5.1](#451-50-增量后台修正子项未启动) 与 [plan 权限待确认表](plan.md#权限待确认表)。 r5 的 13 条为 root 裁定，全部是实现层收紧，未改变用户已定事项。r4 新增的 `memory.migrate.auto` 默认值为 true，保持了用户定的惰性迁移，只作为运维暂停开关，不改变任何已定事项；其余改动都是对评审意见的实现层修订。已定项落点：r1 Q1→§3.3、Q2→§7.1、Q3/Q4/Q7/Q10→§4.3、Q5→§5.5、Q6→§5.4、Q8→§4.3.1、Q9→§6.5；r2 N1→§3.2.3/§3.3.3、N2→§5.4。
+**#36 原范围无待确认项。** 下述 #50 权限待确认表是历史记录，现行 Q1/Q2/Q3 批准与收窄 stock-estimate 合同以 [P50 当前状态](p50-design.md) 为准；见 [§4.5.1](#p50-current-state) 与 [plan 权限待确认表](plan.md#权限待确认表)。 r5 的 13 条为 root 裁定，全部是实现层收紧，未改变用户已定事项。r4 新增的 `memory.migrate.auto` 默认值为 true，保持了用户定的惰性迁移，只作为运维暂停开关，不改变任何已定事项；其余改动都是对评审意见的实现层修订。已定项落点：r1 Q1→§3.3、Q2→§7.1、Q3/Q4/Q7/Q10→§4.3、Q5→§5.5、Q6→§5.4、Q8→§4.3.1、Q9→§6.5；r2 N1→§3.2.3/§3.3.3、N2→§5.4。
 
 ---
 

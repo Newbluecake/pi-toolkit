@@ -11,6 +11,7 @@
 //
 // Pi-free root.
 
+import { STOCK_ESTIMATE_PROFILE, type StockEstimateProfile } from "./p50-estimate.js";
 import { createHash } from "node:crypto";
 import { systemClock } from "../../core/clock.js";
 import { clampSpanMs } from "../../core/deadline.js";
@@ -172,6 +173,8 @@ function capCp(text: string, max: number): string {
 }
 
 export interface P50ClientCapabilities {
+  readonly accountingProfile?: StockEstimateProfile;
+  readonly classifiers?: readonly string[];
   readonly transport: ControlledClassifyTransport;
   readonly revision: {
     readonly transport: ControlledRevisionTransport;
@@ -213,6 +216,7 @@ export type JevClientHandle = JevClient & {
   generateRevision(req: RevisionGenerateRequest): Promise<RevisionGenerateResult>;
   judgeRevisionCoverage(req: RevisionCoverageRequest): Promise<RevisionCoverageResult>;
   usage(): JevUsage;
+  claimStockJob?(jobId: string): boolean;
   dispose(): void;
   reserveClientAttempt(input: ClientAttemptBudgetInput): ClientAttemptReservation | undefined;
   /** Finalizes from original provider observations; no caller-supplied usage. */
@@ -249,6 +253,8 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
   // A reservation covers a complete failover/context-split plan; each actual
   // dispatch consumes one call and one slice. Original promises alone settle
   // slices; a high-level race may only estimate them, never release them.
+  const stockJobClaims = new Set<string>();
+  let stockObserved = false;
   let disposed = false;
   const lifecycle = new AbortController();
   // One observed dynamic-capability epoch, not a model/fee registry. Queued
@@ -773,19 +779,24 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
   function planClassify(
     req: JevRequest,
     transport: ControlledClassifyTransport | undefined,
+    single = false,
   ): Map<string, Planned[]> | undefined {
     if (transport === undefined) return undefined;
     const plans = new Map<string, Planned[]>();
-    for (const id of deps.config.classifiers) {
+    for (const id of single ? deps.config.classifiers.slice(0, 1) : deps.config.classifiers) {
       const { provider, model: modelId } = splitId(id);
       const model = req.registry.getModelOfType?.("classifier", provider, modelId);
       if (model === undefined) continue;
       const entries = Object.entries(req.questions);
       const mid = Math.ceil(entries.length / 2);
-      const batches = [
-        req.questions,
-        ...[entries.slice(0, mid), entries.slice(mid)].filter((h) => h.length > 0).map((h) => Object.fromEntries(h)),
-      ];
+      const batches = single
+        ? [req.questions]
+        : [
+            req.questions,
+            ...[entries.slice(0, mid), entries.slice(mid)]
+              .filter((h) => h.length > 0)
+              .map((h) => Object.fromEntries(h)),
+          ];
       const planned: Planned[] = [];
       for (const questions of batches) {
         // Freeze exactly what the adapter sees, before queue/availability awaits.
@@ -1007,6 +1018,7 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
     state: ReservationState,
     timeoutMs: number,
     signal: AbortSignal,
+    snapshot?: DynamicSnapshot,
   ): Promise<
     | { ok: true; result: ClassifyResult; provenance: ClientProvenance; costUsd: number }
     | { ok: false; grade: "unavailable" | "transient" | "context" | "aborted" | "budget"; errorMessage: string }
@@ -1015,8 +1027,22 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
       state,
       plan.cost,
       (signal) => {
-        const fetchFn = deps.config.proxy === "" ? undefined : makeFetch(deps.config.proxy);
-        return () => plan.prepared.dispatch({ signal, ...(fetchFn === undefined ? {} : { fetch: fetchFn }) });
+        const config = deps.config,
+          proxy = config.proxy;
+        const fetchFn = proxy === "" ? undefined : makeFetch(proxy);
+        return () =>
+          plan.prepared.dispatch({
+            signal,
+            ...(fetchFn === undefined ? {} : { fetch: fetchFn }),
+            terminalCurrent: () =>
+              !disposed &&
+              !lifecycle.signal.aborted &&
+              !signal.aborted &&
+              (plan.prepared.bounds.accountingProfile !== STOCK_ESTIMATE_PROFILE ||
+                (revisionDataField(config, "proxy") === proxy &&
+                  (snapshot === undefined ||
+                    (dynamicCapability === snapshot.capability && dynamicEpoch === snapshot.epoch)))),
+          });
       },
       (result) =>
         plan.prepared.resultEvidence === undefined
@@ -1046,7 +1072,11 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
     if (deps.config.classifiers.length === 0) return fail("off", "no classifiers configured");
     let plans: ReturnType<typeof planClassify>;
     try {
-      plans = planClassify(req, transport);
+      plans = planClassify(
+        req,
+        transport,
+        fallback?.capability?.accountingProfile === STOCK_ESTIMATE_PROFILE && req.jobId !== undefined,
+      );
     } catch {
       plans = undefined;
     }
@@ -1055,6 +1085,8 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
       if (fallback !== undefined && req.jobId === undefined) return askDynamicFallback(req, fallback);
       return fail("unavailable", "revision-unavailable: controlled classify bounds/quote unavailable");
     }
+    const single = fallback?.capability?.accountingProfile === STOCK_ESTIMATE_PROFILE && req.jobId !== undefined;
+    if (single) stockObserved = true;
     const all = [...plans.values()].flat();
     const reservation = reserveClientAttempt({
       mode: req.mode,
@@ -1118,6 +1150,7 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
             state,
             Math.min(remaining, Math.max(1, Math.ceil(totalBudgetMs / 2))),
             combined.signal,
+            fallback,
           );
           if (attempt.ok) {
             const answered = Object.keys(plan.context.questions).filter(
@@ -1128,6 +1161,7 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
           } else {
             if (attempt.grade === "budget" || attempt.grade === "aborted")
               return fail(deadlineElapsed ? "timeout" : attempt.grade, attempt.errorMessage);
+            if (single) return fail("all-failed", attempt.errorMessage);
             if (attempt.grade === "context" && i === 0) {
               attempts = candidates.length;
               continue;
@@ -1188,6 +1222,8 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
     } catch {
       return unavailable;
     }
+    const single = snapshot?.capability?.accountingProfile === STOCK_ESTIMATE_PROFILE && req.jobId !== undefined;
+    if (single) stockObserved = true;
     const revision = snapshot === undefined ? deps.p50?.revision : snapshot.capability?.revision;
     const streaming = revision?.transport.streamingProxy;
     const transport = revision?.transport;
@@ -1239,7 +1275,7 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
       digests = revisionRequestDigests(preparedInput.outbound, req.maxOutputTokens);
       const ids = purpose === "generate" ? revision.models : revision.coverageModels;
       if (ids.length === 0 || ids.length > 4 || new Set(ids).size !== ids.length) return unavailable;
-      for (const id of ids) {
+      for (const id of single ? ids.slice(0, 1) : ids) {
         if (!/^[^/\s]+\/[^\s]+$/.test(id)) return unavailable;
         // Final payload boundary: the only adapter input is a frozen allowlist
         // whose bodies/section were just passed through redactForJev. The raw
@@ -1373,14 +1409,17 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
           combined.signal,
         );
         if (!attempt.ok) {
-          if (attempt.grade === "budget" || attempt.grade === "aborted" || zombies > 0) return unavailable;
+          if (single || attempt.grade === "budget" || attempt.grade === "aborted" || zombies > 0) return unavailable;
           continue;
         }
         // Lost authority never becomes a successful body/provenance or unlocks
         // failover. Original-promise fees have already settled in A.
         if (!revisionCurrent() || disposed || combined.signal.aborted) return unavailable;
         const result = attempt.value;
-        if (result.stopReason !== "stop") continue;
+        if (result.stopReason !== "stop") {
+          if (single) return unavailable;
+          continue;
+        }
         const text = revisionResponseText(result);
         const provenance = resultProvenance(
           plan.prepared,
@@ -1535,6 +1574,12 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
   }
 
   return {
+    claimStockJob(jobId) {
+      if (!p50 || disposed || !/^[a-f0-9]{64}$/.test(jobId) || stockJobClaims.has(jobId) || stockJobClaims.size >= 128)
+        return false;
+      stockJobClaims.add(jobId);
+      return true;
+    },
     status: () => currentStatus(),
     generateRevision: (req) => runRevision(req, "generate") as Promise<RevisionGenerateResult>,
     judgeRevisionCoverage: (req) => runRevision(req, "coverage") as Promise<RevisionCoverageResult>,
@@ -1556,6 +1601,9 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
         if (zombies > 0 || budgetExhausted) return fail("budget", "outstanding zombie or exhausted budget");
         if (deps.p50?.current === undefined) return askBudgeted(req, deps.p50?.transport);
         const snapshot = dynamicSnapshot(req.registry);
+        // Stock participates only in named P50; ordinary Jev keeps its full original chain.
+        if (snapshot.capability?.accountingProfile === STOCK_ESTIMATE_PROFILE && req.jobId === undefined)
+          return askDynamicFallback(req, snapshot);
         if (snapshot.capability) return askBudgeted(req, snapshot.capability.transport, snapshot);
         // A P50 job must never escape the bounded accounting/transport path.
         if (req.jobId !== undefined) return fail("unavailable", "revision-unavailable: trusted binding missing");
@@ -1573,6 +1621,7 @@ export function createJevClient(deps: CreateJevClientDeps): JevClientHandle {
       return {
         costUsd: usageCostUsd,
         calls: usageCalls,
+        ...(stockObserved ? { billingStatus: "UNKNOWN" as const, priceBasis: "catalog-list-estimate" as const } : {}),
         ...(p50
           ? {
               budget: {
@@ -1911,7 +1960,11 @@ export function createRegistryRevisionTransport(
       const complete = input.registry.complete;
       if (
         complete === undefined ||
-        b.maxTokensEnforced !== true ||
+        !(
+          (b.maxTokensEnforced === true && b.accountingProfile === undefined) ||
+          (b.maxTokensEnforced === undefined && b.accountingProfile === STOCK_ESTIMATE_PROFILE)
+        ) ||
+        (b.accountingProfile === STOCK_ESTIMATE_PROFILE && terminalBindingCurrent === undefined) ||
         (b.streamingProxy !== undefined &&
           (!sharedStreaming ||
             b.streamingProxy.registry !== input.registry ||
@@ -1937,6 +1990,7 @@ export function createRegistryRevisionTransport(
       const maxTokens = input.maxOutputTokens;
       // Snapshot quote, not a mutable host price/bound object surviving a queue.
       const bounds = deepFreeze({
+        ...(b.accountingProfile ? { accountingProfile: b.accountingProfile } : {}),
         maxInputTokens: quote.maxInputTokens,
         maxOutputTokens: maxTokens,
         priceUsdPerMillion: { input: quote.priceUsdPerMillion.input, output: quote.priceUsdPerMillion.output },
@@ -1960,7 +2014,8 @@ export function createRegistryRevisionTransport(
           let requests = 0;
           let payloadVerified = false;
           const stream = b.streamingProxy;
-          const streamFetch = opts.fetch;
+          const stock = b.accountingProfile === STOCK_ESTIMATE_PROFILE;
+          const streamFetch = opts.fetch ?? (stock ? globalThis.fetch : undefined);
           const streamProxy = stream?.proxy;
           const streamCheck = stream?.isCurrent;
           const guardedFetch: typeof streamFetch =
@@ -1970,7 +2025,7 @@ export function createRegistryRevisionTransport(
                   // ALL reentrant callbacks precede the terminal pure guard.
                   // In particular, never call streamCheck again after client
                   // current(): it can revoke dynamic proxy/cap authority too.
-                  const streamLive = streamCheck?.call(stream) === true;
+                  const streamLive = stream === undefined ? stock : streamCheck?.call(stream) === true;
                   const clientLive = opts.isCurrent === undefined || opts.isCurrent() === true;
                   const bindingLive = terminalBindingCurrent === undefined || terminalBindingCurrent() === true;
                   const clientTerminal = opts.terminalCurrent === undefined || opts.terminalCurrent() === true;
@@ -1983,11 +2038,12 @@ export function createRegistryRevisionTransport(
                     !clientTerminal ||
                     opts.signal.aborted ||
                     revisionDataField(input.registry, "complete") !== complete ||
-                    revisionDataField(stream, "fetch") !== streamFetch ||
-                    revisionDataField(stream, "proxy") !== streamProxy ||
-                    revisionDataField(stream, "isCurrent") !== streamCheck ||
-                    revisionDataField(stream, "registry") !== input.registry ||
-                    revisionDataField(stream, "chainVersion") !== b.chainVersion
+                    (stream !== undefined &&
+                      (revisionDataField(stream, "fetch") !== streamFetch ||
+                        revisionDataField(stream, "proxy") !== streamProxy ||
+                        revisionDataField(stream, "isCurrent") !== streamCheck ||
+                        revisionDataField(stream, "registry") !== input.registry ||
+                        revisionDataField(stream, "chainVersion") !== b.chainVersion))
                   )
                     throw new Error("revision streaming request revoked or retried");
                   return streamFetch(request, init);
@@ -2034,7 +2090,7 @@ export function createRegistryRevisionTransport(
                 evidence.set(
                   result,
                   deepFreeze({
-                    ...(observed.actual === undefined ? {} : { actual: { ...observed.actual } }),
+                    ...(stock || observed.actual === undefined ? {} : { actual: { ...observed.actual } }),
                     ...(finiteNonnegative(observed.costUsd) ? { costUsd: observed.costUsd } : {}),
                   }),
                 );
