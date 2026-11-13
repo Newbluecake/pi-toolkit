@@ -88,6 +88,32 @@ session files; an idle session open in a terminal not connected to web is undete
 size/mtime are activity signals, not occupancy proof). Managed rpc sessions use the same path.
 Design: `docs/dev/web-hub/{arch,plan,vue-plan,control-plan}.md`, `docs/dev/web-resume/plan.md`.
 
+## UI font scale：对话框与紧凑徽标
+
+设置页 `SettingsView.vue` → `useFontScale.ts` 将 `pwh_fontscale` 应用到 **html** 的
+`--fs-scale`；不是改 root font-size。挂到 body 的 Teleport 也必须继承同一变量，不应在
+组件上再乘一次已经缩放的 `--fs-*` token。
+
+受影响清单（2026-11-13）：
+
+- `AskUserFloat` / `AskUserForm`：`ask-float.css` 的 compact px 覆盖改用原基准对应的
+  `--fs-sm/xs/2xs`；12.5px action 字号保持独立 calc，推荐标签的 16px 行高同步缩放。
+- `PreviewHost` / `PreviewWindow` / `PreviewWindowMenu`：`preview.css` 中 window-limit、
+  phone count、菜单省略号和路径的裸 rem 显式乘 `--fs-scale`，保留原 rem 基准。
+- `FleetTree` / `FleetArchived`：10px 类型字母与 16px 徽标方框同步缩放；树的两个响应式
+  grid 模板共享徽标宽度，子树 offset 按 `10px + badge-size / 2 + gap` 对齐，归档徽标
+  不允许 flex 压缩。100% 的字号、网格与偏移不变。
+
+排除理由：隐私确认框 `PrivacyUnmarkDialog` 已通过 html token 跨 Teleport 继承，不需改
+组件/CSS；其 title/body/button 加入回归。其余已用 `--fs-*`、`inherit` 或相对父字号 em
+的文本不重复缩放。图标、边框、圆角、固定点击热区、窗口拖拽/resize 几何和 iframe 内的
+第三方内容不属于应用字号偏好，不整体放大。没有协议、wire、hub 或冻结件变更。
+
+回归：`tests/web-hub/ui/dialog-font-scale.test.ts` 挂载真实 float/form、Teleport 隐私框、
+预览菜单及活动/归档 Fleet，检查 100% → 200% → reset 的级联值与持久化，另钉住两个
+Fleet grid 模板及子树对齐方程。Happy DOM 不执行 calc 布局运算，测试仅求值简单字号/
+徽标长度表达式，不把它冒充浏览器布局测量。
+
 ## UI serving 与 LAN access
 
 **UI serving

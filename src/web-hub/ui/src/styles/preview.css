@@ -1294,7 +1294,7 @@ body.pwh-pw-dragging .preview-window iframe {
 .preview-window-limit {
   margin: 0;
   padding: var(--sp-1) var(--sp-3);
-  font-size: 0.86rem;
+  font-size: calc(0.86rem * var(--fs-scale, 1));
   color: var(--c-warning-text);
   background: var(--c-warning-soft);
   border-bottom: 1px solid var(--c-warning-border);
@@ -1305,7 +1305,7 @@ body.pwh-pw-dragging .preview-window iframe {
   flex: none;
   margin-left: var(--sp-1);
   padding: 0 var(--sp-1);
-  font-size: 0.78rem;
+  font-size: calc(0.78rem * var(--fs-scale, 1));
   font-variant-numeric: tabular-nums;
   color: var(--c-text-3);
   border: 1px solid var(--c-border);
@@ -1321,7 +1321,7 @@ body.pwh-pw-dragging .preview-window iframe {
 }
 
 .pw-menu-dots {
-  font-size: 1.05rem;
+  font-size: calc(1.05rem * var(--fs-scale, 1));
   line-height: 1;
   letter-spacing: 1px;
 }
@@ -1391,7 +1391,7 @@ body.pwh-pw-dragging .preview-window iframe {
   direction: rtl; /* front-ellipsis, like .preview-path */
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 0.82rem;
+  font-size: calc(0.82rem * var(--fs-scale, 1));
   color: var(--c-text-3);
 }
 

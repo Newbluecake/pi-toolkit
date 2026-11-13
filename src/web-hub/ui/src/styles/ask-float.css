@@ -51,7 +51,7 @@
   overflow: hidden;
   /* Compact ruling (mock ~/pwh-preview/askcompact/ask-compact.png): the whole window runs one
    * notch tighter — 13px base, narrower paddings (scoped overrides below). */
-  font-size: 13px;
+  font-size: var(--fs-sm);
 }
 
 /* --- desktop (≥768px): floating window, default bottom-right just above the composer ------ */
@@ -105,7 +105,7 @@
   min-height: 34px;
   padding: 0 6px 0 10px;
   border-bottom: 1px solid var(--c-border);
-  font-size: 13px;
+  font-size: var(--fs-sm);
   font-weight: var(--fw-medium);
   color: var(--c-text);
 }
@@ -245,7 +245,7 @@
 .ask-float .ask-tabs button {
   min-height: 28px;
   padding: 0 8px;
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 .ask-float .ask-question-text,
@@ -257,12 +257,12 @@
 
 .ask-float .ask-question-text,
 .ask-float .ask-option-label {
-  font-size: 13px;
+  font-size: var(--fs-sm);
 }
 
 .ask-float .ask-context,
 .ask-float .ask-option-desc {
-  font-size: 12px;
+  font-size: var(--fs-xs);
 }
 
 /* Long context collapses to 2 lines with an 「展开/收起」 toggle; option descriptions clamp
@@ -282,7 +282,7 @@
   border: 0;
   background: transparent;
   color: var(--c-primary);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   cursor: pointer;
 }
 
@@ -311,9 +311,9 @@
   border-radius: var(--r-sm);
   background: var(--c-primary);
   color: #fff;
-  font-size: 11px;
+  font-size: var(--fs-2xs);
   font-weight: var(--fw-regular);
-  line-height: 16px;
+  line-height: calc(16px * var(--fs-scale, 1));
   vertical-align: 1px;
 }
 
@@ -323,7 +323,7 @@
   border: 0;
   background: transparent;
   color: var(--c-primary);
-  font-size: 12px;
+  font-size: var(--fs-xs);
   cursor: pointer;
 }
 
@@ -348,7 +348,7 @@
   min-height: 32px;
   min-width: 0;
   padding: 4px 12px;
-  font-size: 12.5px;
+  font-size: calc(12.5px * var(--fs-scale, 1));
 }
 
 .ask-float-item + .ask-float-item {

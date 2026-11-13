@@ -114,12 +114,20 @@
   list-style: none;
 }
 
+/* Badge text and its square share the html font scale, including archived rows outside .tree.
+ * Status icons remain 20px; the badge track and child offset follow the growing square. */
+.tree,
+.fleet-archived {
+  --tree-badge-size: calc(16px * var(--fs-scale, 1));
+}
+
 /* Nested-level alignment (2026-10-17, no chevron column): a child's status icon (20px box) is
  * centred on the PARENT row's type badge (16px box). Row geometry is identical at every tier, flat
  * or not: padding-left --tree-pad, icon 20px, gap, badge 16px.
  *   parent badge left  = pad + 20 + gap            (badge centre = that + 8)
  *   child icon left    = ul-offset + pad           (icon centre = that + 10)
- *   => ul-offset = 20 + gap - 2 = gap + 18  (margin-left + 1px border + padding-left)
+ *   => ul-offset = 10 + badge-size / 2 + gap (18px + gap at 100%)
+ *      (margin-left + 1px border + padding-left)
  * The guide line (the border) sits at margin-left = pad + 9 => x-centre pad + 9.5, i.e. under the
  * parent's status icon centre (pad + 10) within half a pixel. --tree-pad is 3px, not the row's old
  * 8px: it puts a top-level status glyph (13px, centred in the 20px box ⇒ left = 8 + pad + 3.5 = 14.5)
@@ -133,7 +141,7 @@
 .tree ul {
   position: relative;
   margin-left: calc(var(--tree-pad) + 9px);
-  padding-left: calc(18px + var(--tree-gap) - var(--tree-pad) - 9px - 1px);
+  padding-left: calc(10px + var(--tree-badge-size) / 2 + var(--tree-gap) - var(--tree-pad) - 9px - 1px);
   border-left: 1px solid var(--c-border);
 }
 
@@ -158,7 +166,10 @@
    * identical across rows; longer values still grow the track rather than truncate. */
   --run-num-w: 4.75em;
   display: grid;
-  grid-template-columns: 20px 16px minmax(min(45%, 240px), 1fr) minmax(0, auto) minmax(var(--run-num-w), auto);
+  grid-template-columns: 20px var(--tree-badge-size) minmax(min(45%, 240px), 1fr) minmax(0, auto) minmax(
+      var(--run-num-w),
+      auto
+    );
   /* 2026-10-20 「名称和模型名重叠」(user pick D): the model block left line 1 — right-aligned there it
    * overflowed its own track leftwards onto the name whenever its min-content (provider +
    * `·high · 24%`) exceeded the track. It now opens line 3, left-aligned under the activity,
@@ -334,12 +345,12 @@ details[open] > summary.run .chev {
   grid-area: badge;
   display: inline-grid;
   place-items: center;
-  width: 16px;
-  height: 16px;
+  width: var(--tree-badge-size);
+  height: var(--tree-badge-size);
   border-radius: 4px;
   background: var(--tb, #475569);
   color: #fff;
-  font-size: 10px;
+  font-size: calc(10px * var(--fs-scale, 1));
   font-weight: var(--fw-semibold);
   line-height: 1;
   user-select: none;
@@ -615,7 +626,7 @@ details[open] > summary.run .chev {
  * handled by the shrink rules above. */
 @container (max-width: 479px) {
   .run {
-    grid-template-columns: 20px 16px minmax(0, 1fr) minmax(var(--run-num-w), auto);
+    grid-template-columns: 20px var(--tree-badge-size) minmax(0, 1fr) minmax(var(--run-num-w), auto);
     grid-template-areas:
       "icon badge name time"
       ". . model cost"
