@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { TerminalReaper } from "../../../src/web-hub/agent/terminal/reaper.js";
 import { FakeClock } from "../../../src/core/clock.js";
 import { TerminalOwner, terminalResourceHandoff } from "../../../src/web-hub/agent/terminal/owner.js";
 import type {
@@ -459,5 +460,33 @@ describe("terminal owner logical vs physical state §§5.5/6", () => {
     await flush();
     h.backs[32]!.finish(physical);
     await flush();
+  });
+});
+
+describe("terminal reaper I1/I5 bounded attempts", () => {
+  it("a stuck attempt times out, at most three rounds finish within 60s, start is idempotent", async () => {
+    vi.useFakeTimers();
+    const attempt = vi.fn(() => new Promise<boolean>(() => undefined));
+    const reaper = new TerminalReaper(attempt);
+    reaper.start();
+    reaper.start();
+    expect(attempt).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(attempt).toHaveBeenCalledTimes(3);
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(600000);
+    expect(attempt).toHaveBeenCalledTimes(3);
+    reaper.stop();
+  });
+  it("stop cancels a stuck attempt deadline and all retry timers without pretending success", async () => {
+    vi.useFakeTimers();
+    const attempt = vi.fn(() => new Promise<boolean>(() => undefined));
+    const reaper = new TerminalReaper(attempt);
+    reaper.start();
+    expect(vi.getTimerCount()).toBe(1);
+    reaper.stop();
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(attempt).toHaveBeenCalledTimes(1);
   });
 });

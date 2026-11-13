@@ -232,6 +232,11 @@ export class TerminalOwner {
       this.revoke();
       return;
     }
+    if (
+      "channelId" in f &&
+      this.channels.get(f.channelId)?.localConnectionInstance !== this.current()?.localConnectionInstance
+    )
+      return;
     const result = {
       t: "term_res",
       v: 1,
@@ -372,7 +377,8 @@ export class TerminalOwner {
       this.revoke();
       return false;
     }
-    if (!a || !this.channels.has(a.channelId)) return false;
+    if (!a || this.channels.get(a.channelId)?.localConnectionInstance !== this.current()?.localConnectionInstance)
+      return false;
     const frame = {
       t: "term_event",
       v: 1,
@@ -505,7 +511,11 @@ export class TerminalOwner {
           waited: [],
         });
       }
-      this.error(f, error instanceof TerminalBackendError ? error.code : "E_BACKEND_CAPABILITY");
+      this.error(
+        f,
+        error instanceof TerminalBackendError ? error.code : "E_BACKEND_CAPABILITY",
+        r.physical?.outcome === "reaped" ? "none" : "unknown",
+      );
     }
   }
   private openResponse(r: Row, f: Extract<TermReq, { op: "open" | "attach" }>): void {
@@ -753,7 +763,7 @@ export class TerminalOwner {
     try {
       await pending.promise;
       r.nextInputSeq++;
-      r.lastInput = pending;
+      if (r.state === "live" && r.attachment === a) r.lastInput = pending;
       if (f.inputKind === "user" && f.bytesB64.length > 0)
         r.inputIdleAt = this.clock.now() + clampSpanMs(this.options.limits.inputIdleMs)!;
       this.response(f, { ok: true, acceptedThrough: f.inputSeq });
@@ -802,6 +812,7 @@ export class TerminalOwner {
     this.bump(r);
     this.detach(r);
     r.tail.clear();
+    delete r.lastInput;
     r.backend?.close();
     this.persistUnresolved(r);
   }
@@ -893,6 +904,7 @@ export class TerminalOwner {
     });
     this.detach(r);
     r.tail.clear();
+    delete r.lastInput;
     this.persistUnresolved(r);
   }
   /** Only produces a proof from actual backend receipt + wait + /proc validation.
@@ -936,7 +948,9 @@ export class TerminalOwner {
     }
     this.frozenInventory++;
     try {
-      // Inventory itself never spawns; cleanup is allowed and revisioned.
+      // Inventory itself never spawns. Every snapshot gets a fresh revision, including
+      // changes from an old owner's reaper mutating the plain-data handoff.
+      this.revision++;
       const entries = this.resourceEntries();
       if (entries.length > L.unresolvedResources) {
         this.error(f, "E_RESOURCE_QUARANTINED");

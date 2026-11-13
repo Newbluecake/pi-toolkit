@@ -244,10 +244,30 @@ describe("Linux agent-owned terminal §§5.1–5.4, T-ISO/T-SUBREAPER", () => {
   it("all helper/pipe/owner timers are unref'd: a ready backend cannot pin a print-like Node parent", async () => {
     const f = fixture();
     const script = `import { createTerminalTestBackend } from ${JSON.stringify(join(process.cwd(), "src/web-hub/agent/terminal/backend.ts"))};
+      import { createTerminalOwner } from ${JSON.stringify(join(process.cwd(), "src/web-hub/agent/terminal/owner.ts"))};
       const fixture=JSON.parse(process.argv[1]);
       const guard=setTimeout(()=>process.exit(72),4000);
-      const b=createTerminalTestBackend({cwd:fixture.cwd,cols:80,rows:24,inputIdleMs:3600000,maxLifetimeMs:28800000,onData(){}},fixture);
-      b.ready.then(()=>{console.log(JSON.stringify(b.managed));clearTimeout(guard);},()=>process.exit(73));`;
+      const current={localConnectionInstance:'connection',sessionId:'session',epoch:'epoch'};
+      let b; const sent=[];
+      const owner=await createTerminalOwner({...current,cwd:fixture.cwd,
+        limits:{maxPerSession:2,maxPerPrincipal:2,maxTotal:8,inputIdleMs:3600000,maxLifetimeMs:28800000},
+        current:()=>current,allowed:()=>true,send:f=>{sent.push(f);return true;},
+        backend:options=>{b=createTerminalTestBackend(options,fixture);return b;}});
+      const scope={sessionId:'session',epoch:'epoch',ownerInstance:owner.ownerInstance};
+      const offer=owner.offer({t:'cmd',rid:'r',id:'id',deadlineMs:3000,origin:{listener:'loopback',ip:'127.0.0.1',reqId:'r'},
+        cmd:{op:'command',name:'webhub',args:'__terminal'}},{v:1,action:'negotiate',requestNonce:'nonce'});
+      owner.receive({t:'term_req',v:1,rid:'p',sessionId:'session',epoch:'epoch',op:'prepare_protocol',offerId:offer.offerId,hubNonce:'hub'});
+      const handshake={offerId:offer.offerId,hubNonce:'hub',agentChallenge:sent.at(-1).agentChallenge};
+      owner.receive({t:'term_req',v:1,rid:'ready',...scope,op:'protocol_ready',...handshake});
+      owner.receive({t:'term_req',v:1,rid:'bind',...scope,op:'bind',...handshake,proposedChannelId:'channel',grant:sent.at(-1).grant});
+      owner.receive({t:'term_req',v:1,rid:'open',...scope,channelId:'channel',op:'open',openId:'open',termId:'term',reservationId:'reservation',
+        ownerKey:'owner',attachmentId:'attachment',writerLease:'lease',cols:80,rows:24,
+        createTicket:{v:1,bootId:'boot',ticketId:'ticket',issuedAt:Date.now(),expiresAt:Date.now()+600000,
+          ownerBinding:{listener:'loopback',principal:'user',sidTag:'sid',agentKey:'agent',...scope},payloadDigest:'a'.repeat(64),mac:'b'.repeat(64)}});
+      await b.ready; await Promise.resolve();
+      if (!sent.some(f=>f.t==='term_event' && f.kind==='replay_begin')) process.exit(74);
+      console.log(JSON.stringify(b.managed));clearTimeout(guard);`;
+
     const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script, JSON.stringify(f)], {
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 6000,
@@ -558,6 +578,9 @@ describe("Q4 physical half / §5.5: close ACK ≠ reaped proof", () => {
       expect(identities.filter((i) => i.role === "shell").length).toBeLessThanOrEqual(1);
       const result = await h.physical[0]!.done;
       expect(result.outcome).toBe("reaped");
+      expect(
+        h.sent.find((f) => f.t === "term_res" && f.op === "open" && !f.ok && f.code === "E_DEADLINE"),
+      ).toHaveProperty("effect", "unknown");
       await until(() => h.owner.physicalUsed === 0);
       const proof = h.owner.reapProof(entry.identity, evidence)!;
       expect(Value.Check(TerminalReapProofSchema, proof)).toBe(true);

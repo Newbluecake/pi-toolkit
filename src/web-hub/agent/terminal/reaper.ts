@@ -76,24 +76,42 @@ export class TerminalReaper {
   private timer: TimerHandle | undefined;
   private rounds = 0;
   private stopped = false;
+  private started = false;
+  private cancelAttempt: (() => void) | undefined;
   constructor(private readonly attempt: () => Promise<boolean>) {}
   start(): void {
+    if (this.started || this.stopped) return;
+    this.started = true;
     void this.run();
   }
   stop(): void {
     this.stopped = true;
     if (this.timer) systemClock.clearTimer(this.timer);
     this.timer = undefined;
+    this.cancelAttempt?.();
   }
   private async run(): Promise<void> {
     if (this.stopped) return;
     this.rounds++;
-    let complete = false;
-    try {
-      complete = await this.attempt();
-    } catch {
-      /* remains poison */
-    }
+    // A /proc operation may be unreadable or stuck. Bound every attempt as well as
+    // the retry count (3 × 5s + 2 × 20s ≤ 60s). Timeout never establishes gone.
+    const complete = await new Promise<boolean>((resolve) => {
+      let done = false;
+      const finish = (success: boolean): void => {
+        if (done) return;
+        done = true;
+        systemClock.clearTimer(deadline);
+        this.cancelAttempt = undefined;
+        resolve(success);
+      };
+      const deadline = systemClock.setTimer(clampSpanMs(5000)!, () => finish(false));
+      this.cancelAttempt = () => finish(false);
+      try {
+        void this.attempt().then(finish, () => finish(false));
+      } catch {
+        finish(false);
+      }
+    });
     if (complete || this.stopped || this.rounds >= 3) return;
     this.timer = systemClock.setTimer(clampSpanMs(20_000)!, () => {
       this.timer = undefined;
