@@ -5,6 +5,7 @@
   back/forward, middle-click-open-in-new-tab and Tab-order all work for free (ui-design §6.2).
 -->
 <script setup lang="ts">
+import { terminalUiEnabled } from "../../logic/terminalCapability.js";
 import {
   aliasChipText,
   xsAliasOf,
@@ -49,6 +50,9 @@ const { t } = i18n;
 // showing `waiting`). The frozen `AgentCardView` has no dialogs field, so the card looks its
 // own agent up in the App.vue-provided `HUB_CTX` state (no provider ⇒ no badge).
 const hub = inject(HUB_CTX, null);
+const jobsIcon = computed(() =>
+  terminalUiEnabled(hub?.state.value.hub) ? ("jobs-list" as const) : ("terminal" as const),
+);
 const XS_ICON: Record<XsReceive, IconName> = { wake: "radio", deliver: "inbox", replies: "swap", off: "ban" };
 const xsBadge = computed(() => xsBadgeOf(hub?.state.value.agents.get(props.card.key), hub?.state.value.hub?.["caps"]));
 const xsUnread = computed(() =>
@@ -295,7 +299,7 @@ const kindLabel = computed(() => (props.card.kind === "rpc" ? "RPC" : "TUI"));
               data-compact="bash"
               :title="t('agents.runningCount', { n: card.runningBashCount })"
               :aria-label="t('agents.runningCount', { n: card.runningBashCount })"
-              ><span class="agent-terminal-icon"><AppIcon name="terminal" class="icon-sm" /></span
+              ><span class="agent-terminal-icon"><AppIcon :name="jobsIcon" class="icon-sm" /></span
               ><span class="num">{{ card.runningBashCount }}</span></span
             >
             <span v-if="xsAlias" class="chip chip-xs-alias" translate="no" :title="`@${xsAlias}`">{{
@@ -505,7 +509,7 @@ const kindLabel = computed(() => (props.card.kind === "rpc" ? "RPC" : "TUI"));
             >·</span
           >
           <span class="agent-bash-activity"
-            ><span class="agent-terminal-icon"><AppIcon name="terminal" class="icon-sm" /></span
+            ><span class="agent-terminal-icon"><AppIcon :name="jobsIcon" class="icon-sm" /></span
             ><span class="num">{{ t("agents.runningCount", { n: card.runningBashCount }) }}</span></span
           >
         </template>

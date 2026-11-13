@@ -1,3 +1,5 @@
+import type { TerminalHubConfig } from "../protocol/terminal.js";
+import { createTerminalWiring } from "./terminal/wiring.js";
 import type { HumanDispatchBridge } from "./human-dispatch-proof.js";
 import type { XsActivationPort, XsActivationHubPort } from "../../fabric/xs/session-activation.js";
 /**
@@ -80,6 +82,7 @@ import {
 import type { LanStatus } from "../protocol/lan.js";
 import {
   acquireConnection,
+  processAgentId,
   currentConnection,
   MODULE_INSTANCE,
   newAdminRid,
@@ -202,6 +205,8 @@ export interface WebHubSpawnSettings extends HubSpawnConfig {
 }
 
 export interface WebHubSettings {
+  /** Non-live, sparse: absent means default-off without changing legacy JSON. */
+  terminal?: TerminalHubConfig & { enabled: boolean };
   enabled: boolean;
   autoStart: boolean;
   port: number;
@@ -324,6 +329,10 @@ export interface ThreadAgentPort extends ThreadPromptPort {
   threadClosed(h: string, reason: ThreadCloseReason): void;
 }
 export interface WebHubDeps {
+  /** Trusted activate-frozen domain plus live recheck; absent is never plain authority. */
+  terminalGuard?: (ctx: ExtensionContext) => boolean;
+  /** Internal test seam for isolated UID/rc fixtures; no settings/wire/env path. */
+  terminalOwnerFactory?: typeof import("./terminal/owner.js").createTerminalOwner;
   memoryRead?: import("../../memory/index.js").MemoryReadPort;
   memoryWrite?: import("../../memory/scopes/web-write-port.js").MemoryWebWritePort;
   /** P4 owns/wires ONE bridge independent of webHub.enabled; this client only dispatches. */
@@ -726,6 +735,21 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     },
     { publish: () => publishStatus() },
   );
+
+  // Absent while off: no owner, identity IO or extra pi registrations.
+  const terminal = settings.terminal?.enabled === true ? createTerminalWiring(deps.terminalOwnerFactory) : undefined;
+  const terminalAllowed = (): boolean =>
+    safe(
+      () =>
+        attached &&
+        ctx !== undefined &&
+        settings.control !== false &&
+        settings.webCommands !== false &&
+        (ctx.mode === "tui" || ctx.mode === "rpc") &&
+        deps.terminalGuard?.(ctx) === true &&
+        privateNsVerdict().gate === "not-ns",
+      false,
+    );
 
   // Object identities, not timestamps/epochs, bind this activation's live writer.
   const speedActivation = {};
@@ -1202,6 +1226,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   };
 
   const onTick = (): void => {
+    terminal?.check();
     const c = conn;
     const x = ctx;
     if (!attached || c === undefined || x === undefined) return;
@@ -1323,6 +1348,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   };
 
   const commandHandler = createCommandHandler({
+    ...(terminal === undefined ? {} : { terminal }),
     ...(deps.memoryProof !== undefined ? { memoryProof: deps.memoryProof } : {}),
     pi,
     getCtx: () => ctx,
@@ -1488,6 +1514,12 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     send: (frame) => conn?.send(frame),
   });
   const binding: BindingPort = {
+    ...(terminal === undefined
+      ? {}
+      : {
+          onTerminalReq: (frame: import("../protocol/terminal.js").TermReq) => terminal.receive(frame),
+          onTerminalLinkLost: () => terminal.linkLost(),
+        }),
     ...(xsBridge !== undefined
       ? {
           onXsDeliver: (frame) => xsBridge.onDeliver(frame),
@@ -1740,6 +1772,17 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     // `control`, it is a control-plane feature). The range crosses the wire as the `[lo, hi]`
     // tuple; an unparsable range (cannot happen after `parseWebHubProxyBlock`, but hand-built
     // settings objects exist in tests) omits the whole key rather than inventing a default.
+    if (
+      settings.terminal?.enabled === true &&
+      settings.control !== false &&
+      settings.webCommands !== false &&
+      ctx !== undefined &&
+      safe(() => deps.terminalGuard?.(ctx!) === true, false) &&
+      (ctx.mode === "tui" || ctx.mode === "rpc")
+    ) {
+      const { enabled: _enabled, ...terminal } = settings.terminal;
+      config.terminal = terminal;
+    }
     if (settings.proxy?.enabled === true && settings.control !== false) {
       const portRange = parseProxyPortRange(settings.proxy.portRange);
       if (portRange !== undefined) config.proxy = { portRange, maxProxies: settings.proxy.maxProxies };
@@ -1917,6 +1960,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
 
   on("session_start", (event, c) => {
     if (c.mode !== "tui" && c.mode !== "rpc") return; // print/json: never attach
+    terminal?.dispose();
     generation += 1;
     speedOwnerToken = {};
     speed.reset();
@@ -1965,20 +2009,48 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     });
     im.unref();
     startTick();
-    const existing = currentConnection();
-    const suffix = `#${MODULE_INSTANCE}`;
-    if (existing !== undefined && existing.implVersion.endsWith(suffix) && existing.status().state !== "off") {
-      // path 1: same module instance ⇒ reuse synchronously (acquireConnection matches implVersion).
-      connectWith({ pluginVersion: "", buildId: existing.implVersion.slice(0, -suffix.length) });
-      return;
-    }
-    void getBuildInfo().then((info) => {
-      if (gen === generation && attached) connectWith(info);
-    });
+    const connect = (): void => {
+      if (gen !== generation || !attached) return;
+      const existing = currentConnection();
+      const suffix = `#${MODULE_INSTANCE}`;
+      if (existing !== undefined && existing.implVersion.endsWith(suffix) && existing.status().state !== "off") {
+        // path 1: same module instance ⇒ reuse synchronously (acquireConnection matches implVersion).
+        connectWith({ pluginVersion: "", buildId: existing.implVersion.slice(0, -suffix.length) });
+        return;
+      }
+      void getBuildInfo().then((info) => {
+        if (gen === generation && attached) connectWith(info);
+      });
+    };
+    if (terminal !== undefined && settings.terminal !== undefined) {
+      const { enabled: _enabled, ...limits } = settings.terminal;
+      const sessionId = safe(() => c.sessionManager.getSessionId(), "");
+      void terminal
+        .start({
+          sessionId,
+          epoch: MODULE_INSTANCE,
+          cwd: safe(() => c.cwd, ""),
+          local: { stateDir: paths.stateDir, agentNonce: processAgentId().nonce },
+          limits,
+          allowed: () =>
+            gen === generation &&
+            terminalAllowed() &&
+            safe(() => ctx?.sessionManager.getSessionId(), undefined) === sessionId,
+          current: () => {
+            const localConnectionInstance = conn?.terminalConnectionInstance;
+            return gen === generation && attached && localConnectionInstance !== undefined
+              ? { localConnectionInstance, sessionId, epoch: MODULE_INSTANCE }
+              : undefined;
+          },
+          send: (frame) => gen === generation && attached && conn?.trySend(frame) === "written",
+        })
+        .then(connect);
+    } else connect();
   });
 
   on("session_shutdown", (event) => {
     if (!attached) return;
+    terminal?.dispose(); // synchronous revoke + bounded cleanup initiated before detach, not Stack-owned
     attached = false;
     speedOwnerToken = {};
     speed.reset();
@@ -2047,6 +2119,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     on(type, (event, c) => {
       if (!attached) return;
       if (c !== undefined) ctx = c;
+      terminal?.check();
       speedWire.forward(tap, event as { type: string } & Record<string, unknown>);
       // tool-duration plan: `turn_end` fires after the turn's tool executions (pi-agent-core
       // emits it from the loop right after executeToolCalls), so it is the flush point.
@@ -2112,6 +2185,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     lan?: LanStatus;
     ui?: UiStatus;
     privacy?: PrivacyHubStatus;
+    terminal?: { state: "unavailable"; reason: string };
     proxy?: ProxyHubStatus;
     alias?: XsAliasHubStatus;
   }
@@ -2132,6 +2206,13 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       if (isStructurallyUiStatus(parsed.ui)) rec.ui = parsed.ui as UiStatus;
       // privacy (plan v2.1 P3): same structural-only treatment — malformed ⇒ absent.
       if (isStructurallyPrivacyStatus(parsed.privacy)) rec.privacy = parsed.privacy;
+      const terminal = parsed.terminal as Record<string, unknown> | undefined;
+      if (
+        terminal?.state === "unavailable" &&
+        typeof terminal.reason === "string" &&
+        /^[a-z-]{1,64}$/.test(terminal.reason)
+      )
+        rec.terminal = { state: "unavailable", reason: terminal.reason };
       // proxy (plan v2 §5 X1c): same structural-only treatment — malformed ⇒ absent.
       if (isStructurallyProxyStatus(parsed.proxy)) rec.proxy = parsed.proxy;
       // alias (plan §3.3 AL6): structural-only — malformed ⇒ absent.
@@ -2191,7 +2272,10 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     const version = packageVersionSync();
     const pkgDir = pkgRoot ?? packageUiDistDir();
     const hasLocalDist = existsSync(join(packageUiDistDir(), "build-info.json"));
-    return formatUiStatusLines(rec?.ui, { pkgDir, version, hasLocalDist });
+    const lines = formatUiStatusLines(rec?.ui, { pkgDir, version, hasLocalDist });
+    if (settings.terminal?.enabled === true && rec?.terminal?.state === "unavailable")
+      lines.push(`终端不可用：${rec.terminal.reason}。保留已有状态，不会自动重置；修复本地状态后 /webhub restart。`);
+    return lines;
   };
 
   /** §9.3 LAN status lines, straight off `hub.json` — no admin RPC needed. */

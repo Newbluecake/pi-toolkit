@@ -32,6 +32,7 @@
   *parsed* (`parseRouteHash`'s existing behavior, unchanged) on the way to being redirected away.
 -->
 <script setup lang="ts">
+import { terminalOwnsKey } from "../../logic/terminalFocus.js";
 import { computed, inject, onMounted, onUnmounted, provide, ref, watch } from "vue";
 import { useI18n } from "../../composables/useI18n.js";
 import { useMedia } from "../../composables/useMedia.js";
@@ -254,6 +255,7 @@ function onRetry(agentKey: string): void {
 // and `defaultPrevented` is honored so an inner overlay (fleet-drawer plan §6.4's contract)
 // that already handled the key wins.
 function onKeydown(ev: KeyboardEvent): void {
+  if (terminalOwnsKey(ev)) return;
   if (ev.key !== "Escape" || ev.isComposing || ev.defaultPrevented) return;
   if (drawerVisible.value) {
     ev.preventDefault();

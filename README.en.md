@@ -166,6 +166,33 @@ false/0 remain explicit; an empty URL stops sending, an empty secret disables si
 Secure/locked domains stay off without fallback. Reload after changes.
 [Full field/default/compatibility reference](docs/dev/ask-user-feishu-merge/feishu-notify.md) (Chinese).
 
+## WebHub session terminal (optional, default off)
+
+Enable `webHub.enabled`, control and `webHub.terminal.enabled` in `pi-toolkit.json`, then `/reload` and `/webhub restart`:
+
+```json
+{
+  "webHub": {
+    "enabled": true,
+    "control": true,
+    "terminal": {
+      "enabled": true,
+      "maxPerSession": 2,
+      "maxPerPrincipal": 2,
+      "maxTotal": 8,
+      "inputIdleS": 3600,
+      "maxLifetimeS": 28800
+    }
+  }
+}
+```
+
+The terminal button opens a bottom panel with a real Linux/Python 3 PTY and the user's interactive login bash/zsh (including rc). Maximize within the page; **Esc does not close or restore**. “Background” leaves the shell running; refresh and reconnect from the list to the same shell. Explicit termination asks for confirmation. Agent session changes, `/reload` and hub restarts are cleanup boundaries, not persistent terminal hosting. This is neither the pi TUI nor `bash_job`.
+
+**Not a sandbox:** commands execute as the current OS user without model approval. **LAN users can execute commands too. HTTP is plaintext**: eavesdropping or hijacking can expose commands/output/credentials and lead to arbitrary command execution. Enable only on a network and for logins you trust. Filtering inherited API keys/tokens does not prevent rc or the shell from reading same-user files/credentials or writing its own history. Feishu, secure/locked sessions and privacy-marked sessions cannot use the terminal. WebGL2 is required; without it the terminal refuses to start (Chinese diagnostic), with no DOM fallback. Only a bounded output tail is replayed, not full history/VT state. Firefox validation is **NOT RUN** on the accepted GTK3/NSS-limited environment.
+
+Settings above are non-live, durations are in seconds; omitted terminal settings remain off. [Developer invariants, ranges and manual acceptance](docs/dev/web-hub-terminal/README.md).
+
 ### Feishu bot settings (optional)
 
 These are **top-level** `feishuBot.*` keys in the settings file (`pi-toolkit.json`), not `webHub.feishuBot`. Changes require `/reload` then `/webhub restart`. Requires `webHub.enabled:true` and control enabled. [Setup, commands and security](docs/dev/feishu-bot/README.md) · [real-tenant checklist](docs/dev/feishu-bot/acceptance.md) (Chinese). **One app connects to one hub**; concurrent connections split events.

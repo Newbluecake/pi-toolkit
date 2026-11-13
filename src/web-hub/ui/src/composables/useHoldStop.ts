@@ -1,3 +1,4 @@
+import { terminalOwnsKey } from "../logic/terminalFocus.js";
 import { computed, inject, onScopeDispose, ref, watch, type ComputedRef, type InjectionKey } from "vue";
 
 /** Current-turn stop only. Composer owns dispatch/singleflight across ring/fallback remounts;
@@ -179,6 +180,7 @@ export function useHoldStop(busy: () => boolean, emitStop: () => void) {
     if (document.hidden) cancel("none");
   }
   function onEscape(ev: KeyboardEvent): void {
+    if (terminalOwnsKey(ev)) return;
     if (ev.key === "Escape") {
       ev.preventDefault();
       ev.stopPropagation();

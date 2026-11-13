@@ -1,3 +1,4 @@
+import { isReservedTerminalCommand } from "../protocol/terminal.js";
 /**
  * §4.6 policy table (plan control-plan.md §4.6/§4.9, package C11).
  *
@@ -319,6 +320,7 @@ export interface ResolvePolicyOptions {
 /** Main entry point (§4.6/§4.9): resolves the base decision for a classified command, before
  *  the busy/idle split (`effectivePolicy`) and before the caller checks `cmd.confirm`. */
 export function resolveCommandPolicy(opts: ResolvePolicyOptions): PolicyDecision {
+  if (isReservedTerminalCommand({ op: "command", name: opts.name, args: opts.args })) return { policy: "deny" };
   if (/^mem:[1-9][0-9]*$/.test(opts.name)) return { policy: "deny" };
   if (opts.name === "mem" && (opts.args.trim() === "review" || opts.args.trim() === "review --list"))
     return { policy: opts.memoryRevisionReview === true ? (opts.overrides?.mem ?? "allow") : "deny" };

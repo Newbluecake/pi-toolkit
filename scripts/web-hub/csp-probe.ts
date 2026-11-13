@@ -19,6 +19,10 @@
  * `--suite mermaid` (`npm run probe:mermaid`): the web-hub-mermaid real-browser gate (plan §10.4), Chromium + Firefox;
  * `--lan` additionally serves the probe build on 0.0.0.0 for the S0 real-device run.
  *
+ * `--suite terminal [--browser chromium]`: the production WebGL-only spike, including
+ * bounded context-loss recovery, unavailable/activation failures and a CSP negative control.
+ * Firefox is explicitly NOT RUN (root's GTK3/NSS ruling); no DOM renderer selection remains.
+ *
  * Exit codes: 0 = pass; 1 = assertion failure (CSP violated, or something computed wrong); 2 =
  * Playwright/Chromium unavailable (offline cache miss and no network).
  */
@@ -33,9 +37,10 @@ import { runMermaidSuite } from "./mermaid-probe-suite.js";
 
 const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const VITE_CONFIG = resolve(REPO_ROOT, "src/web-hub/ui/vite.config.ts");
-const PROBE_OUT_DIR = resolve(REPO_ROOT, "node_modules/.cache/pwh-csp-probe");
+const CACHE = process.env["PWH_UI_CACHE_DIR"] ?? resolve(REPO_ROOT, "node_modules/.cache");
+const PROBE_OUT_DIR = resolve(CACHE, "pwh-csp-probe");
 const PORT = 42111;
-const MERMAID_REPORT = resolve(REPO_ROOT, "node_modules/.cache/pwh-mermaid-probe-report.json");
+const MERMAID_REPORT = resolve(CACHE, "pwh-mermaid-probe-report.json");
 /** Paths the mermaid suite's pages request on purpose to prove they are NEVER fetched (plan §10.4 N group). */
 const SINK_PREFIX = "/probe-sink/";
 const sinkHits: string[] = [];
@@ -268,6 +273,16 @@ async function mainMermaid(): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  if (argValue("--suite") === "terminal") {
+    const renderer = argValue("--renderer");
+    if (renderer !== undefined && renderer !== "auto" && renderer !== "webgl") {
+      throw new Error("Terminal is WebGL-only; DOM renderer selection has been removed");
+    }
+    // Test production artifacts, not a recompiled approximation of the renderer.
+    await build({ configFile: VITE_CONFIG, logLevel: "warn" });
+    const { runTerminalProbe } = await import("./terminal-probe-suite.js");
+    return runTerminalProbe(argValue("--browser") ?? "chromium");
+  }
   console.log("→ building csp-probe entries via vite.config.ts --mode csp-probe");
   await build({ configFile: VITE_CONFIG, mode: "csp-probe", logLevel: "warn" });
   if (argValue("--suite") === "mermaid") return mainMermaid();

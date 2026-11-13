@@ -19,6 +19,9 @@
  * The listening socket server stays ref'd (the hub is meant to live until the
  * idle monitor fires); every timer here is unref'd.
  */
+import { assembleTerminal } from "./assembly-terminal.js";
+import type { TerminalRevocationFence } from "./terminal/revocation-fence.js";
+import { TERMINAL_UI_CAP } from "../protocol/version.js";
 import { randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { type GitRunner } from "../../git/run.js";
@@ -365,6 +368,11 @@ export async function startHub(
     // Keeping ctl.v1 available does not depend on LAN assembly succeeding.
     const admin = createAdminHandler({
       log,
+      ...(config.terminal === undefined
+        ? {}
+        : {
+            terminalAuth: () => (ctx.fe as HttpFrontendExt & { terminalAuth?: TerminalRevocationFence }).terminalAuth,
+          }),
       hasLan: () => config.lan !== undefined,
       // D/E/F/G gates passed together: expose local setup only with configured LAN.
       advertiseTfa: config.lan !== undefined,
@@ -428,6 +436,7 @@ export async function startHub(
         // agent-server.ts's hello_ack.caps fold (caps-coexist pins the set equality).
         ...TODO_ARCHIVE_HUB_CAPS,
         ...extraHubCaps,
+        ...(config.terminal === undefined ? [] : [TERMINAL_UI_CAP]),
       ],
     };
     ctx.info = info;
@@ -462,8 +471,19 @@ export async function startHub(
     const scheduleHub = assembleSchedule(ctx);
     ctx.scheduleHub = scheduleHub;
     ctx.close = close;
+    let terminal: Awaited<ReturnType<typeof assembleTerminal>>;
     ctx.agentServer = createAgentServer(owner.server, {
       registry,
+      ...(config.terminal === undefined
+        ? {}
+        : {
+            terminal: {
+              ownsCommand: (meta, raw) => terminal?.ingress.ownsCommand(meta, raw) ?? false,
+              consumeAgentFrame: (meta, raw) => terminal?.ingress.consumeAgentFrame(meta, raw),
+              retireLink: (meta) => terminal?.ingress.retireLink(meta),
+              onIngressFailure: (meta) => terminal?.ingress.onIngressFailure?.(meta),
+            },
+          }),
       config,
       log,
       now,
@@ -636,7 +656,8 @@ export async function startHub(
      * "previously blocked, now resolved ⇒ start()" path must not try to resurrect it. */
     ctx.lanClosedByRotateScan = false;
 
-    if (config.privacy === true) await loadPrivacyStore(ctx);
+    if (config.privacy === true || config.terminal !== undefined) await loadPrivacyStore(ctx);
+    if (config.terminal !== undefined) terminal = await assembleTerminal(ctx);
     const commandRouter = createCommandRouter({ registry, log, now });
     ctx.commandRouter = commandRouter;
     const cmdLimit = createCmdLimit(now);
@@ -749,6 +770,7 @@ export async function startHub(
         : {}),
       uploadMetrics,
       agentRemove: agentRemoveService,
+      ...(terminal === undefined ? {} : { terminal: terminal.routes }),
       ...(ctx.avatarRoutes === undefined ? {} : { avatar: ctx.avatarRoutes }),
       ...(privacyRoutes === undefined ? {} : { privacy: privacyRoutes }),
       ...(ctx.uploads === undefined ? {} : { uploads: ctx.uploads }),
@@ -930,6 +952,7 @@ export async function startHub(
       ...(initialLan === undefined ? {} : { lan: initialLan }),
       ...(initialSpawn === undefined ? {} : { spawn: initialSpawn }),
       ...(initialPrivacy === undefined ? {} : { privacy: initialPrivacy }),
+      ...(terminal === undefined ? {} : { terminal: terminal.status }),
       ...(initialProxy === undefined ? {} : { proxy: initialProxy }),
       ...(initialAlias === undefined ? {} : { alias: initialAlias }),
       ui: initialUi,
@@ -972,6 +995,8 @@ export async function startHub(
       const deadline: ReqDeadline = opts?.deadline ?? createReqDeadline(now, closeBudget);
       // Publish the once-promise before any abort listener can re-enter close().
       const botStopped = stopBot();
+      // Domain admission/capability invalidation starts synchronously before listener teardown.
+      const terminalStopped = terminal?.dispose();
       const inner = Promise.resolve().then(async (): Promise<void> => {
         await botStopped; // FIRST cleanup operation: connector must stop ACKing before any teardown.
         unsubscribeBotSlots();
@@ -1029,6 +1054,7 @@ export async function startHub(
         // HTTP face stops accepting, bounded, idempotent (shares the startup-failure promise).
         ctx.unsubscribeProxyRevoke();
         if (ctx.proxyService !== undefined) await bounded(ctx.proxyService.dispose());
+        if (terminalStopped !== undefined) await bounded(terminalStopped);
         await bounded(ctx.fe.close());
         // web-hub-upload plan §2.6 #13 (U3): AFTER the frontend has stopped accepting requests
         // (srv.close + closeAllConnections), poison+reap in-flight upload dirs (committed files

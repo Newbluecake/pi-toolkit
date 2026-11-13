@@ -8,6 +8,8 @@
  * `http.ts` and are imported back; nothing in this file is edited relative
  * to its previous `http.ts` incarnation except the added `export` keywords.
  */
+import { dispatchTerminal, isTerminalPath, terminalFrontend } from "./terminal/routes.js";
+import type { TerminalRoutesPort } from "./ports.js";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
 import { Value } from "@sinclair/typebox/value";
@@ -35,6 +37,7 @@ import { WTDIFF_AUTH_RESERVE_MS } from "./worktree-diff/routes.js";
 import type { AgentRemoveFrontendPort } from "./agent-remove.js";
 import {
   cookieCandidates,
+  clearingSetCookies,
   lanIdentity,
   lanRecordValid,
   resolveCookieIdentity,
@@ -307,6 +310,7 @@ const ABS_EXPIRY_MAX_DELAY_MS = 2_147_483_647;
 // ---------------------------------------------------------------------------
 
 export interface LanRuntime {
+  terminal?: TerminalRoutesPort;
   loginCore?: LanLoginCore;
   sessions?: LanSessionsRoutes;
   csp: string;
@@ -569,10 +573,14 @@ async function requireLanSession(
    * audit line — this function keeps sending the response itself either way, this is purely an
    * out-param for audit correlation. */
   authFailure?: { code?: string },
+  terminalErrors = false,
 ): Promise<LanAuthed | undefined> {
   const fail = (status: number, code: string): undefined => {
     if (authFailure !== undefined) authFailure.code = code;
-    sendError(res, status, code);
+    if (terminalErrors) {
+      if (!res.writableEnded && !res.destroyed)
+        sendJson(res, status, { ok: false, code: code === "E_DB" ? "E_UNAVAILABLE" : code, effect: "none" });
+    } else sendError(res, status, code);
     return undefined;
   };
   const ip = ctx.clientIp;
@@ -636,6 +644,14 @@ async function requireLanSession(
   if (resolution.kind === "conflict") {
     release();
     if (authFailure !== undefined) authFailure.code = "E_AUTH";
+    if (terminalErrors) {
+      if (!res.writableEnded)
+        res.setHeader(
+          "Set-Cookie",
+          clearingSetCookies(LAN_SESSION_COOKIE, req.url ?? "/", req.headers.host, { secure: ctx.scheme === "https" }),
+        );
+      return fail(401, "E_AUTH");
+    }
     sendCookieConflict(res, req, LAN_SESSION_COOKIE, ctx.scheme === "https");
     return undefined;
   }
@@ -1221,6 +1237,14 @@ async function handleLanRequestInner(
     return path === PRIVACY_VERIFY_PATH ? rt.privacy.handleVerify(req, res, io) : rt.privacy.handleLock(req, res, io);
   }
 
+  if (rt.terminal !== undefined && isTerminalPath(path)) {
+    await dispatchTerminal(rt.terminal, req, res, ctx, rt.now, async (remaining) => {
+      const session = await requireLanSession(rt, req, res, ctx, false, lease, remaining, undefined, true);
+      return session?.identity;
+    });
+    return;
+  }
+
   if (method === "POST") {
     if (path === "/api/cmd" || path === "/api/dialog") {
       return dispatchCmdOrDialog(req, res, path, {
@@ -1304,6 +1328,16 @@ async function handleLanRequestInner(
         try {
           await rt.lan.store.deleteSession(sidHash);
           rt.authRevoke.emit({ sel: { sidTag: sidHash }, reason: "logout" });
+          const fence = terminalFrontend(rt.terminal)?.terminalAuth;
+          if (fence !== undefined) {
+            const revision = fence.revision;
+            await fence.repair(
+              { sidTag: sidHash },
+              revision,
+              0,
+              async () => (await raceDeadline(rt.lan.store.touchSession(sidHash, rt.now()), 1000)) === undefined,
+            );
+          }
           rt.lanSse.revoke((c) => c.auth?.sidHash === sidHash, "revoked");
         } catch (err) {
           rt.log.error("web-hub lan http: logout deleteSession failed", { error: String(err) });
@@ -1357,6 +1391,7 @@ async function handleLanRequestInner(
         boundOrigin: ctx.externalOrigin,
         verifiedAt: rt.now(),
       });
+      terminalFrontend(rt.terminal)?.openSse(req, res, session.identity, client.id, ctx.externalOrigin);
       // §4.2 review fix (LC #1): a db-independent hard ceiling — cleared on the connection's own
       // `close` (natural disconnect, logout/passwd revoke, or the 55s tick's own "expired" revoke).
       rt.sseClientIps?.set(client, ctx.clientIp);

@@ -59,7 +59,7 @@ Each holds for every task; details and the evidence live in the README of the su
 - **I8 pi-free boundaries**: `src/core`, `src/prompt-sections`, `src/git` import no pi (`tests/boundary/pi-free.test.ts`); hub/protocol import only `node:*`, typebox and whitelisted files (`tests/web-hub/boundary.test.ts`) — the whitelist only tightens; share code via a mirror copy in `web-hub/protocol/`.
 - **I9 off ⇒ byte-identical**: a settings-gated feature that is off leaves hooks, prompts and output unchanged, proven by the golden files below. Non-live settings need `/reload` (hub side also `/webhub restart`).
 - **I10 append-only wire**: `StatusInfo` open slots, optional frame fields and caps; no PROTO bump; old hub × new agent (and reverse) must stay byte-identical.
-- **I11 secure domain**: D2/D3/D4 guards and D8 forced-off features (`fabric.crossSession`, `externalAgents.droid`, `feishuNotify`, `traffic`, schedule, `reflex`) cannot be re-enabled by any settings path.
+- **I11 secure domain**: D2/D3/D4 guards and D8 forced-off features (`fabric.crossSession`, `externalAgents.droid`, `feishuNotify`, `traffic`, schedule, `reflex`, `webHub.terminal`) cannot be re-enabled by any settings path.
 - **I12 tool vs skill**: tool mechanics live in tool/parameter descriptions; strategy lives in `skills/` (the only copy — none under `~/.agents/skills/`).
 
 ## Frozen artifacts
@@ -117,6 +117,7 @@ Format: entry — one-line role | README to read first and when. `src/*` rows wi
 | `src/memory/` — cwd-keyed project memory (tiered injection, `memory` tool, `/mem`, trash/block restore). | `docs/dev/memory/README.md` · 动 memory/restore 前（memory golden 勿重生） |
 | `src/sysprompt/` + `src/prompt-sections/` — frozen-snapshot system-prompt sections with tail updates; pi-free half in `prompt-sections`. | `docs/dev/sysprompt-stable/README.md` · 动任何 system prompt 动态段前 |
 | `src/web-hub/` — browser UI over a per-machine hub daemon (`webHub.enabled`, default off): protocol/hub/agent/ui, control plane, LAN, Feishu bot, panels. | `docs/dev/web-hub/README.md`（索引 + 总体不变式）· 动 hub/协议/wire/UI 前；子系统另读下面子行 |
+| ↳ `src/web-hub/{agent/terminal,hub/terminal,ui/src/components/terminal}/` — 会话 PTY、私有控制链与 WebGL-only 面板。 | `docs/dev/web-hub-terminal/README.md` · 动终端/设置/receipt/冷恢复/相关接线与测试前 |
 | ↳ `src/web-hub/hub/feishu/` — Feishu bot, durable receive, cross-session mirror. | `docs/dev/feishu-bot/README.md` · 动飞书 bot/xs mirror 前 |
 | ↳ `src/web-hub/hub/spawn/` — managed spawn, restore, relaunch, delete, session history. | `docs/dev/web-hub-spawn/README.md` · 动 spawn/restore/历史前 |
 | ↳ `src/web-hub/hub/preview/` — content/dir/HTML preview, denylist. | `docs/dev/web-hub-preview/README.md` · 动预览/denylist 前 |

@@ -1,5 +1,7 @@
 /** LAN security r2 §5.4–5.6: one checked completion, instance-local challenges and budgets.
  * HTTP/CSRF/cookie parsing and finish-hook registration belong to the integrator. */
+import type { TerminalRevocationFence } from "./terminal/revocation-fence.js";
+import { lanIdentity } from "./auth-identity.js";
 import { createHash, randomBytes } from "node:crypto";
 import {
   LAN_2FA_COOKIE,
@@ -168,7 +170,7 @@ async function step<T>(
   }
 }
 
-export function createLanLoginCore(deps: LanLoginCoreDeps): LanLoginCore {
+export function createLanLoginCore(deps: LanLoginCoreDeps & { terminalAuth?: TerminalRevocationFence }): LanLoginCore {
   const challenges = new Map<string, Challenge>();
   // Never evict an unexpired attempt window: capacity refuses new users fail-closed.
   const windows = new Map<number, UserWindows>();
@@ -356,6 +358,7 @@ export function createLanLoginCore(deps: LanLoginCoreDeps): LanLoginCore {
     recoveryLeft?: number,
   ): Promise<LoginReply> {
     let sid: string | undefined;
+    const terminalLoginRevision = deps.terminalAuth?.revision;
     let reserved = false;
     try {
       if (!live(io, run, ch)) throw new Error("E_ABORTED");
@@ -412,6 +415,31 @@ export function createLanLoginCore(deps: LanLoginCoreDeps): LanLoginCore {
         }
         closeApproval(ch, "success");
         ch.waiter?.wake("expired");
+      }
+      if (deps.terminalAuth !== undefined && terminalLoginRevision !== undefined) {
+        // Explicit successful INSERT provenance, never called by generic authorize/touch.
+        // Optional terminal failure must not change legacy WebHub login success.
+        try {
+          const rec = await step(io, deadline.remaining(), (opts) =>
+            deps.store.touchSession(hashSid(sid!), deps.now(), opts),
+          );
+          if (rec !== undefined && live(io, run))
+            deps.terminalAuth.loginComplete(
+              lanIdentity(
+                {
+                  userId: rec.userId,
+                  epoch: rec.epoch,
+                  sidHash: hashSid(sid),
+                  absoluteExpiresAt: rec.absoluteExpiresAt,
+                },
+                rec,
+              ),
+              rec.epoch,
+              terminalLoginRevision,
+            );
+        } catch {
+          /* no proof is fail-closed for terminal only */
+        }
       }
       auditLan2fa(deps.log, { phase: "complete", method, ip: ctx.clientIp, user: user.username, ok: true });
       // Keep the abort cleanup through the send/finish gap. It is independently bounded

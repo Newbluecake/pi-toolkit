@@ -41,7 +41,11 @@ export interface PwPage {
   goto(url: string, opts?: { waitUntil?: "load" | "domcontentloaded" | "networkidle" }): Promise<unknown>;
   evaluate<T>(fn: (...args: never[]) => T | Promise<T>, ...args: never[]): Promise<T>;
   evaluate<T, A>(fn: (arg: A) => T | Promise<T>, arg: A): Promise<T>;
-  waitForFunction(fn: string | ((...args: never[]) => unknown), opts?: { timeout?: number }): Promise<unknown>;
+  waitForFunction(
+    fn: string | ((...args: never[]) => unknown),
+    arg?: unknown,
+    opts?: { timeout?: number },
+  ): Promise<unknown>;
   click(selector: string): Promise<void>;
   close(): Promise<void>;
   on(event: "console" | "pageerror" | "request", handler: (...args: unknown[]) => void): void;
@@ -171,7 +175,8 @@ function runNpxProbe(offline: boolean): Promise<ChildProbeResult> {
  */
 export async function loadPlaywright(): Promise<LoadPlaywrightResult> {
   const offlineResult = await runNpxProbe(true);
-  const result = offlineResult.ok ? offlineResult : await runNpxProbe(false);
+  const offlineOnly = process.env["npm_config_offline"] === "true";
+  const result = offlineResult.ok || offlineOnly ? offlineResult : await runNpxProbe(false);
   const source: "offline" | "online" = offlineResult.ok ? "offline" : "online";
   if (!result.ok || result.entry === undefined || result.version === undefined || result.executablePath === undefined) {
     return { ok: false, reason: result.reason ?? "playwright unavailable (offline and online resolution both failed)" };

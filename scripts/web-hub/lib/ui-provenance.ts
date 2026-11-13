@@ -226,7 +226,7 @@ export function noticeSection(notices: string, name: string, version: string): s
 
 export function uniquePackages(prov: UiProvenance): NoticePackage[] {
   const map = new Map<string, NoticePackage>();
-  for (const c of Object.values(prov.chunks)) {
+  for (const c of [...Object.values(prov.chunks), ...Object.values(prov.terminal?.css ?? {})]) {
     for (const p of c.packages) map.set(`${p.name}@${p.version}`, p);
   }
   return [...map.values()].sort((a, b) => `${a.name}@${a.version}`.localeCompare(`${b.name}@${b.version}`));

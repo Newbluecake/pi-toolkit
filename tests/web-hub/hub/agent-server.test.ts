@@ -32,14 +32,28 @@ let registry: Registry;
 let sockPath: string;
 const clients: TestClient[] = [];
 
-async function setup(): Promise<void> {
+async function setup(terminal = false): Promise<void> {
   sockPath = join(tmp.make("wh-as-"), "hub.sock");
   registry = createRegistry({ now: () => Date.now(), log: memLog(), pidAlive: () => true });
   server = net.createServer();
   await new Promise<void>((r) => server.listen(sockPath, () => r()));
   agentServer = createAgentServer(server, {
     registry,
-    config: config({ pluginVersion: "9.9.9", buildId: "9.9.9@hub" }),
+    config: config({
+      pluginVersion: "9.9.9",
+      buildId: "9.9.9@hub",
+      ...(terminal
+        ? {
+            terminal: {
+              maxPerSession: 2,
+              maxPerPrincipal: 2,
+              maxTotal: 8,
+              inputIdleMs: 3600000,
+              maxLifetimeMs: 28800000,
+            },
+          }
+        : {}),
+    }),
     log: memLog(),
     now: () => Date.now(),
     httpPort: () => 7878,
@@ -52,7 +66,7 @@ async function client(): Promise<TestClient> {
   return c;
 }
 
-beforeEach(setup);
+beforeEach(() => setup());
 
 afterEach(async () => {
   vi.useRealTimers();
@@ -322,5 +336,40 @@ describe("agent-server: run-transcript frames (fleet-drawer §5.3, F3b)", () => 
     c.send({ t: "run_watch", runId: "r_ABCDEFGH", on: true });
     await sleepReal(20);
     expect(events.filter((e) => e.type.startsWith("run_"))).toEqual([]);
+  });
+});
+
+describe("private terminal current-socket transport", () => {
+  it("off allocates/exposes no terminal transport port", () => {
+    expect(Object.hasOwn(agentServer, "terminalLink")).toBe(false);
+  });
+  it("uses the actual current link, retires old closures on reclaim and refuses detached scope", async () => {
+    await agentServer.close();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await setup(true);
+    const c = await client();
+    c.send(hello());
+    const ack = await c.waitFrame((f) => f["t"] === "hello_ack"),
+      key = ack["agentKey"] as string;
+    expect(agentServer.terminalLink!(key)).toBeUndefined();
+    c.send({ t: "session", sessionId: "one", cwd: "/fixture", reason: "startup", leafId: null, mode: "tui" });
+    await waitFor(() => registry.get(key)?.session?.sessionId === "one");
+    const link = agentServer.terminalLink!(key)!;
+    expect(link.meta).toEqual({ agentKey: key, linkGen: 1, sessionId: "one", epoch: "epoch-1" });
+    expect(link.agentId).toEqual(hello().agentId);
+    expect(link.kind).toBe("tui");
+    expect(link.pendingBytes).toBe(0);
+    expect(link.send({ t: "ping", ts: 1937 })).toBe(true);
+    await c.waitFrame((f) => f["t"] === "ping" && f["ts"] === 1937);
+    c.send({ t: "session_detached", reason: "new" });
+    await waitFor(() => agentServer.terminalLink!(key) === undefined);
+    expect(link.send({ t: "ping", ts: 1938 })).toBe(false);
+    const d = await client();
+    d.send(hello());
+    await d.waitFrame((f) => f["t"] === "hello_ack");
+    d.send({ t: "session", sessionId: "two", cwd: "/fixture", reason: "new", leafId: null, mode: "tui" });
+    await waitFor(() => agentServer.terminalLink!(key)?.meta.sessionId === "two");
+    expect(link.send({ t: "ping", ts: 1938 })).toBe(false);
+    expect(agentServer.terminalLink!(key)!.meta.linkGen).toBe(2);
   });
 });

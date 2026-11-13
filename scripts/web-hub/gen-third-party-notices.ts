@@ -29,10 +29,8 @@ import {
 } from "./lib/ui-provenance.js";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const PROVENANCE_FILES = [
-  resolve(REPO_ROOT, "node_modules/.cache/pwh-ui-provenance.json"),
-  resolve(REPO_ROOT, "node_modules/.cache/pwh-csp-probe-provenance.json"),
-];
+const CACHE = process.env["PWH_UI_CACHE_DIR"] ?? resolve(REPO_ROOT, "node_modules/.cache");
+const PROVENANCE_FILES = [resolve(CACHE, "pwh-ui-provenance.json"), resolve(CACHE, "pwh-csp-probe-provenance.json")];
 const OUT = resolve(REPO_ROOT, "THIRD_PARTY_NOTICES.md");
 
 const INTRO = `# Third-Party Notices
@@ -176,7 +174,7 @@ export function generate(
         version: c.version,
         license: c.license ?? "UNKNOWN",
         usedIn: [
-          `embedded in the pre-bundled \`${outer}\` (identified from the path comments of its shipped dist files)`,
+          `embedded in the pre-bundled \`${outer}\` (identified from ${outer.startsWith("@xterm/") ? "copyright headers" : "the path comments"} of its shipped dist files)`,
         ],
         texts: [c.licenseText],
         notices: c.noticeText === null ? [] : [c.noticeText],

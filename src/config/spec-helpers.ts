@@ -31,7 +31,7 @@ export interface SettingSpecBase {
   /** Read at spawn time (`budget.*`) ⇒ applies to new runs immediately; everything else needs `/reload`. */
   live?: true;
   /** Effective default when `DEFAULT_SETTINGS` leaves the path unset (`workflow.budget.*`). */
-  fallback?: number;
+  fallback?: number | boolean;
   /** One-line help shown by the editor. */
   hint?: string;
   /** What the knob does, shown in the editor's description column. */

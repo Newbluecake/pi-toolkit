@@ -1,0 +1,122 @@
+.terminal-spike-surface {
+  width: 640px;
+  height: 320px;
+  max-width: 100%;
+}
+.terminal-spike-surface .xterm {
+  height: 100%;
+}
+.terminal-spike-surface.is-large {
+  width: 960px;
+  height: 480px;
+}
+
+.terminal-spike-viewport {
+  width: 100%;
+  height: 100%;
+}
+.terminal-spike-viewport.is-initializing {
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.terminal-panel {
+  position: relative;
+  height: 320px;
+  min-height: 160px;
+  max-height: 70%;
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--c-surface, #102030);
+  color: var(--c-text);
+  border-top: 1px solid var(--c-border);
+  font-size: var(--fs-sm);
+}
+.terminal-panel.is-maximized {
+  position: fixed;
+  inset: 12px;
+  z-index: 90;
+  height: auto !important;
+  max-height: none;
+  border: 1px solid var(--c-border);
+}
+.terminal-chrome {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+.terminal-chrome button {
+  min-width: 44px;
+  min-height: 44px;
+}
+.terminal-warning,
+.terminal-hint,
+.terminal-facts,
+.terminal-panel > p {
+  margin: 2px 8px;
+  font-size: var(--fs-xs);
+  overflow-wrap: anywhere;
+}
+.terminal-surface {
+  flex: 1;
+  min-height: 80px;
+  min-width: 0;
+  overflow: hidden;
+}
+.terminal-surface > .terminal-spike-viewport {
+  width: 100%;
+  height: 100%;
+}
+.terminal-resize {
+  height: 8px;
+  cursor: ns-resize;
+  flex-shrink: 0;
+  touch-action: none;
+}
+.terminal-list {
+  overflow: auto;
+  padding: 8px;
+}
+.terminal-list ul {
+  padding: 0;
+  list-style: none;
+}
+.terminal-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  overflow-wrap: anywhere;
+  margin-bottom: 8px;
+}
+.terminal-confirm {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  background: var(--c-surface, #102030);
+  padding: 20px;
+}
+@media (max-width: 767px) {
+  .terminal-panel.is-maximized {
+    inset: 0;
+  }
+}
+
+.terminal-probe.terminal-spike-surface {
+  height: 540px;
+}
+.terminal-probe.terminal-spike-surface.is-large {
+  height: 720px;
+}
+.terminal-probe > .terminal-panel {
+  height: 100%;
+  max-height: none;
+}
+
+.terminal-panel-host {
+  display: contents;
+}

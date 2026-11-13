@@ -31,6 +31,8 @@
  * The `lan.2fa.v1` cap is advertised only when the integrator sets `advertiseTfa: true`
  * (P0: never advertise TFA before the agent-server routing exists).
  */
+import type { TerminalRevocationFence } from "./terminal/revocation-fence.js";
+import { bounded } from "./terminal/limits.js";
 import type { LanReqFrame, LanResFrame } from "../protocol/messages.js";
 import { NEW_IP_WINDOW_MS, type TfaOp, type TfaReqFrame, type TfaResFrame } from "../protocol/lan-2fa.js";
 import { LAN_2FA_HUB_CAP } from "../protocol/version.js";
@@ -90,6 +92,8 @@ export interface AdminHandler {
 }
 
 export interface AdminDeps {
+  /** Enabled-only terminal deny/commit port; not a wire field. */
+  terminalAuth?(): TerminalRevocationFence | undefined;
   log: HubLog;
   hasLan(): boolean;
   store(): LanStorePort | undefined;
@@ -450,6 +454,9 @@ export function createAdminHandler(deps: AdminDeps): AdminHandler {
     // §4.2 "撤销的顺序": `setPassword`'s own transaction already bumps epoch, clears
     // initial_password and deletes every session for that user (db-child.ts) — revoke only
     // needs to happen *after* that commit, before this op's own reply.
+    const terminal = deps.terminalAuth?.();
+    const previous = terminal === undefined ? undefined : await store.getUser(username);
+    if (previous !== undefined) terminal!.revoke({ userId: previous.id });
     await store.setPassword({
       username,
       kdf: "scrypt",
@@ -461,6 +468,28 @@ export function createAdminHandler(deps: AdminDeps): AdminHandler {
     });
     const user = await store.getUser(username);
     if (user !== undefined) deps.lan()?.revoke({ userId: user.id });
+    if (terminal !== undefined && user !== undefined && previous !== undefined) {
+      const selector = { userId: user.id },
+        revision = terminal.selectorRevision(selector);
+      if (revision !== undefined)
+        await terminal.repair(selector, revision, user.epoch, async () => {
+          const result = await bounded(
+            (async () => {
+              const current = await store.getUser(username);
+              return (
+                current !== undefined &&
+                current.id === user.id &&
+                current.epoch > previous.epoch &&
+                (await store.listSessions(user.id, now())).every((row) => row.epoch === current.epoch)
+              );
+            })(),
+            now,
+            now() + 2000,
+            new AbortController().signal,
+          );
+          return result;
+        });
+    }
     audit("passwd", { ok: true, username }, meta);
     // §4.2 emit seam (P0 addendum item 6): after the commit, never before.
     emitSecurity({ type: "passwd" });
@@ -478,6 +507,9 @@ export function createAdminHandler(deps: AdminDeps): AdminHandler {
   async function handleUserDelete(rid: string, username: string, meta: AdminMeta): Promise<LanResFrame> {
     const store = deps.store();
     if (!deps.hasLan() || store === undefined) return noLan(rid, "user_delete", meta);
+    const terminal = deps.terminalAuth?.();
+    const previous = terminal === undefined ? undefined : await store.getUser(username);
+    if (previous !== undefined) terminal!.revoke({ userId: previous.id });
     const result = await store.deleteUser(username);
     if (!result.ok) {
       const code = { "not-found": "E_NO_USER", primary: "E_PRIMARY_USER", "last-user": "E_LAST_USER" }[result.reason];
@@ -588,6 +620,10 @@ export function createAdminHandler(deps: AdminDeps): AdminHandler {
         throw err;
       }
       // ② atomic token replace — also clears the in-memory loopback session map + bumps `authGen`.
+      const terminal = deps.terminalAuth?.();
+      const beforeGen = auth.authGen();
+      const loopRevision = terminal?.revoke({ listener: "loopback" });
+      terminal?.revoke({ listener: "lan" });
       const { token, revoked: loopback } = auth.rotateToken();
       try {
         intent = advanceRotateIntentSync(deps.rotateIntentFile, intent, "token-written");
@@ -606,6 +642,28 @@ export function createAdminHandler(deps: AdminDeps): AdminHandler {
         lan = (await deps.revokeLanSessions()) ?? 0;
         deps.revokeLanSse();
         deps.bumpLanRevokeGen();
+      }
+      if (terminal !== undefined) {
+        // Separate CURRENT store verification, never an old deletion promise completion.
+        const loop = terminal.selectorRevision({ listener: "loopback" });
+        if (loop !== undefined && loopRevision !== undefined)
+          await terminal.repair({ listener: "loopback" }, loop, auth.authGen(), async () => auth.authGen() > beforeGen);
+        if (deps.hasLan()) {
+          const revision = terminal.selectorRevision({ listener: "lan" }),
+            store = deps.store();
+          if (revision !== undefined && store !== undefined)
+            await terminal.repair({ listener: "lan" }, revision, 0, async () =>
+              bounded(
+                (async () => {
+                  const users = await store.listUsers(deps.now?.() ?? Date.now());
+                  return users.every((user) => user.liveSessions === 0);
+                })(),
+                () => deps.now?.() ?? Date.now(),
+                (deps.now?.() ?? Date.now()) + 2000,
+                new AbortController().signal,
+              ),
+            );
+        }
       }
       // ⑤ delete intent.
       try {

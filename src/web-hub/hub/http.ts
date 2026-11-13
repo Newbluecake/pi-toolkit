@@ -59,6 +59,7 @@
  * §6.2/§6.3/§3.3) likewise lives in `http-cmd.ts` (same ⑨-H2 split); both
  * listeners' call sites below import `dispatchCmdOrDialog` from there.
  */
+import { dispatchTerminal, isTerminalPath, terminalFrontend } from "./terminal/routes.js";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import {
   API_ERRORS,
@@ -1196,6 +1197,8 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
   // direct `revokeHtmlCaps` call is a 1:1, in-place, same-order `authRevoke.emit`. The proxy
   // package attaches its own subscriber through the `subscribeAuthRevoke` extra at the bottom.
   const authRevoke = createAuthRevokeBus(log);
+  const terminal = terminalFrontend(deps.terminal);
+  terminal?.terminalAuth.connect(authRevoke);
   // X1c: wiring the proxy routes (`deps.proxy`, present only when `config.proxy` exists) is what
   // arms BOTH the multi-candidate cookie path (§4.1) and the `/api` cross-site gate (§4.3 P4);
   // the explicit flags exist for tests that arm one without the routes. Neither armed ⇒ the
@@ -1386,6 +1389,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       spawn: deps.spawn,
       preview: deps.preview,
       authRevoke,
+      ...(deps.terminal === undefined ? {} : { terminal: deps.terminal }),
       lanCookieMax: multiCandidateAuth ? LAN_COOKIE_MAX : 1,
       ...(proxyRoutes === undefined ? {} : { proxy: proxyRoutes }),
       ...(crossSiteGate ? { crossSiteGate: true } : {}),
@@ -1423,6 +1427,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
         : undefined;
     lan.scope.defer(() => kdfUpgrader?.dispose());
     const loginCore = createLanLoginCore({
+      ...(terminal === undefined ? {} : { terminalAuth: terminal.terminalAuth }),
       ...(kdfUpgrader === undefined ? {} : { kdfUpgrader }),
       store: lan.store,
       kdf: lan.kdf,
@@ -1444,6 +1449,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       },
     });
     rt.sessions = createLanSessionsRoutes({
+      ...(terminal === undefined ? {} : { terminalAuth: terminal.terminalAuth }),
       store: lan.store,
       idleMs: lan.cfg.sessionIdleMs ?? 720 * 60_000,
       now,
@@ -1700,8 +1706,15 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
     return true;
   }
 
-  function openEvents(req: IncomingMessage, res: ServerResponse): void {
-    routes.openEvents(req, res);
+  function openEvents(req: IncomingMessage, res: ServerResponse, identity: AuthIdentity): void {
+    const client = routes.openEvents(req, res);
+    terminal?.openSse(
+      req,
+      res,
+      identity,
+      client.id,
+      canonicalOrigin("http", canonicalHostKey(req.headers.host, "http") ?? ""),
+    );
   }
 
   // web-hub-proxy §4.1 (XA): the single loopback identity resolution. Every executing
@@ -1739,6 +1752,21 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       !apiCrossSiteOk(req, canonicalOrigin("http", canonicalHostKey(req.headers.host, "http") ?? ""))
     ) {
       throw new HttpError(403, "E_CSRF");
+    }
+    if (deps.terminal !== undefined && isTerminalPath(path)) {
+      const ctx = buildContext(req, "loopback");
+      if ("reject" in ctx) throw new HttpError(ctx.reject, ctx.code);
+      await dispatchTerminal(deps.terminal, req, res, ctx, now, async () => {
+        const result = resolveLoopbackIdentity(req);
+        if (result.ok) return result.id;
+        if (result.conflict === true)
+          res.setHeader(
+            "Set-Cookie",
+            clearingSetCookies(SESSION_COOKIE, req.url ?? "/", req.headers.host, { secure: false }),
+          );
+        return undefined;
+      });
+      return;
     }
     // web-hub-spawn plan §SP9 (arch §8.2): `/api/headless*` routes own their whole pipeline
     // (strict CSRF → auth → policy → body → admit → confirm → re-auth → sync start) through
@@ -2042,6 +2070,15 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       if (path === "/api/login") {
         const r = auth.login(field(body, "token"), now());
         if (r.ok) {
+          if (terminal !== undefined) {
+            const resolved = auth.resolve(`${SESSION_COOKIE}=${r.sid}`, now());
+            if (resolved.ok)
+              terminal.terminalAuth.loginComplete(
+                loopbackIdentity(resolved),
+                auth.authGen(),
+                terminal.terminalAuth.revision,
+              );
+          }
           sendJson(
             res,
             200,
@@ -2083,8 +2120,9 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       throw new HttpError(404, "E_NOT_FOUND");
     }
     if (method === "GET") {
-      if (authorizeLoopback(req, res) === undefined) return;
-      if (path === "/api/events") return openEvents(req, res);
+      const identity = authorizeLoopback(req, res);
+      if (identity === undefined) return;
+      if (path === "/api/events") return openEvents(req, res, identity);
       if (path === "/api/history") return routes.historyPage(query, res);
       if (path === "/api/run/history") return routes.runHistoryPage(query, res); // F4: same session gate as /api/history
     }
@@ -2209,6 +2247,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
   async function close(): Promise<void> {
     if (closed) return;
     closed = true;
+    await deps.terminal?.dispose();
     await load?.dispose();
     await lanFacade?.close();
     unsubscribeBus?.();
@@ -2241,6 +2280,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
   // the object literal itself) so that literal still gets full excess-property checking against
   // the frozen `HttpFrontend` shape — every other caller of this factory stays byte-identical.
   return Object.assign(frontend, {
+    ...(terminal === undefined ? {} : { terminalAuth: terminal.terminalAuth }),
     auth,
     revokeAllSse: () => {
       // web-hub-html-preview plan v2 §2.4: token rotate (`revokeLoopbackSse`) also ends every

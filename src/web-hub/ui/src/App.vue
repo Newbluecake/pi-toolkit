@@ -40,6 +40,7 @@ import "./styles/privacy.css";
 import "./styles/outdated-reload.css";
 // syntax-highlight (2026-10): tok-* token colors (CSS vars, light/dark per tokens.css).
 import "./styles/highlight.css";
+import { terminalUiEnabled } from "./logic/terminalCapability.js";
 import IconSprite from "./icons/IconSprite.vue";
 import { browserLocalStorage } from "./components/shell/themeStorage.js";
 import { hubVersionStamp } from "@logic/build-stamp.js";
@@ -385,7 +386,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <IconSprite />
+  <IconSprite :terminal-enabled="terminalUiEnabled(hub?.state.value.hub)" />
   <TokenGate v-if="authMode === 'unknown'" reason="auth-mode-unknown" />
   <template v-else>
     <h1 v-if="showShell" class="sr-only">{{ t("shell.dashboardHeading") }}</h1>

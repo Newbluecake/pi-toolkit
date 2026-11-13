@@ -34,7 +34,19 @@
   defensive agent-key watcher re-reads it.
 -->
 <script setup lang="ts">
-import { computed, defineAsyncComponent, inject, nextTick, onBeforeUnmount, provide, ref, watch } from "vue";
+import {
+  computed,
+  defineAsyncComponent,
+  inject,
+  nextTick,
+  onBeforeUnmount,
+  provide,
+  ref,
+  watch,
+  h,
+  render,
+  getCurrentInstance,
+} from "vue";
 import { holdAvailable, heldRowMode, isWebSentMessage, mergeQueue, newCmdId } from "@logic/control.js";
 import { forgetXsRemote, forgetXsSeeds } from "@logic/xsRequestState.js";
 import { RESUME_DIALOG, type ResumeScope } from "@logic/resume.js";
@@ -66,12 +78,15 @@ import { useActivityRail } from "../../composables/useActivityRail.js";
 import type { FleetRowWire } from "@protocol/messages.js";
 import FleetDrawer, { useFleetDrawerMode, useFleetDrawerOpen } from "../drawer/FleetDrawer.vue";
 
+import { TERMINAL_ENTRY } from "../../logic/terminalContext.js";
+
 const RETRY_NOTICE_ID = "history-error";
 
 const props = defineProps<AgentDetailProps>();
 const emit = defineEmits<AgentDetailEmits>();
 const { t } = useI18n();
 
+const terminalLoadError = ref("");
 const agentNotices = computed(() => buildAgentNotices(props.agent, t));
 const historyErrorNotice = computed<Notice | null>(() => {
   if (props.agent.history !== "error") return null;
@@ -83,9 +98,13 @@ const historyErrorNotice = computed<Notice | null>(() => {
     persistent: false,
   };
 });
-const notices = computed<readonly Notice[]>(() =>
-  historyErrorNotice.value ? [...agentNotices.value, historyErrorNotice.value] : agentNotices.value,
-);
+const notices = computed<readonly Notice[]>(() => [
+  ...agentNotices.value,
+  ...(historyErrorNotice.value ? [historyErrorNotice.value] : []),
+  ...(terminalLoadError.value
+    ? [{ id: "terminal-load", tone: "danger" as const, title: terminalLoadError.value, persistent: false }]
+    : []),
+]);
 
 function onNoticeAction(id: string): void {
   if (id === RETRY_NOTICE_ID) emit("retry");
@@ -146,6 +165,95 @@ const hubCaps = computed<readonly unknown[]>(() => {
   return h !== null && h !== undefined && Array.isArray((h as { caps?: unknown }).caps)
     ? ((h as { caps?: unknown }).caps as readonly unknown[])
     : [];
+});
+const terminalPrivacyAllowed = computed(() => {
+  const p = hub?.state.value.privacy;
+  const sid = (props.agent.session as { sessionId?: unknown } | undefined)?.sessionId;
+  return !hubCaps.value.includes("privacy.v1") || (!!p && p.ready && typeof sid === "string" && !p.locked.has(sid));
+});
+const terminalAvailable = computed(
+  () =>
+    terminalPrivacyAllowed.value &&
+    hubCaps.value.includes("terminal.ui.v1") &&
+    agentLive.value &&
+    controlEnabled.value &&
+    typeof (props.agent.session as { sessionId?: unknown } | undefined)?.sessionId === "string" &&
+    typeof (props.agent.card as { epoch?: unknown }).epoch === "string",
+);
+const terminalOpen = ref(false);
+const terminalMain = ref<HTMLElement | null>(null);
+const terminalAppContext = getCurrentInstance()?.appContext;
+let terminalHost: HTMLDivElement | undefined;
+let terminalLoadGeneration = 0;
+function unmountTerminal() {
+  if (terminalHost) {
+    render(null, terminalHost);
+    terminalHost.remove();
+    terminalHost = undefined;
+  }
+}
+provide(TERMINAL_ENTRY, {
+  available: terminalAvailable,
+  open: terminalOpen,
+  show() {
+    terminalOpen.value = true;
+  },
+});
+const terminalScope = computed(() => ({
+  agentKey: props.agent.key,
+  expect: {
+    sessionId: String((props.agent.session as { sessionId?: unknown } | undefined)?.sessionId ?? ""),
+    epoch: String((props.agent.card as { epoch?: unknown }).epoch ?? ""),
+  },
+}));
+watch(
+  [terminalAvailable, terminalOpen, () => JSON.stringify(terminalScope.value)],
+  async ([available, open]) => {
+    const scope = terminalScope.value;
+    const mine = ++terminalLoadGeneration;
+    unmountTerminal();
+    if (!available || !open) return;
+    if (!hub?.terminal) {
+      terminalLoadError.value = "终端连接不可用，请重新登录。";
+      terminalOpen.value = false;
+      return;
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const module = await Promise.race([
+        import("../terminal/terminal-feature.js"),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error("终端组件加载超时，请重试。")), 5000);
+        }),
+      ]);
+      if (mine !== terminalLoadGeneration || !terminalMain.value) return;
+      terminalHost = document.createElement("div");
+      terminalHost.className = "terminal-panel-host";
+      terminalMain.value.insertBefore(terminalHost, terminalMain.value.querySelector(".dock"));
+      const vnode = h(module.TerminalPanel, {
+        hub,
+        scope,
+        onBackground() {
+          terminalOpen.value = false;
+          void nextTick(() => document.querySelector<HTMLButtonElement>('[data-fold="terminal"]')?.focus());
+        },
+      });
+      if (terminalAppContext) vnode.appContext = terminalAppContext;
+      render(vnode, terminalHost);
+    } catch (error) {
+      if (mine === terminalLoadGeneration) {
+        terminalOpen.value = false;
+        terminalLoadError.value = error instanceof Error ? error.message : "E_UNAVAILABLE";
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+  },
+  { flush: "post" },
+);
+onBeforeUnmount(() => {
+  terminalLoadGeneration++;
+  unmountTerminal();
 });
 const holdOn = computed(() => holdAvailable(props.agent.card, hubCaps.value));
 const cardEpoch = computed(() => {
@@ -603,7 +711,7 @@ function onCloseDrawer(): void {
     <DetailHeader :agent="agent" :narrow="narrow" @back="emit('back')" />
 
     <div class="detail-split">
-      <div class="detail-main">
+      <div ref="terminalMain" class="detail-main">
         <!-- #65 outdated-reload（预览 §1–§4）：落后会话的顶部提示条，无 provider/不落后时自隐。 -->
         <OutdatedReloadBanner :agent-key="agent.key" />
         <NoticeBanner v-for="notice in notices" :key="notice.id" :notice="notice" @action="onNoticeAction" />

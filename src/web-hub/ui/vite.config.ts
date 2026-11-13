@@ -8,6 +8,8 @@
  *    lazy chunks for dynamic `import()`s (2026-10 syntax-highlight: Prism + its language
  *    packs load only when a highlightable code view mounts) — `assets/<name>-<hash>.js`
  *    remains the naming contract `ui-manifest.ts`'s `isAllowedUiPath` enforces.
+ *    Terminal P0 also emits an unlinked terminal-spike entry (no SPA import/user route);
+ *    its impl and ?url styles load only after the isolated probe host is clicked.
  *  - `--mode csp-probe` (`npm run probe:csp` / `npm run probe:mermaid` / `npm run
  *    probe:preview-perf`, §4.4.1): entries `csp-probe/{index,negative,mermaid,preview-perf}.html`,
  *    output `node_modules/.cache/pwh-csp-probe/` (already `.gitignore`d via `node_modules/`),
@@ -51,17 +53,15 @@ export default defineConfig(async ({ command, mode }): Promise<UserConfig> => {
   // naming for mermaid-exclusive chunks, mixed-chunk build failure, ELK EPL banner, and the
   // sha256-bound sidecar `check:web` verifies. Same plugin in both build modes (the probe tests
   // the exact pipeline the shipped bundle uses).
+  const cacheDir = process.env["PWH_UI_CACHE_DIR"] ?? resolve(here, "../../../node_modules/.cache");
   const provenance = mermaidProvenancePlugin({
-    outFile: resolve(
-      here,
-      "../../../node_modules/.cache",
-      cspProbe ? "pwh-csp-probe-provenance.json" : "pwh-ui-provenance.json",
-    ),
+    outFile: resolve(cacheDir, cspProbe ? "pwh-csp-probe-provenance.json" : "pwh-ui-provenance.json"),
   });
 
   return {
     root: cspProbe ? resolve(here, "csp-probe") : here,
     base: "/",
+    ...(process.env["PWH_UI_CACHE_DIR"] ? { cacheDir: resolve(cacheDir, "vite") } : {}),
     publicDir: cspProbe ? false : "public",
     plugins: [vue(), provenance, ...(cspProbe ? [] : [buildInfoPlugin({ builtAt })])],
     resolve: {
@@ -95,14 +95,12 @@ export default defineConfig(async ({ command, mode }): Promise<UserConfig> => {
       __PWH_UI_BUILD__: JSON.stringify({ version, proto: { major: PROTO.major }, commit, builtAt }),
     },
     build: {
-      outDir: cspProbe
-        ? resolve(here, "../../../node_modules/.cache/pwh-csp-probe")
-        : resolve(here, "../../../dist/web-hub-ui"),
+      outDir: cspProbe ? resolve(cacheDir, "pwh-csp-probe") : resolve(here, "../../../dist/web-hub-ui"),
       emptyOutDir: true,
       target: "es2020",
       sourcemap: false, // no .map file, no sourceMappingURL comment
       assetsInlineLimit: 0, // never inline assets as data: URLs
-      cssCodeSplit: false, // one external CSS file, no runtime <link> injection
+      cssCodeSplit: false, // ordinary CSS stays eager; terminal-only ?url assets load via explicit links
       modulePreload: { polyfill: false }, // no polyfill; lazy chunks load via dynamic import()
       rollupOptions: cspProbe
         ? {
@@ -117,7 +115,11 @@ export default defineConfig(async ({ command, mode }): Promise<UserConfig> => {
             output: { chunkFileNames: provenance.chunkFileNames },
           }
         : {
-            input: { index: resolve(here, "index.html") },
+            input: {
+              index: resolve(here, "index.html"),
+              // P0 artifact only: no SPA import, DOM, cap or route. The probe loads this entry explicitly.
+              "terminal-spike": resolve(here, "src/components/terminal/terminal-spike.ts"),
+            },
             // dynamic import()s code-split (e.g. the Prism chunk, the mermaid closure — no manualChunks:
             // mermaid stays lazy per diagram type, D5)
             output: { manualChunks: undefined, chunkFileNames: provenance.chunkFileNames },

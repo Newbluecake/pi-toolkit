@@ -4,7 +4,7 @@
 > 来源：AGENTS.md@fcbf71dc 的对应条目，原文搬运，未改写（仅路径按目录移动更新）。新的实现细节直接写在这里，不要再写回 AGENTS.md。
 > 相关：`arch.md`、`plan.md`、`vue-plan.md`、`control-plan.md`、`lan-plan.md`、`lan-security-plan.md`、`bash-jobs-panel-plan.md`、`archive-report.md`、`fleet-fill-budget.md`（抽屉 agents/bash 按高度对半分配）
 
-子 README 索引（按需另读）：[spawn / restore / relaunch / delete / 会话历史](../web-hub-spawn/README.md) · [内容预览 / HTML 预览](../web-hub-preview/README.md) · [worktree diff / graph](../worktree-diff/README.md) · [本地服务代理 / 链接预览](../web-hub-proxy/README.md) · [Feishu bot / xs mirror](../feishu-bot/README.md) · [fabric 频道/别名 UI](../fabric-cross-session/README.md)
+子 README 索引（按需另读）：[spawn / restore / relaunch / delete / 会话历史](../web-hub-spawn/README.md) · [内容预览 / HTML 预览](../web-hub-preview/README.md) · [worktree diff / graph](../worktree-diff/README.md) · [本地服务代理 / 链接预览](../web-hub-proxy/README.md) · [会话终端 / 权威链 / receipt / 冷恢复 / 验收](../web-hub-terminal/README.md) · [Feishu bot / xs mirror](../feishu-bot/README.md) · [fabric 频道/别名 UI](../fabric-cross-session/README.md)
 
 目录：
 

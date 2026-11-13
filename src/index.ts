@@ -1046,6 +1046,12 @@ export default function activate(rawPi: ExtensionAPI): void {
     // (non-live, like `lanSettingsWarnings` below) and only when the proxy is enabled at all.
     const proxyWarnings = settings.webHub.proxy?.enabled === true ? loadWebHubProxyWarnings() : [];
     webHubRef.current = wireWebHub(pi, {
+      ...(settings.webHub.terminal?.enabled === true
+        ? {
+            terminalGuard: (c) =>
+              secureDomain.kind === "plain" && !isChildSession && secureGuards?.recheckForWrite(c) === undefined,
+          }
+        : {}),
       ...(secureDomain.kind === "plain" && memoryWiring
         ? {
             memoryRead: memoryWiring.webRead,

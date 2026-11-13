@@ -75,14 +75,16 @@ export async function loadPrivacyStore(ctx: HubAssembly) {
   // later (right before the frontend), where every successful mutation republishes the full
   // set as the direct-send `privacy` bus event. (Declared at assembly scope above —
   // `close()` reads it before this point may ever run.)
-  if (config.privacy === true) {
+  if (config.privacy === true || config.terminal !== undefined) {
     ctx.privacyStore = createPrivacyStore({
       stateDir: paths.stateDir,
       log,
       onChange: (locked) => {
         // Same shutdown fence as the avatar store's onChange below.
         if (ctx.isClosing()) return;
-        registry.publish({ type: "privacy", locked });
+        // The terminal authority fences synchronously before any ordinary SSE projection.
+        ctx.terminalPrivacyChanged?.();
+        if (config.privacy === true) registry.publish({ type: "privacy", locked });
       },
     });
     await startupStep(ctx.privacyStore.load());

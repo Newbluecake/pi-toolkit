@@ -953,3 +953,81 @@ export function auditXs(log: { info(msg: string, data?: object): void }, record:
   }
   log.info("xs", out);
 }
+
+/** Terminal r4 §11: identifiers/counters/fixed outcomes only. Never content or its hash. */
+export const TERMINAL_AUDIT_KEYS = [
+  "op",
+  "listener",
+  "ok",
+  "code",
+  "ms",
+  "bytesIn",
+  "bytesOut",
+  "droppedBytes",
+  "n",
+  "exitCode",
+  "reap",
+] as const;
+export interface TerminalAuditRecord {
+  op: string;
+  listener?: "loopback" | "lan";
+  ok: boolean;
+  code?: string;
+  ms?: number;
+  bytesIn?: number;
+  bytesOut?: number;
+  droppedBytes?: number;
+  n?: number;
+  exitCode?: number;
+  reap?: "reaped" | "reap_incomplete";
+}
+export function auditTerminal(log: Pick<HubLog, "info">, record: TerminalAuditRecord): boolean {
+  const out: Record<string, unknown> = { audit: "terminal" };
+  for (const k of TERMINAL_AUDIT_KEYS) {
+    const v = record[k];
+    if (v === undefined) continue;
+    if (
+      k === "op" &&
+      (typeof v !== "string" ||
+        ![
+          "prepare",
+          "list",
+          "open",
+          "attach",
+          "detach",
+          "input",
+          "resize",
+          "ack",
+          "renew",
+          "state",
+          "close",
+          "reject",
+          "auth-revoked",
+          "lease-expired",
+          "idle-expired",
+          "lifetime-expired",
+          "exit",
+          "reap",
+          "reap-incomplete",
+          "aggregate",
+        ].includes(v))
+    )
+      continue;
+    if (k === "code" && (typeof v !== "string" || !/^E_[A-Z_]{1,40}$/.test(v))) continue;
+    if (k === "ok" && typeof v !== "boolean") continue;
+    if (k === "listener" && v !== "loopback" && v !== "lan") continue;
+    if (k === "reap" && v !== "reaped" && v !== "reap_incomplete") continue;
+    if (
+      ["ms", "bytesIn", "bytesOut", "droppedBytes", "n", "exitCode"].includes(k) &&
+      (typeof v !== "number" || !Number.isSafeInteger(v) || v < 0)
+    )
+      continue;
+    out[k] = v;
+  }
+  try {
+    log.info("terminal", out);
+    return true;
+  } catch {
+    return false;
+  }
+}

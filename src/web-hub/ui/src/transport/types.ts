@@ -115,6 +115,7 @@ export type CmdOutcome =
     };
 
 export interface HubTransport {
+  readonly terminal?: import("./terminal.js").TerminalTransport;
   readonly mode: "token" | "password";
   start(): Promise<void>;
   close(): void;

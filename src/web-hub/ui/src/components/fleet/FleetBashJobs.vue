@@ -24,6 +24,8 @@
   overscroll-guard.test.ts 按类名钉),分组包装与状态底色也在该文件。
 -->
 <script setup lang="ts">
+import { terminalUiEnabled } from "../../logic/terminalCapability.js";
+import { HUB_CTX } from "../control/controlContext.js";
 import { computed, inject, ref, watch } from "vue";
 import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";
@@ -35,6 +37,11 @@ import { deshellCmd, type DeshelledCmd } from "../../logic/bashCmd.js";
 import { formatTimeRange, type TimeRangeLabel } from "../../logic/timeRange.js";
 import { FLEET_ARCHIVE } from "./summary.js";
 import "../../styles/bash-jobs.css";
+
+const terminalHub = inject(HUB_CTX, null);
+const jobsIcon = computed(() =>
+  terminalUiEnabled(terminalHub?.state.value.hub) ? ("jobs-list" as const) : ("terminal" as const),
+);
 
 const props = defineProps<FleetBashJobsProps>();
 const emit = defineEmits<FleetBashJobsEmits>();
@@ -267,7 +274,7 @@ function toggleRow(row: BashJobRowWire): void {
 <template>
   <section class="fleet-bash" :data-open="open" aria-readonly="true">
     <button class="bj-sum" type="button" :aria-expanded="open" :aria-label="toggleAria" @click="toggleOpen">
-      <AppIcon name="terminal" class="icon-sm" />
+      <AppIcon :name="jobsIcon" class="icon-sm" />
       <span class="bj-sum-text">{{ summary }}</span>
       <AppIcon name="chev-right" class="icon-sm chev" />
     </button>

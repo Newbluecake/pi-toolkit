@@ -342,6 +342,8 @@ export function mergeSettings(base: Partial<AgentSettings> = {}, config?: AgentT
  * is excluded by the `Ms` suffix test.
  */
 export const TIME_SETTING_MS_PATHS: readonly string[] = [
+  "webHub.terminal.inputIdleMs",
+  "webHub.terminal.maxLifetimeMs",
   ...Object.keys(DEFAULT_BUDGET)
     .filter((k) => k.endsWith("Ms"))
     .map((k) => `budget.${k}`),
@@ -450,6 +452,10 @@ function applySecureDomainOverrides(settings: AgentSettings): AgentSettings {
     externalAgents: { ...settings.externalAgents, droid: { ...settings.externalAgents.droid, enabled: false } },
     feishuNotify: { ...settings.feishuNotify, enabled: false },
     schedule: { ...settings.schedule, enabled: false },
+    // Terminal D8: preserve sparse legacy defaults; explicit true cannot re-enable secure/locked.
+    ...(settings.webHub.terminal === undefined
+      ? {}
+      : { webHub: { ...settings.webHub, terminal: { ...settings.webHub.terminal, enabled: false } } }),
     // traffic-merge plan §6：加密/锁定域禁止流量落库（唯一落库闸口 persist 另有每次复查）。
     traffic: { ...settings.traffic, enabled: false },
     // jev-plan v2 §4 J3 / jev-arch §7.3（I11）：加密/锁定域强制关闭 Jev，无论用户文件怎么写。

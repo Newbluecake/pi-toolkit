@@ -1,3 +1,4 @@
+import { terminalOwnsKey } from "../logic/terminalFocus.js";
 /**
  * web-hub-preview-windows plan r2 §5.6 (W3): the DOM half of the conversation ⇄ window
  * keyboard switcher. Key = `Ctrl+`` forward / `Ctrl+Shift+`` backward (user 拍板 3),
@@ -108,6 +109,7 @@ export function usePreviewWindowCycle(opts: PreviewWindowCycleOptions): void {
   }
 
   function onKeydown(ev: KeyboardEvent): void {
+    if (terminalOwnsKey(ev)) return;
     if (ev.code !== "Backquote" || !ev.ctrlKey || ev.altKey || ev.metaKey) return;
     if (ev.isComposing) return;
     if (face.windows.value.length === 0) return;

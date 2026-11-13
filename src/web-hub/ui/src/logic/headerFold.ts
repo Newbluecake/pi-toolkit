@@ -25,7 +25,7 @@
  * resurrected — the fresh computation wins.
  */
 
-export type TitlebarFoldId = "delete" | "privacy" | "schedule" | "resume" | "channels" | "stop" | "clear";
+export type TitlebarFoldId = "terminal" | "delete" | "privacy" | "schedule" | "resume" | "channels" | "stop" | "clear";
 
 /** Fold order: the FIRST entry folds first (lowest-frequency action — 「删除会话」, 2026-11-02). Frozen by tests. */
 export const TITLEBAR_FOLD_ORDER: readonly TitlebarFoldId[] = [
@@ -149,3 +149,14 @@ export function foldTitlebar(input: TitlebarFoldInput): TitlebarFoldState {
   }
   return next;
 }
+
+export const TITLEBAR_TERMINAL_FOLD_ORDER: readonly TitlebarFoldId[] = [
+  "delete",
+  "privacy",
+  "terminal",
+  "schedule",
+  "resume",
+  "channels",
+  "stop",
+  "clear",
+];

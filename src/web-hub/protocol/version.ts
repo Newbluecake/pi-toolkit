@@ -418,3 +418,6 @@ export const WTGRAPH_MERGED_HUB_CAP = "wtgraph.merged.v1";
  * WTGRAPH_HUB_CAP; LAN width rides `preview.lan.v1`. Without it the UI keeps graph rows inert.
  * A new path + cap only — no frames, no SSE events, no PROTO bump. */
 export const WTGRAPH_FILES_HUB_CAP = "wtgraph.files.v1";
+
+/** Terminal r4: browser HubInfo ONLY, enabled-only at tail; NEVER hello_ack/hello. */
+export const TERMINAL_UI_CAP = "terminal.ui.v1";

@@ -173,6 +173,33 @@ pi install .
 `FEISHU_NOTIFY_CONFIG_PATH` 只指定旧文件回退（空串不读）；secure/locked 强制关闭不回退。
 改后 `/reload`；[全部字段、默认值与兼容语义](docs/dev/ask-user-feishu-merge/feishu-notify.md)。
 
+## WebHub 会话终端（可选，默认关闭）
+
+在 `pi-toolkit.json` 启用 `webHub.enabled`、control 和 `webHub.terminal.enabled`，然后 `/reload` → `/webhub restart`：
+
+```json
+{
+  "webHub": {
+    "enabled": true,
+    "control": true,
+    "terminal": {
+      "enabled": true,
+      "maxPerSession": 2,
+      "maxPerPrincipal": 2,
+      "maxTotal": 8,
+      "inputIdleS": 3600,
+      "maxLifetimeS": 28800
+    }
+  }
+}
+```
+
+详情头「终端」打开底部面板，使用真实 Linux/Python 3 PTY 和当前用户的 interactive login bash/zsh（加载 rc）。可页面内最大化，**Esc 不关闭、不退出最大化**；「放到后台」继续运行，刷新后从列表接回同一 shell；显式终止需确认。agent 会话切换、`/reload` 与 hub 重启是清理边界，不承诺跨边界保活。这不是 pi 原 TUI，也不是 `bash_job`。
+
+**非沙盒：以当前 OS 用户执行，不经模型审批。LAN 登录者也可执行命令；HTTP 是明文**，窃听/劫持可能泄漏命令、输出、凭据并导致任意命令执行；仅对可信网络与登录者启用。过滤 pi 继承的 API key/token 不阻止 rc 或 shell 主动读取同用户文件/凭据、写自己的 history。飞书、secure/锁定及隐私标记会话恒禁。需 WebGL2；不可用时中文提示并拒启，无 DOM 兜底。仅恢复有界尾流，不保证完整历史/VT 屏幕。Firefox 在已接受的 GTK3/NSS 受限环境中 **NOT RUN**，不外推 Chromium 结果。
+
+以上设置非实时，时长单位为秒；省略 terminal block 仍为关闭。[开发者不变式、设置范围与手跑验收](docs/dev/web-hub-terminal/README.md)。
+
 ### 飞书机器人设置（可选）
 
 以下为设置文件（`pi-toolkit.json`）的**顶层** `feishuBot.*`（不是 `webHub.feishuBot`）；改动后 `/reload` → `/webhub restart`，还需 `webHub.enabled:true` 与控制面开启。[配置/命令/安全说明](docs/dev/feishu-bot/README.md) · [真租户验收](docs/dev/feishu-bot/acceptance.md)。**一个应用只连接一个 hub**，双连接会分流事件。

@@ -48,6 +48,7 @@ export type IconName =
   | "swap"
   | "maximize"
   | "restore"
+  | "jobs-list"
   | "terminal"
   | "unlock"
   | "unplug"

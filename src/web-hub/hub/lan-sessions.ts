@@ -29,6 +29,8 @@
  *  - Every outcome (including gate refusals) writes one `auditLanSession` line; the audit
  *    never carries a sidHash, public id or UA string (§8).
  */
+import type { TerminalRevocationFence } from "./terminal/revocation-fence.js";
+import { bounded } from "./terminal/limits.js";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { Value } from "@sinclair/typebox/value";
 import {
@@ -77,7 +79,9 @@ function ipcSignal(ms: number): AbortSignal {
   return ctl.signal;
 }
 
-export function createLanSessionsRoutes(deps: LanSessionsDeps): LanSessionsRoutes {
+export function createLanSessionsRoutes(
+  deps: LanSessionsDeps & { terminalAuth?: TerminalRevocationFence },
+): LanSessionsRoutes {
   const now = deps.now;
   const limit: CmdLimit = createCmdLimit(now);
   // closure-local bookkeeping only (cmd-limit evicts lazily); no timers ⇒ dispose is a no-op.
@@ -92,6 +96,21 @@ export function createLanSessionsRoutes(deps: LanSessionsDeps): LanSessionsRoute
 
   function emitRevoke(sidHash: string): void {
     deps.authRevoke.emit({ sel: { sidTag: sidHash }, reason: "logout" });
+  }
+
+  async function repairSid(sidTag: string, deadline: ReqDeadline): Promise<void> {
+    const fence = deps.terminalAuth,
+      selector = { sidTag };
+    const revision = fence?.selectorRevision(selector);
+    if (!fence || revision === undefined || deadline.expired()) return;
+    await fence.repair(selector, revision, 0, async () =>
+      bounded(
+        deps.store.touchSession(sidTag, now()),
+        now,
+        Math.min(deadline.at, now() + 1000),
+        new AbortController().signal,
+      ).then((rec) => rec === undefined),
+    );
   }
 
   /** `requireLanSession` answers failure responses itself (401 E_AUTH / 429 E_RATE / 503 E_DB);
@@ -264,6 +283,7 @@ export function createLanSessionsRoutes(deps: LanSessionsDeps): LanSessionsRoute
     }
     emitRevoke(target.sidHash);
     deps.revokeSse(target.sidHash);
+    await repairSid(target.sidHash, deadline);
     if (self) io.clearCookie(res);
     audit({ op: "revoke", ip: io.ip, user: auth.user, ok: true, n: 1, complete: true, self, sharedIpKept });
     const body: LanSessionRevokeResponse = { ok: true, revoked: 1, complete: true };
@@ -337,6 +357,7 @@ export function createLanSessionsRoutes(deps: LanSessionsDeps): LanSessionsRoute
       emitRevoke(h);
       deps.revokeSse(h);
     }
+    await Promise.all(result.deleted.map((hash) => repairSid(hash, deadline)));
     const complete = !result.more;
     audit({
       op: "others",
