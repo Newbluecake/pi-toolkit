@@ -17,7 +17,12 @@ export const terminalUiSchemas = () =>
       event: TerminalSseEventSchema,
       requests: TERMINAL_HTTP_SCHEMAS,
       results: TERMINAL_HTTP_SUCCESS_SCHEMAS,
-      errors: TERMINAL_OP_ERROR_CODES,
+      errors: Object.fromEntries(
+        (Object.keys(TERMINAL_HTTP_SCHEMAS) as Array<keyof typeof TERMINAL_HTTP_SCHEMAS>).map((op) => [
+          op,
+          TERMINAL_OP_ERROR_CODES[op],
+        ]),
+      ),
     }),
   );
 const out = fileURLToPath(new URL("../../src/web-hub/ui/src/components/terminal/protocol-schema.ts", import.meta.url));
