@@ -11,6 +11,7 @@ import {
   canonicalBase64Bytes,
   TERMINAL_LIMITS as L,
   type TerminalHubConfig,
+  type TerminalChallenge,
   type TerminalHttpRequests,
   type TerminalHttpResults,
   type TerminalOwnerBinding,
@@ -86,14 +87,14 @@ export interface TerminalServiceDeps {
   pendingBytes: (meta: TerminalIngressMeta) => number;
   resourceFence: TerminalResourceFence;
   privacy: { denied: (sessionId: string) => boolean; onChange: (fn: () => void) => () => void };
-  audit?: (record: TerminalAuditRecord) => boolean | void;
+  audit: (record: TerminalAuditRecord) => boolean | void;
 }
 export function createTerminalService(deps: TerminalServiceDeps) {
   const now = deps.now;
   let auditFailures = 0;
   const note = (record: TerminalAuditRecord) => {
     try {
-      if (deps.audit?.(record) === false) auditFailures = Math.min(Number.MAX_SAFE_INTEGER, auditFailures + 1);
+      if (deps.audit(record) === false) auditFailures = Math.min(Number.MAX_SAFE_INTEGER, auditFailures + 1);
     } catch {
       auditFailures = Math.min(Number.MAX_SAFE_INTEGER, auditFailures + 1);
     }
@@ -117,6 +118,65 @@ export function createTerminalService(deps: TerminalServiceDeps) {
       }
   });
   const channels = new Map<string, Promise<Scope>>();
+  const resourceChannels = new Map<
+    string,
+    {
+      scope: Scope;
+      challenge: TerminalChallenge;
+      id: AuthIdentity;
+      timer: ReturnType<ReturnType<typeof terminalClock>["setTimer"]>;
+    }
+  >();
+  const offResolved = deps.resourceFence.onResolved((ack, meta, ownerInstance) => {
+    const context = resourceChannels.get(ack.challengeId);
+    if (
+      !context ||
+      !sameTerminalMeta(context.scope.target.meta, meta) ||
+      context.scope.owner.ownerInstance !== ownerInstance ||
+      context.challenge.hubBootId !== ack.hubBootId ||
+      context.challenge.linkGen !== ack.linkGen ||
+      now() >= context.challenge.deadlineAt
+    )
+      return;
+    const send = (identities: typeof ack.identities) => {
+      admit(context.id, context.scope.binding, context.scope.target, new AbortController().signal);
+      const frame: TermReq = {
+        t: "term_req",
+        v: 1,
+        rid: terminalId(),
+        sessionId: meta.sessionId,
+        epoch: meta.epoch,
+        ownerInstance,
+        channelId: context.scope.channelId,
+        op: "resolved_ack",
+        resolved: { ...ack, identities },
+      };
+      if (!terminalFrameOk(frame)) return false;
+      return deps.send(meta, frame);
+    };
+    // Metadata batches may have long identities; cap the ACTUAL dedicated frame too.
+    let batch: typeof ack.identities = [];
+    for (const identity of ack.identities) {
+      const proposed = [...batch, identity];
+      const probe = {
+        t: "term_req",
+        v: 1,
+        rid: "x".repeat(32),
+        sessionId: meta.sessionId,
+        epoch: meta.epoch,
+        ownerInstance,
+        channelId: context.scope.channelId,
+        op: "resolved_ack",
+        resolved: { ...ack, identities: proposed },
+      };
+      if (batch.length && !terminalFrameOk(probe)) {
+        if (!send(batch)) return;
+        batch = [];
+      }
+      batch.push(identity);
+    }
+    if (batch.length) send(batch);
+  });
   const waits = new Map<
     string,
     { meta: TerminalIngressMeta; guard: () => void; resolve: (r: TermRes) => void; reject: (e: unknown) => void }
@@ -1025,12 +1085,18 @@ export function createTerminalService(deps: TerminalServiceDeps) {
     );
   }
   async function collect(id: AuthIdentity, b: LiveTerminalBinding, target: TerminalAgentTarget, signal: AbortSignal) {
-    if (inventoryWaits.size >= L.unresolvedResources) throw new TerminalFault("E_LIMIT");
+    if (inventoryWaits.size >= L.unresolvedResources || resourceChannels.size >= L.unresolvedResources)
+      throw new TerminalFault("E_LIMIT");
     const totalAt = now() + L.httpMs;
     const s = await negotiate(id, b, target, "resource-only", signal),
       rid = terminalId();
-    if (inventoryWaits.size >= L.unresolvedResources) throw new TerminalFault("E_LIMIT");
+    if (inventoryWaits.size >= L.unresolvedResources || resourceChannels.size >= L.unresolvedResources)
+      throw new TerminalFault("E_LIMIT");
     const challenge = deps.resourceFence.begin(target.meta, s.owner.ownerInstance, target.processIdentity);
+    const expiry = clock.setTimer(clampSpanMs(challenge.deadlineAt - now()), () =>
+      resourceChannels.delete(challenge.challengeId),
+    );
+    resourceChannels.set(challenge.challengeId, { scope: s, challenge, id, timer: expiry });
     let resolve!: () => void, reject!: (e: unknown) => void;
     const done = new Promise<void>((a, b) => {
       resolve = a;
@@ -1117,6 +1183,9 @@ export function createTerminalService(deps: TerminalServiceDeps) {
       offPrivacy();
       offRevoke();
       offRelease();
+      offResolved();
+      for (const c of resourceChannels.values()) clock.clearTimer(c.timer);
+      resourceChannels.clear();
       bindings.dispose();
       for (const r of records.values()) closeRow(r);
       for (const p of waits.values()) p.reject(new TerminalFault("E_DISABLED"));

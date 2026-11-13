@@ -1,7 +1,7 @@
 /** F2: real socket ingress + owned durable journal + resource fence + local proof verifier.
  * Q4 PTY/multiple-pgid/late-future OS facts are tested by P1-A in web-hub-terminal-pty.test.ts. */
-import { afterEach, describe, expect, it } from "vitest";
-import { mkdtemp, chmod, rm, readFile } from "node:fs/promises";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { mkdtemp, chmod, rm, readFile, open, readlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
@@ -18,8 +18,9 @@ import {
   type TerminalReapProof,
   type TerminalInventoryPage,
   type TerminalChallenge,
+  type TerminalResolvedAck,
 } from "../../src/web-hub/protocol/terminal.js";
-import { connectClient, hello } from "../web-hub/hub/helpers.js";
+import { connectClient, hello, waitFor } from "../web-hub/hub/helpers.js";
 import type { TerminalResourceJournalPort, TerminalIngressMeta } from "../../src/web-hub/hub/ports.js";
 import { terminalUnavailable } from "../../src/web-hub/hub/ports.js";
 import { terminalHarness, type TerminalHarness } from "./web-hub-terminal-harness.js";
@@ -188,12 +189,15 @@ async function resourceFixture(n = 2, independent = false) {
   });
   await fence.initialize(signal);
   const jobs: Promise<unknown>[] = [];
+  let receiver = fence;
+  const acks: TerminalResolvedAck[] = [];
+  fence.onResolved((ack) => acks.push(ack));
   const h = await terminalHarness({
     terminal: {
       ownsCommand: () => false,
       consumeAgentFrame: (meta, raw) => {
         const r = raw as { op: string; ok: boolean; page: TerminalInventoryPage };
-        if (r.op === "inventory" && r.ok) jobs.push(fence.page(meta, r.page, signal));
+        if (r.op === "inventory" && r.ok) jobs.push(receiver.page(meta, r.page, signal));
       },
       retireLink: (meta) => fence.retireLink(meta),
     },
@@ -263,6 +267,10 @@ async function resourceFixture(n = 2, independent = false) {
     dir,
     entries,
     fence,
+    acks,
+    setReceiver: (f: TerminalResourceFence) => {
+      receiver = f;
+    },
     meta,
     currentProcess: agentProcessIdentity,
     pages,
@@ -401,6 +409,8 @@ describe("F2 Q1–Q4 actual H journal/fence/proof chain (§5.5.1)", () => {
       const persisted = JSON.parse(await readFile(join(q.dir, "terminal-resource-fence-v1.json"), "utf8"));
       expect(persisted.resources[0].status).toBe("resolved");
       expect(q.release).toEqual([a.identity.reservationId]);
+      expect(q.acks).toHaveLength(1);
+      expect(q.acks[0]!.identities).toEqual([a.identity]);
       expect(q.fence.snapshot().state).not.toBe("cleared");
       expect(() => q.fence.assertOpen()).toThrow("E_RESOURCE_QUARANTINED");
       for (const at of [6000, 31000, 61000]) {
@@ -437,6 +447,7 @@ describe("F2 Q1–Q4 actual H journal/fence/proof chain (§5.5.1)", () => {
         "unavailable",
       ]);
       expect(q.release).toEqual([]);
+      expect(q.acks).toEqual([]);
       expect(q.fence.physicalUsed()).toBe(1);
       expect(q.fence.snapshot().state).not.toBe("cleared");
       q.fail(false);
@@ -495,7 +506,7 @@ describe("F2 Q1–Q4 actual H journal/fence/proof chain (§5.5.1)", () => {
       expect(f.snapshot().state).not.toBe("cleared");
       expect(() => f.assertOpen()).toThrow("E_RESOURCE_QUARANTINED");
       expect(f.records().resources[0]?.status).toBe("unresolved");
-      expect(f.records().resources[0]).not.toHaveProperty("proof");
+      expect(f.records().resources[0]?.proof).toBeDefined(); // historical evidence is not a fresh challenge authority
     } finally {
       await q.cleanup();
     }
@@ -543,6 +554,76 @@ describe("F2 Q1–Q4 actual H journal/fence/proof chain (§5.5.1)", () => {
       const persisted = JSON.parse(await readFile(join(q.dir, "terminal-resource-fence-v1.json"), "utf8"));
       expect(persisted.resources[0].status).toBe("resolved");
     } finally {
+      await q.cleanup();
+    }
+  }, 20000);
+  it("resolved rename/fsync completion crosses deadline: no release/ACK, cold resolved rows re-quarantine until fresh proof", async () => {
+    const q = await resourceFixture(1);
+    const handle = await open(join(q.dir, "terminal-resource-fence-v1.json"), "r"),
+      proto = Object.getPrototypeOf(handle);
+    await handle.close();
+    const original = proto.sync;
+    let paused = false,
+      resume!: () => void;
+    const spy = vi.spyOn(proto, "sync").mockImplementation(async function (this: { fd: number }) {
+      await original.call(this);
+      if (!paused && (await readlink(`/proc/self/fd/${this.fd}`)) === q.dir) {
+        paused = true;
+        await new Promise<void>((r) => (resume = r));
+      }
+    });
+    try {
+      const pending = q.send(q.pages(q.fence.begin(q.meta, "owner", q.currentProcess)));
+      await waitFor(() => paused);
+      expect(
+        JSON.parse(await readFile(join(q.dir, "terminal-resource-fence-v1.json"), "utf8")).resources[0].status,
+      ).toBe("resolved");
+      q.setTime(q.getTime() + 6000);
+      resume();
+      expect((await pending).at(-1)).toBe("unavailable");
+      expect(q.release).toEqual([]);
+      expect(q.acks).toEqual([]);
+      expect(q.fence.snapshot().state).not.toBe("cleared");
+      expect(q.fence.physicalUsed()).toBe(1);
+      spy.mockRestore();
+      const released: string[] = [],
+        acks: TerminalResolvedAck[] = [];
+      const restarted = new TerminalResourceFence({
+        journal: createTerminalResourceJournal({ stateDir: q.dir, now: q.getTime }),
+        now: q.getTime,
+        verifyProof: createLocalTerminalProofVerifier({ receipt: (p) => q.receipts.has(JSON.stringify(p)) }),
+        onRelease: (id) => released.push(id),
+      });
+      restarted.onResolved((ack) => acks.push(ack));
+      await restarted.initialize(q.signal);
+      q.setReceiver(restarted);
+      expect(restarted.snapshot()).toMatchObject({ state: "collecting", physicalUsed: 1 });
+      expect(() => restarted.assertOpen()).toThrow("E_RESOURCE_QUARANTINED");
+      const expired = restarted.begin(q.meta, "owner", q.currentProcess);
+      const old = q.pages(expired);
+      for (const delta of [5000, 30000, 60000]) {
+        q.setTime(q.getTime() + delta);
+        expect(restarted.snapshot()).toMatchObject({ state: "lost", physicalUsed: 1 });
+        expect(released).toEqual([]);
+        expect(acks).toEqual([]);
+      }
+      expect(await q.send(old)).toEqual(["rejected", "rejected", "rejected"]);
+      const current = restarted.begin(q.meta, "owner", q.currentProcess),
+        pages = q.pages(current);
+      expect(await q.send(pages)).toEqual(["accepted", "accepted", "accepted"]);
+      expect(restarted.snapshot().state).toBe("cleared");
+      expect(released).toHaveLength(1);
+      expect(acks).toHaveLength(1);
+      expect(acks[0]).toMatchObject({
+        hubBootId: restarted.bootId,
+        challengeId: current.challengeId,
+        linkGen: current.linkGen,
+        journalRevision: restarted.records().revision,
+        identities: [q.entries[0]!.identity],
+      });
+    } finally {
+      spy.mockRestore();
+      resume?.();
       await q.cleanup();
     }
   }, 20000);

@@ -1383,3 +1383,51 @@ from an already assembled production terminal: dual real HTTP/SSE listeners + re
 socket/production ready gate use a bounded agent operation fixture, not a fake PTY;
 Q1–Q4 execute actual disk journal/fence/local-verifier paths. Q4 real forkpty, multiple
 pgids and late spawn settlement belong to `web-hub-terminal-pty.test.ts` (P1-A).
+
+### Eager terminal path constants
+
+`protocol/terminal-paths.ts` is zero-import/schema-free and preserves the original HTTP
+path object/order. Both `http-contract.ts` (eager UI) and `terminal.ts` re-export that
+same object. Do not add a runtime `http-contract.ts` dependency on `terminal.ts`: doing
+so eagerly executes TypeBox terminal schemas through `logic/contract.js`'s SSE_EVENTS
+import. The transitive static-import graph test pins this boundary, without widening I8.
+
+### r4.1 resolved receipt acknowledgement
+
+`term_req{op:"resolved_ack",channelId,resolved}` is private/resource-only and has no HTTP
+path or command form. H sends it only after the exact identities' resolved journal CAS
+is durably committed; it binds hub boot/challenge/link, inventoryId/snapshot revision and
+a separate journalRevision. A uses its current post-ready bound channel/snapshot/local reaped receipt
+records with `terminalResolvedAckMatches`, validates the whole batch, then synchronously
+forgets exactly those receipts and advances the revision floor. Unknown/duplicate/stale
+identities reject without partial deletion. A lost ACK pins receipts until a fresh valid
+challenge/commit-bound acknowledgement; it never clears physical slots/quarantine or
+revives shells. The helper checks shape/current private context, not OS proof/fsync itself.
+
+#### P1-H cold-CAS barrier and dedicated resolved acknowledgement
+
+Root r4.2 explicitly chooses the conservative cold-start rule: retained `resolved`
+rows are converted back to startup `unresolved` quarantine on every load. A resolved
+rename/fsync might have landed after an expired or unobserved in-memory CAS, and the
+frozen journal has no durable “final CAS observed” bit. Only current fresh proof clears
+these retained rows. Absence of the old agent stays lost; neither 5/30/60s nor a login
+clears it. This does not revive a shell or release a physical slot. Historical proof
+metadata can remain as evidence, but never serves as a current challenge response.
+
+The resource fence publishes `onResolved` only after OS/receipt verification, successful
+durable resolution, and final current challenge/link/owner CAS. H retains a bounded
+resource-only channel context through its original challenge deadline and emits the
+private `resolved_ack` there, including exact identities, snapshot revision and actual
+committed journal revision. Full-frame byte validation splits long batches without
+truncating identities. Unknown/failed/expired commits never emit an acknowledgement;
+a lost acknowledgement leaves agent receipts pinned and does not undo physical truth.
+No HTTP path, general result, SSE ring or log carries this private receipt authority.
+The channel deadline timer is unref'd and disposal clears it with all other H timers.
+
+The new tests pause the **real directory fsync completion after rename**, inspect actual
+resolved disk bytes, cross the deadline, and assert zero release/ack. Reopening that
+real store re-quarantines, absence remains lost, and only a new complete current proof
+releases/acknowledges once. A separate real socket/production ready-gate path connects
+H inventory verification and disk commit to `terminalResolvedAckMatches` and exact agent
+receipt forgetting; its terminal operations are explicitly non-PTY fixtures, not the
+P1-A physical/process-group gate.

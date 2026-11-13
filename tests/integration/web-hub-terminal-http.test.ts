@@ -2,6 +2,7 @@
  * The dedicated peer's terminal operations are bounded agent-port fixtures, NOT a PTY.
  * Actual forkpty/reaper/renderer are separate P1-A/P2/P3 gates. */
 import net from "node:net";
+import { auditTerminal } from "../../src/web-hub/hub/audit.js";
 import { createAdminHandler } from "../../src/web-hub/hub/admin.js";
 import type { Auth } from "../../src/web-hub/hub/auth.js";
 import { request as httpRequest } from "node:http";
@@ -21,10 +22,22 @@ import { createTerminalNegotiator } from "../../src/web-hub/agent/commands.js";
 import { createTerminalService } from "../../src/web-hub/hub/terminal/service.js";
 import { createTerminalRoutes } from "../../src/web-hub/hub/terminal/routes.js";
 import { createTerminalResourceJournal } from "../../src/web-hub/hub/terminal/resource-fence-journal.js";
-import { TerminalResourceFence } from "../../src/web-hub/hub/terminal/resource-fence.js";
+import {
+  TerminalResourceFence,
+  createLocalTerminalProofVerifier,
+  inventoryDigest,
+} from "../../src/web-hub/hub/terminal/resource-fence.js";
 import { NdjsonDecoder } from "../../src/web-hub/protocol/ndjson.js";
 import type { CmdFrame } from "../../src/web-hub/protocol/messages.js";
-import { TERMINAL_LIMITS as L, type TermReq, type TerminalNegotiation } from "../../src/web-hub/protocol/terminal.js";
+import {
+  terminalResolvedAckMatches,
+  TERMINAL_LIMITS as L,
+  type TerminalReapProof,
+  type TerminalProtocolReadyProof,
+  type TerminalResolvedAckAuthority,
+  type TermReq,
+  type TerminalNegotiation,
+} from "../../src/web-hub/protocol/terminal.js";
 import type { TerminalHttpRequests } from "../../src/web-hub/protocol/terminal.js";
 import { fakeKdf, fakeLanStore } from "../web-hub/contract/fakes.js";
 import { fakeDeps, makeTmp, login, openSse, postJson, rawRequest, type SseConn } from "../web-hub/http/helpers.js";
@@ -61,12 +74,23 @@ async function harness(realClock = false) {
     },
   });
   await privacy.load();
-  const journal = createTerminalResourceJournal({
+  let journalFailure = false;
+  const receipts = new Set<string>();
+  const journalBase = createTerminalResourceJournal({
     stateDir: deps.paths.stateDir,
     now: clock,
     trustedNew: async () => true,
   });
-  const fence = new TerminalResourceFence({ journal, now: clock, verifyProof: async () => false });
+  const journal = {
+    load: journalBase.load,
+    commit: (...args: Parameters<typeof journalBase.commit>) =>
+      journalFailure ? Promise.resolve("unavailable" as const) : journalBase.commit(...args),
+  };
+  const fence = new TerminalResourceFence({
+    journal,
+    now: clock,
+    verifyProof: createLocalTerminalProofVerifier({ receipt: (p) => receipts.has(JSON.stringify(p)) }),
+  });
   await fence.initialize(new AbortController().signal);
   let agentKey = "",
     allowed = true,
@@ -84,6 +108,7 @@ async function harness(realClock = false) {
   const processIdentity = { bootId: "linux-test-boot", pid: 4242, starttime: "100", uid: process.getuid!() };
   const service = createTerminalService({
     config,
+    audit: (record) => auditTerminal(log, record),
     now: clock,
     resourceFence: fence,
     target: (key) =>
@@ -156,6 +181,9 @@ async function harness(realClock = false) {
   agentKey = String(ack.agentKey);
   client.send({ t: "session", sessionId: "session", cwd: "/tmp/work", reason: "startup", leafId: null, mode: "tui" });
   await waitFor(() => registry.get(agentKey)?.session?.sessionId === "session");
+  const privateChannels = new Map<string, TerminalProtocolReadyProof>(),
+    ackAuthorities = new Map<string, TerminalResolvedAckAuthority>(),
+    forgotten: string[] = [];
   const negotiator = createTerminalNegotiator({
     now: clock,
     current: () => ({
@@ -167,10 +195,17 @@ async function harness(realClock = false) {
     allowed: () => allowed,
     limits: config,
     send: (f) => client.send(f),
+    onBound: (channelId, proof) => privateChannels.set(channelId, proof),
   });
   const terms = new Map<
     string,
-    { request: Extract<TermReq, { op: "open" }>; attachmentId: string; writerLease: string; nextInputSeq: number }
+    {
+      request: Extract<TermReq, { op: "open" }>;
+      attachmentId: string;
+      writerLease: string;
+      nextInputSeq: number;
+      closed?: boolean;
+    }
   >();
   const decoder = new NdjsonDecoder({
     onFrame: (raw) => {
@@ -206,6 +241,84 @@ async function harness(realClock = false) {
           ok: true,
           ...extra,
         });
+      if (f.op === "resolved_ack") {
+        const authority = ackAuthorities.get(f.channelId);
+        if (authority && terminalResolvedAckMatches(f, { ...authority, now: clock() })) {
+          for (const identity of f.resolved.identities) {
+            forgotten.push(identity.reservationId);
+          }
+          ackAuthorities.set(f.channelId, {
+            ...authority,
+            receipts: authority.receipts.filter(
+              (i) => !f.resolved.identities.some((j) => j.reservationId === i.reservationId),
+            ),
+            lastJournalRevision: f.resolved.journalRevision,
+          });
+        }
+        return;
+      }
+      if (f.op === "inventory") {
+        const channel = privateChannels.get(f.channelId);
+        if (channel?.mode !== "resource-only") throw Error("inventory without ready resource-only channel");
+        const entries = fence
+          .records()
+          .resources.filter((r) => r.status === "unresolved")
+          .map((r) => r.entry);
+        const evidence = {
+          hubBootId: f.challenge.hubBootId,
+          challengeId: f.challenge.challengeId,
+          linkGen: f.challenge.linkGen,
+          inventoryId: `inventory-${f.rid}`,
+          revision: 7,
+        };
+        const proofs: TerminalReapProof[] = entries
+          .filter((e) => terms.get(e.identity.termId)?.closed)
+          .map((e) => ({
+            ...evidence,
+            identity: e.identity,
+            agentProcessIdentity: e.agentProcessIdentity,
+            proofId: `proof-${e.identity.termId}`,
+            spawnSettled: true,
+            ptyClosed: true,
+            helperReaped: true,
+            managedGroupsGone: true,
+            identitiesChecked: e.managed,
+            outcome: "reaped",
+          }));
+        for (const proof of proofs) receipts.add(JSON.stringify(proof));
+        ackAuthorities.set(f.channelId, {
+          live: true,
+          current: {
+            localConnectionInstance: "conn-1",
+            sessionId: "session",
+            epoch: "epoch-1",
+            ownerInstance: "owner",
+          },
+          channel: { ...channel, channelId: f.channelId },
+          challenge: f.challenge,
+          inventoryId: evidence.inventoryId,
+          revision: evidence.revision,
+          lastJournalRevision: 0,
+          receipts: proofs.map((p) => p.identity),
+          now: clock(),
+        });
+        const digest = inventoryDigest(entries);
+        send({
+          page: {
+            ...evidence,
+            phase: "begin",
+            sender: { agentSessionId: "session", epoch: "epoch-1", ownerInstance: "owner", processIdentity },
+            totalCount: entries.length,
+            chunkCount: 1,
+            digest,
+          },
+        });
+        send({ page: { ...evidence, phase: "chunk", chunkIndex: 0, entries, proofs } });
+        send({
+          page: { ...evidence, phase: "end", totalCount: entries.length, chunkCount: 1, digest, complete: true },
+        });
+        return;
+      }
       const fact = (r: typeof terms extends Map<string, infer T> ? T : never) => ({
         termId: r.request.termId,
         reservationId: r.request.reservationId,
@@ -278,6 +391,8 @@ async function harness(realClock = false) {
         return;
       }
       if (f.op === "close") {
+        const term = terms.get(f.termId);
+        if (term) term.closed = true;
         const respond = () => send({ state: "closing", revision: ++revision });
         if (holdClose) held.push(respond);
         else respond();
@@ -349,6 +464,11 @@ async function harness(realClock = false) {
     log,
     client,
     agentKey,
+    processIdentity,
+    forgotten,
+    setJournalFailure: (v: boolean) => {
+      journalFailure = v;
+    },
     setTime: (n: number) => {
       now = n;
     },
@@ -1071,5 +1191,72 @@ describe("T-REV/T-SSE/T-ID/T-BIND dual listener terminal (§3/4)", () => {
     h.held.splice(0).forEach((f) => f());
     expect((await pending).json.code).toBe("E_LEASE_EXPIRED");
     expect((await h.post(0, "renew", lease)).json.code).toBe("E_LEASE_EXPIRED");
+  });
+  it("real private resource-ready → inventory → durable journal CAS → resolved_ack forgets exact receipts once", async () => {
+    const h = await harness(),
+      c = await h.connection(0),
+      o = await h.opened(0, c);
+    expect(
+      (
+        await h.post(0, "close", {
+          ...c.identity,
+          termId: o.termId,
+          closeId: "close-for-receipt",
+          expectedRevision: o.revision,
+        })
+      ).status,
+    ).toBe(200);
+    h.fence.begin(
+      { agentKey: h.agentKey, linkGen: 1, sessionId: "session", epoch: "epoch-1" },
+      "owner",
+      h.processIdentity,
+    );
+    expect((await h.post(0, "prepare", { ...c.identity, cols: 80, rows: 24 })).status).toBe(200);
+    await h.barrier();
+    const acks = h.frames.filter((f): f is Extract<TermReq, { op: "resolved_ack" }> => f.op === "resolved_ack");
+    expect(acks).toHaveLength(1);
+    expect(acks[0]!.resolved).toMatchObject({
+      hubBootId: h.fence.bootId,
+      linkGen: 1,
+      revision: 7,
+      journalRevision: h.fence.records().revision,
+      identities: [
+        {
+          agentSessionId: "session",
+          termId: o.termId,
+          epoch: "epoch-1",
+          ownerInstance: "owner",
+          reservationId: o.reservationId,
+        },
+      ],
+    });
+    expect(h.forgotten).toEqual([o.reservationId]);
+    expect(h.service.limits.physicalUsed).toBe(0);
+    expect(h.fence.physicalUsed()).toBe(0);
+    const bytes = await readFile(join(h.tmp.dir, "state", "terminal-resource-fence-v1.json"), "utf8");
+    expect(JSON.parse(bytes).resources[0].status).toBe("resolved");
+    const ownEvents = JSON.stringify(c.stream.events);
+    expect(ownEvents).not.toContain("resolved_ack");
+    expect(ownEvents).not.toContain("journalRevision");
+  });
+  it("failed durable resolution never sends resolved_ack and never frees receipts or physical slot", async () => {
+    const h = await harness(),
+      c = await h.connection(0),
+      o = await h.opened(0, c);
+    await h.post(0, "close", { ...c.identity, termId: o.termId, closeId: "close-fail", expectedRevision: o.revision });
+    h.fence.begin(
+      { agentKey: h.agentKey, linkGen: 1, sessionId: "session", epoch: "epoch-1" },
+      "owner",
+      h.processIdentity,
+    );
+    h.setJournalFailure(true);
+    expect((await h.post(0, "prepare", { ...c.identity, cols: 80, rows: 24 })).json.code).toBe(
+      "E_RESOURCE_QUARANTINED",
+    );
+    await h.barrier();
+    expect(h.frames.filter((f) => f.op === "resolved_ack")).toEqual([]);
+    expect(h.forgotten).toEqual([]);
+    expect(h.service.limits.physicalUsed).toBe(1);
+    expect(h.fence.physicalUsed()).toBe(1);
   });
 });

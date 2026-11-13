@@ -10,6 +10,7 @@ import {
   canonicalTerminalInventory,
   terminalIdentityKey,
   TERMINAL_LIMITS as L,
+  type TerminalResolvedAck,
   type TerminalJournal,
   type TerminalResourceEntry,
   type TerminalChallenge,
@@ -49,6 +50,15 @@ export class TerminalResourceFence implements TerminalResourceFencePort {
   private collections = new Map<string, Collect>();
   private released = new Set<string>();
   private recovery = new Set<string>();
+  private resolvedListeners = new Set<
+    (ack: TerminalResolvedAck, meta: TerminalIngressMeta, ownerInstance: string) => void
+  >();
+  onResolved(fn: (ack: TerminalResolvedAck, meta: TerminalIngressMeta, ownerInstance: string) => void) {
+    this.resolvedListeners.add(fn);
+    return () => {
+      this.resolvedListeners.delete(fn);
+    };
+  }
   private releaseListeners = new Set<(reservationId: string) => void>();
   onRelease(fn: (reservationId: string) => void) {
     this.releaseListeners.add(fn);
@@ -76,6 +86,13 @@ export class TerminalResourceFence implements TerminalResourceFencePort {
     this.journal = r.kind === "loaded" ? structuredClone(r.journal) : this.journal;
     const next = structuredClone(this.journal);
     let changed = false;
+    // Root r4.2: resolved bytes might have landed after an unobserved/expired CAS.
+    // A cold boot has no final in-memory CAS witness, so retained rows need fresh proof.
+    for (const row of next.resources)
+      if (row.status === "resolved") {
+        row.status = "unresolved";
+        changed = true;
+      }
     for (const entry of handoff) {
       const key = terminalIdentityKey(entry.identity),
         old = next.resources.find((r) => terminalIdentityKey(r.entry.identity) === key);
@@ -439,7 +456,35 @@ export class TerminalResourceFence implements TerminalResourceFencePort {
     this.state = this.unresolved().some((r) => this.recovery.has(terminalIdentityKey(r.entry.identity)))
       ? "reconciling"
       : "cleared";
+    this.acknowledge(
+      c,
+      s,
+      [...proofs.values()].map((p) => p.identity),
+    );
     return "accepted";
+  }
+  private acknowledge(
+    c: Collect,
+    scope: { hubBootId: string; challengeId: string; linkGen: number; inventoryId: string; revision: number },
+    identities: TerminalResolvedAck["identities"],
+  ) {
+    if (!identities.length || this.failed || this.current(c.meta, scope) !== c) return;
+    const ack: TerminalResolvedAck = {
+      hubBootId: scope.hubBootId,
+      challengeId: scope.challengeId,
+      linkGen: scope.linkGen,
+      inventoryId: scope.inventoryId,
+      revision: scope.revision,
+      journalRevision: this.journal.revision,
+      identities: structuredClone(identities),
+    };
+    for (const fn of this.resolvedListeners) {
+      try {
+        fn(ack, { ...c.meta }, c.ownerInstance);
+      } catch {
+        /* lost ACK pins agent receipts; never re-release a physical slot */
+      }
+    }
   }
   private proofScope(
     s: { hubBootId: string; challengeId: string; linkGen: number; inventoryId: string; revision: number },
@@ -522,6 +567,7 @@ export class TerminalResourceFence implements TerminalResourceFencePort {
     this.state = this.unresolved().some((r) => this.recovery.has(terminalIdentityKey(r.entry.identity)))
       ? "reconciling"
       : "cleared";
+    this.acknowledge(c, p, [p.identity]);
     return "accepted";
   }
   retireLink(meta: TerminalIngressMeta) {
