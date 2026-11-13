@@ -127,6 +127,45 @@ function detail(mode: "docked" | "overlay" | "fullscreen" = "overlay", initialAg
   return { w, selectRun };
 }
 describe("real components (not mock HTML)", () => {
+  it("marks only the open panel selected and transfers selection on header clicks", async () => {
+    const { w } = detail("docked");
+    const agentButton = () => w.get('[data-panel="agent"].fleet-summary-bar');
+    const bashButton = () => w.get('[data-panel="bash"].fleet-summary-bar');
+    const assertSelection = (selected: "agent" | "bash" | null) => {
+      for (const [kind, button] of [
+        ["agent", agentButton()],
+        ["bash", bashButton()],
+      ] as const) {
+        expect(button.classes().includes("is-selected")).toBe(selected === kind);
+        expect(button.attributes("aria-pressed")).toBe(String(selected === kind));
+        expect(button.attributes("aria-expanded")).toBe(String(selected === kind));
+        expect(button.attributes("aria-label")).toBeTruthy();
+        expect(button.get(".fab-count").text()).toBe("1");
+      }
+    };
+    await nextTick();
+    await nextTick();
+    assertSelection("agent");
+    expect(agentButton().element.closest('[data-rail-host="header"]')).not.toBeNull();
+    await bashButton().trigger("click", { detail: 1 });
+    assertSelection("bash");
+    await agentButton().trigger("click", { detail: 1 });
+    assertSelection("agent");
+    await agentButton().trigger("click", { detail: 1 });
+    assertSelection(null);
+  });
+
+  it("uses theme tokens for selection, neutral hover, badge contrast and reduced motion", () => {
+    const css = readFileSync(resolve("src/web-hub/ui/src/styles/fleet.css"), "utf8");
+    expect(css).toMatch(
+      /\.fleet-summary-bar\.is-selected\s*\{[^}]*background: var\(--c-primary\);[^}]*color: var\(--c-on-primary\)/,
+    );
+    expect(css).toMatch(/\.fleet-summary-bar:hover\s*\{\s*background: var\(--c-sunken\)/);
+    expect(css).toMatch(
+      /\.fleet-summary-bar \.fab-count\s*\{[^}]*font-size: var\(--fs-2xs\);[^}]*background: var\(--c-primary\);[^}]*color: var\(--c-on-primary\)/,
+    );
+    expect(css).toMatch(/@media \(prefers-reduced-motion: reduce\)\s*\{\s*\.fleet-summary-bar\s*\{\s*transition: none/);
+  });
   it("persists a switched panel and restores it after remount without changing drawer-open memory", async () => {
     localStorage.setItem("webhub.fleetDrawer.open", "1");
     const first = detail("docked").w;

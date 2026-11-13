@@ -57,6 +57,7 @@ const buttons = computed(() => {
     },
   ].filter((b) => b.available);
 });
+const selectedPanel = computed(() => (props.open ? (props.panel ?? (hasAgent.value ? "agent" : "bash")) : null));
 function toggle(kind: "agent" | "bash", event: MouseEvent): void {
   emit("toggle-panel", kind, event.detail === 0 ? "keyboard" : "pointer", event.currentTarget as HTMLElement);
   // Retain the legacy no-argument event; production only listens to toggle-panel.
@@ -70,11 +71,13 @@ function toggle(kind: "agent" | "bash", event: MouseEvent): void {
       v-for="button in buttons"
       :key="button.kind"
       class="fleet-summary-bar"
+      :class="{ 'is-selected': selectedPanel === button.kind }"
       type="button"
       :data-panel="button.kind"
       :data-active="button.running > 0 || undefined"
       aria-controls="fleet-drawer"
-      :aria-expanded="open && (panel ?? (hasAgent ? 'agent' : 'bash')) === button.kind"
+      :aria-expanded="selectedPanel === button.kind"
+      :aria-pressed="selectedPanel === button.kind"
       :aria-label="button.label"
       @click="toggle(button.kind, $event)"
     >

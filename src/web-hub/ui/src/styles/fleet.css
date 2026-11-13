@@ -44,9 +44,17 @@
   pointer-events: auto;
   color: var(--c-text-3);
   cursor: pointer;
+  transition:
+    background-color 140ms ease,
+    color 140ms ease;
 }
 .fleet-summary-bar:hover {
-  color: var(--c-text);
+  background: var(--c-sunken);
+}
+/* Selection is distinct from running activity (the badge/halo), in either theme. */
+.fleet-summary-bar.is-selected {
+  background: var(--c-primary);
+  color: var(--c-on-primary);
 }
 .fleet-summary-bar:focus:not(:focus-visible) {
   outline: none;
@@ -61,12 +69,6 @@
   width: 20px;
   height: 20px;
 }
-.fleet-summary-bar[data-active] {
-  color: var(--st-running);
-}
-.fleet-summary-bar[aria-expanded="true"] {
-  color: var(--st-running);
-}
 .fleet-summary-bar .fab-count {
   position: absolute;
   top: -2px;
@@ -75,8 +77,8 @@
   padding: 0 5px;
   font-size: var(--fs-2xs);
   border: 2px solid var(--c-surface);
-  background: var(--st-running);
-  color: var(--c-surface);
+  background: var(--c-primary);
+  color: var(--c-on-primary);
 }
 .fleet-summary-bar[data-active]::after {
   content: "";
@@ -101,6 +103,9 @@
   }
 }
 @media (prefers-reduced-motion: reduce) {
+  .fleet-summary-bar {
+    transition: none;
+  }
   .fleet-summary-bar[data-active]::after {
     animation: none;
     opacity: 0.1;

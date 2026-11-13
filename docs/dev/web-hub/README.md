@@ -114,6 +114,17 @@ Design: `docs/dev/web-hub/{arch,plan,vue-plan,control-plan}.md`, `docs/dev/web-r
 Fleet grid 模板及子树对齐方程。Happy DOM 不执行 calc 布局运算，测试仅求值简单字号/
 徽标长度表达式，不把它冒充浏览器布局测量。
 
+## Fleet activity selection
+
+`FleetSummaryBar.vue` 的 agent/bash 按钮沿用 `role="group"` + 原生 toggle button，
+用 `aria-pressed` 与 `.is-selected` 同步表示当前展开的 panel（关闭时都为 false），
+`aria-expanded` 仍保留。`fleet.css` 用 `--c-primary` / `--c-on-primary` 填充选中按钮，
+未选中图标保持中性灰，hover 仅浅背景；运行状态独立保留在数量徽标与 halo 上。
+徽标使用相同的主色/反差色 token，字号继续用 `--fs-2xs`；焦点环不变。
+颜色切换为 140ms，`prefers-reduced-motion: reduce` 下关闭过渡。没有图标或 wire 变更。
+回归在 `tests/web-hub/ui/activity-rail.test.ts`：真实 header 点击验证选中 class、ARIA、
+切换及关闭后的未选中状态；CSS 契约覆盖 token 与 reduced-motion。
+
 ## UI serving 与 LAN access
 
 **UI serving
