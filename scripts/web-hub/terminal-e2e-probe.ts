@@ -16,6 +16,7 @@ import { TERMINAL_JOURNAL_FILE } from "../../src/web-hub/protocol/terminal.js";
 import { TERMINAL_LOCAL_DIR } from "../../src/web-hub/protocol/terminal-local.js";
 import { makeTerminalFixture } from "../../tests/integration/web-hub-terminal-fixture.js";
 import { waitUntil } from "../../tests/web-hub/agent/helpers.js";
+import { terminalFontMetrics } from "./lib/terminal-font-metrics.js";
 import { loadPlaywright } from "./lib/playwright.js";
 
 assert.equal(process.env.npm_config_offline, "true", "explicit offline-only cache required");
@@ -51,6 +52,8 @@ const cookieId = (raw: string | undefined) => {
   return cookieIds.get(value)!;
 };
 let errors = "";
+const warnings: string[] = [];
+let droppedWarnings = 0;
 try {
   const pw = await loadPlaywright();
   assert(pw.ok, pw.ok ? "" : pw.reason);
@@ -152,6 +155,10 @@ try {
   };
   page.on("pageerror", (e: Error) => pageErrors.push(e.message));
   page.on("console", (m: any) => {
+    if (m.type() === "warning") {
+      if (warnings.length < 64) warnings.push(m.text().slice(0, 2048));
+      else droppedWarnings++;
+    }
     if (m.type() === "error") {
       const text = m.text();
       const path = new URL(m.location().url || url).pathname;
@@ -170,7 +177,7 @@ try {
         .catch(() => {});
     if (path.startsWith("/api/terminal/")) ops.push({ op: path.split("/").pop()!, status: r.status() });
   });
-  const shot = (name: string) => page.screenshot({ path: join(out, name + ".png"), fullPage: true });
+  const shot = (name: string) => page.screenshot({ path: join(out, name + "-r2.png"), fullPage: true });
   const button = (name: string) => page.locator(".terminal-chrome").getByRole("button", { name, exact: true });
   const writable = () => page.waitForSelector('.terminal-panel[data-writable="true"]', { timeout: 15000 });
   const send = async (command: string, marker: string) => {
@@ -201,6 +208,16 @@ try {
   steps.push("real token login → terminal button → bottom list");
   await page.locator("[data-terminal-create]").click();
   await writable();
+  const initialFont = await terminalFontMetrics(page);
+  await page.locator(".terminal-chrome").getByRole("button", { name: "放大终端字号", exact: true }).click();
+  const largerFont = await terminalFontMetrics(page);
+  assert.equal(largerFont.fontSize, initialFont.fontSize + 1);
+  await page.locator(".terminal-chrome").getByRole("button", { name: "缩小终端字号", exact: true }).click();
+  const smallerFont = await terminalFontMetrics(page);
+  assert.equal(smallerFont.fontSize, initialFont.fontSize);
+  // Retain a non-default size across GPU recovery AND a real document reload.
+  await page.locator(".terminal-chrome").getByRole("button", { name: "放大终端字号", exact: true }).click();
+  const chosenFont = await terminalFontMetrics(page);
   stage = "real shell echo";
   await send("echo P3_ECHO_OK", "\rP3_ECHO_OK\r\n");
   await send("printf '\\nP3_BEFORE=%s\\n' \"$$\"", "P3_BEFORE=");
@@ -234,6 +251,9 @@ try {
   await writable();
   await send("printf '\\nP3_RECOVERED=%s\\n' \"$$\"", `P3_RECOVERED=${pid}\r\n`);
   assert.equal(ops.filter((o) => ["prepare", "open", "close"].includes(o.op)).length, beforeLoss);
+  const recoveredFont = await terminalFontMetrics(page);
+  assert.equal(recoveredFont.fontSize, chosenFont.fontSize);
+  assert.equal(recoveredFont.fontFamily, chosenFont.fontFamily);
   await shot("03-renderer-recovered");
   steps.push("real context loss → renderer rebuild → attach same PID; zero prepare/open/close");
   stage = "background refresh same PID";
@@ -254,6 +274,10 @@ try {
   await writable();
   await send("printf '\\nP3_AFTER=%s\\n' \"$$\"", `P3_AFTER=${pid}\r\n`);
   assert.equal(ops.filter((o) => o.op === "open").length, 1);
+  const reloadedFont = await terminalFontMetrics(page);
+  assert.equal(reloadedFont.fontSize, chosenFont.fontSize);
+  assert.equal(reloadedFont.fontFamily, chosenFont.fontFamily);
+  result.fonts = { initialFont, largerFont, smallerFont, chosenFont, recoveredFont, reloadedFont };
   await shot("04-refresh-same-pid");
   steps.push("background → real page reload → list attach preserves same PID (one open)");
   stage = "confirmed close and quota reuse";
@@ -325,6 +349,8 @@ try {
   result.cspByDocument = documentCsp;
   result.cspViolations = documentCsp.flat();
   assert.deepEqual(result.cspViolations, []);
+  result.warnings = warnings;
+  result.droppedWarnings = droppedWarnings;
   result.consoleErrors = consoleErrors;
   result.expectedRevocationErrors = expectedRevocationErrors;
   result.pageErrors = pageErrors;
@@ -354,6 +380,11 @@ try {
       );
     });
     const dp = await dc.newPage();
+    dp.on("console", (m: any) => {
+      if (m.type() !== "warning") return;
+      if (warnings.length < 64) warnings.push(m.text().slice(0, 2048));
+      else droppedWarnings++;
+    });
     const attempted: string[] = [];
     dp.on("request", (r: any) => {
       if (/\/api\/terminal\/(prepare|open)$/.test(r.url())) attempted.push(r.url());
@@ -372,7 +403,7 @@ try {
     result.disabledCspViolations = await dp.evaluate(() => (window as any).__disabledCsp);
     assert.deepEqual(result.disabledCspViolations, []);
     assert.equal(await dp.locator(".xterm").count(), 0);
-    await dp.screenshot({ path: join(out, "08-webgl-unavailable.png"), fullPage: true });
+    await dp.screenshot({ path: join(out, "08-webgl-unavailable-r2.png"), fullPage: true });
     steps.push("--disable-webgl: Chinese refusal before prepare/open, no xterm or shell");
   } finally {
     await disabled.close();
@@ -382,6 +413,7 @@ try {
   result.status = "PASS";
 } catch (error) {
   result.status = "FAIL";
+  // Keep bounded warning evidence on failed runs too, independently of assertions.
   result.stage = stage;
   result.error = String(error);
   result.agentDiagnostics = errors;
@@ -401,7 +433,7 @@ try {
         .innerText()
         .catch(() => "")
     ).slice(-6000);
-    await page.screenshot({ path: join(out, "failure.png"), fullPage: true }).catch(() => {});
+    await page.screenshot({ path: join(out, "failure-r2.png"), fullPage: true }).catch(() => {});
   }
   process.exitCode = 1;
 } finally {
@@ -419,6 +451,8 @@ try {
   await browser?.close();
   fixture.cleanup();
   rmSync(root, { recursive: true, force: true });
+  result.warnings = warnings;
+  result.droppedWarnings = droppedWarnings;
   result.authTrace = authTrace;
   result.cleanup = "owned agent/hub/browser stopped; scratch removed";
   writeFileSync(join(out, "e2e-report.json"), JSON.stringify(result, null, 2) + "\n");

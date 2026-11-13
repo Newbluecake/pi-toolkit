@@ -5,6 +5,7 @@ import { resolve, extname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CSP } from "../../src/web-hub/hub/http.js";
 import { loadPlaywright, type PwPage, type PwBrowser } from "./lib/playwright.js";
+import { terminalFontMetrics } from "./lib/terminal-font-metrics.js";
 import type { UiProvenance } from "./lib/ui-provenance.js";
 
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
@@ -272,6 +273,7 @@ export async function runTerminalProbe(selected = "chromium"): Promise<void> {
         "terminal resource loaded before click",
       );
       const initial = await open(page);
+      const initialFont = await terminalFontMetrics(page);
       check(
         initial.text.includes("TRUECOLOR") &&
           initial.contrast === 7 &&
@@ -298,6 +300,7 @@ export async function runTerminalProbe(selected = "chromium"): Promise<void> {
         () => document.querySelector<HTMLElement>("[data-terminal-spike]")?.dataset["fontSize"] === "18",
       );
       const font = await metrics(page);
+      const resizedFont = await terminalFontMetrics(page);
       check(font.cellHeight > initial.cellHeight, "font measurement did not update");
       await page.click("[data-terminal-replay]");
       await wait(
@@ -370,6 +373,11 @@ export async function runTerminalProbe(selected = "chromium"): Promise<void> {
         return host?.dataset["ready"] === "true" && host.dataset["rebuilds"] === "1";
       });
       const recovered = await metrics(page);
+      const recoveredFont = await terminalFontMetrics(page);
+      check(
+        recoveredFont.fontFamily === initialFont.fontFamily && recoveredFont.fontSize === 18,
+        "font changed during renderer recovery",
+      );
       check(
         await page.evaluate(
           () =>
@@ -404,6 +412,9 @@ export async function runTerminalProbe(selected = "chromium"): Promise<void> {
       return {
         before,
         initial,
+        initialFont,
+        resizedFont,
+        recoveredFont,
         resized,
         themed,
         font,

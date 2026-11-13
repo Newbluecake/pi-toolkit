@@ -4,6 +4,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { version } from "@xterm/xterm/package.json";
 import xtermCss from "@xterm/xterm/css/xterm.css?url";
 import terminalCss from "./terminal.css?url";
+import { TERMINAL_FONT_FAMILY, terminalFontsReady, waitTerminalFonts, watchTerminalFonts } from "./fonts.js";
 import { captureTerminalStyles } from "./constructed-styles.js";
 import { createWebglLifecycle, type WebglUiState } from "./webgl-lifecycle.js";
 
@@ -54,6 +55,9 @@ export async function mountTerminal(
     async create(signal, onLoss) {
       if (signal.aborted) throw new Error("终端初始化已取消。");
       requireWebgl2(doc);
+      const fontsReady = terminalFontsReady(doc, fontSize);
+      await waitTerminalFonts(fontsReady, signal); // Inside the existing 3s renderer budget.
+      if (signal.aborted) throw new Error("终端初始化已取消。");
       const stage = doc.createElement("div");
       stage.className = "terminal-spike-viewport is-initializing";
       stage.setAttribute("aria-hidden", "true");
@@ -62,6 +66,7 @@ export async function mountTerminal(
       const terminal = new Terminal({
         allowProposedApi: false,
         fontSize,
+        fontFamily: TERMINAL_FONT_FAMILY,
         minimumContrastRatio: 7,
         cursorBlink: false,
         scrollback: 1000,
@@ -77,12 +82,14 @@ export async function mountTerminal(
       const writes = new Set<(error: Error) => void>();
       let cancelReady = () => {};
       let removeContextLoss = () => {};
+      let removeFontsReady = () => {};
       const dispose = () => {
         if (stopped) return;
         stopped = true;
         signal.removeEventListener("abort", cancelled);
         cancelReady();
         removeContextLoss();
+        removeFontsReady();
         for (const reject of writes) reject(new Error("终端界面已重建或关闭，写入已取消。"));
         // Each cleanup is isolated: a failed third-party disposer must not leave a
         // hidden stage or constructed sheet behind. Core must precede addon cleanup.
@@ -101,7 +108,13 @@ export async function mountTerminal(
       };
       const session = {
         terminal,
-        fit: () => fit.fit(),
+        fit: () => {
+          fit.fit();
+          // Public renderer facts for browser acceptance; no xterm private fields/VT content.
+          stage.dataset["terminalFontFamily"] = String(terminal.options.fontFamily);
+          stage.dataset["terminalFontSize"] = String(terminal.options.fontSize);
+          stage.dataset["terminalCols"] = String(terminal.cols);
+        },
         dispose,
         write(bytes: string | Uint8Array) {
           return new Promise<void>((resolve, reject) => {
@@ -125,6 +138,15 @@ export async function mountTerminal(
             }
           });
         },
+      };
+      const remeasureFonts = () => {
+        if (stopped || signal.aborted) return;
+        // xterm ignores identical option writes. Both values select the same system font;
+        // the public fontFamily option change explicitly triggers CharSizeService.measure.
+        terminal.options.fontFamily = `${TERMINAL_FONT_FAMILY}, monospace`;
+        terminal.options.fontFamily = TERMINAL_FONT_FAMILY;
+        session.fit();
+        terminal.refresh(0, terminal.rows - 1);
       };
       let rejectReady: (error: Error) => void = () => {};
       const cancelled = () => {
@@ -198,8 +220,9 @@ export async function mountTerminal(
           };
           canvas.addEventListener("webglcontextlost", lost, true);
           removeContextLoss = () => canvas.removeEventListener("webglcontextlost", lost, true);
-          fit.fit();
+          session.fit();
           terminal.refresh(0, terminal.rows - 1); // Public onRender excludes redraw-only startup frames.
+          removeFontsReady = watchTerminalFonts(doc, fontsReady, remeasureFonts); // Late font readiness after the bounded wait.
         });
       } catch (error) {
         dispose();

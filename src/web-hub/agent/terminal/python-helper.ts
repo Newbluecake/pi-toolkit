@@ -46,6 +46,7 @@ config = None
 master = None
 shell = None
 shell_sid = None
+shell_session_ready = False
 gate = None
 execfd = None
 execbuf = bytearray()
@@ -98,6 +99,9 @@ def close(why):
         os.close(master); master = None
     emit(dict(t='closing', reason=why))
 
+def managed_key(i):
+    return (i['bootId'], i['pid'], i['starttime'], i['uid'], i['sid'], i['pgid'], i['role'])
+
 def scan():
     global scan_ok, scan_reason
     begin = time.monotonic()
@@ -121,14 +125,18 @@ def scan():
         for i, ppid, state in rows:
             pid = i['pid']
             if pid == os.getpid(): continue
+            # forkpty's parent can run before the child completes login_tty/setsid.
+            # Do not publish that temporary inherited helper SID as a shell identity.
+            if pid == shell and not shell_session_ready: continue
             if (shell_sid is not None and i['sid'] == shell_sid) or pid in descendants:
                 i['role'] = 'shell' if pid == shell else ('background' if i['pgid'] != shell else 'descendant')
                 if master is not None:
                     try:
                         if i['pgid'] == os.tcgetpgrp(master) and pid != shell: i['role'] = 'foreground'
                     except OSError: pass
-                if (pid, i['starttime']) not in known and len(known) >= 255: raise RuntimeError()
-                known[(pid, i['starttime'])] = i
+                key = managed_key(i)
+                if key not in known and len(known) >= 255: raise RuntimeError()
+                known[key] = i
                 alive.append((i, state))
         if len(known) > 255: raise RuntimeError()
         return alive
@@ -209,9 +217,6 @@ def do_fork():
     os.set_blocking(fd, False)
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack('HHHH', config['rows'], config['cols'], 0, 0))
     sel.register(fd, selectors.EVENT_READ)
-    row = identity(pid, 'shell')
-    if row: known[(pid, row[0]['starttime'])] = row[0]
-    emit(dict(t='spawn', managed=list(known.values())))
 
 def command(c):
     global config, parent_beat, input_seq, last_win
@@ -264,7 +269,13 @@ while True:
             try: do_fork()
             except BaseException:
                 emit(dict(t='error', code='E_BACKEND_CAPABILITY')); close('spawn-failed')
-        if closing is None and gate is not None and now-started >= (fixture.get('startDelayMs',0)+fixture.get('execDelayMs',0))/1000:
+        if closing is None and gate is not None and not shell_session_ready:
+            row = identity(shell, 'shell')
+            if row and row[0]['sid'] == shell_sid and row[0]['pgid'] == shell:
+                shell_session_ready = True
+                known[managed_key(row[0])] = row[0]
+                emit(dict(t='spawn', managed=list(known.values())))
+        if closing is None and gate is not None and shell_session_ready and now-started >= (fixture.get('startDelayMs',0)+fixture.get('execDelayMs',0))/1000:
             os.write(gate, b'x'); os.close(gate); gate = None
         if execfd is not None:
             try:

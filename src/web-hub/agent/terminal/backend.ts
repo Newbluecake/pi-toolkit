@@ -58,6 +58,15 @@ export interface TerminalBackendDiagnostic {
   ready: boolean;
   failure?: string;
   closing?: string;
+  reap?: {
+    invalid: boolean;
+    helperReaped: boolean;
+    spawnSettled: boolean;
+    report: string;
+    ptyClosed: boolean;
+    groupsProven: boolean;
+    identitiesGone: boolean;
+  };
 }
 export interface TerminalBackend {
   readonly diagnostic?: TerminalBackendDiagnostic;
@@ -122,6 +131,7 @@ class PythonTerminalBackend implements TerminalBackend {
   private result: TerminalPhysicalResult | undefined;
   private receipt: TerminalLocalReference | undefined;
   private receiptWork: Promise<void> | undefined;
+  private reapDeadlineAt: number | undefined;
   private metadata: TerminalAgentDisplayMetadata = {};
   private resizeActive = false;
   private resizeQueued:
@@ -307,12 +317,15 @@ class PythonTerminalBackend implements TerminalBackend {
         this.invalid = true;
         continue;
       }
-      if (!this.known.has(`${i.pid}:${i.starttime}`) && this.known.size >= 256) {
+      // A PID can legitimately move between job-control groups/roles. Inventory and
+      // immutable receipts must retain every previously advertised observation.
+      const key = JSON.stringify([i.bootId, i.pid, i.starttime, i.uid, i.sid, i.pgid, i.role]);
+      if (!this.known.has(key) && this.known.size >= 256) {
         this.invalid = true;
         this.close();
         return;
       }
-      this.known.set(`${i.pid}:${i.starttime}`, { ...i });
+      this.known.set(key, { ...i });
       if (this.known.size > 256) {
         this.invalid = true;
         this.close();
@@ -515,6 +528,7 @@ class PythonTerminalBackend implements TerminalBackend {
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    this.reapDeadlineAt = systemClock.now() + L.reapMs;
     this.metadata = {};
     if (this.childReaped) return;
     this.resizeQueued?.reject(new TerminalBackendError("E_UNKNOWN_EFFECT"));
@@ -574,7 +588,15 @@ class PythonTerminalBackend implements TerminalBackend {
     this.doneResolve(this.result);
   }
   private async finish(): Promise<void> {
-    const deadline = this.timer(this.options.receiptContext ? 2250 : 250, () => this.resolveIncomplete());
+    // Child close is not the end of the existing physical-proof budget. A loaded
+    // filesystem may need >250ms for real /proc checks; keep the SAME close deadline.
+    const deadline = this.timer(
+      Math.max(0, (this.reapDeadlineAt ?? systemClock.now() + L.reapMs) - systemClock.now()),
+      () => {
+        this.diagnostic.failure ??= "reap-proof-deadline";
+        this.resolveIncomplete();
+      },
+    );
     try {
       const r = await this.retryReap();
       if (!this.result) {
@@ -598,6 +620,15 @@ class PythonTerminalBackend implements TerminalBackend {
       report.spawnSettled === true &&
       report.managedGroupsGone === true &&
       gone;
+    this.diagnostic.reap = {
+      invalid: this.invalid,
+      helperReaped: this.childReaped,
+      spawnSettled: this.settled,
+      report: report?.t === "reaped" ? "reaped" : report?.t === "incomplete" ? "incomplete" : "missing",
+      ptyClosed: report?.ptyClosed === true,
+      groupsProven: report?.managedGroupsGone === true,
+      identitiesGone: gone,
+    };
     const signal = report?.signal;
     if (proven && this.options.receiptContext && !this.receipt) {
       this.receiptWork ??= writePhysicalReceipt(this.options.receiptContext, {

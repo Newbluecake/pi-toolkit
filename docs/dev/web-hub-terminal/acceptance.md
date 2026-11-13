@@ -37,7 +37,9 @@
 - [ ] 点击终止先见确认框，确认前无 close；确认后原PID消失、journal零资源、receipt exact ACK删除。
 - [ ] 释放后可再开；循环次数超过默认 quota2，不能手工 fence.begin/reset 代替回收。
 - [ ] privacy lock、真实 logout/revoke后≤2s面板失效（记录实测毫秒），旧writer不能输入；shell真实清理。
-- [ ] 主路径CSP违规0/无未处理页面异常；保存console error/warnings，不混入negative。
+- [ ] 主路径CSP违规0/无未处理页面异常；保存console error与有界warnings（64条×2048字符+droppedWarnings），不混入negative。
+- [ ] W/i/m在实际fontFamily下advance差<0.5px；真实GPU cell符合floor(advance×DPR)/DPR；A−/A+、loss与真实刷新后字体链/字号保持；中文宽glyph回退保留。比例fontFamily实际构建mutation必须exit1，不能用构建语法失败冒充红。
+- [ ] 字体就绪等待≤500ms且包含在renderer3s内；超时仍开、迟到ready/loadingdone重测，dispose撤订阅；无字体资产/CSP放宽/负letterSpacing。
 - [ ] 独立 `--disable-webgl` Chromium中文「终端未启动」，0 xterm/prepare/open；CSP违规0。
 - [ ] 截图实际打开阅读，非空白/错误页；报告写出证据绝对路径与最终退出码。
 
@@ -46,7 +48,9 @@
 - [ ] separate-process durable-resolution用例连续10次全绿；所选用例其它44个 `-t` skip 不计执行覆盖。
 - [ ] 仍要求 journal revision≥before+2、rows=0、receipt目录空、真实PID gone、私有SSE无id。
 - [ ] 有界等待与生产 reaper60s一致，测试总界300s；失败输出 stage/journal/receipt物理事实/agent/reaper PID状态；不放宽断言、不把exit当release。
-- [ ] 完整 terminal tier2全跑一次（不是十次单例代替全套）。
+- [ ] 完整terminal tier2在maxWorkers2下连跑10轮；另两个owned CPU忙循环负载下3轮。原始输出保留，包括初败根因和修复后轮次，不用单跑绿代替此门。
+- [ ] stdout压力的2s控制应答与原5s物理核验/≤60s reaper分开；cold receipt等原reaper+control上限的真正durable ACK，不抬产品deadline/不放宽reaped断言。
+- [ ] 真实setpgid屏障验证同PID前后组/role历史都在最终proof，forkpty暂态helper组不发布为shell；H覆盖/receipt/OS guards不得为消红而放宽。
 
 ## 必须单列的 NOT RUN / 限界
 

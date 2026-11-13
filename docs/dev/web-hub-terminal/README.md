@@ -58,6 +58,10 @@ capability id/nonce/SHA 仅走专用响应。hub 自读文件，检查 exact sco
 pending/starting/live/closing/reaping/poison 均占物理配额。helper 使用 Linux subreaper，启动时真实双 fork 收养/waitpid 自检；HUP→TERM→KILL 按已核身份/组回收。backend 必须满足 **spawn future sealed/settled、PTY closed、helper completion + waitpid、受管身份/组 gone** 才能写不可变0600 receipt。
 helper 单独退出、发 SIGKILL、HTTP close ACK、wire true/exit 都不是证明；未知保留 `reap_incomplete`。
 
+close之后的OS/receipt核验使用**原5s物理回收预算的剩余时间**，不能在helper close后另用250ms提前判未证回收，也不能另开5s延长总界。最初done仍可能保守incomplete；owner用原≤60s升级reaper重取真实证明，期间配额不释放。真实证明成功后经H当前库存、receipt/OS核验、durable prune/ACK释放；收集/磁盘暂时失败可由后续真实lifecycle或hot-quota open的fresh collection再证，不通过TTL强行清零。丢失helper完整报告、不可读proc/残留组或损坏状态可能持续poison，满额后拒绝新建；没有自动reset。
+
+forkpty父分支可能先于child的login_tty/setsid返回：exec gate前须独立读到shell真实SID==PID、PGID==PID，才发布shell身份/允许exec。进程的job-control PGID/role可合法变化，Python和Node managed表必须按完整(boot,pid,starttime,uid,SID,PGID,role)追加历史观察，不按PID:starttime覆写已发布元组。H的历史覆盖/独立组消失检查**不放宽**。256条上限按观察数计，满表仍fail-closed。
+
 hub 直接读 `terminal-v1/receipts/` 实际文件，核 exact resource tuple/producer/witness/hash/权限，并独立证实原身份 **及记录的 pgid/SID** 消失。当前 inventory 必须 count/digest/revision/连续 chunk/complete/全预期集合一致，不接受部分证明放行：
 
 1. 完整当前 inventory + 实际 receipt + 独立 OS 核验。
@@ -92,6 +96,10 @@ publication 2s logical deadline、late-write seal；同步文件系统调用不�
 - controller 每个 HTTP/action await 前后绑定不可变 authority snapshot（认证、writer代、原 connection 对象/instance/token/expiry、client/session/epoch、AbortSignal）；迟到成功/错误/finally 不能写后继状态。忽略 abort 的 transport 也必须被挡住。卸载 detach 使用独立旧 lease 快照，不恢复 UI。
 
 ## WebGL-only、CSP、lazy 与升级门
+
+字体只用系统具名等宽链：SFMono-Regular / DejaVu Sans Mono / Liberation Mono / Noto Sans Mono / Noto Sans Mono CJK SC / Menlo / Consolas / Courier New，然后才ui-monospace/monospace；本机generic monospace实际会落到比例Noto Sans CJK JP，不能放在链首。无字体资产/下载/新license。xterm测量前fonts.load("Wim中文")与fonts.ready最多等500ms（包含在原3s renderer界内），超时仍打开；迟到ready或loadingdone用公开fontFamily选项的等价变更重新measure/fit/refresh，dispose撤订阅，不读私有字段、不用负letterSpacing掩盖。
+
+A−/A+的10..24字号单独保存为非秘密UI偏好 `pwh_terminal_font_size`，默认14；仅启用后的lazy panel读写，刷新和loss重建保留。source-scan仅增加此feature-local偏好模块，I8白名单不变。浏览器门从公开option facts与真实GPU画布校验W/i/m advance差<0.5px，cell= floor(advance×DPR)/DPR，另保留中文宽glyph回退；强制比例fontFamily的实际构建必须让此门变红。
 
 精确锁 `@xterm/xterm 6.0.0` / fit `0.11.0` / webgl `0.19.0`，只在 UI devDependencies，无 runtime dependency。
 WebGL2 不可用/禁用/getContext throw/null/addon失败：**xterm/CSS/prepare/open 前拒启并中文提示**，不回落 DOM。
@@ -140,7 +148,7 @@ timeout 240s npm run probe:terminal-e2e
 
 真跨层脚本使用随机短路径私有 HOME/port0/Unix socket、真实 guarded authority/receipt/journal/OS verifier，**只 DI 审核过的隔离 uid/rc fixture**；不碰用户真实 ~/.pi、rc、凭据、运行中 hub。agent 版本随 package 以免触发 supersede。
 生产 manifest-verified UI 经真实 token login→按钮→bottom list→echo/PID→max/Esc→真实 loss 同 PID/零新open→后台完成→刷新接回同 PID→确认关闭→物理回收/配额再开→privacy/revoke立即失效→禁用 WebGL 中文拒启。监听原 SSE 仅观测输出，不替换后端/渲染器，不读 xterm 私有 buffer；网络路由仅允许该私有 loopback origin。
-截图、JSON/操作计数、CSP与console错误写 evidence 目录；任何异常 exit1，不把没有测试/只截图当 PASS。先等后台 action 完成再刷新，否则人为取消尚未送出的 detach 不能当成功后台的证明。
+截图（返工版-r2后缀）、JSON/操作计数、CSP与console错误写 evidence 目录；warnings单独有界保存（最多64条、每条2048字符、另记droppedWarnings），主/禁用WebGL页面均采集，不混入错误判定；任何异常 exit1，不把没有测试/只截图当 PASS。先等后台 action 完成再刷新，否则人为取消尚未送出的 detach 不能当成功后台的证明。
 
 七案例保留 normal/recovery、recovery失败、getContext null/throw、addon失败、negative、真实 --disable-webgl。六正例必须0 CSP违规/无可见DOM；negative 必须恰1 CSP违规+1 console error（证明捕获器有效），不混入正例统计。
 

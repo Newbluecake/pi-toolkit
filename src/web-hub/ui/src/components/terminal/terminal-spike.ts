@@ -34,6 +34,7 @@ if (root) {
     root.dataset["rows"] = String(terminal.rows);
     root.dataset["cols"] = String(terminal.cols);
     root.dataset["fontSize"] = String(terminal.options.fontSize);
+    root.dataset["fontFamily"] = String(terminal.options.fontFamily);
     root.dataset["contrast"] = String(terminal.options.minimumContrastRatio);
     root.dataset["bufferText"] = Array.from(
       { length: terminal.buffer.active.length },

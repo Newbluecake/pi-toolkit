@@ -95,9 +95,10 @@ const SOURCE_BANNED_EXCEPT: Record<string, RegExp> = {
  * kind toggle (`pwh_history_kind`, "main" | "all" — a pure UI preference, same class).
  * 2026-10-13 (TEMPORARY): + `transcript/Transcript.vue` for the scroll-rollback investigation
  * breadcrumb (`pwh_diag_scroll` — a 12-entry ring of save/restore/unfollow facts: scroll
- * geometry + anchor ids only, no message content). Remove together with the breadcrumb. */
+ * geometry + anchor ids only, no message content). Remove together with the breadcrumb.
+ * Terminal fonts.ts stores only bounded 10..24 font-size UI preference, never terminal data. */
 const LOCALSTORAGE_ALLOWED =
-  /theme|token-client|ControlNotice\.vue|agents\/AgentList\.vue|drawer\/FleetDrawer\.vue|composables\/useActivityRail\.ts|composables\/useI18n\.ts|spawn\/SessionHistoryDialog\.vue|logic\/state\.js|transcript\/Transcript\.vue/i;
+  /theme|token-client|ControlNotice\.vue|agents\/AgentList\.vue|drawer\/FleetDrawer\.vue|composables\/useActivityRail\.ts|composables\/useI18n\.ts|spawn\/SessionHistoryDialog\.vue|logic\/state\.js|transcript\/Transcript\.vue|components\/terminal\/fonts\.ts/i;
 
 describe("web-hub Vue UI has no HTML-injection / CSP-unsafe sinks", () => {
   it("scans the expected files (glob-failure canary)", () => {

@@ -21,6 +21,7 @@ const rendererFactory = inject<TerminalRendererFactory>(TERMINAL_RENDERER_FACTOR
     clearTimeout(timer);
   }
 });
+import { loadTerminalFontSize, saveTerminalFontSize } from "./fonts.js";
 import terminalCss from "./terminal.css?url";
 import TerminalChrome from "./TerminalChrome.vue";
 import TerminalList from "./TerminalList.vue";
@@ -34,9 +35,10 @@ const maximized = ref(false),
   confirmRow = ref<TerminalRow | null>(null);
 const paste = ref<string | null>(null);
 const height = ref(320);
-const fontSize = ref(14);
+const fontSize = ref(loadTerminalFontSize());
 function font(step: number) {
   fontSize.value = Math.max(10, Math.min(24, fontSize.value + step));
+  saveTerminalFontSize(fontSize.value);
   renderer?.setFontSize(fontSize.value);
   void controller.resize().catch(controller.fail);
 }
@@ -237,6 +239,7 @@ async function ensureRenderer() {
       return;
     }
     renderer = instance;
+    if (fontSize.value !== 14) renderer.setFontSize(fontSize.value);
     wireInput();
     observer = new ResizeObserver(() => {
       clearTimeout(resizeTimer);

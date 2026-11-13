@@ -41,6 +41,7 @@ afterEach(() => {
   for (const w of wrappers.splice(0)) w.unmount();
   vi.useRealTimers();
   document.body.textContent = "";
+  localStorage.removeItem("pwh_terminal_font_size");
   document.head.querySelectorAll("link").forEach((l) => l.remove());
   vi.clearAllMocks();
 });

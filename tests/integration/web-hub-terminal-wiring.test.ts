@@ -154,6 +154,11 @@ async function physicalHub(degraded = false) {
   let owner: TerminalOwner | undefined;
   let frontend: FrontendDeps | undefined;
   const backends: TerminalBackend[] = [];
+  const lifecycleTrace: object[] = [];
+  const trace = (value: object) => {
+    lifecycleTrace.push({ ms: Date.now(), ...value });
+    if (lifecycleTrace.length > 96) lifecycleTrace.shift();
+  };
   let resolvedAcks = 0;
   const launch = async () => {
     const result = await startHub(config({ home: sandbox.home, privacy: true, terminal: terminalConfig }), (deps) => {
@@ -181,6 +186,25 @@ async function physicalHub(degraded = false) {
       owner = await createTerminalOwner({
         ...options,
         send: (frame) => {
+          if (frame.t === "term_event")
+            trace({
+              direction: "agent",
+              kind: frame.kind,
+              revision: frame.revision,
+              ...(frame.kind === "exit" ? { reap: frame.reap } : {}),
+            });
+          if (frame.t === "term_res" && frame.op === "inventory")
+            trace({
+              direction: "agent",
+              op: frame.op,
+              ...(frame.ok
+                ? {
+                    phase: frame.page.phase,
+                    revision: frame.page.revision,
+                    ...(frame.page.phase === "chunk" ? { proofs: frame.page.proofs.length } : {}),
+                  }
+                : { code: frame.code }),
+            });
           // Observe the real producer snapshot before any hostile wire-only projection.
           if (frame.t === "term_res" && frame.ok && frame.op === "inventory") {
             if (frame.page.phase === "chunk" && frame.page.proofs.length) provedInventories.add(frame.page.inventoryId);
@@ -219,6 +243,12 @@ async function physicalHub(degraded = false) {
           backends.push(b);
           return b;
         },
+      });
+      const receive = owner.receive.bind(owner);
+      vi.spyOn(owner, "receive").mockImplementation((frame) => {
+        const op = frame && typeof frame === "object" && "op" in frame ? String(frame.op) : "";
+        if (["inventory", "resolved_ack"].includes(op)) trace({ direction: "hub", op });
+        return receive(frame);
       });
       const forget = owner.forgetResolvedReceipts.bind(owner);
       vi.spyOn(owner, "forgetResolvedReceipts").mockImplementation((ids) => {
@@ -388,6 +418,18 @@ async function physicalHub(degraded = false) {
     },
     provedEnd: () => provedEnd,
     receipts: () => ({ resolvedAcks }),
+    async receiptBarrier(expected: number, ms = TERMINAL_LIMITS.reapRetryMs + TERMINAL_LIMITS.controlMs) {
+      try {
+        await waitUntil(() => resolvedAcks === expected, ms, "physical receipt durable ACK");
+      } catch (error) {
+        const disk = JSON.parse(
+          await readFile(join(paths.stateDir, TERMINAL_LOCAL_DIR, TERMINAL_JOURNAL_FILE), "utf8"),
+        );
+        throw new Error(
+          `${String(error)}; ${JSON.stringify({ resolvedAcks, expected, journal: disk, backend: backends.map((b) => b.diagnostic), trace: lifecycleTrace })}`,
+        );
+      }
+    },
     journal: async () =>
       JSON.parse(
         await readFile(join(paths.stateDir, TERMINAL_LOCAL_DIR, TERMINAL_JOURNAL_FILE), "utf8"),
@@ -455,7 +497,7 @@ describe("terminal real hub + real connection + physical PTY with production loc
         })
       ).status,
     ).toBe(200);
-    await waitUntil(() => h.receipts().resolvedAcks === 1, TERMINAL_LIMITS.reapRetryMs);
+    await h.receiptBarrier(1);
   }, 90000);
   it("HTTP prepare/open → directed output/input echo → detach/attach same PID → close/reap/durable ACK → quota reusable", async () => {
     const h = (await physicalHub())!;
@@ -1156,7 +1198,18 @@ describe("durable consumption and cold hub restart", () => {
           })
         ).status,
       ).toBe(200);
-      await waitUntil(() => h.receipts().resolvedAcks === round + 1, 5000, "consumed receipt ACK");
+      try {
+        // Physical retry uses up to60s; only the real post-durable ACK advances this barrier.
+        await waitUntil(
+          () => h.receipts().resolvedAcks === round + 1,
+          TERMINAL_LIMITS.reapRetryMs + TERMINAL_LIMITS.controlMs,
+          "consumed receipt ACK",
+        );
+      } catch (error) {
+        throw new Error(
+          `${String(error)}; ${JSON.stringify({ round, receipts: h.receipts(), journal: await h.journal(), backends: h.backends.map((b) => b.diagnostic) })}`,
+        );
+      }
       expect((await h.journal()).resources).toEqual([]);
       expect(await readdir(join(h.hub.paths.stateDir, TERMINAL_LOCAL_DIR, "receipts"))).toEqual([]);
       const revision = (await h.journal()).revision;
@@ -1165,7 +1218,7 @@ describe("durable consumption and cold hub restart", () => {
       expect((await h.journal()).revision).toBe(revision); // cold load did not re-quarantine consumed rows
       expect((await h.post("prepare", { cols: 80, rows: 24 })).status).toBe(200);
     }
-  }, 30000);
+  }, 240000);
   it.each(["resolved-before-prune", "pruned-before-ack"])(
     "recovers real durable %s crash window only through fresh proof and prune",
     async (window) => {

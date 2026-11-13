@@ -1,6 +1,6 @@
 /** True Linux PTY / Q4 physical half. No real passwd HOME/shell/rc is executed.
  * All launches use the internal, pre-spawn validated UID fixture factory. H owns journal CAS. */
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   chmodSync,
   existsSync,
@@ -40,6 +40,22 @@ import {
 } from "../../src/web-hub/protocol/terminal.js";
 import { Value } from "@sinclair/typebox/value";
 
+// Delay completion AFTER genuine OS proof, not a replacement verifier or a fake receipt.
+const proofBarrier = vi.hoisted(() => ({ entered: false, wait: undefined as Promise<void> | undefined }));
+vi.mock("../../src/web-hub/agent/terminal/reaper.js", async (load) => {
+  const real = await load<typeof import("../../src/web-hub/agent/terminal/reaper.js")>();
+  return {
+    ...real,
+    terminalIdentitiesGone: async (...args: Parameters<typeof real.terminalIdentitiesGone>) => {
+      const gone = await real.terminalIdentitiesGone(...args);
+      if (gone && proofBarrier.wait) {
+        proofBarrier.entered = true;
+        await proofBarrier.wait;
+      }
+      return gone;
+    },
+  };
+});
 const roots: string[] = [],
   backends: TerminalBackend[] = [],
   owners: TerminalOwner[] = [];
@@ -387,6 +403,76 @@ describe("Linux agent-owned terminal §§5.1–5.4, T-ISO/T-SUBREAPER", () => {
     expect(Date.now() - start).toBeLessThan(5000);
     expect(await terminalIdentitiesGone(result.identitiesChecked)).toBe(true);
   }, 15000);
+  it("retains every real group/role observation when a live process changes job-control group", async () => {
+    const f = fixture(),
+      h = backend(f);
+    await waitRc(h);
+    const script = join(f.cwd, "group-shift.py"),
+      gate = join(f.cwd, "move-group");
+    writeFileSync(
+      script,
+      `import os,time
+print("GROUP_JOB=%s" % os.getpid(),flush=True)
+while not os.path.exists(${JSON.stringify(gate)}): time.sleep(.02)
+os.setpgid(0,0)
+print("GROUP_MOVED",flush=True)
+while True: time.sleep(.1)
+`,
+    );
+    await h.write(`set +m; python3 '${script}' &\n`);
+    await until(() => /GROUP_JOB=\d+/.test(h.output));
+    const pid = Number(/GROUP_JOB=(\d+)/.exec(h.output)![1]);
+    const before = (await readTerminalIdentity(pid))!;
+    await until(() => h.b.managed.some((i) => i.pid === pid && i.pgid === before.pgid));
+    writeFileSync(gate, "go");
+    await until(() => h.output.includes("GROUP_MOVED"));
+    const after = (await readTerminalIdentity(pid))!;
+    expect(after.pgid).toBe(pid);
+    expect(after.pgid).not.toBe(before.pgid);
+    await until(() => h.b.managed.some((i) => i.pid === pid && i.pgid === after.pgid));
+    expect(h.b.managed.filter((i) => i.pid === pid).map((i) => i.pgid)).toEqual(
+      expect.arrayContaining([before.pgid, after.pgid]),
+    );
+    h.b.close();
+    const proof = await h.b.done;
+    expect(proof.outcome, JSON.stringify(h.b.diagnostic)).toBe("reaped");
+    expect(proof.identitiesChecked.filter((i) => i.pid === pid).map((i) => i.pgid)).toEqual(
+      expect.arrayContaining([before.pgid, after.pgid]),
+    );
+    expect(await terminalIdentitiesGone(proof.identitiesChecked)).toBe(true);
+  }, 12000);
+  it("uses the remaining production reap budget when genuine OS proof takes more than 250ms", async () => {
+    const h = backend(fixture());
+    await waitRc(h);
+    let release!: () => void;
+    proofBarrier.entered = false;
+    proofBarrier.wait = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    try {
+      h.b.close();
+      await until(() => proofBarrier.entered);
+      const status = await Promise.race([
+        h.b.done.then(() => "premature-result"),
+        pause(400).then(() => "pending-proof"),
+      ]);
+      expect(status).toBe("pending-proof");
+      release();
+      const physical = await h.b.done;
+      expect(physical.outcome, JSON.stringify(h.b.diagnostic)).toBe("reaped");
+      expect(physical).toMatchObject({
+        helperReaped: true,
+        spawnSettled: true,
+        ptyClosed: true,
+        managedGroupsGone: true,
+      });
+      expect(await terminalIdentitiesGone(physical.identitiesChecked)).toBe(true);
+    } finally {
+      release();
+      proofBarrier.wait = undefined;
+      proofBarrier.entered = false;
+    }
+  }, 12000);
   it("a full helper stdout pipe cannot block close/control or grow unbounded PTY staging", async () => {
     const h = backend(fixture());
     await waitRc(h);
@@ -412,9 +498,11 @@ describe("Linux agent-owned terminal §§5.1–5.4, T-ISO/T-SUBREAPER", () => {
     h.b.close();
     await pause(200);
     stream.resume();
-    const result = await h.b.done;
-    expect(result.outcome).toBe("reaped");
+    // Control service has its own 2s bound, separate from the physical reap/proof budget.
+    await until(() => h.b.diagnostic?.closing === "requested", 2000);
     expect(Date.now() - start).toBeLessThan(2000);
+    const result = await h.b.done;
+    expect(result.outcome, JSON.stringify({ result, diagnostic: h.b.diagnostic })).toBe("reaped");
     expect(await terminalIdentitiesGone(result.identitiesChecked)).toBe(true);
   }, 10000);
   it("agent process death/pipe EOF triggers helper cleanup; an outer subreaper actually waits the helper", async () => {
