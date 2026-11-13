@@ -433,13 +433,13 @@ export class TerminalResourceFence implements TerminalResourceFencePort {
         release.push(r.entry.identity.reservationId);
       }
     }
-    if (this.current(meta, s) !== c) return "rejected";
+    if (signal.aborted || this.current(meta, s) !== c) return "rejected";
     if (!(await this.commit(next, signal))) {
       this.state = "reap_incomplete";
       return "unavailable";
     }
     // A concurrent first revoke/link change cannot release on stale in-flight verification.
-    if (this.current(meta, s) !== c) {
+    if (signal.aborted || this.current(meta, s) !== c) {
       this.state = "lost";
       this.failed = true;
       return "rejected";

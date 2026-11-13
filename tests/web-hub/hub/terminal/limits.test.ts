@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { TerminalLimits } from "../../../../src/web-hub/hub/terminal/limits.js";
+import { TerminalLimits, TERMINAL_QUEUE_ITEMS } from "../../../../src/web-hub/hub/terminal/limits.js";
 import { TERMINAL_LIMITS as L } from "../../../../src/web-hub/protocol/terminal.js";
 const config = {
   maxPerSession: 2,
@@ -54,5 +54,90 @@ describe("terminal physical and forwarding limits (§6.3)", () => {
     expect(x.beginReplay("extra")).toBe(16384);
     x.drop("t0");
     expect(x.queuedBytes()).toBeLessThanOrEqual(7 * 65536);
+  });
+  it("bounds zero-raw-byte controls by items AND retained serialized bytes behind exhausted credit", () => {
+    const x = new TerminalLimits(config, () => 0);
+    for (let i = 0; i < 16; i++) {
+      expect(x.enqueue("t", 8192, () => true)).toBe(true);
+      x.drain();
+    }
+    expect(x.enqueue("t", 8192, () => true)).toBe(true);
+    x.drain();
+    let accepted = 0;
+    for (let i = 0; i < 20000; i++) if (x.enqueue("t", 0, () => true, false, { frameBytes: 100 })) accepted++;
+    expect(accepted).toBe(TERMINAL_QUEUE_ITEMS - 1);
+    expect(x.queuedItems()).toBe(TERMINAL_QUEUE_ITEMS);
+    expect(x.queuedFrameBytes()).toBe(8192 + 512 + accepted * 100);
+    x.drop("t");
+    for (let i = 0; i < 8; i++) expect(x.enqueue("t", 0, () => true, false, { frameBytes: 16384 })).toBe(true);
+    expect(x.enqueue("t", 0, () => true, false, { frameBytes: 1 })).toBe(false);
+    expect(x.queuedFrameBytes()).toBe(L.nonRingPendingBytes);
+    x.drop("t");
+    expect(x.queuedItems()).toBe(0);
+    expect(x.queuedFrameBytes()).toBe(0);
+  });
+  it("coalesces only adjacent state for the same writer, preserving latest state and barrier order", () => {
+    let now = 0;
+    const x = new TerminalLimits(config, () => now);
+    const seen: string[] = [];
+    for (let i = 0; i < 16; i++) {
+      x.enqueue("t", 8192, () => true);
+      x.drain();
+    }
+    x.enqueue("t", 1, () => {
+      seen.push("data");
+      return true;
+    });
+    for (let i = 0; i < 20000; i++)
+      expect(
+        x.enqueue(
+          "t",
+          0,
+          () => {
+            seen.push(`state-${i}`);
+            return true;
+          },
+          false,
+          { frameBytes: 400, coalesceKey: "writer" },
+        ),
+      ).toBe(true);
+    expect(x.queuedItems()).toBe(2);
+    expect(x.queuedFrameBytes()).toBe(513 + 400);
+    x.enqueue(
+      "t",
+      0,
+      () => {
+        seen.push("gap");
+        return true;
+      },
+      false,
+      { frameBytes: 300 },
+    );
+    x.enqueue(
+      "t",
+      0,
+      () => {
+        seen.push("next-state");
+        return true;
+      },
+      false,
+      { frameBytes: 400, coalesceKey: "writer" },
+    );
+    x.enqueue(
+      "t",
+      0,
+      () => {
+        seen.push("other-writer");
+        return true;
+      },
+      false,
+      { frameBytes: 400, coalesceKey: "other" },
+    );
+    expect(x.queuedItems()).toBe(5);
+    now = 1000;
+    for (let i = 0; i < 5; i++) x.drain();
+    expect(seen).toEqual(["data", "state-19999", "gap", "next-state", "other-writer"]);
+    expect(x.queuedItems()).toBe(0);
+    expect(x.queuedFrameBytes()).toBe(0);
   });
 });

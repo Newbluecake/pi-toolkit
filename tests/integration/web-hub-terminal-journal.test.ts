@@ -1,5 +1,7 @@
 /** F2 owned journal + real local verifier OS checks. No shell/rc execution. */
 import { mkdtemp, chmod, writeFile, readFile, rm, symlink } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it, expect } from "vitest";
@@ -34,6 +36,22 @@ const journal: TerminalJournal = { v: 1, revision: 1, resources: [{ entry: row, 
 describe("F2 journal and local proof (§5.5.1)", () => {
   it("integration ownership is explicit without changing frozen tiers", () => {
     expect(projectOf("tests/integration/web-hub-terminal-journal.test.ts")).toBe("tier2");
+  });
+  it("already-aborted real missing-directory load consumes the started filesystem rejection", async () => {
+    const p = join(await dir(), "missing");
+    const moduleUrl = new URL("../../src/web-hub/hub/terminal/resource-fence-journal.ts", import.meta.url).href;
+    const script = `import { createTerminalResourceJournal } from ${JSON.stringify(moduleUrl)};
+      const errors = []; process.on('unhandledRejection', e => errors.push(String(e)));
+      const c = new AbortController(); c.abort();
+      const result = await createTerminalResourceJournal({stateDir:${JSON.stringify(p)}, now:Date.now}).load(c.signal);
+      process.once('beforeExit', () => console.log(JSON.stringify({result, errors})));`;
+    const { stdout, stderr } = await promisify(execFile)(
+      process.execPath,
+      ["--import", "tsx", "--input-type=module", "-e", script],
+      { timeout: 10000 },
+    );
+    expect(stderr).toBe("");
+    expect(JSON.parse(stdout)).toEqual({ result: { kind: "unavailable" }, errors: [] });
   });
   it("missing/corrupt old stores are unavailable, never implicitly empty; only trusted-new authority initializes", async () => {
     const p = await dir();

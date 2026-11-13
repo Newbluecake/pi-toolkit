@@ -128,7 +128,8 @@ async function resourceFixture(n = 2, independent = false) {
   const dir = await mkdtemp(join(tmpdir(), "q-"));
   await chmod(dir, 0o700);
   let now = 1000;
-  const signal = new AbortController().signal;
+  const controller = new AbortController(),
+    signal = controller.signal;
   const agent = await actualProcess(process.pid),
     { sid: _, pgid: __, ...agentProcessIdentity } = agent;
   const entries: TerminalResourceEntry[] = [];
@@ -277,6 +278,7 @@ async function resourceFixture(n = 2, independent = false) {
     send,
     release,
     signal,
+    abort: () => controller.abort(),
     journal,
     receipts,
     h,
@@ -627,6 +629,36 @@ describe("F2 Q1–Q4 actual H journal/fence/proof chain (§5.5.1)", () => {
       await q.cleanup();
     }
   }, 20000);
+  it("aborted collector cannot release after a real disk CAS returns late through an ignoring port", async () => {
+    const q = await resourceFixture(1);
+    const commit = q.journal.commit;
+    let entered = false,
+      resume!: () => void;
+    q.journal.commit = async (rev, next) => {
+      const result = await commit(rev, next, new AbortController().signal);
+      entered = true;
+      await new Promise<void>((r) => {
+        resume = r;
+      });
+      return result;
+    };
+    try {
+      const pending = q.send(q.pages(q.fence.begin(q.meta, "owner", q.currentProcess)));
+      await waitFor(() => entered);
+      expect(
+        JSON.parse(await readFile(join(q.dir, "terminal-resource-fence-v1.json"), "utf8")).resources[0].status,
+      ).toBe("resolved");
+      q.abort();
+      resume();
+      expect((await pending).at(-1)).toBe("rejected");
+      expect(q.release).toEqual([]);
+      expect(q.acks).toEqual([]);
+      expect(q.fence.snapshot().state).toBe("lost");
+    } finally {
+      resume?.();
+      await q.cleanup();
+    }
+  });
   it("Q3 an expected B without any online/ready channel becomes lost at the global collection deadline", async () => {
     const q = await resourceFixture(2, true);
     try {

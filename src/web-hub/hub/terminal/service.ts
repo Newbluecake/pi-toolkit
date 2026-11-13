@@ -123,7 +123,7 @@ export function createTerminalService(deps: TerminalServiceDeps) {
     {
       scope: Scope;
       challenge: TerminalChallenge;
-      id: AuthIdentity;
+      guard: () => void;
       timer: ReturnType<ReturnType<typeof terminalClock>["setTimer"]>;
     }
   >();
@@ -139,7 +139,7 @@ export function createTerminalService(deps: TerminalServiceDeps) {
     )
       return;
     const send = (identities: typeof ack.identities) => {
-      admit(context.id, context.scope.binding, context.scope.target, new AbortController().signal);
+      context.guard();
       const frame: TermReq = {
         t: "term_req",
         v: 1,
@@ -183,7 +183,11 @@ export function createTerminalService(deps: TerminalServiceDeps) {
   >();
   const inventoryWaits = new Map<
     string,
-    { meta: TerminalIngressMeta; accept: (r: Extract<TermRes, { op: "inventory"; ok: true }>) => void }
+    {
+      meta: TerminalIngressMeta;
+      reject: (e: unknown) => void;
+      accept: (r: Extract<TermRes, { op: "inventory"; ok: true }>) => void;
+    }
   >();
   const offers = new Map<
     string,
@@ -223,8 +227,9 @@ export function createTerminalService(deps: TerminalServiceDeps) {
       if (r.sessionId !== meta.sessionId || r.epoch !== meta.epoch) return;
       if (r.t === "term_res") {
         const inventory = inventoryWaits.get(r.rid);
-        if (inventory && r.ok && r.op === "inventory" && sameTerminalMeta(inventory.meta, meta)) {
-          inventory.accept(r);
+        if (inventory && sameTerminalMeta(inventory.meta, meta)) {
+          if (r.ok && r.op === "inventory") inventory.accept(r);
+          else inventory.reject(new TerminalFault("E_RESOURCE_QUARANTINED", "unknown"));
           return;
         }
         const p = waits.get(r.rid);
@@ -325,13 +330,14 @@ export function createTerminalService(deps: TerminalServiceDeps) {
     target: TerminalAgentTarget,
     mode: "interactive" | "resource-only",
     signal: AbortSignal,
+    cleanupGuard?: () => void,
   ): Promise<Scope> {
     target = structuredClone(target);
     const at = now() + L.bootstrapMs,
       meta = target.meta,
       commandId = terminalId(),
       rid = terminalId();
-    const guard = () => admit(id, b, target, signal);
+    const guard = cleanupGuard ?? (() => admit(id, b, target, signal));
     guard();
     if (offers.size >= L.offers || !commandIngress.register(meta, { rid, commandId }))
       throw new TerminalFault("E_LIMIT");
@@ -545,6 +551,7 @@ export function createTerminalService(deps: TerminalServiceDeps) {
     } catch {
       note({ op: "close", ok: false, code: "E_UNAVAILABLE" });
     }
+    void reclaim(r);
   }
   function dropWriter(r: RecordRow) {
     const w = r.writer;
@@ -608,10 +615,14 @@ export function createTerminalService(deps: TerminalServiceDeps) {
     )
       return;
     r.revision = e.revision;
-    if (e.kind === "state") r.state = e.state;
+    if (e.kind === "state") {
+      r.state = e.state === "exited" ? "reap_incomplete" : e.state;
+      if (["closing", "exited", "reap_incomplete"].includes(e.state)) void reclaim(r);
+    }
     // exit is a UI fact, NEVER a physical resource proof or reservation release.
     if (e.kind === "exit") {
-      r.state = e.reap === "reaped" ? "exited" : "reap_incomplete";
+      r.state = "reap_incomplete";
+      void reclaim(r);
       note({
         op: e.reap === "reaped" ? "exit" : "reap-incomplete",
         ok: e.reap === "reaped",
@@ -620,6 +631,17 @@ export function createTerminalService(deps: TerminalServiceDeps) {
       });
     }
     if (!w) return;
+    const { t: _type, channelId: _channel, ...directedEvent } = e;
+    const payload = {
+      agentKey: meta.agentKey,
+      attachmentId: w.attachmentId,
+      connectionInstance: w.binding.metadata.connectionInstance,
+      event: directedEvent,
+    };
+    const metadata = {
+      frameBytes: Buffer.byteLength(`event: terminal\ndata: ${JSON.stringify(payload)}\n\n`),
+      ...(e.kind === "state" ? { coalesceKey: w.attachmentId } : {}),
+    };
     const send = () => {
       try {
         admit(w.binding.identity, w.binding, r.scope.target, new AbortController().signal);
@@ -633,15 +655,7 @@ export function createTerminalService(deps: TerminalServiceDeps) {
         dropWriter(r);
         return false;
       }
-      const { t: _, channelId: __, ...event } = e;
-      if (
-        !w.binding.send("terminal", {
-          agentKey: meta.agentKey,
-          attachmentId: w.attachmentId,
-          connectionInstance: w.binding.metadata.connectionInstance,
-          event,
-        })
-      ) {
+      if (!w.binding.send("terminal", payload)) {
         dropWriter(r);
         return false;
       }
@@ -670,7 +684,7 @@ export function createTerminalService(deps: TerminalServiceDeps) {
       w.unacked += bytes;
       w.sentThrough = Math.max(w.sentThrough, e.offset + bytes);
       w.lastOutputAt = now();
-      if (!limits.enqueue(r.termId, bytes, send, w.replay)) dropWriter(r);
+      if (!limits.enqueue(r.termId, bytes, send, w.replay, metadata)) dropWriter(r);
       else limits.drain();
     } else {
       if (e.kind === "replay_begin") {
@@ -682,7 +696,7 @@ export function createTerminalService(deps: TerminalServiceDeps) {
         r.fact.nextOffset = e.nextOffset;
       }
       // Preserve replay-output → cutover order. Cleanup/revocation uses a separate priority path.
-      if (!limits.enqueue(r.termId, 0, send)) dropWriter(r);
+      if (!limits.enqueue(r.termId, 0, send, false, metadata)) dropWriter(r);
       else limits.drain();
     }
   }
@@ -765,7 +779,8 @@ export function createTerminalService(deps: TerminalServiceDeps) {
     if (target.meta.sessionId !== body.expect.sessionId || target.meta.epoch !== body.expect.epoch)
       throw new TerminalFault("E_SESSION_CHANGED");
     admit(id, b, target, signal);
-    if (deps.resourceFence.snapshot().state !== "cleared" && (op === "prepare" || op === "open")) {
+    const hotFull = op === "open" && limits.full(target.meta.sessionId, `${id.listener}:${id.principal}`);
+    if (!hotFull && deps.resourceFence.snapshot().state !== "cleared" && (op === "prepare" || op === "open")) {
       deps.resourceFence.startCollection();
       await Promise.all(
         (deps.targets?.() ?? [target])
@@ -803,6 +818,12 @@ export function createTerminalService(deps: TerminalServiceDeps) {
         if (old.open) return old.open as Promise<TerminalHttpResults[K]>;
         if (old.fact) return project(old, true) as TerminalHttpResults[K];
         throw new TerminalFault("E_UNKNOWN_EFFECT", "unknown");
+      }
+      if (limits.full(owner.sessionId, `${owner.listener}:${owner.principal}`, s.limits)) {
+        await collectShared(id, b, target);
+        admit(id, b, target, signal);
+        if (limits.full(owner.sessionId, `${owner.listener}:${owner.principal}`, s.limits))
+          throw new TerminalFault("E_LIMIT");
       }
       deps.resourceFence.assertOpen();
       const ordinal = (ordinals.get(owner.sessionId) ?? 0) + 1;
@@ -1049,8 +1070,9 @@ export function createTerminalService(deps: TerminalServiceDeps) {
         w!.ackedThrough = through;
       }
       if (op === "close") {
-        r.state = "closing";
+        if (r.cleanupAt === undefined) r.state = "closing";
         dropWriter(r);
+        await reclaim(r);
       }
       const {
         t: _,
@@ -1085,11 +1107,52 @@ export function createTerminalService(deps: TerminalServiceDeps) {
       a.ownerInstance === b.ownerInstance
     );
   }
+  // One bounded attempt per current agent: lifecycle, hot quota retry and startup share challenges.
+  const collections = new Map<string, { controller: AbortController; work: Promise<void> }>();
+  async function reclaim(r: RecordRow) {
+    await collectShared(r.scope.binding.identity, r.scope.binding, r.scope.target);
+    if (r.cleanupAt === undefined && (r.state === "closing" || r.state === "reap_incomplete")) {
+      r.state = "reap_incomplete";
+      note({ op: "reap-incomplete", ok: false, code: "E_RESOURCE_QUARANTINED", reap: "reap_incomplete" });
+    }
+  }
+  function collectShared(id: AuthIdentity, b: LiveTerminalBinding, target: TerminalAgentTarget): Promise<void> {
+    const key = JSON.stringify(target.meta);
+    const existing = collections.get(key);
+    if (existing) return existing.work;
+    if (disposed || collections.size >= 32) return Promise.resolve();
+    const controller = new AbortController();
+    const expiry = clock.setTimer(2000, () => controller.abort());
+    const guard = () => {
+      if (controller.signal.aborted || disposed) throw new TerminalFault("E_DEADLINE");
+      if (!current(target.meta)) throw new TerminalFault("E_SESSION_CHANGED");
+    };
+    const work = collectRaw(id, b, target, controller.signal, guard)
+      .catch(() => {
+        controller.abort();
+      })
+      .finally(() => {
+        clock.clearTimer(expiry);
+        collections.delete(key);
+      });
+    collections.set(key, { controller, work });
+    return work;
+  }
   async function collect(id: AuthIdentity, b: LiveTerminalBinding, target: TerminalAgentTarget, signal: AbortSignal) {
+    admit(id, b, target, signal);
+    await collectShared(id, b, target);
+  }
+  async function collectRaw(
+    id: AuthIdentity,
+    b: LiveTerminalBinding,
+    target: TerminalAgentTarget,
+    signal: AbortSignal,
+    guard: () => void,
+  ) {
     if (inventoryWaits.size >= L.unresolvedResources || resourceChannels.size >= L.unresolvedResources)
       throw new TerminalFault("E_LIMIT");
     const totalAt = now() + L.httpMs;
-    const s = await negotiate(id, b, target, "resource-only", signal),
+    const s = await negotiate(id, b, target, "resource-only", signal, guard),
       rid = terminalId();
     if (inventoryWaits.size >= L.unresolvedResources || resourceChannels.size >= L.unresolvedResources)
       throw new TerminalFault("E_LIMIT");
@@ -1097,7 +1160,7 @@ export function createTerminalService(deps: TerminalServiceDeps) {
     const expiry = clock.setTimer(clampSpanMs(challenge.deadlineAt - now()), () =>
       resourceChannels.delete(challenge.challengeId),
     );
-    resourceChannels.set(challenge.challengeId, { scope: s, challenge, id, timer: expiry });
+    resourceChannels.set(challenge.challengeId, { scope: s, challenge, guard, timer: expiry });
     let resolve!: () => void, reject!: (e: unknown) => void;
     const done = new Promise<void>((a, b) => {
       resolve = a;
@@ -1106,6 +1169,7 @@ export function createTerminalService(deps: TerminalServiceDeps) {
     let chain = Promise.resolve();
     inventoryWaits.set(rid, {
       meta: target.meta,
+      reject,
       accept: (r) => {
         if (r.channelId !== s.channelId || r.ownerInstance !== s.owner.ownerInstance) {
           reject(new TerminalFault("E_SESSION_CHANGED"));
@@ -1113,7 +1177,7 @@ export function createTerminalService(deps: TerminalServiceDeps) {
         }
         chain = chain
           .then(async () => {
-            admit(id, b, target, signal);
+            guard();
             const status = await deps.resourceFence.page(target.meta, r.page, signal);
             if (status !== "accepted") throw new TerminalFault("E_RESOURCE_QUARANTINED", "unknown");
             if (r.page.phase === "end") resolve();
@@ -1122,7 +1186,7 @@ export function createTerminalService(deps: TerminalServiceDeps) {
       },
     });
     try {
-      admit(id, b, target, signal);
+      guard();
       if (
         !deps.send(target.meta, {
           t: "term_req",
@@ -1140,6 +1204,8 @@ export function createTerminalService(deps: TerminalServiceDeps) {
       await bounded(done, now, Math.min(totalAt, challenge.deadlineAt), signal);
     } finally {
       inventoryWaits.delete(rid);
+      clock.clearTimer(expiry);
+      resourceChannels.delete(challenge.challengeId);
     }
   }
   return {
@@ -1181,6 +1247,8 @@ export function createTerminalService(deps: TerminalServiceDeps) {
       if (disposed) return;
       disposed = true;
       if (timer) clock.clearTimer(timer);
+      for (const c of collections.values()) c.controller.abort();
+      collections.clear();
       offPrivacy();
       offRevoke();
       offRelease();

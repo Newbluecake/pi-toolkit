@@ -102,7 +102,10 @@ async function harness(realClock = false) {
     holdInput = false,
     holdClose = false,
     holdRenew = false,
-    pendingBytes = 0;
+    pendingBytes = 0,
+    inventoryFailure = false,
+    inventoryTimeout = false,
+    withholdProof = false;
   const held: Array<() => void> = [],
     frames: TermReq[] = [];
   const processIdentity = { bootId: "linux-test-boot", pid: 4242, starttime: "100", uid: process.getuid!() };
@@ -205,6 +208,7 @@ async function harness(realClock = false) {
       writerLease: string;
       nextInputSeq: number;
       closed?: boolean;
+      settled: boolean;
     }
   >();
   const decoder = new NdjsonDecoder({
@@ -260,6 +264,23 @@ async function harness(realClock = false) {
       if (f.op === "inventory") {
         const channel = privateChannels.get(f.channelId);
         if (channel?.mode !== "resource-only") throw Error("inventory without ready resource-only channel");
+        if (inventoryTimeout) return;
+        if (inventoryFailure) {
+          client.send({
+            t: "term_res",
+            v: 1,
+            rid: f.rid,
+            sessionId: "session",
+            epoch: "epoch-1",
+            ownerInstance: "owner",
+            channelId: f.channelId,
+            op: "inventory",
+            ok: false,
+            code: "E_UNAVAILABLE",
+            effect: "unknown",
+          });
+          return;
+        }
         const entries = fence
           .records()
           .resources.filter((r) => r.status === "unresolved")
@@ -272,7 +293,9 @@ async function harness(realClock = false) {
           revision: 7,
         };
         const proofs: TerminalReapProof[] = entries
-          .filter((e) => terms.get(e.identity.termId)?.closed)
+          .filter(
+            (e) => !withholdProof && terms.get(e.identity.termId)?.closed && terms.get(e.identity.termId)?.settled,
+          )
           .map((e) => ({
             ...evidence,
             identity: e.identity,
@@ -346,9 +369,16 @@ async function harness(realClock = false) {
       });
       if (f.op === "open") {
         opens++;
-        const t = { request: f, attachmentId: f.attachmentId, writerLease: f.writerLease, nextInputSeq: 0 };
+        const t = {
+          request: f,
+          attachmentId: f.attachmentId,
+          writerLease: f.writerLease,
+          nextInputSeq: 0,
+          settled: false,
+        };
         terms.set(f.termId, t);
         const respond = () => {
+          t.settled = true;
           send(fact(t));
           client.send({
             t: "term_event",
@@ -392,8 +422,10 @@ async function harness(realClock = false) {
       }
       if (f.op === "close") {
         const term = terms.get(f.termId);
-        if (term) term.closed = true;
-        const respond = () => send({ state: "closing", revision: ++revision });
+        const respond = () => {
+          if (term) term.closed = true;
+          send({ state: "closing", revision: ++revision });
+        };
         if (holdClose) held.push(respond);
         else respond();
         return;
@@ -466,6 +498,32 @@ async function harness(realClock = false) {
     agentKey,
     processIdentity,
     forgotten,
+    exit: (termId: string) => {
+      const t = terms.get(termId)!;
+      t.closed = true;
+      client.send({
+        t: "term_event",
+        v: 1,
+        sessionId: "session",
+        epoch: "epoch-1",
+        ownerInstance: "owner",
+        channelId: t.request.channelId,
+        termId,
+        revision,
+        kind: "exit",
+        reap: "reaped",
+        exitCode: 0,
+      });
+    },
+    setInventoryTimeout: (v: boolean) => {
+      inventoryTimeout = v;
+    },
+    setInventoryFailure: (v: boolean) => {
+      inventoryFailure = v;
+    },
+    setWithholdProof: (v: boolean) => {
+      withholdProof = v;
+    },
     setJournalFailure: (v: boolean) => {
       journalFailure = v;
     },
@@ -728,9 +786,11 @@ describe("T-REV/T-SSE/T-ID/T-BIND dual listener terminal (§3/4)", () => {
     expect((await h.post(1, "input", payload)).json.code).toBe("E_AUTH_REVOKING");
     expect((await h.post(1, "prepare", { ...c.identity, cols: 80, rows: 24 })).json.code).toBe("E_AUTH_REVOKING");
     expect(h.counts()).toEqual(before);
-    expect(h.frames.at(-1)?.op).toBe("close");
+    expect(h.frames.some((f) => f.op === "close")).toBe(true);
     resume();
     await logout;
+    await waitFor(() => h.forgotten.length === 1);
+    expect(h.service.limits.physicalUsed).toBe(0); // cleanup survives revoked browser authority
   });
   it("privacy real store onChange and trusted secure guard suppress operations/output and erase panel metadata", async () => {
     const h = await harness(),
@@ -841,6 +901,7 @@ describe("T-REV/T-SSE/T-ID/T-BIND dual listener terminal (§3/4)", () => {
         })
       ).json.code,
     ).toBe("E_LEASE_EXPIRED");
+    h.setWithholdProof(true);
     const close = await h.post(0, "close", {
       ...c.identity,
       termId: opened.termId,
@@ -1144,6 +1205,7 @@ describe("T-REV/T-SSE/T-ID/T-BIND dual listener terminal (§3/4)", () => {
       ).json.code,
     ).toBe("E_INPUT_SEQUENCE");
     expect(h.counts().inputs).toBe(0);
+    h.setWithholdProof(true);
     h.hold("close", true);
     const closing = h.post(0, "close", {
       ...c.identity,
@@ -1192,6 +1254,238 @@ describe("T-REV/T-SSE/T-ID/T-BIND dual listener terminal (§3/4)", () => {
     expect((await pending).json.code).toBe("E_LEASE_EXPIRED");
     expect((await h.post(0, "renew", lease)).json.code).toBe("E_LEASE_EXPIRED");
   });
+  it.each(["close", "detached-exit"] as const)(
+    "normal %s lifecycle reuses quota across six public open cycles without manual quarantine",
+    async (mode) => {
+      const h = await harness(),
+        c = await h.connection(0);
+      const ids: string[] = [];
+      for (let i = 0; i < 6; i++) {
+        const o = await h.opened(0, c);
+        ids.push(o.reservationId);
+        if (mode === "close") {
+          const result = await h.post(0, "close", {
+            ...c.identity,
+            termId: o.termId,
+            closeId: `close-${i}`,
+            expectedRevision: o.revision,
+          });
+          expect(result.status, result.body).toBe(200);
+        } else {
+          expect(
+            (
+              await h.post(0, "detach", {
+                ...c.identity,
+                termId: o.termId,
+                attachmentId: o.attachmentId,
+                writerLease: o.writerLease,
+              })
+            ).status,
+          ).toBe(200);
+          h.exit(o.termId);
+        }
+        await waitFor(() => h.forgotten.length === i + 1);
+        expect(h.service.limits.physicalUsed).toBe(0);
+        expect(h.fence.physicalUsed()).toBe(0);
+        expect(h.fence.snapshot().state).toBe("cleared");
+        const durable = JSON.parse(await readFile(join(h.tmp.dir, "state", "terminal-resource-fence-v1.json"), "utf8"));
+        expect(durable.resources.find((r: any) => r.entry.identity.reservationId === o.reservationId).status).toBe(
+          "resolved",
+        );
+      }
+      expect(h.counts().opens).toBe(6);
+      expect(h.frames.filter((f) => f.op === "inventory")).toHaveLength(6);
+      expect(h.forgotten).toEqual(ids);
+    },
+  );
+  it("hot full open retries failed lifecycle proof collection before admitting one new reservation", async () => {
+    const h = await harness(),
+      c = await h.connection(0);
+    const t = await h.prepare(0, c),
+      first = await h.opened(0, c),
+      second = await h.opened(0, c);
+    h.setWithholdProof(true);
+    for (const o of [first, second])
+      expect(
+        (await h.post(0, "close", { ...c.identity, termId: o.termId, closeId: "retire", expectedRevision: o.revision }))
+          .status,
+      ).toBe(200);
+    expect(h.service.limits.physicalUsed).toBe(2);
+    h.setWithholdProof(false);
+    const before = h.frames.filter((f) => f.op === "inventory").length;
+    const result = await h.post(0, "open", {
+      ...c.identity,
+      openId: t.openId,
+      createTicket: t.createTicket,
+      cols: 80,
+      rows: 24,
+      tabId: "third",
+    });
+    expect(result.status, result.body).toBe(200);
+    await h.barrier();
+    expect(h.frames.filter((f) => f.op === "inventory").length).toBe(before + 1);
+    expect(h.service.limits.physicalUsed).toBe(1);
+    expect(h.counts().opens).toBe(3);
+    expect(h.forgotten).toEqual([first.reservationId, second.reservationId]);
+  });
+  it("an exit/reaped UI frame without physical proof never frees a slot", async () => {
+    const h = await harness(),
+      c = await h.connection(0),
+      o = await h.opened(0, c);
+    h.setWithholdProof(true);
+    h.exit(o.termId);
+    await waitFor(() => h.frames.some((f) => f.op === "inventory"));
+    await h.barrier();
+    const state = await h.post(0, "state", { ...c.identity, target: { termId: o.termId } });
+    expect(state.json.fact.state).toBe("reap_incomplete");
+    expect(h.service.limits.physicalUsed).toBe(1);
+    expect(h.forgotten).toEqual([]);
+  });
+  it.each(["inventory", "proof", "journal", "timeout"] as const)(
+    "unproven %s cleanup retains two slots, hot quota open collects then returns E_LIMIT",
+    async (failure) => {
+      const h = await harness(failure === "timeout"),
+        c = await h.connection(0);
+      const tickets = await Promise.all([h.prepare(0, c), h.prepare(0, c), h.prepare(0, c)]);
+      const opened = [];
+      for (const t of tickets.slice(0, 2)) {
+        const r = await h.post(0, "open", {
+          ...c.identity,
+          openId: t.openId,
+          createTicket: t.createTicket,
+          cols: 80,
+          rows: 24,
+          tabId: "tab",
+        });
+        expect(r.status, r.body).toBe(200);
+        opened.push(r.json);
+      }
+      if (failure === "inventory") h.setInventoryFailure(true);
+      if (failure === "proof") h.setWithholdProof(true);
+      if (failure === "journal") h.setJournalFailure(true);
+      if (failure === "timeout") h.setInventoryTimeout(true);
+      for (const o of opened)
+        expect(
+          (
+            await h.post(0, "close", {
+              ...c.identity,
+              termId: o.termId,
+              closeId: "close",
+              expectedRevision: o.revision,
+            })
+          ).status,
+        ).toBe(200);
+      const before = h.frames.filter((f) => f.op === "inventory").length;
+      const t = tickets[2]!;
+      const r = await h.post(0, "open", {
+        ...c.identity,
+        openId: t.openId,
+        createTicket: t.createTicket,
+        cols: 80,
+        rows: 24,
+        tabId: "third",
+      });
+      expect(r.json.code).toBe("E_LIMIT");
+      // Journal failure may poison the fence before inventory dispatch; an attempt still cannot release it.
+      if (failure !== "journal") expect(h.frames.filter((f) => f.op === "inventory").length).toBeGreaterThan(before);
+      expect(h.counts().opens).toBe(2);
+      expect(h.service.limits.physicalUsed).toBe(2);
+      expect(h.fence.physicalUsed()).toBe(2);
+      expect(h.forgotten).toEqual([]);
+      const list = await h.post(0, "list", c.identity);
+      expect(list.json.rows.map((r: any) => r.state)).toEqual(["reap_incomplete", "reap_incomplete"]);
+    },
+    15000,
+  );
+  it("real agent control flood charges serialized queue, coalesces adjacent state then detaches without closing shell", async () => {
+    const h = await harness(),
+      c = await h.connection(0),
+      o = await h.opened(0, c);
+    const f = h.frames.find((f): f is Extract<TermReq, { op: "open" }> => f.op === "open")!;
+    const base = {
+      t: "term_event",
+      v: 1,
+      sessionId: "session",
+      epoch: "epoch-1",
+      ownerInstance: "owner",
+      channelId: f.channelId,
+      termId: o.termId,
+      revision: 100,
+    };
+    const lease = { ...c.identity, termId: o.termId, attachmentId: o.attachmentId, writerLease: o.writerLease };
+    for (let i = 0; i < 16; i++) {
+      h.client.send({
+        ...base,
+        kind: "output",
+        offset: i * 8192,
+        bytesB64: Buffer.alloc(8192, 97).toString("base64"),
+        streamEpoch: "live-epoch",
+      });
+      await c.stream.waitFor(
+        (e) => e.event === "terminal" && e.data.event.kind === "output" && e.data.event.offset === i * 8192,
+      );
+      expect(
+        (
+          await h.post(0, "ack", {
+            ...lease,
+            ack: { phase: "live", renderedThrough: (i + 1) * 8192 },
+          })
+        ).status,
+      ).toBe(200);
+    }
+    h.client.send({ ...base, kind: "output", offset: 16 * 8192, bytesB64: "YQ==", streamEpoch: "live-epoch" });
+    const state = {
+      ...base,
+      kind: "state",
+      state: "live",
+      deadlines: o.deadlines,
+      writerPresent: true,
+      nextInputSeq: 0,
+    };
+    for (let i = 0; i < 2000; i++) h.client.send({ ...state, nextInputSeq: i });
+    await h.barrier();
+    expect(h.service.limits.queuedItems()).toBe(2);
+    const charged = (event: object) =>
+      Buffer.byteLength(
+        `event: terminal\ndata: ${JSON.stringify({ agentKey: h.agentKey, attachmentId: o.attachmentId, connectionInstance: c.identity.connectionInstance, event })}\n\n`,
+      );
+    const { t: _t, channelId: _channel, ...directedBase } = base;
+    expect(h.service.limits.queuedFrameBytes()).toBe(
+      charged({ ...directedBase, kind: "output", offset: 16 * 8192, bytesB64: "YQ==", streamEpoch: "live-epoch" }) +
+        charged({
+          ...directedBase,
+          kind: "state",
+          state: "live",
+          deadlines: o.deadlines,
+          writerPresent: true,
+          nextInputSeq: 1999,
+        }),
+    );
+    expect(h.service.limits.queuedFrameBytes()).toBeLessThanOrEqual(L.nonRingPendingBytes);
+    for (let i = 0; i < 2000; i++)
+      h.client.send(
+        i % 2 === 0
+          ? { ...base, kind: "gap", requestedOffset: 0, baseOffset: 0, nextOffset: 0, reason: "slow-viewer" }
+          : {
+              ...base,
+              kind: "cutover",
+              attemptId: "attempt",
+              newLiveEpoch: "live-epoch",
+              replayEnd: 0,
+              liveFrom: 0,
+              gap: { from: 0, to: 0 },
+              resetParser: true,
+            },
+      );
+    await h.barrier();
+    expect(h.service.limits.queuedItems()).toBe(0);
+    expect(h.service.limits.queuedFrameBytes()).toBe(0);
+    expect((await h.post(0, "renew", lease)).json.code).toBe("E_LEASE_EXPIRED");
+    expect(h.frames.filter((f) => f.op === "close")).toEqual([]);
+    expect(h.counts().opens).toBe(1);
+    expect(h.service.limits.physicalUsed).toBe(1);
+    expect((await h.post(0, "state", { ...c.identity, target: { termId: o.termId } })).json.fact.state).toBe("live");
+  });
   it("real private resource-ready → inventory → durable journal CAS → resolved_ack forgets exact receipts once", async () => {
     const h = await harness(),
       c = await h.connection(0),
@@ -1206,11 +1500,6 @@ describe("T-REV/T-SSE/T-ID/T-BIND dual listener terminal (§3/4)", () => {
         })
       ).status,
     ).toBe(200);
-    h.fence.begin(
-      { agentKey: h.agentKey, linkGen: 1, sessionId: "session", epoch: "epoch-1" },
-      "owner",
-      h.processIdentity,
-    );
     expect((await h.post(0, "prepare", { ...c.identity, cols: 80, rows: 24 })).status).toBe(200);
     await h.barrier();
     const acks = h.frames.filter((f): f is Extract<TermReq, { op: "resolved_ack" }> => f.op === "resolved_ack");
@@ -1243,13 +1532,8 @@ describe("T-REV/T-SSE/T-ID/T-BIND dual listener terminal (§3/4)", () => {
     const h = await harness(),
       c = await h.connection(0),
       o = await h.opened(0, c);
-    await h.post(0, "close", { ...c.identity, termId: o.termId, closeId: "close-fail", expectedRevision: o.revision });
-    h.fence.begin(
-      { agentKey: h.agentKey, linkGen: 1, sessionId: "session", epoch: "epoch-1" },
-      "owner",
-      h.processIdentity,
-    );
     h.setJournalFailure(true);
+    await h.post(0, "close", { ...c.identity, termId: o.termId, closeId: "close-fail", expectedRevision: o.revision });
     expect((await h.post(0, "prepare", { ...c.identity, cols: 80, rows: 24 })).json.code).toBe(
       "E_RESOURCE_QUARANTINED",
     );

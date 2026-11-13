@@ -34,6 +34,7 @@ export function failure(e: unknown) {
 }
 /** Cancel logical wait only; callers retain all physical reservations after unknown effects. */
 export async function bounded<T>(work: Promise<T>, now: () => number, at: number, signal: AbortSignal): Promise<T> {
+  void work.catch(() => {}); // Work has already started, even when preflight refuses the wait.
   if (signal.aborted || now() >= at) throw new TerminalFault("E_DEADLINE", "unknown");
   return new Promise<T>((resolve, reject) => {
     const clock = terminalClock(now);
@@ -55,9 +56,13 @@ export async function bounded<T>(work: Promise<T>, now: () => number, at: number
     );
   });
 }
+export const TERMINAL_QUEUE_ITEMS = 128;
 export class TerminalLimits {
   private slots = new Map<string, { session: string; principal: string }>();
-  private queues = new Map<string, Array<{ bytes: number; replay: boolean; send: () => boolean }>>();
+  private queues = new Map<
+    string,
+    Array<{ bytes: number; frameBytes: number; coalesceKey?: string; replay: boolean; send: () => boolean }>
+  >();
   private pending = new Map<string, number>();
   private credits = new Map<string, number>();
   private tickAt: number;
@@ -73,17 +78,19 @@ export class TerminalLimits {
   get physicalUsed() {
     return this.slots.size;
   }
-  reserve(id: string, session: string, principal: string, intersection: TerminalHubConfig = this.config): boolean {
-    if (this.slots.has(id)) return false;
+  full(session: string, principal: string, intersection: TerminalHubConfig = this.config): boolean {
     const rows = [...this.slots.values()];
-    if (
+    return (
       rows.length >= Math.min(L.hardTotal, this.config.maxTotal) ||
       rows.filter((x) => x.session === session).length >=
         Math.min(this.config.maxPerSession, intersection.maxPerSession) ||
       rows.filter((x) => x.principal === principal).length >=
         Math.min(this.config.maxPerPrincipal, intersection.maxPerPrincipal)
-    )
-      throw new TerminalFault("E_LIMIT");
+    );
+  }
+  reserve(id: string, session: string, principal: string, intersection: TerminalHubConfig = this.config): boolean {
+    if (this.slots.has(id)) return false;
+    if (this.full(session, principal, intersection)) throw new TerminalFault("E_LIMIT");
     this.slots.set(id, { session, principal });
     return true;
   }
@@ -102,19 +109,39 @@ export class TerminalLimits {
   endReplay(id: string) {
     this.replay.delete(id);
   }
-  enqueue(id: string, bytes: number, send: () => boolean, replay = false): boolean {
+  enqueue(
+    id: string,
+    bytes: number,
+    send: () => boolean,
+    replay = false,
+    metadata: { frameBytes: number; coalesceKey?: string } = { frameBytes: bytes + 512 },
+  ): boolean {
+    const q = this.queues.get(id) ?? [];
+    const last = q.at(-1);
+    const replace = metadata.coalesceKey !== undefined && last?.coalesceKey === metadata.coalesceKey ? last : undefined;
+    const frameBytes = metadata.frameBytes;
     if (
       !Number.isSafeInteger(bytes) ||
       bytes < 0 ||
       bytes > L.outputChunkBytes ||
-      (this.pending.get(id) ?? 0) + bytes > L.liveStagingBytes
+      !Number.isSafeInteger(frameBytes) ||
+      frameBytes < 1 ||
+      (this.pending.get(id) ?? 0) + bytes - (replace?.bytes ?? 0) > L.liveStagingBytes ||
+      q.length + (replace ? 0 : 1) > TERMINAL_QUEUE_ITEMS ||
+      q.reduce((sum, x) => sum + x.frameBytes, 0) + frameBytes - (replace?.frameBytes ?? 0) > L.nonRingPendingBytes
     )
       return false;
-    const q = this.queues.get(id) ?? [];
-    q.push({ bytes, send, replay });
+    if (replace) q.pop();
+    q.push({ bytes, send, replay, ...metadata });
     this.queues.set(id, q);
-    this.pending.set(id, (this.pending.get(id) ?? 0) + bytes);
+    this.pending.set(id, (this.pending.get(id) ?? 0) + bytes - (replace?.bytes ?? 0));
     return true;
+  }
+  queuedItems() {
+    return [...this.queues.values()].reduce((sum, q) => sum + q.length, 0);
+  }
+  queuedFrameBytes() {
+    return [...this.queues.values()].reduce((sum, q) => sum + q.reduce((n, x) => n + x.frameBytes, 0), 0);
   }
   drop(id: string) {
     this.queues.delete(id);
@@ -130,7 +157,7 @@ export class TerminalLimits {
     for (const [id, c] of this.credits)
       this.credits.set(id, Math.min(L.liveRateBytes, c + (delta * L.liveRateBytes) / 1000));
   }
-  /** At most one data chunk per term per pass, control is never queued here. */
+  /** At most one ordered frame per term per pass; raw data alone spends rate credits. */
   drain(): void {
     this.refill();
     for (const [id, q] of [...this.queues]) {
