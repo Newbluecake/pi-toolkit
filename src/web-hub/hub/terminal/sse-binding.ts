@@ -128,6 +128,10 @@ export class TerminalSseBindings {
           }
         }
         listeners.clear();
+        // A local capability erasure must be observable by P2 immediately. Closing the
+        // original SSE also prevents a stale browser from retaining rendered private data.
+        // No token-bearing invalidation frame enters the legacy event ring.
+        if (!res.destroyed && !res.writableEnded) res.end();
       },
     };
     const timer = clock.setTimer(clampSpanMs(meta.parentExpiresAt - this.now()), () => b.revoke());
@@ -161,9 +165,12 @@ export class TerminalSseBindings {
     b.activate();
     return b;
   }
+  revokeAll() {
+    for (const b of [...this.bindings.values()]) b.revoke();
+  }
   dispose() {
     this.off();
-    for (const b of [...this.bindings.values()]) b.revoke();
+    this.revokeAll();
     this.bindings.clear();
   }
 }

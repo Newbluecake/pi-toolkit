@@ -1176,14 +1176,15 @@ capability、末跳 pure-witness trusted-CODE 边界及 stock tokenizer/template
 不承诺旧 UI 新的结构化展示。同步 syscall 不可抢占、同 uid 竞态、无全局回滚、unknown 不重试及
 不保证 elsewhere SDK flush/fsync 的既有限界保持；未连接真实 Hub/用户数据或执行运行中 reload。
 
-## Terminal contract (P1-C, r4; backend/UI not assembled yet)
+## Terminal contract (P1-C, r4)
 
 `protocol/terminal.ts` freezes strict v1 frames, HTTP, limits, creation tickets, SSE
 identity, fences, inventory/pages/reap proofs and metadata-only journal. Terminal is
 sparse/default-off/non-live (`webHub.terminal`; `/reload` + `/webhub restart`), D8 forced-off.
 No hello cap/PROTO change. `terminal.ui.v1` is browser-only; P1-H owns advertising it.
-The optional ports return explicit Unavailable until A/H implement them; no PTY factory
-is installed here. `wireWebHub` alone owns future cleanup, within its existing hooks;
+The enabled agent owner and H ports are now assembled (integration notes below), but
+missing local process/receipt authority still returns explicit Unavailable.
+`wireWebHub` alone owns cleanup within its existing hooks;
 Stack must not own a second terminal lifecycle. Trusted plain-domain guard is injected
 post-HOST_KEY only, and absent guard must refuse.
 
@@ -1197,8 +1198,9 @@ reserved negotiation prefixes. The agent constructs only an allowlisted public o
 fixed refusal, before its ledger, duplicate/query/late paths; there is NO sensitive first
 cmd_result exception. `createTerminalNegotiator` is the ready CAS gate for the later A
 connection branch: offer → dedicated prepare/challenge/ready → dedicated grant → bind.
-It does not create backend/PTY or read inventory. No dedicated callback is wired while
-A is absent. Losing a frame never authorizes re-mint or command-cache recovery.
+The negotiator itself does not create backend/PTY or read inventory. Its dedicated
+callback is wired only by the enabled owner. Losing a frame never authorizes re-mint
+or command-cache recovery.
 Each bootstrap offer has one unref'd segmented-clock timer at its original deadline;
 expiry/rejection/bind/invalidate/dispose remove the row and scrub grant/challenge/proof
 fields. Receive prunes revoked/stale scope before even validating the frame. A must
@@ -1374,10 +1376,10 @@ tail cap `terminal.ui.v1`; agent hello_ack does not change.
   frequency successes aggregate; failures throttle by fixed code. Logger failure is
   fail-soft with bounded `auditHealth().failures`, not an output-amplifying logger loop.
 
-Production owner/ingress/first-use authority wiring remains with the P1-C integration
-owner: pass H's ingress to the already-frozen pre-registry port and routes to the
-frontend, provide trusted OS metadata/receipts and direct privacy store onChange (not
-its SSE projection), and dispose within the existing lifecycle. No new top-level hook
+Production owner/ingress/routes and direct privacy store wiring now live in the P1-C
+integration assembly described below. First-use and cross-process OS/receipt authority
+remain unavailable until separately approved; never substitute status/UI strings or
+wire booleans. Disposal stays within the existing lifecycle. No new top-level hook
 or Stack owner is introduced. Tests explicitly distinguish this integration dependency
 from an already assembled production terminal: dual real HTTP/SSE listeners + real
 socket/production ready gate use a bounded agent operation fixture, not a fake PTY;
@@ -1456,3 +1458,39 @@ open/detach/exit cycles past the two-slot quota without manually starting quaran
 rejects before installing the wait. The real missing-directory journal load with an
 already-aborted signal runs in an isolated Node process and asserts no unhandled
 filesystem rejection. This is not an ENOENT-to-empty-store exception.
+
+### Terminal integration wiring (P1-C, 2026-11-13)
+
+`wireWebHub` exclusively owns one async terminal owner per session generation. Its
+existing post-guard handlers route command offers and dedicated requests, bind the
+actual live `terminalConnectionInstance`, recheck the plain/main guard, and initiate
+`dispose()` synchronously **before** connection detach. Late factory completion is
+disposed, never adopted by a successor. Pass only `TerminalHubConfig` limits (strip
+settings-only `enabled`, otherwise the strict dedicated ready frame is invalid).
+There is no new pi registration, Stack owner, hello capability or activate-trace change.
+
+`hub/assembly-terminal.ts` composes journal → initialized resource fence → service →
+routes. The existing agent-server pre-registry ingress and both frontends use those
+same instances. Egress and pending-byte reads use the actual current Unix socket,
+not registry delivery acknowledgement or a fixed zero. Privacy store callbacks fence
+terminal service/writers **before** ordinary privacy SSE publication; terminal binding
+revocation closes the original SSE so P2 immediately clears private UI. Initial degraded
+privacy closes SSE after the hub burst and before any terminal connection token.
+Detached terminals retain only a dedicated lifecycle control channel: real backend
+completion seals its receipt before sending exit, allowing H to collect without a
+browser writer. Exit itself is still not a physical-release proof.
+
+**Pending authority decision:** `StartHubDeps.terminalAuthority` is a local-only port;
+production currently has no approved cross-process producer implementation. Its absence
+returns `E_UNAVAILABLE`, issues no private binding, and cannot open a PTY. Journal load
+never infers `trustedNew` from first boot/settings/ENOENT. Missing or corrupt old stores
+remain unavailable; the first-use initializer and local process/receipt authority must
+be approved before production terminal use. The contract integration test supplies a
+trusted in-process port backed by the **real** owner's physical receipts and independent
+OS verifier, with an explicitly initialized fixture journal and isolated real PTY/rc;
+it is not evidence of a deployed cross-process authority. The optional backend factory
+is an internal test seam only, with no settings/env/HTTP route.
+
+Off retains no terminal owner/transport/service/maps/timers, reads no terminal journal
+or privacy store because of terminal wiring, advertises no terminal cap and keeps every
+terminal route 404. Frozen fixtures and activation registration trace remain unchanged.

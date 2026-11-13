@@ -135,6 +135,7 @@ export interface HubAssembly extends HubAssemblyBase {
   // window — the startup-gate tests pin exactly this).
 
   privacyStore: PrivacyStore | undefined;
+  terminalPrivacyChanged?: (() => void) | undefined;
 
   previewRoutes: ReturnType<typeof createPreviewRoutes> | undefined;
 

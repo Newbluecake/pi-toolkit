@@ -19,6 +19,7 @@
  * The listening socket server stays ref'd (the hub is meant to live until the
  * idle monitor fires); every timer here is unref'd.
  */
+import { assembleTerminal, type TerminalLocalAuthority } from "./assembly-terminal.js";
 import type { TerminalRevocationFence } from "./terminal/revocation-fence.js";
 import { TERMINAL_UI_CAP } from "../protocol/version.js";
 import { randomBytes } from "node:crypto";
@@ -139,6 +140,8 @@ const HISTORY_SERVICE_DISPOSE_MS = 2_500;
  */
 export const RESTORE_REASONS: ReadonlySet<string> = new Set(["restart", "superseded", "crash"]);
 export interface StartHubDeps {
+  /** Internal local authority. Absent refuses; never inferred from HTTP/status/ENOENT. */
+  terminalAuthority?: TerminalLocalAuthority;
   now?: () => number;
   uid?: number;
   xdgRuntimeDir?: string;
@@ -470,8 +473,19 @@ export async function startHub(
     const scheduleHub = assembleSchedule(ctx);
     ctx.scheduleHub = scheduleHub;
     ctx.close = close;
+    let terminal: Awaited<ReturnType<typeof assembleTerminal>>;
     ctx.agentServer = createAgentServer(owner.server, {
       registry,
+      ...(config.terminal === undefined
+        ? {}
+        : {
+            terminal: {
+              ownsCommand: (meta, raw) => terminal?.service.ingress.ownsCommand(meta, raw) ?? false,
+              consumeAgentFrame: (meta, raw) => terminal?.service.ingress.consumeAgentFrame(meta, raw),
+              retireLink: (meta) => terminal?.service.ingress.retireLink(meta),
+              onIngressFailure: (meta) => terminal?.service.ingress.onIngressFailure?.(meta),
+            },
+          }),
       config,
       log,
       now,
@@ -644,7 +658,8 @@ export async function startHub(
      * "previously blocked, now resolved ⇒ start()" path must not try to resurrect it. */
     ctx.lanClosedByRotateScan = false;
 
-    if (config.privacy === true) await loadPrivacyStore(ctx);
+    if (config.privacy === true || config.terminal !== undefined) await loadPrivacyStore(ctx);
+    if (config.terminal !== undefined) terminal = await assembleTerminal(ctx, deps.terminalAuthority);
     const commandRouter = createCommandRouter({ registry, log, now });
     ctx.commandRouter = commandRouter;
     const cmdLimit = createCmdLimit(now);
@@ -757,6 +772,7 @@ export async function startHub(
         : {}),
       uploadMetrics,
       agentRemove: agentRemoveService,
+      ...(terminal === undefined ? {} : { terminal: terminal.routes }),
       ...(ctx.avatarRoutes === undefined ? {} : { avatar: ctx.avatarRoutes }),
       ...(privacyRoutes === undefined ? {} : { privacy: privacyRoutes }),
       ...(ctx.uploads === undefined ? {} : { uploads: ctx.uploads }),
@@ -980,6 +996,8 @@ export async function startHub(
       const deadline: ReqDeadline = opts?.deadline ?? createReqDeadline(now, closeBudget);
       // Publish the once-promise before any abort listener can re-enter close().
       const botStopped = stopBot();
+      // Domain admission/capability invalidation starts synchronously before listener teardown.
+      const terminalStopped = terminal?.dispose();
       const inner = Promise.resolve().then(async (): Promise<void> => {
         await botStopped; // FIRST cleanup operation: connector must stop ACKing before any teardown.
         unsubscribeBotSlots();
@@ -1037,6 +1055,7 @@ export async function startHub(
         // HTTP face stops accepting, bounded, idempotent (shares the startup-failure promise).
         ctx.unsubscribeProxyRevoke();
         if (ctx.proxyService !== undefined) await bounded(ctx.proxyService.dispose());
+        if (terminalStopped !== undefined) await bounded(terminalStopped);
         await bounded(ctx.fe.close());
         // web-hub-upload plan §2.6 #13 (U3): AFTER the frontend has stopped accepting requests
         // (srv.close + closeAllConnections), poison+reap in-flight upload dirs (committed files

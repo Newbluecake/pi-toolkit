@@ -118,6 +118,8 @@ interface Attachment {
   viewerTimer?: TimerHandle;
 }
 interface Row {
+  /** Dedicated lifecycle control survives writer detach, never carries terminal bytes. */
+  lifecycleChannelId: string;
   identity: TerminalResourceIdentity;
   openId: string;
   ownerKey: string;
@@ -472,6 +474,26 @@ export class TerminalOwner {
     }
     return this.options.send(frame);
   }
+  private lifecycleEvent(
+    r: Row,
+    body: Pick<Extract<TermEvent, { kind: "exit" }>, "kind" | "reap" | "exitCode" | "signal">,
+  ): void {
+    if (
+      !this.allowed() ||
+      this.channels.get(r.lifecycleChannelId)?.localConnectionInstance !== this.current()?.localConnectionInstance
+    )
+      return;
+    const frame: TermEvent = {
+      t: "term_event",
+      v: 1,
+      ...this.scope(),
+      channelId: r.lifecycleChannelId,
+      termId: r.identity.termId,
+      revision: r.revision,
+      ...body,
+    };
+    if (terminalFrameOk(frame)) this.options.send(frame);
+  }
   private bump(r: Row): void {
     r.revision++;
     this.revision++;
@@ -528,6 +550,7 @@ export class TerminalOwner {
       return;
     }
     const r: Row = {
+      lifecycleChannelId: f.channelId,
       identity: {
         agentSessionId: this.options.sessionId,
         termId: f.termId,
@@ -624,6 +647,7 @@ export class TerminalOwner {
     this.response(f, body);
   }
   private startAttachment(r: Row, channelId: string, id: string, lease: string): void {
+    r.lifecycleChannelId = channelId;
     r.attachment = {
       id,
       lease,
@@ -1001,7 +1025,9 @@ export class TerminalOwner {
       r.reaper.start();
     }
     this.bump(r);
-    this.event(r, {
+    // Seal the actual completion receipt before a lifecycle consumer can collect it.
+    this.persistUnresolved(r);
+    this.lifecycleEvent(r, {
       kind: "exit",
       reap: physical.outcome,
       ...(physical.exitCode === undefined ? {} : { exitCode: physical.exitCode }),

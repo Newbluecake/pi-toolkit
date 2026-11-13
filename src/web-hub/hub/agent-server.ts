@@ -49,7 +49,17 @@ import type { AdminHandler } from "./admin.js";
 import type { HubConfig, HubLog } from "./ports.js";
 import type { AgentConn, Registry } from "./registry.js";
 
+/** Private current-socket binding, never card/status projections. Hello identity/kind
+ * are CLAIMS: the local authority must independently validate OS incarnation/domain. */
+export interface TerminalAgentLink {
+  meta: TerminalIngressMeta;
+  agentId: Extract<AgentFrame, { t: "hello" }>["agentId"];
+  kind: Extract<AgentFrame, { t: "hello" }>["kind"];
+  pendingBytes: number;
+  send(frame: HubFrame): boolean;
+}
 export interface AgentServer {
+  terminalLink?(agentKey: string): TerminalAgentLink | undefined;
   connectionCount(): number;
   close(): Promise<void>;
 }
@@ -108,7 +118,11 @@ export function createAgentServer(
   },
 ): AgentServer {
   const { registry, config, log, now } = deps;
-  const conns = new Set<{ sock: net.Socket; teardown: () => void }>();
+  const conns = new Set<{
+    sock: net.Socket;
+    teardown: () => void;
+    terminalLink?: () => TerminalAgentLink | undefined;
+  }>();
   let closed = false;
 
   const onConnection = (sock: net.Socket): void => {
@@ -120,6 +134,8 @@ export function createAgentServer(
     let agentKey: string | undefined;
     let agentPid: number | undefined;
     let terminalMeta: TerminalIngressMeta | undefined;
+    let terminalHello: Extract<AgentFrame, { t: "hello" }> | undefined;
+    let terminalDetached = false;
     let hadBye = false;
     let superseded = false;
     let finished = false;
@@ -194,6 +210,7 @@ export function createAgentServer(
         }
         terminalMeta = { agentKey, linkGen: registry.getLinkGen(agentKey) ?? 0, sessionId: "", epoch: hello.epoch };
         agentPid = hello.agentId.pid;
+        if (config.terminal !== undefined) terminalHello = hello;
         write({
           t: "hello_ack",
           hubVersion: config.pluginVersion,
@@ -375,6 +392,10 @@ export function createAgentServer(
         deps.admin?.handleShutdown(meta, frame.reason);
         return;
       }
+      if (config.terminal !== undefined) {
+        if (frame.t === "session_detached") terminalDetached = true;
+        else if (frame.t === "session") terminalDetached = false;
+      }
       registry.onFrame(agentKey, frame);
       if (frame.t === "bye") {
         hadBye = true;
@@ -421,7 +442,50 @@ export function createAgentServer(
       clearTimeout(silenceTimer);
       clearInterval(pingTimer);
     };
-    const entry = { sock, teardown };
+    const entry = {
+      sock,
+      teardown,
+      ...(config.terminal === undefined
+        ? {}
+        : {
+            terminalLink: (): TerminalAgentLink | undefined => {
+              const view = agentKey === undefined ? undefined : registry.get(agentKey);
+              if (
+                finished ||
+                superseded ||
+                sock.destroyed ||
+                !sock.writable ||
+                !terminalMeta ||
+                !terminalHello ||
+                registry.getLinkGen(terminalMeta.agentKey) !== terminalMeta.linkGen ||
+                !view?.session ||
+                terminalDetached
+              )
+                return undefined;
+              return {
+                meta: { ...terminalMeta, sessionId: view.session.sessionId },
+                agentId: { ...terminalHello.agentId },
+                kind: terminalHello.kind,
+                pendingBytes: sock.writableLength,
+                send: (frame) => {
+                  if (
+                    finished ||
+                    superseded ||
+                    terminalDetached ||
+                    sock.destroyed ||
+                    !sock.writable ||
+                    registry.get(terminalMeta!.agentKey)?.session?.sessionId !== view.session!.sessionId ||
+                    registry.getLinkGen(terminalMeta!.agentKey) !== terminalMeta!.linkGen ||
+                    sock.writableLength > LIMITS.hardQueueBytes
+                  )
+                    return false;
+                  write(frame);
+                  return !sock.destroyed;
+                },
+              };
+            },
+          }),
+    };
     conns.add(entry);
     sock.on("close", () => {
       teardown();
@@ -433,6 +497,17 @@ export function createAgentServer(
   server.on("connection", onConnection);
 
   return {
+    ...(config.terminal === undefined
+      ? {}
+      : {
+          terminalLink: (key: string) => {
+            for (const entry of conns) {
+              const link = entry.terminalLink?.();
+              if (link?.meta.agentKey === key) return link;
+            }
+            return undefined;
+          },
+        }),
     connectionCount: () => conns.size,
     close: async () => {
       if (closed) return;

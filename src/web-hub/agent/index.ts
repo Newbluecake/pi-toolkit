@@ -1,4 +1,5 @@
 import type { TerminalHubConfig } from "../protocol/terminal.js";
+import { createTerminalWiring } from "./terminal/wiring.js";
 import type { HumanDispatchBridge } from "./human-dispatch-proof.js";
 import type { XsActivationPort, XsActivationHubPort } from "../../fabric/xs/session-activation.js";
 /**
@@ -329,6 +330,8 @@ export interface ThreadAgentPort extends ThreadPromptPort {
 export interface WebHubDeps {
   /** Trusted activate-frozen domain plus live recheck; absent is never plain authority. */
   terminalGuard?: (ctx: ExtensionContext) => boolean;
+  /** Internal test seam for isolated UID/rc fixtures; no settings/wire/env path. */
+  terminalOwnerFactory?: typeof import("./terminal/owner.js").createTerminalOwner;
   memoryRead?: import("../../memory/index.js").MemoryReadPort;
   memoryWrite?: import("../../memory/scopes/web-write-port.js").MemoryWebWritePort;
   /** P4 owns/wires ONE bridge independent of webHub.enabled; this client only dispatches. */
@@ -731,6 +734,20 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     },
     { publish: () => publishStatus() },
   );
+
+  // Absent while off: no owner, identity IO or extra pi registrations.
+  const terminal = settings.terminal?.enabled === true ? createTerminalWiring(deps.terminalOwnerFactory) : undefined;
+  const terminalAllowed = (): boolean =>
+    safe(
+      () =>
+        attached &&
+        ctx !== undefined &&
+        settings.control !== false &&
+        settings.webCommands !== false &&
+        (ctx.mode === "tui" || ctx.mode === "rpc") &&
+        deps.terminalGuard?.(ctx) === true,
+      false,
+    );
 
   // Object identities, not timestamps/epochs, bind this activation's live writer.
   const speedActivation = {};
@@ -1207,6 +1224,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   };
 
   const onTick = (): void => {
+    terminal?.check();
     const c = conn;
     const x = ctx;
     if (!attached || c === undefined || x === undefined) return;
@@ -1328,6 +1346,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   };
 
   const commandHandler = createCommandHandler({
+    ...(terminal === undefined ? {} : { terminal }),
     ...(deps.memoryProof !== undefined ? { memoryProof: deps.memoryProof } : {}),
     pi,
     getCtx: () => ctx,
@@ -1493,6 +1512,12 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     send: (frame) => conn?.send(frame),
   });
   const binding: BindingPort = {
+    ...(terminal === undefined
+      ? {}
+      : {
+          onTerminalReq: (frame: import("../protocol/terminal.js").TermReq) => terminal.receive(frame),
+          onTerminalLinkLost: () => terminal.linkLost(),
+        }),
     ...(xsBridge !== undefined
       ? {
           onXsDeliver: (frame) => xsBridge.onDeliver(frame),
@@ -1750,7 +1775,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       settings.control !== false &&
       settings.webCommands !== false &&
       ctx !== undefined &&
-      deps.terminalGuard?.(ctx) === true &&
+      safe(() => deps.terminalGuard?.(ctx!) === true, false) &&
       (ctx.mode === "tui" || ctx.mode === "rpc")
     ) {
       const { enabled: _enabled, ...terminal } = settings.terminal;
@@ -1933,6 +1958,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
 
   on("session_start", (event, c) => {
     if (c.mode !== "tui" && c.mode !== "rpc") return; // print/json: never attach
+    terminal?.dispose();
     generation += 1;
     speedOwnerToken = {};
     speed.reset();
@@ -1981,20 +2007,47 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     });
     im.unref();
     startTick();
-    const existing = currentConnection();
-    const suffix = `#${MODULE_INSTANCE}`;
-    if (existing !== undefined && existing.implVersion.endsWith(suffix) && existing.status().state !== "off") {
-      // path 1: same module instance ⇒ reuse synchronously (acquireConnection matches implVersion).
-      connectWith({ pluginVersion: "", buildId: existing.implVersion.slice(0, -suffix.length) });
-      return;
-    }
-    void getBuildInfo().then((info) => {
-      if (gen === generation && attached) connectWith(info);
-    });
+    const connect = (): void => {
+      if (gen !== generation || !attached) return;
+      const existing = currentConnection();
+      const suffix = `#${MODULE_INSTANCE}`;
+      if (existing !== undefined && existing.implVersion.endsWith(suffix) && existing.status().state !== "off") {
+        // path 1: same module instance ⇒ reuse synchronously (acquireConnection matches implVersion).
+        connectWith({ pluginVersion: "", buildId: existing.implVersion.slice(0, -suffix.length) });
+        return;
+      }
+      void getBuildInfo().then((info) => {
+        if (gen === generation && attached) connectWith(info);
+      });
+    };
+    if (terminal !== undefined && settings.terminal !== undefined) {
+      const { enabled: _enabled, ...limits } = settings.terminal;
+      const sessionId = safe(() => c.sessionManager.getSessionId(), "");
+      void terminal
+        .start({
+          sessionId,
+          epoch: MODULE_INSTANCE,
+          cwd: safe(() => c.cwd, ""),
+          limits,
+          allowed: () =>
+            gen === generation &&
+            terminalAllowed() &&
+            safe(() => ctx?.sessionManager.getSessionId(), undefined) === sessionId,
+          current: () => {
+            const localConnectionInstance = conn?.terminalConnectionInstance;
+            return gen === generation && attached && localConnectionInstance !== undefined
+              ? { localConnectionInstance, sessionId, epoch: MODULE_INSTANCE }
+              : undefined;
+          },
+          send: (frame) => gen === generation && attached && conn?.trySend(frame) === "written",
+        })
+        .then(connect);
+    } else connect();
   });
 
   on("session_shutdown", (event) => {
     if (!attached) return;
+    terminal?.dispose(); // synchronous revoke + bounded cleanup initiated before detach, not Stack-owned
     attached = false;
     speedOwnerToken = {};
     speed.reset();
@@ -2063,6 +2116,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     on(type, (event, c) => {
       if (!attached) return;
       if (c !== undefined) ctx = c;
+      terminal?.check();
       speedWire.forward(tap, event as { type: string } & Record<string, unknown>);
       // tool-duration plan: `turn_end` fires after the turn's tool executions (pi-agent-core
       // emits it from the loop right after executeToolCalls), so it is the flush point.

@@ -36,9 +36,11 @@ export const BASE_TEST_INCLUDE: readonly string[] = ["tests/**/*.test.ts", "test
 // The opt-in real-browser probe lives in scripts/, never the daily test project.
 // Schedule interval P1: schedule-secure-activate and schedule-interval-lock are integration/
 // (actual activate / real kernel lock), hence covered by this prefix, never the secure mount project.
-// Terminal r4: web-hub-terminal-{ingress,old-hub,quarantine}.test.ts use real
-// decoder/registry/HTTP/SSE; future pty/lifecycle/reconnect/http suites also belong
-// to integration/. Q4 physical coverage remains P1-A, not a secure-mount skip.
+// Terminal r4: web-hub-terminal-{ingress,old-hub,quarantine,http,journal,pty,wiring}.test.ts
+// are explicitly owned by this integration/ prefix (real sockets/durable IO/PTY).
+// Agent terminal-{owner,owner-factory,connection,environment,wiring} and UI controller/
+// authority tests use isolated fake backend/socket/clock ports, hence remain tier1;
+// their subprocess/physical counterparts must stay here, never secure-mount-skipped.
 export const TIER2_DIRS: readonly string[] = ["tests/integration/", "tests/conformance/"];
 
 /** Tier 2 files outside TIER2_DIRS (plan D2): real private lock / plain child processes /
