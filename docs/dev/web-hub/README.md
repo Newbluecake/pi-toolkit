@@ -1384,26 +1384,6 @@ socket/production ready gate use a bounded agent operation fixture, not a fake P
 Q1–Q4 execute actual disk journal/fence/local-verifier paths. Q4 real forkpty, multiple
 pgids and late spawn settlement belong to `web-hub-terminal-pty.test.ts` (P1-A).
 
-### Eager terminal path constants
-
-`protocol/terminal-paths.ts` is zero-import/schema-free and preserves the original HTTP
-path object/order. Both `http-contract.ts` (eager UI) and `terminal.ts` re-export that
-same object. Do not add a runtime `http-contract.ts` dependency on `terminal.ts`: doing
-so eagerly executes TypeBox terminal schemas through `logic/contract.js`'s SSE_EVENTS
-import. The transitive static-import graph test pins this boundary, without widening I8.
-
-### r4.1 resolved receipt acknowledgement
-
-`term_req{op:"resolved_ack",channelId,resolved}` is private/resource-only and has no HTTP
-path or command form. H sends it only after the exact identities' resolved journal CAS
-is durably committed; it binds hub boot/challenge/link, inventoryId/snapshot revision and
-a separate journalRevision. A uses its current post-ready bound channel/snapshot/local reaped receipt
-records with `terminalResolvedAckMatches`, validates the whole batch, then synchronously
-forgets exactly those receipts and advances the revision floor. Unknown/duplicate/stale
-identities reject without partial deletion. A lost ACK pins receipts until a fresh valid
-challenge/commit-bound acknowledgement; it never clears physical slots/quarantine or
-revives shells. The helper checks shape/current private context, not OS proof/fsync itself.
-
 #### P1-H cold-CAS barrier and dedicated resolved acknowledgement
 
 Root r4.2 explicitly chooses the conservative cold-start rule: retained `resolved`
