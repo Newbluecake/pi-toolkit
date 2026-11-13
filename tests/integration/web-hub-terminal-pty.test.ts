@@ -4,16 +4,15 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   chmodSync,
   existsSync,
-  lstatSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
-  readdirSync,
   realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { systemRcPreflight } from "./web-hub-terminal-system-rc.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
@@ -88,34 +87,6 @@ afterEach(async () => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-/** Before native system rc runs: audit all installed /etc startup inputs for this fixture.
- * Refuse a HOME/ZDOTDIR assignment (including locale.conf's eval input), not post-hoc repair.
- * The fixture wrapper disables optional bash-completion sourcing and verifies HOME pre-exec.
- * No claim to OS isolation: system startup scripts are trusted and not modified. */
-function systemRcPreflight(): void {
-  const files = [
-    "/etc/profile",
-    "/etc/bashrc",
-    "/etc/zshenv",
-    "/etc/zshrc",
-    "/etc/zprofile",
-    "/etc/zlogin",
-    "/etc/locale.conf",
-    ...readdirSync("/etc/profile.d")
-      .filter((f) => f.endsWith(".sh") || f === "sh.local")
-      .map((f) => `/etc/profile.d/${f}`),
-  ];
-  for (const file of files.filter(existsSync)) {
-    const st = lstatSync(file);
-    if (!st.isFile() || st.mode & 0o022) throw new Error("unsafe fixture system startup");
-    const code = readFileSync(file, "utf8")
-      .split("\n")
-      .filter((s) => !s.trim().startsWith("#"))
-      .join("\n");
-    if (/(?:^|[;\s])(?:export\s+)?(?:HOME|ZDOTDIR)\s*=|(?:unset|read)\s+(?:HOME|ZDOTDIR)/m.test(code))
-      throw new Error("system startup redirects fixture HOME: coverage refused before exec");
-  }
-}
 function fixture(kind: "bash" | "zsh" = "bash", delays: Partial<TerminalTestFixture> = {}): TerminalTestFixture {
   systemRcPreflight();
   const root = mkdtempSync(join(tmpdir(), "tp-"));

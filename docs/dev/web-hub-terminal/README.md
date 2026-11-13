@@ -130,6 +130,14 @@ terminal binding token只驻当前页面私有内存，不进URL/storage/history
 - off golden、activate-trace、boundary；不变更 I8 白名单/注册 trace/旧 fixtures。`git diff --quiet 2d802f1f -- tests/fixtures/`、`git diff --check`、Prettier 精确路径检查。
 - separate-process durable-release 用例保留 revision≥before+2、零 journal rows、exact receipt ACK 删除、真实 PID gone 断言；等待对齐生产 reaper 上限60s，不以 close/exit 代替。失败输出 stage/round/journal/receipt物理字段/PID stat/agent固定诊断/lifecycle，不输出秘密；四轮总界300s。重复10次记录不能当 full-file 其余用例通过。
 
+### 隔离 PTY fixture 的系统 rc 门
+
+`tests/integration/web-hub-terminal-system-rc.ts` 是 fixture 与 PTY suite 共用的 **test-only** pre-exec audit；不属于生产终端准入。先枚举 Fedora/Ubuntu bash、zsh 的系统启动路径及 `profile.d/*.sh` / `sh.local`，再 `realpath` 到 `/etc` 或 `/usr` 内的 regular file，要求目标 uid 0、不可 world-write，group-write 仅允许 gid 0（将 root 组视为管理信任边界）。不以 symlink 自身常见的 0777 mode 判断目标可写性；不声称 ACL 审计或防御并发 root 改写。缺省的可选 rc 可不存在，但 dangling symlink、读取/枚举失败不静默略过；错误只带文件路径与固定原因/OS code，不带文件正文。
+
+HOME/ZDOTDIR assignment、unset/read 的原有检测与注释过滤保持不变，发现重定向必须在 exec 前拒绝，不通过改 HOME、跳过 rc 或降低覆盖率“修复”。单元测试用私有 scratch 根、文件列表和属主 uid 替身，不改真实 `/etc`。此检查不是 shell parser，也不是 OS 沙盒；fixture wrapper 仍须验证 HOME 并禁用可选 bash-completion。
+
+2026-11-14 CI `43509495998` 的完整 setup 日志证实 `ubuntu-latest` 已指向 **Ubuntu 26.04.1 / ubuntu26/20261111.196.1**。该镜像 [systemd 259.9-0ubuntu0.1 的 SBOM](https://github.com/actions/runner-images/releases/tag/ubuntu26%2F20261111.196) 与官方 `.deb` 内容一致：`/etc/profile.d/{70-systemd-shell-extra,80-systemd-osc-context}.sh` 是指向 `/usr/lib/systemd/profile.d/` 下同名 root:root 0644 文件的 symlink。旧 `lstat().isFile()` 因而拒绝正常安装；两目标均不命中 HOME/ZDOTDIR 检测。不能把镜像版本误当 24.04，或无证据归因于 `env_vars.sh` 的组写权限。
+
 ### 离线 Chromium tier3（不进 CI、不安装依赖）
 
 前置 Linux/Python/bash、Node≥22.12、已有匹配 Playwright1.63.0/Chromium revision1243缓存。缺缓存报失败/NOT RUN，绝不隐式下载。使用 owned0700 短路径 HOME/XDG_CACHE_HOME/TMPDIR；unset XDG_RUNTIME_DIR/NODE_OPTIONS/PI_CODING_AGENT_DIR、umask0022；只读 node_modules symlink 必设私有 `PWH_UI_CACHE_DIR`。

@@ -1,44 +1,11 @@
 /** Isolated real-PTY UID fixture, using the same pre-exec system-rc audit as P1-A. */
-import {
-  chmodSync,
-  existsSync,
-  lstatSync,
-  mkdtempSync,
-  mkdirSync,
-  readFileSync,
-  readdirSync,
-  realpathSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import assert from "node:assert/strict";
 import { assertTerminalFixture, type TerminalTestFixture } from "../../src/web-hub/agent/terminal/environment.js";
-function systemRcPreflight(): void {
-  const files = [
-    "/etc/profile",
-    "/etc/bashrc",
-    "/etc/zshenv",
-    "/etc/zshrc",
-    "/etc/zprofile",
-    "/etc/zlogin",
-    "/etc/locale.conf",
-    ...readdirSync("/etc/profile.d")
-      .filter((f) => f.endsWith(".sh") || f === "sh.local")
-      .map((f) => `/etc/profile.d/${f}`),
-  ];
-  for (const file of files.filter(existsSync)) {
-    const st = lstatSync(file);
-    if (!st.isFile() || st.mode & 0o022) throw new Error("unsafe fixture system startup");
-    const code = readFileSync(file, "utf8")
-      .split("\n")
-      .filter((s) => !s.trim().startsWith("#"))
-      .join("\n");
-    if (/(?:^|[;\s])(?:export\s+)?(?:HOME|ZDOTDIR)\s*=|(?:unset|read)\s+(?:HOME|ZDOTDIR)/m.test(code))
-      throw new Error("system startup redirects fixture HOME: coverage refused before exec");
-  }
-}
+import { systemRcPreflight } from "./web-hub-terminal-system-rc.js";
+
 export function makeTerminalFixture(): { fixture: TerminalTestFixture; cleanup(): void } {
   const kind = "bash";
   systemRcPreflight();
