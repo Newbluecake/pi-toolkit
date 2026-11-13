@@ -284,6 +284,66 @@ const handshake = { offerId: id, hubNonce: id };
 const ready = { ...handshake, agentChallenge: id };
 const deadlines = closed({ inputIdleAt: uint, lifetimeAt: uint, parentExpiresAt: uint });
 export const TerminalStateSchema = literals(["starting", "live", "closing", "exited", "failed", "reap_incomplete"]);
+
+/** §7.1 / §7.3 display-only metadata, append-only and NEVER browser input/authority.
+ * P1-A: derive shellName from the validated login-shell basename, userLabel from the
+ * uid record, hostLabel from the local host, cwd from the INITIAL trusted ctx.cwd.
+ * Never use OSC title/OSC7, terminal output, later shell pwd, commands or browser claims.
+ * P1-H: assign sessionOrdinal once per accepted reservation (monotonic per agent session
+ * in this hub boot; no wrap/reassignment on idempotent retry), createdAt as hub Unix ms at acceptance,
+ * writerPresent from the authoritative current writer lease, ownerLabel from this login.
+ * Hub-owned fields from agent replies MUST be ignored/overwritten by H, not trusted.
+ *
+ * H publishes only hub metadata in list/state. A/H omit shellName/userLabel/hostLabel/cwd
+ * there; these descriptive fields are only for an authorized open/attach panel (§4.2
+ * explicitly forbids cwd in list). All metadata is private/no-store, never journal,
+ * audit/history/notification/Feishu/global SSE. UI uses text nodes, never HTML or links.
+ * Unsupported/overlong labels are omitted, not truncated or guessed from termId/OSC.
+ *
+ * secure/locked, privacy marked (even UI-unlocked), unknown/degraded privacy, revoked
+ * auth/binding: deny the terminal operation/output; omit ALL metadata and erase cached
+ * display fields. Optionality is compatibility, NOT permission to return a masked row.
+ */
+export const TERMINAL_DISPLAY_LIMITS = Object.freeze({
+  shellNameChars: 64,
+  userLabelChars: 128,
+  hostLabelChars: 253,
+  cwdChars: 4096,
+  ownerLabelChars: 128,
+});
+// Unicode text except C0/C1/DEL, line separators and bidi direction controls. Not markup.
+const displayTextCharacters = "[^\\u0000-\\u001f\\u007f-\\u009f\\u061c\\u200e\\u200f\\u2028-\\u202e\\u2066-\\u2069]";
+const displayTextPattern = "^" + displayTextCharacters + "+$";
+const displayText = (maxLength: number) => Type.String({ minLength: 1, maxLength, pattern: displayTextPattern });
+export const TerminalAgentDisplayMetadataSchema = closed({
+  shellName: Type.Optional(
+    Type.String({ minLength: 1, maxLength: TERMINAL_DISPLAY_LIMITS.shellNameChars, pattern: "^[A-Za-z0-9._+-]+$" }),
+  ),
+  userLabel: Type.Optional(displayText(TERMINAL_DISPLAY_LIMITS.userLabelChars)),
+  hostLabel: Type.Optional(
+    Type.String({ minLength: 1, maxLength: TERMINAL_DISPLAY_LIMITS.hostLabelChars, pattern: "^[A-Za-z0-9._:-]+$" }),
+  ),
+  cwd: Type.Optional(
+    Type.String({
+      minLength: 1,
+      maxLength: TERMINAL_DISPLAY_LIMITS.cwdChars,
+      pattern: "^/" + displayTextCharacters + "*$",
+    }),
+  ),
+});
+export type TerminalAgentDisplayMetadata = Static<typeof TerminalAgentDisplayMetadataSchema>;
+export const TerminalHubDisplayMetadataSchema = closed({
+  sessionOrdinal: Type.Optional(pos),
+  createdAt: Type.Optional(uint),
+  writerPresent: Type.Optional(Type.Boolean()),
+  ownerLabel: Type.Optional(displayText(TERMINAL_DISPLAY_LIMITS.ownerLabelChars)),
+});
+export type TerminalHubDisplayMetadata = Static<typeof TerminalHubDisplayMetadataSchema>;
+export const TerminalDisplayMetadataSchema = closed({
+  ...TerminalAgentDisplayMetadataSchema.properties,
+  ...TerminalHubDisplayMetadataSchema.properties,
+});
+export type TerminalDisplayMetadata = Static<typeof TerminalDisplayMetadataSchema>;
 const facts = {
   termId: id,
   reservationId: id,
@@ -293,8 +353,15 @@ const facts = {
   baseOffset: uint,
   nextOffset: uint,
   deadlines,
+  ...TerminalHubDisplayMetadataSchema.properties,
 };
-const attachment = { ...facts, attachmentId: id, writerLease: id, replayMode: literals(["cold", "warm"]) };
+const attachment = {
+  ...facts,
+  attachmentId: id,
+  writerLease: id,
+  replayMode: literals(["cold", "warm"]),
+  ...TerminalAgentDisplayMetadataSchema.properties,
+};
 const b64 = (bytes: number) =>
   Type.String({
     maxLength: 4 * Math.ceil(bytes / 3),

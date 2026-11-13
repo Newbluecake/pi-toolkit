@@ -1214,3 +1214,15 @@ unknown physical effect + `E_RESOURCE_QUARANTINED`, never TTL permission to open
 contract tests and explicit dependency TODOs distinguish this from full integration gates.
 Legacy trace code in `tests/web-hub/terminal-legacy/` preserves unpatched baseline ingress
 and LRU/waiter behavior for old-hub and mixed-version tests; never add terminal guards there.
+
+### Terminal display metadata (P1-C additive contract)
+
+Optional `sessionOrdinal/createdAt/writerPresent/ownerLabel` are hub-authoritative;
+optional `shellName/userLabel/hostLabel/cwd` come from validated agent login-shell/uid/
+host/initial context, never OSC/title/output. `protocol/terminal.ts` exports their closed
+schemas, character limits and types. Legacy facts/attachments/frames need none of them.
+Only authorized open/attach panels receive the agent descriptive fields; list/state
+omit them (in particular list never returns cwd). Secure/locked, privacy marked (even
+locally unlocked), unknown/degraded privacy or revoked auth/binding deny the operation
+and omit/clear all metadata, not a masked row. No journal/audit/history/global SSE copies;
+UI renders text, not HTML/links. These are contracts for A/H/P2, not new runtime producers.

@@ -15,6 +15,11 @@ import {
   TerminalReapProofSchema,
   TerminalQuarantineSchema,
   TERMINAL_HTTP_SCHEMAS,
+  TERMINAL_HTTP_SUCCESS_SCHEMAS,
+  TerminalDisplayMetadataSchema,
+  TerminalAgentDisplayMetadataSchema,
+  TerminalHubDisplayMetadataSchema,
+  TERMINAL_DISPLAY_LIMITS,
   type TerminalResourceEntry,
 } from "../../../src/web-hub/protocol/terminal.js";
 
@@ -245,5 +250,180 @@ describe("F2 metadata contract, not OS proof verification (§5.5.1)", () => {
       expect(Value.Check(TerminalReapProofSchema, { ...proof, [key]: false })).toBe(false);
     expect(Value.Check(TerminalReapProofSchema, { ...proof, cleaned: true })).toBe(false);
     expect(Value.Check(TerminalReapProofSchema, { ...proof, outcome: "close-accepted" })).toBe(false);
+  });
+});
+
+// Baseline response shapes from 85c2a577: no metadata is required or synthesized.
+const oldTerminalFacts = {
+  termId: "term",
+  reservationId: "reservation",
+  revision: 1,
+  state: "live",
+  nextInputSeq: 0,
+  baseOffset: 0,
+  nextOffset: 2,
+  deadlines: { inputIdleAt: 3600000, lifetimeAt: 28800000, parentExpiresAt: 28800000 },
+};
+const oldTerminalAttachment = {
+  ...oldTerminalFacts,
+  attachmentId: "attachment",
+  writerLease: "lease",
+  replayMode: "cold",
+};
+const hubMetadata = { sessionOrdinal: 1, createdAt: 1700000000000, writerPresent: true, ownerLabel: "本次登录" };
+const agentMetadata = { shellName: "bash", userLabel: "测试用户", hostLabel: "worker.example", cwd: "/项目/终端" };
+describe("terminal optional display metadata (§7.1 / §7.3, append-only)", () => {
+  it("keeps all old HTTP responses and dedicated frames valid and byte-identical without defaults", () => {
+    const responses = {
+      open: { ok: true, ...oldTerminalAttachment },
+      attach: { ok: true, ...oldTerminalAttachment },
+      list: { ok: true, revision: 1, rows: [oldTerminalFacts] },
+      state: { ok: true, fact: oldTerminalFacts },
+    };
+    for (const op of ["open", "attach", "list", "state"] as const) {
+      const response = responses[op],
+        bytes = JSON.stringify(response);
+      expect(Value.Check(TERMINAL_HTTP_SUCCESS_SCHEMAS[op], response), op).toBe(true);
+      expect(JSON.stringify(response)).toBe(bytes);
+      expect(JSON.stringify(response)).not.toContain("sessionOrdinal");
+      const frame = { t: "term_res", v: 1, rid: "rid", ...scope, channelId: "channel", op, ...response };
+      const wire = JSON.stringify(frame) + "\n";
+      expect(decodeAgentFrame(frame), op).toBe(frame);
+      expect(JSON.stringify(decodeAgentFrame(frame)) + "\n").toBe(wire);
+    }
+    expect(Value.Check(TerminalDisplayMetadataSchema, {})).toBe(true);
+    expect(Value.Check(TerminalAgentDisplayMetadataSchema, {})).toBe(true);
+    expect(Value.Check(TerminalHubDisplayMetadataSchema, {})).toBe(true);
+  });
+  it("accepts optional panel metadata and authoritative list/state metadata; root cwd is valid", () => {
+    const panel = { ok: true, ...oldTerminalAttachment, ...hubMetadata, ...agentMetadata };
+    for (const op of ["open", "attach"] as const) {
+      expect(Value.Check(TERMINAL_HTTP_SUCCESS_SCHEMAS[op], panel)).toBe(true);
+      expect(
+        decodeAgentFrame({ t: "term_res", v: 1, rid: "rid", ...scope, channelId: "channel", op, ...panel }),
+      ).toBeDefined();
+    }
+    expect(Value.Check(TerminalDisplayMetadataSchema, { ...hubMetadata, ...agentMetadata })).toBe(true);
+    expect(Value.Check(TerminalAgentDisplayMetadataSchema, { cwd: "/" })).toBe(true);
+    expect(
+      Value.Check(TERMINAL_HTTP_SUCCESS_SCHEMAS.list, {
+        ok: true,
+        revision: 1,
+        rows: [{ ...oldTerminalFacts, ...hubMetadata }],
+      }),
+    ).toBe(true);
+    expect(
+      Value.Check(TERMINAL_HTTP_SUCCESS_SCHEMAS.state, { ok: true, fact: { ...oldTerminalFacts, ...hubMetadata } }),
+    ).toBe(true);
+  });
+  it.each([
+    ["shellName", TERMINAL_DISPLAY_LIMITS.shellNameChars, "b"],
+    ["userLabel", TERMINAL_DISPLAY_LIMITS.userLabelChars, "u"],
+    ["hostLabel", TERMINAL_DISPLAY_LIMITS.hostLabelChars, "h"],
+    ["ownerLabel", TERMINAL_DISPLAY_LIMITS.ownerLabelChars, "o"],
+    ["cwd", TERMINAL_DISPLAY_LIMITS.cwdChars, "/"],
+  ] as const)("%s enforces the exact character limit", (field, max, char) => {
+    expect(Value.Check(TerminalDisplayMetadataSchema, { [field]: char.repeat(max) })).toBe(true);
+    expect(Value.Check(TerminalDisplayMetadataSchema, { [field]: char.repeat(max + 1) })).toBe(false);
+    expect(Value.Check(TerminalDisplayMetadataSchema, { [field]: "" })).toBe(false);
+    expect(Value.Check(TerminalDisplayMetadataSchema, { [field]: null })).toBe(false);
+  });
+  it("rejects display controls/bidi, shell paths, invalid host labels and non-absolute cwd", () => {
+    for (const field of ["userLabel", "ownerLabel", "cwd"]) {
+      for (const control of [
+        "\n",
+        "\r",
+        "\t",
+        "\0",
+        "\x1b",
+        "\x7f",
+        "\x85",
+        "\u061c",
+        "\u200e",
+        "\u2028",
+        "\u202e",
+        "\u2066",
+      ]) {
+        expect(
+          Value.Check(TerminalDisplayMetadataSchema, { [field]: "/safe" + control + "tail" }),
+          field + JSON.stringify(control),
+        ).toBe(false);
+      }
+    }
+    for (const meta of [
+      { shellName: "/bin/bash" },
+      { shellName: "bash -c" },
+      { shellName: "bash\x1b" },
+      { hostLabel: "host name" },
+      { hostLabel: "host<script>" },
+      { cwd: "relative/path" },
+    ])
+      expect(Value.Check(TerminalDisplayMetadataSchema, meta)).toBe(false);
+  });
+  it("validates hub counters/time/boolean, rejects unknown keys, and does not widen request/event schemas", () => {
+    for (const meta of [
+      { sessionOrdinal: 0 },
+      { sessionOrdinal: -1 },
+      { sessionOrdinal: 1.5 },
+      { sessionOrdinal: Number.MAX_SAFE_INTEGER + 1 },
+      { createdAt: -1 },
+      { createdAt: Infinity },
+      { createdAt: 0.5 },
+      { writerPresent: "true" },
+      { title: "OSC title" },
+      { pid: 7 },
+      { env: {} },
+      { unknown: true },
+    ])
+      expect(Value.Check(TerminalDisplayMetadataSchema, meta)).toBe(false);
+    expect(
+      Value.Check(TerminalDisplayMetadataSchema, {
+        createdAt: 0,
+        sessionOrdinal: Number.MAX_SAFE_INTEGER,
+        writerPresent: false,
+      }),
+    ).toBe(true);
+    expect(
+      Value.Check(TERMINAL_HTTP_SUCCESS_SCHEMAS.open, {
+        ok: true,
+        ...oldTerminalAttachment,
+        ...agentMetadata,
+        unknown: true,
+      }),
+    ).toBe(false);
+    expect(decodeAgentFrame({ ...output, ...agentMetadata })).toBeUndefined(); // no new event fields
+    expect(
+      Value.Check(TERMINAL_HTTP_SCHEMAS.list, {
+        agentKey: "agent",
+        expect: { sessionId: "s", epoch: "e" },
+        clientId: "c",
+        connectionInstance: "i",
+        connectionToken: "t",
+        ownerLabel: "forged",
+      }),
+    ).toBe(false);
+  });
+  it("list/state cannot carry panel-only shell/user/host/cwd metadata (§4.2 / §7.1)", () => {
+    for (const [field, value] of Object.entries(agentMetadata)) {
+      const fact = { ...oldTerminalFacts, [field]: value };
+      expect(Value.Check(TERMINAL_HTTP_SUCCESS_SCHEMAS.list, { ok: true, revision: 1, rows: [fact] }), field).toBe(
+        false,
+      );
+      expect(Value.Check(TERMINAL_HTTP_SUCCESS_SCHEMAS.state, { ok: true, fact }), field).toBe(false);
+      expect(
+        decodeAgentFrame({
+          t: "term_res",
+          v: 1,
+          rid: "rid",
+          ...scope,
+          channelId: "channel",
+          op: "list",
+          ok: true,
+          revision: 1,
+          rows: [fact],
+        }),
+        field,
+      ).toBeUndefined();
+    }
   });
 });

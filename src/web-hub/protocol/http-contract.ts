@@ -325,3 +325,6 @@ export type {
   TerminalSseEvent,
   TerminalFailure,
 } from "./terminal.js";
+
+/** Terminal display metadata: optional response-only fields; see terminal.ts for ownership/privacy. */
+export type { TerminalDisplayMetadata, TerminalAgentDisplayMetadata, TerminalHubDisplayMetadata } from "./terminal.js";
