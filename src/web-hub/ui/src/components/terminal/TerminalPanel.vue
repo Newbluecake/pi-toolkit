@@ -329,14 +329,16 @@ function onPaste(event: ClipboardEvent) {
     void nextTick(() => root.value?.querySelector<HTMLButtonElement>("[data-terminal-cancel]")?.focus());
   }
 }
-function sendPaste() {
+async function sendPaste() {
   const text = paste.value;
   paste.value = null;
-  if (text !== null && state.writable) {
-    userEvent();
-    renderer?.terminal?.paste(text);
-  }
+  // Remove the higher modal first; its focus must not freeze this explicit user paste.
+  await nextTick();
+  if (disposed || !state.writable || text === null) return;
   renderer?.focus();
+  if (!inputAllowed()) return;
+  userEvent();
+  renderer?.terminal?.paste(text);
 }
 function adjust(event: KeyboardEvent) {
   if (event.key === "ArrowUp" || event.key === "ArrowDown") {

@@ -70,17 +70,23 @@ function setup(fails = false) {
     write: vi.fn(async () => {}),
     state: { phase: "ready", rebuilds: 0 },
   };
-  mocks.mount.mockImplementation(async () => {
+  mocks.mount.mockImplementation(async (surface: HTMLElement) => {
     if (fails) throw new Error("当前浏览器不支持 WebGL2，终端未启动。");
+    const helper = document.createElement("textarea");
+    surface.append(helper);
+    terminal.focus.mockImplementation(() => helper.focus());
+    terminal.paste.mockImplementation((value: string) => mocks.data(value));
     return renderer;
   });
   let sink: (name: string, data: unknown) => void = () => {};
-  const request = vi.fn(async (op: string) =>
+  const request = vi.fn(async (op: string, body?: any) =>
     op === "list"
       ? { ok: true, revision: 1, rows: [fact] }
       : op === "attach"
         ? { ...attachment }
-        : { ok: true, revision: 2 },
+        : op === "input"
+          ? { ok: true, acceptedThrough: body.inputSeq }
+          : { ok: true, revision: 2 },
   );
   const hub = {
     state: ref({ clientId: "client" }),
@@ -181,6 +187,78 @@ describe("TerminalPanel / Chrome / List (§7.1–7.4)", () => {
     expect(w.text()).not.toContain("#term");
     expect(w.text()).not.toContain("background");
     expect(w.find("time").exists()).toBe(false);
+  });
+  it("confirms multiline paste after modal removal/focus restore, and never sends cancelled text", async () => {
+    const { w, sink, request, renderer } = setup();
+    await flushPromises();
+    w.getComponent(TerminalList).vm.$emit("attach", fact);
+    await vi.waitFor(() => expect(mocks.mount).toHaveBeenCalledOnce());
+    await flushPromises();
+    const send = (event: any) =>
+      sink("terminal", {
+        agentKey: "agent",
+        attachmentId: "attachment",
+        connectionInstance: "instance",
+        event: {
+          v: 1,
+          sessionId: "session",
+          epoch: "epoch",
+          ownerInstance: "owner",
+          termId: "term",
+          revision: 2,
+          ...event,
+        },
+      });
+    send({
+      kind: "replay_begin",
+      attemptId: "attempt",
+      replayEpoch: "replay",
+      S: 0,
+      N0: 0,
+      deadlineAt: Date.now() + 3000,
+    });
+    await flushPromises();
+    send({
+      kind: "cutover",
+      attemptId: "attempt",
+      newLiveEpoch: "live",
+      replayEnd: 0,
+      liveFrom: 0,
+      gap: { from: 0, to: 0 },
+      resetParser: true,
+    });
+    await nextTick();
+    renderer.focus();
+    const helper = w.get("[data-terminal-input] textarea").element;
+    const paste = () => {
+      const e = new Event("paste", { bubbles: true, composed: true, cancelable: true });
+      Object.defineProperty(e, "clipboardData", { value: { getData: () => "echo one\necho two" } });
+      helper.dispatchEvent(e);
+      return e;
+    };
+    expect(paste().defaultPrevented).toBe(true);
+    await nextTick();
+    expect(w.find('[aria-modal="true"]').exists()).toBe(true);
+    expect(request.mock.calls.some((c) => c[0] === "input")).toBe(false);
+    await w.get("[data-terminal-cancel]").trigger("click");
+    expect(request.mock.calls.some((c) => c[0] === "input")).toBe(false);
+    renderer.focus();
+    paste();
+    await nextTick();
+    const buttons = w.get('[aria-modal="true"]').findAll("button");
+    await buttons[1]!.trigger("click");
+    await flushPromises();
+    const input = request.mock.calls.find((c) => c[0] === "input")?.[1];
+    expect(input?.inputKind).toBe("user");
+    expect(atob(input?.bytesB64)).toBe("echo one\necho two");
+    expect(w.find('[aria-modal="true"]').exists()).toBe(false);
+  });
+  it("supports keyboard panel-height adjustment without recreating the renderer", async () => {
+    const { w } = setup();
+    await flushPromises();
+    await w.get('[role="separator"]').trigger("keydown", { key: "ArrowUp" });
+    expect((w.element as HTMLElement).style.height).toBe("340px");
+    expect(mocks.mount).not.toHaveBeenCalled();
   });
   it("adds the jobs symbol only with the hub feature prop; off markup is byte-identical after toggling", async () => {
     const w = mount(IconSprite);
