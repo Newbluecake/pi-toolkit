@@ -156,6 +156,28 @@ describe("§8.4 caps coexistence — hub cap surfaces (upload ∪ spawn ∪ runt
     expect(browserCaps).not.toContain(PRIVACY_HUB_CAP); // privacy P1: key absent ⇒ no cap
   });
 
+  it("terminal.ui.v1 is exactly one browser-only tail exception; agent ack bytes/cap order stay legacy", async () => {
+    const fe = fakeFrontend();
+    const result = await startHub(
+      config({
+        home: tmp.make("wh-term-caps-"),
+        terminal: { maxPerSession: 2, maxPerPrincipal: 2, maxTotal: 8, inputIdleMs: 3600000, maxLifetimeMs: 28800000 },
+      }),
+      fe.factory,
+      { uid: process.getuid?.() ?? 0 },
+    );
+    if ("exists" in result) throw new Error("unexpected existing hub");
+    hubs.push(result);
+    const c = await connectClient(result.paths.socketPath);
+    c.send(hello());
+    const ack = await c.waitFrame((f) => f.t === "hello_ack");
+    c.sock.destroy();
+    const agentCaps = ack.caps as string[];
+    expect(result.info.caps).toEqual([...agentCaps, "terminal.ui.v1"]);
+    expect(result.info.caps.filter((c) => c === "terminal.ui.v1")).toHaveLength(1);
+    expect(agentCaps).not.toContain("terminal.ui.v1");
+  });
+
   it("config.privacy: privacy.v1 joins BOTH surfaces and stays set-equal (static — LAN state never moves it)", async () => {
     const home = tmp.make("wh-coexist-privacy-");
     const fe = fakeFrontend();

@@ -19,6 +19,8 @@
  * The listening socket server stays ref'd (the hub is meant to live until the
  * idle monitor fires); every timer here is unref'd.
  */
+import type { TerminalRevocationFence } from "./terminal/revocation-fence.js";
+import { TERMINAL_UI_CAP } from "../protocol/version.js";
 import { randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { type GitRunner } from "../../git/run.js";
@@ -365,6 +367,11 @@ export async function startHub(
     // Keeping ctl.v1 available does not depend on LAN assembly succeeding.
     const admin = createAdminHandler({
       log,
+      ...(config.terminal === undefined
+        ? {}
+        : {
+            terminalAuth: () => (ctx.fe as HttpFrontendExt & { terminalAuth?: TerminalRevocationFence }).terminalAuth,
+          }),
       hasLan: () => config.lan !== undefined,
       // D/E/F/G gates passed together: expose local setup only with configured LAN.
       advertiseTfa: config.lan !== undefined,
@@ -428,6 +435,7 @@ export async function startHub(
         // agent-server.ts's hello_ack.caps fold (caps-coexist pins the set equality).
         ...TODO_ARCHIVE_HUB_CAPS,
         ...extraHubCaps,
+        ...(config.terminal === undefined ? [] : [TERMINAL_UI_CAP]),
       ],
     };
     ctx.info = info;

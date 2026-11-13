@@ -1312,3 +1312,74 @@ RequestFailure 的 authority 是私有字段，不能被错误对象序列化投
 await 使用 action guard，取消的 action 不会清后继 busy 或触发后台/终止后的旧 UI 继续。
 卸载 detach 使用独立的权限/lease 快照且不复用已取消 signal；它不授予重新 attach/open。
 metadata 缺省紧凑标记统一 `unknown`，中文解释只在独立提示段，不改变按钮/警告文案。
+
+### Terminal hub control plane (P1-H, r4)
+
+`hub/terminal/` implements the enabled-only control plane; it never spawns a shell,
+imports pi or uses BashJobManager. `createTerminalService` consumes trusted current
+agent/link/session/domain and OS-incarnation getters, dedicated egress (including
+actual pending-byte accounting), a resource fence, and a privacy authority subscription.
+`createTerminalRoutes` is the optional `FrontendDeps.terminal`; the same handler is
+used on loopback and LAN HTTP (not HTTPS-only). Absent port preserves legacy HTTP/SSE
+bytes and allocates no terminal maps/timers. Browser HubInfo alone appends the single
+tail cap `terminal.ui.v1`; agent hello_ack does not change.
+
+- **Authorization**: `TerminalRevocationFence` subscribes before listener exposure.
+  First emit installs the deny synchronously, invalidates original socket bindings,
+  pending work and writers, then schedules close. Exact selectors never LRU/TTL-evict;
+  saturation widens to sticky all-deny. Consumer failure poisons admission. Wide
+  repair requires selector/revision CAS and an independent current committed-store
+  verification, followed by a new real login-complete proof. Generic auth/touch cannot
+  produce that proof. LAN completion observes the actual checked insertion; token
+  login observes actual loopback session creation. Admin passwd/rotation have optional
+  enabled-only first-deny + commit/repair plumbing; failed/late work stays denied.
+- **Private SSE**: `TerminalSseBindings` holds the original response object, identity,
+  instance and random token. Same-origin EventSource GET without Origin/Fetch Metadata
+  is supported, but the candidate only activates on strict Origin/JSON/X-PWH POST.
+  Cross/null/same-site origins cannot receive terminal tokens. Each enqueue rechecks
+  proof, fence, expiry, original object/attachment and socket pressure. No terminal
+  event enters SseHub.publish, replay ring, global bus, transcript or notifications.
+- **Creation/writers**: HMAC tickets bind the complete owner and creation payload, not
+  the SSE instance. The 64/owner, 2048/hub ledger pins accepted identities past expiry;
+  an old ticket never creates a replacement shell. Single-writer CAS precedes any
+  asynchronous open/attach. Reconnecting clients query/attach, not re-open; stale
+  connections cannot obtain the old writer capability. Open timeout/close/exit are
+  logical facts, not physical release. Only the fence's durable proof CAS releases a
+  reservation and expires its retained creation fact. Hub-owned metadata overrides
+  agent-supplied display fields; list/state project no panel-only cwd/user/host/shell.
+  Privacy/secure/revoke erase all cached display metadata, not partially masked rows.
+- **Budgets**: total HTTP 5s starts before auth/body; bootstrap shares one 3s budget;
+  controls 2s; writer 15s, replay 3s. Every timer is unref'd and dispose-cleared.
+  Shell input-idle/absolute/parent deadlines are checked synchronously as well as by
+  the sweep; renew/output/automatic terminal responses do not extend input-idle.
+  Physical slots include pending/closing/poison. Per-terminal queues are bounded,
+  round-robin, with replay reservation inside the existing 512KiB/s budget; ordered
+  replay output cannot be overtaken by cutover. Input egress refuses at the terminal
+  UDS pending budget, leaving the shared legacy/control path independent. NoACK/slow
+  viewers lose the writer instead of stopping background collection.
+- **F2**: `resource-fence-journal.ts` validates the owned 0700 physical directory and
+  owned regular 0600 O_NOFOLLOW file; writes are exclusive-temp + fsync + rename +
+  directory fsync, serialized CAS. Missing/corrupt _old_ stores are Unavailable, never
+  empty. `trustedNew` is an internal first-use authority, not inferred from ENOENT and
+  never exposed by HTTP/settings. Off never reads/creates this file. The fence takes
+  journal and pure-data handoff union, pins missing agents, collects current owner/
+  process/link/boot/challenge/revision-bound contiguous pages, checks SHA256 canonical
+  metadata digest/duplicates/coverage and applies no partial snapshot. New unknown
+  resources also quarantine. Only independently verified physical proofs + successful
+  resolved commit release once; 5/30/60s do not release lost resources. The local proof
+  verifier needs a trusted exact owner/reaper receipt for PTY/future/waitpid facts AND
+  independently checks registered Linux boot/pid/starttime/uid identities through bounded
+  /proc reads; schema booleans, a missing inventory, or kill ACK are never that receipt.
+- **Audit**: strict fixed-token/counter whitelist, no content or content hashes. High-
+  frequency successes aggregate; failures throttle by fixed code. Logger failure is
+  fail-soft with bounded `auditHealth().failures`, not an output-amplifying logger loop.
+
+Production owner/ingress/first-use authority wiring remains with the P1-C integration
+owner: pass H's ingress to the already-frozen pre-registry port and routes to the
+frontend, provide trusted OS metadata/receipts and direct privacy store onChange (not
+its SSE projection), and dispose within the existing lifecycle. No new top-level hook
+or Stack owner is introduced. Tests explicitly distinguish this integration dependency
+from an already assembled production terminal: dual real HTTP/SSE listeners + real
+socket/production ready gate use a bounded agent operation fixture, not a fake PTY;
+Q1–Q4 execute actual disk journal/fence/local-verifier paths. Q4 real forkpty, multiple
+pgids and late spawn settlement belong to `web-hub-terminal-pty.test.ts` (P1-A).
