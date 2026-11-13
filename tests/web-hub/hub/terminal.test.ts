@@ -165,3 +165,83 @@ it("receiver rejection/expiry retains only non-capability correlation tombstones
     spy.mockRestore();
   }
 });
+
+describe("terminal hub binding audit", () => {
+  it("accepts exact current offer correlation", () => {
+    const offers: unknown[] = [];
+    const p = createTerminalCommandIngress({
+      current: () => true,
+      onOffer: (_m, _id, o) => offers.push(o),
+      onDedicated: () => {},
+    });
+    const id = "a".repeat(16),
+      offer = { v: 1, outcome: "handshake-required", offerId: "offer" };
+    expect(p.register(meta, { commandId: id, rid: "rid" })).toBe(true);
+    p.consumeAgentFrame(meta, {
+      t: "cmd_result",
+      id,
+      rid: "rid",
+      ok: true,
+      data: { op: "command", kind: "builtin", completion: "sync", history: "none", terminal: offer },
+    });
+    expect(offers).toEqual([offer]);
+  });
+
+  it.each(["missing row", "current", "sessionId", "epoch", "owner schema", "owner CAS"])(
+    "single binding: bindOwner %s",
+    (fault) => {
+      let current = true;
+      const p = createTerminalCommandIngress({ current: () => current, onOffer: () => {}, onDedicated: () => {} });
+      const id = "a".repeat(16);
+      expect(p.register(meta, { commandId: id, rid: "rid" })).toBe(true);
+      // Independent positive control leaves the tested row unbound for the schema case.
+      const control = "c".repeat(16);
+      expect(p.register(meta, { commandId: control, rid: "control" })).toBe(true);
+      expect(p.bindOwner(meta, control, "owner")).toBe(true);
+      if (fault === "owner CAS") expect(p.bindOwner(meta, id, "owner")).toBe(true);
+      let m = meta,
+        owner = "owner";
+      if (fault === "current") current = false;
+      if (fault === "sessionId" || fault === "epoch") m = { ...meta, [fault]: "other" };
+      if (fault === "owner schema") owner = "";
+      if (fault === "owner CAS") owner = "other";
+      expect(p.bindOwner(m, fault === "missing row" ? "b".repeat(16) : id, owner)).toBe(false);
+    },
+  );
+  it.each(["current", "sessionId", "epoch", "type", "id", "rid", "ok"])(
+    "single binding: offer correlation %s",
+    (fault) => {
+      let current = true;
+      const offers: unknown[] = [];
+      const p = createTerminalCommandIngress({
+        current: () => current,
+        onOffer: (_m, _id, o) => offers.push(o),
+        onDedicated: () => {},
+      });
+      const id = "a".repeat(16);
+      expect(p.register(meta, { commandId: id, rid: "rid" })).toBe(true);
+      const raw = {
+        t: "cmd_result",
+        id,
+        rid: "rid",
+        ok: true,
+        data: {
+          op: "command",
+          kind: "builtin",
+          completion: "sync",
+          history: "none",
+          terminal: { v: 1, outcome: "handshake-required", offerId: "offer" },
+        },
+      };
+      let m = meta;
+      if (fault === "current") current = false;
+      if (fault === "sessionId" || fault === "epoch") m = { ...meta, [fault]: "other" };
+      if (fault === "type") raw.t = "cmd_late";
+      if (fault === "id") raw.id = "b".repeat(16); // rid still claims reserved row
+      if (fault === "rid") raw.rid = "other"; // id still claims reserved row
+      if (fault === "ok") raw.ok = false;
+      p.consumeAgentFrame(m, raw);
+      expect(offers).toEqual([undefined]);
+    },
+  );
+});

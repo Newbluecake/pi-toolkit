@@ -130,71 +130,81 @@ describe("r4.1 private durable resolved acknowledgement", () => {
     ).toBe(true);
     expect(decodeHubFrame({ ...frame, grant: "forged" })).toBeUndefined();
   });
-  it.each(["hubBootId", "challengeId", "linkGen", "inventoryId", "revision", "journalRevision"] as const)(
-    "rejects stale/wrong %s without forgetting receipts",
-    (field) => {
-      const { frame, authority } = sample();
-      const wrong =
-        typeof frame.resolved[field] === "number"
-          ? field === "journalRevision"
-            ? 6
-            : Number(frame.resolved[field]) + 1
-          : "wrong";
-      expect(terminalResolvedAckMatches({ ...frame, resolved: { ...frame.resolved, [field]: wrong } }, authority)).toBe(
-        false,
-      );
-    },
-  );
-  it.each([
-    "live",
-    "mode",
-    "connection",
-    "current-session",
-    "current-epoch",
-    "current-owner",
-    "channel",
-    "sessionId",
-    "epoch",
-    "ownerInstance",
-    "deadline",
-  ])("rejects %s authority mismatch", (fault) => {
-    const { frame, authority } = sample();
-    let a = authority,
-      f = frame;
-    if (fault === "live") a = { ...a, live: false };
-    if (fault === "mode") a = { ...a, channel: { ...a.channel, mode: "interactive" } };
-    if (fault === "connection") a = { ...a, current: { ...a.current, localConnectionInstance: "other" } };
-    if (fault === "current-session") a = { ...a, current: { ...a.current, sessionId: "other" } };
-    if (fault === "current-epoch") a = { ...a, current: { ...a.current, epoch: "other" } };
-    if (fault === "current-owner") a = { ...a, current: { ...a.current, ownerInstance: "other" } };
-    if (fault === "deadline") a = { ...a, now: 5000 };
-    if (fault === "channel") f = { ...f, channelId: "other" };
-    if (fault === "sessionId" || fault === "epoch" || fault === "ownerInstance") f = { ...f, [fault]: "other" };
-    expect(terminalResolvedAckMatches(f, a)).toBe(false);
+  // Each row falsifies one predicate while keeping the other guards satisfied.
+  // Mirror the invalid connection id on both sides so equality still holds.
+  const cases: Array<[string, Array<[string, unknown]>]> = [
+    ["frame schema", [["frame.extra", true]]],
+    ["operation tag (schema + tag boundary)", [["frame.op", "inventory"]]],
+    ["live", [["authority.live", false]]],
+    ["channel.mode", [["authority.channel.mode", "interactive"]]],
+    [
+      "connection id schema",
+      [
+        ["authority.channel.localConnectionInstance", ""],
+        ["authority.current.localConnectionInstance", ""],
+      ],
+    ],
+    ...["localConnectionInstance", "sessionId", "epoch", "ownerInstance"].map(
+      (field): [string, Array<[string, unknown]>] => [`current.${field}`, [[`authority.current.${field}`, "other"]]],
+    ),
+    ["challenge schema", [["authority.challenge.extra", true]]],
+    ...["channelId", "sessionId", "epoch", "ownerInstance"].map((field): [string, Array<[string, unknown]>] => [
+      `frame.${field}`,
+      [[`frame.${field}`, "other"]],
+    ]),
+    ["now safe integer", [["authority.now", 0.5]]],
+    ["now nonnegative", [["authority.now", -1]]],
+    ["deadline equality", [["authority.now", 5000]]],
+    ...["hubBootId", "challengeId", "inventoryId"].map((field): [string, Array<[string, unknown]>] => [
+      `resolved.${field}`,
+      [[`frame.resolved.${field}`, "other"]],
+    ]),
+    ["resolved.linkGen", [["frame.resolved.linkGen", 3]]],
+    ["resolved.revision", [["frame.resolved.revision", 4]]],
+    ["journal floor safe integer", [["authority.lastJournalRevision", 7.5]]],
+    ["journal floor nonnegative", [["authority.lastJournalRevision", -1]]],
+    ["journal rollback", [["authority.lastJournalRevision", 9]]],
+    [
+      "receipt cap",
+      [
+        [
+          "authority.receipts",
+          [identity, ...Array.from({ length: 32 }, (_, i) => ({ ...identity, termId: `other-${i}` }))],
+        ],
+      ],
+    ],
+    ["receipt schema", [["authority.receipts", [{ ...identity, extra: true }]]]],
+    ["receipt duplicate", [["authority.receipts", [identity, identity]]]],
+    ...["agentSessionId", "termId", "epoch", "ownerInstance", "reservationId"].map(
+      (field): [string, Array<[string, unknown]>] => [
+        `identity.${field}`,
+        [["frame.resolved.identities", [{ ...identity, [field]: "other" }]]],
+      ],
+    ),
+    ["identity duplicate", [["frame.resolved.identities", [identity, identity]]]],
+    ["known then unknown", [["frame.resolved.identities", [identity, { ...identity, termId: "other" }]]]],
+    ["unknown then known", [["frame.resolved.identities", [{ ...identity, termId: "other" }, identity]]]],
+  ];
+  it.each(cases)("single binding: %s", (_condition, changes) => {
+    const input = sample();
+    expect(terminalResolvedAckMatches(input.frame, input.authority)).toBe(true);
+    for (const [path, value] of changes) {
+      const keys = path.split(".");
+      let object = input as unknown as Record<string, unknown>;
+      for (const key of keys.slice(0, -1)) object = object[key] as Record<string, unknown>;
+      object[keys.at(-1)!] = value;
+    }
+    expect(terminalResolvedAckMatches(input.frame, input.authority)).toBe(false);
   });
-  it("compares the full old resource tuple and rejects unknown/duplicate batches atomically", () => {
+  it("accepts the receipt cap boundary and an equal durable journal floor", () => {
     const { frame, authority } = sample();
-    for (const field of ["agentSessionId", "termId", "epoch", "ownerInstance", "reservationId"] as const)
-      expect(
-        terminalResolvedAckMatches(
-          { ...frame, resolved: { ...frame.resolved, identities: [{ ...identity, [field]: "wrong" }] } },
-          authority,
-        ),
-        field,
-      ).toBe(false);
     expect(
-      terminalResolvedAckMatches(
-        { ...frame, resolved: { ...frame.resolved, identities: [identity, identity] } },
-        authority,
-      ),
-    ).toBe(false);
-    expect(
-      terminalResolvedAckMatches(
-        { ...frame, resolved: { ...frame.resolved, identities: [identity, { ...identity, termId: "unknown" }] } },
-        authority,
-      ),
-    ).toBe(false);
-    expect(terminalResolvedAckMatches(frame, { ...authority, receipts: [identity, identity] })).toBe(false);
+      terminalResolvedAckMatches(frame, {
+        ...authority,
+        lastJournalRevision: 8,
+        receipts: [identity, ...Array.from({ length: 31 }, (_, i) => ({ ...identity, termId: `other-${i}` }))],
+      }),
+    ).toBe(true);
   });
   it("forgets only after full acceptance; replay/unknown are no-effect, missing ACK does not expire receipts", () => {
     const { frame, authority } = sample();

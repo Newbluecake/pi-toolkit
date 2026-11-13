@@ -20,20 +20,33 @@ afterEach(() => {
 function harness() {
   let time = 0,
     allowed = true;
-  let scope = { localConnectionInstance: "connection", sessionId: "session", epoch: "epoch", ownerInstance: "owner" };
+  type Scope = { localConnectionInstance: string; sessionId: string; epoch: string; ownerInstance: string };
+  let scope: Scope | undefined = {
+    localConnectionInstance: "connection",
+    sessionId: "session",
+    epoch: "epoch",
+    ownerInstance: "owner",
+  };
+  let times: number[] = [];
+  let onMint: (() => void) | undefined;
+  let onSend: (() => void) | undefined;
   const sent: TermRes[] = [],
     bound: Array<{ channel: string; proof: TerminalProtocolReadyProof }> = [];
   let minted = 0;
   const gate = createTerminalNegotiator({
-    now: () => time,
+    now: () => (times.length ? (time = times.shift()!) : time),
     current: () => scope,
     allowed: () => allowed,
     limits,
     mintGrant: () => {
       minted++;
+      onMint?.();
       return "private-grant";
     },
-    send: (f) => sent.push(f),
+    send: (f) => {
+      sent.push(f);
+      onSend?.();
+    },
     onBound: (channel, proof) => bound.push({ channel, proof }),
   });
   gates.push(gate);
@@ -51,7 +64,22 @@ function harness() {
       allowed = false;
     },
     replaceConnection() {
-      scope = { ...scope, localConnectionInstance: "different" };
+      scope = { ...scope!, localConnectionInstance: "different" };
+    },
+    changeScope(field: keyof Scope) {
+      scope = { ...scope!, [field]: "different" };
+    },
+    loseScope() {
+      scope = undefined;
+    },
+    clockSequence(values: number[]) {
+      times = [...values];
+    },
+    onMint(fn: () => void) {
+      onMint = fn;
+    },
+    onSend(fn: () => void) {
+      onSend = fn;
     },
   };
 }
@@ -94,25 +122,84 @@ describe("terminal agent sending-side ready gate (§4.1(6), T-BIND/T-CACHE)", ()
     expect(h.bound).toHaveLength(1);
     expect(h.bound[0]!.proof.mode).toBe("interactive");
   });
-  it.each(["wrong-challenge", "wrong-owner", "wrong-epoch", "connection", "expiry", "guard", "dispose"])(
-    "%s rejects before mint/send",
-    (fault) => {
-      const h = harness(),
-        ready = challenge(h);
-      let request = { ...ready };
-      if (fault === "wrong-challenge") request.agentChallenge = "wrong";
-      if (fault === "wrong-owner") request.ownerInstance = "wrong";
-      if (fault === "wrong-epoch") request.epoch = "wrong";
-      if (fault === "connection") h.replaceConnection();
-      if (fault === "expiry") h.setTime(3000);
-      if (fault === "guard") h.disable();
-      if (fault === "dispose") h.gate.dispose();
-      expect(h.gate.receive(request)).toBe(false);
-      expect(h.minted).toBe(0);
-      expect(h.sent).toHaveLength(1);
-      expect(h.bound).toEqual([]);
-    },
-  );
+  it.each([
+    "proof.ownerInstance",
+    "proof.hubNonce",
+    "proof.agentChallenge",
+    "frame.sessionId",
+    "frame.epoch",
+    "current.localConnectionInstance",
+    "current.sessionId",
+    "current.epoch",
+    "current.ownerInstance",
+    "current.absent",
+    "expiry",
+    "allowed",
+    "dispose",
+  ])("single binding: %s rejects before mint/send", (fault) => {
+    const h = harness(),
+      ready = challenge(h);
+    const request = { ...ready };
+    if (fault.startsWith("proof.") || fault.startsWith("frame."))
+      Object.assign(request, { [fault.split(".")[1]!]: "wrong" });
+    if (fault.startsWith("current.")) {
+      const field = fault.split(".")[1]!;
+      if (field === "absent") h.loseScope();
+      else h.changeScope(field as "localConnectionInstance" | "sessionId" | "epoch" | "ownerInstance");
+    }
+    if (fault === "expiry") h.setTime(3000);
+    if (fault === "allowed") h.disable();
+    if (fault === "dispose") h.gate.dispose();
+    expect(h.gate.receive(request)).toBe(false);
+    expect(h.minted).toBe(0);
+    expect(h.sent).toHaveLength(1);
+    expect(h.bound).toEqual([]);
+  });
+  it("single binding: prepare phase rejects replay", () => {
+    const h = harness(),
+      ready = challenge(h);
+    const { ownerInstance: _owner, agentChallenge: _challenge, ...prep } = ready;
+    expect(h.gate.receive({ ...prep, op: "prepare_protocol" })).toBe(false);
+    expect(h.sent).toHaveLength(1);
+    expect(h.minted).toBe(0);
+  });
+  it("single binding: admission rechecks live after prune", () => {
+    const h = harness();
+    const offer = h.gate.offer(command(), { v: 1, action: "negotiate", requestNonce: "nonce" })!;
+    // A real clock can cross the deadline between successive synchronous guard reads.
+    h.clockSequence([2999, 3000]);
+    expect(
+      h.gate.receive({
+        t: "term_req",
+        v: 1,
+        rid: "prep",
+        sessionId: "session",
+        epoch: "epoch",
+        op: "prepare_protocol",
+        offerId: offer.offerId,
+        hubNonce: "hub",
+      }),
+    ).toBe(false);
+    expect(h.sent).toEqual([]);
+    expect(h.minted).toBe(0);
+  });
+  it("single binding: pre-mint live check forbids even minting after deadline", () => {
+    const h = harness(),
+      ready = challenge(h);
+    h.clockSequence([2999, 2999, 3000]);
+    expect(h.gate.receive(ready)).toBe(false);
+    expect(h.minted).toBe(0);
+    expect(h.sent).toHaveLength(1);
+  });
+  it("single binding: post-mint live check forbids sending after port revocation", () => {
+    const h = harness(),
+      ready = challenge(h);
+    h.onMint(() => h.disable());
+    expect(h.gate.receive(ready)).toBe(false);
+    expect(h.minted).toBe(1);
+    expect(h.sent).toHaveLength(1);
+    expect(h.bound).toEqual([]);
+  });
   it("resource-only ready never mints an interactive grant, cannot bind or upgrade", () => {
     const h = harness(),
       ready = challenge(h, "resource_inventory");
@@ -270,4 +357,38 @@ describe("terminal offer expiry/material reclamation (r_TJ5QEN3F Major)", () => 
     scrubbed(observed.rows[0]!);
     expect(vi.getTimerCount()).toBe(0);
   });
+});
+
+describe("terminal admission binding audit", () => {
+  it.each(["allowed", "dispose", "current"])("single binding: offer admission %s", (fault) => {
+    const h = harness();
+    if (fault === "allowed") h.disable();
+    if (fault === "dispose") h.gate.dispose();
+    if (fault === "current") h.loseScope();
+    expect(h.gate.offer(command(), { v: 1, action: "negotiate", requestNonce: "nonce" })).toBeUndefined();
+    expect(h.minted).toBe(0);
+    expect(h.sent).toEqual([]);
+  });
+  it.each(["negotiate", "resource_inventory"] as const)(
+    "single binding: %s bind before ready has no grant/proof authority",
+    (mode) => {
+      const h = harness(),
+        ready = challenge(h, mode);
+      expect(h.gate.receive({ ...ready, op: "bind", grant: "invented", proposedChannelId: "channel" })).toBe(false);
+      expect(h.bound).toEqual([]);
+      expect(h.sent).toHaveLength(1);
+      expect(h.minted).toBe(0);
+    },
+  );
+});
+
+it.each(["resource-only", "bind"])("single binding: %s handoff rechecks after transport callback", (mode) => {
+  const h = harness(),
+    ready = challenge(h, mode === "resource-only" ? "resource_inventory" : "negotiate");
+  if (mode === "bind") expect(h.gate.receive(ready)).toBe(true);
+  h.onSend(() => h.disable());
+  const request =
+    mode === "bind" ? { ...ready, op: "bind", grant: "private-grant", proposedChannelId: "channel" } : ready;
+  expect(h.gate.receive(request)).toBe(true); // reply was sent before revocation
+  expect(h.bound).toEqual([]); // but no backend handoff may cross it
 });
