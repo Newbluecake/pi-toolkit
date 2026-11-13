@@ -125,6 +125,27 @@ Fleet grid 模板及子树对齐方程。Happy DOM 不执行 calc 布局运算�
 回归在 `tests/web-hub/ui/activity-rail.test.ts`：真实 header 点击验证选中 class、ARIA、
 切换及关闭后的未选中状态；CSS 契约覆盖 token 与 reduced-motion。
 
+## Terminal P0 spike：严格 CSP 阻塞（2026-11-13）
+
+仅锁定 UI devDependencies：`@xterm/xterm@6.0.0` 与 `@xterm/addon-fit@0.11.0`。
+fit 是方案指定的容器尺寸适配所需最小 addon；两包均为 MIT、无生产依赖。
+尚未接入任何 renderer、host、设置、cap、PTY 或用户入口，P1/P2 不得据此启动。
+
+P0 在安装包源码核验时触发方案 §8.2 的停止条件：
+`@xterm/xterm/src/browser/CoreBrowserTerminal.ts` 的 `_createRenderer()` 无条件创建
+`DomRenderer`；其 `src/browser/renderer/dom/DomRenderer.ts` 的 `_updateDimensions()`
+与 `_injectCss()` 创建两个 `<style>`，再通过 `textContent` 写入尺寸和主题规则。
+这不是外部 `xterm.css`，仅将后者改为 `?url` 懒加载不能解决。
+当前主 UI `CSP` 保持 `style-src 'self'`，未放宽、未加 nonce、未修改第三方包或添加
+其他 renderer addon。**结论是 BLOCKED，不是终端 CSP PASS。**
+
+隔离工作区重建的现有 UI 门禁通过，但没有 terminal-exclusive 产物，因此不代表终端
+体积门已通过。真实 Chromium/Firefox、negative control、字体/Worker/OSC/IME 等终端
+行为均 NOT RUN（隔离环境无本地浏览器/Playwright 缓存）；静态源码证据不能替代它们。
+`THIRD_PARTY_NOTICES.md` 继续由实际 bundle provenance 生成，未将尚未渲染进 bundle 的
+两包伪标为已发布。后续若有获批的兼容路径，必须重做 terminal-exclusive JS/CSS 的
+模块图及 SHA256 计量、许可证闭包、首屏增量与完整真实浏览器门，再交 root 放行。
+
 ## UI serving 与 LAN access
 
 **UI serving
