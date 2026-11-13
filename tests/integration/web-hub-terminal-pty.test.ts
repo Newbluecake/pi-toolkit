@@ -25,7 +25,11 @@ import {
 } from "../../src/web-hub/agent/terminal/backend.js";
 import { assertTerminalFixture, type TerminalTestFixture } from "../../src/web-hub/agent/terminal/environment.js";
 import { TERMINAL_PYTHON_HELPER } from "../../src/web-hub/agent/terminal/python-helper.js";
-import { createTerminalOwner, type TerminalOwner } from "../../src/web-hub/agent/terminal/owner.js";
+import {
+  createTerminalOwner,
+  terminalResourceHandoff,
+  type TerminalOwner,
+} from "../../src/web-hub/agent/terminal/owner.js";
 import { readTerminalIdentity, terminalIdentitiesGone } from "../../src/web-hub/agent/terminal/reaper.js";
 import {
   TerminalReapProofSchema,
@@ -699,6 +703,12 @@ describe("Q4 physical half / §5.5: close ACK ≠ reaped proof", () => {
       return readFileSync(`/proc/${shell.pid}/stat`, "utf8").split(") ")[1]?.startsWith("Z") === true;
     });
     await h.owner.dispose();
+    // This fixture intentionally cannot produce a proof. Stop its test-local retry
+    // and detach its metadata observer before discarding its isolated bookkeeping;
+    // otherwise an already-running fallback scan can legitimately reinsert poison.
+    const privateOwner = h.owner as unknown as { rows: Map<string, { reaper?: { stop(): void } }> };
+    privateOwner.rows.get("t-one")?.reaper?.stop();
+    delete (b as unknown as { options: TerminalBackendOptions }).options.onManaged;
     const global = globalThis as Record<symbol, unknown>;
     // Isolated test teardown only: this deliberately poisoned fixture never enables a later test.
     const store = global[Symbol.for("pi-subagent:web-hub:terminal-resource-fence-v1")] as
@@ -708,3 +718,150 @@ describe("Q4 physical half / §5.5: close ACK ≠ reaped proof", () => {
         if (store[i]!.identity.ownerInstance === h.owner.ownerInstance) store.splice(i, 1);
   }, 15000);
 });
+
+it("resolved_ack fresh inventory carries real old-owner reap proof; concurrent cleanup cannot acknowledge an unsent proof", async () => {
+  expect(terminalResourceHandoff()).toEqual([]);
+  const old = await ownerHarness(fixture());
+  old.open();
+  await until(() => old.sent.some((f) => f.t === "term_event" && f.kind === "replay_begin"));
+  const begin = old.sent.findLast((f) => f.t === "term_event" && f.kind === "replay_begin") as Extract<
+    TermEvent,
+    { kind: "replay_begin" }
+  >;
+  old.request("ack", {
+    termId: "t-one",
+    attachmentId: "attachment",
+    writerLease: "lease",
+    ack: {
+      phase: "replay_ready",
+      attemptId: begin.attemptId,
+      replayEpoch: begin.replayEpoch,
+      renderedThrough: begin.N0,
+    },
+  });
+  const cutover = old.sent.findLast((f) => f.t === "term_event" && f.kind === "cutover") as Extract<
+    TermEvent,
+    { kind: "cutover" }
+  >;
+  old.request("input", {
+    termId: "t-one",
+    attachmentId: "attachment",
+    writerLease: "lease",
+    inputSeq: 0,
+    inputKind: "user",
+    streamEpoch: cutover.newLiveEpoch,
+    bytesB64: Buffer.from("trap '' HUP TERM\nsleep 90 &\nsleep 90\n").toString("base64"),
+  });
+  await until(() => new Set(old.physical[0]!.managed.filter((i) => i.role !== "helper").map((i) => i.pgid)).size >= 3);
+  const identity = old.owner
+    .resourceEntries()
+    .find((e) => e.identity.ownerInstance === old.owner.ownerInstance)!.identity;
+  const closing = old.owner.dispose(); // A real 3s KILL escalation keeps cleanup concurrent with the new snapshot.
+  const next = await ownerHarness(fixture());
+  const scope = { sessionId: "session", epoch: "epoch", ownerInstance: next.owner.ownerInstance };
+  const offer = next.owner.offer(
+    {
+      t: "cmd",
+      rid: "resource-offer",
+      id: "resource-offer",
+      deadlineMs: 3000,
+      origin: { listener: "loopback", ip: "127.0.0.1", reqId: "resource" },
+      cmd: { op: "command", name: "webhub", args: "__terminal" },
+    },
+    { v: 1, action: "resource_inventory", requestNonce: "resource-nonce" },
+  )!;
+  expect(
+    next.owner.receive({
+      t: "term_req",
+      v: 1,
+      rid: "prepare-resource",
+      sessionId: "session",
+      epoch: "epoch",
+      op: "prepare_protocol",
+      offerId: offer.offerId,
+      hubNonce: "resource-hub",
+    }),
+  ).toBe(true);
+  const challenge = next.sent.at(-1) as Extract<TermRes, { op: "protocol_challenge" }>;
+  expect(
+    next.owner.receive({
+      t: "term_req",
+      v: 1,
+      rid: "ready-resource",
+      ...scope,
+      op: "protocol_ready",
+      offerId: offer.offerId,
+      hubNonce: "resource-hub",
+      agentChallenge: challenge.agentChallenge,
+    }),
+  ).toBe(true);
+  const channelId = (next.sent.at(-1) as { channelId: string }).channelId;
+  const snapshot = (challengeId: string) => {
+    const start = next.sent.length;
+    expect(
+      next.owner.receive({
+        t: "term_req",
+        v: 1,
+        rid: challengeId,
+        ...scope,
+        channelId,
+        op: "inventory",
+        challenge: { hubBootId: "new-hub-boot", challengeId, linkGen: 2, deadlineAt: Date.now() + 5000 },
+      }),
+    ).toBe(true);
+    const frames = next.sent
+      .slice(start)
+      .filter(
+        (f): f is Extract<TermRes, { op: "inventory"; ok: true }> => f.t === "term_res" && f.op === "inventory" && f.ok,
+      );
+    expect(frames[0]?.page.phase).toBe("begin");
+    expect(frames.at(-1)?.page.phase).toBe("end");
+    return frames;
+  };
+  const ack = (frames: ReturnType<typeof snapshot>) => {
+    const p = frames[0]!.page;
+    return {
+      t: "term_req",
+      v: 1,
+      rid: "resolved-old",
+      ...scope,
+      channelId,
+      op: "resolved_ack",
+      resolved: {
+        hubBootId: p.hubBootId,
+        challengeId: p.challengeId,
+        linkGen: p.linkGen,
+        inventoryId: p.inventoryId,
+        revision: p.revision,
+        journalRevision: 9,
+        identities: [identity],
+      },
+    };
+  };
+  const pending = snapshot("cleanup-pending");
+  expect(pending.flatMap((f) => (f.page.phase === "chunk" ? f.page.proofs : []))).toEqual([]);
+  await closing;
+  expect(await old.physical[0]!.done).toMatchObject({ outcome: "reaped" });
+  expect(next.physical).toHaveLength(0);
+  expect(
+    terminalResourceHandoff().map((e) => ({
+      sameOld: e.identity.ownerInstance === old.owner.ownerInstance,
+      state: e.state,
+      spawn: e.spawnState,
+    })),
+  ).toEqual([]);
+  expect(next.owner.physicalUsed).toBe(0);
+  expect(next.owner.receive(ack(pending))).toBe(false); // OS exit now is not a proof that was previously sent.
+  const complete = snapshot("cleanup-proven");
+  const proof = complete.flatMap((f) => (f.page.phase === "chunk" ? f.page.proofs : []))[0]!;
+  expect(Value.Check(TerminalReapProofSchema, proof)).toBe(true);
+  expect(proof.identity).toEqual(identity);
+  expect(await terminalIdentitiesGone(proof.identitiesChecked)).toBe(true);
+  expect(next.owner.receive(ack(pending))).toBe(false);
+  expect(next.owner.receive(ack(complete))).toBe(true);
+  expect(next.owner.receive(ack(complete))).toBe(false);
+  expect(next.owner.resourceEntries()).toEqual([]);
+  expect(next.owner.physicalUsed).toBe(0);
+  (old.physical[0] as unknown as { options: TerminalBackendOptions }).options.onManaged?.();
+  expect(next.owner.resourceEntries()).toEqual([]); // Confirmed old receipt cannot resurrect.
+}, 15000);

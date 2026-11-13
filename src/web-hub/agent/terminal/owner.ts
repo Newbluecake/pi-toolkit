@@ -13,6 +13,8 @@ import {
   canonicalTerminalInventory,
   terminalFrameOk,
   terminalIdentityKey,
+  terminalResolvedAckMatches,
+  type TerminalChallenge,
   type TermReq,
   type TermRes,
   type TermEvent,
@@ -88,11 +90,23 @@ export interface TerminalOwnerOptions {
   /** Trusted private backend factory for isolated harnesses. Production omits it. */
   backend?: (options: TerminalBackendOptions) => TerminalBackend;
 }
+interface InventorySnapshot {
+  challenge: TerminalChallenge;
+  inventoryId: string;
+  revision: number;
+  receipts: TerminalResourceIdentity[];
+  timer?: TimerHandle;
+}
+interface BoundChannel extends Pick<TerminalProtocolReadyProof, "mode" | "localConnectionInstance"> {
+  inventoryGeneration: number;
+  snapshot?: InventorySnapshot;
+}
 interface Attachment {
   id: string;
   lease: string;
   channelId: string;
   until: number;
+  replayDeadlineAt: number;
   phase: "replaying" | "writable";
   attemptId: string;
   replayEpoch: string;
@@ -114,6 +128,7 @@ interface Row {
   lifetimeAt: number;
   retired?: true;
   resolved?: true;
+  receipt?: TerminalReapReceipt;
   revision: number;
   state: "starting" | "live" | "closing" | "exited" | "failed" | "reap_incomplete";
   tail: TerminalTail;
@@ -132,6 +147,7 @@ interface Row {
   reaper?: TerminalReaper;
 }
 interface TerminalReapReceipt {
+  confirmed?: true;
   entry: TerminalResourceEntry;
   physical: TerminalPhysicalResult;
 }
@@ -151,24 +167,62 @@ export function terminalResourceHandoff(): TerminalResourceEntry[] {
   return structuredClone(handoffStore());
 }
 
-export async function createTerminalOwner(options: TerminalOwnerOptions): Promise<TerminalOwner> {
-  const identity = await readTerminalIdentity(process.pid);
-  if (!identity) throw new TerminalBackendError("E_BACKEND_CAPABILITY");
-  return new TerminalOwner(options, {
-    bootId: identity.bootId,
-    pid: identity.pid,
-    starttime: identity.starttime,
-    uid: identity.uid,
+export function createTerminalOwner(options: TerminalOwnerOptions): Promise<TerminalOwner> {
+  const clock = options.clock ?? systemClock;
+  const budget = clampSpanMs(L.probeMs)!;
+  const deadlineAt = clock.now() + budget;
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let pendingOptions: TerminalOwnerOptions | undefined = options;
+    const fail = (code: "E_DEADLINE" | "E_BACKEND_CAPABILITY"): void => {
+      if (settled) return;
+      settled = true;
+      pendingOptions = undefined;
+      clock.clearTimer(timer);
+      reject(new TerminalBackendError(code));
+    };
+    // The production clock is segmented and unref'd. /proc promises are not
+    // cancellable, so late completion is sealed off before allocating an owner.
+    const timer = clock.setTimer(budget, () => fail("E_DEADLINE"));
+    void readTerminalIdentity(process.pid).then(
+      (identity) => {
+        if (settled) return;
+        if (clock.now() >= deadlineAt) {
+          fail("E_DEADLINE");
+          return;
+        }
+        if (!identity) {
+          fail("E_BACKEND_CAPABILITY");
+          return;
+        }
+        try {
+          const owner = new TerminalOwner(pendingOptions!, {
+            bootId: identity.bootId,
+            pid: identity.pid,
+            starttime: identity.starttime,
+            uid: identity.uid,
+          });
+          settled = true;
+          pendingOptions = undefined;
+          clock.clearTimer(timer);
+          resolve(owner);
+        } catch {
+          fail("E_BACKEND_CAPABILITY");
+        }
+      },
+      () => fail("E_BACKEND_CAPABILITY"),
+    );
   });
 }
 export class TerminalOwner {
   readonly ownerInstance = randomUUID();
   readonly negotiator: ReturnType<typeof createTerminalNegotiator>;
   private readonly rows = new Map<string, Row>();
-  private readonly channels = new Map<string, Pick<TerminalProtocolReadyProof, "mode" | "localConnectionInstance">>();
+  private readonly channels = new Map<string, BoundChannel>();
+  private readonly journalFloors = new Map<string, number>();
   private readonly clock: Clock;
   private tickTimer: TimerHandle | undefined;
-  private lostTimer: TimerHandle | undefined;
+  private readonly retirementTimers = new Set<TimerHandle>();
   private disposed = false;
   private disposal: Promise<void> | undefined;
   private frozenInventory = 0;
@@ -193,7 +247,11 @@ export class TerminalOwner {
       onBound: (id, proof) => {
         if (!this.allowed() || this.channels.size >= L.offers) return;
         this.linkInstance = proof.localConnectionInstance;
-        this.channels.set(id, { mode: proof.mode, localConnectionInstance: proof.localConnectionInstance });
+        this.channels.set(id, {
+          mode: proof.mode,
+          localConnectionInstance: proof.localConnectionInstance,
+          inventoryGeneration: 0,
+        });
       },
     });
     // No timer until the first real terminal/resource channel; off/unused stays inert.
@@ -227,16 +285,16 @@ export class TerminalOwner {
   private scope() {
     return { sessionId: this.options.sessionId, epoch: this.options.epoch, ownerInstance: this.ownerInstance };
   }
-  private response(f: TermReq, body: object): void {
+  private response(f: TermReq, body: object): boolean {
     if (!this.allowed()) {
       this.revoke();
-      return;
+      return false;
     }
     if (
       "channelId" in f &&
       this.channels.get(f.channelId)?.localConnectionInstance !== this.current()?.localConnectionInstance
     )
-      return;
+      return false;
     const result = {
       t: "term_res",
       v: 1,
@@ -247,7 +305,9 @@ export class TerminalOwner {
       ...body,
     } as TermRes;
     if (!terminalFrameOk(result)) throw new Error("terminal response contract");
-    if (!this.options.send(result)) this.linkLost();
+    const sent = this.options.send(result);
+    if (!sent) this.linkLost();
+    return sent;
   }
   private error(f: TermReq, code: string, effect: "none" | "unknown" = "none"): void {
     this.response(f, { ok: false, code, effect });
@@ -272,6 +332,7 @@ export class TerminalOwner {
       return false;
     const proof = this.channels.get(f.channelId);
     if (!proof || proof.localConnectionInstance !== this.current()?.localConnectionInstance) return false;
+    if (f.op === "resolved_ack") return this.resolvedAck(f, proof);
     if (f.op === "inventory") {
       void this.inventory(f);
       return true;
@@ -328,6 +389,7 @@ export class TerminalOwner {
       a.channelId !== f.channelId ||
       this.clock.now() >= a.until
     ) {
+      if (a && this.clock.now() >= a.until) this.detach(r);
       this.error(f, "E_LEASE_EXPIRED");
       return true;
     }
@@ -337,6 +399,12 @@ export class TerminalOwner {
       return true;
     }
     if (f.op === "renew") {
+      if (this.attachmentExpired(r, a)) {
+        const replayExpired = a.phase === "replaying";
+        this.detach(r);
+        this.error(f, replayExpired ? "E_DEADLINE" : "E_LEASE_EXPIRED");
+        return true;
+      }
       a.until = this.clock.now() + clampSpanMs(L.leaseMs)!;
       this.response(f, { ok: true, revision: r.revision });
       return true;
@@ -371,6 +439,10 @@ export class TerminalOwner {
       deadlines: { inputIdleAt: r.inputIdleAt, lifetimeAt: r.lifetimeAt, parentExpiresAt: r.parentExpiresAt },
     };
   }
+  private attachmentExpired(r: Row, a: Attachment): boolean {
+    const now = this.clock.now();
+    return r.attachment !== a || now >= a.until || (a.phase === "replaying" && now >= a.replayDeadlineAt);
+  }
   private event(r: Row, body: object): boolean {
     const a = r.attachment;
     if (!this.allowed()) {
@@ -379,6 +451,11 @@ export class TerminalOwner {
     }
     if (!a || this.channels.get(a.channelId)?.localConnectionInstance !== this.current()?.localConnectionInstance)
       return false;
+    // Timers are proactive cleanup, never the authority for lease/replay expiry.
+    if (this.attachmentExpired(r, a)) {
+      this.detach(r);
+      return false;
+    }
     const frame = {
       t: "term_event",
       v: 1,
@@ -389,6 +466,10 @@ export class TerminalOwner {
       ...body,
     } as TermEvent;
     if (!terminalFrameOk(frame)) throw new Error("terminal event contract");
+    if (this.attachmentExpired(r, a)) {
+      this.detach(r);
+      return false;
+    }
     return this.options.send(frame);
   }
   private bump(r: Row): void {
@@ -548,6 +629,7 @@ export class TerminalOwner {
       lease,
       channelId,
       until: this.clock.now() + clampSpanMs(L.leaseMs)!,
+      replayDeadlineAt: this.clock.now() + clampSpanMs(L.replayMs)!,
       phase: "replaying",
       attemptId: randomUUID(),
       replayEpoch: randomUUID(),
@@ -586,8 +668,8 @@ export class TerminalOwner {
     const a = r.attachment!;
     const suffix = r.tail.suffix();
     a.N0 = suffix.N0;
-    const deadlineAt = this.clock.now() + clampSpanMs(L.replayMs)!;
-    a.replayTimer = this.clock.setTimer(clampSpanMs(L.replayMs)!, () => {
+    const deadlineAt = a.replayDeadlineAt;
+    a.replayTimer = this.clock.setTimer(clampSpanMs(Math.max(0, deadlineAt - this.clock.now()))!, () => {
       if (r.attachment === a && a.phase === "replaying") this.detach(r);
     });
     if (requested < suffix.S)
@@ -628,6 +710,11 @@ export class TerminalOwner {
   private ack(r: Row, a: Attachment, f: Extract<TermReq, { op: "ack" }>): void {
     const ack = f.ack;
     if (ack.phase === "replay_ready") {
+      if (this.clock.now() >= a.replayDeadlineAt) {
+        this.detach(r);
+        this.error(f, "E_REPLAY_DEADLINE");
+        return;
+      }
       if (
         a.phase !== "replaying" ||
         ack.attemptId !== a.attemptId ||
@@ -651,6 +738,13 @@ export class TerminalOwner {
           resetParser: true,
         })
       ) {
+        this.detach(r);
+        this.error(f, "E_REPLAY_DEADLINE");
+        return;
+      }
+      // Recheck at the writable commit as well: transport callbacks must not let a
+      // late/reentrant ready resurrect a detached or expired attachment.
+      if (r.attachment !== a || this.clock.now() >= a.replayDeadlineAt || this.clock.now() >= a.until) {
         this.detach(r);
         this.error(f, "E_REPLAY_DEADLINE");
         return;
@@ -747,6 +841,11 @@ export class TerminalOwner {
     }
     if (f.inputSeq !== r.nextInputSeq || !r.backend) {
       this.error(f, "E_INPUT_SEQUENCE");
+      return;
+    }
+    if (this.attachmentExpired(r, a)) {
+      this.detach(r);
+      this.error(f, "E_LEASE_EXPIRED");
       return;
     }
     const pending = {
@@ -848,11 +947,16 @@ export class TerminalOwner {
     // Capacity is admission-limited before spawning, never evict an unresolved resource.
   }
   private retainReceipt(r: Row): void {
+    if (r.receipt?.confirmed) {
+      r.resolved = true;
+      return;
+    }
     if (r.resolved || r.physical?.outcome !== "reaped") return;
     const store = receiptStore();
     const key = terminalIdentityKey(r.identity);
     const index = store.findIndex((e) => terminalIdentityKey(e.entry.identity) === key);
     const receipt = { entry: this.entry(r), physical: structuredClone(r.physical) };
+    r.receipt = receipt; // Shared plain data only: no owner/fd/closure back-reference.
     if (index >= 0) store[index] = receipt;
     else if (store.length < L.unresolvedResources) store.push(receipt);
   }
@@ -869,6 +973,7 @@ export class TerminalOwner {
       return 0;
     for (const key of keys) {
       const index = store.findIndex((r) => terminalIdentityKey(r.entry.identity) === key);
+      store[index]!.confirmed = true; // Seals late old-owner metadata observers before removal.
       store.splice(index, 1);
       for (const row of this.rows.values()) if (terminalIdentityKey(row.identity) === key) row.resolved = true;
     }
@@ -914,7 +1019,13 @@ export class TerminalOwner {
     evidence: Pick<TerminalReapProof, "hubBootId" | "challengeId" | "linkGen" | "inventoryId" | "revision">,
   ): TerminalReapProof | undefined {
     const row = this.rows.get(identity.termId);
-    const local = row && terminalIdentityKey(row.identity) === terminalIdentityKey(identity) ? row : undefined;
+    const local =
+      row &&
+      !row.resolved &&
+      !row.receipt?.confirmed &&
+      terminalIdentityKey(row.identity) === terminalIdentityKey(identity)
+        ? row
+        : undefined;
     const retained = receiptStore().find(
       (r) => terminalIdentityKey(r.entry.identity) === terminalIdentityKey(identity),
     );
@@ -938,10 +1049,15 @@ export class TerminalOwner {
     const entries = new Map<string, TerminalResourceEntry>();
     for (const r of receiptStore()) entries.set(terminalIdentityKey(r.entry.identity), structuredClone(r.entry));
     for (const e of handoffStore()) entries.set(terminalIdentityKey(e.identity), structuredClone(e));
-    for (const r of this.rows.values()) if (!r.resolved) entries.set(terminalIdentityKey(r.identity), this.entry(r));
+    for (const r of this.rows.values())
+      if (!r.resolved && !r.receipt?.confirmed) entries.set(terminalIdentityKey(r.identity), this.entry(r));
     return [...entries.values()];
   }
   private async inventory(f: Extract<TermReq, { op: "inventory" }>): Promise<void> {
+    const channel = this.channels.get(f.channelId);
+    if (!channel) return;
+    this.clearSnapshot(channel);
+    const generation = ++channel.inventoryGeneration;
     if (this.clock.now() >= f.challenge.deadlineAt || f.challenge.deadlineAt - this.clock.now() > L.inventoryMs) {
       this.error(f, "E_DEADLINE");
       return;
@@ -995,31 +1111,125 @@ export class TerminalOwner {
         ...chunks.map((chunk, index) => ({ ...evidence, phase: "chunk" as const, chunkIndex: index, ...chunk })),
         { ...evidence, phase: "end", totalCount: entries.length, chunkCount: chunks.length, digest, complete: true },
       ];
-      for (const page of pages) this.response(f, { ok: true, page });
+      for (const page of pages) {
+        if (
+          this.channels.get(f.channelId) !== channel ||
+          channel.inventoryGeneration !== generation ||
+          !this.response(f, { ok: true, page })
+        )
+          return;
+      }
+      // A proof is acknowledgeable ONLY after the entire exact snapshot was sent.
+      // No reentrant/late end, new challenge, or failed write can install authority.
+      if (
+        channel.mode !== "resource-only" ||
+        this.channels.get(f.channelId) !== channel ||
+        channel.inventoryGeneration !== generation ||
+        !this.allowed() ||
+        this.current()?.localConnectionInstance !== channel.localConnectionInstance ||
+        this.clock.now() >= f.challenge.deadlineAt
+      )
+        return;
+      const snapshot: InventorySnapshot = {
+        challenge: { ...f.challenge },
+        inventoryId: evidence.inventoryId,
+        revision: evidence.revision,
+        receipts: chunks.flatMap((chunk) => chunk.proofs.map((proof) => ({ ...proof.identity }))),
+      };
+      channel.snapshot = snapshot;
+      snapshot.timer = this.clock.setTimer(clampSpanMs(Math.max(0, f.challenge.deadlineAt - this.clock.now()))!, () => {
+        if (channel.snapshot === snapshot) this.clearSnapshot(channel);
+      });
     } finally {
       this.frozenInventory--;
     }
+  }
+  private clearSnapshot(channel: BoundChannel): void {
+    if (channel.snapshot?.timer) this.clock.clearTimer(channel.snapshot.timer);
+    delete channel.snapshot;
+  }
+  private clearChannels(): void {
+    for (const channel of this.channels.values()) this.clearSnapshot(channel);
+    this.channels.clear();
+    this.journalFloors.clear();
+  }
+  /** Dedicated one-way durable confirmation, not browser/render/close ACK. */
+  private resolvedAck(f: Extract<TermReq, { op: "resolved_ack" }>, channel: BoundChannel): boolean {
+    if (!this.allowed()) return false;
+    const current = this.current();
+    const snapshot = channel.snapshot;
+    if (!current || !snapshot || this.channels.get(f.channelId) !== channel) return false;
+    const known = new Set(
+      receiptStore()
+        .filter((r) => r.physical.outcome === "reaped")
+        .map((r) => terminalIdentityKey(r.entry.identity)),
+    );
+    const receipts = snapshot.receipts.filter((identity) => known.has(terminalIdentityKey(identity)));
+    if (
+      !terminalResolvedAckMatches(f, {
+        live: true,
+        current: { ...current, ownerInstance: this.ownerInstance },
+        channel: {
+          ...this.scope(),
+          channelId: f.channelId,
+          mode: channel.mode,
+          localConnectionInstance: channel.localConnectionInstance,
+        },
+        challenge: snapshot.challenge,
+        inventoryId: snapshot.inventoryId,
+        revision: snapshot.revision,
+        lastJournalRevision: this.journalFloors.get(snapshot.challenge.hubBootId) ?? 0,
+        receipts,
+        now: this.clock.now(),
+      })
+    )
+      return false;
+    if (!this.journalFloors.has(snapshot.challenge.hubBootId) && this.journalFloors.size >= L.offers) return false;
+    // Fresh final authority check after schema/metadata validation; no await or
+    // external callback after the pointer/absolute-time fence and deletion CAS.
+    if (
+      !this.allowed() ||
+      this.current()?.localConnectionInstance !== channel.localConnectionInstance ||
+      this.clock.now() >= snapshot.challenge.deadlineAt
+    )
+      return false;
+    if (
+      this.channels.get(f.channelId) !== channel ||
+      channel.snapshot !== snapshot ||
+      this.forgetResolvedReceipts(f.resolved.identities) !== f.resolved.identities.length
+    )
+      return false;
+    const forgotten = new Set(f.resolved.identities.map(terminalIdentityKey));
+    snapshot.receipts = snapshot.receipts.filter((identity) => !forgotten.has(terminalIdentityKey(identity)));
+    this.journalFloors.set(snapshot.challenge.hubBootId, f.resolved.journalRevision);
+    return true;
   }
   /** Live connection incarnation retired: immediate capabilities/input invalidation.
    * Never resurrect old channels on reconnect. Old shells get ≤30s to be reaped. */
   linkLost(): void {
     this.negotiator.invalidate();
-    this.channels.clear();
-    for (const r of this.rows.values()) {
+    this.clearChannels();
+    // A retired connection owns this exact set, not all rows existing 30s later.
+    // Repeated notifications for the same retirement cannot extend its deadline.
+    const retired = [...this.rows.values()].filter((r) => !r.retired && r.physical?.outcome !== "reaped");
+    for (const r of retired) {
       r.retired = true;
       this.detach(r);
     }
-    if (!this.lostTimer && !this.disposed)
-      this.lostTimer = this.clock.setTimer(clampSpanMs(L.linkLossMs)!, () => {
-        this.lostTimer = undefined;
-        for (const r of this.rows.values()) this.closeRow(r);
+    this.linkInstance = undefined;
+    if (retired.length && !this.disposed) {
+      const timer = this.clock.setTimer(clampSpanMs(L.linkLossMs)!, () => {
+        this.retirementTimers.delete(timer);
+        for (const r of retired) if (this.rows.get(r.identity.termId) === r) this.closeRow(r);
       });
+      this.retirementTimers.add(timer);
+    }
   }
   /** Host privacy/secure/auth-domain transition: synchronous revocation, not a detach.
    * This is not a new pi hook; the existing wireWebHub owner must call it. */
   revoke(): void {
     this.negotiator.invalidate();
-    this.channels.clear();
+    this.clearChannels();
     for (const r of this.rows.values()) {
       this.closeRow(r);
       r.backend?.close();
@@ -1031,10 +1241,11 @@ export class TerminalOwner {
     if (this.disposal) return this.disposal;
     this.disposed = true;
     this.negotiator.dispose();
-    this.channels.clear();
+    this.clearChannels();
     if (this.tickTimer) this.clock.clearTimer(this.tickTimer);
-    if (this.lostTimer) this.clock.clearTimer(this.lostTimer);
-    this.tickTimer = this.lostTimer = undefined;
+    for (const timer of this.retirementTimers) this.clock.clearTimer(timer);
+    this.retirementTimers.clear();
+    this.tickTimer = undefined;
     for (const r of this.rows.values()) {
       this.closeRow(r);
       this.persistUnresolved(r);

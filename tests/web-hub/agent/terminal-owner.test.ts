@@ -36,12 +36,12 @@ afterEach(async () => {
 const flush = async () => {
   for (let i = 0; i < 8; i++) await Promise.resolve();
 };
-function harness() {
+function harness(maxPerSession = 1, clock = new FakeClock(1_000_000)) {
   vi.useFakeTimers();
-  const clock = new FakeClock(1_000_000);
   let allowed = true;
   const current = { localConnectionInstance: "connection", sessionId: "session", epoch: "epoch" };
   const sent: Array<TermRes | TermEvent> = [];
+  let sendHook: ((frame: TermRes | TermEvent) => boolean) | undefined;
   const backs: Array<{
     options: TerminalBackendOptions;
     backend: TerminalBackend;
@@ -49,50 +49,53 @@ function harness() {
     ready(): void;
   }> = [];
   const display = { shellName: "bash", userLabel: "user", hostLabel: "host", cwd: "/fixture" };
-  const owner = new TerminalOwner({
-    ...current,
-    cwd: "/fixture",
-    clock,
-    limits,
-    allowed: () => allowed,
-    current: () => current,
-    send: (f) => {
-      expect(terminalFrameOk(f)).toBe(true);
-      sent.push(f);
-      return true;
+  const owner = new TerminalOwner(
+    {
+      ...current,
+      cwd: "/fixture",
+      clock,
+      limits: { ...limits, maxPerSession },
+      allowed: () => allowed,
+      current: () => current,
+      send: (f) => {
+        expect(terminalFrameOk(f)).toBe(true);
+        sent.push(f);
+        return sendHook?.(f) ?? true;
+      },
+      backend: (options) => {
+        let finish!: (p: TerminalPhysicalResult) => void, ready!: () => void;
+        const done = new Promise<TerminalPhysicalResult>((r) => {
+          finish = r;
+        });
+        const backend: TerminalBackend = {
+          ready: new Promise((r) => {
+            ready = r;
+          }),
+          done,
+          managed: [],
+          spawnSettled: false,
+          display,
+          input: vi.fn(async () => undefined),
+          resize: vi.fn(async () => undefined),
+          close: vi.fn(() => {
+            for (const key of Object.keys(display)) delete (display as Record<string, string>)[key];
+          }),
+          retryReap: async () => ({
+            outcome: "reap_incomplete",
+            spawnSettled: true,
+            ptyClosed: false,
+            helperReaped: true,
+            managedGroupsGone: false,
+            identitiesChecked: [],
+            waited: [],
+          }),
+        };
+        backs.push({ options, backend, finish, ready });
+        return backend;
+      },
     },
-    backend: (options) => {
-      let finish!: (p: TerminalPhysicalResult) => void, ready!: () => void;
-      const done = new Promise<TerminalPhysicalResult>((r) => {
-        finish = r;
-      });
-      const backend: TerminalBackend = {
-        ready: new Promise((r) => {
-          ready = r;
-        }),
-        done,
-        managed: [],
-        spawnSettled: false,
-        display,
-        input: vi.fn(async () => undefined),
-        resize: vi.fn(async () => undefined),
-        close: vi.fn(() => {
-          for (const key of Object.keys(display)) delete (display as Record<string, string>)[key];
-        }),
-        retryReap: async () => ({
-          outcome: "reap_incomplete",
-          spawnSettled: true,
-          ptyClosed: false,
-          helperReaped: true,
-          managedGroupsGone: false,
-          identitiesChecked: [],
-          waited: [],
-        }),
-      };
-      backs.push({ options, backend, finish, ready });
-      return backend;
-    },
-  });
+    processIdentity,
+  );
   owners.push(owner);
   const scope = { sessionId: "session", epoch: "epoch", ownerInstance: owner.ownerInstance };
   const request = (op: string, extra: object = {}, channelId = "channel") => {
@@ -208,6 +211,12 @@ function harness() {
     display,
     disable: () => {
       allowed = false;
+    },
+    replaceConnection: (id: string) => {
+      current.localConnectionInstance = id;
+    },
+    setSendHook: (hook?: (frame: TermRes | TermEvent) => boolean) => {
+      sendHook = hook;
     },
   };
 }
@@ -488,5 +497,357 @@ describe("terminal reaper I1/I5 bounded attempts", () => {
     await vi.advanceTimersByTimeAsync(60000);
     expect(vi.getTimerCount()).toBe(0);
     expect(attempt).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("F1 exact retired-link resource ownership", () => {
+  const physical = {
+    outcome: "reaped" as const,
+    spawnSettled: true,
+    ptyClosed: true,
+    helperReaped: true,
+    managedGroupsGone: true,
+    identitiesChecked: [],
+    waited: [],
+  };
+  it("old resources fully reaped, new link terminal survives the old 30s callback", async () => {
+    const h = harness();
+    h.negotiate();
+    h.open();
+    h.backs[0]!.ready();
+    await flush();
+    h.owner.linkLost();
+    h.reaped();
+    await flush();
+    expect(h.owner.physicalUsed).toBe(0);
+    h.replaceConnection("connection-2");
+    h.negotiate();
+    h.open("new");
+    h.backs[1]!.ready();
+    await flush();
+    try {
+      h.clock.advance(30000);
+      expect(h.backs[1]!.backend.close).not.toHaveBeenCalled();
+      expect(h.owner.physicalUsed).toBe(1);
+    } finally {
+      h.backs[1]!.finish(physical);
+      await flush();
+    }
+  });
+  it("two retired generations keep independent exact sets and never close a third generation", async () => {
+    const h = harness(2);
+    h.negotiate();
+    h.open();
+    h.backs[0]!.ready();
+    await flush();
+    h.owner.linkLost();
+    h.reaped();
+    await flush();
+    h.clock.advance(1000);
+    h.replaceConnection("connection-2");
+    h.negotiate();
+    h.open("second");
+    h.backs[1]!.ready();
+    await flush();
+    h.owner.linkLost();
+    h.replaceConnection("connection-3");
+    h.negotiate();
+    h.open("third");
+    h.backs[2]!.ready();
+    await flush();
+    try {
+      h.clock.advance(29000); // Only retirement #1 has expired.
+      expect(h.backs[1]!.backend.close).not.toHaveBeenCalled();
+      expect(h.backs[2]!.backend.close).not.toHaveBeenCalled();
+      h.clock.advance(1000); // Retirement #2 closes only the second resource.
+      expect(h.backs[1]!.backend.close).toHaveBeenCalledOnce();
+      expect(h.backs[2]!.backend.close).not.toHaveBeenCalled();
+    } finally {
+      h.backs[1]!.finish(physical);
+      h.backs[2]!.finish(physical);
+      await flush();
+    }
+  });
+});
+
+/** Moves authoritative now without dispatching any timer callback. */
+class DeferredClock extends FakeClock {
+  private offset = 0;
+  override now(): number {
+    return super.now() + this.offset;
+  }
+  jump(ms: number): void {
+    this.offset += ms;
+  }
+}
+describe("F2 synchronous absolute expiry, overdue timer not dispatched", () => {
+  it("replay ready after deadline+1ms fails and cannot cut over even with cleanup timer pending", async () => {
+    const clock = new DeferredClock(1_000_000),
+      h = harness(1, clock);
+    h.negotiate();
+    h.open();
+    h.backs[0]!.ready();
+    await flush();
+    const begin = h.sent.findLast((f) => f.t === "term_event" && f.kind === "replay_begin") as Extract<
+      TermEvent,
+      { kind: "replay_begin" }
+    >;
+    clock.jump(3001); // DO NOT advance() or run timers.
+    try {
+      const before = h.sent.length;
+      h.request("ack", {
+        ...h.writer,
+        ack: {
+          phase: "replay_ready",
+          attemptId: begin.attemptId,
+          replayEpoch: begin.replayEpoch,
+          renderedThrough: begin.N0,
+        },
+      });
+      expect(h.sent.at(-1)).toMatchObject({ op: "ack", ok: false, code: "E_REPLAY_DEADLINE" });
+      expect(h.sent.slice(before).some((f) => f.t === "term_event" && f.kind === "cutover")).toBe(false);
+      h.request("renew", h.writer);
+      expect(h.sent.at(-1)).toHaveProperty("code", "E_LEASE_EXPIRED");
+    } finally {
+      h.reaped();
+      await flush();
+    }
+  });
+  it("lease+1ms output is never enqueued, expired attachment is detached before the delayed tick", async () => {
+    const clock = new DeferredClock(1_000_000),
+      h = harness(1, clock);
+    h.negotiate();
+    h.open();
+    h.backs[0]!.ready();
+    await flush();
+    h.writable();
+    clock.jump(15001);
+    try {
+      const before = h.sent.length;
+      h.backs[0]!.options.onData(Buffer.from("expired-output"));
+      expect(h.sent).toHaveLength(before);
+      h.request("renew", h.writer);
+      expect(h.sent.at(-1)).toHaveProperty("code", "E_LEASE_EXPIRED");
+      expect(h.backs[0]!.backend.close).not.toHaveBeenCalled(); // detached/background, not killed
+    } finally {
+      h.reaped();
+      await flush();
+    }
+  });
+});
+
+type H = ReturnType<typeof harness>;
+const reapedPhysical = {
+  outcome: "reaped" as const,
+  spawnSettled: true,
+  ptyClosed: true,
+  helperReaped: true,
+  managedGroupsGone: true,
+  identitiesChecked: [],
+  waited: [],
+};
+async function createReceipt(h: H, id = "one", index = 0): Promise<TerminalResourceIdentity> {
+  h.open(id);
+  h.backs[index]!.ready();
+  await flush();
+  const identity = h.owner.resourceEntries().find((e) => e.identity.termId === `t-${id}`)!.identity;
+  h.backs[index]!.finish(reapedPhysical);
+  await flush();
+  return identity;
+}
+function resourceChannel(h: H): string {
+  return (h.negotiate("resource_inventory") as { channelId: string }).channelId;
+}
+function inventory(h: H, channelId: string, challengeId = "cleanup-challenge") {
+  const before = h.sent.length;
+  h.request(
+    "inventory",
+    { challenge: { hubBootId: "hub-boot", challengeId, linkGen: 1, deadlineAt: h.clock.now() + 5000 } },
+    channelId,
+  );
+  const frames = h.sent
+    .slice(before)
+    .filter(
+      (f): f is Extract<TermRes, { op: "inventory"; ok: true }> => f.t === "term_res" && f.op === "inventory" && f.ok,
+    );
+  expect(frames.map((f) => f.page.phase)).toEqual(["begin", ...frames.slice(1, -1).map(() => "chunk"), "end"]);
+  return frames;
+}
+function resolvedAck(
+  frames: ReturnType<typeof inventory>,
+  identities?: TerminalResourceIdentity[],
+  journalRevision = 1,
+) {
+  const begin = frames[0]!;
+  const page = begin.page;
+  return {
+    t: "term_req",
+    v: 1,
+    rid: "durable-confirmation",
+    sessionId: begin.sessionId,
+    epoch: begin.epoch,
+    ownerInstance: begin.ownerInstance,
+    channelId: begin.channelId,
+    op: "resolved_ack",
+    resolved: {
+      hubBootId: page.hubBootId,
+      challengeId: page.challengeId,
+      linkGen: page.linkGen,
+      inventoryId: page.inventoryId,
+      revision: page.revision,
+      journalRevision,
+      identities:
+        identities ?? frames.flatMap((f) => (f.page.phase === "chunk" ? f.page.proofs.map((p) => p.identity) : [])),
+    },
+  };
+}
+describe("dedicated resolved_ack consumes only actually sent current physical proofs", () => {
+  it.each(["hubBootId", "challengeId", "linkGen", "inventoryId", "revision"] as const)(
+    "rejects wrong %s without any receipt deletion, then accepts exact current proof",
+    async (field) => {
+      const h = harness();
+      h.negotiate();
+      await createReceipt(h);
+      const channel = resourceChannel(h),
+        frames = inventory(h, channel),
+        ack = resolvedAck(frames);
+      const bad = {
+        ...ack,
+        resolved: { ...ack.resolved, [field]: typeof ack.resolved[field] === "number" ? 99 : "wrong" },
+      };
+      expect(h.owner.receive(bad)).toBe(false);
+      expect(h.owner.resourceEntries()).toHaveLength(1);
+      expect(h.owner.receive(ack)).toBe(true);
+      expect(h.owner.resourceEntries()).toEqual([]);
+      expect(h.owner.physicalUsed).toBe(0);
+      expect(h.owner.receive(ack)).toBe(false);
+    },
+  );
+  it.each(["sessionId", "epoch", "ownerInstance", "channelId"] as const)(
+    "rejects wrong sender %s with a valid body",
+    async (field) => {
+      const h = harness();
+      h.negotiate();
+      await createReceipt(h);
+      const ack = resolvedAck(inventory(h, resourceChannel(h)));
+      expect(h.owner.receive({ ...ack, [field]: "wrong" })).toBe(false);
+      expect(h.owner.resourceEntries()).toHaveLength(1);
+      expect(h.owner.receive(ack)).toBe(true);
+    },
+  );
+  it("unknown/duplicate identity batches never partially delete; an interactive channel cannot confirm", async () => {
+    const h = harness();
+    h.negotiate();
+    const known = await createReceipt(h);
+    const interactive = resolvedAck(inventory(h, "channel"));
+    expect(h.owner.receive(interactive)).toBe(false);
+    const ack = resolvedAck(inventory(h, resourceChannel(h)));
+    for (const identities of [
+      [known, known],
+      [known, { ...known, reservationId: "unknown" }],
+    ])
+      expect(h.owner.receive({ ...ack, resolved: { ...ack.resolved, identities } })).toBe(false);
+    expect(h.owner.resourceEntries()).toHaveLength(1);
+    expect(h.owner.receive(ack)).toBe(true);
+  });
+  it("expired challenge rejects before a pending timer callback; a fresh challenge is required", async () => {
+    const clock = new DeferredClock(1_000_000),
+      h = harness(1, clock);
+    h.negotiate();
+    await createReceipt(h);
+    const channel = resourceChannel(h),
+      ack = resolvedAck(inventory(h, channel));
+    clock.jump(5001);
+    expect(h.owner.receive(ack)).toBe(false);
+    expect(h.owner.resourceEntries()).toHaveLength(1);
+    const fresh = resolvedAck(inventory(h, channel, "fresh-challenge"));
+    expect(h.owner.receive(ack)).toBe(false);
+    expect(h.owner.receive(fresh)).toBe(true);
+  });
+  it("superseded snapshots and journal revision regression reject; equal commit revision can confirm a different subset once", async () => {
+    const h = harness(2);
+    h.negotiate();
+    const a = await createReceipt(h),
+      b = await createReceipt(h, "two", 1);
+    const channel = resourceChannel(h),
+      stale = resolvedAck(inventory(h, channel, "old-challenge"));
+    const frames = inventory(h, channel, "new-challenge");
+    expect(h.owner.receive(stale)).toBe(false);
+    expect(h.owner.receive(resolvedAck(frames, [a], 9))).toBe(true);
+    expect(h.owner.receive(resolvedAck(frames, [b], 8))).toBe(false);
+    expect(h.owner.resourceEntries()).toHaveLength(1);
+    expect(h.owner.receive(resolvedAck(frames, [b], 9))).toBe(true);
+    expect(h.owner.receive(resolvedAck(frames, [b], 9))).toBe(false);
+    expect(h.owner.resourceEntries()).toEqual([]);
+  });
+  it("connection retirement invalidates the old receipt authority even if the exact old frame is replayed", async () => {
+    const h = harness();
+    h.negotiate();
+    await createReceipt(h);
+    const ack = resolvedAck(inventory(h, resourceChannel(h)));
+    h.owner.linkLost();
+    h.replaceConnection("new-connection");
+    expect(h.owner.receive(ack)).toBe(false);
+    expect(h.owner.resourceEntries()).toHaveLength(1);
+    const fresh = resolvedAck(inventory(h, resourceChannel(h), "fresh-link-challenge"));
+    expect(h.owner.receive(fresh)).toBe(true);
+  });
+  it("old-owner cleanup completing after inventory is NOT an already-sent proof; fresh snapshot confirms only the exact old identity", async () => {
+    const a = harness();
+    a.negotiate();
+    a.open();
+    a.backs[0]!.ready();
+    await flush();
+    const identity = a.owner.resourceEntries()[0]!.identity;
+    const disposal = a.owner.dispose();
+    const b = harness(),
+      channel = resourceChannel(b);
+    const beforeCleanup = inventory(b, channel);
+    expect(beforeCleanup.flatMap((f) => (f.page.phase === "chunk" ? f.page.proofs : []))).toEqual([]);
+    a.reaped();
+    await disposal;
+    await flush();
+    expect(b.owner.receive(resolvedAck(beforeCleanup, [identity]))).toBe(false);
+    expect(b.owner.resourceEntries()).toHaveLength(1);
+    const fresh = inventory(b, channel, "after-old-cleanup");
+    expect(b.owner.receive(resolvedAck(beforeCleanup, [identity]))).toBe(false);
+    expect(b.owner.receive(resolvedAck(fresh, [identity]))).toBe(true);
+    expect(b.owner.physicalUsed).toBe(0);
+    expect(b.owner.resourceEntries()).toEqual([]);
+    a.backs[0]!.options.onManaged?.(); // A late old reaper observer may still finish after this ACK.
+    expect(b.owner.resourceEntries()).toEqual([]);
+    expect(a.owner.resourceEntries()).toEqual([]);
+  });
+  it("an end-frame write failure cannot authorize receipt forgetting", async () => {
+    const h = harness();
+    h.negotiate();
+    await createReceipt(h);
+    const channel = resourceChannel(h);
+    h.setSendHook((f) => !(f.t === "term_res" && f.op === "inventory" && f.ok && f.page.phase === "end"));
+    const frames = inventory(h, channel),
+      ack = resolvedAck(frames);
+    expect(h.owner.receive(ack)).toBe(false);
+    expect(h.owner.resourceEntries()).toHaveLength(1);
+    h.setSendHook();
+    expect(h.owner.receive(resolvedAck(inventory(h, resourceChannel(h), "after-failed-write")))).toBe(true);
+  });
+  it("a reentrant ACK before the end-frame send returns cannot race the snapshot installation", async () => {
+    const h = harness();
+    h.negotiate();
+    await createReceipt(h);
+    const channel = resourceChannel(h);
+    const frames: ReturnType<typeof inventory> = [];
+    let premature: boolean | undefined;
+    h.setSendHook((f) => {
+      if (f.t === "term_res" && f.op === "inventory" && f.ok) {
+        frames.push(f);
+        if (f.page.phase === "end") premature = h.owner.receive(resolvedAck(frames));
+      }
+      return true;
+    });
+    inventory(h, channel);
+    expect(premature).toBe(false);
+    expect(h.owner.resourceEntries()).toHaveLength(1);
+    expect(h.owner.receive(resolvedAck(frames))).toBe(true);
   });
 });
