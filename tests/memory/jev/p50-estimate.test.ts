@@ -1,8 +1,10 @@
 import { expect, it } from "vitest";
+import { payloadTemplateHash } from "../../../scripts/dev/p50-closure-runtime.js";
 import {
   estimatePayload,
   stockClassifyPayload,
   stockRevisionPayload,
+  stockRevisionThinkingDisabled,
   stockRevisionPayloadSupported,
   STOCK_ESTIMATE_PROFILE,
 } from "../../../src/memory/jev/p50-estimate.js";
@@ -61,4 +63,47 @@ it("versioned templates map bool to noul, include whole framing and reject unsup
     identityEvidence: "unknown",
     billingStatus: "UNKNOWN",
   });
+});
+
+it("DeepSeek thinking-off is exact, included in the semantic template/hash and quote, never enables reasoning", () => {
+  const context = { systemPrompt: "system", messages: [{ role: "user" as const, content: "body", timestamp: 1 }] };
+  const native = {
+    provider: "deepseek",
+    baseUrl: "https://api.deepseek.com",
+    reasoning: true,
+    compat: { thinkingFormat: "deepseek" },
+  };
+  expect(stockRevisionThinkingDisabled(native)).toBe(true);
+  const plain = stockRevisionPayload("g", context, 384);
+  const off = stockRevisionPayload("g", context, 384, stockRevisionThinkingDisabled(native));
+  expect(off.thinking).toEqual({ type: "disabled" });
+  expect(stockRevisionPayloadSupported(off)).toBe(true);
+  expect(estimatePayload(off)).toBeGreaterThan(estimatePayload(plain)!);
+  expect(payloadTemplateHash(off)).not.toBe(payloadTemplateHash(plain));
+  expect(stockRevisionThinkingDisabled({ ...native, reasoning: false })).toBe(false);
+  expect(stockRevisionThinkingDisabled({ ...native, thinkingLevelMap: { off: null } })).toBe(false);
+  expect(stockRevisionThinkingDisabled({ ...native, compat: { thinkingFormat: "qwen" } })).toBe(false);
+  expect(stockRevisionThinkingDisabled({ provider: "other", reasoning: true })).toBe(false);
+  let invoked = 0;
+  expect(
+    stockRevisionThinkingDisabled({
+      get reasoning() {
+        invoked++;
+        return true;
+      },
+    }),
+  ).toBe(false);
+  expect(invoked).toBe(0);
+});
+it.each([
+  { type: "enabled" },
+  { type: "disabled", extra: true },
+  { type: "disabled", budget_tokens: 1 },
+  {},
+  null,
+  "disabled",
+  { enable: false },
+])("stock framing rejects unsupported thinking %j", (thinking) => {
+  const payload = stockRevisionPayload("g", { systemPrompt: "s", messages: [] }, 384);
+  expect(stockRevisionPayloadSupported({ ...payload, thinking })).toBe(false);
 });

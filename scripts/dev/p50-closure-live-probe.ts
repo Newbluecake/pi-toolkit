@@ -18,6 +18,7 @@ import {
 } from "./p50-closure-runtime.js";
 import { estimatePayload, STOCK_ESTIMATE_PROFILE } from "../../src/memory/jev/p50-estimate.js";
 import { memoryDirFor } from "../../src/memory/paths.js";
+import { ClosureProbeFailure, ProbeDiagnostics } from "./p50-closure-diagnostics.js";
 
 export type ProbeStage = "R1" | "R2" | "G1" | "C1";
 export type ProbeTransport = "proxy" | "direct-user-approved";
@@ -191,9 +192,11 @@ export interface ClosureProbeEffect {
   readonly targetRawUnchanged: boolean;
   readonly contextRawUnchanged: boolean;
   readonly auditState: string;
+  readonly usage?: import("../../src/memory/jev/contracts.js").JevUsage;
 }
 export interface ClosureRunnerContext {
   readonly isolation: ReturnType<typeof validateClosureManifest>;
+  readonly diagnostics: ProbeDiagnostics;
   /** Install at the existing SDK fetch injection boundary; never issue HTTP here. */
   beforeHttp(stage: ProbeStage, endpoint: string, payload: unknown): void;
 }
@@ -207,38 +210,47 @@ export async function runApprovedClosureProbe(
   const events: { stage: ProbeStage; estimatedInputTokens: number; payloadSha256: string; serverEnforced: false }[] =
     [];
   let stopped = false;
-  const effect = await runner({
-    isolation,
-    beforeHttp(stage, endpoint, payload) {
-      if (stopped) throw Error("PROBE_STOPPED");
-      try {
-        const r = isolation.manifest.routes[events.length];
-        if (!r || r.stage !== stage || r.endpoint !== endpoint) throw Error("EXTRA_OR_UNAPPROVED_REQUEST");
-        const estimated = estimatePayload(payload);
-        if (estimated === undefined) throw Error("PAYLOAD_DATA");
-        const digest = manifestSha256(JSON.stringify(payload));
-        if (
-          estimated > r.estimatedInputTokens ||
-          (r.payloadSha256 !== undefined && digest !== r.payloadSha256) ||
-          (r.payloadTemplateSha256 !== undefined &&
-            payloadTemplateHash(payload as Record<string, unknown>) !== r.payloadTemplateSha256) ||
-          (payload as { model?: unknown }).model !== r.model
-        )
-          throw Error(stage === "C1" ? "C_ENVELOPE" : "PAYLOAD_MISMATCH");
-        events.push({ stage, estimatedInputTokens: estimated, payloadSha256: digest, serverEnforced: false });
-      } catch (error) {
-        stopped = true;
-        throw error;
-      }
-    },
-  }).catch((error: unknown) => {
+  const diagnostics = new ProbeDiagnostics();
+  let effect: ClosureProbeEffect;
+  try {
+    effect = await runner({
+      isolation,
+      diagnostics,
+      beforeHttp(stage, endpoint, payload) {
+        if (stopped) throw Error("PROBE_STOPPED");
+        try {
+          const r = isolation.manifest.routes[events.length];
+          if (!r || r.stage !== stage || r.endpoint !== endpoint) throw Error("EXTRA_OR_UNAPPROVED_REQUEST");
+          const estimated = estimatePayload(payload);
+          if (estimated === undefined) throw Error("PAYLOAD_DATA");
+          const digest = manifestSha256(JSON.stringify(payload));
+          if (
+            estimated > r.estimatedInputTokens ||
+            (r.payloadSha256 !== undefined && digest !== r.payloadSha256) ||
+            (r.payloadTemplateSha256 !== undefined &&
+              payloadTemplateHash(payload as Record<string, unknown>) !== r.payloadTemplateSha256) ||
+            (payload as { model?: unknown }).model !== r.model
+          )
+            throw Error(stage === "C1" ? "C_ENVELOPE" : "PAYLOAD_MISMATCH");
+          events.push({ stage, estimatedInputTokens: estimated, payloadSha256: digest, serverEnforced: false });
+          diagnostics.admitted(stage);
+        } catch (error) {
+          stopped = true;
+          throw error;
+        }
+      },
+    });
+  } catch (error: unknown) {
+    diagnostics.fail("RUNNER_FAILED");
     const code = error instanceof Error ? error.message : "";
-    throw Error(
+    throw new ClosureProbeFailure(
       ["PROBE_STOPPED", "EXTRA_OR_UNAPPROVED_REQUEST", "PAYLOAD_DATA", "PAYLOAD_MISMATCH", "C_ENVELOPE"].includes(code)
         ? code
         : "INCOMPLETE_CLOSURE",
+      diagnostics,
     );
-  });
+  }
+  if (effect.usage) diagnostics.usage(effect.usage);
   if (
     stopped ||
     events.length !== 4 ||
@@ -248,8 +260,18 @@ export async function runApprovedClosureProbe(
     !effect.targetRawUnchanged ||
     !effect.contextRawUnchanged ||
     effect.auditState !== "prepared"
-  )
-    throw Error("INCOMPLETE_CLOSURE");
+  ) {
+    diagnostics.fail(
+      events.length === 0
+        ? "NO_R_CALL"
+        : events.length < 4 || effect.suggestions !== 1
+          ? diagnostics.noSuggestion()
+          : effect.auditState !== "prepared"
+            ? "AUDIT_MISSING"
+            : "POSTCONDITION",
+    );
+    throw new ClosureProbeFailure("INCOMPLETE_CLOSURE", diagnostics);
+  }
   return { verdict: "PASS" as const, assurance: STOCK_ESTIMATE_PROFILE, events, effect, live: "NOT_RUN" as const };
 }
 export const closureManifestBytes = (manifest: ClosureManifest): string => JSON.stringify(manifest, null, 2) + "\n";
@@ -346,13 +368,22 @@ export async function probeMain(
     await ports.auth(catalog.runtime, catalog.registry, current);
     const run = () =>
       runApprovedClosureProbe(bytes, value("--manifest-sha"), async (context) => {
-        const registry = new ProbeRegistry(catalog.runtime, context.beforeHttp);
+        const registry = new ProbeRegistry(catalog.runtime, context.beforeHttp, globalThis.fetch, context.diagnostics);
         return ports.run(context, registry, catalog.settings);
       });
     const result = await (transport === "direct-user-approved" ? withDirectProbeTransport(run) : run());
     return { code: 0, output: JSON.stringify({ ...result, live: "RUN" }) + "\n" };
   } catch (error) {
-    return { code: 2, output: probeErrorCode(error) + "\n" };
+    const notScheduled = new ProbeDiagnostics();
+    notScheduled.fail("NO_SCHEDULE");
+    return {
+      code: 2,
+      output:
+        probeErrorCode(error) +
+        "\n" +
+        JSON.stringify(error instanceof ClosureProbeFailure ? error.diagnostic : notScheduled.snapshot()) +
+        "\n",
+    };
   }
 }
 function joinAgentHome() {

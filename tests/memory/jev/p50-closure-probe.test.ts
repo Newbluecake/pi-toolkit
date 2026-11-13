@@ -9,6 +9,7 @@ import {
   type ClosureManifest,
   type ProbeStage,
 } from "../../../scripts/dev/p50-closure-live-probe.js";
+import { ClosureProbeFailure } from "../../../scripts/dev/p50-closure-diagnostics.js";
 import { estimatePayload } from "../../../src/memory/jev/p50-estimate.js";
 import { wireFixture } from "../govern/revision-wire-helpers.js";
 const roots: string[] = [];
@@ -138,3 +139,29 @@ it("approved OFFLINE manifest → actual default wire/SDK fakeHTTP 2R+G+C → or
   });
   expect(result.events.map((e) => e.stage)).toEqual(["R1", "R2", "G1", "C1"]);
 });
+
+it.each(["AUDIT_MISSING", "POSTCONDITION", "RUNNER_FAILED"] as const)(
+  "postflight/runner failure maps %s without echoing upstream text",
+  async (code) => {
+    const m = manifest(ownRoot()),
+      bytes = JSON.stringify(m);
+    const failure = await runApprovedClosureProbe(bytes, manifestSha256(bytes), async (ctx) => {
+      if (code === "RUNNER_FAILED")
+        throw new Error("synthetic-secret-in-message", { cause: new Error("synthetic-secret-in-cause") });
+      for (const r of m.routes) ctx.beforeHttp(r.stage, r.endpoint, { model: r.model });
+      return {
+        suggestions: 1,
+        autoEligible: false,
+        automaticCommitCalls: 0,
+        targetRawUnchanged: code !== "POSTCONDITION",
+        contextRawUnchanged: true,
+        auditState: code === "AUDIT_MISSING" ? "missing" : "prepared",
+      };
+    }).catch((error) => error);
+    expect(failure).toBeInstanceOf(ClosureProbeFailure);
+    expect(failure.message).toBe("INCOMPLETE_CLOSURE");
+    expect(failure.diagnostic.internalCode).toBe(code);
+    expect(failure.diagnostic.beforeHttpCount).toBe(code === "RUNNER_FAILED" ? 0 : 4);
+    expect(JSON.stringify(failure.diagnostic)).not.toContain("synthetic-secret");
+  },
+);

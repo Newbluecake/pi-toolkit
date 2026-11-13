@@ -29,6 +29,7 @@ import {
   estimatePayload,
   stockClassifyPayload,
   stockRevisionPayload,
+  stockRevisionThinkingDisabled,
   STOCK_ESTIMATE_PROFILE,
 } from "../../src/memory/jev/p50-estimate.js";
 import { createStockEstimateP50Binding } from "../../src/memory/jev/p50-binding.js";
@@ -37,6 +38,7 @@ import { wireMemoryScopes } from "../../src/memory/scopes/wire.js";
 import { createIncrementalScheduler } from "../../src/memory/govern/incremental.js";
 import { readIncrementalCorpus } from "../../src/memory/govern/incremental-corpus.js";
 import { readIndex } from "../../src/memory/jev/index-store.js";
+import { ProbeDiagnostics, transportErrorClass } from "./p50-closure-diagnostics.js";
 import {
   manifestSha256,
   type ClosureManifest,
@@ -107,6 +109,7 @@ export function buildClosureManifest(
       models[2]!.model.id,
       revisionTransportContext({ purpose: "generate", instruction: "merge-survivor", ...common }),
       384,
+      stockRevisionThinkingDisabled(models[2]!.model),
     ),
     // 1024 input bytes, each requiring maximal JSON escaping at EVERY nested
     // serialization layer. This is an envelope, never a real candidate/request.
@@ -114,6 +117,7 @@ export function buildClosureManifest(
       models[3]!.model.id,
       revisionTransportContext({ purpose: "coverage", ...common, candidateBody: "\u0001".repeat(1024) }),
       384,
+      stockRevisionThinkingDisabled(models[3]!.model),
     ),
   ];
   const routes = models.map(({ route, model, endpoint }, i) => {
@@ -356,19 +360,29 @@ export class ProbeRegistry extends ModelRegistry {
     runtime: ModelRuntime,
     private readonly before: ClosureRunnerContext["beforeHttp"],
     private readonly http: typeof fetch = globalThis.fetch,
+    private readonly diagnostics?: ProbeDiagnostics,
   ) {
     super(runtime);
   }
   private count = 0;
   private stopped = false;
-  private guarded(fallback: typeof fetch = this.http): typeof fetch {
+  private rCalls = 0;
+  private gCalls = 0;
+  private guarded(fallback: typeof fetch = this.http, callStage: ProbeStage = "R1"): typeof fetch {
     return async (url, init) => {
       if (this.stopped) throw Error("PROBE_STOPPED");
       try {
         const stage = (["R1", "R2", "G1", "C1"] as ProbeStage[])[this.count++];
         if (!stage) throw Error();
         this.before(stage, String(url), JSON.parse(String(init?.body)));
-        const response = await fallback(url, { ...init, redirect: "error" });
+        let response: Response;
+        try {
+          response = await fallback(url, { ...init, redirect: "error" });
+        } catch (error) {
+          this.diagnostics?.error(callStage, transportErrorClass(error, init?.signal));
+          throw Error("PROVIDER_FAILED");
+        }
+        this.diagnostics?.status(callStage, response.status);
         if (!response.ok) {
           this.stopped = true;
           throw Error();
@@ -381,11 +395,19 @@ export class ProbeRegistry extends ModelRegistry {
     };
   }
   override async classify(...[model, context, opts]: Parameters<ModelRegistry["classify"]>) {
+    const stage = this.rCalls++ === 0 ? "R1" : "R2";
+    this.diagnostics?.started(stage);
     try {
-      const result = await super.classify(model, context, { ...opts, maxRetries: 0, fetch: this.guarded(opts?.fetch) });
+      const result = await super.classify(model, context, {
+        ...opts,
+        maxRetries: 0,
+        fetch: this.guarded(opts?.fetch, stage),
+      });
+      this.diagnostics?.result(stage, result.stopReason !== "stop", result.usage);
       if (result.stopReason !== "stop") return { ...result, errorMessage: "PROVIDER_FAILED" };
       return result;
     } catch {
+      this.diagnostics?.result(stage, true);
       throw Error("PROVIDER_FAILED");
     }
   }
@@ -394,18 +416,22 @@ export class ProbeRegistry extends ModelRegistry {
     context: Parameters<ModelRegistry["complete"]>[1],
     opts?: import("@earendil-works/pi-ai").ModelsApiStreamOptions<T>,
   ) {
+    const stage = this.gCalls++ === 0 ? "G1" : "C1";
+    this.diagnostics?.started(stage);
     try {
       // For stock G/C, opts.fetch is the binding's final pure guard. It calls
       // captured global fetch. Place observation before that existing guard.
       const result = await super.complete(model, context, {
         ...opts,
         maxRetries: 0,
-        fetch: this.guarded(opts?.fetch ?? this.http),
+        fetch: this.guarded(opts?.fetch ?? this.http, stage),
       } as import("@earendil-works/pi-ai").ModelsApiStreamOptions<T>);
+      this.diagnostics?.result(stage, result.stopReason === "error" || result.stopReason === "aborted", result.usage);
       if (result.stopReason === "error" || result.stopReason === "aborted")
         return { ...result, errorMessage: "PROVIDER_FAILED" };
       return result;
     } catch {
+      this.diagnostics?.result(stage, true);
       throw Error("PROVIDER_FAILED");
     }
   }
@@ -422,6 +448,7 @@ export async function runClosureHost(ctx: ClosureRunnerContext, registry: ModelR
   const oldCwd = process.cwd();
   const handlers = new Map<string, ((event: unknown, context: ExtensionContext) => unknown)[]>();
   let shutdown: (() => Promise<void>) | undefined;
+  let usage: (() => ReturnType<JevClientHandle["usage"]>) | undefined;
   try {
     for (const path of Object.values(m.paths)) mkdirSync(path, { recursive: true, mode: 0o700 });
     Object.assign(process.env, env);
@@ -491,7 +518,10 @@ export async function runClosureHost(ctx: ClosureRunnerContext, registry: ModelR
       remote: () => undefined,
       hubPaths: () => undefined,
     });
-    if (!scopes) throw Error("OWNER_UNAVAILABLE");
+    if (!scopes) {
+      ctx.diagnostics.fail("NO_SCHEDULE");
+      throw Error("OWNER_UNAVAILABLE");
+    }
     const blocks = join(memoryDir, "blocks");
     // One-shot directory: never adopt or reuse evidence from an earlier run.
     if (existsSync(memoryDir)) throw Error("ISOLATION_NOT_EMPTY");
@@ -521,6 +551,12 @@ export async function runClosureHost(ctx: ClosureRunnerContext, registry: ModelR
         invalidate: () => scheduler?.stop(),
       },
     });
+    const client = wire.client as JevClientHandle;
+    usage = () => client.usage();
+    const generate = client.generateRevision;
+    const coverage = client.judgeRevisionCoverage;
+    client.generateRevision = (request) => ctx.diagnostics.observeRevision("G1", generate(request));
+    client.judgeRevisionCoverage = (request) => ctx.diagnostics.observeRevision("C1", coverage(request));
     shutdown = async () => {
       active = false;
       scheduler?.stop();
@@ -536,7 +572,10 @@ export async function runClosureHost(ctx: ClosureRunnerContext, registry: ModelR
       isError: false,
     });
     const owner = scopes.current();
-    if (!owner || !wire.p50?.ready()) throw Error("OWNER_UNAVAILABLE");
+    if (!owner || !wire.p50?.ready()) {
+      ctx.diagnostics.fail("NO_SCHEDULE");
+      throw Error("OWNER_UNAVAILABLE");
+    }
     const stat = statSync(memoryDir);
     const directory = { realpath: memoryDir, dev: stat.dev, ino: stat.ino, sessionEpoch: 1 };
     let complete!: () => void;
@@ -579,6 +618,7 @@ export async function runClosureHost(ctx: ClosureRunnerContext, registry: ModelR
       readCorpus: readIncrementalCorpus,
       canAttempt: wire.p50.canAttempt,
       handler: async (batch, attempt) => {
+        ctx.diagnostics.schedule();
         try {
           return await wire.p50!.handle(batch, attempt);
         } finally {
@@ -597,7 +637,10 @@ export async function runClosureHost(ctx: ClosureRunnerContext, registry: ModelR
       await Promise.race([
         done,
         new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(Error("PROBE_TIMEOUT")), 150000);
+          timer = setTimeout(() => {
+            ctx.diagnostics.timeout();
+            reject(Error("PROBE_TIMEOUT"));
+          }, 150000);
           timer.unref();
         }),
       ]);
@@ -606,12 +649,20 @@ export async function runClosureHost(ctx: ClosureRunnerContext, registry: ModelR
     }
     const suggestions = readIndex(memoryDir).index.review?.suggestions.filter((s) => s.revision) ?? [];
     const p = suggestions[0]?.revision;
-    const audit = p
-      ? (JSON.parse(readFileSync(join(blocks, ".jev/revisions", p.batchId, p.actionId, "audit.json"), "utf8")) as {
-          state: string;
-          commitOrigin?: string;
-        })
-      : undefined;
+    if (!p) ctx.diagnostics.fail(ctx.diagnostics.noSuggestion());
+    let audit: { state: string; commitOrigin?: string } | undefined;
+    try {
+      audit = p
+        ? (JSON.parse(readFileSync(join(blocks, ".jev/revisions", p.batchId, p.actionId, "audit.json"), "utf8")) as {
+            state: string;
+            commitOrigin?: string;
+          })
+        : undefined;
+      if (p && audit?.state !== "prepared") ctx.diagnostics.fail("AUDIT_MISSING");
+    } catch {
+      ctx.diagnostics.fail("AUDIT_MISSING");
+      throw Error("INCOMPLETE_CLOSURE");
+    }
     return {
       suggestions: suggestions.length,
       autoEligible: p?.autoEligible ?? false,
@@ -622,8 +673,10 @@ export async function runClosureHost(ctx: ClosureRunnerContext, registry: ModelR
       usage: (wire.client as JevClientHandle).usage(),
     };
   } catch {
+    ctx.diagnostics.fail("RUNNER_FAILED");
     throw Error("INCOMPLETE_CLOSURE");
   } finally {
+    if (usage) ctx.diagnostics.usage(usage());
     await shutdown?.();
     process.chdir(oldCwd);
     for (const [key, value] of Object.entries(saved)) {

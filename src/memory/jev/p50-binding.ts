@@ -9,6 +9,7 @@ import {
   estimatePayload,
   stockClassifyPayload,
   stockRevisionPayload,
+  stockRevisionThinkingDisabled,
   stockRevisionPayloadSupported,
 } from "./p50-estimate.js";
 import type {
@@ -561,7 +562,12 @@ export function createStockEstimateP50Binding(spec: {
             estimatePayload(
               classifier
                 ? stockClassifyPayload(name, ctx as ClassifyContext)
-                : stockRevisionPayload(name, ctx as RevisionTransportContext, output),
+                : stockRevisionPayload(
+                    name,
+                    ctx as RevisionTransportContext,
+                    output,
+                    stockRevisionThinkingDisabled(model),
+                  ),
             ),
           countPayload: estimatePayload,
         },

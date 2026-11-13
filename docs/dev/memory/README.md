@@ -1630,3 +1630,45 @@ timeout --signal=TERM --kill-after=10s 180s node --import tsx scripts/dev/p50-cl
 未验证：真实 provider/auth/价目有效性、tokenizer 准确率、server 输出硬限、backend identity/Q2 independence、
 invoice、生产部署与物理UI。C13 仍 **LIVE NOT RUN**，认证桥的离线实现不等于真实凭据可用或用户批准。
 既有同步 syscall 不可抢占、同uid竞态、fsync非掉电事务限界不变。
+
+### P50 standalone failure diagnostics and DeepSeek thinking-off framing (2026-11-13)
+
+`p50-closure-live-probe.ts` retains exit 2 and the fixed public code as stderr's first line;
+failures now append exactly one `p50-redacted-diagnostic-v1` JSON line. It contains only
+fixed internal codes, the successful `beforeHttp` stage sequence/count, per-stage registry
+call/admission counts, numeric HTTP status/token usage and fixed error classes, plus numeric
+client usage/reservation/outstanding/zombie/queue counts. It never includes URLs, model/auth
+objects, headers, request/response bodies, SDK messages, stacks or causes. Preflight failures
+have `NO_SCHEDULE` and zero counts. `beforeHttp` is admission evidence, **not proof that a
+socket was dispatched or that a provider billed a request**. Missing status/error means
+unobserved/unknown, not success or zero billing. HTTP 401/403 maps to `auth`, other 4xx/5xx
+to their fixed classes; successful HTTP followed by SDK/protocol rejection maps to `parse`.
+No error text is parsed. The first observed internal failure wins over cleanup/postflight.
+
+The runner distinguishes `NO_SCHEDULE`, `NO_R_CALL`, `R_FAILED`, `G_FAILED`, `C_FAILED`,
+`NO_SUGGESTION`, `AUDIT_MISSING`, `TIMEOUT`, `POSTCONDITION`, and `RUNNER_FAILED`.
+The probe's revision-result observers retain the exact original promises and only inspect
+fixed outcome discriminants; they do not dispatch, retry or alter provider results. Existing
+scheduler/budget/one-shot/zero-auto/zero-retry and unref'd deadline rules are unchanged.
+Seven-channel synthetic-secret capture tests cover failure stderr and sidecars, HTTP errors,
+network/timeout exceptions, malformed classifier JSON and malformed coverage output.
+
+An offline regression using **native built-in** `opencode/jev-1.13` and
+`deepseek/deepseek-flash` (not a custom test provider), synthetic SDK credentials and fake
+HTTP reproduced a fast `G_FAILED`: R1/R2 reached HTTP, G reached registry.complete but failed
+locally before its HTTP gate. pi 1.5's DeepSeek chat serializer emits
+`thinking:{type:"disabled"}` for its reasoning-capable model with thinking off. The previous
+stock payload allowlist rejected that field, and its quote/manifest templates omitted it.
+Stock now admits **only that exact disabled shape**, mirrors the SDK's deterministic
+DeepSeek off framing in its quote and manifest template/hash, and still rejects enabled,
+extra-field and other thinking shapes. Certified protocol behavior and non-DeepSeek
+framing are unchanged. The native regression now produces exactly four HTTP requests,
+one prepared suggestion and byte-identical raw blocks. Removing `thinking` from the
+allowlist makes that regression red; admitting arbitrary thinking makes the negative
+shape tests red. This is offline implementation evidence, **not a successful LIVE run**.
+
+Diagnostics alone do not enter the approval manifest. The framing fix **does** change
+DeepSeek G/C template bytes, token estimates, aggregate reserve and manifest SHA; print a
+fresh manifest with a new unused private root and obtain separate human approval before
+any new LIVE attempt. Never replay a prior approval automatically. Prior LIVE billing or
+HTTP counts cannot be reconstructed exactly from an old `INCOMPLETE_CLOSURE` message.

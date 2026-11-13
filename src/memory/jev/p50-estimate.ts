@@ -54,12 +54,32 @@ export function stockClassifyPayload(model: string, ctx: ClassifyContext): Recor
     ),
   };
 }
+/** Mirror only the SDK's deterministic DeepSeek thinking-off framing. Never
+ * invoke model accessors or enable reasoning; other formats still fail closed. */
+export function stockRevisionThinkingDisabled(model: unknown): boolean {
+  const field = (v: unknown, key: string): unknown => {
+    if (!v || typeof v !== "object") return undefined;
+    const d = Object.getOwnPropertyDescriptor(v, key);
+    return d && "value" in d ? d.value : undefined;
+  };
+  const format = field(field(model, "compat"), "thinkingFormat");
+  const url = field(model, "baseUrl");
+  return (
+    field(model, "reasoning") === true &&
+    field(field(model, "thinkingLevelMap"), "off") !== null &&
+    (format === "deepseek" ||
+      (format === undefined &&
+        (field(model, "provider") === "deepseek" ||
+          (typeof url === "string" && url.toLowerCase().includes("deepseek.com")))))
+  );
+}
 /** Quote includes both supported optional SDK framing fields conservatively.
  * Final payload allowlist/recount rejects all other serializer/sampling modes. */
 export function stockRevisionPayload(
   model: string,
   ctx: RevisionTransportContext,
   output: number,
+  thinkingDisabled = false,
 ): Record<string, unknown> {
   return {
     model,
@@ -71,6 +91,7 @@ export function stockRevisionPayload(
     stream_options: { include_usage: true },
     store: false,
     max_tokens: output,
+    ...(thinkingDisabled ? { thinking: { type: "disabled" } } : {}),
   };
 }
 export function stockRevisionPayloadSupported(p: Readonly<Record<string, unknown>>): boolean {
@@ -81,6 +102,7 @@ export function stockRevisionPayloadSupported(p: Readonly<Record<string, unknown
     "stream_options",
     "store",
     "max_tokens",
+    "thinking",
     "prompt_cache_key",
     "prompt_cache_retention",
   ];
@@ -90,6 +112,11 @@ export function stockRevisionPayloadSupported(p: Readonly<Record<string, unknown
     (p.store === undefined || p.store === false) &&
     p.prompt_cache_key === undefined &&
     p.prompt_cache_retention === undefined &&
+    (p.thinking === undefined ||
+      (p.thinking !== null &&
+        typeof p.thinking === "object" &&
+        Reflect.ownKeys(p.thinking).length === 1 &&
+        Object.getOwnPropertyDescriptor(p.thinking, "type")?.value === "disabled")) &&
     (p.stream_options === undefined || JSON.stringify(p.stream_options) === '{"include_usage":true}')
   );
 }

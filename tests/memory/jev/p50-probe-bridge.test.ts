@@ -10,11 +10,15 @@ vi.mock("undici", async (importOriginal) => {
   const actual = await importOriginal<typeof import("undici")>();
   return { ...actual, fetch: vi.fn() };
 });
+import { ClosureProbeFailure, ProbeDiagnostics } from "../../../scripts/dev/p50-closure-diagnostics.js";
+import * as corpusModule from "../../../src/memory/govern/incremental-corpus.js";
+import * as indexModule from "../../../src/memory/jev/index-store.js";
 import { clearHealthTable } from "../../../src/memory/jev/health.js";
 import { loadSettings } from "../../../src/config/settings.js";
 import {
   openProbeCatalog,
   buildClosureManifest,
+  payloadTemplateHash,
   requireProbeAuth,
   requireQuote,
   ProbeRegistry,
@@ -29,6 +33,11 @@ import {
   runApprovedClosureProbe,
 } from "../../../scripts/dev/p50-closure-live-probe.js";
 const SECRET = "synthetic-credential-NEVER-PRINT-5df9b2";
+const preflightError = (code: string) => {
+  const diagnostics = new ProbeDiagnostics();
+  diagnostics.fail("NO_SCHEDULE");
+  return { code: 2, output: code + "\n" + JSON.stringify(diagnostics.snapshot()) + "\n" };
+};
 /** JSON.stringify(Error) is {}, so scan rendered diagnostics, not JSON mock calls.
  * Restore locally even on failure so Vitest's own reporting is never swallowed. */
 async function captureOutput<T>(run: () => Promise<T>) {
@@ -277,7 +286,7 @@ it("no --live rejects before catalog/auth/network; print is deterministic, crede
     auth = vi.fn(),
     run = vi.fn();
   const ports = { open, auth, run };
-  expect(await probeMain([], ports)).toEqual({ code: 2, output: "APPROVAL_REQUIRED\n" });
+  expect(await probeMain([], ports)).toEqual(preflightError("APPROVAL_REQUIRED"));
   expect(open).not.toHaveBeenCalled();
   const args = ["--print-manifest", "--root", c.manifest.root];
   const printed = await probeMain(args, ports);
@@ -317,7 +326,7 @@ it("bad manifest sha and >$1 quote refuse BEFORE catalog/auth/runner/fetch", asy
   vi.stubGlobal("fetch", fetch);
   expect(
     await probeMain(["--live", "--manifest", file, "--manifest-sha", "f".repeat(64)], { open, auth, run }),
-  ).toEqual({ code: 2, output: "APPROVAL_HASH_MISMATCH\n" });
+  ).toEqual(preflightError("APPROVAL_HASH_MISMATCH"));
   const huge = { ...c.manifest, budgetUsd: 1.01, plannedReserveUsd: 1.01 };
   writeFileSync(file, JSON.stringify({ manifest: huge }));
   expect(
@@ -326,7 +335,7 @@ it("bad manifest sha and >$1 quote refuse BEFORE catalog/auth/runner/fetch", asy
       auth,
       run,
     }),
-  ).toEqual({ code: 2, output: "RESERVATION_LIMIT\n" });
+  ).toEqual(preflightError("RESERVATION_LIMIT"));
   expect(() => requireQuote(huge)).toThrow("RESERVATION_LIMIT");
   expect(open).not.toHaveBeenCalled();
   expect(auth).not.toHaveBeenCalled();
@@ -357,16 +366,15 @@ it("valid CLI manifest still refuses missing auth, route drift and unsupported p
   const run = vi.fn(),
     auth = vi.fn(requireProbeAuth),
     open = vi.fn(async () => c);
-  expect(await probeMain(args, { open, auth, run })).toEqual({ code: 2, output: "AUTH_UNAVAILABLE\n" });
+  expect(await probeMain(args, { open, auth, run })).toEqual(preflightError("AUTH_UNAVAILABLE"));
   expect(auth).toHaveBeenCalledTimes(1);
   expect(readdirSync(c.manifest.root)).toEqual([]);
   const changed = loadSettings({
     memory: { ...c.settings, jev: { ...c.settings.jev, classifiers: ["missing/model"] } },
   }).memory;
-  expect(await probeMain(args, { open: async () => ({ ...c, settings: changed }), auth, run })).toEqual({
-    code: 2,
-    output: "ROUTE_UNAVAILABLE\n",
-  });
+  expect(await probeMain(args, { open: async () => ({ ...c, settings: changed }), auth, run })).toEqual(
+    preflightError("ROUTE_UNAVAILABLE"),
+  );
   const proxySettings = { ...c.settings, jev: { ...c.settings.jev, proxy: "http://127.0.0.1:9" } };
   const proxyManifest = buildClosureManifest(proxySettings, c.registry, c.manifest.root);
   expect(proxyManifest.approval).toMatchObject({ executionGate: "PROXY_UNAVAILABLE" });
@@ -376,7 +384,7 @@ it("valid CLI manifest still refuses missing auth, route drift and unsupported p
       ["--live", "--manifest", file, "--manifest-sha", manifestSha256(closureManifestBytes(proxyManifest))],
       { open: async () => ({ ...c, settings: proxySettings }), auth, run },
     ),
-  ).toEqual({ code: 2, output: "PROXY_UNAVAILABLE\n" });
+  ).toEqual(preflightError("PROXY_UNAVAILABLE"));
   expect(auth).toHaveBeenCalledTimes(1);
   expect(run).not.toHaveBeenCalled();
   expect(fetch).not.toHaveBeenCalled();
@@ -412,10 +420,10 @@ it("direct transport is SHA-bound and requires matching explicit print/LIVE appr
   writeFileSync(file, printed.output);
   const args = ["--live", "--manifest", file, "--manifest-sha", approved.manifestSha256];
   for (const option of [[], ["--transport", "proxy"]])
-    expect(await probeMain([...args, ...option], ports)).toEqual({ code: 2, output: "PROXY_UNAVAILABLE\n" });
+    expect(await probeMain([...args, ...option], ports)).toEqual(preflightError("PROXY_UNAVAILABLE"));
   // Explicit direct LIVE cannot use a different SHA, even with matching transport.
   expect(await probeMain([...args.slice(0, -1), "f".repeat(64), "--transport", "direct-user-approved"], ports)).toEqual(
-    { code: 2, output: "APPROVAL_HASH_MISMATCH\n" },
+    preflightError("APPROVAL_HASH_MISMATCH"),
   );
   const stock = await probeMain(["--print-manifest", "--root", c.manifest.root], ports);
   expect(stock.code).toBe(0);
@@ -438,7 +446,7 @@ it("direct transport is SHA-bound and requires matching explicit print/LIVE appr
       ],
       ports,
     ),
-  ).toEqual({ code: 2, output: "PROXY_UNAVAILABLE\n" });
+  ).toEqual(preflightError("PROXY_UNAVAILABLE"));
   expect(auth).not.toHaveBeenCalled();
   expect(run).not.toHaveBeenCalled();
   expect(fetch).not.toHaveBeenCalled();
@@ -583,7 +591,7 @@ it.each([
     const captured = await captureOutput(async () => {
       try {
         return await runApprovedClosureProbe(bytes, manifestSha256(bytes), async (ctx) => {
-          const registry = new ProbeRegistry(c.runtime, ctx.beforeHttp);
+          const registry = new ProbeRegistry(c.runtime, ctx.beforeHttp, globalThis.fetch, ctx.diagnostics);
           return runClosureHost(ctx, registry, c.settings);
         });
       } catch (failure) {
@@ -624,3 +632,202 @@ it.each([
   },
   15000,
 );
+
+it("native stock opencode classifier and deepseek chat use the read-only api-key bridge and injected fetch", async () => {
+  const agent = root();
+  // Actual built-in provider registrations, not the custom test classifier.
+  const reader = vi.fn((_provider: string, _path?: string) => ({ type: "api_key" as const, key: SECRET }));
+  const c = await openProbeCatalog(agent, true, reader);
+  const settings = loadSettings({
+    memory: {
+      jev: {
+        classifiers: ["opencode/jev-1.13"],
+        proxy: "",
+        predict: { model: { models: ["deepseek/deepseek-flash"] } },
+      },
+    },
+  }).memory;
+  const manifest = buildClosureManifest(settings, c.registry, root(), "direct-user-approved");
+  const bytes = closureManifestBytes(manifest);
+  const fetch = http();
+  vi.mocked(directFetch).mockImplementation(fetch as unknown as typeof directFetch);
+  vi.stubGlobal("fetch", fetch);
+  await requireProbeAuth(c.runtime, c.registry, manifest);
+  expect(fetch).not.toHaveBeenCalled();
+  const outcome = await withDirectProbeTransport(() =>
+    runApprovedClosureProbe(bytes, manifestSha256(bytes), async (ctx) =>
+      runClosureHost(ctx, new ProbeRegistry(c.runtime, ctx.beforeHttp, globalThis.fetch, ctx.diagnostics), settings),
+    ),
+  );
+  expect(outcome.effect).toMatchObject({ suggestions: 1, auditState: "prepared", usage: { calls: 4 } });
+  expect(outcome.events.map((e) => e.stage)).toEqual(["R1", "R2", "G1", "C1"]);
+  expect(fetch).toHaveBeenCalledTimes(4);
+  expect(directFetch).toHaveBeenCalledTimes(4);
+  expect(fetch.mock.calls.map(([url]) => String(url))).toEqual(manifest.routes.map((r) => r.endpoint));
+  const generationPayload = JSON.parse(String(fetch.mock.calls[2]![1]?.body));
+  expect(generationPayload.thinking).toEqual({ type: "disabled" });
+  expect(payloadTemplateHash(generationPayload)).toBe(manifest.routes[2]!.payloadTemplateSha256);
+  expect(reader.mock.calls.map((call) => call[0])).toEqual(expect.arrayContaining(["opencode", "deepseek"]));
+});
+
+const visitReports = (dir: string): string =>
+  readdirSync(dir, { withFileTypes: true })
+    .map((d) => (d.isDirectory() ? visitReports(join(dir, d.name)) : readFileSync(join(dir, d.name), "utf8")))
+    .join("");
+it.each([
+  [1, "network", "R_FAILED", undefined],
+  [2, "auth", "R_FAILED", 401],
+  [3, "http_4xx", "G_FAILED", 429],
+  [3, "http_5xx", "G_FAILED", 503],
+  [4, "network", "C_FAILED", undefined],
+  [1, "parse", "R_FAILED", 200],
+  [4, "parse", "C_FAILED", 200],
+  [1, "timeout", "R_FAILED", undefined],
+] as const)(
+  "failure at request %s (%s) emits only fixed codes and numeric telemetry",
+  async (at, errorClass, internalCode, status) => {
+    const c = await catalog();
+    const good = http();
+    let n = 0;
+    const fetch = vi.fn<typeof globalThis.fetch>(async (url, init) => {
+      if (++n !== at) return good(url, init);
+      if (status === 200 && at === 4)
+        return new Response(
+          `data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: SECRET }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`,
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      if (status !== undefined) return new Response(SECRET, { status });
+      const error = new Error(SECRET, { cause: new Error(SECRET) });
+      if (errorClass === "timeout") error.name = "TimeoutError";
+      throw error;
+    });
+    vi.stubGlobal("fetch", fetch);
+    const file = join(root(), "manifest.json");
+    writeFileSync(file, JSON.stringify({ manifest: c.manifest }));
+    const captured = await captureOutput(async () => {
+      const result = await probeMain(
+        ["--live", "--manifest", file, "--manifest-sha", manifestSha256(closureManifestBytes(c.manifest))],
+        { open: async () => c, auth: requireProbeAuth, run: runClosureHost },
+      );
+      process.stderr.write(result.output); // exercise the actual CLI's output channel
+      return result;
+    });
+    expect(captured.value.code).toBe(2);
+    const lines = captured.value.output.trim().split("\n");
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toBe("INCOMPLETE_CLOSURE");
+    const d = JSON.parse(lines[1]!);
+    const stage = (["R1", "R2", "G1", "C1"] as const)[at - 1]!;
+    expect(d).toMatchObject({
+      contract: "p50-redacted-diagnostic-v1",
+      internalCode,
+      scheduled: 1,
+      beforeHttpCount: at,
+      beforeHttp: ["R1", "R2", "G1", "C1"].slice(0, at),
+      stages: { [stage]: { calls: 1, beforeHttp: 1, error: errorClass } },
+      usage: { calls: at },
+    });
+    expect(d.stages[stage].status).toBe(status);
+    expect(fetch).toHaveBeenCalledTimes(at);
+    expect(captured.output).toBe(captured.value.output);
+    expect(captured.output + visitReports(c.manifest.root)).not.toContain(SECRET);
+    for (const forbidden of ["message", "stack", "headers", "body", "authorization", "Bearer", "https:"])
+      expect(captured.output).not.toContain(forbidden);
+  },
+);
+it.each(["NO_SCHEDULE", "NO_R_CALL", "NO_SUGGESTION"] as const)(
+  "real host admission/selection failure diagnoses %s",
+  async (code) => {
+    const c = await catalog();
+    const good = http();
+    const fetch = vi.fn<typeof globalThis.fetch>(async (url, init) => {
+      const response = await good(url, init);
+      if (code !== "NO_SUGGESTION") return response;
+      const body = (await response.json()) as {
+        answers: { revisionRelation: { choice: string; probabilities: Record<string, number> } };
+      };
+      body.answers.revisionRelation.choice = "unrelated";
+      body.answers.revisionRelation.probabilities = { conflict: 0.005, supersedes: 0.005, unrelated: 0.99 };
+      return new Response(JSON.stringify(body));
+    });
+    vi.stubGlobal("fetch", fetch);
+    if (code === "NO_R_CALL") {
+      const original = corpusModule.readIncrementalCorpus;
+      vi.spyOn(corpusModule, "readIncrementalCorpus").mockImplementation((d) => {
+        const corpus = original(d);
+        return corpus && { ...corpus, candidates: [] };
+      });
+    }
+    const bytes = closureManifestBytes(c.manifest);
+    const failure = await runApprovedClosureProbe(bytes, manifestSha256(bytes), async (ctx) =>
+      runClosureHost(
+        ctx,
+        new ProbeRegistry(c.runtime, ctx.beforeHttp, globalThis.fetch, ctx.diagnostics),
+        code === "NO_SCHEDULE" ? { ...c.settings, governance: { enabled: false } } : c.settings,
+      ),
+    ).catch((error) => error);
+    expect(failure).toBeInstanceOf(ClosureProbeFailure);
+    expect(failure.message).toBe("INCOMPLETE_CLOSURE");
+    expect(failure.diagnostic.internalCode).toBe(code);
+    expect(fetch).toHaveBeenCalledTimes(code === "NO_SUGGESTION" ? 2 : 0);
+  },
+);
+it("150s runner watchdog produces TIMEOUT after scheduled work and records in-flight usage", async () => {
+  const c = await catalog();
+  let started!: () => void;
+  const dispatched = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  const fetch = vi.fn<typeof globalThis.fetch>(() => {
+    started();
+    return new Promise(() => {});
+  });
+  vi.stubGlobal("fetch", fetch);
+  let fire!: () => void;
+  const set = globalThis.setTimeout;
+  vi.spyOn(globalThis, "setTimeout").mockImplementation(((fn: () => void, ms?: number) => {
+    if (ms === 150000) fire = fn;
+    return set(fn, ms);
+  }) as typeof setTimeout);
+  const bytes = closureManifestBytes(c.manifest);
+  const pending = runApprovedClosureProbe(bytes, manifestSha256(bytes), async (ctx) =>
+    runClosureHost(ctx, new ProbeRegistry(c.runtime, ctx.beforeHttp, globalThis.fetch, ctx.diagnostics), c.settings),
+  ).catch((error) => error);
+  await dispatched;
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(fire).toBeTypeOf("function");
+  fire(); // exact production runner deadline callback, no wall-clock delay
+  const failure = await pending;
+  expect(failure).toBeInstanceOf(ClosureProbeFailure);
+  expect(failure.diagnostic).toMatchObject({
+    internalCode: "TIMEOUT",
+    scheduled: 1,
+    beforeHttpCount: 1,
+    usage: { calls: 1, outstanding: 1 },
+  });
+});
+
+it("real host diagnoses an unreadable prepared audit separately from HTTP/provider failures", async () => {
+  const c = await catalog();
+  const fetch = http();
+  vi.stubGlobal("fetch", fetch);
+  const original = indexModule.readIndex;
+  let corrupted = false;
+  vi.spyOn(indexModule, "readIndex").mockImplementation((...args) => {
+    const result = original(...args);
+    const revision = result.index.review?.suggestions.find((s) => s.revision)?.revision;
+    if (revision && !corrupted) {
+      writeFileSync(join(args[0], "blocks/.jev/revisions", revision.batchId, revision.actionId, "audit.json"), "{");
+      corrupted = true;
+    }
+    return result;
+  });
+  const bytes = closureManifestBytes(c.manifest);
+  const failure = await runApprovedClosureProbe(bytes, manifestSha256(bytes), async (ctx) =>
+    runClosureHost(ctx, new ProbeRegistry(c.runtime, ctx.beforeHttp, globalThis.fetch, ctx.diagnostics), c.settings),
+  ).catch((error) => error);
+  expect(corrupted).toBe(true);
+  expect(failure).toBeInstanceOf(ClosureProbeFailure);
+  expect(failure.diagnostic).toMatchObject({ internalCode: "AUDIT_MISSING", beforeHttpCount: 4, usage: { calls: 4 } });
+  expect(fetch).toHaveBeenCalledTimes(4);
+});
