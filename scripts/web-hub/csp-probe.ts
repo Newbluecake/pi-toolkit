@@ -19,6 +19,10 @@
  * `--suite mermaid` (`npm run probe:mermaid`): the web-hub-mermaid real-browser gate (plan §10.4), Chromium + Firefox;
  * `--lan` additionally serves the probe build on 0.0.0.0 for the S0 real-device run.
  *
+ * `--suite terminal [--browser chromium|firefox|both]`: build and serve the actual production
+ * terminal spike. Chromium is the P0 requirement per root's 2026-11-13 ruling; Firefox is
+ * explicitly NOT RUN unless selected (host GTK3/NSS is not upgraded by this probe).
+ *
  * Exit codes: 0 = pass; 1 = assertion failure (CSP violated, or something computed wrong); 2 =
  * Playwright/Chromium unavailable (offline cache miss and no network).
  */
@@ -268,6 +272,12 @@ async function mainMermaid(): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  if (argValue("--suite") === "terminal") {
+    // Test production artifacts, not a recompiled approximation of the renderer.
+    await build({ configFile: VITE_CONFIG, logLevel: "warn" });
+    const { runTerminalProbe } = await import("./terminal-probe-suite.js");
+    return runTerminalProbe(argValue("--browser") ?? "chromium", argValue("--renderer") ?? "auto");
+  }
   console.log("→ building csp-probe entries via vite.config.ts --mode csp-probe");
   await build({ configFile: VITE_CONFIG, mode: "csp-probe", logLevel: "warn" });
   if (argValue("--suite") === "mermaid") return mainMermaid();

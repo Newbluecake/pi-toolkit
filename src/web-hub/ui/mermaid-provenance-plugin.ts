@@ -1,5 +1,5 @@
 /**
- * Rollup/Vite plugin: mermaid provenance (web-hub-mermaid plan §7.2, r3 R2-2/R2-7/R2-8).
+ * Rollup/Vite plugin: mermaid + terminal P0 provenance (web-hub-mermaid plan §7.2, r3 R2-2/R2-7/R2-8).
  *
  * Computes — from the module graph, at `buildEnd` — the set `E` of modules that ONLY the lazily
  * imported `components/shared/mermaid-impl.ts` can reach (`E = M \ A`: `M` = reachable from the impl,
@@ -17,6 +17,8 @@
  *    third-party components that pre-bundled outer packages (mermaid, @mermaid-js/parser, …) embed
  *    (detected from the `// …node_modules/.pnpm/<name>@<ver>/…` path comments their dist files carry).
  *
+ * Terminal P0 adds a second graph-exclusive closure, term-* names, mixed/escaped-module
+ * rejection, and SHA-bound ?url CSS assets (Rollup originalFileNames -> emitted bytes).
  * `check:web` (scripts/web-hub/check-ui-dist.ts + lib/ui-provenance.ts) consumes the sidecar.
  * Nothing here runs at runtime in the browser or the hub.
  */
@@ -39,6 +41,9 @@ export interface ProvenancePackage {
 export interface ProvenanceChunk {
   sha256: string;
   mermaidExclusive: boolean;
+  terminalHost?: boolean;
+  terminalExclusive?: boolean;
+  containsTerminalImpl?: boolean;
   containsImpl: boolean;
   containsElk: boolean;
   packages: ProvenancePackage[];
@@ -58,6 +63,10 @@ export interface UiProvenance {
   v: 1;
   /** False when the build never reaches `mermaid-impl.ts` (e.g. the production build before the UI wires it). */
   implInGraph: boolean;
+  terminal?: {
+    implInGraph: boolean;
+    css: Record<string, { sha256: string; sourceSha256: string; sourceModule: string; packages: ProvenancePackage[] }>;
+  };
   chunks: Record<string, ProvenanceChunk>;
   /** Outer `name@version` → embedded-component artifacts. */
   embedded: Record<string, ProvenanceEmbedded[]>;
@@ -240,6 +249,9 @@ export function mermaidProvenancePlugin(options: MermaidProvenanceOptions): Merm
   const implSuffix = options.implSuffix ?? DEFAULT_IMPL_SUFFIX;
   let exclusive = new Set<string>();
   let implId: string | null = null;
+  let terminalImplId: string | null = null;
+  let terminalExclusive = new Set<string>();
+  let terminalCss: NonNullable<UiProvenance["terminal"]>["css"] = {};
   let outDir = "";
   let elkVersion = "unknown";
   const embeddedByModule = new Map<string, { pkgKey: string; file: string; components: string[] }>();
@@ -248,6 +260,9 @@ export function mermaidProvenancePlugin(options: MermaidProvenanceOptions): Merm
     string,
     {
       exclusive: boolean;
+      terminalHost: boolean;
+      terminalExclusive: boolean;
+      containsTerminalImpl: boolean;
       containsImpl: boolean;
       containsElk: boolean;
       packages: ProvenancePackage[];
@@ -282,6 +297,8 @@ export function mermaidProvenancePlugin(options: MermaidProvenanceOptions): Merm
     name: "pwh:mermaid-provenance",
     apply: "build",
     chunkFileNames(chunk) {
+      if (chunk.moduleIds.length > 0 && chunk.moduleIds.every((id) => terminalExclusive.has(id)))
+        return "assets/term-[name]-[hash].js";
       return chunkFileNamePattern(chunk.moduleIds, exclusive);
     },
     configResolved(config) {
@@ -297,6 +314,10 @@ export function mermaidProvenancePlugin(options: MermaidProvenanceOptions): Merm
         const lookup: ModuleLookup = (id) => this.getModuleInfo(id);
         exclusive = computeExclusiveSets(lookup, ids, implId).exclusive;
       }
+      terminalImplId = ids.find((id) => id.endsWith(`components${sep}terminal${sep}terminal-impl.ts`)) ?? null;
+      terminalExclusive = terminalImplId
+        ? computeExclusiveSets((id) => this.getModuleInfo(id), ids, terminalImplId).exclusive
+        : new Set();
       const elkId = ids.find((id) => ELK_MODULE_RE.test(id));
       if (elkId) {
         const info = await packageInfo(elkId);
@@ -306,9 +327,19 @@ export function mermaidProvenancePlugin(options: MermaidProvenanceOptions): Merm
       for (const id of ids) {
         const loc = packageDirOfModuleId(id);
         if (!loc) continue;
-        const code = this.getModuleInfo(id)?.code;
-        if (typeof code !== "string" || !code.includes("node_modules/")) continue;
+        let code = this.getModuleInfo(id)?.code;
+        const cleanId = id.split("?")[0] ?? id;
+        if (loc.name.startsWith("@xterm/") && (cleanId.endsWith(".css") || /\/lib\/[^/]+\.mjs$/.test(cleanId)))
+          code = await readFile(cleanId, "utf8");
+        if (typeof code !== "string") continue;
         const components = embeddedComponentsOf(code);
+        // xterm prebundles VS Code sources and preserves Microsoft + historical terminal
+        // attributions in its ESM/CSS headers, not pnpm path comments. Pin that closure too.
+        if (
+          ["@xterm/xterm", "@xterm/addon-webgl"].includes(loc.name) &&
+          /Copyright \(c\) (Microsoft Corporation|2011 Fabrice Bellard)/.test(code)
+        )
+          components.push("xterm-embedded-attributions@6.0.0");
         if (components.length === 0) continue;
         const info = await packageInfo(id);
         if (!info) continue;
@@ -332,6 +363,29 @@ export function mermaidProvenancePlugin(options: MermaidProvenanceOptions): Merm
     },
     async generateBundle(_o, bundle: OutputBundle) {
       chunkMeta.clear();
+      terminalCss = {};
+      // ?url assets must identify an exclusive module as their original source.
+      // This binds emitted CSS to the actual module graph, not a filename convention.
+      for (const id of terminalExclusive) {
+        if (!id.endsWith(".css?url")) continue;
+        const source = await readFile(id.slice(0, -4));
+        if (/@import\b|url\s*\(/i.test(source.toString())) this.error(`terminal CSS has unresolved import/url: ${id}`);
+        const matches = Object.entries(bundle).filter(
+          ([, item]) => item.type === "asset" && item.originalFileNames.includes(id.slice(0, -4)),
+        );
+        if (matches.length !== 1) this.error(`terminal CSS asset not uniquely emitted: ${id}`);
+        const [path, asset] = matches[0]!;
+        if (asset.type !== "asset") this.error("terminal CSS is not an asset");
+        const outputHash = createHash("sha256").update(asset.source).digest("hex");
+        const p = await packageInfo(id);
+        const hash = createHash("sha256").update(source).digest("hex");
+        terminalCss[path] = {
+          sha256: outputHash,
+          sourceSha256: hash,
+          sourceModule: relative(resolve(outDir, "../../"), id).split(sep).join("/"),
+          packages: p ? [p] : [],
+        };
+      }
       for (const [fileName, item] of Object.entries(bundle)) {
         if (item.type !== "chunk") continue;
         const chunk = item as OutputChunk;
@@ -345,6 +399,18 @@ export function mermaidProvenancePlugin(options: MermaidProvenanceOptions): Merm
               `(e.g. ${cls.offenders.join(", ")}) — fix the import graph so mermaid code never shares a chunk with app code`,
           );
         }
+        const escaped = rendered.filter(
+          (id) =>
+            id.includes(`components${sep}terminal${sep}`) &&
+            !id.endsWith(`terminal-spike.ts`) &&
+            !terminalExclusive.has(id),
+        );
+        if (escaped.length)
+          this.error(`terminal provenance: terminal module reachable outside lazy impl: ${escaped.join(", ")}`);
+        const term = classifyChunkModules(rendered, terminalExclusive);
+        if (term.mixed) this.error(`terminal provenance: mixed chunk ${fileName} (${term.offenders.join(", ")})`);
+        if (rendered.some((id) => /[\\/]node_modules[\\/]@xterm[\\/]/.test(id)) && !term.exclusive)
+          this.error(`terminal provenance: xterm escaped exclusive chunk ${fileName}`);
         const pkgs = new Map<string, ProvenancePackage>();
         for (const id of rendered) {
           const p = await packageInfo(id);
@@ -352,6 +418,9 @@ export function mermaidProvenancePlugin(options: MermaidProvenanceOptions): Merm
         }
         chunkMeta.set(fileName, {
           exclusive: cls.exclusive,
+          terminalHost: rendered.some((id) => id.endsWith(`components${sep}terminal${sep}terminal-spike.ts`)),
+          terminalExclusive: term.exclusive,
+          containsTerminalImpl: terminalImplId !== null && rendered.includes(terminalImplId),
           containsImpl: implId !== null && rendered.includes(implId),
           containsElk: rendered.some((id) => ELK_MODULE_RE.test(id)),
           packages: [...pkgs.values()].sort((a, b) => (a.name + a.version).localeCompare(b.name + b.version)),
@@ -375,6 +444,9 @@ export function mermaidProvenancePlugin(options: MermaidProvenanceOptions): Merm
           chunks[rel] = {
             sha256,
             mermaidExclusive: meta?.exclusive ?? false,
+            terminalHost: meta?.terminalHost ?? false,
+            terminalExclusive: meta?.terminalExclusive ?? false,
+            containsTerminalImpl: meta?.containsTerminalImpl ?? false,
             containsImpl: meta?.containsImpl ?? false,
             containsElk: meta?.containsElk ?? false,
             packages: meta?.packages ?? [],
@@ -389,7 +461,18 @@ export function mermaidProvenancePlugin(options: MermaidProvenanceOptions): Merm
           (embedded[e.pkgKey] ??= []).push({ file: e.file, sha256, components: e.components });
         }
         for (const list of Object.values(embedded)) list.sort((a, b) => a.file.localeCompare(b.file));
-        const prov: UiProvenance = { v: 1, implInGraph: implId !== null, chunks, embedded };
+        for (const [path, asset] of Object.entries(terminalCss)) {
+          asset.sha256 = createHash("sha256")
+            .update(await readFile(join(outDir, path)))
+            .digest("hex");
+        }
+        const prov: UiProvenance = {
+          v: 1,
+          implInGraph: implId !== null,
+          chunks,
+          embedded,
+          terminal: { implInGraph: terminalImplId !== null, css: terminalCss },
+        };
         await mkdir(dirname(options.outFile), { recursive: true });
         await writeFile(options.outFile, `${JSON.stringify(prov, null, 1)}\n`, "utf8");
       },

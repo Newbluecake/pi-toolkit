@@ -1,0 +1,12 @@
+.terminal-spike-surface {
+  width: 640px;
+  height: 320px;
+  max-width: 100%;
+}
+.terminal-spike-surface .xterm {
+  height: 100%;
+}
+.terminal-spike-surface.is-large {
+  width: 960px;
+  height: 480px;
+}

@@ -45,6 +45,14 @@ import {
   type VendoredBundled,
 } from "./lib/ui-provenance.js";
 
+import {
+  TERMINAL_JS_BUDGET_GZIP_BYTES,
+  TERMINAL_CSS_BUDGET_GZIP_BYTES,
+  TERMINAL_HOST_BUDGET_GZIP_BYTES,
+  terminalExclusiveSet,
+  verifyTerminalProvenance,
+} from "./lib/terminal-provenance.js";
+
 const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const DIST_DIR = resolve(REPO_ROOT, "dist/web-hub-ui");
 const PROVENANCE_FILE =
@@ -142,7 +150,7 @@ const FIRST_SCREEN_JS_BUDGET_GZIP_BYTES = 512 * 1024;
 // 2026-10-16 user ruling ("免得反复折腾"): lazy JS and CSS follow the first-screen rule — roughly 2× headroom,
 // coarse regression alarms only.
 const LAZY_JS_BUDGET_GZIP_BYTES = 128 * 1024;
-// CSS (one file, cssCodeSplit:false ⇒ all of it is first-screen): the 25 KiB set in vue-plan v2.1
+// Ordinary CSS (cssCodeSplit:false); terminal-only ?url assets are separately budgeted: the 25 KiB set in vue-plan v2.1
 // was as empirical as the old JS total. 2026-10-11 (user: don't spend effort squeezing gzip bytes)
 // it follows the same rule as the first-screen JS budget — measured 25,615 B gz × 1.10 rounded up
 // to a whole KiB = 28 KiB — so it stays a regression alarm instead of a per-feature chore.
@@ -384,6 +392,8 @@ async function main(): Promise<void> {
   await checkIndexHtml(await readFile(indexAbs, "utf8").catch(() => fail("index.html is missing")));
 
   let cssGzipTotal = 0;
+  const cssBytes = new Map<string, Buffer>();
+  const cssGzipBytes = new Map<string, number>();
   const jsSources = new Map<string, string>();
   const jsBytes = new Map<string, Buffer>();
   const jsGzipBytes = new Map<string, number>();
@@ -398,7 +408,10 @@ async function main(): Promise<void> {
       jsSources.set(rel, source);
       jsGzipBytes.set(rel, gzipBytes(source));
     } else if (ext === ".css") {
-      const source = await readFile(abs, "utf8");
+      const bytes = await readFile(abs);
+      cssBytes.set(rel, bytes);
+      cssGzipBytes.set(rel, gzipBytes(bytes));
+      const source = bytes.toString("utf8");
       if (/<style[\s>]/i.test(source)) fail(`${rel}: contains a <style> tag literal (unexpected in CSS)`);
       // Motion pref (2026-10, `pwh_motion`): the reduce rules must have been rewritten.
       // `[data-motion=…]` selectors appear in built CSS ONLY through vite.config.ts's
@@ -423,11 +436,39 @@ async function main(): Promise<void> {
   const disjoint = verifyFirstScreenDisjoint(classification.firstScreen, prov);
   if (disjoint.length > 0) fail(disjoint.join("; "));
   for (const [rel, source] of jsSources) scanForbiddenPatterns(source, rel, exemptionsFor(rel, prov));
+  const terminalCssInputs = new Map<string, Buffer>();
+  for (const asset of Object.values(prov.terminal?.css ?? {})) {
+    const input = resolve(REPO_ROOT, asset.sourceModule.replace(/\?url$/, ""));
+    if (!input.startsWith(REPO_ROOT)) fail("terminal CSS source outside repo");
+    terminalCssInputs.set(asset.sourceModule, await readFile(input));
+  }
+  const terminalErrors = verifyTerminalProvenance(
+    prov,
+    classification.firstScreen,
+    cssBytes,
+    await readFile(indexAbs, "utf8"),
+    terminalCssInputs,
+  );
+  if (terminalErrors.length) fail(`terminal provenance: ${terminalErrors.join("; ")}`);
+  const terminal = terminalExclusiveSet(prov);
+  const terminalJsGzip = [...terminal].reduce((total, path) => total + jsGzipBytes.get(path)!, 0);
+  const terminalCssGzip = Object.keys(prov.terminal?.css ?? {}).reduce(
+    (total, path) => total + cssGzipBytes.get(path)!,
+    0,
+  );
+  const hosts = Object.entries(prov.chunks)
+    .filter(([, c]) => c.terminalHost)
+    .map(([path]) => path);
+  const hostGzip = hosts.reduce((total, path) => total + jsGzipBytes.get(path)!, 0);
+  if (terminalJsGzip > TERMINAL_JS_BUDGET_GZIP_BYTES) fail(`terminal JS budget exceeded: ${terminalJsGzip}`);
+  if (terminalCssGzip > TERMINAL_CSS_BUDGET_GZIP_BYTES) fail(`terminal CSS budget exceeded: ${terminalCssGzip}`);
+  if (hostGzip > TERMINAL_HOST_BUDGET_GZIP_BYTES) fail(`terminal host budget exceeded: ${hostGzip}`);
+  cssGzipTotal -= terminalCssGzip;
   const exclusive = exclusiveSet(prov);
   const firstScreenJsGzip = [...classification.firstScreen].reduce((total, path) => total + jsGzipBytes.get(path)!, 0);
   // The mermaid closure is budgeted on its own (MERMAID_JS_BUDGET); it never counts as lazy app JS.
   const lazyJsGzip = [...classification.lazy]
-    .filter((path) => !exclusive.has(path))
+    .filter((path) => !exclusive.has(path) && !terminal.has(path))
     .reduce((total, path) => total + jsGzipBytes.get(path)!, 0);
   const mermaidJsGzip = mermaidGzipBytes(prov, jsGzipBytes);
   if (budgetExceeded(mermaidJsGzip, MERMAID_JS_BUDGET_GZIP_BYTES)) {
@@ -458,7 +499,7 @@ async function main(): Promise<void> {
   }
 
   console.log(
-    `✓ check:web — dist/web-hub-ui/ OK (${files.length} files, first-screen JS ${firstScreenJsGzip}B gz/${FIRST_SCREEN_JS_BUDGET_GZIP_BYTES}B, lazy JS ${lazyJsGzip}B gz/${LAZY_JS_BUDGET_GZIP_BYTES}B, mermaid JS ${mermaidJsGzip}B gz/${MERMAID_JS_BUDGET_GZIP_BYTES}B in ${exclusive.size} mmd files, CSS ${cssGzipTotal}B gz/${CSS_BUDGET_GZIP_BYTES}B, ${uniquePackages(prov).length} packages)`,
+    `✓ check:web — dist/web-hub-ui/ OK (${files.length} files, first-screen JS ${firstScreenJsGzip}B gz/${FIRST_SCREEN_JS_BUDGET_GZIP_BYTES}B, lazy JS ${lazyJsGzip}B gz/${LAZY_JS_BUDGET_GZIP_BYTES}B, mermaid JS ${mermaidJsGzip}B gz/${MERMAID_JS_BUDGET_GZIP_BYTES}B in ${exclusive.size} mmd files, CSS ${cssGzipTotal}B gz/${CSS_BUDGET_GZIP_BYTES}B, terminal JS ${terminalJsGzip}B gz/${TERMINAL_JS_BUDGET_GZIP_BYTES}B in ${terminal.size} files, terminal CSS ${terminalCssGzip}B gz/${TERMINAL_CSS_BUDGET_GZIP_BYTES}B, terminal host ${hostGzip}B gz/${TERMINAL_HOST_BUDGET_GZIP_BYTES}B, ${uniquePackages(prov).length} packages)`,
   );
 }
 

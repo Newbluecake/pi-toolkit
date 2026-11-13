@@ -41,7 +41,11 @@ export interface PwPage {
   goto(url: string, opts?: { waitUntil?: "load" | "domcontentloaded" | "networkidle" }): Promise<unknown>;
   evaluate<T>(fn: (...args: never[]) => T | Promise<T>, ...args: never[]): Promise<T>;
   evaluate<T, A>(fn: (arg: A) => T | Promise<T>, arg: A): Promise<T>;
-  waitForFunction(fn: string | ((...args: never[]) => unknown), opts?: { timeout?: number }): Promise<unknown>;
+  waitForFunction(
+    fn: string | ((...args: never[]) => unknown),
+    arg?: unknown,
+    opts?: { timeout?: number },
+  ): Promise<unknown>;
   click(selector: string): Promise<void>;
   close(): Promise<void>;
   on(event: "console" | "pageerror" | "request", handler: (...args: unknown[]) => void): void;
