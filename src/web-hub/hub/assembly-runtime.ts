@@ -281,10 +281,32 @@ export function startRuntimeMonitors(
         }, UPLOAD_SWEEP_TICK_MS);
   ctx.uploadSweepTick?.unref();
 
-  ctx.stopFence = startFence(paths.socketPath, ctx.socketIdentity!, (why) => {
-    log.warn("socket fence lost: another hub owns the socket path", { why });
-    void ctx.close!("fence");
-  });
+  ctx.stopFence = startFence(
+    paths.socketPath,
+    ctx.socketIdentity!,
+    (why) => {
+      log.warn(
+        why === "socket-replaced"
+          ? "socket fence lost: another hub owns the socket path"
+          : "socket fence verification failed",
+        { why },
+      );
+      void ctx.close!("fence");
+    },
+    undefined,
+    undefined,
+    {
+      onDiagnostic: ({ errorClass, durationMs, inFlight, strike, threshold }) => {
+        log.warn("socket fence check strike", {
+          errorClass: /^[A-Za-z0-9_-]{1,64}$/.test(errorClass) ? errorClass : "unknown",
+          durationMs,
+          inFlight,
+          strike,
+          threshold,
+        });
+      },
+    },
+  );
 
   ctx.idle = createIdleMonitor({
     counts: () => ({
