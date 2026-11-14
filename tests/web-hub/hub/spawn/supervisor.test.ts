@@ -4218,12 +4218,21 @@ describe("retained exited r3: cache-only snapshots, guarded D7, lazy binding", (
       if (op === "open") mono += 21;
     });
     loadInto(kit, [
+      liveStored({ spawnId: "native-live-candidate" }),
       liveStored({ state: "stopping", restoreIntent: undefined }),
       terminal({ spawnId: "second-record" }),
     ]);
     await kit.h.sup.init(deadline());
     expect(fs.ledger.map((e) => e.op)).toEqual(["open", "close"]);
-    expect(kit.h.store.dirtyGet()!.every((r) => r.sessionFile === undefined)).toBe(true);
+    const tracked = kit.h.order.indexOf("track");
+    expect(tracked).toBeGreaterThanOrEqual(0);
+    expect(kit.h.order.indexOf("probe:open")).toBeGreaterThan(tracked);
+    expect(
+      kit.h.store
+        .dirtyGet()!
+        .filter((r) => r.state === "exited")
+        .every((r) => r.sessionFile === undefined),
+    ).toBe(true);
     expect(fs.reads()).toHaveLength(0);
   });
 
