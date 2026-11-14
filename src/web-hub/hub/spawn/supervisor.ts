@@ -100,6 +100,15 @@ import {
   type SpawnsPayload,
 } from "../../protocol/spawn.js";
 import type { ForkReason, HistoryKind, ProofGap } from "../../protocol/session-history.js";
+import {
+  isPiLazyBasename,
+  bindingDigest,
+  type SessionBinding,
+  type CachedAdoptionProof,
+  type LazyBindingPermit,
+  type ProofWorkBudget,
+  type RetainedSessionGuard,
+} from "./retained-session.js";
 import type { Reaper, ReaperTrackRecord } from "./reaper.js";
 import type { SpawnRegistryPort } from "./ports.js";
 import { createRpcStdio, type RpcStdio } from "./rpc-stdio.js";
@@ -110,10 +119,8 @@ import type { CaptureSessionPathPin, SessionPathPin, VerifySessionPathPin } from
 import {
   classifyForRestore,
   hidesIdentityOnWire,
-  locateSessionFile,
   planSessionArgv,
   restoreWireOf,
-  type LocateSessionFs,
   type RestoreSessionFs,
 } from "./restore-plan.js";
 import {
@@ -370,6 +377,11 @@ interface StopState {
 }
 
 interface Supervised extends InternalRecord {
+  coordsRevision: number;
+  adoptionProof?: CachedAdoptionProof;
+  adoptionAttempted?: boolean;
+  adoptionBlocked?: boolean;
+  lazyPermit?: LazyBindingPermit;
   uiCancelled: Array<{ method: string; title?: string; at: number }>;
   child: ChildProcess | undefined;
   stdio: RpcStdio | undefined;
@@ -416,6 +428,7 @@ export type ShutdownMode = "terminate" | "restore";
 
 /** The slice of the bus `SessionInfo` the supervisor keeps (RS3). */
 interface SessionCoords {
+  cwd: string;
   sessionId: string;
   sessionFile?: string | undefined;
 }
@@ -549,10 +562,9 @@ export interface SpawnSupervisorDeps {
    *  or the dir was never created because no fork has ever happened yet). */
   forkSrcDir?: string;
   // ---- spawn-relaunch (optional)
-  /** `process.env.PI_CODING_AGENT_DIR ?? <home>/.pi/agent` — the base for
-   *  `locateSessionFile`'s default-session-dir fallback when a relaunch target never adopted a
-   *  `sessionFile`. Absent ⇒ the locate step is skipped (straight to `--session-id`). */
+  /** Lexical agentDir candidate (not a nofollow proof or content-read authorization). */
   agentDir?: string;
+  retainedSessionGuard?: RetainedSessionGuard;
 }
 
 // ---------------------------------------------------------------------------
@@ -810,10 +822,21 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
     if (rec.removePending) out.removeIntent = true;
     if (rec.noProcess !== undefined) out.noProcess = rec.noProcess;
     // web-hub-spawn-restore plan §5.2/D6: the restore fields exist on disk ONLY when restore is on
-    // (restore off ⇒ spawns.json byte-identical to the pre-feature format). A terminal record
-    // without a `restore` slice carries no session coordinates (useless, costs budget).
+    // (restore off ⇒ spawns.json byte-identical to the pre-feature format). Terminal
+    // coordinates now require adoption provenance, independently of the restore slice.
     if (restoreOn) {
-      const keepSession = !isTerminalSpawnState(rec.state) || rec.restore !== undefined;
+      // Cache-only projection: NEVER acquire/refresh a proof in any save/debounce/flush.
+      const restricted = isTerminalSpawnState(rec.state) || rec.sessionGuard !== undefined;
+      const binding = bindingOf(rec);
+      const cached =
+        binding !== undefined &&
+        deps.retainedSessionGuard?.matches(rec.adoptionProof, binding, rec.coordsRevision) === true;
+      const keepSession = !restricted || cached;
+      if (restricted) {
+        out.sessionGuard = rec.sessionGuard ?? { kind: "default-tree-v1" };
+        if (cached && rec.adoptionProof !== undefined)
+          out.sessionGuard = { ...out.sessionGuard, baseline: rec.adoptionProof.baseline };
+      }
       if (keepSession && rec.sessionId !== undefined && RESTORE_SESSION_ID_RE.test(rec.sessionId)) {
         out.sessionId = rec.sessionId;
         if (rec.sessionFile !== undefined) out.sessionFile = rec.sessionFile;
@@ -1115,6 +1138,8 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
   function deleteRecord(rec: Supervised): void {
     if (records.get(rec.spawnId) !== rec) return;
     records.delete(rec.spawnId);
+    delete rec.adoptionProof;
+    delete rec.lazyPermit;
     persistDebounced();
     schedulePush();
     deps.audit({ audit: "spawn", phase: "remove", spawnId: rec.spawnId });
@@ -1177,7 +1202,11 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
     const terminal = [...records.values()].filter((r) => isTerminalSpawnState(r.state));
     if (terminal.length <= SPAWN_TERMINAL_KEEP) return;
     terminal.sort((a, b) => a.updatedAt - b.updatedAt);
-    for (const rec of terminal.slice(0, terminal.length - SPAWN_TERMINAL_KEEP)) records.delete(rec.spawnId);
+    for (const rec of terminal.slice(0, terminal.length - SPAWN_TERMINAL_KEEP)) {
+      records.delete(rec.spawnId);
+      delete rec.adoptionProof;
+      delete rec.lazyPermit;
+    }
   }
 
   function finalizeTerminal(rec: Supervised): void {
@@ -1426,23 +1455,195 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
    * web-hub-spawn-restore plan RS3/D6: adopt the bound agent's session coordinates. Returns true
    * when anything changed. `sessionPersisted` is re-judged against the (possibly new) file.
    */
+  function bindingOf(rec: Supervised): SessionBinding | undefined {
+    return rec.sessionId !== undefined && rec.sessionFile !== undefined
+      ? { spawnId: rec.spawnId, cwd: rec.cwd, sessionId: rec.sessionId, sessionFile: rec.sessionFile }
+      : undefined;
+  }
+
+  function prepareAdoption(rec: Supervised, work?: ProofWorkBudget): boolean {
+    const guard = deps.retainedSessionGuard,
+      binding = bindingOf(rec);
+    const previous = rec.adoptionProof;
+    delete rec.adoptionProof;
+    rec.adoptionAttempted = true;
+    if (!restoreOn || guard === undefined || binding === undefined || rec.adoptionBlocked) return false;
+    const expected = rec.sessionGuard?.baseline ?? previous?.baseline;
+    // A sticky restricted-but-unproven record may never become legacy/capture a replacement.
+    if (rec.sessionGuard !== undefined && expected === undefined) return false;
+    const result = guard.capture(binding, rec.coordsRevision, expected, work);
+    if (!result.ok) {
+      rec.adoptionBlocked = true;
+      return false;
+    }
+    rec.adoptionProof = result.value;
+    if (rec.sessionGuard !== undefined || isTerminalSpawnState(rec.state))
+      rec.sessionGuard = { ...(rec.sessionGuard ?? { kind: "default-tree-v1" }), baseline: result.value.baseline };
+    if (result.value.leafPresent) rec.sessionPersisted = true;
+    return true;
+  }
+
   function adoptSessionCoords(rec: Supervised, session: SessionCoords): boolean {
+    if (rec.sessionGuard !== undefined && session.cwd !== rec.cwd) {
+      rec.coordsRevision++;
+      delete rec.adoptionProof;
+      rec.adoptionBlocked = true;
+      rec.hintDetail = "session-swapped";
+      enterStopping(rec, "protocol_error");
+      return true;
+    }
     const file =
       session.sessionFile !== undefined && isValidRestoreSessionFile(session.sessionFile)
         ? session.sessionFile
         : undefined;
     const changed = rec.sessionId !== session.sessionId || rec.sessionFile !== file;
+    if (!changed && rec.adoptionAttempted) return false;
+    rec.coordsRevision++;
+    delete rec.adoptionProof;
+    delete rec.adoptionBlocked;
+    // A real guarded switch is a new adoption, never a reuse of the lazy permit.
+    // Failed candidates revoke the old revision and stop; never adopt an unsafe tuple.
+    let switchedProof: CachedAdoptionProof | undefined;
+    if (changed && rec.sessionGuard !== undefined) {
+      const b =
+        file !== undefined
+          ? { spawnId: rec.spawnId, cwd: session.cwd, sessionId: session.sessionId, sessionFile: file }
+          : undefined;
+      const result = b !== undefined ? deps.retainedSessionGuard?.capture(b, rec.coordsRevision) : undefined;
+      rec.adoptionAttempted = true;
+      if (!result?.ok) {
+        rec.adoptionBlocked = true;
+        rec.hintDetail = "session-swapped";
+        enterStopping(rec, "protocol_error");
+        return true;
+      }
+      switchedProof = result.value;
+    }
     rec.sessionId = session.sessionId;
     if (rec.sessionFile !== file) {
       delete rec.sessionPersisted;
       if (file === undefined) delete rec.sessionFile;
       else rec.sessionFile = file;
     }
-    if (file !== undefined && rec.sessionPersisted !== true && sessionFileExists(file)) {
+    if (switchedProof !== undefined && rec.sessionGuard !== undefined) {
+      rec.adoptionProof = switchedProof;
+      rec.sessionGuard.baseline = switchedProof.baseline;
+      if (switchedProof.leafPresent) rec.sessionPersisted = true;
+    } else prepareAdoption(rec);
+    // Preserve legacy live/custom boot behavior without issuing retained authorization.
+    if (
+      rec.sessionGuard === undefined &&
+      file !== undefined &&
+      rec.sessionPersisted !== true &&
+      sessionFileExists(file)
+    )
       rec.sessionPersisted = true;
+    return changed;
+  }
+
+  function guardedPlan(rec: Supervised, remainingMs = 20) {
+    const guard = deps.retainedSessionGuard,
+      binding = bindingOf(rec);
+    if (rec.sessionGuard?.lazyIntent !== undefined)
+      return { ok: false as const, failure: "session-invalid" as const, detail: "lazy-binding-unresolved" };
+    if (
+      binding === undefined ||
+      guard === undefined ||
+      rec.adoptionBlocked ||
+      (rec.sessionGuard !== undefined && rec.sessionGuard.baseline === undefined)
+    ) {
+      return { ok: false as const, failure: "session-invalid" as const, detail: "default-tree-unproven" };
+    }
+    const result = guard.withRead(
+      binding,
+      rec.coordsRevision,
+      rec.sessionGuard?.baseline ?? rec.adoptionProof?.baseline,
+      (reader, proof) => {
+        const plan = planSessionArgv(
+          {
+            ...binding,
+            sessionPersisted: rec.sessionPersisted ?? (proof.baseline.file !== undefined ? true : undefined),
+          },
+          reader,
+          getuidFn(),
+        );
+        if (plan.ok) {
+          rec.adoptionProof = proof;
+          rec.adoptionAttempted = true;
+          rec.sessionGuard = { kind: "default-tree-v1", baseline: proof.baseline };
+          if (proof.leafPresent) rec.sessionPersisted = true;
+        }
+        return plan;
+      },
+      guard.budget(remainingMs),
+    );
+    if (!result.ok) {
+      delete rec.adoptionProof;
+      rec.adoptionBlocked = true;
+      return result;
+    }
+    return result.value;
+  }
+
+  function bindGuardedLive(rec: Supervised, session: SessionCoords): boolean {
+    if (rec.sessionGuard === undefined) return true;
+    // The session frame is independent of hello; never prove a reported tuple using the
+    // record's old cwd in place of the actual report (including for exact --session binds).
+    if (session.cwd !== rec.cwd) return false;
+    const permit = rec.lazyPermit;
+    const target = rec.sessionTarget;
+    if (permit !== undefined && permit.state === "active") {
+      const id = identityOf(rec),
+        actual = permit.actualForkIdentity;
+      const file = session.sessionFile;
+      if (
+        rec.restore?.phase !== "registering" ||
+        rec.restore.attempts !== permit.attempt ||
+        rec.coordsRevision !== permit.sourceRevision ||
+        rec.registerDeadlineAt === undefined ||
+        now() >= rec.registerDeadlineAt ||
+        session.sessionId !== permit.sessionId ||
+        rec.cwd !== permit.cwd ||
+        id === undefined ||
+        id.pid !== actual.pid ||
+        id.bootId !== actual.bootId ||
+        id.procStartTicks !== actual.procStartTicks ||
+        id.uid !== actual.uid ||
+        !verifyIdentityById(id, true).ok ||
+        rec.agentKey === undefined ||
+        registry.get(rec.agentKey)?.pid !== id.pid ||
+        file === undefined ||
+        (file !== permit.oldSessionFile && !isPiLazyBasename(file, permit.sessionId))
+      )
+        return false;
+      const b: SessionBinding = {
+        spawnId: rec.spawnId,
+        cwd: session.cwd,
+        sessionId: session.sessionId,
+        sessionFile: file,
+      };
+      const expected = { ...permit.parentBaseline, bindingDigest: bindingDigest(b) };
+      const proof = deps.retainedSessionGuard?.capture(b, rec.coordsRevision + 1, expected);
+      if (
+        !proof?.ok ||
+        now() >= rec.registerDeadlineAt ||
+        rec.restore.attempts !== permit.attempt ||
+        rec.state !== "starting"
+      )
+        return false;
+      permit.state = "consumed";
+      rec.coordsRevision++;
+      rec.sessionFile = file;
+      rec.sessionId = session.sessionId;
+      rec.adoptionProof = proof.value;
+      rec.adoptionAttempted = true;
+      rec.sessionGuard = { kind: "default-tree-v1", baseline: proof.value.baseline };
+      if (proof.value.leafPresent) rec.sessionPersisted = true;
       return true;
     }
-    return changed;
+    // All actual --session forks remain exact, regardless of the history switch.
+    if (target === undefined || session.sessionId !== target.id || session.sessionFile !== target.file) return false;
+    return prepareAdoption(rec);
   }
 
   function auditRestore(rec: Supervised, step: NonNullable<SpawnAuditRecord["restore"]>): void {
@@ -1462,6 +1663,11 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
   function goLive(rec: Supervised, session: SessionCoords): void {
     if (isTerminalSpawnState(rec.state) || rec.state !== "starting") return;
     const sessionId = session.sessionId;
+    if (!bindGuardedLive(rec, session)) {
+      rec.hintDetail = "session-swapped";
+      enterStopping(rec, "protocol_error");
+      return;
+    }
     // session-history plan §4.6.3 step 1: a forked/resumed session reporting an unexpected id —
     // annotate only (owner-only hintDetail + a non-persisted audit code, PD3), still goes live.
     if (rec.sessionTarget !== undefined && sessionId !== rec.sessionTarget.id) {
@@ -1612,6 +1818,8 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
       // once observed the evidence sticks (no further stats for this file).
       if (rec.lastBusy && !busy && rec.sessionPersisted !== true && rec.sessionFile !== undefined) {
         if (sessionFileExists(rec.sessionFile)) {
+          rec.coordsRevision++;
+          prepareAdoption(rec);
           rec.sessionPersisted = true;
           persistDebounced();
         }
@@ -1798,6 +2006,7 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
       lastBusy: false,
       restoreSlot: undefined,
       lifetimeAnchorAt: undefined,
+      coordsRevision: 0,
       ...(sessionTarget === undefined ? {} : { sessionTarget }),
       ...(sessionFrom === undefined ? {} : { from: sessionFrom }),
       ...(sessionPathPin === undefined ? {} : { sessionPathPin }),
@@ -2026,6 +2235,7 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
       lastBusy: false,
       restoreSlot: undefined,
       lifetimeAnchorAt: undefined,
+      coordsRevision: 0,
     };
     return rec;
   }
@@ -2290,6 +2500,19 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
       schedulePush();
     }
     scheduleRestores(reaperOk);
+    // One boot adoption batch AFTER original reaper tracking/enqueue; shared total budget.
+    const guard = restoreOn ? deps.retainedSessionGuard : undefined;
+    if (guard !== undefined) {
+      const work = guard.budget(Math.max(0, deadline.remaining()));
+      let preparedAny = false;
+      for (const rec of records.values()) {
+        if (!guard.available(work)) break;
+        if (!isTerminalSpawnState(rec.state) || rec.removePending || bindingOf(rec) === undefined) continue;
+        preparedAny = true;
+        prepareAdoption(rec, work);
+      }
+      if (preparedAny) persistDebounced();
+    }
   }
 
   // ----------------------------------------------------------------- restore (web-hub-spawn-restore v1)
@@ -2481,11 +2704,19 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
       launcherChanged = true; // arch §4.2: same degrade as start()
       return failRestorePreflight(rec, "launcher");
     }
-    const plan = planSessionArgv(
-      { sessionId: rec.sessionId, sessionFile: rec.sessionFile, sessionPersisted: rec.sessionPersisted, cwd: rec.cwd },
-      sessionFs,
-      getuidFn(),
-    );
+    const plan =
+      rec.sessionGuard !== undefined
+        ? guardedPlan(rec)
+        : planSessionArgv(
+            {
+              sessionId: rec.sessionId,
+              sessionFile: rec.sessionFile,
+              sessionPersisted: rec.sessionPersisted,
+              cwd: rec.cwd,
+            },
+            sessionFs,
+            getuidFn(),
+          );
     if (!plan.ok) return failRestorePreflight(rec, plan.failure, plan.detail);
     if (rec.restore === undefined) return failRestorePreflight(rec, "persist"); // unreachable: candidates carry it
 
@@ -2517,12 +2748,27 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
     rec.restore.attempts += 1;
     rec.restore.lastAt = t;
     rec.updatedAt = t;
+    const lazy =
+      rec.sessionGuard !== undefined &&
+      plan.tail.length === 2 &&
+      plan.tail[0] === "--session-id" &&
+      plan.tail[1] === rec.sessionId &&
+      rec.sessionPersisted !== true &&
+      rec.sessionGuard.baseline?.file === undefined;
+    if (lazy && rec.sessionGuard !== undefined) rec.sessionGuard.lazyIntent = { attempt: rec.restore.attempts };
+    delete rec.lazyPermit;
     const saved = store.saveNow(storedSnapshot());
-    if (!saved.ok) return failRestorePreflight(rec, "persist");
+    if (!saved.ok) {
+      if (rec.sessionGuard !== undefined) delete rec.sessionGuard.lazyIntent;
+      return failRestorePreflight(rec, "persist");
+    }
 
     // ④ forkInto — pin first (dev/ino re-check), then the shared fork stretch.
     const pin = dirs.pinSync({ realpath: rec.cwd, dev: rec.dev, ino: rec.ino });
-    if (!pin.ok) return failRestorePreflight(rec, "cwd-changed", `cwd ${pin.reason}`);
+    if (!pin.ok) {
+      if (rec.sessionGuard !== undefined) delete rec.sessionGuard.lazyIntent;
+      return failRestorePreflight(rec, "cwd-changed", `cwd ${pin.reason}`);
+    }
     rec.spawnEventSettled = false;
     rec.rejectProbe = undefined; // D8: never `--model` on restore ⇒ no model verdict machinery
     rec.breakerVerdict = undefined;
@@ -2545,7 +2791,33 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
       },
     );
     if (res === "persist-failed" && rec.restore !== undefined) rec.restore.failure = "persist";
-    if (res !== "ok") return false;
+    if (res !== "ok") {
+      if ((res === "spawn-threw" || res === "no-child") && rec.sessionGuard !== undefined)
+        delete rec.sessionGuard.lazyIntent;
+      return false;
+    }
+    // forkInto completed identity save AND reaper.track: assignment only, zero FS here.
+    rec.sessionTarget = { id: rec.sessionId!, ...(rec.sessionFile === undefined ? {} : { file: rec.sessionFile }) };
+    const actual = identityOf(rec),
+      base = rec.sessionGuard?.baseline;
+    if (
+      lazy &&
+      actual !== undefined &&
+      base !== undefined &&
+      rec.sessionFile !== undefined &&
+      rec.sessionId !== undefined
+    ) {
+      rec.lazyPermit = {
+        attempt: rec.restore.attempts,
+        sourceRevision: rec.coordsRevision,
+        sessionId: rec.sessionId,
+        cwd: rec.cwd,
+        parentBaseline: base,
+        oldSessionFile: rec.sessionFile,
+        actualForkIdentity: actual,
+        state: "active",
+      };
+    }
     auditRestore(rec, "fork");
     return true;
   }
@@ -2670,6 +2942,10 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
         if (verified.ok) groupKill(verified.pid, "SIGTERM");
       }
       store.flushAndClose(deadline);
+      for (const rec of records.values()) {
+        delete rec.adoptionProof;
+        delete rec.lazyPermit;
+      }
       const sinkBudget = deriveBudget(deadline.remaining(), 300, 6000);
       const sinkDeadline = createReqDeadline(now, Math.max(1, sinkBudget));
       const closes: Array<Promise<void>> = [];
@@ -2783,22 +3059,9 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
     if (sessionId === undefined || !RESTORE_SESSION_ID_RE.test(sessionId)) {
       return { ok: false, code: "E_BAD_REQUEST", reason: "no-session" };
     }
-    // Session coordinate preflight (D7, sync). When the record never adopted a `sessionFile`, ONE
-    // bounded locate-by-id in pi's default session dir runs first; a hit is adopted (so the fork
-    // — and any later restore — uses `--session <file>`), a miss keeps D7's `--session-id` rule.
-    if (rec.sessionFile === undefined && deps.agentDir !== undefined) {
-      const locateFs: LocateSessionFs = { ...sessionFs, readdirSync: readdirFn };
-      const located = locateSessionFile(locateFs, deps.agentDir, rec.cwd, sessionId);
-      if (located !== undefined && isValidRestoreSessionFile(located)) {
-        rec.sessionFile = located;
-        rec.sessionPersisted = true;
-      }
-    }
-    const plan = planSessionArgv(
-      { sessionId, sessionFile: rec.sessionFile, sessionPersisted: rec.sessionPersisted, cwd: rec.cwd },
-      sessionFs,
-      getuidFn(),
-    );
+    // Manual terminal restoration is always restricted to a provable default tree.
+    // No id-only locate/read fallback; cache provenance never substitutes for this read lease.
+    const plan = guardedPlan(rec, Math.max(0, deadline.remaining() - INTENT_MIN_REMAINING_MS));
     if (!plan.ok) return { ok: false, code: "E_SPAWN_GONE", reason: plan.failure };
 
     // Commit (L1 discipline: the transition lands on disk BEFORE the job can fork). The OLD
@@ -2808,7 +3071,8 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
     const prevKey = rec.agentKey;
     rec.state = "starting";
     delete rec.endReason;
-    delete rec.noProcess;
+    // Keep authoritative no-process evidence through the job's L6 re-check too. It is
+    // cleared with the old identity in restoreForkSync's synchronous new-fork intent.
     rec.stop = undefined;
     delete rec.hint;
     rec.hintDetail = undefined;

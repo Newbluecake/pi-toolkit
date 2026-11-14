@@ -1,3 +1,6 @@
+import { createSpawnStore } from "../../../../src/web-hub/hub/spawn/store.js";
+import { retainedFake } from "./retained-fake.js";
+import { createRetainedSessionGuard } from "../../../../src/web-hub/hub/spawn/retained-session.js";
 /**
  * web-hub-spawn plan §SP7 acceptance (arch v2 §3.1 table ①–⑩ + the 9 numbered cases):
  *
@@ -8,7 +11,7 @@
  */
 import { EventEmitter } from "node:events";
 import { type ChildProcess, type SpawnOptions, spawn as realSpawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -2555,18 +2558,21 @@ interface RestoreKit {
   files: Map<string, FakeSessionFile>;
   gone: Array<{ spawnId: string; key: string }>;
   vetoUnlinks: number;
+  retained: ReturnType<typeof retainedFake>;
 }
 
 function restoreKit(over: Partial<SpawnSupervisorDeps> = {}, cfgOver: Partial<HubSpawnConfig> = {}): RestoreKit {
   const world = procWorld();
   const files = new Map<string, FakeSessionFile>();
   const gone: Array<{ spawnId: string; key: string }> = [];
-  const kit: RestoreKit = { h: undefined as unknown as Harness, world, files, gone, vetoUnlinks: 0 };
+  const retained = retainedFake(files);
+  const kit: RestoreKit = { h: undefined as unknown as Harness, world, files, gone, vetoUnlinks: 0, retained };
   const kills: Array<{ pid: number; signal: string }> = [];
   kit.h = makeHarness({
     cfg: baseCfg({ restore: true, ...cfgOver }),
     proc: { readFileSync: worldProc(world), platform: "linux" },
     sessionFs: fakeSessionFs(files),
+    retainedSessionGuard: retained.guard,
     onPrevAgentGone: (spawnId, key) => gone.push({ spawnId, key }),
     kill: (pid, signal) => {
       kills.push({ pid, signal });
@@ -2642,7 +2648,7 @@ function pathPin(abs = SESS_ABS) {
  *  `sessionFile` precisely, unlike `driveToLive`'s fixed `sessionInfo()`. */
 async function driveToLiveWith(
   h: Harness,
-  session: { sessionId: string; sessionFile?: string },
+  session: { sessionId: string; sessionFile?: string; cwd?: string },
   key = "k1000",
   cwd = REALPATH,
 ): Promise<FakeChild> {
@@ -2666,7 +2672,7 @@ async function driveToLiveWith(
   h.registry.publish({
     type: "session",
     agentKey: key,
-    session: { ...session, reason: "new", leafId: null, mode: "rpc" as const },
+    session: { cwd, ...session, reason: "new", leafId: null, mode: "rpc" as const },
   });
   await vi.advanceTimersByTimeAsync(0);
   return child;
@@ -3948,34 +3954,21 @@ describe("spawn-relaunch: supervisor.relaunch()", () => {
     for (const k of [kit, kit2, kit3]) expect(k.h.spawnCalls).toHaveLength(0);
   });
 
-  it("locate fallback: no sessionFile on record ⇒ bounded scan of pi's default session dir; hit ⇒ adopted + --session <file>; miss ⇒ --session-id <id>", async () => {
-    const AGENT_DIR = "/home/u/.pi/agent";
-    const kit = restoreKit({
-      agentDir: AGENT_DIR,
-      readdirSync: (p: string) => {
-        if (p === `${AGENT_DIR}/sessions/--w-proj--`) return ["2026_sess-old.jsonl"];
-        throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
-      },
-    });
+  it("Q1: id-only terminal rejects without locate/read/fork (old live boot fallback remains separate)", async () => {
+    const scan = vi.fn(() => ["2026_sess-old.jsonl"]);
+    const kit = restoreKit({ agentDir: "/home/u/.pi/agent", readdirSync: scan });
     kit.files.set(SESS_FILE, { head: sessHeader() });
     loadInto(kit, [terminalStored({ sessionFile: undefined, sessionPersisted: undefined })]);
     await kit.h.sup.init(deadline());
-    expect(kit.h.sup.relaunch("sprestore0000001", deadline())).toMatchObject({ ok: true });
-    expect(kit.h.sup.records()[0]!.sessionFile).toBe(SESS_FILE); // adopted for the fork + future restores
-    await vi.advanceTimersByTimeAsync(0);
-    expect(kit.h.spawnCalls[0]!.args).toEqual([LAUNCHER[1], "--mode", "rpc", "--session", SESS_FILE]);
-
-    const miss = restoreKit({
-      agentDir: AGENT_DIR,
-      readdirSync: () => {
-        throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
-      },
+    expect(kit.h.sup.relaunch("sprestore0000001", deadline())).toEqual({
+      ok: false,
+      code: "E_SPAWN_GONE",
+      reason: "session-invalid",
     });
-    loadInto(miss, [terminalStored({ sessionFile: undefined, sessionPersisted: undefined })]);
-    await miss.h.sup.init(deadline());
-    expect(miss.h.sup.relaunch("sprestore0000001", deadline())).toMatchObject({ ok: true });
     await vi.advanceTimersByTimeAsync(0);
-    expect(miss.h.spawnCalls[0]!.args).toEqual([LAUNCHER[1], "--mode", "rpc", "--session-id", "sess-old"]);
+    expect(scan).not.toHaveBeenCalled();
+    expect(kit.retained.reads()).toHaveLength(0);
+    expect(kit.h.spawnCalls).toHaveLength(0);
   });
 
   it("commit persist failure ⇒ failed{spawn_error}+never-forked (no fork, no orphan), E_LAUNCHER persist", async () => {
@@ -4016,4 +4009,683 @@ describe("spawn lanConfirm (2026-10-13 U1 拍板): the LAN per-spawn confirm gat
     expect(off.sup.policy("p", "lan", "https", true).confirm).toBe("unknown-dir");
     expect(off.sup.policy("p", "loopback", "http", false).confirm).toBe("unknown-dir");
   });
+});
+
+// r3: source proofs only at adoption events; every D7 independently revalidates expected.
+describe("retained exited r3: cache-only snapshots, guarded D7, lazy binding", () => {
+  const terminal = (over: Partial<StoredRecord> = {}) =>
+    liveStored({ state: "exited", exit: { code: 0, signal: null }, endReason: "user", ...over });
+
+  it.each([false, true])("202→queued job: replaced ancestor rejects read/fork (history=%s)", async (history) => {
+    for (const path of [
+      "/",
+      "/home",
+      "/home/u/.pi/agent",
+      "/home/u/.pi/agent/sessions",
+      "/home/u/.pi/agent/sessions/--w-proj--",
+      SESS_FILE,
+    ]) {
+      const capture = vi.fn(() => ({ ok: true as const, pin: pathPin(SESS_FILE) }));
+      const kit = restoreKit(history ? { sessionPathPin: { capture, verify: () => ({ ok: true }) } } : {});
+      kit.files.set(SESS_FILE, { head: sessHeader() });
+      loadInto(kit, [terminal()]);
+      await kit.h.sup.init(deadline());
+      expect(kit.h.sup.relaunch("sprestore0000001", deadline())).toMatchObject({ ok: true });
+      expect(kit.h.spawnCalls).toHaveLength(0);
+      const snapshot = savesOf(kit.h, "sprestore0000001").at(-1)!;
+      expect(snapshot).toMatchObject({
+        state: "starting",
+        sessionGuard: { kind: "default-tree-v1", baseline: expect.any(Object) },
+      });
+      kit.retained.ledger.length = 0;
+      kit.retained.inodes.set(path, 99999);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(kit.h.sup.records()[0]).toMatchObject({
+        state: "failed",
+        restore: { failure: "session-invalid" },
+        sessionGuard: { kind: "default-tree-v1" },
+      });
+      expect(kit.retained.reads()).toHaveLength(0);
+      expect(kit.h.spawnCalls).toHaveLength(0);
+      expect(capture).not.toHaveBeenCalled();
+      expect(kit.retained.fds.size).toBe(0);
+    }
+  });
+
+  it.each([false, true])(
+    "starting disk→new supervisor: expected chain checked BEFORE read (replacement=%s)",
+    async (replace) => {
+      const a = restoreKit();
+      a.files.set(SESS_FILE, { head: sessHeader() });
+      loadInto(a, [terminal()]);
+      await a.h.sup.init(deadline());
+      expect(a.h.sup.relaunch("sprestore0000001", deadline())).toMatchObject({ ok: true });
+      const disk: StoredRecord = JSON.parse(JSON.stringify(savesOf(a.h, "sprestore0000001").at(-1)!));
+      // A genuine starting commit, not a fabricated terminal; no graceful shutdown/crash rewrite.
+      const b = restoreKit();
+      b.files.set(SESS_FILE, { head: sessHeader() });
+      for (const [p, ino] of a.retained.inodes) b.retained.inodes.set(p, ino);
+      if (replace) b.retained.inodes.set("/home/u/.pi/agent/sessions", 22222);
+      loadInto(b, [disk]);
+      await b.h.sup.init(deadline());
+      await vi.advanceTimersByTimeAsync(0);
+      if (replace) {
+        expect(b.retained.reads()).toHaveLength(0);
+        expect(b.h.spawnCalls).toHaveLength(0);
+        expect(b.h.sup.records()[0]).toMatchObject({
+          state: "failed",
+          sessionGuard: { kind: "default-tree-v1" },
+          restore: { failure: "session-invalid" },
+        });
+      } else {
+        expect(b.retained.reads()).toHaveLength(1);
+        expect(b.h.spawnCalls).toHaveLength(1);
+      }
+      expect(b.retained.fds.size).toBe(0);
+    },
+  );
+
+  it("cached terminal provenance constrains manual preflight too (not rebase after replacement)", async () => {
+    const kit = restoreKit();
+    kit.files.set(SESS_FILE, { head: sessHeader() });
+    loadInto(kit, [terminal()]);
+    await kit.h.sup.init(deadline());
+    kit.retained.inodes.set("/home", 9999);
+    kit.retained.ledger.length = 0;
+    expect(kit.h.sup.relaunch("sprestore0000001", deadline())).toMatchObject({ ok: false, reason: "session-invalid" });
+    expect(kit.retained.reads()).toHaveLength(0);
+    expect(kit.h.spawnCalls).toHaveLength(0);
+  });
+
+  it.each(["symlink", "owner", "nlink"] as const)(
+    "fresh adoption rejects %s leaf; terminal snapshot/flush never probes",
+    async (fault) => {
+      const kit = restoreKit();
+      kit.files.set(SESS_FILE, { head: sessHeader("sess-1") });
+      kit.retained.bad.set(SESS_FILE, fault);
+      await kit.h.sup.init(deadline());
+      kit.h.sup.start(req(), deadline());
+      const child = await driveToLiveWith(kit.h, { sessionId: "sess-1", sessionFile: SESS_FILE });
+      kit.retained.ledger.length = 0;
+      kit.retained.setOnOp(() => {
+        throw Error("snapshot must not touch FS");
+      });
+      child.emit("exit", 0, null);
+      const stored = kit.h.store.dirtyGet()![0]!;
+      expect(stored.state).toBe("exited");
+      expect(stored.sessionId).toBeUndefined();
+      expect(stored.sessionFile).toBeUndefined();
+      expect(stored.sessionPersisted).toBeUndefined();
+      expect(stored.sessionGuard?.kind).toBe("default-tree-v1");
+      await kit.h.sup.shutdown(createReqDeadline(() => Date.now(), 0));
+      expect(kit.retained.ledger).toEqual([]);
+      expect(kit.retained.reads()).toHaveLength(0);
+    },
+  );
+
+  it("adoption→terminal→debounce/expired flush reuses cache; save identity→track and remove→stop are probe-free", async () => {
+    const kit = restoreKit();
+    kit.files.set(SESS_FILE, { head: sessHeader("sess-1") });
+    kit.retained.setOnOp((op) => kit.h.order.push(`retention:${op}`));
+    await kit.h.sup.init(deadline());
+    kit.h.sup.start(req(), deadline());
+    const forkStart = kit.h.order.indexOf("spawnFn"),
+      track = kit.h.order.indexOf("track");
+    expect(track).toBeGreaterThan(forkStart);
+    expect(kit.h.order.slice(forkStart, track + 1).filter((x) => x.startsWith("retention:"))).toEqual([]);
+    const child = await driveToLiveWith(kit.h, { sessionId: "sess-1", sessionFile: SESS_FILE });
+    expect(kit.h.order.findIndex((x) => x.startsWith("retention:"))).toBeGreaterThan(track);
+    kit.retained.ledger.length = 0;
+    kit.h.registry.publish({
+      type: "session",
+      agentKey: "k1000",
+      session: { ...sessionInfo(), sessionFile: SESS_FILE },
+    });
+    expect(kit.retained.ledger).toEqual([]);
+    child.emit("exit", 0, null);
+    kit.h.sup.noteSpawnChanged(kit.h.sup.records()[0]!.spawnId);
+    expect(kit.h.store.dirtyGet()![0]).toMatchObject({
+      state: "exited",
+      sessionFile: SESS_FILE,
+      sessionId: "sess-1",
+      sessionGuard: { baseline: expect.any(Object) },
+    });
+    expect(kit.retained.ledger).toEqual([]);
+    await kit.h.sup.shutdown(createReqDeadline(() => Date.now(), 0));
+    expect(kit.retained.ledger).toEqual([]);
+
+    const live = restoreKit();
+    live.files.set(SESS_FILE, { head: sessHeader("sess-1") });
+    await live.h.sup.init(deadline());
+    live.h.sup.start(req(), deadline());
+    await driveToLiveWith(live.h, { sessionId: "sess-1", sessionFile: SESS_FILE });
+    live.retained.ledger.length = 0;
+    live.h.sup.remove(live.h.sup.records()[0]!.spawnId, deadline());
+    expect(live.h.sup.records()[0]!.state).toBe("stopping");
+    expect(live.retained.ledger).toEqual([]);
+  });
+
+  it("first file observation checks old missing parent baseline once; repeated frames/idle are probe-free", async () => {
+    const kit = restoreKit();
+    await kit.h.sup.init(deadline());
+    kit.h.sup.start(req(), deadline());
+    await driveToLiveWith(kit.h, { sessionId: "sess-1", sessionFile: SESS_FILE });
+    kit.files.set(SESS_FILE, { head: sessHeader("sess-1") });
+    kit.retained.ledger.length = 0;
+    const status = (busy: boolean) =>
+      kit.h.registry.publish({ type: "status", agentKey: "k1000", status: { leafId: null, busy, pending: false } });
+    status(true);
+    status(false);
+    expect(kit.retained.probes().length).toBeGreaterThan(0);
+    expect(kit.h.sup.records()[0]!.sessionPersisted).toBe(true);
+    kit.retained.ledger.length = 0;
+    status(true);
+    status(false);
+    kit.h.registry.publish({
+      type: "session",
+      agentKey: "k1000",
+      session: { ...sessionInfo(), sessionFile: SESS_FILE },
+    });
+    expect(kit.retained.ledger).toEqual([]);
+  });
+
+  it("first file observation cannot rebase a replaced parent or keep old missing authorization", async () => {
+    const kit = restoreKit();
+    await kit.h.sup.init(deadline());
+    kit.h.sup.start(req(), deadline());
+    const child = await driveToLiveWith(kit.h, { sessionId: "sess-1", sessionFile: SESS_FILE });
+    kit.retained.inodes.set("/home/u/.pi/agent/sessions", 999);
+    kit.files.set(SESS_FILE, { head: sessHeader("sess-1") });
+    for (const busy of [true, false])
+      kit.h.registry.publish({ type: "status", agentKey: "k1000", status: { leafId: null, busy, pending: false } });
+    child.emit("exit", 0, null);
+    expect(kit.h.store.dirtyGet()![0]!.sessionFile).toBeUndefined();
+    expect(kit.retained.reads()).toHaveLength(0);
+  });
+
+  it("boot candidates share ONE budget; no probes before original track, B never starts after A's slow open", async () => {
+    const fs = retainedFake();
+    let mono = 0;
+    const guard = createRetainedSessionGuard({
+      agentDir: "/home/u/.pi/agent",
+      uid: 1000,
+      fs: fs.fs,
+      monoNow: () => mono,
+    });
+    const kit = restoreKit({ retainedSessionGuard: guard });
+    fs.setOnOp((op) => {
+      kit.h.order.push(`probe:${op}`);
+      if (op === "open") mono += 21;
+    });
+    loadInto(kit, [
+      liveStored({ spawnId: "native-live-candidate" }),
+      liveStored({ state: "stopping", restoreIntent: undefined }),
+      terminal({ spawnId: "second-record" }),
+    ]);
+    await kit.h.sup.init(deadline());
+    expect(fs.ledger.map((e) => e.op)).toEqual(["open", "close"]);
+    const tracked = kit.h.order.indexOf("track");
+    expect(tracked).toBeGreaterThanOrEqual(0);
+    expect(kit.h.order.indexOf("probe:open")).toBeGreaterThan(tracked);
+    expect(
+      kit.h.store
+        .dirtyGet()!
+        .filter((r) => r.state === "exited")
+        .every((r) => r.sessionFile === undefined),
+    ).toBe(true);
+    expect(fs.reads()).toHaveLength(0);
+  });
+
+  it("restore off never asks its injected guard for ANY proof or read", async () => {
+    const kit = restoreKit({}, { restore: false });
+    loadInto(kit, [terminal()]);
+    await kit.h.sup.init(deadline());
+    kit.h.sup.start(req(), deadline());
+    const child = await driveToLiveWith(kit.h, { sessionId: "sess-1", sessionFile: SESS_FILE });
+    child.emit("exit", 0, null);
+    kit.h.store.dirtyGet();
+    await kit.h.sup.shutdown(createReqDeadline(() => Date.now(), 0));
+    expect(kit.retained.ledger).toEqual([]);
+  });
+
+  const oldFile = "/home/u/.pi/agent/sessions/--w-proj--/2020-01-01T00-00-00-000Z_sess-old.jsonl";
+  const newFile = "/home/u/.pi/agent/sessions/--w-proj--/2026-11-14T13-00-00-000Z_sess-old.jsonl";
+
+  async function lazyFork() {
+    const kit = restoreKit();
+    loadInto(kit, [terminal({ sessionFile: oldFile, sessionPersisted: undefined })]);
+    await kit.h.sup.init(deadline());
+    expect(kit.h.sup.relaunch("sprestore0000001", deadline())).toMatchObject({ ok: true });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(kit.h.spawnCalls[0]!.args.slice(-2)).toEqual(["--session-id", "sess-old"]);
+    expect(savesOf(kit.h, "sprestore0000001").at(-1)).toMatchObject({ sessionGuard: { lazyIntent: { attempt: 1 } } });
+    return kit;
+  }
+
+  it("actual lazy fork permits ONE same-id/cwd ISO-basename migration, pure snapshot; missing stays missing", async () => {
+    const kit = await lazyFork();
+    const before = (kit.h.sup.records()[0] as any).coordsRevision;
+    await driveToLiveWith(kit.h, { sessionId: "sess-old", sessionFile: newFile }, "new-key");
+    expect(kit.h.sup.records()[0]).toMatchObject({ state: "live", sessionFile: newFile, sessionId: "sess-old" });
+    expect((kit.h.sup.records()[0] as any).coordsRevision).toBe(before + 1);
+    const stored = savesOf(kit.h, "sprestore0000001").at(-1)!;
+    expect(stored.sessionFile).toBe(newFile);
+    expect(stored.sessionGuard?.baseline?.file).toBeUndefined();
+    expect(stored.sessionGuard?.lazyIntent).toBeUndefined();
+    expect(stored.sessionPersisted).toBeUndefined();
+    expect(kit.files.has(newFile)).toBe(false);
+    expect(kit.retained.reads()).toHaveLength(0);
+    expect(kit.h.onLive).toHaveLength(1);
+    kit.retained.ledger.length = 0;
+    kit.h.registry.publish({
+      type: "session",
+      agentKey: "new-key",
+      session: { ...sessionInfo(), sessionId: "sess-old", sessionFile: newFile },
+    });
+    kit.h.store.dirtyGet();
+    expect(kit.retained.ledger).toEqual([]);
+    expect((kit.h.sup.records()[0] as any).lazyPermit.state).toBe("consumed");
+    expect(kit.h.spawnCalls).toHaveLength(1);
+  });
+
+  it.each(["/different/project", "/w-proj"])(
+    "lazy binding rejects wrong session cwd %s after correct hello without proving or consuming the permit",
+    async (cwd) => {
+      const kit = await lazyFork();
+      const rec = kit.h.sup.records()[0] as any;
+      const revision = rec.coordsRevision;
+      const baseline = rec.sessionGuard.baseline;
+      const capture = vi.spyOn(kit.retained.guard, "capture");
+      kit.retained.ledger.length = 0;
+      // driveToLiveWith publishes hello cwd=/w/proj, then this independent session frame.
+      await driveToLiveWith(kit.h, { sessionId: "sess-old", sessionFile: newFile, cwd }, "new-key");
+      expect(kit.h.registry.get("new-key")!.cwd).toBe(REALPATH);
+      expect(rec).toMatchObject({
+        state: "stopping",
+        endReason: "protocol_error",
+        hintDetail: "session-swapped",
+        cwd: REALPATH,
+        sessionId: "sess-old",
+        sessionFile: oldFile,
+        coordsRevision: revision,
+        lazyPermit: { state: "active" },
+        sessionGuard: { baseline, lazyIntent: { attempt: 1 } },
+      });
+      expect(kit.retained.ledger).toEqual([]);
+      expect(kit.h.onLive).toHaveLength(0);
+      expect(kit.h.spawnCalls).toHaveLength(1);
+      expect(savesOf(kit.h, rec.spawnId).at(-1)!.sessionGuard?.lazyIntent).toEqual({ attempt: 1 });
+      expect(capture).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    { sessionId: "wrong-id", sessionFile: newFile },
+    { sessionId: "sess-old", sessionFile: "/custom/2026-11-14T13-00-00-000Z_sess-old.jsonl" },
+    { sessionId: "sess-old", sessionFile: newFile.replace("2026-11-14T13-00-00-000Z", "not-a-timestamp") },
+  ])("lazy candidate rejects mismatched identity/path/name %j", async (session) => {
+    const kit = await lazyFork();
+    await driveToLiveWith(kit.h, session, "new-key");
+    expect(kit.h.sup.records()[0]).toMatchObject({
+      state: "stopping",
+      sessionFile: oldFile,
+      sessionGuard: { lazyIntent: { attempt: 1 } },
+    });
+    expect(kit.h.onLive).toHaveLength(0);
+    expect(kit.retained.reads()).toHaveLength(0);
+  });
+
+  it.each(["symlink", "owner", "nlink"] as const)("lazy new candidate leaf %s fails without binding", async (fault) => {
+    const kit = await lazyFork();
+    kit.files.set(newFile, { head: sessHeader() });
+    kit.retained.bad.set(newFile, fault);
+    await driveToLiveWith(kit.h, { sessionId: "sess-old", sessionFile: newFile }, "new-key");
+    expect(kit.h.sup.records()[0]).toMatchObject({ state: "stopping", sessionFile: oldFile });
+    expect(kit.h.onLive).toHaveLength(0);
+  });
+
+  it("--session remains exact even when another valid same-id timestamp is reported", async () => {
+    const kit = restoreKit();
+    kit.files.set(oldFile, { head: sessHeader() });
+    loadInto(kit, [terminal({ sessionFile: oldFile })]);
+    await kit.h.sup.init(deadline());
+    expect(kit.h.sup.relaunch("sprestore0000001", deadline())).toMatchObject({ ok: true });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(kit.h.spawnCalls[0]!.args.slice(-2)).toEqual(["--session", oldFile]);
+    await driveToLiveWith(kit.h, { sessionId: "sess-old", sessionFile: newFile }, "new-key");
+    expect(kit.h.sup.records()[0]).toMatchObject({ state: "stopping", sessionFile: oldFile });
+    expect(kit.h.sup.records()[0]!.sessionGuard?.lazyIntent).toBeUndefined();
+  });
+
+  it.each(["forking", "registering"] as const)(
+    "unresolved lazy %s disk reload: zero content and new forks",
+    async (phase) => {
+      const a = await lazyFork();
+      const disk: StoredRecord = JSON.parse(
+        JSON.stringify(savesOf(a.h, "sprestore0000001").find((r) => r.restore?.phase === phase)!),
+      );
+      expect(disk.sessionGuard?.lazyIntent).toEqual({ attempt: 1 });
+      const b = restoreKit();
+      for (const [p, ino] of a.retained.inodes) b.retained.inodes.set(p, ino);
+      if (phase === "forking") b.world.environ.set(1234, `PI_WEBHUB_SPAWN_ID=${disk.spawnId}\0`);
+      loadInto(b, [disk]);
+      await b.h.sup.init(deadline());
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(b.h.spawnCalls).toHaveLength(0);
+      expect(b.retained.reads()).toHaveLength(0);
+      expect(b.h.sup.records()[0]!.sessionGuard?.lazyIntent).toEqual({ attempt: 1 });
+      expect(b.h.sup.relaunch(disk.spawnId, deadline())).not.toMatchObject({ ok: true });
+    },
+  );
+
+  it.each(["cwd", "relaunch-store", "fork-intent-store", "spawn-throw", "no-child"] as const)(
+    "never-forked lazy %s failure retains L6 evidence through retry and forks once after recovery",
+    async (fault) => {
+      const kit = restoreKit();
+      const { h } = kit;
+      loadInto(kit, [terminal({ sessionFile: oldFile, sessionPersisted: undefined })]);
+      await h.sup.init(deadline());
+      const spawn = h.spawnImpl;
+      if (fault === "cwd") h.dirs.pinResult = { ok: false, reason: "changed" };
+      if (fault === "relaunch-store") h.store.saveNowResults.push({ ok: false, code: "ENOSPC" });
+      if (fault === "fork-intent-store") h.store.saveNowResults.push({ ok: true }, { ok: false, code: "ENOSPC" });
+      if (fault === "spawn-throw")
+        h.spawnImpl = () => {
+          throw new Error("before fork");
+        };
+      if (fault === "no-child") h.spawnImpl = () => undefined as unknown as ChildProcess;
+      expect(h.sup.relaunch("sprestore0000001", deadline())).toMatchObject(
+        fault === "relaunch-store" ? { ok: false, reason: "persist" } : { ok: true },
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(h.spawnCalls).toHaveLength(0);
+      expect(h.sup.records()[0]).toMatchObject({ state: "failed", noProcess: "never-forked" });
+      expect(h.sup.records()[0]!.pid).toBeUndefined();
+      expect(h.sup.records()[0]!.sessionGuard?.lazyIntent).toBeUndefined();
+      expect(h.sup.deathOf("sprestore0000001")).toBe("confirmed");
+      h.dirs.pinResult = { ok: true, fd: 7, cwdArg: "/proc/self/fd/7" };
+      h.spawnImpl = spawn;
+      expect(h.sup.relaunch("sprestore0000001", deadline())).toEqual({ ok: true, state: "starting", dup: false });
+      // Check both the in-memory reaping state and the actual commit before the job runs.
+      const reaping = { ...h.sup.records()[0]!, restore: { ...h.sup.records()[0]!.restore } };
+      const committed = savesOf(h, "sprestore0000001").at(-1);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(h.spawnCalls).toHaveLength(1);
+      expect(reaping).toMatchObject({ noProcess: "never-forked", restore: { phase: "reaping" } });
+      expect(committed).toMatchObject({ noProcess: "never-forked", restore: { phase: "reaping" } });
+      expect(h.spawnCalls[0]!.args.slice(-2)).toEqual(["--session-id", "sess-old"]);
+      expect(h.sup.records()[0]).toMatchObject({
+        state: "starting",
+        pid: h.children[0]!.pid,
+        restore: { phase: "registering" },
+        sessionGuard: { lazyIntent: { attempt: 1 } },
+      });
+      expect(h.sup.records()[0]!.noProcess).toBeUndefined();
+      await driveToLiveWith(h, { sessionId: "sess-old", sessionFile: newFile }, "retry-key");
+      expect(h.sup.records()[0]).toMatchObject({ state: "live", sessionFile: newFile });
+      expect(h.sup.records()[0]!.sessionGuard?.lazyIntent).toBeUndefined();
+      expect(h.onLive).toHaveLength(1);
+    },
+  );
+
+  it("actual lazy fork with failed identity persist keeps unresolved intent and refuses retry even after exit", async () => {
+    const kit = restoreKit();
+    const { h } = kit;
+    loadInto(kit, [terminal({ sessionFile: oldFile, sessionPersisted: undefined })]);
+    await h.sup.init(deadline());
+    h.store.saveNowResults.push({ ok: true }, { ok: true }, { ok: false, code: "ENOSPC" });
+    expect(h.sup.relaunch("sprestore0000001", deadline())).toMatchObject({ ok: true });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.spawnCalls).toHaveLength(1);
+    expect(h.sup.records()[0]).toMatchObject({
+      state: "stopping",
+      restore: { failure: "persist" },
+      sessionGuard: { lazyIntent: { attempt: 1 } },
+    });
+    expect(h.sup.records()[0]!.noProcess).toBeUndefined();
+    h.children[0]!.emit("exit", 1, null);
+    expect(h.sup.deathOf("sprestore0000001")).toBe("confirmed");
+    expect(h.sup.relaunch("sprestore0000001", deadline())).toMatchObject({ ok: false, reason: "session-invalid" });
+    expect(h.spawnCalls).toHaveLength(1);
+    expect(h.sup.records()[0]!.sessionGuard?.lazyIntent).toEqual({ attempt: 1 });
+  });
+
+  it("actual lazy child exit before binding leaves intent unresolved; explicit same-id retry cannot recreate empty session", async () => {
+    const kit = await lazyFork();
+    kit.h.children[0]!.emit("exit", 1, null);
+    expect(kit.h.sup.relaunch("sprestore0000001", deadline())).toMatchObject({ ok: false, reason: "session-invalid" });
+    expect(kit.h.spawnCalls).toHaveLength(1);
+    expect(kit.h.sup.records()[0]!.sessionGuard?.lazyIntent).toEqual({ attempt: 1 });
+  });
+});
+
+describe("retained sticky guard additional refusal/recovery matrix", () => {
+  const terminal = (over: Partial<StoredRecord> = {}) =>
+    liveStored({ state: "exited", exit: { code: 0, signal: null }, endReason: "user", ...over });
+  it.each(["custom", "alias", "missing-port"])(
+    "all manual callers get Q1 fail closed for %s, no legacy header read",
+    async (kind) => {
+      const oldRead = vi.fn(() => sessHeader());
+      const kit = restoreKit({
+        sessionFs: { ...fakeSessionFs(new Map()), readHeadSync: oldRead },
+        ...(kind === "missing-port" ? { retainedSessionGuard: undefined } : {}),
+      });
+      const file = kind === "custom" ? "/custom/private.jsonl" : SESS_FILE;
+      kit.files.set(file, { head: sessHeader() });
+      if (kind === "alias") kit.retained.bad.set("/home/u/.pi/agent", "symlink");
+      loadInto(kit, [terminal({ sessionFile: file })]);
+      await kit.h.sup.init(deadline());
+      expect(kit.h.sup.relaunch("sprestore0000001", deadline())).toEqual({
+        ok: false,
+        code: "E_SPAWN_GONE",
+        reason: "session-invalid",
+      });
+      expect(oldRead).not.toHaveBeenCalled();
+      expect(kit.retained.reads()).toHaveLength(0);
+      expect(kit.h.spawnCalls).toHaveLength(0);
+    },
+  );
+  it("guarded live custom switch is refused without clearing sticky expected constraint", async () => {
+    const kit = restoreKit();
+    kit.files.set(SESS_FILE, { head: sessHeader() });
+    loadInto(kit, [terminal()]);
+    await kit.h.sup.init(deadline());
+    kit.h.sup.relaunch("sprestore0000001", deadline());
+    await vi.advanceTimersByTimeAsync(0);
+    await driveToLiveWith(kit.h, { sessionId: "sess-old", sessionFile: SESS_FILE }, "new-key");
+    const base = kit.h.sup.records()[0]!.sessionGuard!.baseline;
+    kit.h.registry.publish({
+      type: "session",
+      agentKey: "new-key",
+      session: { ...sessionInfo(), sessionId: "different", sessionFile: "/custom/private.jsonl" },
+    });
+    expect(kit.h.sup.records()[0]).toMatchObject({ state: "stopping", sessionId: "sess-old", sessionFile: SESS_FILE });
+    const stored = savesOf(kit.h, "sprestore0000001").at(-1)!;
+    expect(stored.sessionGuard?.baseline).toEqual(base);
+    expect(stored.sessionFile).toBeUndefined();
+  });
+  it.each(["registering", "live-same-tuple", "live-switch"] as const)(
+    "guarded %s rejects wrong session cwd independently of the correct hello cwd",
+    async (phase) => {
+      const kit = restoreKit();
+      kit.files.set(SESS_FILE, { head: sessHeader() });
+      loadInto(kit, [terminal()]);
+      await kit.h.sup.init(deadline());
+      kit.h.sup.relaunch("sprestore0000001", deadline());
+      await vi.advanceTimersByTimeAsync(0);
+      const reported = { sessionId: "sess-old", sessionFile: SESS_FILE, cwd: "/different/project" };
+      if (phase === "registering") await driveToLiveWith(kit.h, reported, "new-key");
+      else {
+        await driveToLiveWith(kit.h, { sessionId: "sess-old", sessionFile: SESS_FILE }, "new-key");
+        kit.retained.ledger.length = 0;
+        kit.h.registry.publish({
+          type: "session",
+          agentKey: "new-key",
+          session: {
+            ...sessionInfo(),
+            ...reported,
+            ...(phase === "live-switch"
+              ? { sessionId: "other-id", sessionFile: SESS_FILE.replace("sess-old", "other-id") }
+              : {}),
+          },
+        });
+        expect(kit.retained.ledger).toEqual([]);
+      }
+      expect(kit.h.sup.records()[0]).toMatchObject({
+        state: "stopping",
+        cwd: REALPATH,
+        sessionId: "sess-old",
+        sessionFile: SESS_FILE,
+        endReason: "protocol_error",
+        hintDetail: "session-swapped",
+      });
+      expect(kit.h.onLive).toHaveLength(phase === "registering" ? 0 : 1);
+    },
+  );
+
+  it("history=false exact goLive still revalidates parent identity after fork", async () => {
+    const kit = restoreKit();
+    kit.files.set(SESS_FILE, { head: sessHeader() });
+    loadInto(kit, [terminal()]);
+    await kit.h.sup.init(deadline());
+    kit.h.sup.relaunch("sprestore0000001", deadline());
+    await vi.advanceTimersByTimeAsync(0);
+    kit.retained.inodes.set("/home/u/.pi/agent/sessions", 55555);
+    kit.retained.ledger.length = 0;
+    await driveToLiveWith(kit.h, { sessionId: "sess-old", sessionFile: SESS_FILE }, "new-key");
+    expect(kit.h.sup.records()[0]!.state).toBe("stopping");
+    expect(kit.h.onLive).toHaveLength(0);
+    expect(kit.retained.reads()).toHaveLength(0);
+  });
+  it("lazy new basename first observation preserves parent baseline/true evidence; following restore uses exact new name", async () => {
+    const oldFile = "/home/u/.pi/agent/sessions/--w-proj--/2020-01-01T00-00-00-000Z_sess-old.jsonl";
+    const newFile = "/home/u/.pi/agent/sessions/--w-proj--/2026-11-14T13-00-00-000Z_sess-old.jsonl";
+    const kit = restoreKit();
+    loadInto(kit, [terminal({ sessionFile: oldFile, sessionPersisted: undefined })]);
+    await kit.h.sup.init(deadline());
+    kit.h.sup.relaunch("sprestore0000001", deadline());
+    await vi.advanceTimersByTimeAsync(0);
+    const child = await driveToLiveWith(kit.h, { sessionId: "sess-old", sessionFile: newFile }, "new-key");
+    kit.files.set(newFile, { head: sessHeader() });
+    for (const busy of [true, false])
+      kit.h.registry.publish({ type: "status", agentKey: "new-key", status: { leafId: null, busy, pending: false } });
+    expect(kit.h.sup.records()[0]!.sessionPersisted).toBe(true);
+    child.emit("exit", 0, null);
+    expect(kit.h.sup.relaunch("sprestore0000001", deadline())).toMatchObject({ ok: true });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(kit.h.spawnCalls.at(-1)!.args.slice(-2)).toEqual(["--session", newFile]);
+    expect(kit.h.sup.records()[0]!.sessionGuard?.lazyIntent).toBeUndefined();
+  });
+  it("lazy permit cannot migrate under a wrong attempt, revision, identity, deadline, or budget", async () => {
+    for (const fault of ["attempt", "revision", "identity", "deadline", "budget", "parent"]) {
+      const fs = retainedFake();
+      let mono = 0;
+      const guard = createRetainedSessionGuard({
+        agentDir: "/home/u/.pi/agent",
+        uid: 1000,
+        fs: fs.fs,
+        monoNow: () => mono,
+      });
+      const kit = restoreKit({ retainedSessionGuard: guard });
+      loadInto(kit, [terminal({ sessionPersisted: undefined })]);
+      await kit.h.sup.init(deadline());
+      kit.h.sup.relaunch("sprestore0000001", deadline());
+      await vi.advanceTimersByTimeAsync(0);
+      const r = kit.h.sup.records()[0] as any;
+      if (fault === "attempt") r.restore.attempts++;
+      if (fault === "revision") r.coordsRevision++;
+      if (fault === "identity")
+        r.lazyPermit.actualForkIdentity = { ...r.lazyPermit.actualForkIdentity, procStartTicks: 999 };
+      if (fault === "deadline") r.registerDeadlineAt = Date.now() - 1;
+      if (fault === "budget")
+        fs.setOnOp((op) => {
+          if (op === "open") mono += 21;
+        });
+      if (fault === "parent") fs.inodes.set("/home", 99999);
+      await driveToLiveWith(
+        kit.h,
+        {
+          sessionId: "sess-old",
+          sessionFile: "/home/u/.pi/agent/sessions/--w-proj--/2026-11-14T13-00-00-000Z_sess-old.jsonl",
+        },
+        "new-key",
+      );
+      expect(kit.h.sup.records()[0]!.state, fault).toBe("stopping");
+      expect(kit.h.onLive, fault).toHaveLength(0);
+      expect(kit.h.sup.records()[0]!.sessionGuard?.lazyIntent, fault).toEqual({ attempt: 1 });
+      expect(fs.fds.size).toBe(0);
+    }
+  });
+});
+
+describe("retained snapshots with actual store debounce and expired flush", () => {
+  it("real 200ms getter and flush serialize cached coordinates without a single retention operation", async () => {
+    const scratch = mkdtempSync(join(tmpdir(), "retained-store-"));
+    try {
+      const file = join(scratch, "spawns.json"),
+        store = createSpawnStore({ file, log: memLog(), now: () => Date.now() });
+      const kit = restoreKit({ store });
+      kit.files.set(SESS_FILE, { head: sessHeader("sess-1") });
+      await kit.h.sup.init(deadline());
+      kit.h.sup.start(req(), deadline());
+      const child = await driveToLiveWith(kit.h, { sessionId: "sess-1", sessionFile: SESS_FILE });
+      kit.retained.ledger.length = 0;
+      kit.retained.setOnOp(() => {
+        throw Error("snapshot probe");
+      });
+      child.emit("exit", 0, null);
+      await vi.advanceTimersByTimeAsync(200);
+      let disk = JSON.parse(readFileSync(file, "utf8")).records[0];
+      expect(disk).toMatchObject({
+        state: "exited",
+        sessionId: "sess-1",
+        sessionFile: SESS_FILE,
+        sessionGuard: { baseline: expect.any(Object) },
+      });
+      kit.h.sup.noteSpawnChanged(disk.spawnId); // dirty getter has not fired again
+      await kit.h.sup.shutdown(createReqDeadline(() => Date.now(), 0));
+      disk = JSON.parse(readFileSync(file, "utf8")).records[0];
+      expect(disk.sessionFile).toBe(SESS_FILE);
+      expect(kit.retained.ledger).toEqual([]);
+      expect(store.closed).toBe(true);
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+});
+
+it("64KiB: current supervisor/SSE can retain latest terminal while actual disk and second Hub retain none of it", async () => {
+  const scratch = mkdtempSync(join(tmpdir(), "retained-pressure-"));
+  try {
+    const file = join(scratch, "spawns.json");
+    const store = createSpawnStore({ file, log: memLog(), now: () => Date.now() });
+    const kit = restoreKit({ store }, { maxProcesses: 16, maxPerPrincipal: 16 });
+    kit.files.set(SESS_FILE, { head: sessHeader("sess-1") });
+    await kit.h.sup.init(deadline());
+    const first = req();
+    expect(kit.h.sup.start(first, deadline())).toMatchObject({ ok: true });
+    const child = await driveToLiveWith(kit.h, { sessionId: "sess-1", sessionFile: SESS_FILE });
+    child.emit("exit", 0, null);
+    for (let i = 0; i < 16; i++) {
+      const active = req({ owner: { listener: "loopback", reqId: `active-${i}` + "界".repeat(1500) } });
+      expect(kit.h.sup.start(active, deadline())).toMatchObject({ ok: true });
+      await driveToLiveWith(kit.h, { sessionId: "sess-1", sessionFile: SESS_FILE }, `active-${i}`);
+    }
+    expect(kit.h.sup.records().find((r) => r.spawnId === first.spawnId)?.state).toBe("exited");
+    const sse = kit.h.registry.events.filter((e) => e.type === "spawns").at(-1)!;
+    expect(JSON.stringify(sse)).toContain(first.spawnId);
+    const disk = JSON.parse(readFileSync(file, "utf8"));
+    expect(disk.records).toHaveLength(16);
+    expect(disk.records.some((r: StoredRecord) => r.spawnId === first.spawnId)).toBe(false);
+    expect(Buffer.byteLength(readFileSync(file, "utf8"))).toBeGreaterThan(64 * 1024);
+    const secondStore = createSpawnStore({ file, log: memLog(), now: () => Date.now() });
+    const second = restoreKit({ store: secondStore });
+    await second.h.sup.init(deadline());
+    expect(second.h.sup.records().some((r) => r.spawnId === first.spawnId)).toBe(false);
+    expect(kit.files.has(SESS_FILE)).toBe(true); // store eviction never deletes JSONL
+    await second.h.sup.shutdown(createReqDeadline(() => Date.now(), 0));
+    await kit.h.sup.shutdown(createReqDeadline(() => Date.now(), 0));
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
 });

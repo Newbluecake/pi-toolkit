@@ -49,9 +49,10 @@ preflight → `forkInto` with `--session <file>` / `--session-id <id>`, never `-
 Refusals: unknown spawnId or restore-off ⇒ 404; death not `confirmed` ⇒ 409
 `E_AGENT_ONLINE{exit-unconfirmed}` (B-alive); no/invalid sessionId or a pending delete ⇒ 409
 `E_BAD_REQUEST{no-session|removing}`; the persisted session file gone/tampered ⇒ 410
-`E_SPAWN_GONE{session-missing|session-invalid}`; a record without a `sessionFile` gets ONE
-bounded locate-by-id in pi's default session dir (`restore-plan.ts`'s `locateSessionFile`)
-before the `--session-id` fallback. Idempotent: a non-terminal record ⇒ 202 `dup:true`, never
+`E_SPAWN_GONE{session-missing|session-invalid}`. Terminal relaunch now requires an explicit
+provable ordinary default-tree `sessionFile`; custom/unknown/id-only targets are rejected
+with `410 E_SPAWN_GONE{session-invalid}`, without locate-by-id or content scanning (Q1=1).
+Unmarked nonterminal live/custom boot restores retain their legacy D7 contract. Idempotent: a non-terminal record ⇒ 202 `dup:true`, never
 a second fork. A relaunch re-anchors the lifetime (`lifetimeAnchorAt`, runtime-only — restore
 D14's createdAt anchor stays untouched for boot restores). UI: `logic/spawn.js`'s
 `relaunchableFor` gates the affordance on the cap; the whole stale card becomes the action
@@ -93,3 +94,118 @@ programmable ONLY through `HubDeps.spawnSeams` (`main.ts` never sets it; env/con
 integration (real hub × fake pi + starvation), RH1–RH4 conformance (real pi + real hub restore). Off ⇒ the hub stays
 byte-identical (no cap, no service, routes 404, restore carries no path pin). Design:
 `docs/dev/web-hub-session-history/plan.md`.
+
+## Retained exited discovery (`spawn.exited.v1`, r3)
+
+With `spawn.restore === true` **and** a passed platform probe, both hub cap surfaces append
+`spawn.exited.v1` from the same array tail (no PROTO change, no new record wire fields).
+The UI's history dialog can consume existing `spawns.items` for recent exited records and
+`failed` records carrying restore evidence, including after registry removal/reconnect/Hub
+restart. The action is explicit **same-spawnId relaunch**, not fresh create, history-ref
+fabrication or automatic fork/prompt replay. The parallel UI package owns presentation.
+`restore:false` retains the exact old disk/cap behavior and performs zero retention IO.
+
+### Default-tree provenance, not domain attestation (Q1=1/Q2=1)
+
+Only direct JSONL children of `<agentDir>/sessions/<pi cwd encoding>/` can gain terminal
+coordinates. Lexical `resolveAgentDir`, `sessionPersisted`, and disk JSON are not authority.
+`retained-session.ts` opens from `/`, then each ancestor through a private parent fd under
+proc-fd with `O_DIRECTORY|O_NOFOLLOW`, comparing expected dev/ino **before descending**.
+Sessions/cwd directories must be owned; leaf lstat must show owned regular, nlink=1, no
+symlink. Missing leaf ENOENT is allowed; missing directories and other errors fail closed.
+Metadata capture never reads content, enumerates candidates, creates directories or consults
+secure registrations/vaults. Custom/secure/unknown coordinates cannot gain new terminal
+retention or manual restore authorization. This relies on the product contract that agentDir
+is not nested in a registered vault; it is not general bind-mount/domain attestation.
+
+Each supervisor owns its guard factory. Opaque runtime certificates bind factory, full
+`{spawnId,cwd,sessionId,sessionFile}` and coordinate revision. Proofs are prepared only on
+adoption/real tuple change, the first actual file observation, a single boot-terminal batch,
+or the current relaunch/job target. Repeated same-coordinate session/status events do not
+walk the chain. A first file observation revalidates the previous missing-leaf parent chain,
+not a newly captured replacement. An invalidated revision has no retained authorization.
+
+**`toStored`/`storedSnapshot`/save/debounce/expired shutdown flush do zero new retention FS**:
+only matching cached provenance can preserve terminal or guarded-state coordinates. No
+cache means stripping the three coordinates, keeping the sticky restricted marker/expected
+baseline. Finalize/recovery, fork→identity-save→reaper.track, and remove→save→stop do not
+prepare proofs. Boot adoption runs only after original reaper assembly/tracking/enqueue;
+shutdown flush precedes runtime-cache disposal. No new timer or background scan is added.
+
+One monotonic work budget caps a target preparation (or the **whole boot batch**) at
+20 ms / 512 operations / 128 segments. Each operation/candidate checks the same budget
+before starting, and checks cumulative time afterwards. All acquired fds close in finally,
+including after exhaustion. The clamp is a local hub mirror, not a core/secure dependency.
+A synchronous syscall itself cannot be interrupted: this is a no-further-work bound, **not**
+a hard wallclock guarantee for kernel D-state IO. Budget failure conservatively loses
+retention, never delays safety bookkeeping to prepare unrelated records.
+
+### Sticky disk constraint and D7 leases
+
+Store envelope remains v2. Optional disk-only `sessionGuard:{kind:"default-tree-v1",
+baseline?,lazyIntent?}` is strictly validated; baseline holds a tuple SHA-256 digest, exact
+root-to-parent dev/ino chain and optional previously observed leaf identity. Digest is a
+binding/error check, not a signature. New bytes count in the unchanged store budget.
+Neither coordinates nor guard/baseline/lazyIntent appear in Public/Owner/SSE/GET projections.
+
+A cached adoption certificate is **not read permission**. Both `relaunch()` preflight and
+`restoreForkSync()` acquire a fresh fd-anchored reader before `planSessionArgv` D7. Expected
+ancestors/leaf are checked before header read; the exact-file reader uses only the verified
+fd (`NOFOLLOW|NONBLOCK`, fstat again) and expires at callback return. It cannot cross await,
+queue or restart. `sessionGuard` stays sticky through starting phases, failed retries, live
+stability cleanup and reload; a restricted-but-unproven record cannot fall into legacy
+reading. History=false still assembles this guard, but no HistoryService/generation/scanner.
+Existing history capture/goLive pin remains an additional check when history is enabled.
+
+A replaced chain between 202 and job execution, or between starting save and a new Hub,
+therefore fails before content read/new fork. L6 death confirmation remains prior to new
+fork; existing fence/veto/restore-intent and native unmarked live-crash recovery remain.
+Pi itself still opens PATH after fork: existing W-class concurrent swap-and-restore races
+and same-uid/mount residuals are **not** claimed eliminated by the fd header reader.
+
+### Lazy never-seen file binding
+
+Pi 1.5 `--session-id` can report a new ISO-timestamp basename without creating a JSONL until
+conversation starts. Only a D7-verified never-seen missing leaf (no persisted evidence or
+old leaf identity), with the actual exact `--session-id <id>` tail, gets a one-attempt runtime
+permit. A disk `lazyIntent:{attempt}` is saved before fork; the permit activates only after
+actual child identity-save and reaper.track, by assignment only (no new FS in that window).
+The first registering child's identity/id/cwd/deadline/attempt/revision must match. The
+**actual session frame's cwd** must byte-match the original record (and thus the permit),
+independently of a correct hello cwd, before any candidate proof or permit consumption.
+Guarded exact binds and subsequent session switches check this too, even for unchanged
+id/file. A mismatch stops via `protocol_error`/`session-swapped`, preserving the old
+coordinates and any unresolved lazy intent; it cannot substitute the old record cwd for
+the report. One reported same-parent pi ISO-basename is reverified nofollow against the expected parent
+chain. Success atomically moves coordinates/revision/cache, consumes the permit and clears
+intent before the pure live save. It does not create files or replay a prompt.
+
+Actual `--session <file>` remains exact; ever-observed then missing is still 410
+`session-missing`, never lazy recreation. Forking/registering restart or actual-child failure
+before binding cannot revive a permit from JSON: unresolved lazyIntent rejects new forks
+with existing `session-invalid`, bounded detail `lazy-binding-unresolved`, no scan/guessing.
+Only authoritative never-forked paths clear intent for another explicit retry (including
+pre-fork store/cwd failures, synchronous spawn throw and no child). Relaunch retains
+`noProcess` through both the persisted reaping transition and the restore job's L6 check;
+only the existing synchronous new-fork intent stretch clears it with the old identity.
+Missing pid without this evidence remains unknown, never implicitly confirmed. An actual
+fork with failed identity persistence keeps its unresolved intent, even after verified exit.
+Migration whose live save fails can leave old unresolved disk intent; the next Hub conservatively
+refuses it instead of guessing a possibly conversation-bearing new filename.
+
+### Retention budgets and compatibility
+
+The runtime Map's regular terminal limit remains 20, oldest updatedAt first. The store's
+16 nonterminal / 20 terminal / 64 KiB soft write target / 256 KiB read cap / 200 ms debounce
+are unchanged. Disk trimming removes whole terminal records, never guard/file/evidence
+individually. Nonterminal identities alone can exceed 64 KiB and evict **all** terminal
+records; no promise of 20 or even one across restart. Store trimming does not mutate the
+runtime Map: browser refresh can see an item that a later Hub restart cannot. JSONL is not
+deleted. There is no second unbounded index or automatic recovery of removed records.
+
+Old v2 records without guard still load; old terminal coordinates need first current proof,
+and old records already lacking coordinates cannot be repaired by guessing. New Hub×old UI
+keeps field/request/state-enum parsing compatible, not entire retained sets/state sequences
+byte-identical. Custom terminal refusal and ordinary retained relaunch are declared behavior
+changes. An old Hub may ignore/drop the optional disk guard: **downgrade does not preserve
+the new security guarantee**. No frozen fixture was regenerated for this implementation.

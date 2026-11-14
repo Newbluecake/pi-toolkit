@@ -1,3 +1,4 @@
+import type { RetainedSessionFs } from "./spawn/retained-session.js";
 /**
  * hub composition root (plan §1.4.2 / §1.3.3 / §3.1 — frozen interface, S1-W1
  * 接口包). Wires singleton → registry → history → agent server → injected
@@ -166,6 +167,8 @@ export interface StartHubDeps {
     wrapFirstPrompt?: (fwd: FirstPromptForwarder) => FirstPromptForwarder;
     /** web-hub-spawn-restore plan HR1 test hook: the restore stability window. */
     restoreStableMs?: number;
+    retainedSessionFs?: RetainedSessionFs;
+    retainedSessionMonotonicNow?: () => number;
     /** session-history plan PD22 (§4.8 step 1): programmatic-only seams for the spawn-history
      * service. `historyProcFs` overrides the occupancy scan's async /proc reads (tests expose
      * only the pids they spawned — a dev machine's live pi processes would otherwise force

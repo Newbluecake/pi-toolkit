@@ -239,3 +239,22 @@ describe("first-prompt body never survives any projection (arch §6.4/§4.6)", (
     expect(blob).not.toContain("TOP-SECRET");
   });
 });
+
+describe("retained disk constraint never enters any public/owner projection", () => {
+  it("adding coordinates+baseline+lazyIntent leaves same-input projections byte-identical", () => {
+    const extra = makeRecord({
+      ...rich,
+      sessionId: "private-id",
+      sessionFile: "/private/path.jsonl",
+      sessionPersisted: true,
+      sessionGuard: {
+        kind: "default-tree-v1",
+        baseline: { bindingDigest: "a".repeat(64), chain: [{ dev: 1, ino: 2 }] },
+        lazyIntent: { attempt: 1 },
+      },
+    });
+    expect(toPublic(extra)).toEqual(toPublic(rich));
+    expect(toViewer(extra, OWNER_PRINCIPAL, false)).toEqual(toViewer(rich, OWNER_PRINCIPAL, false));
+    expect(toViewer(extra, OTHER_PRINCIPAL, false)).toEqual(toViewer(rich, OTHER_PRINCIPAL, false));
+  });
+});
