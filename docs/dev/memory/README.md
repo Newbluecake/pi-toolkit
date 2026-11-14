@@ -1479,13 +1479,13 @@ flush 与单 activation 非绝对费用上限等既有限界保持。离线源�
 
 ## #50 stock-estimate suggest-only 收口（2026-11-13，离线）
 
-**状态：认证桥已就绪，LIVE 待用户确认（READY_FOR_APPROVAL / LIVE NOT RUN）。** 本节覆盖上文 stock 必须先满足 certified
+**状态：认证桥已就绪；用户批准的 standalone C13 LIVE PASS（2026-11-14）。** 本节覆盖上文 stock 必须先满足 certified
 能力才可生成建议的阻塞，不覆盖任何 provider 认证、Q2 自动或部署证明。三个维度分报：
 
 | 维度            | 当前证据与状态                                                                                                                       |
 | --------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
 | 源码与离线闭环  | 新 stock profile 经真实默认 resolver → wire/scopes/scheduler → 唯一 SDK client → D/C/review，离线 fake HTTP 验证；READY_FOR_APPROVAL |
-| 真实运行 / LIVE | NOT RUN；未读取真实密钥、用户数据或修改真实设置，未部署、reload、执行真实请求或付费                                                  |
+| 真实运行 / LIVE | C13 standalone 用户批准后直连 LIVE PASS；未修改真实设置，未证明生产部署或代理链路                                                    |
 | 能力 / 财务认证 | 后端 identity UNKNOWN、服务端硬输出 cap NOT PROVEN、账单 UNKNOWN；本地 list-price estimate 不等于 invoice，Q2 自动不启用             |
 
 ### 两个互斥合同与实际装配
@@ -1607,7 +1607,7 @@ R 与 G/C direct/支持的 proxy 最后 fetch 均先执行可重入 callback，�
   dispatcher-handler major 不同，不能把 8.x Agent 强转交给它），标准流式 Response 桥接回 SDK。
   这避免 SDK/全局代理配置影响；路由/认证/预算/四次/零重试/
   redirect:error 门全保留。此例证明力**弱于生产代理链路**，不证明 proxy streaming 能力、生产可用性
-  或部署；当前仅离线 mock 验证，真实 LIVE 仍 NOT RUN，后续真实执行须另行确认本次 SHA。
+  或部署；离线 mock 之外的本次直连 LIVE 结果见下，其他真实执行仍须另行确认对应 SHA。
 - 专用类型门（含 estimate+`maxTokensEnforced:true` / `serverEnforced:true` 等负向用例）：
   `timeout 180s node node_modules/typescript-7/bin/tsc --noEmit -p tests/memory/jev/p50-closure.tsconfig.json`。
   Vitest 擦除类型不代替此门。新 fakeHTTP 用例 tier1，无外网、real provider 或付费请求。
@@ -1627,8 +1627,20 @@ timeout --signal=TERM --kill-after=10s 180s node --import tsx scripts/dev/p50-cl
   --live --agent-dir "$AGENT_DIR" --manifest /tmp/p50-approved-manifest.json --manifest-sha '<approved manifestSha256>'
 ```
 
-未验证：真实 provider/auth/价目有效性、tokenizer 准确率、server 输出硬限、backend identity/Q2 independence、
-invoice、生产部署与物理UI。C13 仍 **LIVE NOT RUN**，认证桥的离线实现不等于真实凭据可用或用户批准。
+**C13 standalone LIVE PASS（2026-11-14 20:13，Asia/Shanghai）**：用户批准执行，结果 JSON
+`/tmp/p50-live-v3-result.json` 为 stdout、exit 0、stderr 空；清单 `/tmp/p50-direct-manifest-v3.json` 的
+manifestSha256 为 `ddb378a276c09ee7b9c414d5b90f0c1766944c198dc38a5f5caccdd315df0c79`。
+transport `direct-user-approved` 仅对本次 standalone 旁路已配置 Jev proxy，未改真实设置；与此前用户批准的
+v2 清单（`db2b8f28…`）相比仅私有 root 路径不同，route/price/template/预算逐字相同。
+四次 HTTP：R1/R2/G1/C1 估算输入 tokens 分别为 738/738/912/1102；suggestions 1、
+`autoEligible: false`、`automaticCommitCalls: 0`、`targetRawUnchanged: true`、
+`contextRawUnchanged: true`、`auditState: prepared`。usage `costUsd: 0.00019818`，
+`catalog-list-estimate`，`billingStatus: UNKNOWN`、`serverEnforced: false`、`identityEvidence: unknown`。
+先前 LIVE #1 的 G 在本地被拒，DeepSeek thinking-off framing 已由 `bec327f2` 修复；#2 的 R1 遇到
+provider HTTP 402 计费问题，用户已处理。
+
+仍未验证：proxy streaming 能力及生产代理链路（本次直连证明力弱于生产链路）、tokenizer 准确率、
+server 输出硬限、backend identity/Q2 independence、invoice、生产部署与物理 UI；单次成功亦不认证价目或账单。
 既有同步 syscall 不可抢占、同uid竞态、fsync非掉电事务限界不变。
 
 ### P50 standalone failure diagnostics and DeepSeek thinking-off framing (2026-11-13)
