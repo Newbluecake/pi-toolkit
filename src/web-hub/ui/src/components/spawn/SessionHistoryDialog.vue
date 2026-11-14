@@ -53,6 +53,9 @@ import type { HistoryQueryWire } from "@protocol/session-history.js";
 import type { SpawnHistoryOutcome } from "../../transport/types.js";
 import { MODAL_OVERLAY_ROOTS } from "@logic/overlayRoots.js";
 import { HUB_CTX } from "../control/controlContext.js";
+import { RETAINED_RELAUNCH } from "../../composables/useRetainedRelaunch.js";
+import { retainedExitedSupported } from "../../logic/spawn.js";
+import RetainedExitedSessions from "./RetainedExitedSessions.vue";
 import HistoryForkConfirm from "./HistoryForkConfirm.vue";
 import SpawnConfirm from "./SpawnConfirm.vue";
 import "../../styles/history.css";
@@ -68,6 +71,16 @@ const emit = defineEmits<{
 const { t } = useI18n();
 
 const hub = inject(HUB_CTX, null);
+const retained = inject(RETAINED_RELAUNCH, null);
+const historySupported = computed(() => {
+  const caps = hub?.state.value.hub?.["caps"];
+  return Array.isArray(caps) && caps.includes("spawn.history.v1");
+});
+const exitedSupported = computed(() => retainedExitedSupported(hub?.state.value.hub?.["caps"]));
+watch(
+  () => retained?.completed.value,
+  () => emit("close"),
+);
 const newSession = computed(() => hub?.spawn?.newSession ?? null);
 const flow = computed(() => newSession.value?.flow.value ?? ({ phase: "idle" } as const));
 
@@ -124,7 +137,7 @@ function sleep(ms: number): Promise<void> {
 /** Waits for a token; false ⇒ the request was superseded/unmounted while queued (token NOT taken). */
 async function acquireToken(mySeq: number): Promise<boolean> {
   for (;;) {
-    if (unmounted || mySeq !== seq) return false;
+    if (!historySupported.value || unmounted || mySeq !== seq) return false;
     const wait = bucket.tryTake();
     if (wait === 0) return true;
     await sleep(wait);
@@ -132,6 +145,7 @@ async function acquireToken(mySeq: number): Promise<boolean> {
 }
 
 async function runReq(q: HistoryQueryWire, auto: boolean): Promise<void> {
+  if (!historySupported.value || unmounted) return;
   const spawn = hub?.spawn;
   const mySeq = ++seq;
   activeReqs++;
@@ -150,8 +164,9 @@ async function runReq(q: HistoryQueryWire, auto: boolean): Promise<void> {
       let attempt = 0;
       for (;;) {
         if (!(await acquireToken(mySeq))) return;
+        if (!historySupported.value || unmounted || mySeq !== seq) return;
         r = await history(q);
-        if (unmounted || mySeq !== seq) return;
+        if (!historySupported.value || unmounted || mySeq !== seq) return;
         if (r.ok || r.status !== 429) break;
         // Silent 429 retry: keep the list/state untouched, wait, then go again (still current).
         bucket.drain();
@@ -162,7 +177,7 @@ async function runReq(q: HistoryQueryWire, auto: boolean): Promise<void> {
     } catch {
       r = { ok: false, error: "E_NETWORK", status: 0 };
     }
-    if (unmounted || mySeq !== seq) return;
+    if (!historySupported.value || unmounted || mySeq !== seq) return;
     if (r.ok) {
       state.value = historyListReducer(state.value, {
         type: "page",
@@ -198,6 +213,7 @@ async function runReq(q: HistoryQueryWire, auto: boolean): Promise<void> {
 }
 
 function commitQuery(q: string): void {
+  if (!historySupported.value || unmounted) return;
   if (debounceTimer !== null) {
     clearTimeout(debounceTimer);
     debounceTimer = null;
@@ -211,6 +227,7 @@ function commitQuery(q: string): void {
 let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
 function onSearchInput(ev: Event): void {
+  if (!historySupported.value || unmounted) return;
   searchRaw.value = (ev.target as HTMLInputElement).value;
   if (debounceTimer !== null) clearTimeout(debounceTimer);
   const v = searchRaw.value;
@@ -221,6 +238,7 @@ function onSearchInput(ev: Event): void {
 }
 
 function onSearchKeydown(ev: KeyboardEvent): void {
+  if (!historySupported.value || unmounted) return;
   if (ev.key === "Enter") {
     ev.preventDefault();
     commitQuery(searchRaw.value.trim());
@@ -233,6 +251,7 @@ function onSearchKeydown(ev: KeyboardEvent): void {
 }
 
 function onKindToggle(): void {
+  if (!historySupported.value || unmounted) return;
   kind.value = kind.value === "all" ? "main" : "all";
   writeHistoryKindPref(safeStorage(), kind.value);
   state.value = historyListReducer(state.value, { type: "query", q: state.value.q, kind: kind.value });
@@ -240,6 +259,7 @@ function onKindToggle(): void {
 }
 
 function onLoadMore(): void {
+  if (!historySupported.value || unmounted) return;
   const cur = state.value;
   if (cur.phase !== "ready" || cur.cursor === undefined) return;
   // One page request at a time: no manual round while an auto-continue is pending (the footer
@@ -250,9 +270,31 @@ function onLoadMore(): void {
 }
 
 function refresh(): void {
+  if (!historySupported.value || unmounted) return;
   state.value = historyListReducer(state.value, { type: "query", q: state.value.q, kind: state.value.kind });
   void runReq({ q: state.value.q, kind: state.value.kind }, false);
 }
+
+watch(
+  historySupported,
+  (supported) => {
+    seq++;
+    for (const e of sleepers) {
+      clearTimeout(e.timer);
+      e.done();
+    }
+    sleepers.clear();
+    if (debounceTimer !== null) {
+      clearTimeout(debounceTimer);
+      debounceTimer = null;
+    }
+    pendingFork.value = null;
+    sessionError.value = null;
+    state.value = HISTORY_LIST_IDLE;
+    if (supported && !unmounted) commitQuery(searchRaw.value.trim());
+  },
+  { flush: "sync" },
+);
 
 // ---------------------------------------------------------------------------
 // rows / actions
@@ -285,7 +327,7 @@ const sessionErrorText = computed(() => (sessionError.value === null ? null : t(
 /** Rows clickable while no flow phase holds the wire (submitting/confirming). */
 const flowBusy = computed(() => {
   const p = flow.value.phase;
-  return p === "submitting" || p === "confirming";
+  return p === "submitting" || p === "confirming" || retained?.busy.value === true;
 });
 
 function rowTitle(row: HistoryRowModel): string {
@@ -293,7 +335,7 @@ function rowTitle(row: HistoryRowModel): string {
 }
 
 function onPrimary(row: HistoryRowModel): void {
-  if (flowBusy.value || !row.startable) return;
+  if (!historySupported.value || flowBusy.value || !row.startable) return;
   if (row.forkOnly !== undefined) {
     // forkOnly rows fork straight away — the local confirm below is the only confirmation
     // (PD17); the forkOnly reason/proofGap/live feed the warning copy.
@@ -306,6 +348,7 @@ function onPrimary(row: HistoryRowModel): void {
 }
 
 function onLocalForkConfirm(): void {
+  if (!historySupported.value || flowBusy.value) return;
   const row = pendingFork.value;
   pendingFork.value = null;
   const ns = newSession.value;
@@ -327,6 +370,7 @@ function toggleOverflow(key: string): void {
   overflowKey.value = overflowKey.value === key ? null : key;
 }
 function onOverflowFork(row: HistoryRowModel): void {
+  if (!historySupported.value || flowBusy.value) return;
   overflowKey.value = null;
   pendingFork.value = row;
 }
@@ -355,6 +399,7 @@ function onListKeydown(ev: KeyboardEvent): void {
 const confirmingFlow = computed(() => (flow.value.phase === "confirming" ? flow.value : null));
 
 watch(flow, (f) => {
+  if (!historySupported.value) return;
   if (f.phase === "awaiting" || f.phase === "done") {
     emit("close"); // 进入 awaiting ⇒ 关闭弹窗 (§4.7.2); SpawnRow shows the record from here
     return;
@@ -382,13 +427,15 @@ onMounted(async () => {
   releaseScrollLock = acquireBodyScrollLock();
   document.addEventListener("keydown", onDocumentKeydown, true);
   await nextTick();
-  searchInput.value?.focus();
+  (searchInput.value ?? panelEl.value?.querySelector<HTMLButtonElement>("button"))?.focus();
+  if (!historySupported.value) return;
   // Initial page — the reducer's `query` also arms the expired-restart budget.
   state.value = historyListReducer(HISTORY_LIST_IDLE, { type: "query", q: "", kind: kind.value });
   void runReq({ q: "", kind: kind.value }, false);
 });
 
 onUnmounted(() => {
+  retained?.cancel();
   unmounted = true;
   seq++; // drop any in-flight response
   for (const e of sleepers) {
@@ -433,6 +480,7 @@ function trapTab(ev: KeyboardEvent): void {
 }
 
 function onCancelOrClose(): void {
+  retained?.cancel();
   const f = flow.value;
   if (f.phase === "confirming") newSession.value?.cancel();
   pendingFork.value = null;
@@ -480,13 +528,14 @@ function onDocumentKeydown(ev: KeyboardEvent): void {
       <section
         ref="panelEl"
         class="history-dialog"
+        :class="{ 'is-managed-only': !historySupported && exitedSupported }"
         role="dialog"
         aria-modal="true"
         :aria-label="t('history.dialogAria')"
         tabindex="-1"
       >
         <!-- 409 session-open ⇒ HistoryForkConfirm; any other 409 reason ⇒ SpawnConfirm -->
-        <template v-if="confirmingFlow">
+        <template v-if="historySupported && confirmingFlow">
           <HistoryForkConfirm
             v-if="confirmingFlow.reason === 'session-open'"
             :reason="confirmingFlow.forkReason ?? 'unverified'"
@@ -511,7 +560,7 @@ function onDocumentKeydown(ev: KeyboardEvent): void {
 
         <!-- user-chosen fork (row action / overflow) ⇒ the SAME confirm view, locally -->
         <HistoryForkConfirm
-          v-else-if="pendingFork"
+          v-else-if="historySupported && pendingFork"
           :reason="pendingFork.forkOnly ?? 'manual'"
           :by="pendingFork.live?.by"
           :gap="pendingFork.proofGap"
@@ -535,7 +584,7 @@ function onDocumentKeydown(ev: KeyboardEvent): void {
                 <AppIcon name="x" class="icon-sm" />
               </button>
             </div>
-            <div class="history-searchrow">
+            <div v-if="historySupported" class="history-searchrow">
               <div class="history-search">
                 <AppIcon name="search" />
                 <input
@@ -560,26 +609,32 @@ function onDocumentKeydown(ev: KeyboardEvent): void {
             </div>
           </header>
 
-          <p v-if="flow.phase === 'submitting'" class="history-status" role="status">
+          <RetainedExitedSessions v-if="exitedSupported" />
+
+          <p v-else-if="historySupported && flow.phase === 'submitting'" class="history-status" role="status">
             <AppIcon name="loader" class="icon-sm spin" />{{ t("spawn.pickerSubmitting") }}
           </p>
-          <div v-if="sessionErrorText" class="history-session-error" role="alert">
+          <div v-if="historySupported && sessionErrorText" class="history-session-error" role="alert">
             <span class="history-session-error-title">{{ t("history.sessionErrorTitle") }}</span>
             {{ sessionErrorText }}
           </div>
 
-          <p v-if="state.phase === 'loading' && rows.length === 0" class="history-status" role="status">
+          <p
+            v-if="historySupported && state.phase === 'loading' && rows.length === 0"
+            class="history-status"
+            role="status"
+          >
             <AppIcon name="loader" class="icon-sm spin" />{{ t("history.loading") }}
           </p>
           <!-- the error block renders with OR without gathered rows (an appended-page failure
                still shows what the query found so far) -->
-          <div v-else-if="state.phase === 'error'" class="history-session-error" role="alert">
+          <div v-else-if="historySupported && state.phase === 'error'" class="history-session-error" role="alert">
             <span>{{ errorText }}</span>
             <button class="btn btn-ghost btn-xs" type="button" @click="refresh">{{ t("history.retry") }}</button>
           </div>
 
           <div
-            v-else-if="rows.length > 0"
+            v-else-if="historySupported && rows.length > 0"
             ref="listEl"
             class="history-list"
             role="listbox"
@@ -659,9 +714,9 @@ function onDocumentKeydown(ev: KeyboardEvent): void {
               <p v-if="row.blockedKey" class="history-row-blocked">{{ t(row.blockedKey) }}</p>
             </div>
           </div>
-          <p v-if="emptyHint" class="history-empty">{{ emptyHint }}</p>
+          <p v-if="historySupported && emptyHint" class="history-empty">{{ emptyHint }}</p>
 
-          <footer class="history-foot">
+          <footer v-if="historySupported" class="history-foot">
             <div class="history-foot-row">
               <div class="history-foot-status">
                 <p v-if="state.phase === 'loading' && rows.length > 0" class="history-status" role="status">

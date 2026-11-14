@@ -61,7 +61,7 @@ import {
  *   reason?: SpawnPolicyWire["reason"] | "unavailable" }
  *   | { kind: "same-cwd", agentKey: string, cwd: string, enabled: boolean }
  *   | { kind: "pick-dir", enabled: boolean, reason?: SpawnPolicyWire["reason"] | "unavailable" }
- *   | { kind: "history", enabled: boolean, reason?: SpawnPolicyWire["reason"] }} NewSessionAction
+ *   | { kind: "history", enabled: boolean, reason?: SpawnPolicyWire["reason"], managedOnly?: boolean }} NewSessionAction
  */
 
 /** `SpawnPolicyWire.reason` → its `spawn.denied*` i18n key (NewSessionMenu + AgentList hint). */
@@ -144,10 +144,11 @@ export function spawnAvailability({ hubCaps, listResult } = {}) {
  * (the 0-agent EmptyState entry, arch §9.1). spawn-cwd's enablement is the spawn availability
  * alone (it never touches the selected agent's control plane).
  * @param {{ hubCaps?: unknown, listResult?: SpawnListResult | null | undefined,
- *   selected?: { agent?: any, hubControl?: boolean, controlPresent?: boolean } | null }} p
+ *   selected?: { agent?: any, hubControl?: boolean, controlPresent?: boolean } | null,
+ *   spawns?: SpawnsPayload | null }} p
  * @returns {NewSessionAction[]}
  */
-export function newSessionActions({ hubCaps, listResult, selected } = {}) {
+export function newSessionActions({ hubCaps, listResult, selected, spawns } = {}) {
   /** @type {NewSessionAction[]} */
   const out = [];
   const caps = Array.isArray(hubCaps) ? hubCaps : [];
@@ -188,13 +189,20 @@ export function newSessionActions({ hubCaps, listResult, selected } = {}) {
   // advertises `spawn.history.v1` AND a `GET /api/headless` succeeded — available ⇒ enabled,
   // a denied policy ⇒ disabled with its reason (spawnDeniedKey, same as pick-dir); every
   // other availability state (no-cap / not-found / error / unknown) HIDES it entirely.
-  if (caps.includes(SPAWN_HISTORY_HUB_CAP)) {
+  // spawn.exited.v1 also permits a managed-only entry when retained records exist; the
+  // optional UI-only marker never changes legacy actions or goes onto the wire.
+  if (caps.includes(SPAWN_HISTORY_HUB_CAP) || retainedRecoveryRows(spawns, caps).length > 0) {
     if (avail.state === "available") {
-      out.push({ kind: "history", enabled: true });
+      out.push({
+        kind: "history",
+        enabled: true,
+        ...(!caps.includes(SPAWN_HISTORY_HUB_CAP) ? { managedOnly: true } : {}),
+      });
     } else if (avail.state === "denied") {
       out.push({
         kind: "history",
         enabled: false,
+        ...(!caps.includes(SPAWN_HISTORY_HUB_CAP) ? { managedOnly: true } : {}),
         ...(avail.policy.reason !== undefined ? { reason: avail.policy.reason } : {}),
       });
     }
@@ -525,4 +533,39 @@ export function classifyRelaunchError(outcome) {
     default:
       return "network";
   }
+}
+
+// UI-side literal: H1 owns protocol registration; no record/wire additions are needed.
+export const SPAWN_EXITED_UI_CAP = "spawn.exited.v1";
+/** @param {unknown} caps @returns {boolean} */
+export function retainedExitedSupported(caps) {
+  return Array.isArray(caps) && caps.includes(SPAWN_EXITED_UI_CAP);
+}
+/** Restore object (not only its optional failure string) proves restore provenance.
+ * @param {any} rec @returns {boolean} */
+export function isRetainedRestoreFailure(rec) {
+  return rec?.state === "failed" && restoreOf(rec) !== undefined;
+}
+/** Current hub retention, independent of cards, channel filters and local row dismissal.
+ * @param {SpawnsPayload | null | undefined} spawns @param {unknown} caps
+ * @returns {SpawnRecordPublic[]} */
+export function retainedRecoveryRows(spawns, caps) {
+  if (!retainedExitedSupported(caps)) return [];
+  return itemsOf(spawns)
+    .filter(
+      (r) =>
+        r && typeof r.spawnId === "string" && r.spawnId !== "" && (r.state === "exited" || isRetainedRestoreFailure(r)),
+    )
+    .slice()
+    .sort(
+      (a, b) =>
+        (Number(b.updatedAt) || 0) - (Number(a.updatedAt) || 0) ||
+        (a.spawnId < b.spawnId ? -1 : a.spawnId > b.spawnId ? 1 : 0),
+    );
+}
+/** @param {any} out @returns {string} */
+export function relaunchErrorKey(out) {
+  if (out?.reason === "no-session") return "spawn.relaunchErrNoSession";
+  const bucket = classifyRelaunchError(out) ?? "network";
+  return `spawn.relaunchErr${bucket[0].toUpperCase()}${bucket.slice(1)}`;
 }

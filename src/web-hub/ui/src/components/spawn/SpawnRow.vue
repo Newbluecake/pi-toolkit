@@ -11,7 +11,10 @@
       · 「详情」— fetches `useSpawn.list()` and shows the OWNER-only fields (`hintDetail`,
         `stderrTail`, arch §6.4) when this principal owns the record; otherwise an owner-only
         note. Everything renders through interpolation ⇒ textContent.
-      · 「重试」— resolves the owner-only `cwd` from the same `list()` detail and resubmits via
+      · New spawn.exited.v1 + a restore object: 「重试恢复」 calls the sidebar's shared
+        same-spawnId relaunch controller. No owner lookup or fresh/fork fallback, even when
+        restore.failure or the old agentKey is missing.
+      · Otherwise 「重试」— resolves the owner-only `cwd` from the same `list()` detail and resubmits via
         `useNewSession.submit({ cwd })` (a NEW id, §3.2 失败后重试); without owner visibility an
         inline note explains why nothing happened. session-history plan PD15: hidden on records
         with `from` (history resume/fork) — `submit({cwd})` would spawn a FRESH session, not
@@ -26,6 +29,8 @@ import { useI18n } from "../../composables/useI18n.js";
 import { removalTargetForSpawn } from "../../logic/remove.js";
 import {
   isRestoring,
+  isRetainedRestoreFailure,
+  retainedExitedSupported,
   restoreFailureKey,
   restorePhaseKey,
   spawnHintKey,
@@ -34,6 +39,7 @@ import {
 import type { SpawnRecordPublic } from "@protocol/spawn.js";
 import { HUB_CTX } from "../control/controlContext.js";
 import "../../styles/spawn.css";
+import { RETAINED_RELAUNCH } from "../../composables/useRetainedRelaunch.js";
 import RemoveButton from "../agents/RemoveButton.vue";
 
 const props = defineProps<{ readonly rec: SpawnRecordPublic }>();
@@ -41,6 +47,14 @@ const emit = defineEmits<{ dismiss: [] }>();
 const { t } = useI18n();
 
 const hub = inject(HUB_CTX, null);
+const retained = inject(RETAINED_RELAUNCH, null);
+const restoreRetry = computed(
+  () => retainedExitedSupported(hub?.state.value.hub?.["caps"]) && isRetainedRestoreFailure(props.rec),
+);
+const restoreRetryBusy = computed(() => retained?.isPending(props.rec.spawnId) === true);
+const restoreRetryError = computed(() =>
+  restoreRetry.value ? retained?.errors.value.get(props.rec.spawnId) : undefined,
+);
 
 const hintLabel = computed(() => {
   const hint = props.rec.hint;
@@ -171,12 +185,20 @@ const modelCap = computed(() => {
 });
 
 async function onRetry(): Promise<void> {
+  // Restore provenance is authoritative even without failure/cwd/agentKey. Never fall back
+  // to a fresh submit when the shared controller is unavailable or relaunch is refused.
+  if (restoreRetry.value) {
+    await retained?.request(props.rec.spawnId);
+    return;
+  }
   const spawn = hub?.spawn;
   if (spawn === undefined || retryBusy.value) return;
   retryBusy.value = true;
   retryDenied.value = false;
   try {
     const owner = await fetchDetail();
+    // An SSE/cap change during owner lookup must not turn a restore retry into a fresh start.
+    if (restoreRetry.value) return;
     if (owner?.cwd === undefined) {
       retryDenied.value = true;
       return;
@@ -209,9 +231,13 @@ async function onRetry(): Promise<void> {
       <!-- 2026-10-13 拍板 ②: first-prompt mirror chip (fp: pending/sending/delivered) -->
       <span v-if="fpChipLabel" class="chip chip-spawn" translate="no">{{ fpChipLabel }}</span>
       <!-- session-history plan PD15: the origin marker (English token: history | fork) -->
-      <span v-if="fromOrigin" class="chip chip-mono" :title="t('history.fromRetryHidden')" translate="no">{{
-        fromOrigin
-      }}</span>
+      <span
+        v-if="fromOrigin"
+        class="chip chip-mono"
+        :title="restoreRetry ? t('history.retainedVerify') : t('history.fromRetryHidden')"
+        translate="no"
+        >{{ fromOrigin }}</span
+      >
       <RemoveButton
         v-if="removeTarget"
         :target="{ spawnId: removeTarget.spawnId }"
@@ -229,14 +255,14 @@ async function onRetry(): Promise<void> {
           {{ t("spawn.rowDetails") }}
         </button>
         <button
-          v-if="fromOrigin === null"
+          v-if="restoreRetry || fromOrigin === null"
           class="btn btn-ghost btn-xs"
           type="button"
-          :aria-label="t('spawn.rowRetryAria', { cwd: rec.cwdLabel })"
-          :disabled="retryBusy"
+          :aria-label="restoreRetry ? t('spawn.rowRetryRestore') : t('spawn.rowRetryAria', { cwd: rec.cwdLabel })"
+          :disabled="restoreRetry ? !retained || restoreRetryBusy || rec.removing === true : retryBusy"
           @click="onRetry"
         >
-          {{ t("spawn.rowRetry") }}
+          {{ restoreRetry ? t("spawn.rowRetryRestore") : t("spawn.rowRetry") }}
         </button>
         <button
           class="btn btn-ghost btn-xs"
@@ -251,7 +277,8 @@ async function onRetry(): Promise<void> {
     <p v-if="restorePhaseLabel" class="spawn-row-hint" data-restore="phase">{{ restorePhaseLabel }}</p>
     <p v-if="restoreFailureLabel" class="spawn-row-hint" data-restore="failure">{{ restoreFailureLabel }}</p>
     <p v-if="hintLabel" class="spawn-row-hint">{{ hintLabel }}</p>
-    <p v-if="fromOrigin" class="spawn-row-hint">{{ t("history.fromRetryHidden") }}</p>
+    <p v-if="fromOrigin && !restoreRetry" class="spawn-row-hint">{{ t("history.fromRetryHidden") }}</p>
+    <p v-else-if="restoreRetryError" class="spawn-row-hint" role="alert">{{ t(restoreRetryError) }}</p>
     <p v-if="retryDenied" class="spawn-row-hint">{{ t("spawn.rowOwnerOnly") }}</p>
     <template v-if="detailOpen">
       <p v-if="detailFailed" class="spawn-row-hint">{{ t("spawn.rowDetailError") }}</p>

@@ -766,3 +766,62 @@ describe("classifyRelaunchError (spawn.relaunchErr* buckets)", () => {
     expect(API_ERRORS).toContain("E_AGENT_ONLINE");
   });
 });
+
+// Retained records are current hub state, independent of agents and owner projections.
+import {
+  retainedRecoveryRows,
+  isRetainedRestoreFailure,
+  relaunchErrorKey,
+  SPAWN_EXITED_UI_CAP,
+} from "../../../src/web-hub/ui/src/logic/spawn.js";
+describe("spawn.exited.v1 UI mirror", () => {
+  it("requires exact cap; selects exited OR failed+restore object, stable updatedAt/id sorting", () => {
+    const mk = (spawnId: string, state: SpawnRecordPublic["state"], updatedAt: number, extra = {}) => ({
+      spawnId,
+      state,
+      updatedAt,
+      ...extra,
+    });
+    const payload = {
+      items: [
+        null,
+        mk("z", "exited", 2),
+        mk("a", "exited", 2),
+        mk("b", "failed", 3, { restore: { attempt: 1 } }),
+        mk("fresh", "failed", 9),
+        mk("start", "starting", 10, { restore: { attempt: 1 } }),
+        mk("remove", "exited", 1, { removing: true }),
+      ],
+    } as unknown as SpawnsPayload;
+    expect(retainedRecoveryRows(payload, [])).toEqual([]);
+    expect(retainedRecoveryRows(payload, ["spawn.relaunch.v1"])).toEqual([]);
+    expect(retainedRecoveryRows(payload, [SPAWN_EXITED_UI_CAP]).map((r) => r.spawnId)).toEqual([
+      "b",
+      "a",
+      "z",
+      "remove",
+    ]);
+    expect(isRetainedRestoreFailure({ state: "failed", restore: {} })).toBe(true);
+    expect(isRetainedRestoreFailure({ state: "failed", restore: null })).toBe(false);
+    expect(retainedRecoveryRows(undefined, [SPAWN_EXITED_UI_CAP])).toEqual([]);
+    expect(retainedRecoveryRows({ items: "bad" } as unknown as SpawnsPayload, [SPAWN_EXITED_UI_CAP])).toEqual([]);
+    expect(relaunchErrorKey({ ok: false, reason: "no-session", error: "E_BAD_REQUEST" })).toBe(
+      "spawn.relaunchErrNoSession",
+    );
+  });
+  it("managed-only action is appended only with cap+retained rows and never duplicates ordinary history", () => {
+    const spawns = { items: [{ spawnId: "s", state: "exited" }] } as SpawnsPayload;
+    const listResult = { ok: true as const, policy: policy(), items: [] };
+    const base = { listResult, spawns };
+    const old = newSessionActions({ ...base, hubCaps: ["spawn.v1"] });
+    expect(newSessionActions({ ...base, hubCaps: ["spawn.v1", "unknown"] })).toEqual(old);
+    expect(
+      newSessionActions({ ...base, hubCaps: ["spawn.v1", SPAWN_EXITED_UI_CAP] }).filter((a) => a.kind === "history"),
+    ).toEqual([{ kind: "history", enabled: true, managedOnly: true }]);
+    expect(
+      newSessionActions({ ...base, hubCaps: ["spawn.v1", "spawn.history.v1", SPAWN_EXITED_UI_CAP] }).filter(
+        (a) => a.kind === "history",
+      ),
+    ).toEqual([{ kind: "history", enabled: true }]);
+  });
+});

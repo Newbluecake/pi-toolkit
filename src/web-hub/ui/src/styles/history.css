@@ -400,3 +400,44 @@
   min-height: 0;
   overflow-y: auto;
 }
+
+/* A separate spawn-record view: never mix its rows into the file-history listbox. */
+.history-retained {
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: 45%;
+  overflow-y: auto;
+  border-bottom: 1px solid var(--c-border);
+  padding-bottom: var(--sp-2);
+}
+.history-dialog.is-managed-only .history-retained {
+  max-height: none;
+}
+.history-retained-title {
+  margin: 0 0 var(--sp-1);
+  font-size: var(--fs-sm);
+}
+.history-retained-list {
+  list-style: none;
+  padding: 0;
+  margin: var(--sp-2) 0 0;
+}
+.history-retained-row {
+  border-top: 1px solid var(--c-border);
+  padding: var(--sp-2) 0;
+}
+.history-retained-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.history-retained-cwd {
+  flex: 1 1 140px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: var(--fs-sm);
+}
+.history-retained-row .btn {
+  min-height: 44px;
+}

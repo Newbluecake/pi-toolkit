@@ -106,6 +106,8 @@ const spawn = {
   stateFailed: "failed",
   rowDetails: "详情",
   rowDetailsAria: "查看 {cwd} 的失败详情",
+  rowRetryRestore: "重试恢复",
+  relaunchErrNoSession: "此记录没有可用恢复坐标，请在原会话环境选择历史。",
   rowRetry: "重试",
   rowRetryAria: "在 {cwd} 重新启动会话",
   rowDismiss: "关闭",
