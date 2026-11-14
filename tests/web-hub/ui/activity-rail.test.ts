@@ -387,35 +387,104 @@ describe("Task60 compact panel: 零预留列 + 单实例双宿主（compact-pane
     expect(drawerRoot()!.querySelector(".activity-bridge")).toBeNull();
   });
 
-  it("关闭回到浮动宿主；子详情公共头部不重复 close，back 退选但入口宿主不销毁", async () => {
+  it("列表与子详情共享右侧入口和 close；back 退选但入口宿主不销毁", async () => {
     const { w, selectRun } = detail();
     const btn = w.get('[data-panel="agent"].fleet-summary-bar').element;
     await w.get('[data-panel="agent"].fleet-summary-bar').trigger("click", { detail: 1 });
     await nextTick();
     expect(btn.closest('[data-rail-host="header"]')).not.toBeNull();
-    // 选入子详情：公共头部保留入口，无重复 close；RunHeader 保留 back/name/status/close
+    const listHead = drawerRoot()!.querySelector(".drawer-head")!;
+    const host = btn.closest('[data-rail-host="header"]')!;
+    const close = listHead.querySelector(".drawer-close")!;
+    const terminalBtn = w.get('[data-panel="bash"].fleet-summary-bar').element;
+    expect(terminalBtn.closest('[data-rail-host="header"]')).toBe(host);
+    expect(host.parentElement).toBe(listHead);
+    expect(host.nextElementSibling).toBe(close);
+    // Selection only replaces the leading content, not the right-side controls.
     await w.setProps({ agent: { ...agent(), runSel: "r1" } as AgentState });
     await nextTick();
     const head = drawerRoot()!.querySelector(".drawer-head")!;
     expect(head.querySelector('[data-rail-host="header"]')).not.toBeNull();
     expect(head.querySelector(".activity-pin")).toBeNull();
-    expect(head.querySelector(".drawer-close")).toBeNull(); // 公共头部不重复 close
+    expect(head).toBe(listHead);
+    expect(head.querySelector(".drawer-close")).toBe(close);
+    expect(host.parentElement).toBe(head);
+    expect(host.nextElementSibling).toBe(close);
+    expect(drawerRoot()!.querySelectorAll(".drawer-close")).toHaveLength(1);
     const runHead = drawerRoot()!.querySelector(".run-head")!;
     expect(runHead.querySelector(".drawer-back")).not.toBeNull();
     expect(runHead.querySelector(".run-head-name")).not.toBeNull();
-    expect(runHead.querySelector(".run-head .drawer-close")).not.toBeNull();
+    expect(runHead.parentElement).toBe(head);
+    expect(runHead.nextElementSibling).toBe(head.querySelector(".run-head-meta"));
+    expect(head.querySelector(".run-head-meta")!.nextElementSibling).toBe(host);
+    expect(w.get('[data-panel="bash"].fleet-summary-bar').element).toBe(terminalBtn);
+    expect(terminalBtn.closest('[data-rail-host="header"]')).toBe(host);
+    expect(runHead.querySelector(".drawer-close")).toBeNull();
     expect(btn.closest('[data-rail-host="header"]')).not.toBeNull(); // 分支切换不销毁宿主
     // back：退选 run，抽屉保持打开，入口仍在头部
     await w.get(".drawer-back").trigger("click");
     await nextTick();
     expect(selectRun).toHaveBeenCalledWith("A", null);
-    expect(btn.closest('[data-rail-host="header"]')).not.toBeNull();
+    await w.setProps({ agent: agent() });
+    expect(drawerRoot()!.querySelector(".drawer-head")).toBe(listHead);
+    expect(host.nextElementSibling).toBe(close);
+    expect(btn.closest('[data-rail-host="header"]')).toBe(host);
+    expect(terminalBtn.closest('[data-rail-host="header"]')).toBe(host);
     // 关闭：迁回浮动宿主（同一节点）
     await w.get(".drawer-close").trigger("click");
     await nextTick();
     await nextTick();
     expect(w.get('[data-panel="agent"].fleet-summary-bar').element).toBe(btn);
     expect(btn.closest('[data-rail-host="floating"]')).not.toBeNull();
+  });
+
+  it("keeps detail metadata visible, including lastRow fallback, at every width", async () => {
+    // Load actual production CSS: DOM presence alone missed the old container-query hiding.
+    const style = document.createElement("style");
+    const css = readFileSync(resolve("src/web-hub/ui/src/styles/drawer.css"), "utf8");
+    style.textContent = css;
+    document.head.append(style);
+    cleanups.push(() => style.remove());
+    expect(css.replace(/\/\*[\s\S]*?\*\//g, "")).not.toMatch(/@container/);
+    const selected = { ...row, title: "A long display title", label: "worker-label", type: "verifier" };
+    const initial = { ...agent(), fleet: [selected], runSel: "r1" } as AgentState;
+    const { w } = detail("docked", initial);
+    for (const width of [375, 767, 900, 1280]) {
+      const drawer = w.get("#fleet-drawer").element as HTMLElement;
+      drawer.style.width = `${width}px`;
+      for (const fallback of [false, true]) {
+        await w.setProps({
+          agent: {
+            ...initial,
+            fleet: fallback ? [] : [selected],
+            runTx: {
+              ...agent(),
+              runId: "r1",
+              lastRow: selected,
+              status: "working",
+              terminal: false,
+              live: false,
+              retries: 0,
+            },
+          } as unknown as AgentState,
+        });
+        const meta = w.get(".run-head-meta");
+        for (const selector of [
+          ".run-head-label",
+          ".run-head-status",
+          ".chip",
+          ...(fallback ? [".chip-notlisted"] : []),
+        ]) {
+          const el = meta.get(selector).element;
+          expect(el.textContent?.trim()).toBeTruthy();
+          expect(getComputedStyle(el).display).not.toBe("none");
+          expect(meta.get(selector).isVisible()).toBe(true);
+        }
+        expect(w.find(".chip-notlisted").exists()).toBe(fallback);
+        expect(meta.element.parentElement).toBe(w.get(".drawer-head").element);
+        expect(w.get(".run-head").find(".chip").exists()).toBe(false);
+      }
+    }
   });
 
   it("Teleport 迁移不丢 rail 内焦点：仅还给同一节点，不抢其它焦点", async () => {

@@ -586,9 +586,9 @@ watch(
         <AppIcon :name="panel === 'bash' ? 'terminal' : 'bot'" class="icon-sm drawer-title-icon" />
         <span class="drawer-title">{{ t(panel === "bash" ? "fleet.commandsTitle" : "fleet.panelTitle") }}</span>
       </template>
+      <RunHeader v-else :agent="agent" :mode="mode" @back="onBackToTree" />
       <slot name="activity"></slot>
       <button
-        v-if="selectedRunId === null"
         class="btn btn-ghost btn-icon drawer-close"
         type="button"
         :aria-label="t('drawer.close')"
@@ -598,7 +598,6 @@ watch(
       </button>
     </div>
     <template v-if="selectedRunId !== null">
-      <RunHeader :agent="agent" :mode="mode" @back="onBackToTree" @close="onClose" />
       <RunTranscript :key="selectedRunId" :agent="agent" :now="now" />
     </template>
     <template v-else>

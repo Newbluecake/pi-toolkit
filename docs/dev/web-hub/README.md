@@ -308,6 +308,18 @@ Privacy lock still unmounts the whole detail subtree including both rail buttons
 checks-body-applicability,detail-body}.test.ts`; real compiled-UI evidence and design decisions:
 `docs/dev/activity-rail/plan.md`. No Vue Transition/rAF, inline style or new dependency.
 
+### Stable drawer header controls
+
+List and selected-run views share one `.drawer-head`: the leading list title or
+`RunHeader`, then the persistent activity host and the same close button. The first
+line never wraps: back, state icon and ellipsized title shrink only in the leading
+area; activity targets retain their size, gap and right alignment. Details add a
+full-width second line for text status, truncatable @label, type and not-listed
+chips (including the lastRow fallback). Secondary information and any tools may
+wrap but must remain visible and in the accessibility tree at every width; no
+container-width hiding rule is allowed. The list layout is unchanged.
+No subscription, terminal, focus, wire or toggle behavior changes.
+
 ### Historical Task60 compact panel — zero reserved column, entry moves into the header
 
 **Historical implementation, superseded by the click-driven drawer described above.** The following

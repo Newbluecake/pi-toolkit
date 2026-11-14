@@ -1,7 +1,7 @@
 <!--
   抽屉里被选中 run 的头部(fleet-drawer plan v2 §6.3/§6.6 — F6):图标 + 名字 + type chip +
   状态行,外加「← 子 agent 列表」返回键(back —— 退选 run、回到树视图,fullscreen 下是
-  唯一的返回路径)和关闭按钮(`.drawer-close`,§6.4 #6 的焦点目标)。
+  唯一的返回路径)。关闭按钮由公共 drawer-head 持有。
 
   §6.3 的 lastRow 回退:被选中的 run 移出投影行后(64/8 上限淘汰),头部改用
   `runTx.lastRow`(F5 在 reducer 里保留的最后一条 FleetRowWire)继续显示,并加
@@ -88,18 +88,12 @@ const spins = computed(() => fleetStateSpins(visualState.value));
     <span class="run-icon run-head-icon"><AppIcon :name="icon" :class="{ icon: true, spin: spins }" /></span>
     <span class="run-head-name">
       <b translate="no">{{ name }}</b>
-      <span v-if="subLabel" class="run-head-label" translate="no" :title="subLabel">{{ subLabel }}</span>
-      <span v-if="typeChip" class="chip" translate="no">{{ typeChip }}</span>
-      <span v-if="!listed" class="chip chip-notlisted">{{ t("drawer.notListed") }}</span>
     </span>
-    <span v-if="statusText" class="run-head-status" translate="no">{{ statusText }}</span>
-    <button
-      class="btn btn-ghost btn-icon drawer-close"
-      type="button"
-      :aria-label="t('drawer.close')"
-      @click="emit('close')"
-    >
-      <AppIcon name="x" class="icon-sm" />
-    </button>
   </header>
+  <div class="run-head-meta">
+    <span v-if="statusText" class="run-head-status" translate="no">{{ statusText }}</span>
+    <span v-if="subLabel" class="run-head-label" translate="no" :title="subLabel">{{ subLabel }}</span>
+    <span v-if="typeChip" class="chip" translate="no">{{ typeChip }}</span>
+    <span v-if="!listed" class="chip chip-notlisted">{{ t("drawer.notListed") }}</span>
+  </div>
 </template>

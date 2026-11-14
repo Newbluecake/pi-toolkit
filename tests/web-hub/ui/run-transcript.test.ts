@@ -295,7 +295,9 @@ describe("U10: 被选中的 run 移出 rows(§6.3 lastRow 回退)", () => {
     mountDetail(agent, hub);
     const head = document.querySelector("#fleet-drawer .run-head")!;
     expect(head.textContent).toContain(`label-${RUN}`); // lastRow 的名字
-    expect(head.querySelector(".chip-notlisted")!.textContent).toBe("no longer listed");
+    expect(document.querySelector("#fleet-drawer .run-head-meta .chip-notlisted")!.textContent).toBe(
+      "no longer listed",
+    );
     expect(document.querySelector("#fleet-drawer .run-tx")!.textContent).toContain("run-msg"); // 不中断
   });
 });

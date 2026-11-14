@@ -77,10 +77,47 @@
   border-bottom: 1px solid var(--c-border);
 }
 
-/* Task60: 公共头部窄到放不下时只换行自身（入口行 flex-shrink:0、标题可截断），不侵入
- * 正文；run-head 不换行。 */
+/* One non-wrapping header owns the activity host and close button in both views.
+ * Only its leading content shrinks; rail hit targets and spacing never move. */
 .drawer-head {
+  flex-wrap: nowrap;
+}
+
+.drawer-head > .run-head {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+}
+
+.drawer-head > [data-rail-host="header"] {
+  margin-left: auto;
+}
+
+/* Details add a full-width second line without changing the first line's geometry.
+ * Metadata remains in the accessibility tree at every drawer width. */
+.drawer-head:has(> .run-head) {
   flex-wrap: wrap;
+  row-gap: 0;
+}
+
+.run-head-meta {
+  order: 1;
+  flex: 0 0 100%;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  padding-bottom: var(--sp-2);
+  overflow-wrap: anywhere;
+}
+
+.run-head-meta .chip {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 /* 2026-10-15: the fleet drawer title leads with the bot icon (same family as the bash group's
@@ -95,6 +132,9 @@
   min-width: 0;
   font-size: var(--fs-sm);
   font-weight: var(--fw-semibold);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* §6.3: 浮层删除后，`.tree-scroll` 是抽屉内的静态滚动容器。`container-type: inline-size`
@@ -136,8 +176,8 @@
 
 /* Secondary `@label` token when a raw display title took over the name slot
  * (mirrors fleet.css `.run-name .run-label`). */
-.run-head-name .run-head-label {
-  flex: 0 1 auto;
+.run-head-meta .run-head-label {
+  flex: 1 1 8ch;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -148,10 +188,12 @@
 }
 
 .run-head-status {
-  flex: none;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
   color: var(--c-text-3);
   font-size: var(--fs-xs);
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 /* §6.3 lastRow 回退:被选中的 run 移出投影行后的「不在列表中」标记 */
