@@ -20,6 +20,13 @@ export function useRetainedRelaunch(hub: HubHandle | null) {
   const locks = ref<ReadonlySet<string>>(new Set());
   const intents = new Map<string, { original: string; accepted: boolean; progressed: boolean }>();
   let disposed = false;
+  // HubInfo's real process generation, not the per-agent/session epoch.
+  const generation = computed(() => {
+    const h = hub?.state.value.hub;
+    const pid = h?.["pid"];
+    const startedAt = h?.["startedAt"];
+    return typeof pid === "number" && typeof startedAt === "number" ? `${pid}:${startedAt}` : null;
+  });
   const busy = computed(() => pending.value.size > 0 || locks.value.size > 0);
   function error(id: string, key: string) {
     errors.value = new Map(errors.value).set(id, key);
@@ -73,7 +80,7 @@ export function useRetainedRelaunch(hub: HubHandle | null) {
     [
       () => hub?.state.value.conn,
       () => hub?.state.value.clientId,
-      () => hub?.state.value.hub?.["epoch"],
+      () => generation.value,
       () => retainedExitedSupported(hub?.state.value.hub?.["caps"]),
     ],
     cancel,

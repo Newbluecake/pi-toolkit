@@ -217,7 +217,7 @@ async function onRetry(): Promise<void> {
 </script>
 
 <template>
-  <div class="spawn-row" :data-state="rec.state">
+  <div class="spawn-row" :class="{ 'is-retained-restore': restoreRetry }" :data-state="rec.state">
     <div class="spawn-row-line">
       <AppIcon v-if="rec.state === 'starting'" name="loader" class="icon-sm spin" />
       <AppIcon v-else name="alert" class="icon-sm" />

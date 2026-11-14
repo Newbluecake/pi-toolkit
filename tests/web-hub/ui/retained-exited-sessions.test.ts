@@ -2,6 +2,8 @@
 import { mount, flushPromises } from "@vue/test-utils";
 import { defineComponent, h, provide, ref, shallowRef } from "vue";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { formatDateTime, localeFor } from "../../../src/web-hub/ui/src/format.js";
+import { setLangOverride, resetLangForTests } from "../../../src/web-hub/ui/src/composables/useI18n.js";
 import SpawnRow from "../../../src/web-hub/ui/src/components/spawn/SpawnRow.vue";
 import SessionHistoryDialog from "../../../src/web-hub/ui/src/components/spawn/SessionHistoryDialog.vue";
 import { HUB_CTX } from "../../../src/web-hub/ui/src/components/control/controlContext.js";
@@ -28,7 +30,7 @@ function rec(over: Partial<SpawnRecordPublic> = {}): SpawnRecordPublic {
 }
 function harness(items = [rec()], caps = ["spawn.v1", CAP]) {
   const state = shallowRef({
-    hub: { caps, epoch: "epoch-1" },
+    hub: { caps, pid: 101, startedAt: 1000 },
     conn: "connected",
     clientId: "tab-1",
     agents: new Map(),
@@ -66,6 +68,8 @@ afterEach(() => {
   window.location.hash = "";
   localStorage.clear();
   vi.useRealTimers();
+  vi.restoreAllMocks();
+  resetLangForTests();
 });
 function setup(f: ReturnType<typeof harness>, row?: SpawnRecordPublic) {
   let controller!: RetainedRelaunch;
@@ -240,7 +244,7 @@ describe("retained recovery UI: one shared intent, no fresh fallback", () => {
     expect(f.submit).not.toHaveBeenCalled();
   });
 
-  it.each(["conn", "epoch", "clientId", "cap"])(
+  it.each(["conn", "pid", "startedAt", "clientId", "cap"])(
     "%s change cancels pending intent and ignores late HTTP/SSE",
     async (field) => {
       const f = harness();
@@ -257,9 +261,14 @@ describe("retained recovery UI: one shared intent, no fresh fallback", () => {
         ...f.state.value,
         ...(field === "conn" ? { conn: "reconnecting" as const } : {}),
         ...(field === "clientId" ? { clientId: "tab-2" } : {}),
-        ...(field === "epoch" ? { hub: { ...f.state.value.hub, epoch: "epoch-2" } } : {}),
+        ...(field === "pid" ? { hub: { ...f.state.value.hub, pid: 102 } } : {}),
+        ...(field === "startedAt" ? { hub: { ...f.state.value.hub, startedAt: 2000 } } : {}),
         ...(field === "cap" ? { hub: { caps: ["spawn.v1"] } } : {}),
       };
+      expect(controller.pending.value.size).toBe(0);
+      expect(controller.isPending("sp-one")).toBe(true); // generation/connection cancellation does not release HTTP lock
+      await controller.request("sp-one");
+      expect(f.relaunch).toHaveBeenCalledTimes(1);
       resolve({ ok: true, spawnId: "sp-one", state: "starting" });
       await flushPromises();
       f.records([rec({ state: "live", agentKey: "new" })]);
@@ -347,3 +356,22 @@ describe("retained recovery UI: one shared intent, no fresh fallback", () => {
     expect(f.relaunch).not.toHaveBeenCalled();
   });
 });
+
+it.each(["en-US", "zh-CN"])(
+  "retained dates follow UI language, not browser %s, including runtime switch",
+  async (browserLang) => {
+    vi.spyOn(window.navigator, "languages", "get").mockReturnValue([browserLang]);
+    const ui = browserLang === "en-US" ? "zh" : "en";
+    setLangOverride(ui, null);
+    const at = 1794651000000;
+    const f = harness([rec({ updatedAt: at })]);
+    setup(f);
+    await flushPromises();
+    const date = () => document.body.querySelector(".history-retained time")!.textContent;
+    expect(date()).toBe(formatDateTime(at, localeFor(ui)));
+    const next = ui === "en" ? "zh" : "en";
+    setLangOverride(next, null);
+    await flushPromises();
+    expect(date()).toBe(formatDateTime(at, localeFor(next)));
+  },
+);

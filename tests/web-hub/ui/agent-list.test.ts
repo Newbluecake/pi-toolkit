@@ -2241,7 +2241,7 @@ describe("AgentList retained exited discovery", () => {
     expect(document.body.querySelector(".history-retained-row")).not.toBeNull();
     w.unmount();
   });
-  it("old cap has exact existing DOM and list request sequence even when exited records exist", async () => {
+  it("old-cap entries ignore retained records within the current implementation (baseline parity is tested separately)", async () => {
     const hub = retainedHub([spawnRec({ state: "exited" })], ["spawn.v1", "spawn.history.v1"]);
     const w = mount(AgentList, {
       props: { cards: [], selectedKey: null, filter: "" },

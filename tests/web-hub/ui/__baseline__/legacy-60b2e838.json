@@ -1,0 +1,281 @@
+{
+  "baselineRevision": "60b2e838",
+  "contract": "element DOM serialization excluding comment nodes; exact text and attributes; ordered UI-to-HubSpawnHandle request intents (not raw HTTP bytes)",
+  "scenarios": {
+    "no-exited-cap": {
+      "input": {
+        "caps": ["spawn.v1", "spawn.relaunch.v1"],
+        "items": [
+          {
+            "spawnId": "legacy-failed",
+            "cwdLabel": "project",
+            "state": "failed",
+            "createdAt": 1794650980000,
+            "updatedAt": 1794650990000,
+            "origin": {
+              "listener": "loopback",
+              "reqId": "legacy-request"
+            }
+          },
+          {
+            "spawnId": "legacy-restored",
+            "cwdLabel": "project",
+            "state": "failed",
+            "createdAt": 1794650980000,
+            "updatedAt": 1794650990000,
+            "origin": {
+              "listener": "loopback",
+              "reqId": "legacy-request"
+            },
+            "restore": {
+              "attempt": 1,
+              "failure": "session-invalid"
+            }
+          },
+          {
+            "spawnId": "legacy-exited",
+            "cwdLabel": "project",
+            "state": "exited",
+            "createdAt": 1794650980000,
+            "updatedAt": 1794650990000,
+            "origin": {
+              "listener": "loopback",
+              "reqId": "legacy-request"
+            }
+          }
+        ]
+      },
+      "agentList": "<nav class=\"sidebar\" data-density=\"compact\" aria-label=\"Agents\"><div class=\"sidebar-head\"><div class=\"sidebar-headrow\"><button class=\"btn btn-ghost btn-icon sidebar-collapse-toggle\" type=\"button\" aria-pressed=\"false\" aria-label=\"Collapse sidebar\"><svg class=\"icon icon-sm\" aria-hidden=\"true\"><use href=\"#i-chev-left\"></use></svg></button><h2 class=\"sidebar-title\">Sessions <span class=\"count num\">0</span></h2><button class=\"btn btn-ghost btn-icon list-density-toggle\" type=\"button\" aria-pressed=\"true\" aria-label=\"Compact list: directory, title and alias only (click for detailed)\" title=\"Compact list: directory, title and alias only (click for detailed)\"><svg class=\"icon icon-sm\" aria-hidden=\"true\"><use href=\"#i-layers\"></use></svg></button><span class=\"nsmenu\"><button class=\"btn btn-ghost btn-xs new-session-btn\" type=\"button\" aria-label=\"Start a new session in the selected session's directory; pick a directory when none is selected\">New session</button><button class=\"btn btn-ghost btn-xs nsmenu-toggle\" type=\"button\" aria-haspopup=\"menu\" aria-expanded=\"false\" aria-label=\"More ways to start a session\"><svg class=\"icon icon-sm\" aria-hidden=\"true\"><use href=\"#i-arrow-down\"></use></svg></button></span></div><div class=\"search\"><svg class=\"icon\" aria-hidden=\"true\"><use href=\"#i-search\"></use></svg><input class=\"input\" type=\"search\" name=\"agent-filter\" placeholder=\"Filter by path or session…\" aria-label=\"Filter sessions\" autocomplete=\"off\" spellcheck=\"false\" value=\"\"></div></div><ul class=\"spawn-pending\" aria-label=\"Headless sessions in progress\"><li><div class=\"spawn-row\" data-state=\"failed\"><div class=\"spawn-row-line\"><svg class=\"icon icon-sm\" aria-hidden=\"true\"><use href=\"#i-alert\"></use></svg><span class=\"chip chip-spawn\" data-state=\"failed\" translate=\"no\">failed</span><span class=\"spawn-row-cwd\" title=\"project\" translate=\"no\">project</span><span class=\"remove-wrap\"><button class=\"btn btn-ghost remove-btn\" type=\"button\" aria-label=\"Stop and delete this web-started session record\"><svg class=\"icon icon-sm\" aria-hidden=\"true\"><use href=\"#i-x\"></use></svg></button></span><span class=\"spawn-row-actions\"><button class=\"btn btn-ghost btn-xs\" type=\"button\" aria-label=\"Show failure details for project\">Details</button><button class=\"btn btn-ghost btn-xs\" type=\"button\" aria-label=\"Retry starting a session in project\">Retry</button><button class=\"btn btn-ghost btn-xs\" type=\"button\" aria-label=\"Dismiss this row\">Dismiss</button></span></div></div></li><li><div class=\"spawn-row\" data-state=\"failed\"><div class=\"spawn-row-line\"><svg class=\"icon icon-sm\" aria-hidden=\"true\"><use href=\"#i-alert\"></use></svg><span class=\"chip chip-spawn\" data-state=\"failed\" translate=\"no\">failed</span><span class=\"spawn-row-cwd\" title=\"project\" translate=\"no\">project</span><span class=\"remove-wrap\"><button class=\"btn btn-ghost remove-btn\" type=\"button\" aria-label=\"Stop and delete this web-started session record\"><svg class=\"icon icon-sm\" aria-hidden=\"true\"><use href=\"#i-x\"></use></svg></button></span><span class=\"spawn-row-actions\"><button class=\"btn btn-ghost btn-xs\" type=\"button\" aria-label=\"Show failure details for project\">Details</button><button class=\"btn btn-ghost btn-xs\" type=\"button\" aria-label=\"Retry starting a session in project\">Retry</button><button class=\"btn btn-ghost btn-xs\" type=\"button\" aria-label=\"Dismiss this row\">Dismiss</button></span></div><p class=\"spawn-row-hint\" data-restore=\"failure\">The session file is unreadable or does not match — cannot restore</p></div></li></ul><div class=\"empty\"><span class=\"empty-icon\" aria-hidden=\"true\"><svg class=\"icon\" aria-hidden=\"true\"><use href=\"#i-terminal\"></use></svg></span><h2>No pi sessions connected</h2><p>Start pi on this machine with webHub.enabled on; sessions appear here within a second.</p><button class=\"btn spawn-empty-pick\" type=\"button\">Choose a directory…</button></div></nav>",
+      "menu": "<span class=\"nsmenu\"><button class=\"btn btn-ghost btn-xs new-session-btn\" type=\"button\" aria-label=\"Start a new session in the selected session's directory; pick a directory when none is selected\">New session</button><button class=\"btn btn-ghost btn-xs nsmenu-toggle\" type=\"button\" aria-haspopup=\"menu\" aria-expanded=\"true\" aria-label=\"More ways to start a session\"><svg class=\"icon icon-sm\" aria-hidden=\"true\"><use href=\"#i-arrow-down\"></use></svg></button><div class=\"nsmenu-menu\" role=\"menu\" aria-label=\"New session options\"><button class=\"nsmenu-item\" type=\"button\" role=\"menuitem\"><span>Choose a directory…</span></button></div></span>",
+      "spawnRow": {
+        "before": "<div class=\"spawn-row\" data-state=\"failed\"><div class=\"spawn-row-line\"><svg class=\"icon icon-sm\" aria-hidden=\"true\"><use href=\"#i-alert\"></use></svg><span class=\"chip chip-spawn\" data-state=\"failed\" translate=\"no\">failed</span><span class=\"spawn-row-cwd\" title=\"project\" translate=\"no\">project</span><span class=\"remove-wrap\"><button class=\"btn btn-ghost remove-btn\" type=\"button\" aria-label=\"Stop and delete this web-started session record\"><svg class=\"icon icon-sm\" aria-hidden=\"true\"><use href=\"#i-x\"></use></svg></button></span><span class=\"spawn-row-actions\"><button class=\"btn btn-ghost btn-xs\" type=\"button\" aria-label=\"Show failure details for project\">Details</button><button class=\"btn btn-ghost btn-xs\" type=\"button\" aria-label=\"Retry starting a session in project\">Retry</button><button class=\"btn btn-ghost btn-xs\" type=\"button\" aria-label=\"Dismiss this row\">Dismiss</button></span></div><p class=\"spawn-row-hint\" data-restore=\"failure\">The session file is unreadable or does not match — cannot restore</p></div>",
+        "details": "<div class=\"spawn-row\" data-state=\"failed\"><div class=\"spawn-row-line\"><svg class=\"icon icon-sm\" aria-hidden=\"true\"><use href=\"#i-alert\"></use></svg><span class=\"chip chip-spawn\" data-state=\"failed\" translate=\"no\">failed</span><span class=\"spawn-row-cwd\" title=\"project\" translate=\"no\">project</span><span class=\"remove-wrap\"><button class=\"btn btn-ghost remove-btn\" type=\"button\" aria-label=\"Stop and delete this web-started session record\"><svg class=\"icon icon-sm\" aria-hidden=\"true\"><use href=\"#i-x\"></use></svg></button></span><span class=\"spawn-row-actions\"><button class=\"btn btn-ghost btn-xs\" type=\"button\" aria-label=\"Show failure details for project\">Details</button><button class=\"btn btn-ghost btn-xs\" type=\"button\" aria-label=\"Retry starting a session in project\">Retry</button><button class=\"btn btn-ghost btn-xs\" type=\"button\" aria-label=\"Dismiss this row\">Dismiss</button></span></div><p class=\"spawn-row-hint\" data-restore=\"failure\">The session file is unreadable or does not match — cannot restore</p><div></div></div>"
+      },
+      "historyModal": null,
+      "ledger": [
+        {
+          "method": "GET",
+          "path": "/api/headless"
+        },
+        {
+          "method": "GET",
+          "path": "/api/headless"
+        },
+        {
+          "method": "GET",
+          "path": "/api/headless"
+        },
+        {
+          "op": "newSession.submit",
+          "input": {
+            "cwd": "/project"
+          }
+        }
+      ]
+    },
+    "ordinary-history-cap": {
+      "input": {
+        "caps": ["spawn.v1", "spawn.relaunch.v1", "spawn.history.v1"],
+        "items": [
+          {
+            "spawnId": "legacy-failed",
+            "cwdLabel": "project",
+            "state": "failed",
+            "createdAt": 1794650980000,
+            "updatedAt": 1794650990000,
+            "origin": {
+              "listener": "loopback",
+              "reqId": "legacy-request"
+            }
+          },
+          {
+            "spawnId": "legacy-restored",
+            "cwdLabel": "project",
+            "state": "failed",
+            "createdAt": 1794650980000,
+            "updatedAt": 1794650990000,
+            "origin": {
+              "listener": "loopback",
+              "reqId": "legacy-request"
+            },
+            "restore": {
+              "attempt": 1,
+              "failure": "session-invalid"
+            }
+          },
+          {
+            "spawnId": "legacy-exited",
+            "cwdLabel": "project",
+            "state": "exited",
+            "createdAt": 1794650980000,
+            "updatedAt": 1794650990000,
+            "origin": {
+              "listener": "loopback",
+              "reqId": "legacy-request"
+            }
+          }
+        ]
+      },
+      "agentList": "<nav class=\"sidebar\" data-density=\"compact\" aria-label=\"Agents\"><div class=\"sidebar-head\"><div class=\"sidebar-headrow\"><button class=\"btn btn-ghost btn-icon sidebar-collapse-toggle\" type=\"button\" aria-pressed=\"false\" aria-label=\"Collapse sidebar\"><svg class=\"icon icon-sm\" aria-hidden=\"true\"><use href=\"#i-chev-left\"></use></svg></button><h2 class=\"sidebar-title\">Sessions <span class=\"count num\">0</span></h2><button class=\"btn btn-ghost btn-icon list-density-toggle\" type=\"button\" aria-pressed=\"true\" aria-label=\"Compact list: directory, title and alias only (click for detailed)\" title=\"Compact list: directory, title and alias only (click for detailed)\"><svg class=\"icon icon-sm\" aria-hidden=\"true\"><use href=\"#i-layers\"></use></svg></button><span class=\"nsmenu\"><button class=\"btn btn-ghost btn-xs new-session-btn\" type=\"button\" aria-label=\"Start a new session in the selected session's directory; pick a directory when none is selected\">New session</button><button class=\"btn btn-ghost btn-xs nsmenu-toggle\" type=\"button\" aria-haspopup=\"menu\" aria-expanded=\"false\" aria-label=\"More ways to start a session\"><svg class=\"icon icon-sm\" aria-hidden=\"true\"><use href=\"#i-arrow-down\"></use></svg></button></span></div><div class=\"search\"><svg class=\"icon\" aria-hidden=\"true\"><use href=\"#i-search\"></use></svg><input class=\"input\" type=\"search\" name=\"agent-filter\" placeholder=\"Filter by path or session…\" aria-label=\"Filter sessions\" autocomplete=\"off\" spellcheck=\"false\" value=\"\"></div></div><ul class=\"spawn-pending\" aria-label=\"Headless sessions in progress\"><li><div class=\"spawn-row\" data-state=\"failed\"><div class=\"spawn-row-line\"><svg class=\"icon icon-sm\" aria-hidden=\"true\"><use href=\"#i-alert\"></use></svg><span class=\"chip chip-spawn\" data-state=\"failed\" translate=\"no\">failed</span><span class=\"spawn-row-cwd\" title=\"project\" translate=\"no\">project</span><span class=\"remove-wrap\"><button class=\"btn btn-ghost remove-btn\" type=\"button\" aria-label=\"Stop and delete this web-started session record\"><svg class=\"icon icon-sm\" aria-hidden=\"true\"><use href=\"#i-x\"></use></svg></button></span><span class=\"spawn-row-actions\"><button class=\"btn btn-ghost btn-xs\" type=\"button\" aria-label=\"Show failure details for project\">Details</button><button class=\"btn btn-ghost btn-xs\" type=\"button\" aria-label=\"Retry starting a session in project\">Retry</button><button class=\"btn btn-ghost btn-xs\" type=\"button\" aria-label=\"Dismiss this row\">Dismiss</button></span></div></div></li><li><div class=\"spawn-row\" data-state=\"failed\"><div class=\"spawn-row-line\"><svg class=\"icon icon-sm\" aria-hidden=\"true\"><use href=\"#i-alert\"></use></svg><span class=\"chip chip-spawn\" data-state=\"failed\" translate=\"no\">failed</span><span class=\"spawn-row-cwd\" title=\"project\" translate=\"no\">project</span><span class=\"remove-wrap\"><button class=\"btn btn-ghost remove-btn\" type=\"button\" aria-label=\"Stop and delete this web-started session record\"><svg class=\"icon icon-sm\" aria-hidden=\"true\"><use href=\"#i-x\"></use></svg></button></span><span class=\"spawn-row-actions\"><button class=\"btn btn-ghost btn-xs\" type=\"button\" aria-label=\"Show failure details for project\">Details</button><button class=\"btn btn-ghost btn-xs\" type=\"button\" aria-label=\"Retry starting a session in project\">Retry</button><button class=\"btn btn-ghost btn-xs\" type=\"button\" aria-label=\"Dismiss this row\">Dismiss</button></span></div><p class=\"spawn-row-hint\" data-restore=\"failure\">The session file is unreadable or does not match — cannot restore</p></div></li></ul><div class=\"empty\"><span class=\"empty-icon\" aria-hidden=\"true\"><svg class=\"icon\" aria-hidden=\"true\"><use href=\"#i-terminal\"></use></svg></span><h2>No pi sessions connected</h2><p>Start pi on this machine with webHub.enabled on; sessions appear here within a second.</p><button class=\"btn spawn-empty-pick\" type=\"button\">Choose a directory…</button><button class=\"btn spawn-empty-pick\" type=\"button\">History sessions</button></div><div class=\"sidebar-foot\"><button class=\"sidebar-history-btn\" type=\"button\" aria-label=\"History sessions\"><svg class=\"icon icon-sm\" aria-hidden=\"true\"><use href=\"#i-clock\"></use></svg><span>History sessions</span></button></div></nav>",
+      "menu": "<span class=\"nsmenu\"><button class=\"btn btn-ghost btn-xs new-session-btn\" type=\"button\" aria-label=\"Start a new session in the selected session's directory; pick a directory when none is selected\">New session</button><button class=\"btn btn-ghost btn-xs nsmenu-toggle\" type=\"button\" aria-haspopup=\"menu\" aria-expanded=\"true\" aria-label=\"More ways to start a session\"><svg class=\"icon icon-sm\" aria-hidden=\"true\"><use href=\"#i-arrow-down\"></use></svg></button><div class=\"nsmenu-menu\" role=\"menu\" aria-label=\"New session options\"><button class=\"nsmenu-item\" type=\"button\" role=\"menuitem\"><span>Choose a directory…</span></button></div></span>",
+      "spawnRow": {
+        "before": "<div class=\"spawn-row\" data-state=\"failed\"><div class=\"spawn-row-line\"><svg class=\"icon icon-sm\" aria-hidden=\"true\"><use href=\"#i-alert\"></use></svg><span class=\"chip chip-spawn\" data-state=\"failed\" translate=\"no\">failed</span><span class=\"spawn-row-cwd\" title=\"project\" translate=\"no\">project</span><span class=\"remove-wrap\"><button class=\"btn btn-ghost remove-btn\" type=\"button\" aria-label=\"Stop and delete this web-started session record\"><svg class=\"icon icon-sm\" aria-hidden=\"true\"><use href=\"#i-x\"></use></svg></button></span><span class=\"spawn-row-actions\"><button class=\"btn btn-ghost btn-xs\" type=\"button\" aria-label=\"Show failure details for project\">Details</button><button class=\"btn btn-ghost btn-xs\" type=\"button\" aria-label=\"Retry starting a session in project\">Retry</button><button class=\"btn btn-ghost btn-xs\" type=\"button\" aria-label=\"Dismiss this row\">Dismiss</button></span></div><p class=\"spawn-row-hint\" data-restore=\"failure\">The session file is unreadable or does not match — cannot restore</p></div>",
+        "details": "<div class=\"spawn-row\" data-state=\"failed\"><div class=\"spawn-row-line\"><svg class=\"icon icon-sm\" aria-hidden=\"true\"><use href=\"#i-alert\"></use></svg><span class=\"chip chip-spawn\" data-state=\"failed\" translate=\"no\">failed</span><span class=\"spawn-row-cwd\" title=\"project\" translate=\"no\">project</span><span class=\"remove-wrap\"><button class=\"btn btn-ghost remove-btn\" type=\"button\" aria-label=\"Stop and delete this web-started session record\"><svg class=\"icon icon-sm\" aria-hidden=\"true\"><use href=\"#i-x\"></use></svg></button></span><span class=\"spawn-row-actions\"><button class=\"btn btn-ghost btn-xs\" type=\"button\" aria-label=\"Show failure details for project\">Details</button><button class=\"btn btn-ghost btn-xs\" type=\"button\" aria-label=\"Retry starting a session in project\">Retry</button><button class=\"btn btn-ghost btn-xs\" type=\"button\" aria-label=\"Dismiss this row\">Dismiss</button></span></div><p class=\"spawn-row-hint\" data-restore=\"failure\">The session file is unreadable or does not match — cannot restore</p><div></div></div>"
+      },
+      "historyModal": {
+        "initial": "<section class=\"history-dialog\" role=\"dialog\" aria-modal=\"true\" aria-label=\"Past sessions\" tabindex=\"-1\"><header class=\"history-head\"><div class=\"history-headrow\"><h3 class=\"history-title\">History sessions</h3><button class=\"btn btn-ghost btn-icon\" type=\"button\" aria-label=\"Close\"><svg class=\"icon icon-sm\" aria-hidden=\"true\"><use href=\"#i-x\"></use></svg></button></div><div class=\"history-searchrow\"><div class=\"history-search\"><svg class=\"icon\" aria-hidden=\"true\"><use href=\"#i-search\"></use></svg><input class=\"input\" type=\"search\" name=\"history-search\" placeholder=\"Search title, path or id\" aria-label=\"Search sessions\" maxlength=\"128\" autocomplete=\"off\" spellcheck=\"false\" value=\"\"></div><label class=\"history-kind\"><input type=\"checkbox\"><span>Include subagents</span></label></div></header><div class=\"history-list\" role=\"listbox\" aria-label=\"History sessions\" tabindex=\"0\"><div class=\"history-row\" role=\"option\" aria-selected=\"true\" aria-disabled=\"false\"><div class=\"history-row-line1\"><span class=\"history-row-title\" title=\"Recorded legacy title\">Recorded legacy title</span><span class=\"history-row-time\" translate=\"no\">5m ago</span></div><div class=\"history-row-line2\"><span class=\"history-row-cwd\" title=\"/project\" translate=\"no\">project</span><span class=\"history-row-actions\"><button class=\"btn btn-ghost btn-xs\" type=\"button\" aria-label=\"Resume\" title=\"Click to resume this session\">Resume</button><span class=\"history-overflow\"><button class=\"btn btn-ghost btn-xs\" type=\"button\" aria-label=\"More actions for this session\" aria-expanded=\"false\"><span class=\"history-overflow-dots\" translate=\"no\">⋯</span></button></span></span></div></div></div><footer class=\"history-foot\"><div class=\"history-foot-row\"><div class=\"history-foot-status\"></div></div><details class=\"history-besteffort\"><summary class=\"history-besteffort-summary\"><span aria-hidden=\"true\">ⓘ</span> About occupancy detection</summary><p class=\"history-besteffort-text\" role=\"note\">Occupancy detection is best-effort: processes run as root, inside containers, or started by non-pi launchers cannot be detected (W3/W4); so can a process that opens the session only after the check completes (W1/W2), and the instant a just-exited pi's pid is reused by a new process (W5); auto-restore after a hub restart does not re-check (W6); a session file swapped out and swapped back during startup cannot be detected (W7). Opening the same session twice only forks the session tree — no data is lost or corrupted.</p></details></footer></section>",
+        "queried": "<section class=\"history-dialog\" role=\"dialog\" aria-modal=\"true\" aria-label=\"Past sessions\" tabindex=\"-1\"><header class=\"history-head\"><div class=\"history-headrow\"><h3 class=\"history-title\">History sessions</h3><button class=\"btn btn-ghost btn-icon\" type=\"button\" aria-label=\"Close\"><svg class=\"icon icon-sm\" aria-hidden=\"true\"><use href=\"#i-x\"></use></svg></button></div><div class=\"history-searchrow\"><div class=\"history-search\"><svg class=\"icon\" aria-hidden=\"true\"><use href=\"#i-search\"></use></svg><input class=\"input\" type=\"search\" name=\"history-search\" placeholder=\"Search title, path or id\" aria-label=\"Search sessions\" maxlength=\"128\" autocomplete=\"off\" spellcheck=\"false\" value=\"parser\"></div><label class=\"history-kind\"><input type=\"checkbox\" checked=\"\"><span>Include subagents</span></label></div></header><div class=\"history-list\" role=\"listbox\" aria-label=\"History sessions\" tabindex=\"0\"><div class=\"history-row\" role=\"option\" aria-selected=\"true\" aria-disabled=\"false\"><div class=\"history-row-line1\"><span class=\"history-row-title\" title=\"Recorded legacy title\">Recorded legacy title</span><span class=\"history-row-time\" translate=\"no\">5m ago</span></div><div class=\"history-row-line2\"><span class=\"history-row-cwd\" title=\"/project\" translate=\"no\">project</span><span class=\"history-row-actions\"><button class=\"btn btn-ghost btn-xs\" type=\"button\" aria-label=\"Resume\" title=\"Click to resume this session\">Resume</button><span class=\"history-overflow\"><button class=\"btn btn-ghost btn-xs\" type=\"button\" aria-label=\"More actions for this session\" aria-expanded=\"false\"><span class=\"history-overflow-dots\" translate=\"no\">⋯</span></button></span></span></div></div></div><footer class=\"history-foot\"><div class=\"history-foot-row\"><div class=\"history-foot-status\"></div></div><details class=\"history-besteffort\"><summary class=\"history-besteffort-summary\"><span aria-hidden=\"true\">ⓘ</span> About occupancy detection</summary><p class=\"history-besteffort-text\" role=\"note\">Occupancy detection is best-effort: processes run as root, inside containers, or started by non-pi launchers cannot be detected (W3/W4); so can a process that opens the session only after the check completes (W1/W2), and the instant a just-exited pi's pid is reused by a new process (W5); auto-restore after a hub restart does not re-check (W6); a session file swapped out and swapped back during startup cannot be detected (W7). Opening the same session twice only forks the session tree — no data is lost or corrupted.</p></details></footer></section>"
+      },
+      "ledger": [
+        {
+          "method": "GET",
+          "path": "/api/headless"
+        },
+        {
+          "method": "GET",
+          "path": "/api/headless"
+        },
+        {
+          "method": "GET",
+          "path": "/api/headless/history",
+          "query": {
+            "q": "",
+            "kind": "main"
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/headless/history",
+          "query": {
+            "q": "parser",
+            "kind": "main"
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/headless/history",
+          "query": {
+            "q": "parser",
+            "kind": "all"
+          }
+        },
+        {
+          "op": "newSession.submit",
+          "input": {
+            "cwd": "/project",
+            "session": {
+              "key": "2026-10/file.jsonl",
+              "id": "session-id",
+              "mode": "resume"
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/headless"
+        },
+        {
+          "op": "newSession.submit",
+          "input": {
+            "cwd": "/project"
+          }
+        }
+      ]
+    },
+    "restore-off": {
+      "input": {
+        "caps": ["spawn.v1", "spawn.history.v1"],
+        "items": [
+          {
+            "spawnId": "legacy-failed",
+            "cwdLabel": "project",
+            "state": "failed",
+            "createdAt": 1794650980000,
+            "updatedAt": 1794650990000,
+            "origin": {
+              "listener": "loopback",
+              "reqId": "legacy-request"
+            }
+          },
+          {
+            "spawnId": "legacy-exited",
+            "cwdLabel": "project",
+            "state": "exited",
+            "createdAt": 1794650980000,
+            "updatedAt": 1794650990000,
+            "origin": {
+              "listener": "loopback",
+              "reqId": "legacy-request"
+            }
+          }
+        ]
+      },
+      "agentList": "<nav class=\"sidebar\" data-density=\"compact\" aria-label=\"Agents\"><div class=\"sidebar-head\"><div class=\"sidebar-headrow\"><button class=\"btn btn-ghost btn-icon sidebar-collapse-toggle\" type=\"button\" aria-pressed=\"false\" aria-label=\"Collapse sidebar\"><svg class=\"icon icon-sm\" aria-hidden=\"true\"><use href=\"#i-chev-left\"></use></svg></button><h2 class=\"sidebar-title\">Sessions <span class=\"count num\">0</span></h2><button class=\"btn btn-ghost btn-icon list-density-toggle\" type=\"button\" aria-pressed=\"true\" aria-label=\"Compact list: directory, title and alias only (click for detailed)\" title=\"Compact list: directory, title and alias only (click for detailed)\"><svg class=\"icon icon-sm\" aria-hidden=\"true\"><use href=\"#i-layers\"></use></svg></button><span class=\"nsmenu\"><button class=\"btn btn-ghost btn-xs new-session-btn\" type=\"button\" aria-label=\"Start a new session in the selected session's directory; pick a directory when none is selected\">New session</button><button class=\"btn btn-ghost btn-xs nsmenu-toggle\" type=\"button\" aria-haspopup=\"menu\" aria-expanded=\"false\" aria-label=\"More ways to start a session\"><svg class=\"icon icon-sm\" aria-hidden=\"true\"><use href=\"#i-arrow-down\"></use></svg></button></span></div><div class=\"search\"><svg class=\"icon\" aria-hidden=\"true\"><use href=\"#i-search\"></use></svg><input class=\"input\" type=\"search\" name=\"agent-filter\" placeholder=\"Filter by path or session…\" aria-label=\"Filter sessions\" autocomplete=\"off\" spellcheck=\"false\" value=\"\"></div></div><ul class=\"spawn-pending\" aria-label=\"Headless sessions in progress\"><li><div class=\"spawn-row\" data-state=\"failed\"><div class=\"spawn-row-line\"><svg class=\"icon icon-sm\" aria-hidden=\"true\"><use href=\"#i-alert\"></use></svg><span class=\"chip chip-spawn\" data-state=\"failed\" translate=\"no\">failed</span><span class=\"spawn-row-cwd\" title=\"project\" translate=\"no\">project</span><span class=\"remove-wrap\"><button class=\"btn btn-ghost remove-btn\" type=\"button\" aria-label=\"Stop and delete this web-started session record\"><svg class=\"icon icon-sm\" aria-hidden=\"true\"><use href=\"#i-x\"></use></svg></button></span><span class=\"spawn-row-actions\"><button class=\"btn btn-ghost btn-xs\" type=\"button\" aria-label=\"Show failure details for project\">Details</button><button class=\"btn btn-ghost btn-xs\" type=\"button\" aria-label=\"Retry starting a session in project\">Retry</button><button class=\"btn btn-ghost btn-xs\" type=\"button\" aria-label=\"Dismiss this row\">Dismiss</button></span></div></div></li></ul><div class=\"empty\"><span class=\"empty-icon\" aria-hidden=\"true\"><svg class=\"icon\" aria-hidden=\"true\"><use href=\"#i-terminal\"></use></svg></span><h2>No pi sessions connected</h2><p>Start pi on this machine with webHub.enabled on; sessions appear here within a second.</p><button class=\"btn spawn-empty-pick\" type=\"button\">Choose a directory…</button><button class=\"btn spawn-empty-pick\" type=\"button\">History sessions</button></div><div class=\"sidebar-foot\"><button class=\"sidebar-history-btn\" type=\"button\" aria-label=\"History sessions\"><svg class=\"icon icon-sm\" aria-hidden=\"true\"><use href=\"#i-clock\"></use></svg><span>History sessions</span></button></div></nav>",
+      "menu": "<span class=\"nsmenu\"><button class=\"btn btn-ghost btn-xs new-session-btn\" type=\"button\" aria-label=\"Start a new session in the selected session's directory; pick a directory when none is selected\">New session</button><button class=\"btn btn-ghost btn-xs nsmenu-toggle\" type=\"button\" aria-haspopup=\"menu\" aria-expanded=\"true\" aria-label=\"More ways to start a session\"><svg class=\"icon icon-sm\" aria-hidden=\"true\"><use href=\"#i-arrow-down\"></use></svg></button><div class=\"nsmenu-menu\" role=\"menu\" aria-label=\"New session options\"><button class=\"nsmenu-item\" type=\"button\" role=\"menuitem\"><span>Choose a directory…</span></button></div></span>",
+      "spawnRow": {
+        "before": "<div class=\"spawn-row\" data-state=\"failed\"><div class=\"spawn-row-line\"><svg class=\"icon icon-sm\" aria-hidden=\"true\"><use href=\"#i-alert\"></use></svg><span class=\"chip chip-spawn\" data-state=\"failed\" translate=\"no\">failed</span><span class=\"spawn-row-cwd\" title=\"project\" translate=\"no\">project</span><span class=\"remove-wrap\"><button class=\"btn btn-ghost remove-btn\" type=\"button\" aria-label=\"Stop and delete this web-started session record\"><svg class=\"icon icon-sm\" aria-hidden=\"true\"><use href=\"#i-x\"></use></svg></button></span><span class=\"spawn-row-actions\"><button class=\"btn btn-ghost btn-xs\" type=\"button\" aria-label=\"Show failure details for project\">Details</button><button class=\"btn btn-ghost btn-xs\" type=\"button\" aria-label=\"Retry starting a session in project\">Retry</button><button class=\"btn btn-ghost btn-xs\" type=\"button\" aria-label=\"Dismiss this row\">Dismiss</button></span></div></div>",
+        "details": "<div class=\"spawn-row\" data-state=\"failed\"><div class=\"spawn-row-line\"><svg class=\"icon icon-sm\" aria-hidden=\"true\"><use href=\"#i-alert\"></use></svg><span class=\"chip chip-spawn\" data-state=\"failed\" translate=\"no\">failed</span><span class=\"spawn-row-cwd\" title=\"project\" translate=\"no\">project</span><span class=\"remove-wrap\"><button class=\"btn btn-ghost remove-btn\" type=\"button\" aria-label=\"Stop and delete this web-started session record\"><svg class=\"icon icon-sm\" aria-hidden=\"true\"><use href=\"#i-x\"></use></svg></button></span><span class=\"spawn-row-actions\"><button class=\"btn btn-ghost btn-xs\" type=\"button\" aria-label=\"Show failure details for project\">Details</button><button class=\"btn btn-ghost btn-xs\" type=\"button\" aria-label=\"Retry starting a session in project\">Retry</button><button class=\"btn btn-ghost btn-xs\" type=\"button\" aria-label=\"Dismiss this row\">Dismiss</button></span></div><div></div></div>"
+      },
+      "historyModal": {
+        "initial": "<section class=\"history-dialog\" role=\"dialog\" aria-modal=\"true\" aria-label=\"Past sessions\" tabindex=\"-1\"><header class=\"history-head\"><div class=\"history-headrow\"><h3 class=\"history-title\">History sessions</h3><button class=\"btn btn-ghost btn-icon\" type=\"button\" aria-label=\"Close\"><svg class=\"icon icon-sm\" aria-hidden=\"true\"><use href=\"#i-x\"></use></svg></button></div><div class=\"history-searchrow\"><div class=\"history-search\"><svg class=\"icon\" aria-hidden=\"true\"><use href=\"#i-search\"></use></svg><input class=\"input\" type=\"search\" name=\"history-search\" placeholder=\"Search title, path or id\" aria-label=\"Search sessions\" maxlength=\"128\" autocomplete=\"off\" spellcheck=\"false\" value=\"\"></div><label class=\"history-kind\"><input type=\"checkbox\" checked=\"\"><span>Include subagents</span></label></div></header><div class=\"history-list\" role=\"listbox\" aria-label=\"History sessions\" tabindex=\"0\"><div class=\"history-row\" role=\"option\" aria-selected=\"true\" aria-disabled=\"false\"><div class=\"history-row-line1\"><span class=\"history-row-title\" title=\"Recorded legacy title\">Recorded legacy title</span><span class=\"history-row-time\" translate=\"no\">5m ago</span></div><div class=\"history-row-line2\"><span class=\"history-row-cwd\" title=\"/project\" translate=\"no\">project</span><span class=\"history-row-actions\"><button class=\"btn btn-ghost btn-xs\" type=\"button\" aria-label=\"Resume\" title=\"Click to resume this session\">Resume</button><span class=\"history-overflow\"><button class=\"btn btn-ghost btn-xs\" type=\"button\" aria-label=\"More actions for this session\" aria-expanded=\"false\"><span class=\"history-overflow-dots\" translate=\"no\">⋯</span></button></span></span></div></div></div><footer class=\"history-foot\"><div class=\"history-foot-row\"><div class=\"history-foot-status\"></div></div><details class=\"history-besteffort\"><summary class=\"history-besteffort-summary\"><span aria-hidden=\"true\">ⓘ</span> About occupancy detection</summary><p class=\"history-besteffort-text\" role=\"note\">Occupancy detection is best-effort: processes run as root, inside containers, or started by non-pi launchers cannot be detected (W3/W4); so can a process that opens the session only after the check completes (W1/W2), and the instant a just-exited pi's pid is reused by a new process (W5); auto-restore after a hub restart does not re-check (W6); a session file swapped out and swapped back during startup cannot be detected (W7). Opening the same session twice only forks the session tree — no data is lost or corrupted.</p></details></footer></section>",
+        "queried": "<section class=\"history-dialog\" role=\"dialog\" aria-modal=\"true\" aria-label=\"Past sessions\" tabindex=\"-1\"><header class=\"history-head\"><div class=\"history-headrow\"><h3 class=\"history-title\">History sessions</h3><button class=\"btn btn-ghost btn-icon\" type=\"button\" aria-label=\"Close\"><svg class=\"icon icon-sm\" aria-hidden=\"true\"><use href=\"#i-x\"></use></svg></button></div><div class=\"history-searchrow\"><div class=\"history-search\"><svg class=\"icon\" aria-hidden=\"true\"><use href=\"#i-search\"></use></svg><input class=\"input\" type=\"search\" name=\"history-search\" placeholder=\"Search title, path or id\" aria-label=\"Search sessions\" maxlength=\"128\" autocomplete=\"off\" spellcheck=\"false\" value=\"parser\"></div><label class=\"history-kind\"><input type=\"checkbox\"><span>Include subagents</span></label></div></header><div class=\"history-list\" role=\"listbox\" aria-label=\"History sessions\" tabindex=\"0\"><div class=\"history-row\" role=\"option\" aria-selected=\"true\" aria-disabled=\"false\"><div class=\"history-row-line1\"><span class=\"history-row-title\" title=\"Recorded legacy title\">Recorded legacy title</span><span class=\"history-row-time\" translate=\"no\">5m ago</span></div><div class=\"history-row-line2\"><span class=\"history-row-cwd\" title=\"/project\" translate=\"no\">project</span><span class=\"history-row-actions\"><button class=\"btn btn-ghost btn-xs\" type=\"button\" aria-label=\"Resume\" title=\"Click to resume this session\">Resume</button><span class=\"history-overflow\"><button class=\"btn btn-ghost btn-xs\" type=\"button\" aria-label=\"More actions for this session\" aria-expanded=\"false\"><span class=\"history-overflow-dots\" translate=\"no\">⋯</span></button></span></span></div></div></div><footer class=\"history-foot\"><div class=\"history-foot-row\"><div class=\"history-foot-status\"></div></div><details class=\"history-besteffort\"><summary class=\"history-besteffort-summary\"><span aria-hidden=\"true\">ⓘ</span> About occupancy detection</summary><p class=\"history-besteffort-text\" role=\"note\">Occupancy detection is best-effort: processes run as root, inside containers, or started by non-pi launchers cannot be detected (W3/W4); so can a process that opens the session only after the check completes (W1/W2), and the instant a just-exited pi's pid is reused by a new process (W5); auto-restore after a hub restart does not re-check (W6); a session file swapped out and swapped back during startup cannot be detected (W7). Opening the same session twice only forks the session tree — no data is lost or corrupted.</p></details></footer></section>"
+      },
+      "ledger": [
+        {
+          "method": "GET",
+          "path": "/api/headless"
+        },
+        {
+          "method": "GET",
+          "path": "/api/headless"
+        },
+        {
+          "method": "GET",
+          "path": "/api/headless/history",
+          "query": {
+            "q": "",
+            "kind": "all"
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/headless/history",
+          "query": {
+            "q": "parser",
+            "kind": "all"
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/headless/history",
+          "query": {
+            "q": "parser",
+            "kind": "main"
+          }
+        },
+        {
+          "op": "newSession.submit",
+          "input": {
+            "cwd": "/project",
+            "session": {
+              "key": "2026-10/file.jsonl",
+              "id": "session-id",
+              "mode": "resume"
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/headless"
+        },
+        {
+          "op": "newSession.submit",
+          "input": {
+            "cwd": "/project"
+          }
+        }
+      ]
+    }
+  },
+  "recordedFrom": "60b2e8384cc48e0d9df979902245e690aa0314d0"
+}

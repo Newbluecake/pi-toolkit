@@ -222,7 +222,7 @@ describe("SpawnRow.vue — first-prompt mirror chip (2026-10-13 拍板 ②: 等�
 });
 
 describe("SpawnRow retained retry compatibility", () => {
-  it("old hub failed+restore keeps existing owner-cwd fresh retry and identical DOM", async () => {
+  it("old hub failed+restore keeps owner-cwd fresh retry (DOM baseline is tested separately)", async () => {
     const f = fakeHub({ caps: ["spawn.v1"], ownerCwd: "/old" });
     const w = mountRow({ ...BASE_REC, restore: { attempt: 1 } }, f);
     expect(w.text()).not.toContain("Retry recovery");

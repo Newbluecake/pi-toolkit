@@ -3,12 +3,14 @@
 import { computed, inject } from "vue";
 import { HUB_CTX } from "../control/controlContext.js";
 import { RETAINED_RELAUNCH } from "../../composables/useRetainedRelaunch.js";
+import { formatDateTime, localeFor } from "../../format.js";
 import { useI18n } from "../../composables/useI18n.js";
 import { retainedRecoveryRows, restoreFailureKey } from "../../logic/spawn.js";
 
 const hub = inject(HUB_CTX, null);
 const retained = inject(RETAINED_RELAUNCH, null);
-const { t } = useI18n();
+const i18n = useI18n();
+const { t } = i18n;
 const rows = computed(() => {
   const records = hub?.state.value.spawns;
   const terminal = retainedRecoveryRows(records, hub?.state.value.hub?.["caps"]);
@@ -29,7 +31,7 @@ function isoTime(at: number): string | undefined {
   return Number.isFinite(d.getTime()) ? d.toISOString() : undefined;
 }
 function displayTime(at: number): string {
-  return isoTime(at) === undefined ? "—" : new Date(at).toLocaleString();
+  return isoTime(at) === undefined ? "—" : formatDateTime(at, localeFor(i18n.lang));
 }
 </script>
 
