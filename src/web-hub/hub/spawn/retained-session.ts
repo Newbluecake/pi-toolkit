@@ -56,6 +56,7 @@ export interface ProofWorkBudget {
   segmentsLeft: number;
 }
 /** Opaque runtime token. Only its issuing factory's WeakMap gives it meaning. */
+export type GuardedReadLease = RestoreSessionFs;
 export interface CachedAdoptionProof {
   readonly baseline: PathBaseline;
   readonly leafPresent: boolean;
@@ -85,7 +86,7 @@ export interface RetainedSessionGuard {
     binding: SessionBinding,
     revision: number,
     expected: PathBaseline | undefined,
-    callback: (fs: RestoreSessionFs, proof: CachedAdoptionProof) => T,
+    callback: (fs: GuardedReadLease, proof: CachedAdoptionProof) => T,
     budget?: ProofWorkBudget,
   ): GuardResult<T>;
 }
@@ -258,15 +259,15 @@ export function createRetainedSessionGuard(opts: {
         throw new Error("leaf-invalid");
       if (leaf !== undefined && expected?.file !== undefined && !same(leaf, expected.file))
         throw new Error("leaf-changed");
-      const base: PathBaseline = {
+      const base: PathBaseline = Object.freeze({
         bindingDigest: bindingDigest(b),
-        chain,
+        chain: Object.freeze(chain.map((ref) => Object.freeze(ref))),
         ...(leaf !== undefined
-          ? { file: { dev: leaf.dev, ino: leaf.ino } }
+          ? { file: Object.freeze({ dev: leaf.dev, ino: leaf.ino }) }
           : expected?.file !== undefined
-            ? { file: expected.file }
+            ? { file: Object.freeze({ ...expected.file }) }
             : {}),
-      };
+      });
       check(work);
       const proof: CachedAdoptionProof = Object.freeze({ baseline: base, leafPresent: leaf !== undefined });
       issued.set(proof, { digest: base.bindingDigest, revision });
@@ -323,7 +324,9 @@ export function createRetainedSessionGuard(opts: {
               return buf.subarray(0, n).toString("utf8");
             },
           };
-          return callback(reader, proof);
+          const value = callback(reader, proof);
+          if (record(value) && typeof value["then"] === "function") throw new Error("synchronous-lease-required");
+          return value;
         } finally {
           active = false;
           if (fd !== undefined) {

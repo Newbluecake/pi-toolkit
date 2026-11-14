@@ -66,6 +66,8 @@ describe("retained session provenance and independent read leases", () => {
     expect(f.reads()).toHaveLength(1);
     expect(f.fds.size).toBe(0);
     expect(() => expired!.readHeadSync(binding.sessionFile, 20)).toThrow("lease-expired");
+    expect(f.guard.withRead(binding, 1, captured.value.baseline, () => Promise.resolve(1)).ok).toBe(false);
+    expect(f.fds.size).toBe(0);
   });
 
   it.each([
@@ -203,6 +205,21 @@ describe("retained session provenance and independent read leases", () => {
     expect(clampProofSpanMs(-20)).toBe(0);
     expect(clampProofSpanMs(1e9)).toBe(20);
     expect(clampProofSpanMs(0.5)).toBe(0.5);
+  });
+
+  it("128 path segments is inclusive; the 129th is refused before opening root", () => {
+    const f = retainedFake();
+    const agentDir = "/" + Array.from({ length: 126 }, () => "a").join("/");
+    const guard = createRetainedSessionGuard({ agentDir, uid: 1000, fs: f.fs, monoNow: () => 0 });
+    const b = { ...binding, sessionFile: `${agentDir}/sessions/--w-proj--/x.jsonl` };
+    const work = guard.budget();
+    expect(guard.capture(b, 1, undefined, work).ok).toBe(true);
+    expect(work.segmentsLeft).toBe(0);
+    expect(f.fds.size).toBe(0);
+    f.ledger.length = 0;
+    const tooDeep = createRetainedSessionGuard({ agentDir: `${agentDir}/b`, uid: 1000, fs: f.fs });
+    expect(tooDeep.capture({ ...b, sessionFile: `${agentDir}/b/sessions/--w-proj--/x.jsonl` }, 1).ok).toBe(false);
+    expect(f.ledger).toEqual([]);
   });
 
   it("all fds close on callback/read/fstat failure; close failure does not skip other owned fds", () => {
