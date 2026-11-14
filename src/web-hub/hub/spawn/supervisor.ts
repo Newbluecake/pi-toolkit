@@ -428,6 +428,7 @@ export type ShutdownMode = "terminate" | "restore";
 
 /** The slice of the bus `SessionInfo` the supervisor keeps (RS3). */
 interface SessionCoords {
+  cwd: string;
   sessionId: string;
   sessionFile?: string | undefined;
 }
@@ -1483,6 +1484,14 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
   }
 
   function adoptSessionCoords(rec: Supervised, session: SessionCoords): boolean {
+    if (rec.sessionGuard !== undefined && session.cwd !== rec.cwd) {
+      rec.coordsRevision++;
+      delete rec.adoptionProof;
+      rec.adoptionBlocked = true;
+      rec.hintDetail = "session-swapped";
+      enterStopping(rec, "protocol_error");
+      return true;
+    }
     const file =
       session.sessionFile !== undefined && isValidRestoreSessionFile(session.sessionFile)
         ? session.sessionFile
@@ -1498,7 +1507,7 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
     if (changed && rec.sessionGuard !== undefined) {
       const b =
         file !== undefined
-          ? { spawnId: rec.spawnId, cwd: rec.cwd, sessionId: session.sessionId, sessionFile: file }
+          ? { spawnId: rec.spawnId, cwd: session.cwd, sessionId: session.sessionId, sessionFile: file }
           : undefined;
       const result = b !== undefined ? deps.retainedSessionGuard?.capture(b, rec.coordsRevision) : undefined;
       rec.adoptionAttempted = true;
@@ -1578,6 +1587,9 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
 
   function bindGuardedLive(rec: Supervised, session: SessionCoords): boolean {
     if (rec.sessionGuard === undefined) return true;
+    // The session frame is independent of hello; never prove a reported tuple using the
+    // record's old cwd in place of the actual report (including for exact --session binds).
+    if (session.cwd !== rec.cwd) return false;
     const permit = rec.lazyPermit;
     const target = rec.sessionTarget;
     if (permit !== undefined && permit.state === "active") {
@@ -1604,7 +1616,12 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
         (file !== permit.oldSessionFile && !isPiLazyBasename(file, permit.sessionId))
       )
         return false;
-      const b: SessionBinding = { spawnId: rec.spawnId, cwd: rec.cwd, sessionId: session.sessionId, sessionFile: file };
+      const b: SessionBinding = {
+        spawnId: rec.spawnId,
+        cwd: session.cwd,
+        sessionId: session.sessionId,
+        sessionFile: file,
+      };
       const expected = { ...permit.parentBaseline, bindingDigest: bindingDigest(b) };
       const proof = deps.retainedSessionGuard?.capture(b, rec.coordsRevision + 1, expected);
       if (
@@ -3054,7 +3071,8 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
     const prevKey = rec.agentKey;
     rec.state = "starting";
     delete rec.endReason;
-    delete rec.noProcess;
+    // Keep authoritative no-process evidence through the job's L6 re-check too. It is
+    // cleared with the old identity in restoreForkSync's synchronous new-fork intent.
     rec.stop = undefined;
     delete rec.hint;
     rec.hintDetail = undefined;

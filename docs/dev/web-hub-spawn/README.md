@@ -170,8 +170,13 @@ conversation starts. Only a D7-verified never-seen missing leaf (no persisted ev
 old leaf identity), with the actual exact `--session-id <id>` tail, gets a one-attempt runtime
 permit. A disk `lazyIntent:{attempt}` is saved before fork; the permit activates only after
 actual child identity-save and reaper.track, by assignment only (no new FS in that window).
-The first registering child's identity/id/cwd/deadline/attempt/revision must match; one
-reported same-parent pi ISO-basename is reverified nofollow against the expected parent
+The first registering child's identity/id/cwd/deadline/attempt/revision must match. The
+**actual session frame's cwd** must byte-match the original record (and thus the permit),
+independently of a correct hello cwd, before any candidate proof or permit consumption.
+Guarded exact binds and subsequent session switches check this too, even for unchanged
+id/file. A mismatch stops via `protocol_error`/`session-swapped`, preserving the old
+coordinates and any unresolved lazy intent; it cannot substitute the old record cwd for
+the report. One reported same-parent pi ISO-basename is reverified nofollow against the expected parent
 chain. Success atomically moves coordinates/revision/cache, consumes the permit and clears
 intent before the pure live save. It does not create files or replay a prompt.
 
@@ -179,8 +184,13 @@ Actual `--session <file>` remains exact; ever-observed then missing is still 410
 `session-missing`, never lazy recreation. Forking/registering restart or actual-child failure
 before binding cannot revive a permit from JSON: unresolved lazyIntent rejects new forks
 with existing `session-invalid`, bounded detail `lazy-binding-unresolved`, no scan/guessing.
-Only authoritative never-forked paths clear intent for another explicit retry. Migration
-whose live save fails can leave old unresolved disk intent; the next Hub conservatively
+Only authoritative never-forked paths clear intent for another explicit retry (including
+pre-fork store/cwd failures, synchronous spawn throw and no child). Relaunch retains
+`noProcess` through both the persisted reaping transition and the restore job's L6 check;
+only the existing synchronous new-fork intent stretch clears it with the old identity.
+Missing pid without this evidence remains unknown, never implicitly confirmed. An actual
+fork with failed identity persistence keeps its unresolved intent, even after verified exit.
+Migration whose live save fails can leave old unresolved disk intent; the next Hub conservatively
 refuses it instead of guessing a possibly conversation-bearing new filename.
 
 ### Retention budgets and compatibility

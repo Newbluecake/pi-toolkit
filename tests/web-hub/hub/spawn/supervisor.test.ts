@@ -2648,7 +2648,7 @@ function pathPin(abs = SESS_ABS) {
  *  `sessionFile` precisely, unlike `driveToLive`'s fixed `sessionInfo()`. */
 async function driveToLiveWith(
   h: Harness,
-  session: { sessionId: string; sessionFile?: string },
+  session: { sessionId: string; sessionFile?: string; cwd?: string },
   key = "k1000",
   cwd = REALPATH,
 ): Promise<FakeChild> {
@@ -2672,7 +2672,7 @@ async function driveToLiveWith(
   h.registry.publish({
     type: "session",
     agentKey: key,
-    session: { ...session, reason: "new", leafId: null, mode: "rpc" as const },
+    session: { cwd, ...session, reason: "new", leafId: null, mode: "rpc" as const },
   });
   await vi.advanceTimersByTimeAsync(0);
   return child;
@@ -4288,6 +4288,37 @@ describe("retained exited r3: cache-only snapshots, guarded D7, lazy binding", (
     expect(kit.h.spawnCalls).toHaveLength(1);
   });
 
+  it.each(["/different/project", "/w-proj"])(
+    "lazy binding rejects wrong session cwd %s after correct hello without proving or consuming the permit",
+    async (cwd) => {
+      const kit = await lazyFork();
+      const rec = kit.h.sup.records()[0] as any;
+      const revision = rec.coordsRevision;
+      const baseline = rec.sessionGuard.baseline;
+      const capture = vi.spyOn(kit.retained.guard, "capture");
+      kit.retained.ledger.length = 0;
+      // driveToLiveWith publishes hello cwd=/w/proj, then this independent session frame.
+      await driveToLiveWith(kit.h, { sessionId: "sess-old", sessionFile: newFile, cwd }, "new-key");
+      expect(kit.h.registry.get("new-key")!.cwd).toBe(REALPATH);
+      expect(rec).toMatchObject({
+        state: "stopping",
+        endReason: "protocol_error",
+        hintDetail: "session-swapped",
+        cwd: REALPATH,
+        sessionId: "sess-old",
+        sessionFile: oldFile,
+        coordsRevision: revision,
+        lazyPermit: { state: "active" },
+        sessionGuard: { baseline, lazyIntent: { attempt: 1 } },
+      });
+      expect(kit.retained.ledger).toEqual([]);
+      expect(kit.h.onLive).toHaveLength(0);
+      expect(kit.h.spawnCalls).toHaveLength(1);
+      expect(savesOf(kit.h, rec.spawnId).at(-1)!.sessionGuard?.lazyIntent).toEqual({ attempt: 1 });
+      expect(capture).not.toHaveBeenCalled();
+    },
+  );
+
   it.each([
     { sessionId: "wrong-id", sessionFile: newFile },
     { sessionId: "sess-old", sessionFile: "/custom/2026-11-14T13-00-00-000Z_sess-old.jsonl" },
@@ -4347,6 +4378,78 @@ describe("retained exited r3: cache-only snapshots, guarded D7, lazy binding", (
     },
   );
 
+  it.each(["cwd", "relaunch-store", "fork-intent-store", "spawn-throw", "no-child"] as const)(
+    "never-forked lazy %s failure retains L6 evidence through retry and forks once after recovery",
+    async (fault) => {
+      const kit = restoreKit();
+      const { h } = kit;
+      loadInto(kit, [terminal({ sessionFile: oldFile, sessionPersisted: undefined })]);
+      await h.sup.init(deadline());
+      const spawn = h.spawnImpl;
+      if (fault === "cwd") h.dirs.pinResult = { ok: false, reason: "changed" };
+      if (fault === "relaunch-store") h.store.saveNowResults.push({ ok: false, code: "ENOSPC" });
+      if (fault === "fork-intent-store") h.store.saveNowResults.push({ ok: true }, { ok: false, code: "ENOSPC" });
+      if (fault === "spawn-throw")
+        h.spawnImpl = () => {
+          throw new Error("before fork");
+        };
+      if (fault === "no-child") h.spawnImpl = () => undefined as unknown as ChildProcess;
+      expect(h.sup.relaunch("sprestore0000001", deadline())).toMatchObject(
+        fault === "relaunch-store" ? { ok: false, reason: "persist" } : { ok: true },
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(h.spawnCalls).toHaveLength(0);
+      expect(h.sup.records()[0]).toMatchObject({ state: "failed", noProcess: "never-forked" });
+      expect(h.sup.records()[0]!.pid).toBeUndefined();
+      expect(h.sup.records()[0]!.sessionGuard?.lazyIntent).toBeUndefined();
+      expect(h.sup.deathOf("sprestore0000001")).toBe("confirmed");
+      h.dirs.pinResult = { ok: true, fd: 7, cwdArg: "/proc/self/fd/7" };
+      h.spawnImpl = spawn;
+      expect(h.sup.relaunch("sprestore0000001", deadline())).toEqual({ ok: true, state: "starting", dup: false });
+      // Check both the in-memory reaping state and the actual commit before the job runs.
+      const reaping = { ...h.sup.records()[0]!, restore: { ...h.sup.records()[0]!.restore } };
+      const committed = savesOf(h, "sprestore0000001").at(-1);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(h.spawnCalls).toHaveLength(1);
+      expect(reaping).toMatchObject({ noProcess: "never-forked", restore: { phase: "reaping" } });
+      expect(committed).toMatchObject({ noProcess: "never-forked", restore: { phase: "reaping" } });
+      expect(h.spawnCalls[0]!.args.slice(-2)).toEqual(["--session-id", "sess-old"]);
+      expect(h.sup.records()[0]).toMatchObject({
+        state: "starting",
+        pid: h.children[0]!.pid,
+        restore: { phase: "registering" },
+        sessionGuard: { lazyIntent: { attempt: 1 } },
+      });
+      expect(h.sup.records()[0]!.noProcess).toBeUndefined();
+      await driveToLiveWith(h, { sessionId: "sess-old", sessionFile: newFile }, "retry-key");
+      expect(h.sup.records()[0]).toMatchObject({ state: "live", sessionFile: newFile });
+      expect(h.sup.records()[0]!.sessionGuard?.lazyIntent).toBeUndefined();
+      expect(h.onLive).toHaveLength(1);
+    },
+  );
+
+  it("actual lazy fork with failed identity persist keeps unresolved intent and refuses retry even after exit", async () => {
+    const kit = restoreKit();
+    const { h } = kit;
+    loadInto(kit, [terminal({ sessionFile: oldFile, sessionPersisted: undefined })]);
+    await h.sup.init(deadline());
+    h.store.saveNowResults.push({ ok: true }, { ok: true }, { ok: false, code: "ENOSPC" });
+    expect(h.sup.relaunch("sprestore0000001", deadline())).toMatchObject({ ok: true });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.spawnCalls).toHaveLength(1);
+    expect(h.sup.records()[0]).toMatchObject({
+      state: "stopping",
+      restore: { failure: "persist" },
+      sessionGuard: { lazyIntent: { attempt: 1 } },
+    });
+    expect(h.sup.records()[0]!.noProcess).toBeUndefined();
+    h.children[0]!.emit("exit", 1, null);
+    expect(h.sup.deathOf("sprestore0000001")).toBe("confirmed");
+    expect(h.sup.relaunch("sprestore0000001", deadline())).toMatchObject({ ok: false, reason: "session-invalid" });
+    expect(h.spawnCalls).toHaveLength(1);
+    expect(h.sup.records()[0]!.sessionGuard?.lazyIntent).toEqual({ attempt: 1 });
+  });
+
   it("actual lazy child exit before binding leaves intent unresolved; explicit same-id retry cannot recreate empty session", async () => {
     const kit = await lazyFork();
     kit.h.children[0]!.emit("exit", 1, null);
@@ -4401,6 +4504,45 @@ describe("retained sticky guard additional refusal/recovery matrix", () => {
     expect(stored.sessionGuard?.baseline).toEqual(base);
     expect(stored.sessionFile).toBeUndefined();
   });
+  it.each(["registering", "live-same-tuple", "live-switch"] as const)(
+    "guarded %s rejects wrong session cwd independently of the correct hello cwd",
+    async (phase) => {
+      const kit = restoreKit();
+      kit.files.set(SESS_FILE, { head: sessHeader() });
+      loadInto(kit, [terminal()]);
+      await kit.h.sup.init(deadline());
+      kit.h.sup.relaunch("sprestore0000001", deadline());
+      await vi.advanceTimersByTimeAsync(0);
+      const reported = { sessionId: "sess-old", sessionFile: SESS_FILE, cwd: "/different/project" };
+      if (phase === "registering") await driveToLiveWith(kit.h, reported, "new-key");
+      else {
+        await driveToLiveWith(kit.h, { sessionId: "sess-old", sessionFile: SESS_FILE }, "new-key");
+        kit.retained.ledger.length = 0;
+        kit.h.registry.publish({
+          type: "session",
+          agentKey: "new-key",
+          session: {
+            ...sessionInfo(),
+            ...reported,
+            ...(phase === "live-switch"
+              ? { sessionId: "other-id", sessionFile: SESS_FILE.replace("sess-old", "other-id") }
+              : {}),
+          },
+        });
+        expect(kit.retained.ledger).toEqual([]);
+      }
+      expect(kit.h.sup.records()[0]).toMatchObject({
+        state: "stopping",
+        cwd: REALPATH,
+        sessionId: "sess-old",
+        sessionFile: SESS_FILE,
+        endReason: "protocol_error",
+        hintDetail: "session-swapped",
+      });
+      expect(kit.h.onLive).toHaveLength(phase === "registering" ? 0 : 1);
+    },
+  );
+
   it("history=false exact goLive still revalidates parent identity after fork", async () => {
     const kit = restoreKit();
     kit.files.set(SESS_FILE, { head: sessHeader() });
