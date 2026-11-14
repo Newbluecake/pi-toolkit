@@ -38,6 +38,8 @@ export function makeTerminalFixture(): { fixture: TerminalTestFixture; cleanup()
     join(home, ".bashrc"),
     'export RC_COUNT=$(( ${RC_COUNT:-0} + 1 ))\nexport RC_API_KEY=from-fixture-rc\nPS1="fixture> "\nHISTFILE=/dev/null\nprintf "RC_READY\\n"\n',
   );
+  // Keep the same startup policy as the bash/zsh PTY suite; do not invoke global compinit.
+  writeFileSync(join(home, ".zshenv"), "skip_global_compinit=1\n");
   writeFileSync(join(home, ".zprofile"), "export PROFILE_COUNT=$(( ${PROFILE_COUNT:-0} + 1 ))\n");
   writeFileSync(
     join(home, ".zshrc"),

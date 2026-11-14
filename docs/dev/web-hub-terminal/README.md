@@ -138,6 +138,19 @@ HOME/ZDOTDIR assignment、unset/read 的原有检测与注释过滤保持不变�
 
 2026-11-14 CI `43509495998` 的完整 setup 日志证实 `ubuntu-latest` 已指向 **Ubuntu 26.04.1 / ubuntu26/20261111.196.1**。该镜像 [systemd 259.9-0ubuntu0.1 的 SBOM](https://github.com/actions/runner-images/releases/tag/ubuntu26%2F20261111.196) 与官方 `.deb` 内容一致：`/etc/profile.d/{70-systemd-shell-extra,80-systemd-osc-context}.sh` 是指向 `/usr/lib/systemd/profile.d/` 下同名 root:root 0644 文件的 symlink。旧 `lstat().isFile()` 因而拒绝正常安装；两目标均不命中 HOME/ZDOTDIR 检测。不能把镜像版本误当 24.04，或无证据归因于 `env_vars.sh` 的组写权限。
 
+### CI3：用户 rc 与输入就绪（test-only）
+
+PTY suite 与共享 fixture 一开始已创建全部 zsh startup files，所以 newuser-install 不应触发。
+Ubuntu/Debian 打包的 `zshrc` 在 Ubuntu 上会先于用户 `.zshrc` 调用 `compinit`；fixture 的
+`.zshenv` 使用其文档化开关 `skip_global_compinit=1`，避免宿主 completion 目录权限提示，
+不设置 `NO_RCS`/`GLOBAL_RCS`，不跳过原生 login rc。PTY 回归用私有不安全 fpath 模拟该 gate。
+`waitRc` 同时等待独立 `RC_READY` 行与 fixture prompt，而非把 rc 中途标记当 readline 已就绪；
+Ctrl-D 回归有意拉开 marker/prompt 窗口，仍核 exit code 与真实 reaped 证明，未放大 timeout。
+`until` 的失败附最多两个 backend 各 1024 字符的 PTY suffix：先替换 fixture 根、用户路径与
+所有已知假秘密，再截尾并 JSON 转义控制字符；真实输出回归验证脱敏与长度。
+越界 HOME 测试使用另一个私有 0700 fixture 的现存目录，测 containment，不依赖开发机账号。
+这些都是测试策略，不替生产终端抑制真实用户的首次配置或 compinit 提示。
+
 ### 离线 Chromium tier3（不进 CI、不安装依赖）
 
 前置 Linux/Python/bash、Node≥22.12、已有匹配 Playwright1.63.0/Chromium revision1243缓存。缺缓存报失败/NOT RUN，绝不隐式下载。使用 owned0700 短路径 HOME/XDG_CACHE_HOME/TMPDIR；unset XDG_RUNTIME_DIR/NODE_OPTIONS/PI_CODING_AGENT_DIR、umask0022；只读 node_modules symlink 必设私有 `PWH_UI_CACHE_DIR`。

@@ -57,12 +57,31 @@ vi.mock("../../src/web-hub/agent/terminal/reaper.js", async (load) => {
 });
 const roots: string[] = [],
   backends: TerminalBackend[] = [],
-  owners: TerminalOwner[] = [];
+  owners: TerminalOwner[] = [],
+  outputs: Array<() => string> = [];
 const pause = (ms = 20) => new Promise<void>((r) => setTimeout(r, ms));
+function ptyTail(): string {
+  return JSON.stringify(
+    outputs.slice(-2).map((output) => {
+      let text = output();
+      for (const root of roots) text = text.replaceAll(root, "<fixture>");
+      for (const value of [
+        "FAKE_PI_KEY",
+        "FAKE_CAMEL_KEY",
+        "FAKE_TOKEN",
+        "FAKE_INHERITED_RC_KEY",
+        "FAKE_UNRECOGNIZED",
+        "from-fixture-rc",
+      ])
+        text = text.replaceAll(value, "<redacted>");
+      return text.replace(/\/(?:home|Users)\/[^\s'";]+/g, "<user-path>").slice(-1024);
+    }),
+  );
+}
 async function until(check: () => boolean | Promise<boolean>, ms = 8000): Promise<void> {
   const end = Date.now() + ms;
   while (!(await check())) {
-    if (Date.now() > end) throw new Error("terminal fixture deadline");
+    if (Date.now() > end) throw new Error(`terminal fixture deadline; PTY tail=${ptyTail()}`);
     await pause();
   }
 }
@@ -84,6 +103,7 @@ afterEach(async () => {
     b.close();
     await b.done;
   }
+  outputs.splice(0);
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
@@ -119,6 +139,9 @@ function fixture(kind: "bash" | "zsh" = "bash", delays: Partial<TerminalTestFixt
     join(home, ".bashrc"),
     'export RC_COUNT=$(( ${RC_COUNT:-0} + 1 ))\nexport RC_API_KEY=from-fixture-rc\nPS1="fixture> "\nHISTFILE=/dev/null\nprintf "RC_READY\\n"\n',
   );
+  // Ubuntu's global zshrc calls compinit before the user zshrc. Its documented
+  // opt-out avoids completion permission prompts in this non-completion fixture.
+  writeFileSync(join(home, ".zshenv"), "skip_global_compinit=1\n");
   writeFileSync(join(home, ".zprofile"), "export PROFILE_COUNT=$(( ${PROFILE_COUNT:-0} + 1 ))\n");
   writeFileSync(
     join(home, ".zshrc"),
@@ -172,6 +195,7 @@ function backend(f: TerminalTestFixture, extra: Partial<TerminalBackendOptions> 
   };
   const b = createTerminalTestBackend(options, f);
   backends.push(b);
+  outputs.push(() => output);
   return {
     b,
     get output() {
@@ -184,7 +208,9 @@ function backend(f: TerminalTestFixture, extra: Partial<TerminalBackendOptions> 
 }
 async function waitRc(h: ReturnType<typeof backend>) {
   await h.b.ready;
-  await until(() => h.output.includes("RC_READY"));
+  // RC_READY is printed inside rc, before interactive startup/readline is done.
+  // In particular, sending VEOF before the prompt may be consumed during startup.
+  await until(() => h.output.includes("RC_READY\r\n") && h.output.includes("fixture> "));
 }
 const evidence = { hubBootId: "boot", challengeId: "challenge", linkGen: 1, inventoryId: "inventory", revision: 1 };
 
@@ -232,6 +258,43 @@ describe("Linux agent-owned terminal §§5.1–5.4, T-ISO/T-SUBREAPER", () => {
     },
     15000,
   );
+  it("zsh fixture opts out of global compinit before user rc even with an insecure completion directory", async () => {
+    const f = fixture("zsh");
+    const insecure = join(f.root, "completion");
+    mkdirSync(insecure);
+    chmodSync(insecure, 0o777);
+    // Fedora-family hosts do not call compinit globally. Reproduce Ubuntu's
+    // documented gate before user rc without editing /etc or skipping other rc.
+    writeFileSync(
+      join(f.home, ".zprofile"),
+      readFileSync(join(f.home, ".zprofile"), "utf8") +
+        `fpath=('${insecure}' $fpath)\nif [[ -z "$skip_global_compinit" ]]; then autoload -U compinit; compinit; fi\n`,
+    );
+    const h = backend(f);
+    await waitRc(h);
+    expect(h.output).not.toContain("insecure directories");
+    await h.write('printf "SKIP:%s\\n" "$skip_global_compinit"\n');
+    await until(() => h.output.includes("SKIP:1\r\n"));
+  });
+  it("deadline diagnostics retain a bounded, escaped PTY suffix without fixture paths or sentinel secrets", async () => {
+    const f = fixture(),
+      h = backend(f);
+    await waitRc(h);
+    await h.write(
+      `printf '%s\\n' '${"x".repeat(1500)}FAKE_PI_KEY FAKE_TOKEN from-fixture-rc ${f.home} DIAGNOSTIC_END'\n`,
+    );
+    await until(() => h.output.includes("DIAGNOSTIC_END\r\n"));
+    const error = await until(() => false, 1).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(Error);
+    const message = (error as Error).message;
+    expect(message).toContain("terminal fixture deadline; PTY tail=");
+    expect(message).toContain("DIAGNOSTIC_END");
+    expect(message).toContain("<redacted>");
+    expect(message).not.toMatch(/FAKE_PI_KEY|FAKE_TOKEN|from-fixture-rc/);
+    expect(message).not.toContain(f.root);
+    expect(message).not.toContain("\u001b"); // JSON escaping, never raw terminal control bytes.
+    expect(message.length).toBeLessThan(13000); // 2 × 1024 chars × at most 6 JSON-escape bytes, plus framing.
+  });
   it("background output remains bounded and cannot renew the helper's own idle/lifetime deadline", async () => {
     const h = backend(fixture(), { inputIdleMs: 500, maxLifetimeMs: 10000 });
     await waitRc(h);
@@ -295,10 +358,12 @@ describe("Linux agent-owned terminal §§5.1–5.4, T-ISO/T-SUBREAPER", () => {
       return true;
     });
   }, 10000);
-  it("T-ISO rejects real HOME, external rc/shell, uid mismatch and symlink escape before any helper is created", () => {
+  it("T-ISO rejects out-of-root HOME, external rc/shell, uid mismatch and symlink escape before any helper is created", () => {
     const f = fixture();
+    // A real, owned 0700 directory, but outside f.root: reject containment, not ENOENT.
+    const outside = fixture();
     for (const bad of [
-      { ...f, home: "/home/bluecake" },
+      { ...f, home: outside.home },
       { ...f, rcFiles: ["/etc/profile"] },
       { ...f, shell: "/usr/bin/bash" },
       { ...f, uid: f.uid + 1 },
@@ -330,9 +395,19 @@ describe("Linux agent-owned terminal §§5.1–5.4, T-ISO/T-SUBREAPER", () => {
     expect((await h.b.done).outcome).toBe("reaped");
   }, 15000);
   it("Ctrl-D EOF exits the real interactive shell without stopping the agent", async () => {
-    const h = backend(fixture());
+    const f = fixture();
+    // Make the rc-marker/prompt gap deterministic: an early VEOF can be lost
+    // when readline subsequently initializes its terminal input mode.
+    const profile = join(f.home, ".bash_profile");
+    writeFileSync(profile, readFileSync(profile, "utf8") + "sleep 0.1\n");
+    const h = backend(f);
     await waitRc(h);
     await h.b.input(0, Buffer.from([4]), "user");
+    let exited = false;
+    void h.b.done.then(() => {
+      exited = true;
+    });
+    await until(() => exited, 5000);
     expect(await h.b.done).toMatchObject({ outcome: "reaped", exitCode: 0, ptyClosed: true, helperReaped: true });
     expect(process.pid).toBeGreaterThan(0);
   });
@@ -555,7 +630,18 @@ async function ownerHarness(f: TerminalTestFixture) {
       return true;
     },
     backend: (options) => {
-      const b = createTerminalTestBackend(options, f);
+      let output = "";
+      const b = createTerminalTestBackend(
+        {
+          ...options,
+          onData: (bytes) => {
+            output += bytes.toString("utf8");
+            options.onData(bytes);
+          },
+        },
+        f,
+      );
+      outputs.push(() => output);
       physical.push(b);
       return b;
     },
