@@ -1788,7 +1788,7 @@ describe.skipIf(!IS_LINUX)("web-hub spawn restore — in-process graceful paths 
     const home = sandbox.home;
     const h = await boot(home);
     expect(h.hub.info.caps).toContain("spawn.relaunch.v1"); // restore on ⇒ the cap rides
-    const cwd = projDir(home, "proj", ["--cmd-echo", "--write-session"]);
+    const cwd = projDir(home, "proj", ["--cmd-echo", "--write-session", "--default-session-tree"]);
     const spawnId = await spawnIt(h, cwd);
     const r1 = await waitRestoreRec(
       h.stateDir,
@@ -1866,7 +1866,7 @@ describe.skipIf(!IS_LINUX)("web-hub spawn restore — in-process graceful paths 
     sandbox = sandboxHome();
     const home = sandbox.home;
     const h = await boot(home);
-    const cwd = projDir(home, "proj", ["--write-session"]);
+    const cwd = projDir(home, "proj", ["--write-session", "--default-session-tree"]);
     const spawnId = await spawnIt(h, cwd);
     const r1 = await waitRestoreRec(
       h.stateDir,
@@ -1893,6 +1893,41 @@ describe.skipIf(!IS_LINUX)("web-hub spawn restore — in-process graceful paths 
     );
     expect(res.status).toBe(410);
     expect(JSON.parse(res.body)).toEqual({ error: "E_SPAWN_GONE", reason: "session-missing" });
+    expect(restoreRecOf(h.stateDir, spawnId)).toMatchObject({ state: "exited" });
+    expect(forkArgvs(cwd)).toHaveLength(1); // never forked
+  }, 60_000);
+
+  it("HR8c spawn-relaunch: custom coordinates ⇒ 410 E_SPAWN_GONE{session-invalid}, record stays exited, no fork", async () => {
+    sandbox = sandboxHome();
+    const home = sandbox.home;
+    const h = await boot(home);
+    const cwd = projDir(home, "proj", ["--write-session"]);
+    const spawnId = await spawnIt(h, cwd);
+    const r1 = await waitRestoreRec(
+      h.stateDir,
+      spawnId,
+      (r) => r.state === "live" && r.sessionPersisted === true,
+      15_000,
+      "live + session file observed",
+    );
+    procChildren.add(r1.pid!);
+    const stop = await postJson(
+      h.port,
+      `/api/headless/${spawnId}/stop`,
+      {},
+      { Cookie: h.cookie, Origin: `http://127.0.0.1:${h.port}` },
+    );
+    expect(stop.status).toBe(202);
+    await waitRestoreRec(h.stateDir, spawnId, (r) => r.state === "exited", 10_000, "exited after stop");
+    expect(existsSync(r1.sessionFile!)).toBe(true); // custom is refused even while present
+    const res = await postJson(
+      h.port,
+      "/api/headless/relaunch",
+      { spawnId },
+      { Cookie: h.cookie, Origin: `http://127.0.0.1:${h.port}` },
+    );
+    expect(res.status).toBe(410);
+    expect(JSON.parse(res.body)).toEqual({ error: "E_SPAWN_GONE", reason: "session-invalid" });
     expect(restoreRecOf(h.stateDir, spawnId)).toMatchObject({ state: "exited" });
     expect(forkArgvs(cwd)).toHaveLength(1); // never forked
   }, 60_000);

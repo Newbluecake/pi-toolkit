@@ -73,6 +73,9 @@
  *   --fork <src>           (needs --session-id) fork from the hub's fork-src snapshot; exit 3 outside it
  *   --delay-open <ms>      wait before reading the --session file (HH10)
  *   --delay-session <ms>   wait after opening it, before the session frame (HH10b)
+ *   --default-session-tree ordinary pi cwd-encoded parent and ISO basename (opt-in only)
+ *   --lazy-new-timestamp   opt-in pi lazy naming: missing --session-id gets a current
+ *                          ISO basename; mkdir parent only, persist on first prompt, not boot
  *   --title-only           comm=pi sample that never connects (HH9/RH4)
  *
  * Everything the tests assert on rides STDERR (which the hub tees into
@@ -225,7 +228,19 @@ async function resolveSessionStartup() {
     return;
   }
   if (byId !== "") sessionId = byId;
-  else if (has("--write-session")) {
+  if (has("--default-session-tree") || has("--lazy-new-timestamp")) {
+    const encoded = `--${process
+      .cwd()
+      .replace(/^[/\\]/, "")
+      .replace(/[/\\:]/g, "-")}--`;
+    const parent = `${process.env.HOME ?? "/nonexistent"}/.pi/agent/sessions/${encoded}`;
+    fs4.mkdirSync(parent, { recursive: true });
+    // A fixed past fresh timestamp makes the lazy retry's current timestamp deterministically
+    // different without a sleep. Only opt-in fresh forks use it; --session stays verbatim.
+    const timestamp =
+      byId === "" && has("--lazy-new-timestamp") ? "2000-01-01T00:00:00.000Z" : new Date().toISOString();
+    sessionFile = `${parent}/${timestamp.replace(/[:.]/g, "-")}_${sessionId}.jsonl`;
+  } else if (byId === "" && has("--write-session")) {
     sessionFile = `${process.env.HOME ?? "/nonexistent"}/.pi/agent/sessions/fake/${sessionId}.jsonl`;
   }
 }
@@ -304,6 +319,7 @@ function connectAndHello() {
         // the hub's command router delivers over the AGENT SOCKET (registry.send), not stdio —
         // the first-prompt fp_<spawnId> frame arrives here.
         log(`CMD ${frame.id} op=${frame.cmd && frame.cmd.op} retry=${frame.retry === true}`);
+        if (has("--lazy-new-timestamp") && frame.cmd?.op === "prompt") persistLazyConversation();
         if (has("--cmd-echo")) {
           sockSend({
             t: "cmd_result",
@@ -506,9 +522,32 @@ process.on("SIGINT", () => {
 // orchestration
 // ---------------------------------------------------------------------------
 
+function persistLazyConversation() {
+  if (sessionFile === undefined) return;
+  const fs = require("node:fs");
+  if (!fs.existsSync(sessionFile)) {
+    fs.writeFileSync(
+      sessionFile,
+      `${JSON.stringify({ type: "session", version: 3, id: sessionId, timestamp: new Date().toISOString(), cwd: process.cwd() })}\n`,
+    );
+  }
+  fs.appendFileSync(
+    sessionFile,
+    `${JSON.stringify({ type: "message", message: { role: "user", content: "fake conversation" } })}\n`,
+  );
+  log(`SESSION-WRITTEN ${sessionFile}`);
+  sockSend({ t: "status", leafId: null, busy: true, pending: false });
+  setTimeout(() => sockSend({ t: "status", leafId: null, busy: false, pending: false }), 50);
+}
+
 function afterLive() {
   // fired once hello_ack arrived and the session frame went out — the record is `live`
-  if (has("--write-session") && sessionFile !== undefined && valueOf("--session", "") === "") {
+  if (
+    has("--write-session") &&
+    !has("--lazy-new-timestamp") &&
+    sessionFile !== undefined &&
+    valueOf("--session", "") === ""
+  ) {
     // one simulated turn: the session file appears, then status busy → idle (RS3 evidence path)
     setTimeout(() => {
       try {

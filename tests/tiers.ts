@@ -48,6 +48,8 @@ export const TIER2_DIRS: readonly string[] = ["tests/integration/", "tests/confo
 /** Tier 2 files outside TIER2_DIRS (plan D2): real private lock / plain child processes /
  * build-artifact-dependent suites. Not real-mount — those are SECURE_MOUNT_FILES. */
 export const TIER2_FILES: readonly string[] = [
+  // Retained exited lifecycle: real hub assembly/store, sockets and fake-pi child processes.
+  "tests/integration/web-hub-exited-discoverable.test.ts",
   // #70 credential-safe persistence tests use the real settings flock, no real vault.
   "tests/config/feishu-notify-settings.test.ts",
   // Interval P1: these drivers use the real single-file writer/flock through fixtures (hidden

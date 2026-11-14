@@ -764,6 +764,88 @@ describe.skipIf(!existsSync(PI_CLI))("rpc-spawn conformance — restore argv tai
     }
   }, 60_000);
 
+  it("CR2b: missing --session-id reports a current ISO basename, reads/EOF never create a conversation file", async () => {
+    const prepared = prepareHome();
+    const id = randomUUID();
+    const parent = join(
+      prepared.agentDir,
+      "sessions",
+      `--${prepared.workdir.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`,
+    );
+    const old = join(parent, `2000-01-01T00-00-00-000Z_${id}.jsonl`);
+    expect(existsSync(old)).toBe(false);
+    const before = Date.now();
+    const run = launch(prepared, ["--session-id", id]);
+    try {
+      await until(() => run.sessionsSeen.length > 0, 25_000, "CR2b session frame");
+      const frame = run.sessionsSeen[0]!;
+      expect(frame).toMatchObject({ sessionId: id, mode: "rpc" });
+      expect(typeof frame.sessionFile).toBe("string");
+      const file = frame.sessionFile as string;
+      expect(dirname(file)).toBe(parent);
+      expect(file).not.toBe(old);
+      const stamp = file.slice(parent.length + 1, -(id.length + 7));
+      expect(stamp).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z$/);
+      const iso = stamp.replace(/T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z$/, "T$1:$2:$3.$4Z");
+      expect(new Date(iso).toISOString().replace(/[:.]/g, "-")).toBe(stamp);
+      expect(Date.parse(iso)).toBeGreaterThanOrEqual(before);
+      expect(Date.parse(iso)).toBeLessThanOrEqual(Date.now());
+      expect(run.stderr).toContain(`No project session found with id '${id}'`);
+      expect(existsSync(file)).toBe(false);
+      expect(await messagesOf(run)).toEqual([]);
+      expect(existsSync(file)).toBe(false);
+      run.child.stdin?.end();
+      await Promise.race([
+        run.exit,
+        new Promise((_, reject) => {
+          const t = setTimeout(() => reject(new Error("CR2b EOF timeout")), 8_000);
+          t.unref();
+        }),
+      ]);
+      expect(existsSync(file)).toBe(false);
+      expect(existsSync(old)).toBe(false);
+    } finally {
+      run.cleanup();
+    }
+  }, 60_000);
+
+  it("CR2c: SessionManager.create with an explicit id names now, persists only after appendMessage", async () => {
+    const prepared = prepareHome();
+    try {
+      const { SessionManager } = await import("@earendil-works/pi-coding-agent");
+      const id = randomUUID();
+      const parent = join(
+        prepared.agentDir,
+        "sessions",
+        `--${prepared.workdir.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`,
+      );
+      const before = Date.now();
+      const sm = SessionManager.create(prepared.workdir, parent, { id });
+      const file = sm.getSessionFile()!;
+      expect(sm.getSessionId()).toBe(id);
+      expect(dirname(file)).toBe(parent);
+      const stamp = file.slice(parent.length + 1, -(id.length + 7));
+      expect(stamp).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z$/);
+      const iso = stamp.replace(/T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z$/, "T$1:$2:$3.$4Z");
+      expect(Date.parse(iso)).toBeGreaterThanOrEqual(before);
+      expect(Date.parse(iso)).toBeLessThanOrEqual(Date.now());
+      expect(existsSync(file)).toBe(false);
+      expect(sm.getSessionFile()).toBe(file);
+      expect(existsSync(file)).toBe(false);
+      sm.appendMessage({ role: "user", content: [{ type: "text", text: "local conformance" }], timestamp: Date.now() });
+      expect(sm.getSessionFile()).toBe(file);
+      expect(existsSync(file)).toBe(true);
+      const lines = readFileSync(file, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      expect(lines[0]).toMatchObject({ type: "session", id, cwd: prepared.workdir });
+      expect(lines.some((line) => line.type === "message" && line.message?.role === "user")).toBe(true);
+    } finally {
+      rmSync(prepared.home, { recursive: true, force: true });
+    }
+  }, 60_000);
+
   it("CR3: --session <missing abs path> ⇒ LIVE on an EMPTY session at that path (F22 — why the hub preflights)", async () => {
     const prepared = prepareHome();
     const missing = join(prepared.agentDir, "sessions", "--work--", "gone-session.jsonl");
