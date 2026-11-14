@@ -77,8 +77,9 @@ describe("T-ID1 P0: default-equivalent values preserve legacy literal paths", ()
     for (const p of parts) expect(p).toContain("const hubAgentDir = ctx.hubAgentDir;");
     expect(hub).toMatch(/^\s+hubAgentDir,$/m);
     // P4 为 hub.json 的 agentDir 写入加了第 7 处消费（仍共用同一个 hubAgentDir）。
+    // #37 retained exited 坐标的默认树证明是第 8 处消费，仍共用同一个 hubAgentDir。
     const uses = [hub, ...parts].reduce((n, src) => n + (src.match(/agentDir: hubAgentDir/g)?.length ?? 0), 0);
-    expect(uses).toBe(7);
+    expect(uses).toBe(8);
     for (const src of [hub, ...parts]) expect(src).not.toContain('process.env["PI_CODING_AGENT_DIR"]');
     const launcher = readFileSync(new URL("../../src/secure/bin/helper.mjs", import.meta.url), "utf8");
     expect(launcher).toContain("C.defaultConvertContext(process.env, { home, cwd, agentDir: piAgentDir(home) })");
