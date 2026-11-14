@@ -1,3 +1,4 @@
+import { createRetainedSessionGuard } from "./spawn/retained-session.js";
 import { webHubSpawnFiles } from "../protocol/paths.js";
 import type { HubAssembly } from "./assembly.js";
 import { auditSpawn } from "./audit.js";
@@ -129,9 +130,21 @@ export async function assembleSpawn(ctx: HubAssembly): Promise<void> {
       audit: (r) => auditSpawn(log, r),
       pluginVersion: config.pluginVersion,
       stderrDir: spawnFiles.logDir,
-      // spawn-relaunch: the base for `locateSessionFile`'s default-session-dir fallback (same
-      // expression as spawnDirs'/history's agentDir above).
+      // Lexical candidate shared with dirs/history; the independent guard below proves
+      // ordinary default-tree coordinates without constructing the history scanner.
       agentDir: hubAgentDir,
+      ...(spawnCfg.restore === true && platform.ok
+        ? {
+            retainedSessionGuard: createRetainedSessionGuard({
+              agentDir: hubAgentDir,
+              uid: deps.uid ?? process.getuid?.() ?? -1,
+              ...(deps.spawnSeams?.retainedSessionFs === undefined ? {} : { fs: deps.spawnSeams.retainedSessionFs }),
+              ...(deps.spawnSeams?.retainedSessionMonotonicNow === undefined
+                ? {}
+                : { monoNow: deps.spawnSeams.retainedSessionMonotonicNow }),
+            }),
+          }
+        : {}),
       // session-history plan §4.6.3/§4.8 (v3.4 X1): the restore re-fork's path-pin pair —
       // injected ONLY when history is on; absent ⇒ restore keeps its exact pre-history
       // behavior (no capture, no goLive verify, §5). Same `HistorySyncFs` for both halves.

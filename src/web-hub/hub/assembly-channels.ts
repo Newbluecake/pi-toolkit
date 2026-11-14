@@ -21,6 +21,7 @@ import {
   SPAWN_HUB_CAP,
   SPAWN_MODEL_HUB_CAP,
   SPAWN_RELAUNCH_HUB_CAP,
+  SPAWN_EXITED_HUB_CAP,
   THREAD_CAP,
   THREAD_REBIND_CAP,
   VERSION_HUB_CAP,
@@ -213,6 +214,7 @@ export function assembleHubCaps(ctx: HubAssembly): readonly string[] {
     // two-surface tail-append rule; absent ⇒ caps byte-identical). Declared even when the
     // store root failed to resolve (spawn.v1 precedent: the UI needs the cap to explain).
     ...(config.schedule === undefined ? [] : [SCHED_HUB_CAP, SCHED_INTERVAL_CAP]),
+    ...(config.spawn?.restore === true && spawnPlatform?.ok === true ? [SPAWN_EXITED_HUB_CAP] : []),
   ];
 
   return extraHubCaps;

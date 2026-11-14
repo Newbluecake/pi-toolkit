@@ -1,3 +1,4 @@
+import { defaultRetainedSessionFs, type RetainedSessionFs } from "../../../src/web-hub/hub/spawn/retained-session.js";
 /**
  * web-hub-spawn plan §SP10 acceptance: hub-assembly tests — the ONLY place SP1–SP9's parts are
  * proven to meet (and, with `config.spawn` absent, to stay away from) each other.
@@ -17,7 +18,12 @@ import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { FrontendDeps, FrontendFactory, HubConfig, HttpFrontend } from "../../../src/web-hub/hub/ports.js";
 import { installProcessHandlers, startHub, type RunningHub, type StartHubDeps } from "../../../src/web-hub/hub/hub.js";
-import { SPAWN_HUB_CAP, SPAWN_MODEL_HUB_CAP, SPAWN_RELAUNCH_HUB_CAP } from "../../../src/web-hub/protocol/version.js";
+import {
+  SPAWN_HUB_CAP,
+  SPAWN_MODEL_HUB_CAP,
+  SPAWN_RELAUNCH_HUB_CAP,
+  SPAWN_EXITED_HUB_CAP,
+} from "../../../src/web-hub/protocol/version.js";
 import { webHubSpawnFiles, webHubStateDir } from "../../../src/web-hub/protocol/paths.js";
 import type { HubSpawnConfig } from "../../../src/web-hub/protocol/spawn.js";
 import type { Reaper, ReaperTrackRecord } from "../../../src/web-hub/hub/spawn/reaper.js";
@@ -198,6 +204,8 @@ interface StartKitOpts {
    * hub process that crashed mid-delete) so the restart-recovery path runs end-to-end through
    * the real file store, not just the fake-store unit matrix in `spawn/supervisor.test.ts`. */
   beforeStart?: (home: string) => void;
+  retainedSessionFs?: RetainedSessionFs;
+  retainedSessionMonotonicNow?: () => number;
 }
 
 /** SP13 P3: the `order` capture of the most recent FAILED startKit (the kit object never
@@ -231,6 +239,10 @@ async function startKit(opts: StartKitOpts = {}): Promise<HubKit> {
                   spawnFn: ((_cmd: string, _args: readonly string[], _opts: SpawnOptions) => child) as typeof realSpawn,
                 }),
             ...(opts.probe === undefined ? {} : { probe: opts.probe }),
+            ...(opts.retainedSessionFs === undefined ? {} : { retainedSessionFs: opts.retainedSessionFs }),
+            ...(opts.retainedSessionMonotonicNow === undefined
+              ? {}
+              : { retainedSessionMonotonicNow: opts.retainedSessionMonotonicNow }),
             ...(opts.withAssembly === true
               ? { wrapFirstPrompt: (f: FirstPromptForwarder): FirstPromptForwarder => (fwd = f) }
               : {}),
@@ -358,11 +370,14 @@ describe("hub assembly × managed spawn (plan §SP10)", () => {
     // restore absent ⇒ no cap (the SPAWN_CFG baseline above pins the exact tail already)
     const off = await startKit({ spawn: SPAWN_CFG, withAssembly: true });
     expect(off.hub.info.caps).not.toContain(SPAWN_RELAUNCH_HUB_CAP);
+    expect(off.hub.info.caps).not.toContain(SPAWN_EXITED_HUB_CAP);
 
     // restore on ⇒ the cap joins the spawn.v1 tail on the browser surface…
     const on = await startKit({ spawn: { ...SPAWN_CFG, restore: true }, withAssembly: true });
     expect(on.hub.info.caps).toContain(SPAWN_HUB_CAP);
     expect(on.hub.info.caps).toContain(SPAWN_RELAUNCH_HUB_CAP);
+    expect(on.hub.info.caps.at(-1)).toBe(SPAWN_EXITED_HUB_CAP);
+    expect(on.hub.info.caps.filter((c) => c === SPAWN_EXITED_HUB_CAP)).toHaveLength(1);
     // …and the agent-facing hello_ack carries the identical array (同源数组展开, order included)
     const c = await connectClient(on.hub.paths.socketPath);
     c.send(hello());
@@ -377,6 +392,81 @@ describe("hub assembly × managed spawn (plan §SP10)", () => {
       probe: { platform: "darwin" },
     });
     expect(noPlatform.hub.info.caps).not.toContain(SPAWN_RELAUNCH_HUB_CAP);
+    expect(noPlatform.hub.info.caps).not.toContain(SPAWN_EXITED_HUB_CAP);
+
+    // The retention FS/monotonic seam is assembled independently of history scanning.
+    const base = defaultRetainedSessionFs();
+    let probes = 0,
+      reads = 0,
+      clocks = 0;
+    let stateFile = "",
+      sessionFile = "";
+    const managedOnly = await startKit({
+      spawn: { ...SPAWN_CFG, restore: true, history: false },
+      withAssembly: true,
+      retainedSessionFs: {
+        ...base,
+        openSync(p, flags) {
+          probes++;
+          return base.openSync(p, flags);
+        },
+        readSync(...args) {
+          reads++;
+          return base.readSync(...args);
+        },
+      },
+      retainedSessionMonotonicNow: () => {
+        clocks++;
+        return 0;
+      },
+      beforeStart(home) {
+        const parent = `${home}/.pi/agent/sessions/--w-proj--`;
+        mkdirSync(parent, { recursive: true });
+        sessionFile = `${parent}/session.jsonl`;
+        writeFileSync(sessionFile, JSON.stringify({ type: "session", id: "retained-id", cwd: "/w/proj" }) + "\n");
+        const stateDir = webHubStateDir(home);
+        mkdirSync(stateDir, { recursive: true });
+        stateFile = webHubSpawnFiles(stateDir).spawnsJson;
+        writeFileSync(
+          stateFile,
+          JSON.stringify({
+            v: 2,
+            gen: 1,
+            records: [
+              {
+                spawnId: "retained-asm-terminal",
+                state: "exited",
+                cwd: "/w/proj",
+                dev: 1,
+                ino: 1,
+                createdAt: 1,
+                updatedAt: 2,
+                owner: { listener: "loopback", reqId: "retained-asm" },
+                exit: { code: 0, signal: null },
+                sessionId: "retained-id",
+                sessionFile,
+                sessionPersisted: true,
+              },
+            ],
+          }),
+        );
+      },
+    });
+    expect(managedOnly.hub.info.caps).toContain(SPAWN_EXITED_HUB_CAP);
+    expect(managedOnly.hub.info.caps).not.toContain("spawn.history.v1");
+    expect(probes).toBeGreaterThan(0);
+    expect(clocks).toBeGreaterThan(0);
+    expect(reads).toBe(0);
+    expect(managedOnly.sup!.records()[0]!.sessionGuard?.baseline).toBeDefined();
+    const beforeFlush = probes;
+    await managedOnly.hub.close("test");
+    const disk = JSON.parse(readFileSync(stateFile, "utf8"));
+    expect(disk.records[0]).toMatchObject({
+      sessionFile,
+      sessionGuard: { kind: "default-tree-v1", baseline: expect.any(Object) },
+    });
+    expect(probes).toBe(beforeFlush);
+    expect(reads).toBe(0);
   });
 
   it("platform probe failure ⇒ fail closed: caps still carry spawn.v1, policy reason platform, no store file", async () => {
