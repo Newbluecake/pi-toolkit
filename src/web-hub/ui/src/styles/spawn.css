@@ -695,3 +695,28 @@
     min-height: 44px;
   }
 }
+
+/* The new-cap recovery label is longer than the legacy retry. Keep its cwd readable and
+ * place actions on their own wrapping line, without changing any old-cap row geometry. */
+.spawn-row.is-retained-restore .spawn-row-line {
+  flex-wrap: wrap;
+}
+.spawn-row.is-retained-restore .spawn-row-cwd {
+  flex: 1 1 80px;
+  min-width: 60px;
+}
+.spawn-row.is-retained-restore .spawn-row-actions {
+  flex: 1 0 100%;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.spawn-row.is-retained-restore .spawn-row-actions .btn {
+  min-height: 44px;
+  max-width: 100%;
+  white-space: normal;
+}
+.spawn-row.is-retained-restore .chip-mono {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

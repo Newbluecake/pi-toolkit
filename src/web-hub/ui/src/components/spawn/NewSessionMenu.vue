@@ -16,7 +16,8 @@
     a denied policy shows it disabled with its reason). The toggle exists while any menu item
     is renderable. The 「历史会话…」 item moved to the AgentList sidebar footer (2026-10
     relocation — reachable in every layout that renders the sidebar, so the menu copy would
-    be pure duplication).
+    be pure duplication). With spawn.exited.v1 and no history capability, a managed-only
+    recovery item is appended; it never requests file history.
   - Keyboard: Enter/Space activate natively; ArrowDown on the closed toggle opens and focuses
     the first enabled item; ArrowUp/ArrowDown cycle focus between enabled items; Escape closes
     and returns focus to the toggle. Outside click closes. No timers, no rAF.
@@ -43,6 +44,7 @@ const emit = defineEmits<{
 const { t } = useI18n();
 
 const spawnCwd = computed(() => props.actions.find((a) => a.kind === "spawn-cwd"));
+const managedHistory = computed(() => props.actions.find((a) => a.kind === "history" && a.managedOnly));
 const sameCwd = computed(() => props.actions.find((a) => a.kind === "same-cwd"));
 const pickDir = computed(() => props.actions.find((a) => a.kind === "pick-dir"));
 /** arch §8.3: a 404/unavailable pick-dir is hidden, not shown disabled. */
@@ -51,7 +53,9 @@ const pickDirVisible = computed(() => {
   return a !== undefined && a.kind === "pick-dir" && a.reason !== "unavailable";
 });
 /** The dropdown renders while any item is renderable (same-cwd needs a selected agent). */
-const menuAvailable = computed(() => sameCwd.value !== undefined || pickDirVisible.value);
+const menuAvailable = computed(
+  () => sameCwd.value !== undefined || pickDirVisible.value || managedHistory.value !== undefined,
+);
 
 const pickDirReason = computed(() => {
   const a = pickDir.value;
@@ -101,7 +105,7 @@ function onMainClick(): void {
 }
 
 function onItemClick(action: NewSessionAction): void {
-  if (action.kind === "pick-dir" && !action.enabled) return;
+  if ((action.kind === "pick-dir" || action.kind === "history") && !action.enabled) return;
   if (action.kind === "same-cwd" && (!action.enabled || props.busy === true)) return;
   closeMenu(false);
   emit("select", action);
@@ -182,8 +186,30 @@ onBeforeUnmount(() => {
       >
         {{ t("spawn.itemSameCwd") }}
       </button>
+      <template v-if="managedHistory">
+        <button
+          v-if="pickDir && pickDirVisible"
+          class="nsmenu-item"
+          type="button"
+          role="menuitem"
+          :disabled="!pickDir.enabled"
+          @click="onItemClick(pickDir)"
+        >
+          <span>{{ t("spawn.itemPickDir") }}</span>
+          <span v-if="pickDirReason" class="nsmenu-item-reason">{{ pickDirReason }}</span>
+        </button>
+        <button
+          class="nsmenu-item"
+          type="button"
+          role="menuitem"
+          :disabled="!managedHistory.enabled || busy === true"
+          @click="onItemClick(managedHistory)"
+        >
+          {{ t("history.retainedEntry") }}
+        </button>
+      </template>
       <button
-        v-if="pickDir && pickDirVisible"
+        v-else-if="pickDir && pickDirVisible"
         class="nsmenu-item"
         type="button"
         role="menuitem"

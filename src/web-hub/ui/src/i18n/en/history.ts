@@ -12,6 +12,18 @@
 const history = {
   // --- AgentList sidebar footer + EmptyState entry (2026-10: the footer entry replaced the
   // --- old NewSessionMenu dropdown item — one persistent entry point, same gating) ---
+  retainedEntry: "Exited sessions…",
+  retainedEntryAria: "Open retained exited and recovery-failed records; {n} exited sessions",
+  retainedTitle: "Recently exited managed sessions",
+  retainedBudget:
+    "Recent records retained by the current hub. After a restart, the disk budget may retain fewer records or none. This is not the complete session history.",
+  retainedVerify:
+    "The previous process and session file will be checked before recovery. An unconfirmed process may prevent recovery (409).",
+  retainedTry: "Try to restore",
+  retainedEmpty: "No retained exited records.",
+  retainedEvicted: "The record is no longer in the retention window.",
+  retainedFailed:
+    "Recovery failed. Check the original session environment before trying again; no new session will be created.",
   sidebarEntry: "History sessions",
   emptyStateItem: "History sessions",
 

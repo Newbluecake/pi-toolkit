@@ -41,7 +41,7 @@
   `commands` slot lists `title` ⇒ clearing the input and saving sends `/title auto`).
 -->
 <script setup lang="ts">
-import { computed, inject, nextTick, ref, watch } from "vue";
+import { computed, inject, nextTick, provide, ref, watch } from "vue";
 import AppIcon from "../../icons/AppIcon.vue";
 import { useI18n } from "../../composables/useI18n.js";
 import { useListDensity } from "../../composables/useListDensity.js";
@@ -54,6 +54,7 @@ import {
   newSessionActions,
   pendingRows,
   relaunchableFor,
+  retainedRecoveryRows,
   restoringKeys,
   spawnAvailability,
   spawnDeniedKey,
@@ -63,6 +64,7 @@ import type { SpawnListOutcome } from "../../transport/types.js";
 import type { AgentCardView } from "../../types.js";
 import type { AgentListEmits, AgentListProps } from "../../contracts.js";
 import { CONTROL_ENV, HUB_CTX } from "../control/controlContext.js";
+import { RETAINED_RELAUNCH, useRetainedRelaunch } from "../../composables/useRetainedRelaunch.js";
 import EmptyState from "../shell/EmptyState.vue";
 import DirPicker from "../spawn/DirPicker.vue";
 import NewSessionMenu from "../spawn/NewSessionMenu.vue";
@@ -81,6 +83,10 @@ const { t } = useI18n();
 // is expanded — collapsed (user decision 2026-11-04) removes the whole row from the DOM: the 56px
 // rail has no room for chips and CSS-only hiding left them visibly overflowing.
 const hub = inject(HUB_CTX, null);
+const retained = useRetainedRelaunch(hub);
+provide(RETAINED_RELAUNCH, retained);
+const retainedRows = computed(() => retainedRecoveryRows(hub?.state.value.spawns, hub?.state.value.hub?.["caps"]));
+const exitedCount = computed(() => retainedRows.value.filter((r) => r.state === "exited").length);
 const channelPick = ref<string | null>(null);
 const channelRows = computed(() => {
   const agents = hub?.state.value.agents;
@@ -178,6 +184,7 @@ const sessionActions = computed<readonly NewSessionAction[]>(() =>
   newSessionActions({
     hubCaps: hubCaps.value,
     listResult: spawnListResult.value,
+    spawns: hub?.state.value.spawns ?? null,
     selected: {
       agent: selectedAgent.value,
       hubControl: hub?.state.value.control === true,
@@ -298,6 +305,10 @@ async function onNewSession(): Promise<void> {
 }
 
 function onMenuSelect(action: NewSessionAction): void {
+  if (action.kind === "history") {
+    onHistoryEntry();
+    return;
+  }
   if (action.kind === "pick-dir") {
     if (!action.enabled) return showSpawnHint();
     openPicker(false);
@@ -594,7 +605,14 @@ function onStaleRowClick(row: AgentRow, ev: MouseEvent): void {
       @close="pickerOpen = false"
       @done="pickerOpen = false"
     />
-    <SessionHistoryDialog v-if="historyOpen" :plaintext="plaintext" @close="historyOpen = false" />
+    <SessionHistoryDialog
+      v-if="historyOpen"
+      :plaintext="plaintext"
+      @close="
+        historyOpen = false;
+        retained.cancel();
+      "
+    />
     <ul v-if="spawnRows.length > 0" class="spawn-pending" :aria-label="t('spawn.pendingAria')">
       <li v-for="rec in spawnRows" :key="rec.spawnId">
         <SpawnRow :rec="rec" @dismiss="dismissSpawn(rec.spawnId)" />
@@ -613,7 +631,11 @@ function onStaleRowClick(row: AgentRow, ev: MouseEvent): void {
           {{ t("spawn.itemPickDir") }}
         </button>
         <button v-if="historyEnabled" class="btn spawn-empty-pick" type="button" @click="historyOpen = true">
-          {{ t("history.emptyStateItem") }}
+          {{
+            retainedRows.length && historyAction?.kind === "history" && historyAction.managedOnly
+              ? t("history.retainedEntry")
+              : t("history.emptyStateItem")
+          }}
         </button>
       </template>
     </EmptyState>
@@ -672,12 +694,22 @@ function onStaleRowClick(row: AgentRow, ev: MouseEvent): void {
         class="sidebar-history-btn"
         type="button"
         :disabled="!historyAction.enabled"
-        :aria-label="t('history.sidebarEntry')"
+        :aria-label="
+          retainedRows.length ? t('history.retainedEntryAria', { n: exitedCount }) : t('history.sidebarEntry')
+        "
         :aria-describedby="historyReason !== null ? 'sidebar-history-reason' : undefined"
         @click="onHistoryEntry"
       >
         <AppIcon name="clock" class="icon-sm" />
-        <span>{{ t("history.sidebarEntry") }}</span>
+        <span v-if="!retainedRows.length">{{ t("history.sidebarEntry") }}</span>
+        <span v-else>
+          {{
+            historyAction.kind === "history" && historyAction.managedOnly
+              ? t("history.retainedEntry")
+              : t("history.sidebarEntry")
+          }}
+          <span class="chip chip-mono" translate="no">exited {{ exitedCount }}</span>
+        </span>
       </button>
       <!-- sr-ONLY in the collapsed rail (agents.css) — never display:none, so the disabled
            reason the aria-describedby above points at stays exposed to AT in every state. -->

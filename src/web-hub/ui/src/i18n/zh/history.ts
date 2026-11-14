@@ -8,6 +8,15 @@ import type en from "../en/history.js";
 const history = {
   // --- AgentList 侧边栏底部入口 + EmptyState 入口（2026-10：底部常驻入口取代了原
   // --- NewSessionMenu 下拉项——唯一持久入口，同一套门控） ---
+  retainedEntry: "已退出会话…",
+  retainedEntryAria: "查看保留的退出与恢复失败记录；已退出 {n} 个会话",
+  retainedTitle: "最近退出的托管会话",
+  retainedBudget: "当前 Hub 保留的最近退出记录；重启后的记录受磁盘预算限制，可能更少或为空。这不是完整的会话历史。",
+  retainedVerify: "恢复前将核验旧进程与会话文件；旧进程死亡未确认时可能拒绝恢复（409）。",
+  retainedTry: "尝试恢复",
+  retainedEmpty: "当前没有保留的退出记录。",
+  retainedEvicted: "记录已不在保留窗口。",
+  retainedFailed: "恢复失败。请在原会话环境核对后再尝试；不会新建会话。",
   sidebarEntry: "历史会话",
   emptyStateItem: "历史会话",
 

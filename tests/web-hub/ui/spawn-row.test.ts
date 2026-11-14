@@ -220,3 +220,33 @@ describe("SpawnRow.vue — first-prompt mirror chip (2026-10-13 拍板 ②: 等�
     expect(none.text()).not.toContain("fp:");
   });
 });
+
+describe("SpawnRow retained retry compatibility", () => {
+  it("old hub failed+restore keeps owner-cwd fresh retry (DOM baseline is tested separately)", async () => {
+    const f = fakeHub({ caps: ["spawn.v1"], ownerCwd: "/old" });
+    const w = mountRow({ ...BASE_REC, restore: { attempt: 1 } }, f);
+    expect(w.text()).not.toContain("Retry recovery");
+    await w
+      .findAll("button")
+      .find((b) => b.text() === "Retry")!
+      .trigger("click");
+    await flushPromises();
+    expect(f.submits).toEqual([{ cwd: "/old" }]);
+    expect(w.find('[role="alert"]').exists()).toBe(false);
+  });
+  it("new cap ordinary fresh failure keeps old retry, while restore failure fails closed without controller", async () => {
+    const f = fakeHub({ caps: ["spawn.v1", "spawn.exited.v1"], ownerCwd: "/fresh" });
+    const plain = mountRow(BASE_REC, f);
+    await plain
+      .findAll("button")
+      .find((b) => b.text() === "Retry")!
+      .trigger("click");
+    await flushPromises();
+    expect(f.submits).toEqual([{ cwd: "/fresh" }]);
+    const restored = mountRow({ ...BASE_REC, restore: { attempt: 1 } }, f);
+    const retry = restored.findAll("button").find((b) => b.text() === "Retry recovery")!;
+    expect(retry.attributes("disabled")).toBeDefined();
+    await retry.trigger("click");
+    expect(f.submits).toHaveLength(1);
+  });
+});

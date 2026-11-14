@@ -1,0 +1,11 @@
+/** Copy to the BASELINE WORKTREE ROOT as .u1-record.workspace.ts. Absolute project/setup
+ * paths prevent Vitest 2's nested-worktree discovery from selecting the parent project. */
+import { fileURLToPath } from "node:url";
+import { defineWorkspace } from "vitest/config";
+import { baseProject } from "./vitest.config.js";
+const root = fileURLToPath(new URL(".", import.meta.url));
+export default defineWorkspace([{ ...baseProject, root, test: { ...baseProject.test, name: "baseline",
+  include: ["tests/web-hub/ui/__baseline__/record-legacy.test.ts"],
+  setupFiles: [fileURLToPath(new URL("./tests/setup/sandbox-home.ts", import.meta.url))],
+  globalSetup: [fileURLToPath(new URL("./tests/setup/global-tz.ts", import.meta.url))],
+} }]);

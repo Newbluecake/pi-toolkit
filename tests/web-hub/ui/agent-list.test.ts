@@ -2157,3 +2157,126 @@ describe("left AgentCard activity source (#46)", () => {
     expect(frames).not.toMatch(/transform|box-shadow|width|height/);
   });
 });
+
+describe("AgentList retained exited discovery", () => {
+  const caps = ["spawn.v1", "spawn.exited.v1", "xs.channel.v1"];
+  function retainedHub(items: SpawnRecordPublic[], extraCaps = caps) {
+    return hubWithSpawn({
+      caps: extraCaps,
+      spawns: { items, active: 0, max: 10 },
+      list: async () => ({ ok: true, policy: spawnPolicy, items }),
+    });
+  }
+  it.each([375, 767])(
+    "%spx list with zero agents/selection has footer exited N and empty-state entry (no fake online cards)",
+    async (width) => {
+      const original = window.innerWidth;
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: width });
+      const hub = retainedHub([spawnRec({ state: "exited" }), spawnRec({ spawnId: "sp2", state: "exited" })]);
+      const history = vi.fn();
+      (hub.spawn as { history?: unknown }).history = history;
+      const w = mount(AgentList, {
+        props: { cards: [], selectedKey: null, filter: "" },
+        global: { provide: { [HUB_CTX as symbol]: hub } },
+      });
+      await flushPromises();
+      expect(w.get(".sidebar-history-btn").text()).toContain("exited 2");
+      expect(w.get(".sidebar-history-btn").attributes("aria-label")).toContain("2 exited sessions");
+      expect(w.findAll("a.agent-card")).toHaveLength(0);
+      const emptyEntry = w.findAll(".spawn-empty-pick").find((b) => b.text().includes("Exited sessions"))!;
+      await emptyEntry.trigger("click");
+      await flushPromises();
+      expect(document.body.querySelector(".history-retained-row")).not.toBeNull();
+      expect(history).not.toHaveBeenCalled();
+      expect(w.get("nav.sidebar").element.lastElementChild?.classList.contains("sidebar-foot")).toBe(true);
+      w.unmount();
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: original });
+    },
+  );
+  it("zero exited + restore-failed is discoverable after local dismiss; remove does not revive it", async () => {
+    const failed = spawnRec({ state: "failed", restore: { attempt: 1 } });
+    const hub = retainedHub([failed]);
+    const w = mount(AgentList, {
+      props: { cards: [], selectedKey: null, filter: "" },
+      global: { provide: { [HUB_CTX as symbol]: hub } },
+    });
+    await flushPromises();
+    expect(w.get(".sidebar-history-btn").text()).toContain("exited 0");
+    await w
+      .findAll(".spawn-row button")
+      .find((b) => b.text() === "Dismiss")!
+      .trigger("click");
+    await w.get(".sidebar-history-btn").trigger("click");
+    await flushPromises();
+    expect(document.body.querySelector(".history-retained-row")?.textContent).toContain("restore failed");
+    hub.state.value = { ...hub.state.value, spawns: { items: [], active: 0, max: 10 } };
+    await flushPromises();
+    expect(document.body.querySelector(".history-retained-row")).toBeNull();
+    expect(w.find(".sidebar-history-btn").exists()).toBe(false);
+    w.unmount();
+  });
+  it("text/channel filtering does not gate the local managed-history footer", async () => {
+    const hub = retainedHub([spawnRec({ state: "exited" })]);
+    hub.state.value = {
+      ...hub.state.value,
+      agents: new Map([
+        ["agent-1", { key: "agent-1", status: { xs: { joined: true, channels: ["default"] } } }],
+        ["outside", { key: "outside", status: { xs: { joined: true, channels: ["other-channel"] } } }],
+      ]) as unknown as HubState["agents"],
+    };
+    const w = mount(AgentList, {
+      props: { cards: [card()], selectedKey: null, filter: "nothing-matches" },
+      global: { provide: { [HUB_CTX as symbol]: hub } },
+    });
+    await flushPromises();
+    expect(w.findAll("a.agent-card")).toHaveLength(0);
+    expect(w.get(".sidebar-history-btn").text()).toContain("exited 1");
+    await w.setProps({ filter: "" });
+    const channel = w.findAll(".channel-filter button").find((b) => b.text().includes("#other-channel"))!;
+    await channel.trigger("click");
+    expect(channel.attributes("aria-pressed")).toBe("true");
+    expect(w.findAll("a.agent-card")).toHaveLength(0);
+    await w.get(".sidebar-history-btn").trigger("click");
+    await flushPromises();
+    expect(document.body.querySelector(".history-retained-row")).not.toBeNull();
+    w.unmount();
+  });
+  it("old-cap entries ignore retained records within the current implementation (baseline parity is tested separately)", async () => {
+    const hub = retainedHub([spawnRec({ state: "exited" })], ["spawn.v1", "spawn.history.v1"]);
+    const w = mount(AgentList, {
+      props: { cards: [], selectedKey: null, filter: "" },
+      global: { provide: { [HUB_CTX as symbol]: hub } },
+    });
+    await flushPromises();
+    const before = w.html();
+    hub.state.value = { ...hub.state.value, spawns: { items: [], active: 0, max: 10 } };
+    await flushPromises();
+    expect(w.html()).toBe(before);
+    expect(w.text()).not.toContain("exited");
+    w.unmount();
+  });
+});
+
+it("managed-only menu entry opens retained history instead of /new, with no scan", async () => {
+  const hub = hubWithSpawn({
+    caps: ["spawn.v1", "spawn.exited.v1"],
+    spawns: { items: [spawnRec({ state: "exited" })], active: 0, max: 10 },
+    list: async () => ({ ok: true, policy: spawnPolicy, items: [] }),
+  });
+  const history = vi.fn();
+  (hub.spawn as { history?: unknown }).history = history;
+  const w = mount(AgentList, {
+    props: { cards: [], selectedKey: null, filter: "" },
+    global: { provide: { [HUB_CTX as symbol]: hub } },
+  });
+  await flushPromises();
+  await w.get(".nsmenu-toggle").trigger("click");
+  const managed = w.findAll(".nsmenu-item").find((b) => b.text().includes("Exited sessions"))!;
+  expect(managed.exists()).toBe(true);
+  await managed.trigger("click");
+  await flushPromises();
+  expect(document.body.querySelector(".history-retained-row")).not.toBeNull();
+  expect(w.find(".replace-confirm").exists()).toBe(false);
+  expect(history).not.toHaveBeenCalled();
+  w.unmount();
+});

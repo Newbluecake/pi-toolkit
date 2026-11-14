@@ -123,6 +123,9 @@ const spawn = {
   stateFailed: "failed",
   rowDetails: "Details",
   rowDetailsAria: "Show failure details for {cwd}",
+  rowRetryRestore: "Retry recovery",
+  relaunchErrNoSession:
+    "This record has no usable recovery coordinates. Select history in the original session environment.",
   rowRetry: "Retry",
   rowRetryAria: "Retry starting a session in {cwd}",
   rowDismiss: "Dismiss",

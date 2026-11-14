@@ -799,16 +799,17 @@ describe("SessionHistoryDialog: resume / fork flows", () => {
     expect(qa(".history-row")).toHaveLength(0);
   });
 
-  it("PD14: without the history cap the resume fails locally — NO request, the session error shows", async () => {
+  it("without the history cap the complete history engine is gated — no scan or submit", async () => {
     const h = harness({
       history: [{ ok: true, page: historyPage({ items: [mainItem()] }) }],
       caps: ["spawn.v1"], // no spawn.history.v1
     });
     mountDialog(h);
     await flushPromises();
-    await click(q<HTMLButtonElement>(".history-row-actions button"));
+    expect(qa(".history-row-actions button")).toHaveLength(0);
+    expect(qa(".history-searchrow")).toHaveLength(0);
+    expect(h.historyCalls).toHaveLength(0);
     expect(h.starts).toHaveLength(0);
-    expect(q(".history-session-error").textContent).toContain("no longer offers session history");
   });
 });
 
@@ -914,4 +915,113 @@ describe("SessionHistoryDialog: topmost overlay decision (preview-windows §5.2,
     await flushPromises();
     expect(w.emitted("close") ?? []).toHaveLength(0);
   });
+});
+
+describe("managed-only history engine gates", () => {
+  type Engine = {
+    commitQuery(q: string): void;
+    onSearchInput(ev: Event): void;
+    onSearchKeydown(ev: KeyboardEvent): void;
+    onKindToggle(): void;
+    onLoadMore(): void;
+    refresh(): void;
+    runReq(q: { q: string; kind: "main"; cursor?: string }, auto: boolean): Promise<void>;
+  };
+  it("history=false gates mount, Enter/search/kind, refresh/more/expired/auto/rate paths and flow watcher: zero scans/timers", async () => {
+    vi.useFakeTimers();
+    const h = harness({
+      caps: ["spawn.v1", "spawn.exited.v1"],
+      history: [{ ok: false, status: 429, error: "E_RATE" }],
+    });
+    const w = mountDialog(h);
+    await flushPromises();
+    const e = (w.vm.$ as unknown as { setupState: Engine }).setupState;
+    e.commitQuery("x");
+    const input = document.createElement("input");
+    input.value = "search";
+    const ev = new Event("input");
+    Object.defineProperty(ev, "target", { value: input });
+    e.onSearchInput(ev);
+    e.onSearchKeydown(new KeyboardEvent("keydown", { key: "Enter" }));
+    e.onKindToggle();
+    e.refresh();
+    e.onLoadMore();
+    await e.runReq({ q: "", kind: "main", cursor: "expired" }, false);
+    await e.runReq({ q: "", kind: "main" }, true);
+    h.hub.spawn!.newSession.flow.value = { phase: "failed", kind: "session", code: "session-invalid" };
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(h.historyCalls).toHaveLength(0);
+    expect(h.starts).toHaveLength(0);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(qa(".history-searchrow, .history-list, .history-foot")).toHaveLength(0);
+    expect(q(".history-retained").textContent).toContain("not the complete session history");
+  });
+
+  it.each(["rate", "auto", "expired", "debounce"])(
+    "losing history cap cancels pending %s continuation and old callbacks",
+    async (mode) => {
+      vi.useFakeTimers();
+      const h = harness({
+        history: [
+          mode === "rate"
+            ? { ok: false, status: 429, error: "E_RATE", retryAfterS: 2 }
+            : { ok: true, page: historyPage() },
+        ],
+      });
+      let resolve: ((r: SpawnHistoryOutcome) => void) | undefined;
+      if (mode === "auto" || mode === "expired") {
+        h.hub.spawn!.history = () =>
+          new Promise((done) => {
+            resolve = done;
+          });
+      }
+      const w = mountDialog(h);
+      await flushPromises();
+      const e = (w.vm.$ as unknown as { setupState: Engine }).setupState;
+      if (mode === "debounce") {
+        const input = q<HTMLInputElement>("input[type=search]");
+        await type(input, "x");
+      }
+      h.hub.state.value = { ...h.hub.state.value, hub: { caps: ["spawn.v1", "spawn.exited.v1"] } };
+      const before = h.historyCalls.length;
+      resolve?.(
+        mode === "expired"
+          ? { ok: false, status: 409, error: "E_BAD_REQUEST", reason: "cursor-expired" }
+          : {
+              ok: true,
+              page: historyPage({
+                cursor: "next",
+                partial: { reason: "budget" },
+                stats: { files: 5, indexed: 1, enum: { complete: false, dirsDone: 1, dirsTotal: 5 } },
+              }),
+            },
+      );
+      e.commitQuery("late");
+      e.onKindToggle();
+      e.refresh();
+      e.onLoadMore();
+      await e.runReq({ q: "", kind: "main", cursor: "expired" }, mode === "auto");
+      h.hub.spawn!.newSession.flow.value = { phase: "failed", kind: "session", code: "session-invalid" };
+      await flushPromises();
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(h.historyCalls).toHaveLength(before);
+      expect(vi.getTimerCount()).toBe(0);
+      expect(qa(".history-row")).toHaveLength(0);
+    },
+  );
+});
+
+it("cap removal between token acquisition and history IO cannot leak a scan", async () => {
+  const h = harness({ history: [{ ok: true, page: historyPage() }] });
+  const w = mountDialog(h);
+  await flushPromises();
+  const e = (
+    w.vm.$ as unknown as { setupState: { runReq(q: { q: string; kind: "main" }, auto: boolean): Promise<void> } }
+  ).setupState;
+  const before = h.historyCalls.length;
+  const pending = e.runReq({ q: "race", kind: "main" }, false);
+  h.hub.state.value = { ...h.hub.state.value, hub: { caps: ["spawn.v1", "spawn.exited.v1"] } };
+  await pending;
+  expect(h.historyCalls).toHaveLength(before);
 });
