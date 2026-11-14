@@ -1,3 +1,4 @@
+import { isSessionGuard, type SessionGuard } from "./retained-session.js";
 /**
  * web-hub-spawn plan §SP5 (arch v2 §7.7): `<stateDir>/spawns.json` persistence — the L1 anchor.
  *
@@ -164,6 +165,8 @@ export interface StoredRecord {
   sessionFile?: string;
   /** The session file was once observed on disk (D7's "it existed, now it is gone" evidence). */
   sessionPersisted?: true;
+  /** Disk-only sticky default-tree constraint, never a runtime read authorization. */
+  sessionGuard?: SessionGuard;
   /** D4: tagged by a graceful restore-mode shutdown (saveNow BEFORE any stdin EOF). */
   restoreIntent?: true;
   /** §5.1 restore bookkeeping; see `StoredRestore`. */
@@ -207,6 +210,19 @@ function isRestoreFieldsOk(v: Record<string, unknown>): boolean {
   }
   const sessionPersisted = v["sessionPersisted"];
   if (sessionPersisted !== undefined && sessionPersisted !== true) return false;
+  const guard = v["sessionGuard"];
+  if (guard !== undefined) {
+    const spawnId = v["spawnId"],
+      cwd = v["cwd"];
+    const binding =
+      typeof spawnId === "string" &&
+      typeof cwd === "string" &&
+      typeof sessionId === "string" &&
+      typeof sessionFile === "string"
+        ? { spawnId, cwd, sessionId, sessionFile }
+        : undefined;
+    if (!isSessionGuard(guard, binding)) return false;
+  }
   const restoreIntent = v["restoreIntent"];
   if (restoreIntent !== undefined && restoreIntent !== true) return false;
   const restore = v["restore"];

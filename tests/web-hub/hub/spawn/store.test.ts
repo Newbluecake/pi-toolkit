@@ -1,3 +1,4 @@
+import { bindingDigest } from "../../../../src/web-hub/hub/spawn/retained-session.js";
 /**
  * web-hub-spawn plan §SP5: `hub/spawn/store.ts` — spawns.json persistence.
  *
@@ -582,5 +583,121 @@ describe("tmp 命名与 gen (plan §SP5: tmp-<pid>-<gen>)", () => {
     s.saveNow([rec()]);
     expect(tmps).toEqual([1, 2, 3].map((g) => join(dir, `spawns.json.tmp-${process.pid}-${g}`)));
     expect(renames.every((r) => r.to === file())).toBe(true);
+  });
+});
+
+// Disk-only retained constraints are strict append-only v2 fields; never independent tokens.
+describe("retained sessionGuard v2 persistence and byte budget", () => {
+  function guarded(over: Partial<StoredRecord> = {}): StoredRecord {
+    const r = rec({
+      spawnId: "retained-terminal",
+      state: "exited",
+      sessionId: "sess-id",
+      sessionFile: "/home/u/.pi/agent/sessions/--home-u-proj--/x.jsonl",
+      sessionPersisted: true,
+      ...over,
+    });
+    const b = { spawnId: r.spawnId, cwd: r.cwd, sessionId: r.sessionId!, sessionFile: r.sessionFile! };
+    const count = b.sessionFile.split("/").filter(Boolean).length;
+    r.sessionGuard = {
+      kind: "default-tree-v1",
+      baseline: {
+        bindingDigest: bindingDigest(b),
+        chain: Array.from({ length: count }, (_, i) => ({ dev: 1, ino: i + 1 })),
+        file: { dev: 1, ino: 100 },
+      },
+      lazyIntent: { attempt: 1 },
+    };
+    return r;
+  }
+  it("guard+baseline+lazyIntent roundtrip under existing v2, alongside legacy absent guard", () => {
+    const s = createSpawnStore({ file: file(), log, now: () => 100 });
+    const records = [guarded(), rec()];
+    expect(s.saveNow(records)).toEqual({ ok: true });
+    expect(createSpawnStore({ file: file(), log, now: () => 100 }).load(d()).records).toEqual(records);
+    expect(readJson(file()).v).toBe(2);
+  });
+  it.each([
+    { kind: "unknown" },
+    { kind: "default-tree-v1", extra: true },
+    { kind: "default-tree-v1", baseline: {} },
+    { kind: "default-tree-v1", lazyIntent: { attempt: 0 } },
+    { kind: "default-tree-v1", lazyIntent: { attempt: 4 } },
+    { kind: "default-tree-v1", lazyIntent: { attempt: 1, token: "not-authority" } },
+  ])("malformed optional guard makes the whole file corrupt: %j", (guard) => {
+    const r = guarded();
+    const raw = { ...r, sessionGuard: guard };
+    writeFileSync(
+      file(),
+      JSON.stringify({ v: 2, gen: 1, writer: { pid: 1, startedAt: 0, bootId: "b" }, records: [raw] }),
+    );
+    const loaded = createSpawnStore({ file: file(), log, now: () => 100 }).load(d());
+    expect(loaded.corrupt).toBe(true);
+    expect(loaded.records).toEqual([]);
+  });
+  it.each(["digest", "short-chain", "long-chain", "unsafe-inode", "foreign-binding"])(
+    "strict baseline validates %s",
+    (fault) => {
+      const r = guarded();
+      const base = r.sessionGuard!.baseline!;
+      const changed =
+        fault === "digest"
+          ? { ...base, bindingDigest: "x".repeat(64) }
+          : fault === "short-chain"
+            ? { ...base, chain: base.chain.slice(1) }
+            : fault === "long-chain"
+              ? { ...base, chain: Array.from({ length: 130 }, () => ({ dev: 1, ino: 1 })) }
+              : fault === "unsafe-inode"
+                ? { ...base, file: { dev: 1, ino: Number.MAX_SAFE_INTEGER + 1 } }
+                : { ...base, bindingDigest: "a".repeat(64) };
+      writeFileSync(
+        file(),
+        JSON.stringify({ v: 2, gen: 1, records: [{ ...r, sessionGuard: { ...r.sessionGuard, baseline: changed } }] }),
+      );
+      expect(createSpawnStore({ file: file(), log, now: () => 100 }).load(d()).corrupt).toBe(true);
+    },
+  );
+  it("restricted-but-unproven and baseline-with-stripped-coordinates are valid, not legacy authorization", () => {
+    const r = guarded();
+    delete r.sessionId;
+    delete r.sessionFile;
+    delete r.sessionPersisted;
+    const s = createSpawnStore({ file: file(), log, now: () => 100 });
+    s.saveNow([r, rec({ spawnId: "unproven", sessionGuard: { kind: "default-tree-v1" } })]);
+    expect(createSpawnStore({ file: file(), log, now: () => 100 }).load(d()).records).toHaveLength(2);
+  });
+  it("guard bytes count; nonterminal identity alone above 64KiB can evict EVERY terminal, without mutating caller memory", () => {
+    const active = Array.from({ length: 16 }, (_, i) =>
+      rec({ spawnId: `live-${i}`, owner: { listener: "loopback", reqId: `q${i}` + "界".repeat(1500) } }),
+    );
+    const terminal = guarded({ updatedAt: 99999 });
+    const memory = [...active, terminal];
+    const s = createSpawnStore({ file: file(), log, now: () => 100 });
+    expect(s.saveNow(memory)).toEqual({ ok: true });
+    expect(Buffer.byteLength(readFileSync(file(), "utf8"))).toBeGreaterThan(SPAWNS_FILE_TARGET_BYTES);
+    expect(Buffer.byteLength(readFileSync(file(), "utf8"))).toBeLessThan(SPAWNS_READ_MAX_BYTES);
+    expect(memory).toHaveLength(17);
+    expect(memory.at(-1)).toBe(terminal);
+    const reload = createSpawnStore({ file: file(), log, now: () => 100 }).load(d());
+    expect(reload.records).toHaveLength(16);
+    expect(reload.records.some((r) => r.spawnId === terminal.spawnId)).toBe(false);
+    expect(reload.records.every((r) => r.state === "live")).toBe(true);
+  });
+  it("under pressure evicts oldest WHOLE terminal with guard and coordinates, never strips safety fields to fit", () => {
+    const records = Array.from({ length: 20 }, (_, i) =>
+      guarded({ spawnId: `retained-${i}`, updatedAt: i, owner: { listener: "loopback", reqId: "界".repeat(1200) } }),
+    );
+    const s = createSpawnStore({ file: file(), log, now: () => 100 });
+    s.saveNow(records);
+    const loaded = createSpawnStore({ file: file(), log, now: () => 100 }).load(d()).records;
+    expect(loaded.length).toBeGreaterThan(0);
+    expect(loaded.length).toBeLessThan(20);
+    expect(loaded.some((r) => r.spawnId === "retained-19")).toBe(true);
+    expect(loaded.some((r) => r.spawnId === "retained-0")).toBe(false);
+    for (const r of loaded) {
+      expect(r.sessionFile).toBeDefined();
+      expect(r.sessionPersisted).toBe(true);
+      expect(r.sessionGuard?.baseline?.file).toEqual({ dev: 1, ino: 100 });
+    }
   });
 });
