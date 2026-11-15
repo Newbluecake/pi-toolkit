@@ -28,6 +28,8 @@ export type SseEventName = (typeof SSE_EVENTS)[number];
 export interface SseClient {
   id: string;
   subscribed: Set<string>;
+  /** Connection-local frames only: same encoder/FIFO, no event id or replay-ring entry. */
+  readonly output: Pick<SseOutput, "send" | "pendingBytes" | "abort">;
   send(event: SseEventName, data: unknown): boolean;
   close(): void;
   /** Set when the LAN listener attaches an authenticated client (§4.2); loopback clients never set it. */
@@ -185,6 +187,11 @@ export function createSseHub(opts: {
     const client: SseClient = {
       id,
       subscribed,
+      output: {
+        send: (frame) => write(state, frame),
+        pendingBytes: () => output.pendingBytes(),
+        abort: () => output.abort(),
+      },
       send: (event, data) => write(state, formatSseFrame(event, data)),
       close: () => drop(state),
       ...(auth === undefined ? {} : { auth }),

@@ -1,5 +1,6 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import type { SseClient } from "../sse.js";
 import type { AuthIdentity } from "../auth-identity.js";
 import type { TerminalSseBinding } from "../ports.js";
 import type { TerminalSseIdentity } from "../../protocol/terminal.js";
@@ -39,6 +40,7 @@ export class TerminalSseBindings {
     id: AuthIdentity,
     clientId: string,
     origin: string,
+    output: SseClient["output"],
   ): LiveTerminalBinding | undefined {
     if (!terminalSseOriginOk(req, origin)) return undefined;
     let p;
@@ -95,8 +97,8 @@ export class TerminalSseBindings {
           b.revoke();
           return false;
         }
-        // Terminal events bypass SseHub.publish AND its replay ring; only this original socket.
-        if (res.writableLength > 65_536) {
+        // Bypass publish/replay, never the original connection's encoder/FIFO.
+        if (output.pendingBytes() > 65_536) {
           b.revoke();
           return false;
         }
@@ -106,7 +108,7 @@ export class TerminalSseBindings {
           return false;
         }
         try {
-          const ok = res.write(frame);
+          const ok = output.send(frame);
           if (!ok) b.revoke();
           return ok;
         } catch {
@@ -131,7 +133,7 @@ export class TerminalSseBindings {
         // A local capability erasure must be observable by P2 immediately. Closing the
         // original SSE also prevents a stale browser from retaining rendered private data.
         // No token-bearing invalidation frame enters the legacy event ring.
-        if (!res.destroyed && !res.writableEnded) res.end();
+        output.abort();
       },
     };
     const timer = clock.setTimer(clampSpanMs(meta.parentExpiresAt - this.now()), () => b.revoke());

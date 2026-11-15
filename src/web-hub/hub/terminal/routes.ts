@@ -1,5 +1,6 @@
 /** Both listeners call this one handler AFTER existing Host/client guards. */
 import type { IncomingMessage, ServerResponse } from "node:http";
+import type { SseClient } from "../sse.js";
 import type { AuthIdentity } from "../auth-identity.js";
 import type { HubLog, RequestContext, TerminalRoutesPort } from "../ports.js";
 import {
@@ -15,7 +16,14 @@ import type { TerminalRevocationFence } from "./revocation-fence.js";
 export interface TerminalFrontendPort extends TerminalRoutesPort {
   terminalAuth: TerminalRevocationFence;
   auditHealth(): { failures: number };
-  openSse(req: IncomingMessage, res: ServerResponse, id: AuthIdentity, clientId: string, origin: string): void;
+  openSse(
+    req: IncomingMessage,
+    res: ServerResponse,
+    id: AuthIdentity,
+    clientId: string,
+    origin: string,
+    output: SseClient["output"],
+  ): void;
 }
 export const terminalFrontend = (port: TerminalRoutesPort | undefined): TerminalFrontendPort | undefined =>
   port && "terminalAuth" in port && "openSse" in port ? (port as TerminalFrontendPort) : undefined;
@@ -172,8 +180,8 @@ export function createTerminalRoutes(deps: {
     auditHealth: () => ({
       failures: Math.min(Number.MAX_SAFE_INTEGER, auditFailures + deps.service.auditHealth().failures),
     }),
-    openSse(req, res, id, clientId, origin) {
-      deps.service.bindings.connect(req, res, id, clientId, origin);
+    openSse(req, res, id, clientId, origin, output) {
+      deps.service.bindings.connect(req, res, id, clientId, origin, output);
     },
     async handle(req, res, ctx, id, signal) {
       const path = (req.url ?? "").split("?")[0],

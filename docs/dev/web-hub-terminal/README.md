@@ -45,6 +45,24 @@
 6. 定向 `terminal_connection` / `terminal` 只向原实际 socket 发，不进普通 SSE_EVENTS、broadcast、replay ring、session/history/通知。enqueue 再核身份、expiry/fence、原 binding/attachment、socket pressure；撤销关闭原 SSE，使页面立即失效。
 7. 所有 computed deadline 经 clamp/segmented clock；所有运行时 timer unref；每层 bounded queue/deadline 独立，不能靠放大 timeout/缓冲假装恢复。Hub/protocol 保持 I8 pi-free 边界及原白名单。
 
+### 私有 SSE 与 negotiated encoder
+
+loopback 与 LAN 都把 `openEvents` 返回的原 `SseClient.output` 经 terminal routes/assembly
+显式传给 binding；`terminal_connection` / `terminal` 只绕过 publish/ring，**不得直接
+`res.write` 或另建 compressor**。私有帧与公开帧共享原 FIFO、gzip `Z_SYNC_FLUSH` 和
+identity drain 处理，无新公开事件/id/cap。binding 的 64 KiB 压力检查使用该 output 的
+保守 pending bytes（队列 + 在途输入 + encoder + socket），不能仅看 `res.writableLength`。
+每次 enqueue 前的身份、原 proof、expiry/active/fence 与 24 KiB 单帧检查不变；send=true
+表示接收入队，而不是浏览器已消费。撤权先同步清 live/active 与 listeners，再 abort 原 output，
+丢弃尚未写出的队列并销毁 compressor/socket，不用 `res.end()` 绕过 encoder 的生命周期；
+已交给 socket 的 bytes 无法撤回。普通 SSE close 的排空语义仍由 output 管理。
+terminal off 不调用该端口、不新增字节；私有材料仍不进入 replay。
+
+回归：`tests/web-hub/hub/terminal/sse-binding.test.ts` 用真实 zlib + 内存 Writable 覆盖
+identity/gzip 的交错次序、完整 trailer/逐帧解码、无后继帧仍及时 flush、drain、encoder
+积压压力、撤销丢弃队列、close/error/expiry 与 replay 隔离；真实 HTTP/双 listener 接线
+由原 `tests/integration/web-hub-terminal-http.test.ts` 验证。
+
 ## 权威链、物理 receipt 与冷恢复（F2）
 
 ### 本地 authority

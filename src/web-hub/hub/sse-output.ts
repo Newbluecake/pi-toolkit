@@ -4,6 +4,8 @@ import { constants, createGzip, type Gzip } from "node:zlib";
 
 export interface SseOutput {
   send(frame: string): boolean;
+  /** Conservative queued input + encoder + socket bytes, including the in-flight frame. */
+  pendingBytes(): number;
   /** Stop admission, finish accepted frames (or replace queued frames with a terminal auth frame). */
   finish(terminal?: string): void;
   abort(): void;
@@ -182,6 +184,7 @@ export function createSseOutput(
   }
 
   return {
+    pendingBytes,
     send(frame) {
       if (closed || ending) return false;
       const bytes = Buffer.byteLength(frame, "utf8");

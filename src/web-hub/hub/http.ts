@@ -1714,6 +1714,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       identity,
       client.id,
       canonicalOrigin("http", canonicalHostKey(req.headers.host, "http") ?? ""),
+      client.output,
     );
   }
 

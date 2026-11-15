@@ -1149,6 +1149,13 @@ capability、末跳 pure-witness trusted-CODE 边界及 stock tokenizer/template
 `X-Accel-Buffering: no`、keep-alive 不变；原 SSE 没有 `no-transform`，不删除其他路径的该指令。
 压缩中途出错只能断开重连，不能在已发 gzip header 后混入 identity 字节。
 
+终端开启时，两个 listener 经 terminal routes/assembly 显式传递原 `SseClient.output` 给
+binding；私有 `terminal_connection` / `terminal` 同样经过此 encoder/FIFO/逐帧 flush，
+不进入公开事件表或 replay ring。binding 按 output 的总 pending bytes 检查原 64 KiB
+压力界；撤销通过 output.abort 丢弃未写队列并关闭原连接，不得旁路 `res.write/end`。
+终端关闭时无私有帧、SSE 字节不变。私有通道回归见
+`tests/web-hub/hub/terminal/sse-binding.test.ts`。
+
 所有帧进入同一 FIFO；identity write=false 后等 socket drain，gzip 一次只处理一帧，
 flush 完成且下游可写才继续。bootstrap、Last-Event-ID replay、history→status/ctl→缓冲帧
 自动走此队列，后来的 live 更新不能超车。既有 replay 超预算→resync 策略保留。publish

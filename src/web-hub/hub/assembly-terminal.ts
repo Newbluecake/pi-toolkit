@@ -120,14 +120,14 @@ export async function assembleTerminal(ctx: HubAssembly) {
       }
       return baseRoutes.handle(req, res, context, identity, signal);
     },
-    openSse(req, res, id, clientId, origin) {
+    openSse(req, res, id, clientId, origin, output) {
       // Legacy privacy snapshots cannot express degraded. Use observable connection loss,
       // after the hub capability burst but before issuing any private binding material.
       if (local === undefined || ctx.privacyStore === undefined || ctx.privacyStore.degraded) {
-        if (!res.destroyed && !res.writableEnded) res.end();
+        output.abort();
         return;
       }
-      baseRoutes.openSse(req, res, id, clientId, origin);
+      baseRoutes.openSse(req, res, id, clientId, origin, output);
     },
   };
   const dispose = async () => {
