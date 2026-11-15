@@ -312,7 +312,7 @@ describe.sequential("#45 locked real-component mixed-version matrix", () => {
   it("N from O launcher (missing source) is unavailable despite legacy terminal key; plain restart recovers", async () => {
     expect(oldHappyPath).toBe(true);
     const m = machine(),
-      h = await m.hub(undefined, { legacy: true });
+      h = await m.hub(undefined, { viaLauncher: true, oldLauncherRoot: baseline.root });
     const a = await m.agent();
     await cardFor(h, a.sessionId, false);
     expect(JSON.parse(readFileSync(h.paths.hubJson, "utf8")).terminal).toMatchObject({

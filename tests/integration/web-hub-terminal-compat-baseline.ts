@@ -247,6 +247,7 @@ export function isolatedMachine(enabled = true, limits: object = {}) {
         legacyLimits?: object;
         spawn?: boolean;
         viaLauncher?: boolean;
+        oldLauncherRoot?: string;
         launchDomain?: "locked";
       } = {},
     ) {
@@ -262,6 +263,7 @@ export function isolatedMachine(enabled = true, limits: object = {}) {
           legacyLimits: options.legacyLimits,
           spawn: options.spawn,
           viaLauncher: options.viaLauncher,
+          oldLauncherRoot: options.oldLauncherRoot,
           launchDomain: options.launchDomain,
         }),
       );
@@ -551,27 +553,56 @@ if (process.argv[2] === "--hub") {
       c = fakeCtx({ sessionId: "unqualified-launcher", mode: "rpc" });
     const paths = resolveHubPaths({ home: input.home, uid: process.getuid!() });
     let child: ChildProcess | undefined, launchConfig: any;
-    const ctl = wireWebHub(a.pi, {
-      settings: { ...SETTINGS, autoStart: true, terminal: { enabled: false, ...LIMITS } },
-      terminalGuard: () => false,
-      fleet: () => [],
-      paths,
-      env: { HOME: input.home },
-      argv1: join(CURRENT_ROOT, "node_modules/@earendil-works/pi-coding-agent/dist/cli.js"),
-      buildInfo: async () => ({ pluginVersion: "0.12.1", buildId: "terminal-launcher-integration" }),
-      spawnImpl: (...args: any[]) => {
-        launchConfig = JSON.parse(args[2].env.PI_WEBHUB_CONFIG);
-        child = (spawn as any)(...args);
-        return child;
-      },
-    });
-    a.fire("session_start", { type: "session_start" }, c.ctx);
-    await waitUntil(
-      () => existsSync(paths.hubJson) && ctl.status().state === "live",
-      15000,
-      "real spawnHub main entry",
-    );
-    assert(!Object.hasOwn(launchConfig, "terminal"), "unqualified launcher must not supply terminal config");
+    const observeSpawn = (...args: any[]) => {
+      launchConfig = JSON.parse(args[2].env.PI_WEBHUB_CONFIG);
+      child = (spawn as any)(...args);
+      return child;
+    };
+    if (input.oldLauncherRoot) {
+      // Actual locked O launcher implementation starts the actual N main entry.
+      // No marker deletion, fake version flag or patched production code.
+      const { resolveJitiCli, spawnHub } = await import(
+        pathToFileURL(join(input.oldLauncherRoot, "src/web-hub/agent/launcher.ts")).href
+      );
+      const argv1 = join(CURRENT_ROOT, "node_modules/@earendil-works/pi-coding-agent/dist/cli.js");
+      const jiti = resolveJitiCli({ argv1, override: "" });
+      assert(jiti.ok, "locked old jiti resolver");
+      const launched = spawnHub(
+        { execPath: process.execPath, jitiCli: jiti.jitiCli, argv1 },
+        join(input.componentRoot, "src/web-hub/hub/main.ts"),
+        {
+          v: 1,
+          home: input.home,
+          port: 0,
+          idleExitMinutes: 10,
+          pluginVersion: "0.12.1",
+          buildId: "terminal-old-launcher",
+          terminal: LIMITS,
+        },
+        observeSpawn,
+      );
+      assert.equal(launched.blocked, false);
+      await waitUntil(() => existsSync(paths.hubJson), 15000, "actual old spawnHub starts new main");
+      assert(Object.hasOwn(launchConfig, "terminal"), "old launcher supplies its actual legacy config");
+    } else {
+      const ctl = wireWebHub(a.pi, {
+        settings: { ...SETTINGS, autoStart: true, terminal: { enabled: false, ...LIMITS } },
+        terminalGuard: () => false,
+        fleet: () => [],
+        paths,
+        env: { HOME: input.home },
+        argv1: join(CURRENT_ROOT, "node_modules/@earendil-works/pi-coding-agent/dist/cli.js"),
+        buildInfo: async () => ({ pluginVersion: "0.12.1", buildId: "terminal-launcher-integration" }),
+        spawnImpl: observeSpawn,
+      });
+      a.fire("session_start", { type: "session_start" }, c.ctx);
+      await waitUntil(
+        () => existsSync(paths.hubJson) && ctl.status().state === "live",
+        15000,
+        "real spawnHub main entry",
+      );
+      assert(!Object.hasOwn(launchConfig, "terminal"), "unqualified launcher must not supply terminal config");
+    }
     const record = JSON.parse(readFileSync(paths.hubJson, "utf8"));
     const cookie = await login(record.port, paths.tokenFile);
     const snapshot = async () => {
