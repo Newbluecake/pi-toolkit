@@ -21,6 +21,7 @@ const load = (file: string) => import(pathToFileURL(join(root, file)).href);
 const { wireWebHub } = await load("src/web-hub/agent/index.ts");
 const { createTerminalOwner } = await load("src/web-hub/agent/terminal/owner.ts");
 const { createTerminalTestBackend } = await load("src/web-hub/agent/terminal/backend.ts");
+const { currentConnection } = await load("src/web-hub/agent/connection.ts");
 const { localPlainEnvironment } = await load("src/web-hub/protocol/terminal-local.ts");
 const { resolveHubPaths } = await load("src/web-hub/protocol/paths.ts");
 const { fakePi, fakeCtx, SETTINGS } = await load("tests/web-hub/agent/helpers.ts");
@@ -67,10 +68,24 @@ const control = wireWebHub(a.pi, {
         try {
           const f = JSON.parse(line);
           if (f.t === "status") process.send?.({ event: "status-write", raw: line });
+          if (["hello", "session", "status"].includes(f.t))
+            process.send?.({ event: "agent-wire", direction: "out", raw: line });
         } catch {}
       }
       return write(chunk, ...rest);
     };
+    let incoming = "";
+    socket.on("data", (chunk: Buffer) => {
+      incoming += chunk.toString();
+      let i: number;
+      while ((i = incoming.indexOf("\n")) >= 0) {
+        const raw = incoming.slice(0, i);
+        incoming = incoming.slice(i + 1);
+        try {
+          if (JSON.parse(raw).t === "hello_ack") process.send?.({ event: "agent-wire", direction: "in", raw });
+        } catch {}
+      }
+    });
     return socket;
   },
   buildInfo: async () => ({ pluginVersion: input.pluginVersion ?? "1.2.3", buildId: "child-terminal-integration" }),
@@ -114,6 +129,20 @@ const tick = setInterval(() => {
 tick.unref();
 process.on("message", async (raw: any) => {
   try {
+    const entry = currentConnection()?.slots?.get("status");
+    if (raw.op === "flush-throws") {
+      const conn = currentConnection();
+      const set = conn.setSlot.bind(conn);
+      const fail = () => {
+        throw new Error("fixture-slot-fault");
+      };
+      conn.setSlot = (kind: any, frame: any, flush: any) => {
+        set(kind, frame, flush);
+        if (kind === "status") conn.slots.get(kind).flush = fail;
+      };
+      entry.flush = fail;
+    }
+    if (raw.op === "disconnect") currentConnection()?.socket?.destroy();
     if (raw.op === "guard") {
       allowed = raw.allowed;
       guardThrows = raw.throws ?? false;
@@ -126,11 +155,12 @@ process.on("message", async (raw: any) => {
     if (raw.op === "session") {
       c.state.sessionId = raw.sessionId;
       Object.assign(c.ctx, { cwd: raw.cwd });
-      a.fire("session_start", { type: "session_start" }, c.ctx);
+      a.fire("session_start", { type: "session_start", reason: raw.reason ?? "new" }, c.ctx);
     }
     a.fire("turn_end", { type: "turn_end" }, c.ctx);
     process.send?.({
       id: raw.id,
+      rawStatus: entry?.frame,
       backendCount,
       backendSuccesses: backends.length,
       pid: process.pid,

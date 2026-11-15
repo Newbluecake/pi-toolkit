@@ -3,7 +3,16 @@ import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { CURRENT_ROOT, lockedBaseline, isolatedMachine, cardFor, drained } from "./web-hub-terminal-compat-baseline.js";
+import {
+  CURRENT_ROOT,
+  lockedBaseline,
+  isolatedMachine,
+  cardFor,
+  drained,
+  offBytes,
+  OFF_RAW_GOLDEN,
+  currentSourceSnapshot,
+} from "./web-hub-terminal-compat-baseline.js";
 import { waitUntil } from "../web-hub/agent/helpers.js";
 import { login, openSse, postJson, rawRequest } from "../web-hub/http/helpers.js";
 import { TERMINAL_HTTP_PATHS } from "../../src/web-hub/protocol/terminal-paths.js";
@@ -38,7 +47,15 @@ async function physical(h: any, m: any, card: any, a: any) {
   expect(existsSync(`/proc/${pid}/stat`)).toBe(false);
   return { pid, cwd: a.fixture.cwd, revision: JSON.parse(readFileSync(journalPath(h), "utf8")).revision };
 }
-async function browserCase(h: any, card: any, a: any, shown: boolean, allowed: boolean, label: string) {
+async function browserCase(
+  h: any,
+  card: any,
+  a: any,
+  shown: boolean,
+  allowed: boolean,
+  label: string,
+  encoding: "gzip" | "identity" | "old-gzip-defect" = "gzip",
+) {
   const module = process.env.TPS_PLAYWRIGHT_MODULE,
     binary = process.env.TPS_CHROMIUM;
   expect(module, "offline browser package required; no npx/install fallback").toBeTruthy();
@@ -46,7 +63,11 @@ async function browserCase(h: any, card: any, a: any, shown: boolean, allowed: b
   const { chromium } = await import(pathToFileURL(module!).href);
   const browser = await chromium.launch({ headless: true, executablePath: binary });
   try {
-    const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, locale: "zh-CN" });
+    const context = await browser.newContext({
+      viewport: { width: 1440, height: 1000 },
+      locale: "zh-CN",
+      extraHTTPHeaders: { "Accept-Encoding": encoding === "identity" ? "identity" : "gzip" },
+    });
     const origin = `http://127.0.0.1:${h.port}`;
     await context.route("**/*", (route: any) =>
       route
@@ -75,6 +96,7 @@ async function browserCase(h: any, card: any, a: any, shown: boolean, allowed: b
     const page = await context.newPage(),
       ops: any[] = [],
       errors: string[] = [],
+      expectedRejections: string[] = [],
       network: any[] = [];
     page.on("requestfailed", (r: any) => network.push({ path: new URL(r.url()).pathname, failed: r.failure() }));
     page.on("response", (r: any) => {
@@ -82,7 +104,16 @@ async function browserCase(h: any, card: any, a: any, shown: boolean, allowed: b
       if (path.startsWith("/api/")) network.push({ path, status: r.status() });
     });
     page.on("console", (m: any) => {
-      if (m.type() === "error") errors.push(m.text());
+      if (m.type() === "error") {
+        if (
+          shown &&
+          !allowed &&
+          new URL(m.location().url || origin).pathname === "/api/terminal/list" &&
+          /status of 409/.test(m.text())
+        )
+          expectedRejections.push(m.text());
+        else errors.push(m.text());
+      }
     });
     page.on("pageerror", (e: any) => errors.push(e.message));
     page.on("response", (r: any) => {
@@ -91,6 +122,27 @@ async function browserCase(h: any, card: any, a: any, shown: boolean, allowed: b
     });
     const token = readFileSync(h.paths.tokenFile, "utf8").trim();
     await page.goto(`${origin}/#t=${encodeURIComponent(token)}`);
+    if (encoding === "old-gzip-defect") {
+      await waitUntil(
+        () =>
+          network.some((r) => r.path === "/api/events" && r.failed?.errorText === "net::ERR_CONTENT_DECODING_FAILED"),
+        10000,
+        "locked-old genuine gzip defect",
+      );
+      expect(network.some((r) => r.path === "/api/login" && r.status === 200)).toBe(true);
+      expect(await page.locator(".agent-card").count()).toBe(0);
+      expect(ops).toEqual([]);
+      const evidence = {
+        label,
+        encoding,
+        outcome: "KNOWN_OLD_DEFECT_NOT_DOWNGRADE_PASS",
+        network,
+        backendCount: await count(a),
+      };
+      writeFileSync(join(baseline.root, `matrix-${label}-old-gzip-defect.json`), JSON.stringify(evidence, null, 2));
+      console.log(`MIXED_OLD_GZIP_DEFECT ${JSON.stringify(evidence)}`);
+      return;
+    }
     await page.waitForSelector(".agent-card", { timeout: 15000 }).catch(async (error: any) => {
       await page.screenshot({ path: join(baseline.root, `failure-${label}.png`) });
       throw new Error(
@@ -99,7 +151,7 @@ async function browserCase(h: any, card: any, a: any, shown: boolean, allowed: b
     });
     // Only one target in each cell, avoiding any version-specific route shortcut.
     await page.locator(".agent-card").first().click();
-    await page.waitForSelector(".detail-header");
+    await page.waitForSelector(".detail-head");
     const entry = page.locator('[aria-controls="terminal-panel"]');
     if (shown) {
       await entry.waitFor({ state: "visible", timeout: 10000 });
@@ -128,16 +180,28 @@ async function browserCase(h: any, card: any, a: any, shown: boolean, allowed: b
       }
     } else {
       // A real ordinary status is already present; wait for header hydration via control.
-      await page.waitForSelector(".detail-header");
+      await page.waitForSelector(".detail-head");
       expect(await entry.count()).toBe(0);
       expect(ops).toEqual([]);
     }
     expect(await page.evaluate(() => (window as any).__compat.csp)).toEqual([]);
     expect(errors).toEqual([]);
+    if (shown && !allowed) expect(expectedRejections).toHaveLength(1);
     await page.screenshot({ path: join(baseline.root, `matrix-${label}.png`), fullPage: true });
-    const evidence = { label, shown, allowed, ops, pageErrors: errors, backendCount: await count(a) };
+    const evidence = {
+      label,
+      encoding,
+      shown,
+      allowed,
+      ops,
+      expectedRejections,
+      pageErrors: errors,
+      backendCount: await count(a),
+    };
     writeFileSync(join(baseline.root, `matrix-${label}.json`), JSON.stringify(evidence, null, 2));
-    console.log(`MIXED_CELL ${JSON.stringify(evidence)}`);
+    console.log(
+      `MIXED_CELL ${JSON.stringify({ ...evidence, ops: ops.filter((o) => ["list", "prepare", "open", "close"].some((k) => o.path.endsWith("/" + k))) })}`,
+    );
   } finally {
     await browser.close();
   }
@@ -150,7 +214,9 @@ describe.sequential("#45 locked real-component mixed-version matrix", () => {
       a = await m.agent(baseline.root);
     const card = await cardFor(h, a.sessionId, false),
       evidence = await physical(h, m, card, a);
-    await browserCase(h, card, a, true, true, "OOO");
+    await browserCase(h, card, a, true, true, "OOO", "old-gzip-defect");
+    expect(await count(a)).toBe(1);
+    await browserCase(h, card, a, true, true, "OOO-identity-supplement", "identity");
     expect(await count(a)).toBe(2);
     oldHappyPath = true;
     writeFileSync(join(baseline.root, "old-happy-path.json"), JSON.stringify(evidence, null, 2));
@@ -182,7 +248,16 @@ describe.sequential("#45 locked real-component mixed-version matrix", () => {
         expect(p.body).toMatchObject({ ok: false, effect: "none" });
         expect(await count(a)).toBe(0);
       }
-      await browserCase(h, card, a, cell.shown, cell.allowed && cell.shown, cell.label);
+      if (cell.hub === "O") await browserCase(h, card, a, cell.shown, false, cell.label, "old-gzip-defect");
+      await browserCase(
+        h,
+        card,
+        a,
+        cell.shown,
+        cell.allowed && cell.shown,
+        cell.label,
+        cell.hub === "O" ? "identity" : "gzip",
+      );
       expect(await count(a)).toBe(cell.allowed ? (cell.shown ? 2 : 1) : 0);
     }, 120000);
   it.each(["O", "N"])(
@@ -210,6 +285,23 @@ describe.sequential("#45 locked real-component mixed-version matrix", () => {
     },
     40000,
   );
+  it("T3 true off: locked-old and new raw hello/ack/session/status/HTTP/SSE equal the frozen old output", async () => {
+    for (const root of [baseline.root, currentSourceSnapshot()]) {
+      const m = machine(false),
+        h = await m.hub(root, { source: "plain", uiRoot: baseline.root }),
+        a = await m.agent(root, { terminalOff: true });
+      expect(await offBytes(h, a)).toEqual(OFF_RAW_GOLDEN);
+      expect(existsSync(join(h.paths.stateDir, "terminal-v1"))).toBe(false);
+      await browserCase(
+        h,
+        await cardFor(h, a.sessionId, false),
+        a,
+        false,
+        false,
+        root === baseline.root ? "OOO-true-off" : "NNO-true-off",
+      );
+    }
+  }, 40000);
   it("N from O launcher (missing source) is unavailable despite legacy terminal key; plain restart recovers", async () => {
     expect(oldHappyPath).toBe(true);
     const m = machine(),
