@@ -72,6 +72,32 @@ hub PID/port/启动时间与 models.sampledAt。**没有删除 features/caps/sta
 - 两个 O 既有缺陷都须单列：私帧绕gzip encoder（已修）、多agent inventory end publication碰全局busy丢drain（已修）。
   FIFO修复不得扩原deadline/重试/提前unlock/放松receipt或双CAS；直接queue abort/error/继承测试仍是独立门。
 
+### #45 CI 历史与离线浏览器门
+
+CI `test` job 的 checkout 必须 `fetch-depth: 0`：compat/rollback 会实际构建并执行锁定的
+`4e15fac15ee42293eac7c19943655537bd21b7c2` 完整组件，缺提交必须报错，不能 skip 或替换成新实现。
+本地浅克隆先运行 `git fetch --unshallow origin`（完整克隆缺对象时 `git fetch origin`）再重跑。
+`web-min-node` 只构建 UI/运行 sqlite smoke，不跑这些历史集成测试，保留浅 checkout。
+
+compat 拆为 **11 个始终运行的后端项 + 10 个独立浏览器矩阵项**。后端项仍要求真实旧
+PTY/open/pwd/reap、HTTP unsupported/404、off raw golden 与旧 launcher/new hub 恢复证据。
+缺少任一 `TPS_PLAYWRIGHT_MODULE` / `TPS_CHROMIUM` 时，仅浏览器 describe self-gate，明确显示
+**offline browser not provided ⇒ NOT RUN**；CI 预期 **11 PASS + 10 SKIP**，不是浏览器 PASS。
+两变量均存在时执行全部 **21 项**，模块导入/二进制启动无效仍失败，不能吞错或下载 fallback。
+rollback/per-session 不依赖浏览器，始终执行；`probe:terminal-e2e` 是显式 Tier 3 门，缺离线资产仍报错，
+不加入 CI。
+
+本地先按 [README 离线 Chromium 前置](README.md#离线-chromium-tier3不进-ci不安装依赖) 配好私有
+HOME/XDG_CACHE_HOME/TMPDIR、只读 node_modules 与当前 UI 构建，再执行（不安装或下载）：
+
+```sh
+export TPS_PLAYWRIGHT_MODULE=/absolute/path/to/existing/playwright/index.mjs
+export TPS_CHROMIUM=/absolute/path/to/existing/chromium/chrome
+PI_TOOLKIT_TEST_WORKERS=2 ./node_modules/.bin/vitest run --no-cache --project tier2 tests/integration/web-hub-terminal-compat.test.ts
+# 独立的完整跨层 Tier 3 门，不由上面的浏览器矩阵替代：
+timeout 240s npm run probe:terminal-e2e
+```
+
 ## 真后端 Chromium 路径
 
 - [ ] 真实 hub HTTP + 真实独立 Node agent连接（fake-pi仅SDK宿主）+ Linux Python PTY/helper；端口0/private Unix socket。

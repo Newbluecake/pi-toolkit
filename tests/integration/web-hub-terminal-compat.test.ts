@@ -18,7 +18,6 @@ import { login, openSse, postJson, rawRequest } from "../web-hub/http/helpers.js
 import { TERMINAL_HTTP_PATHS } from "../../src/web-hub/protocol/terminal-paths.js";
 
 let baseline: Awaited<ReturnType<typeof lockedBaseline>>;
-let oldHappyPath = false;
 const machines: ReturnType<typeof isolatedMachine>[] = [];
 afterEach(async () => {
   for (const m of machines.splice(0).reverse()) await m.close();
@@ -214,17 +213,24 @@ async function browserCase(
   }
 }
 
-describe.sequential("#45 locked real-component mixed-version matrix", () => {
-  it("O/O/O baseline first: real old login/SSE/authority/PTY/pwd/reap and manifest UI click", async () => {
+// Backend evidence always runs. Only the separate browser matrix is self-gated;
+// supplied but invalid module/binary paths must still fail during import/launch.
+const offlineBrowserProvided = !!(process.env.TPS_PLAYWRIGHT_MODULE && process.env.TPS_CHROMIUM);
+function registerMatrix(browser: boolean) {
+  let oldHappyPath = false;
+  it("O/O/O baseline first: real old login/SSE/authority/PTY/pwd/reap", async () => {
     const m = machine(),
       h = await m.hub(baseline.root, { legacy: true, uiRoot: baseline.root }),
       a = await m.agent(baseline.root);
     const card = await cardFor(h, a.sessionId, false),
       evidence = await physical(h, m, card, a);
-    await browserCase(h, card, a, true, true, "OOO", "old-gzip-defect");
     expect(await count(a)).toBe(1);
-    await browserCase(h, card, a, true, true, "OOO-identity-supplement", "identity");
-    expect(await count(a)).toBe(2);
+    if (browser) {
+      await browserCase(h, card, a, true, true, "OOO", "old-gzip-defect");
+      expect(await count(a)).toBe(1);
+      await browserCase(h, card, a, true, true, "OOO-identity-supplement", "identity");
+      expect(await count(a)).toBe(2);
+    }
     oldHappyPath = true;
     writeFileSync(join(baseline.root, "old-happy-path.json"), JSON.stringify(evidence, null, 2));
   }, 120000);
@@ -255,17 +261,19 @@ describe.sequential("#45 locked real-component mixed-version matrix", () => {
         expect(p.body).toMatchObject({ ok: false, code: "E_UNSUPPORTED", effect: "none" });
         expect(await count(a)).toBe(0);
       }
-      if (cell.hub === "O") await browserCase(h, card, a, cell.shown, false, cell.label, "old-gzip-defect");
-      await browserCase(
-        h,
-        card,
-        a,
-        cell.shown,
-        cell.allowed && cell.shown,
-        cell.label,
-        cell.hub === "O" ? "identity" : "gzip",
-      );
-      expect(await count(a)).toBe(cell.allowed ? (cell.shown ? 2 : 1) : 0);
+      if (browser) {
+        if (cell.hub === "O") await browserCase(h, card, a, cell.shown, false, cell.label, "old-gzip-defect");
+        await browserCase(
+          h,
+          card,
+          a,
+          cell.shown,
+          cell.allowed && cell.shown,
+          cell.label,
+          cell.hub === "O" ? "identity" : "gzip",
+        );
+      }
+      expect(await count(a)).toBe(cell.allowed ? (browser && cell.shown ? 2 : 1) : 0);
     }, 120000);
   it.each(["O", "N"])(
     "O/N/%s old config without terminal never dynamically enables",
@@ -287,7 +295,7 @@ describe.sequential("#45 locked real-component mixed-version matrix", () => {
           )
         ).status,
       ).toBe(404);
-      await browserCase(h, card, a, false, false, `ON${ui}-off`);
+      if (browser) await browserCase(h, card, a, false, false, `ON${ui}-off`);
       expect(await count(a)).toBe(0);
     },
     40000,
@@ -299,31 +307,41 @@ describe.sequential("#45 locked real-component mixed-version matrix", () => {
         a = await m.agent(root, { terminalOff: true });
       expect(await offBytes(h, a)).toEqual(OFF_RAW_GOLDEN);
       expect(existsSync(join(h.paths.stateDir, "terminal-v1"))).toBe(false);
-      await browserCase(
-        h,
-        await cardFor(h, a.sessionId, false),
-        a,
-        false,
-        false,
-        root === baseline.root ? "OOO-true-off" : "NNO-true-off",
-      );
+      if (browser)
+        await browserCase(
+          h,
+          await cardFor(h, a.sessionId, false),
+          a,
+          false,
+          false,
+          root === baseline.root ? "OOO-true-off" : "NNO-true-off",
+        );
     }
   }, 40000);
-  it("N from O launcher (missing source) is unavailable despite legacy terminal key; plain restart recovers", async () => {
-    expect(oldHappyPath).toBe(true);
-    const m = machine(),
-      h = await m.hub(undefined, { viaLauncher: true, oldLauncherRoot: baseline.root });
-    const a = await m.agent();
-    await cardFor(h, a.sessionId, false);
-    expect(JSON.parse(readFileSync(h.paths.hubJson, "utf8")).terminal).toMatchObject({
-      state: "unavailable",
-      reason: "startup-domain-unknown",
-    });
-    expect(h.caps).not.toContain("terminal.ui.v1");
-    expect(await count(a)).toBe(0);
-    await h.peer.close();
-    const h2 = await m.hub(undefined, { source: "plain" });
-    const card = await cardFor(h2, a.sessionId);
-    await physical(h2, m, card, a);
-  }, 90000);
-});
+  if (!browser)
+    it("N from O launcher (missing source) is unavailable despite legacy terminal key; plain restart recovers", async () => {
+      expect(oldHappyPath).toBe(true);
+      const m = machine(),
+        h = await m.hub(undefined, { viaLauncher: true, oldLauncherRoot: baseline.root });
+      const a = await m.agent();
+      await cardFor(h, a.sessionId, false);
+      expect(JSON.parse(readFileSync(h.paths.hubJson, "utf8")).terminal).toMatchObject({
+        state: "unavailable",
+        reason: "startup-domain-unknown",
+      });
+      expect(h.caps).not.toContain("terminal.ui.v1");
+      expect(await count(a)).toBe(0);
+      await h.peer.close();
+      const h2 = await m.hub(undefined, { source: "plain" });
+      const card = await cardFor(h2, a.sessionId);
+      await physical(h2, m, card, a);
+    }, 90000);
+}
+
+describe.sequential("#45 locked real-component backend matrix (always run)", () => registerMatrix(false));
+describe
+  .skipIf(!offlineBrowserProvided)
+  .sequential(
+    "#45 offline browser matrix (offline browser not provided ⇒ NOT RUN when TPS_PLAYWRIGHT_MODULE or TPS_CHROMIUM is missing)",
+    () => registerMatrix(true),
+  );

@@ -71,14 +71,24 @@ export function currentSourceSnapshot() {
   return root;
 }
 export async function lockedBaseline() {
-  assert.equal(
-    execFileSync("git", ["rev-parse", `${OLD_SHA}^{commit}`], {
+  let commit: string;
+  try {
+    commit = execFileSync("git", ["rev-parse", "--verify", `${OLD_SHA}^{commit}`], {
       cwd: CURRENT_ROOT,
       encoding: "utf8",
       timeout: 10000,
-    }).trim(),
-    OLD_SHA,
-  );
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+  } catch (cause) {
+    throw new Error(
+      `Terminal compatibility tests require the complete locked baseline ${OLD_SHA}. ` +
+        "Full Git history is required: use actions/checkout with fetch-depth: 0 in CI, " +
+        "or run git fetch --unshallow origin in a shallow local clone (git fetch origin in a full clone). " +
+        "Restore the historical commit and rerun; old-component evidence must not be skipped.",
+      { cause },
+    );
+  }
+  assert.equal(commit, OLD_SHA);
   const root = mkdtempSync(join(tmpdir(), "ob-"));
   chmodSync(root, 0o700);
   const archivePath = `${root}.tar`;
