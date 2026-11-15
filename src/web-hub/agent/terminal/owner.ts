@@ -10,6 +10,7 @@ import {
 } from "../../protocol/terminal-local.js";
 import { ensurePrivateDir, STATE_DIR_POLICY } from "../../protocol/paths.js";
 import { createHash, randomUUID } from "node:crypto";
+import { isAbsolute } from "node:path";
 import { Buffer } from "node:buffer";
 import { Value } from "@sinclair/typebox/value";
 import { systemClock, type Clock, type TimerHandle } from "../../../core/clock.js";
@@ -88,6 +89,9 @@ export interface TerminalOwnerOptions {
   sessionId: string;
   epoch: string;
   cwd: string;
+  /** Trusted host getter. Called ONCE per first open, never on ticket retry/attach.
+   * Production supplies the current wireWebHub ctx, not the session_start snapshot. */
+  currentCwd?(): string;
   /** Guarded wireWebHub only; never HTTP/settings/env/backend user overrides. */
   local?: { stateDir: string; agentNonce: string };
   limits: TerminalHubConfig;
@@ -359,6 +363,11 @@ export class TerminalOwner {
     } catch {
       return false;
     }
+  }
+  /** Public declaration readiness is stricter than test/legacy private negotiation:
+   * a real active local authority and current live session are both required. */
+  ready(): boolean {
+    return this.localAuthority?.active === true && this.allowed();
   }
   private scope() {
     return { sessionId: this.options.sessionId, epoch: this.options.epoch, ownerInstance: this.ownerInstance };
@@ -638,6 +647,15 @@ export class TerminalOwner {
       this.error(f, "E_LIMIT");
       return;
     }
+    let cwd: string | undefined;
+    try {
+      cwd = this.options.currentCwd ? this.options.currentCwd() : this.options.cwd;
+      if (typeof cwd !== "string" || !isAbsolute(cwd) || cwd.includes("\0"))
+        throw new TerminalBackendError("E_BAD_REQUEST");
+      if (!this.allowed()) throw new TerminalBackendError("E_BAD_REQUEST");
+    } catch {
+      cwd = undefined; // Retain a failed ticket tombstone; retry must not recapture/fork.
+    }
     const r: Row = {
       lifecycleChannelId: f.channelId,
       identity: {
@@ -668,8 +686,9 @@ export class TerminalOwner {
     this.rows.set(f.termId, r);
     this.revision++;
     try {
+      if (cwd === undefined) throw new TerminalBackendError("E_BAD_REQUEST");
       r.backend = (this.options.backend ?? createTerminalBackend)({
-        cwd: this.options.cwd,
+        cwd,
         cols: f.cols,
         rows: f.rows,
         inputIdleMs: this.options.limits.inputIdleMs,

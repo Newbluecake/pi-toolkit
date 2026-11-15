@@ -1,15 +1,17 @@
 /** Activation-local lifecycle, owned only by wireWebHub's existing handlers.
  * No pi registrations, global owner, Stack member or off-path IO. */
+import { parseTerminalSession, type TerminalSession } from "../../protocol/terminal-session.js";
 import type { CmdFrame } from "../../protocol/messages.js";
 import type { TerminalNegotiation, TermReq } from "../../protocol/terminal.js";
 import { createTerminalOwner, type TerminalOwner, type TerminalOwnerOptions } from "./owner.js";
 
-type OwnerPort = Pick<TerminalOwner, "offer" | "receive" | "linkLost" | "revoke" | "dispose">;
+type OwnerPort = Pick<TerminalOwner, "offer" | "receive" | "linkLost" | "revoke" | "dispose" | "ready">;
 export function createTerminalWiring(
   factory: (options: TerminalOwnerOptions) => Promise<OwnerPort> = createTerminalOwner,
 ) {
   let generation = 0;
   let owner: OwnerPort | undefined;
+  let options: TerminalOwnerOptions | undefined;
   let allowed: (() => boolean) | undefined;
   const check = () => {
     try {
@@ -25,17 +27,19 @@ export function createTerminalWiring(
     const old = owner;
     owner = undefined;
     allowed = undefined;
+    options = undefined;
     // dispose synchronously seals capabilities BEFORE the caller detaches its connection.
     if (old) void old.dispose().catch(() => {});
   };
   return {
-    async start(options: TerminalOwnerOptions): Promise<void> {
+    async start(next: TerminalOwnerOptions): Promise<void> {
       dispose();
       const gen = generation;
-      allowed = options.allowed;
+      options = next;
+      allowed = next.allowed;
       if (!check()) return;
       try {
-        const created = await factory(options);
+        const created = await factory(next);
         if (gen !== generation) {
           void created.dispose().catch(() => {});
           return;
@@ -44,6 +48,23 @@ export function createTerminalWiring(
         if (!check()) dispose();
       } catch {
         /* no fallback owner, offer stays unsupported */
+      }
+    },
+    declaration(): TerminalSession | undefined {
+      try {
+        const o = options;
+        if (!o || !check() || owner?.ready() !== true) return undefined;
+        const c = o.current();
+        if (!c || c.sessionId !== o.sessionId || c.epoch !== o.epoch) return undefined;
+        return parseTerminalSession({
+          v: 1,
+          enabled: true,
+          sessionId: o.sessionId,
+          epoch: o.epoch,
+          limits: { ...o.limits },
+        });
+      } catch {
+        return undefined;
       }
     },
     offer(frame: CmdFrame, request: TerminalNegotiation) {

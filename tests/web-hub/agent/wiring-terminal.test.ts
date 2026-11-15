@@ -35,6 +35,7 @@ function setup(on: boolean, guard?: () => boolean) {
     c = fakeCtx();
   Object.assign(c.ctx, { cwd: tmp.dir });
   const o = {
+    ready: vi.fn(() => true),
     offer: vi.fn(() => ({ v: 1, outcome: "handshake-required", offerId: "offer" })),
     receive: vi.fn(),
     revoke: vi.fn(),
@@ -149,13 +150,14 @@ describe("production terminal owner wiring", () => {
 });
 
 describe("enabled-only unavailable-store status", () => {
-  it("shows a fixed actionable prerequisite reason without adding an off status line", () => {
+  it("ignores an unbound stale prerequisite record and adds no off status line", () => {
     const on = setup(true, () => true);
     writeFileSync(
       pathsIn(tmp.dir).hubJson,
       JSON.stringify({ terminal: { state: "unavailable", reason: "journal-missing" } }),
     );
-    expect(on.control.ui.statusLines().join("\n")).toContain("终端不可用：journal-missing");
+    expect(on.control.ui.statusLines().join("\n")).toContain("hub终端能力未知");
+    expect(on.control.ui.statusLines().join("\n")).not.toContain("journal-missing");
     const off = setup(false);
     expect(off.control.ui.statusLines().join("\n")).not.toContain("终端不可用");
   });

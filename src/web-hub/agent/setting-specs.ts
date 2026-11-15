@@ -8,7 +8,10 @@ import type { SettingSpec } from "../../config/spec-helpers.js";
 
 export const WEBHUB_SETTING_SPECS: Record<string, SettingSpec> = {
   "webHub.terminal.enabled": {
-    ...bool("webHub.terminal.enabled", "Session terminal (default off; /reload and /webhub restart required)"),
+    ...bool(
+      "webHub.terminal.enabled",
+      "Session terminal eligibility; hub machine policy is frozen at startup (default off; /reload and /webhub restart required)",
+    ),
     fallback: false,
   },
   "webHub.terminal.maxPerSession": {
@@ -22,6 +25,8 @@ export const WEBHUB_SETTING_SPECS: Record<string, SettingSpec> = {
   "webHub.terminal.maxPerPrincipal": {
     kind: "number",
     path: "webHub.terminal.maxPerPrincipal",
+    description:
+      "Machine-wide principal ceiling: only the hub-selected agentDir applies; restart hub from the correct agentDir",
     integer: true,
     min: 1,
     max: 8,
@@ -30,6 +35,7 @@ export const WEBHUB_SETTING_SPECS: Record<string, SettingSpec> = {
   "webHub.terminal.maxTotal": {
     kind: "number",
     path: "webHub.terminal.maxTotal",
+    description: "Machine-wide physical ceiling: only the hub-selected agentDir applies; other agents cannot change it",
     integer: true,
     min: 1,
     max: 32,

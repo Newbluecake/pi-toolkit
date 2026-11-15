@@ -4,13 +4,17 @@ import { join } from "node:path";
 import { resolveJitiCli, shouldSpawnHub, spawnHub } from "../../../src/web-hub/agent/launcher.js";
 import type { HubConfig } from "../../../src/web-hub/hub/ports.js";
 import { TIMING } from "../../../src/web-hub/protocol/messages.js";
+import * as domain from "../../../src/secure/domain.js";
 import { tmpDir } from "./helpers.js";
 
 let tmp: ReturnType<typeof tmpDir>;
 beforeEach(() => {
   tmp = tmpDir("wh-d-launch-");
 });
-afterEach(() => tmp.cleanup());
+afterEach(() => {
+  vi.restoreAllMocks();
+  tmp.cleanup();
+});
 
 /** npm-global layout: <p>/lib/node_modules/@earendil-works/pi-coding-agent + nested jiti, <p>/bin/pi symlink. */
 function piLayout(): { piPkg: string; jitiCli: string; bin: string } {
@@ -94,6 +98,48 @@ describe("spawnHub", () => {
     buildId: "1.0.0@abc",
   };
   const plan = { execPath: "/usr/bin/node", jitiCli: "/j/jiti-cli.mjs", argv1: "/p/cli.js" };
+
+  it.each([
+    ["plain", "plain"],
+    ["secure", "denied"],
+    ["locked", "denied"],
+    [undefined, undefined],
+  ] as const)(
+    "frozen source %s -> private bootstrap %s, removes inherited marker without mutation",
+    (kind, expected) => {
+      const saved = process.env.PI_WEBHUB_TERMINAL_SOURCE;
+      process.env.PI_WEBHUB_TERMINAL_SOURCE = "forged-inherited";
+      try {
+        vi.spyOn(domain, "getSecureDomain").mockReturnValue(kind === undefined ? undefined : ({ kind } as never));
+        const spawnImpl = vi.fn(() => ({ on: vi.fn(), unref: vi.fn() }));
+        spawnHub(plan, "/m.ts", config, spawnImpl as never, () => undefined);
+        const env = (spawnImpl.mock.calls[0] as unknown as [string, string[], { env: NodeJS.ProcessEnv }])[2].env;
+        expect(env).not.toBe(process.env);
+        expect(env.PI_WEBHUB_TERMINAL_SOURCE).toBe(expected);
+        expect(Object.hasOwn(env, "PI_WEBHUB_TERMINAL_SOURCE")).toBe(expected !== undefined);
+        expect(process.env.PI_WEBHUB_TERMINAL_SOURCE).toBe("forged-inherited");
+        expect(JSON.parse(env.PI_WEBHUB_CONFIG!)).toEqual(config); // legacy config stays byte-equal
+      } finally {
+        if (saved === undefined) delete process.env.PI_WEBHUB_TERMINAL_SOURCE;
+        else process.env.PI_WEBHUB_TERMINAL_SOURCE = saved;
+      }
+    },
+  );
+  it("throwing frozen source is absent; namespace refusal executes BEFORE reading source", () => {
+    const source = vi.spyOn(domain, "getSecureDomain").mockImplementation(() => {
+      throw new Error("secret");
+    });
+    const spawnImpl = vi.fn(() => ({ on: vi.fn(), unref: vi.fn() }));
+    expect(spawnHub(plan, "/m.ts", config, spawnImpl as never, () => "private-ns")).toEqual({
+      blocked: true,
+      reason: "private-ns",
+    });
+    expect(source).not.toHaveBeenCalled();
+    expect(spawnImpl).not.toHaveBeenCalled();
+    spawnHub(plan, "/m.ts", config, spawnImpl as never, () => undefined);
+    const env = (spawnImpl.mock.calls[0] as unknown as [string, string[], { env: NodeJS.ProcessEnv }])[2].env;
+    expect(Object.hasOwn(env, "PI_WEBHUB_TERMINAL_SOURCE")).toBe(false);
+  });
 
   it("detached, stdio ignore, env carries config + launcher, child unref'd and its async error swallowed", () => {
     const child = { on: vi.fn(), unref: vi.fn() };

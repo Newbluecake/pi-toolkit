@@ -36,7 +36,7 @@ afterEach(async () => {
 const flush = async () => {
   for (let i = 0; i < 8; i++) await Promise.resolve();
 };
-function harness(maxPerSession = 1, clock = new FakeClock(1_000_000)) {
+function harness(maxPerSession = 1, clock = new FakeClock(1_000_000), currentCwd?: () => string) {
   vi.useFakeTimers();
   let allowed = true;
   const current = { localConnectionInstance: "connection", sessionId: "session", epoch: "epoch" };
@@ -53,6 +53,7 @@ function harness(maxPerSession = 1, clock = new FakeClock(1_000_000)) {
     {
       ...current,
       cwd: "/fixture",
+      ...(currentCwd ? { currentCwd } : {}),
       clock,
       limits: { ...limits, maxPerSession },
       allowed: () => allowed,
@@ -223,6 +224,7 @@ function harness(maxPerSession = 1, clock = new FakeClock(1_000_000)) {
 describe("terminal owner logical vs physical state §§5.5/6", () => {
   it("does not spawn before dedicated ready+bind, pins physical slot until real result, never on close ACK", async () => {
     const h = harness();
+    expect(h.owner.ready()).toBe(false); // passing guard without active local authority is never public eligibility
     expect(h.backs).toHaveLength(0);
     h.negotiate();
     expect(h.backs).toHaveLength(0);
@@ -850,4 +852,63 @@ describe("dedicated resolved_ack consumes only actually sent current physical pr
     expect(h.owner.resourceEntries()).toHaveLength(1);
     expect(h.owner.receive(resolvedAck(frames))).toBe(true);
   });
+});
+
+describe("first-open current cwd capture (T5/T14)", () => {
+  it("captures once per ticket, existing PTY unchanged; next open uses current getter", async () => {
+    let cwd = "/first";
+    const get = vi.fn(() => cwd);
+    const h = harness(4, undefined, get);
+    h.negotiate();
+    h.open();
+    h.backs[0]!.ready();
+    await flush();
+    cwd = "/second";
+    h.open(); // exact ticket retry uses original row/backend, no cwd read
+    expect(get).toHaveBeenCalledTimes(1);
+    expect(h.backs).toHaveLength(1);
+    expect(h.backs[0]!.options.cwd).toBe("/first");
+    h.open("two");
+    h.backs[1]!.ready();
+    await flush();
+    expect(get).toHaveBeenCalledTimes(2);
+    expect(h.backs.map((b) => b.options.cwd)).toEqual(["/first", "/second"]);
+    expect(
+      h.owner
+        .resourceEntries()
+        .map((e) => JSON.stringify(e))
+        .join(),
+    ).not.toMatch(/first|second|cwd/);
+    for (const b of h.backs)
+      b.finish({
+        outcome: "reaped",
+        spawnSettled: true,
+        ptyClosed: true,
+        helperReaped: true,
+        managedGroupsGone: true,
+        identitiesChecked: [],
+        waited: [],
+      });
+    await flush();
+  });
+  it.each(["", "relative", "/invalid\0path", undefined])(
+    "bad getter %s is fixed failure, retry never recaptures",
+    async (cwd) => {
+      const get = vi.fn(() => {
+        if (cwd === undefined) throw new Error("secret/path");
+        return cwd;
+      });
+      const h = harness(1, undefined, get);
+      h.negotiate();
+      h.open();
+      await flush();
+      expect(h.sent.at(-1)).toMatchObject({ ok: false, code: "E_BAD_REQUEST", effect: "none" });
+      expect(h.backs).toHaveLength(0);
+      expect(h.owner.physicalUsed).toBe(0);
+      h.open();
+      expect(get).toHaveBeenCalledTimes(1);
+      expect(h.backs).toHaveLength(0);
+      expect(JSON.stringify(h.owner.resourceEntries())).not.toContain("cwd");
+    },
+  );
 });

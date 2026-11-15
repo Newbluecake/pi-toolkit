@@ -3,7 +3,8 @@
 import { writePhysicalReceipt, type TerminalReceiptContext } from "../../protocol/terminal-local.js";
 import type { TerminalLocalReference } from "../../protocol/terminal.js";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { accessSync, constants, realpathSync } from "node:fs";
+import { accessSync, constants, realpathSync, statSync } from "node:fs";
+import { isAbsolute } from "node:path";
 import { Buffer } from "node:buffer";
 import { systemClock, type TimerHandle } from "../../../core/clock.js";
 import { clampSpanMs } from "../../../core/deadline.js";
@@ -163,7 +164,8 @@ class PythonTerminalBackend implements TerminalBackend {
     fixture?: TerminalTestFixture,
   ) {
     if (
-      !options.cwd ||
+      typeof options.cwd !== "string" ||
+      !isAbsolute(options.cwd) ||
       options.cwd.includes("\0") ||
       !Number.isInteger(options.cols) ||
       !Number.isInteger(options.rows) ||
@@ -173,6 +175,14 @@ class PythonTerminalBackend implements TerminalBackend {
       options.rows > 200
     )
       throw new TerminalBackendError("E_BAD_REQUEST");
+    // Fail before helper spawn when the trusted cwd cannot be traversed. The helper
+    // still chdirs just before exec (and fails closed if the path changes meanwhile).
+    try {
+      if (!statSync(options.cwd).isDirectory()) throw new Error("not-directory");
+      accessSync(options.cwd, constants.X_OK);
+    } catch {
+      throw new TerminalBackendError("E_BAD_REQUEST");
+    }
     const inputIdleMs = clampSpanMs(options.inputIdleMs),
       maxLifetimeMs = clampSpanMs(options.maxLifetimeMs);
     if (inputIdleMs === undefined || maxLifetimeMs === undefined || inputIdleMs === 0 || maxLifetimeMs === 0)

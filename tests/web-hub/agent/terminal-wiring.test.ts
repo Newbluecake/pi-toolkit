@@ -14,6 +14,7 @@ const options: TerminalOwnerOptions = {
 };
 function owner() {
   return {
+    ready: vi.fn(() => true),
     offer: vi.fn<TerminalOwner["offer"]>(),
     receive: vi.fn<TerminalOwner["receive"]>(),
     linkLost: vi.fn(),
@@ -121,5 +122,46 @@ describe("wireWebHub terminal lifecycle adapter", () => {
     expect(old.dispose).toHaveBeenCalledTimes(1);
     expect(wiring.offer(frame, negotiation)).toBeUndefined();
     expect(old.offer).not.toHaveBeenCalled();
+  });
+});
+
+describe("positive declaration readiness", () => {
+  it("check true is not readiness; factory pending/failure/authority false/throw stay absent", async () => {
+    const held = pending<ReturnType<typeof owner>>();
+    const w = createTerminalWiring(() => held.promise);
+    const live = { localConnectionInstance: "live", sessionId: "session", epoch: "epoch" };
+    const start = w.start({ ...options, current: () => live });
+    expect(w.check()).toBe(true);
+    expect(w.declaration()).toBeUndefined();
+    const o = owner();
+    o.ready.mockReturnValue(false);
+    held.resolve(o);
+    await start;
+    expect(w.check()).toBe(true);
+    expect(w.declaration()).toBeUndefined();
+    o.ready.mockReturnValue(true);
+    expect(w.declaration()).toEqual({
+      v: 1,
+      enabled: true,
+      sessionId: "session",
+      epoch: "epoch",
+      limits: options.limits,
+    });
+    o.ready.mockImplementation(() => {
+      throw new Error("authority unknown");
+    });
+    expect(w.declaration()).toBeUndefined();
+    w.dispose();
+    expect(w.declaration()).toBeUndefined();
+  });
+  it.each([
+    undefined,
+    { localConnectionInstance: "live", sessionId: "old", epoch: "epoch" },
+    { localConnectionInstance: "live", sessionId: "session", epoch: "old" },
+  ])("refuses missing/stale current identity %j", async (current) => {
+    const w = createTerminalWiring(async () => owner());
+    await w.start({ ...options, current: () => current });
+    expect(w.declaration()).toBeUndefined();
+    w.dispose();
   });
 });

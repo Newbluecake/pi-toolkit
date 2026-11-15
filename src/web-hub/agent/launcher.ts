@@ -12,7 +12,7 @@
  * unref'd, async spawn errors swallowed).
  */
 import { hubSafeEnv } from "../../secure/env.js";
-import { hubSpawnBlockedReason } from "../../secure/domain.js";
+import { getSecureDomain, hubSpawnBlockedReason } from "../../secure/domain.js";
 import { spawn as nodeSpawn } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -107,13 +107,24 @@ export function spawnHub(
   const reason = privateNsBlocked();
   if (reason !== undefined) return { blocked: true, reason };
   try {
+    // Never trust an inherited marker (hubSafeEnv may return process.env itself).
+    // This bootstrap veto uses the frozen domain, NOT the session runtime guard.
+    const env = { ...hubSafeEnv(process.env) };
+    delete env.PI_WEBHUB_TERMINAL_SOURCE;
+    try {
+      const kind = getSecureDomain()?.kind;
+      if (kind === "plain") env.PI_WEBHUB_TERMINAL_SOURCE = "plain";
+      else if (kind === "secure" || kind === "locked") env.PI_WEBHUB_TERMINAL_SOURCE = "denied";
+    } catch {
+      /* uninitialized/unknown provenance stays absent, never inferred plain */
+    }
     const child = spawnImpl(plan.execPath, [plan.jitiCli, mainTs], {
       detached: true,
       stdio: "ignore",
       cwd: config.home,
       env: {
         // data-encryption §2.7: the hub only ever sees the pre-secure env (identity when no PI_SECURE_* key).
-        ...hubSafeEnv(process.env),
+        ...env,
         PI_WEBHUB_CONFIG: JSON.stringify(config),
         PI_WEBHUB_LAUNCHER: JSON.stringify([plan.execPath, plan.argv1]),
       },

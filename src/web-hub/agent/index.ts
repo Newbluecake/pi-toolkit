@@ -1,4 +1,6 @@
 import type { TerminalHubConfig } from "../protocol/terminal.js";
+import { formatTerminalStatusLines, type TerminalEligibility } from "./terminal-status.js";
+import { parseTerminalSession } from "../protocol/terminal-session.js";
 import { createTerminalWiring } from "./terminal/wiring.js";
 import type { HumanDispatchBridge } from "./human-dispatch-proof.js";
 import type { XsActivationPort, XsActivationHubPort } from "../../fabric/xs/session-activation.js";
@@ -88,6 +90,7 @@ import {
   newAdminRid,
   type BindingPort,
   type HubConnection,
+  type SlotFlush,
 } from "./connection.js";
 import { createXsAgentBridge, type XsAgentPort } from "./xs.js";
 import type { XsHubPort } from "../../fabric/xs/sender.js";
@@ -118,7 +121,15 @@ import { resolveJitiCli, spawnHub, type LauncherPlan } from "./launcher.js";
 import { judgePrivateNsGate, type PrivateNsGateVerdict } from "../../secure/domain.js";
 import { AGENT_NOSPAWN_CAP } from "../protocol/nospawn.js";
 import { MaskedInputComponent, runPasswdPrompt, type PasswdOutcome } from "./passwd-prompt.js";
-import { verifyProcIdentity, readStartTicksNow } from "./proc-identity.js";
+import {
+  verifyProcIdentity,
+  readStartTicksNow,
+  readStatSync,
+  parseStartTicks,
+  parseCmdline,
+  parseUidLine,
+  looksLikeHubArgv,
+} from "./proc-identity.js";
 import { ctlLivenessProbe, restartHub, type RestartOutcome } from "./restart.js";
 import { buildBranchReply, buildSnapshotReply } from "./snapshot.js";
 import { fleetFingerprint, projectFleet, readStatus } from "./status.js";
@@ -751,6 +762,22 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       false,
     );
 
+  let lastTerminalFp: string | undefined;
+  // Shared by the write-time SlotFlush and local diagnostics. Never read stored status.
+  const terminalProjection = () => {
+    const unavailable = (state: TerminalEligibility) => ({ state, declaration: undefined });
+    if (!terminalAllowed()) {
+      terminal?.check(); // synchronously revoke/unlink before publishing withdrawal
+      return unavailable("guard-denied");
+    }
+    if (!conn?.terminalConnectionInstance) return unavailable("not-connected");
+    const declaration = terminal?.declaration();
+    const sessionId = safe(() => ctx?.sessionManager.getSessionId(), undefined);
+    if (!declaration || !sessionId || !parseTerminalSession(declaration, { sessionId, epoch: MODULE_INSTANCE }))
+      return unavailable("owner-unavailable");
+    return { state: "eligible" as const, declaration };
+  };
+
   // Object identities, not timestamps/epochs, bind this activation's live writer.
   const speedActivation = {};
   let speedOwnerToken = {};
@@ -1121,6 +1148,23 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     return tokens.length > 0 ? tokens : undefined;
   };
 
+  // Raw stored frame NEVER contains a positive declaration. Even the connection's
+  // generic throwing-transform fallback therefore cannot replay old eligibility.
+  const terminalStatusFlush: SlotFlush = (frame, caps) => {
+    const { terminalSession: _ignored, ...raw } = frame as typeof frame & { terminalSession?: unknown };
+    try {
+      const transformed = xsBridge?.slotFlush({ ...raw }, caps) ?? raw;
+      const { terminalSession: _discarded, ...safeFrame } = transformed as typeof frame & { terminalSession?: unknown };
+      const projection = terminalProjection();
+      lastTerminalFp = JSON.stringify(projection);
+      return projection.declaration && safeFrame.t === "status"
+        ? { ...safeFrame, terminalSession: projection.declaration }
+        : safeFrame;
+    } catch {
+      return raw;
+    }
+  };
+
   const publishStatus = (): void => {
     const c = conn;
     const x = ctx;
@@ -1175,7 +1219,8 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     // byte-identical to the pre-feature shape (StatusInfoSchema is open; old hubs/UIs ignore it).
     const reloadView = reloadTracker.projection();
     if (reloadView !== undefined) s.reload = reloadView;
-    c.setSlot("status", { t: "status", ...s }, xsBridge?.slotFlush);
+    if (terminal !== undefined) delete s.terminalSession;
+    c.setSlot("status", { t: "status", ...s }, terminal === undefined ? xsBridge?.slotFlush : terminalStatusFlush);
   };
 
   const projectCurrentModels = (x: ExtensionContext) =>
@@ -1230,6 +1275,13 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     const c = conn;
     const x = ctx;
     if (!attached || c === undefined || x === undefined) return;
+    if (terminal !== undefined) {
+      const fp = JSON.stringify(terminalProjection());
+      if (fp !== lastTerminalFp) {
+        lastTerminalFp = fp;
+        publishStatus();
+      }
+    }
     try {
       // spike K7④: idle custom_message never reaches extensions — a leaf move is the only signal.
       const leaf = x.sessionManager.getLeafId();
@@ -1518,7 +1570,10 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       ? {}
       : {
           onTerminalReq: (frame: import("../protocol/terminal.js").TermReq) => terminal.receive(frame),
-          onTerminalLinkLost: () => terminal.linkLost(),
+          onTerminalLinkLost: () => {
+            terminal.linkLost();
+            lastTerminalFp = undefined; // NO writes: old instance is not cleared until callback returns.
+          },
         }),
     ...(xsBridge !== undefined
       ? {
@@ -1961,6 +2016,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
   on("session_start", (event, c) => {
     if (c.mode !== "tui" && c.mode !== "rpc") return; // print/json: never attach
     terminal?.dispose();
+    lastTerminalFp = undefined;
     generation += 1;
     speedOwnerToken = {};
     speed.reset();
@@ -2030,6 +2086,12 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
           sessionId,
           epoch: MODULE_INSTANCE,
           cwd: safe(() => c.cwd, ""),
+          currentCwd: () => {
+            // ctx is updated by subsequent pi events; c is only the initial snapshot.
+            if (gen !== generation || !terminalAllowed() || ctx?.sessionManager.getSessionId() !== sessionId)
+              throw new Error("terminal cwd unavailable");
+            return ctx.cwd;
+          },
           local: { stateDir: paths.stateDir, agentNonce: processAgentId().nonce },
           limits,
           allowed: () =>
@@ -2185,7 +2247,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     lan?: LanStatus;
     ui?: UiStatus;
     privacy?: PrivacyHubStatus;
-    terminal?: { state: "unavailable"; reason: string };
+    terminal?: unknown;
     proxy?: ProxyHubStatus;
     alias?: XsAliasHubStatus;
   }
@@ -2206,13 +2268,8 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
       if (isStructurallyUiStatus(parsed.ui)) rec.ui = parsed.ui as UiStatus;
       // privacy (plan v2.1 P3): same structural-only treatment — malformed ⇒ absent.
       if (isStructurallyPrivacyStatus(parsed.privacy)) rec.privacy = parsed.privacy;
-      const terminal = parsed.terminal as Record<string, unknown> | undefined;
-      if (
-        terminal?.state === "unavailable" &&
-        typeof terminal.reason === "string" &&
-        /^[a-z-]{1,64}$/.test(terminal.reason)
-      )
-        rec.terminal = { state: "unavailable", reason: terminal.reason };
+      // Formatter validates/project fixed values only; no arbitrary fields are printed.
+      if (parsed.terminal !== undefined) rec.terminal = parsed.terminal;
       // proxy (plan v2 §5 X1c): same structural-only treatment — malformed ⇒ absent.
       if (isStructurallyProxyStatus(parsed.proxy)) rec.proxy = parsed.proxy;
       // alias (plan §3.3 AL6): structural-only — malformed ⇒ absent.
@@ -2273,8 +2330,33 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     const pkgDir = pkgRoot ?? packageUiDistDir();
     const hasLocalDist = existsSync(join(packageUiDistDir(), "build-info.json"));
     const lines = formatUiStatusLines(rec?.ui, { pkgDir, version, hasLocalDist });
-    if (settings.terminal?.enabled === true && rec?.terminal?.state === "unavailable")
-      lines.push(`终端不可用：${rec.terminal.reason}。保留已有状态，不会自动重置；修复本地状态后 /webhub restart。`);
+    if (terminal !== undefined) {
+      let verified = false;
+      try {
+        if (rec?.pid !== undefined && rec.procStartTicks !== undefined && rec.argv && looksLikeHubArgv(rec.argv)) {
+          const stat = readStatSync(rec.pid);
+          const argv = parseCmdline(readFileSync(`/proc/${rec.pid}/cmdline`, "utf8"));
+          const uid = parseUidLine(readFileSync(`/proc/${rec.pid}/status`, "utf8"));
+          verified =
+            stat !== undefined &&
+            parseStartTicks(stat) === rec.procStartTicks &&
+            argv.length === rec.argv.length &&
+            argv.every((v, i) => v === rec.argv![i]) &&
+            uid?.real === process.getuid?.() &&
+            uid?.effective === process.getuid?.();
+        }
+      } catch {
+        /* stale/unreadable identity is unknown, not a running hub snapshot */
+      }
+      lines.push(
+        ...formatTerminalStatusLines({
+          settings: settings.terminal,
+          eligibility: terminalProjection().state,
+          hubIdentityVerified: verified,
+          hubSnapshot: rec?.terminal,
+        }),
+      );
+    }
     return lines;
   };
 
