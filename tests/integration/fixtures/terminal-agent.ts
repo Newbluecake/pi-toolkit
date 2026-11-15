@@ -26,7 +26,8 @@ const { resolveHubPaths } = await load("src/web-hub/protocol/paths.ts");
 const { fakePi, fakeCtx, SETTINGS } = await load("tests/web-hub/agent/helpers.ts");
 let allowed = true,
   guardThrows = false,
-  backendCount = 0;
+  backendCount = 0,
+  validatedConstructor = false;
 const backends: any[] = [];
 const a = fakePi(),
   c = fakeCtx({ sessionId: input.sessionId ?? "child-terminal-session", mode: "rpc" });
@@ -80,7 +81,13 @@ const control = wireWebHub(a.pi, {
         backendCount++;
         // Only the audited uid/rc fixture changes. opts.cwd is the production
         // currentCwd capture, not a fixture override of it.
-        const backend = createTerminalTestBackend(opts, { ...input.fixture, cwd: opts.cwd });
+        // Negative cwd tests reuse the constructor from an already-created REAL
+        // backend and its already-audited uid/rc fixture. This avoids having the
+        // fixture's containment/mode check mask production cwd preflight. opts is
+        // untouched; even a broken fallback could only exec the isolated fixture.
+        const backend = validatedConstructor
+          ? new backends[0].constructor(opts, input.fixture)
+          : createTerminalTestBackend(opts, { ...input.fixture, cwd: opts.cwd });
         backends.push(backend);
         void backend.ready.catch(() =>
           process.stderr.write(`BACKEND_READY_FAILURE ${JSON.stringify(backend.diagnostic)}\n`),
@@ -112,6 +119,10 @@ process.on("message", async (raw: any) => {
       guardThrows = raw.throws ?? false;
     }
     if (raw.op === "cwd") Object.assign(c.ctx, { cwd: raw.cwd });
+    if (raw.op === "validated-constructor") {
+      if (!backends.length) throw new Error("real-backend-required");
+      validatedConstructor = true;
+    }
     if (raw.op === "session") {
       c.state.sessionId = raw.sessionId;
       Object.assign(c.ctx, { cwd: raw.cwd });
@@ -121,6 +132,7 @@ process.on("message", async (raw: any) => {
     process.send?.({
       id: raw.id,
       backendCount,
+      backendSuccesses: backends.length,
       pid: process.pid,
       processCwd: process.cwd(),
       managed: backends.flatMap((b) => b.managed),

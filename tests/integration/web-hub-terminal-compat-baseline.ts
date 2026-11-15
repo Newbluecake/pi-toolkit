@@ -204,7 +204,14 @@ export function isolatedMachine(enabled = true, limits: object = {}) {
     streams,
     async hub(
       componentRoot = CURRENT_ROOT,
-      options: { source?: string; legacy?: boolean; uiRoot?: string; privacy?: boolean } = {},
+      options: {
+        source?: string;
+        legacy?: boolean;
+        uiRoot?: string;
+        privacy?: boolean;
+        legacyLimits?: object;
+        spawn?: boolean;
+      } = {},
     ) {
       const path = join(root, `hub-${sequence++}.json`);
       writeFileSync(
@@ -215,6 +222,8 @@ export function isolatedMachine(enabled = true, limits: object = {}) {
           legacy: options.legacy ?? false,
           uiRoot: options.uiRoot,
           privacy: options.privacy ?? false,
+          legacyLimits: options.legacyLimits,
+          spawn: options.spawn,
         }),
       );
       const peer = processPeer(fileURLToPath(import.meta.url), ["--hub", path], {
@@ -384,6 +393,40 @@ if (process.argv[2] === "--hub") {
   const { createHttpFrontend } = await load("src/web-hub/hub/http.ts");
   const { createUiServer } = await load("src/web-hub/hub/static.ts");
   let frontend: any;
+  let spawnConfig: object | undefined;
+  if (input.spawn) {
+    const pkg = join(input.home, "launcher", "node_modules", "@earendil-works", "pi-coding-agent");
+    mkdirSync(pkg, { recursive: true, mode: 0o700 });
+    writeFileSync(
+      join(pkg, "package.json"),
+      JSON.stringify({ name: "@earendil-works/pi-coding-agent", version: "1.5.0" }),
+    );
+    const entry = join(pkg, "pi.mjs");
+    // Audited fake-pi host observation, not an authority/target/verifier replacement.
+    writeFileSync(
+      entry,
+      `import {readFileSync,writeFileSync} from "node:fs";
+      import {join} from "node:path";
+      const i=process.argv.indexOf("--session-id"),id=i<0?null:process.argv[i+1];
+      const privacy=JSON.parse(readFileSync(join(process.env.HOME,".pi/agent/web-hub/privacy.json"),"utf8"));
+      writeFileSync(join(process.cwd(),".privacy-entry.json"),JSON.stringify({id,pid:process.pid,marked:privacy.locked[id]===true}));
+      await import(${JSON.stringify(pathToFileURL(join(CURRENT_ROOT, "tests/integration/fixtures/fake-rpc-pi.mjs")).href)});`,
+    );
+    spawnConfig = {
+      launcher: [process.execPath, entry],
+      spawn: {
+        roots: [input.home],
+        maxProcesses: 2,
+        maxPerPrincipal: 2,
+        ratePerMinute: 30,
+        maxLifetimeMinutes: 10,
+        registerTimeoutS: 10,
+        lan: "off",
+        history: true,
+        restore: false,
+      },
+    };
+  }
   const result = await startHub(
     {
       v: 1,
@@ -393,7 +436,8 @@ if (process.argv[2] === "--hub") {
       pluginVersion: "0.12.1",
       buildId: "terminal-per-session-integration",
       privacy: input.privacy,
-      ...(input.legacy ? { terminal: LIMITS } : {}),
+      ...spawnConfig,
+      ...(input.legacy ? { terminal: input.legacyLimits ?? LIMITS } : {}),
     },
     (deps: any) => {
       frontend = deps;

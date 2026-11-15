@@ -1,7 +1,7 @@
 /** r2 cross-process acceptance: actual wireWebHub/UDS/HTTP/SSE/local proof/Python PTY.
  * Only fake-pi and audited uid/rc DI; no target/receipt/proof replacement. */
 import { afterEach, describe, expect, it } from "vitest";
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { isolatedMachine, cardFor, drained, LIMITS } from "./web-hub-terminal-compat-baseline.js";
 import { waitUntil } from "../web-hub/agent/helpers.js";
@@ -259,7 +259,7 @@ describe("#45 real per-session terminal", () => {
     await browser.close(cb, tb);
     await drained(h);
   }, 90000);
-  it.each(["missing", "file"])(
+  it.each(["missing", "file", "no-access"])(
     "T14: %s cwd fails fixed-error with zero helper/fallback",
     async (fault) => {
       const m = machine(),
@@ -267,8 +267,19 @@ describe("#45 real per-session terminal", () => {
         a = await m.agent(),
         card = await cardFor(h, a.sessionId),
         b = await m.browser(h);
+      expect(process.getuid!()).not.toBe(0);
+      // Prime the real backend constructor with its audited isolated uid/rc.
+      const good = await b.open(card);
+      await b.close(card, good);
+      await drained(h);
+      await a.peer.command("validated-constructor");
+      const before = await a.peer.command("snapshot");
       const bad = join(a.fixture.root, fault);
       if (fault === "file") writeFileSync(bad, "not directory");
+      if (fault === "no-access") {
+        mkdirSync(bad, { mode: 0o700 });
+        chmodSync(bad, 0o600);
+      }
       await a.peer.command("cwd", { cwd: bad });
       const p = await b.post(card, "prepare", { cols: 80, rows: 24 });
       expect(p.status).toBe(200);
@@ -280,10 +291,77 @@ describe("#45 real per-session terminal", () => {
         rows: 24,
       });
       expect(o.status).not.toBe(200);
-      expect(o.body).toMatchObject({ ok: false, code: fault === "missing" ? "E_BACKEND_CAPABILITY" : "E_BAD_REQUEST" });
+      expect(o.body).toMatchObject({ ok: false, code: "E_BAD_REQUEST" });
+      if (fault === "no-access") chmodSync(bad, 0o700);
       const state = await a.peer.command("snapshot");
-      expect(state.managed).toEqual([]);
-      expect(state.backendCount).toBe(1);
+      expect(state.managed).toEqual(before.managed);
+      expect(state.backendSuccesses).toBe(1);
+      expect(state.backendCount).toBe(2);
+    },
+    30000,
+  );
+});
+
+describe("T8 real boot privacy → history fork → actual fake-pi child", () => {
+  it.each(["healthy", "degraded", "mark-failure"])(
+    "privacy=false terminal=true %s",
+    async (fault) => {
+      expect(process.getuid!()).not.toBe(0);
+      const m = machine(),
+        state = join(m.home, ".pi/agent/web-hub"),
+        cwd = join(m.home, "project"),
+        sessions = join(m.home, ".pi/agent/sessions/d1");
+      mkdirSync(state, { recursive: true, mode: 0o700 });
+      mkdirSync(cwd, { mode: 0o700 });
+      mkdirSync(sessions, { recursive: true, mode: 0o700 });
+      writeFileSync(
+        join(sessions, "a.jsonl"),
+        `${JSON.stringify({ type: "session", version: 3, id: "locked-source", cwd, timestamp: new Date().toISOString() })}\n`,
+      );
+      writeFileSync(
+        join(state, "privacy.json"),
+        fault === "degraded" ? "{corrupt" : JSON.stringify({ version: 1, locked: { "locked-source": true } }),
+        { mode: 0o600 },
+      );
+      const h = await m.hub(undefined, { source: "plain", spawn: true });
+      expect(h.caps).toContain("terminal.session.v1");
+      expect(h.caps).not.toContain("privacy.v1");
+      const cookie = await login(h.port, h.paths.tokenFile),
+        headers = { Cookie: cookie, Origin: `http://127.0.0.1:${h.port}` };
+      // Public privacy routes intentionally stay off despite the internal store.
+      expect((await postJson(h.port, "/api/privacy/lock", {}, headers)).status).toBe(404);
+      if (fault === "mark-failure") mkdirSync(join(state, "privacy.json.tmp"), { mode: 0o700 });
+      try {
+        const response = await postJson(
+          h.port,
+          "/api/headless",
+          {
+            id: "forkprivacy0123456789",
+            cwd,
+            confirm: true,
+            expectCwd: cwd,
+            session: { key: "d1/a.jsonl", id: "locked-source", mode: "fork" },
+          },
+          headers,
+        );
+        expect(response.status, response.body).toBe(fault === "healthy" ? 202 : 500);
+        if (fault === "healthy") {
+          await waitUntil(() => existsSync(join(cwd, ".privacy-entry.json")), 10000, "real fork child entry");
+          const observed = JSON.parse(readFileSync(join(cwd, ".privacy-entry.json"), "utf8"));
+          expect(observed).toMatchObject({ marked: true });
+          expect(observed.id).not.toBe("locked-source");
+          expect(observed.pid).toBeGreaterThan(0);
+          expect(JSON.parse(readFileSync(join(state, "privacy.json"), "utf8")).locked[observed.id]).toBe(true);
+          expect(existsSync(`/proc/${observed.pid}/stat`)).toBe(true);
+          console.log(`T8_REAL_CHILD ${JSON.stringify(observed)}`);
+        } else {
+          expect(JSON.parse(response.body)).toEqual({ error: "E_INTERNAL" });
+          expect(existsSync(join(cwd, ".privacy-entry.json"))).toBe(false);
+          expect(existsSync(join(state, "spawns.json"))).toBe(false);
+        }
+      } finally {
+        /* The owned fault directory is retained until fixture teardown. */
+      }
     },
     30000,
   );
