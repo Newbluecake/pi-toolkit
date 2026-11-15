@@ -164,6 +164,69 @@ Jev 是一个分类器驱动的核心 memory 子系统，职责三项：召回�
 
 **默认值、分类器列表、阈值以代码为准**：`src/memory/settings.ts`、`src/memory/setting-specs.ts`（29 个 `memory.jev.*` 键：原 14（#26 删 `confirmTimeoutS`）+ memory-predict 的 15 个 `memory.jev.predict.*`，plan §10；其中 `model.*` 7 键在 P1b 只解析不使用，P2（§11.2）接线后生效）。各包交付报告见 `docs/dev/memory/reports/J*-report.md`。
 
+## #40 P0 · 无行为基线与离线证据（2026-11-15）
+
+P0 对应已批准的 `/tmp/pe-relevance-plan.md` r3 §4 P0、§3.4、§5.1/§5.2。
+基线为含 #42 late-threshold 与 #43 选择诊断的 `4969929f`；不是更早调查版本。
+`error-relevance.ts` 只原样提取 `wire.ts::recallE` 的旧候选谓词，调用处仍传原
+`new Set(input.hitTags)`，不增加 semantic/failure-intent 门，不改变 audience、P、S、
+select、诊断 schema、分类问句或阈值。`meta.tags` 必须来自 `effectiveMeta`，不是 raw
+sidecar tags。拒绝顺序仍为 `!pending` → tags 非空 → every(high) → !some(hit)，
+返回顺序仍为 pending → pitfall → procedure → some(hit)。已打标但有效 tags 为空的
+pitfall/procedure 保留；pending 保留；纯 high 无交集拒绝；mixed normal 保留。
+
+**冻结的生产 baseline 接口**（后续行为包另加门，不改写此旧核）：
+
+```ts
+type ErrorRelevanceMeta = Pick<EffectiveMeta, "pending" | "tags" | "type">;
+legacyErrorCandidateAllowed(
+  meta: ErrorRelevanceMeta,
+  hit: ReadonlySet<string>,
+  highRiskTagIds: ReadonlySet<string>,
+): boolean;
+```
+
+此函数只决定 E 候选资格，不决定 classifier 回答或最终注入。
+`ErrorRelevanceMeta` 和 `ErrorRelevanceSnapshotV1` 的权威类型在
+`src/memory/jev/error-relevance.ts`。后者是 **可选离线输入，不是 wire/持久侧车字段**：
+`{v:1,id,provenance,meta:{pending,tags,type?},hitTags:string[],highRiskTagIds:string[]}`。
+JSON 中未知 type 省略（运行时对应 undefined）；tags 为有效 tag ID 数组。
+provenance 必填，记录真实 selection-time 输入来源；缺快照必须 unknown，不能拿当前侧车
+或最近成功工具补历史证据。`error-relevance-snapshots.jsonl` 每行一个此类型，id 不可重复。
+P0 不需要 P 物化，故不新增 `predict/candidates.ts`；原 closure 的 I/O 和 P/S 物化完全不动。
+未来若需快照，须以现有 `predict/select.ts::Candidate/SelectPInput` 为准，不猜 P 分数。
+接口未绑定 body/authority 推导，后续 agent-only 正文受众可独立接入；本包不启用该行为，
+不收窄 user、不迁移真实 metadata，`.008` 仍 topic，P 仍仅高危/allow 减 deny。
+
+**Tier 3 脚本骨架**（无 LIVE、无 provider/client/settings/HOME 读取、无阈值或选择公式副本）：
+
+```sh
+node --import tsx scripts/dev/memory-pe-relevance-eval.mjs \
+  --data /tmp/memeval-1115 --legacy-data /tmp/memeval \
+  --before-root /path/to/P0-baseline --after-root /path/to/candidate \
+  --evidence retained-only --entry src --out /tmp/new-private-pe-results
+```
+
+两 root 必须暴露上述已提取 baseline；仅比较 P0 自身时可指同一 root（是 identity
+baseline，不称新旧行为效果）。`--entry dist` 只从各 root 的生产 dist 模块加载；src 模式
+通过本项目 tsx loader。脚本拒绝缺参数、exact/frozen-answer 模式和 LIVE 选项；out 必须为
+`/tmp` 下全新目录，且不在 repo、任一代码 root 或数据目录内，0700/文件0600。
+输出 manifest（数据/source/artifact SHA256、HEAD、实际入口）、per-instance JSONL、summary JSON/MD。
+不会复制私有正文到仓库或默认 stdout；功能 verdict 必须由外部 wire/parity/golden 门禁提供。
+
+retained-only 质量验收为已批准证据级别；但“录制基线计数”不等于“生产门重新判定为 retained”。
+11-15 固定集只有已选输出，没有历史 effectiveMeta/hit 或完整 P 选择快照，因此默认逐项 unknown，
+依然列全分母和原 grade，不用 grade 合成回答、不猜补位。可选 E 快照只复跑生产旧核，
+与旧输出矛盾时标 baselineMismatch/FAIL。`retainedRegressionVerdict` 缺任何输入则
+NOT-EVALUATED；`qualityVerdict` **恒 NOT-EVALUATED**。frozen-answer 只列 NOT-EVALUATED
+附表，不借旧所选 p 冒充完整 answers；11-05 未恢复也不称双窗完成。
+新门/任务绑定/P replay 属后续包，不用本包零行为身份基线宣称降噪或长期质量达标。
+
+门禁：四组基线加短路访问顺序（`error-relevance.test.ts`）、脚本合成 schema/unknown/
+离线生产导入与私有输出契约（`pe-relevance-eval.test.ts`，无进程/网络/长等待，均 tier1）、
+旧 wire-recall/wire-predict/wire-predict-model 全量、pi-free、memory off/golden、governance；
+build 后独立 tier2 bundle-parity。fixtures 与 activate-trace 不刷新。
+
 ## P 选择诊断与 G7 复评（2026-11-15）
 
 用户决定：**P 仍只预测 risk:high / fastPathAllowTags，减去 fastPathDenyTags**。

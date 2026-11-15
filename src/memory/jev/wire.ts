@@ -103,6 +103,7 @@ import {
   type Taxonomy,
 } from "./contracts.js";
 import { decideErrorRecall, decideRecall, effectiveMeta } from "./decide.js";
+import { legacyErrorCandidateAllowed } from "./error-relevance.js";
 import { appendDiagLine, readDiagLines } from "./diag-log.js";
 import { EntryIndex, expiredEntries } from "./entries.js";
 import {
@@ -2066,18 +2067,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
       if (e.inline.isPrivate === true || e.secret || segment.isInjected(e.hash)) return false;
       if (dir !== undefined && !entryEligible(e, dir, "E", c.index.entries[e.hash])) return false;
       const meta = effectiveMeta(e, c.index.entries[e.hash], c.taxonomy);
-      // Pending entries (no sidecar record yet) have no known type — they stay
-      // candidates rather than being silently excluded (untagged corpora
-      // would otherwise never get E recall).
-      if (
-        !meta.pending &&
-        meta.tags.length > 0 &&
-        meta.tags.every((t) => highRiskTagIds.has(t)) &&
-        !meta.tags.some((t) => hit.has(t))
-      ) {
-        return false; // #36 §6.3：纯高危动作类标签且与失败命令无交集
-      }
-      return meta.pending || meta.type === "pitfall" || meta.type === "procedure" || meta.tags.some((t) => hit.has(t));
+      return legacyErrorCandidateAllowed(meta, hit, highRiskTagIds);
     });
     if (pool.length === 0) return undefined;
     if (pool.length > E_MAX_CANDIDATES) pool = prefilter(pool, (e) => e.body, input.errorText, E_MAX_CANDIDATES);
