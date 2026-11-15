@@ -985,3 +985,89 @@ describe("model binding (§6.2, topic-switch runJudge shape)", () => {
     expect(h.model.calls[0]!.options?.reasoning).toBeUndefined();
   });
 });
+
+describe("model threshold parity across timely and late paths", () => {
+  const question = "请解释发版流程需要考虑哪些环境差异以及如何提前检查失败后会出现的风险和应对办法？";
+  const reply = (p: number) => ({
+    content: [{ type: "text", text: JSON.stringify({ tags: [{ id: "release", p }] }) }],
+  });
+  const final = (h: Harness) => h.appended.filter((a) => a.data.kind === "final").at(-1)!.data;
+
+  test("below threshold: timely rejects and late exact cache cannot inject P", async () => {
+    const timely = harness({ fail: "System One API error (451): blocked", predictModel: { threshold: 0.95 } });
+    await goStatus(timely, "partial");
+    const work = timely.promptNow(question);
+    timely.clock.advance(800);
+    timely.model.resolve(0, reply(0.9));
+    expect(await work).toBeUndefined();
+    expect(final(timely).tags.find((t: any) => t.tag === "release").sources).not.toContain("M");
+
+    const h = harness({ fail: "System One API error (451): blocked", predictModel: { threshold: 0.95 } });
+    await goStatus(h, "partial");
+    await h.prompt("好的");
+    await sleep(40);
+    h.branch.length = 0;
+    const late = h.promptNow(question);
+    h.clock.advance(1000);
+    expect(await late).toBeUndefined();
+    h.model.resolve(0, reply(0.9));
+    await flush(14);
+    await h.prompt("好的");
+    h.branch.length = 0;
+    expect(await h.promptNow(question)).toBeUndefined();
+    expect(h.model.calls).toHaveLength(1);
+    expect(final(h).tags.find((t: any) => t.tag === "release").sources).not.toContain("M");
+  });
+
+  test.each([
+    { p: 0.9, injected: false },
+    { p: 0.95, injected: true },
+  ])("pending full at high threshold p=$p", async ({ p, injected }) => {
+    const h = harness({ fail: "System One API error (451): blocked", predictModel: { threshold: 0.95 } });
+    await goStatus(h, "partial");
+    const late = h.promptNow(UNCERTAIN);
+    h.clock.advance(1000);
+    await late;
+    h.model.resolve(0, { content: [{ type: "text", text: JSON.stringify({ tags: [{ id: "git-commit", p }] }) }] });
+    await flush(14);
+    const result = await h.prompt("继续");
+    expect(
+      h.appended
+        .filter((a) => a.data.kind === "final")
+        .at(-1)
+        ?.data.tags.find((t: any) => t.tag === "git-commit")
+        ?.sources?.includes("M") ?? false,
+    ).toBe(injected);
+    if (!injected) expect(result).toBeUndefined();
+    expect(h.model.calls).toHaveLength(1);
+  });
+  test("passing late pending remains capped and cancel discards it at high threshold", async () => {
+    const h = harness({ fail: "System One API error (451): blocked", predictModel: { threshold: 0.95 } });
+    await goStatus(h, "partial");
+    const late = h.promptNow(UNCERTAIN);
+    h.clock.advance(1000);
+    await late;
+    h.model.resolve(0, reply(0.95));
+    await flush(14);
+    const next = h.promptNow(question);
+    h.clock.advance(1000);
+    await next;
+    const release = final(h).tags.find((t: any) => t.tag === "release");
+    expect(release.sources).toContain("M");
+    expect(release.score).toBeCloseTo(1 - (1 - 0.48) * (1 - 0.6 * 0.85), 4);
+    if (h.model.calls.length > 1) {
+      h.model.resolve(1, reply(0.95));
+      await flush(14);
+    }
+
+    const cancel = harness({ fail: "System One API error (451): blocked", predictModel: { threshold: 0.95 } });
+    await goStatus(cancel, "partial");
+    const pending = cancel.promptNow(UNCERTAIN);
+    cancel.clock.advance(1000);
+    await pending;
+    cancel.model.resolve(0, { content: [{ type: "text", text: REPLY_OK }] });
+    await flush(14);
+    expect(await cancel.prompt("算了，这个先不提交了")).toBeUndefined();
+    expect(await cancel.prompt("继续")).toBeUndefined();
+  });
+});

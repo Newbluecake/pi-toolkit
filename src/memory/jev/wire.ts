@@ -2808,6 +2808,10 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     appendPredict(entry);
   };
 
+  // parsePredictReply removes unknown tags; apply the same threshold on both paths.
+  const passingPredictTags = (tags: readonly ModelHit[], threshold: number): ModelHit[] =>
+    tags.filter((t) => t.p >= threshold);
+
   /** §7.2 late path: the flight settled only after the window closed — the
    *  parsed result seeds the exact-key cache + pendingModel and NOTHING is
    *  delivered (P never calls sendMessage), plus the §9.4 call record. */
@@ -2820,8 +2824,9 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     if (outcome.kind === "ok") {
       const parsed = parsePredictReply(outcome.text, b.knownTags);
       if (parsed.ok) {
-        predictCache.set(b.key, parsed.tags);
-        predictCache.setPending(parsed.tags, undefined, b.turnSeqAtStart);
+        const passing = passingPredictTags(parsed.tags, b.threshold);
+        predictCache.set(b.key, passing);
+        predictCache.setPending(passing, undefined, b.turnSeqAtStart);
       }
     }
     appendPredictCall(b.chain, outcome, false, effectiveWindowMs(b, ws));
@@ -2842,7 +2847,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
         const parsed = parsePredictReply(raced.outcome.text, b.knownTags);
         if (parsed.ok) {
           modelTimely += 1;
-          const passing = parsed.tags.filter((t) => t.p >= b.threshold);
+          const passing = passingPredictTags(parsed.tags, b.threshold);
           if (passing.length > 0) {
             tags = tally({ hits: b.r0.hits, modifiers: b.r0.modifiers, modelHits: [...b.modelExtras, ...passing] });
             origin = "rules+model";

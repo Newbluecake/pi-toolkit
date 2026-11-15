@@ -1684,3 +1684,10 @@ DeepSeek G/C template bytes, token estimates, aggregate reserve and manifest SHA
 fresh manifest with a new unused private root and obtain separate human approval before
 any new LIVE attempt. Never replay a prior approval automatically. Prior LIVE billing or
 HTTP counts cannot be reconstructed exactly from an old `INCOMPLETE_CLOSURE` message.
+
+### Predict model threshold parity
+
+Model replies are parsed against the known taxonomy and filtered by the flight's
+threshold on both timely and late paths. Late results enter the exact cache and
+pending slot only after that filtering; pending redemption may then cap a passing
+probability at 0.6 and must not apply the threshold again.
