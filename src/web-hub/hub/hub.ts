@@ -1,3 +1,4 @@
+import { normalizeTerminalPolicy } from "./terminal/policy.js";
 import type { RetainedSessionFs } from "./spawn/retained-session.js";
 /**
  * hub composition root (plan §1.4.2 / §1.3.3 / §3.1 — frozen interface, S1-W1
@@ -22,7 +23,7 @@ import type { RetainedSessionFs } from "./spawn/retained-session.js";
  */
 import { assembleTerminal } from "./assembly-terminal.js";
 import type { TerminalRevocationFence } from "./terminal/revocation-fence.js";
-import { TERMINAL_UI_CAP } from "../protocol/version.js";
+import { TERMINAL_UI_CAP, TERMINAL_SESSION_CAP } from "../protocol/version.js";
 import { randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { type GitRunner } from "../../git/run.js";
@@ -276,6 +277,9 @@ export async function startHub(
     return { exists: false, closed: true, reason: await closed };
   }
 
+  const normalizedTerminal = normalizeTerminalPolicy(config, { signal: startup.signal });
+  config = normalizedTerminal.config;
+
   const ctx = createHubAssembly({
     config,
     deps,
@@ -439,7 +443,7 @@ export async function startHub(
         // agent-server.ts's hello_ack.caps fold (caps-coexist pins the set equality).
         ...TODO_ARCHIVE_HUB_CAPS,
         ...extraHubCaps,
-        ...(config.terminal === undefined ? [] : [TERMINAL_UI_CAP]),
+        ...(config.terminal === undefined ? [] : [TERMINAL_UI_CAP, TERMINAL_SESSION_CAP]),
       ],
     };
     ctx.info = info;
@@ -702,7 +706,7 @@ export async function startHub(
     // above, before the spawn assembly — see the comment there). Gated on the same
     // `config.privacy === true`; off ⇒ no routes, no `privacy` frame, no cap.
     let privacyRoutes: ReturnType<typeof createPrivacyRoutes> | undefined;
-    if (ctx.privacyStore !== undefined) {
+    if (config.privacy === true && ctx.privacyStore !== undefined) {
       privacyRoutes = createPrivacyRoutes({
         store: ctx.privacyStore,
         registry,
@@ -955,7 +959,9 @@ export async function startHub(
       ...(initialLan === undefined ? {} : { lan: initialLan }),
       ...(initialSpawn === undefined ? {} : { spawn: initialSpawn }),
       ...(initialPrivacy === undefined ? {} : { privacy: initialPrivacy }),
-      ...(terminal === undefined ? {} : { terminal: terminal.status }),
+      ...(normalizedTerminal.diagnostic === undefined
+        ? {}
+        : { terminal: { ...normalizedTerminal.diagnostic, ...(terminal?.status ?? {}) } }),
       ...(initialProxy === undefined ? {} : { proxy: initialProxy }),
       ...(initialAlias === undefined ? {} : { alias: initialAlias }),
       ui: initialUi,

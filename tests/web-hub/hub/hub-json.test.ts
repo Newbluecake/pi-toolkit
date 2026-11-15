@@ -273,3 +273,40 @@ describe("hub.json privacy field (web-hub-privacy plan v2.1, P3)", () => {
     }
   });
 });
+
+it("per-session startup snapshot is append-only, survives unrelated patches and never adds an off key", () => {
+  const { file, cleanup } = tmpFile();
+  try {
+    const writer = createHubJsonWriter(file, memLog());
+    writer.write(baseRecord());
+    expect(readFileSync(file, "utf8")).toBe(`${JSON.stringify(baseRecord(), null, 2)}\n`);
+    const terminal = {
+      mode: "per-session" as const,
+      source: "agentDir" as const,
+      state: "ready" as const,
+      effectiveMachineLimits: {
+        maxPerSession: 2,
+        maxPerPrincipal: 3,
+        maxTotal: 5,
+        inputIdleMs: 300000,
+        maxLifetimeMs: 900000,
+      },
+    };
+    writer.write(baseRecord({ terminal }));
+    writer.patchSpawn({ count: 0 });
+    expect(JSON.parse(readFileSync(file, "utf8")).terminal).toEqual(terminal);
+    writer.write(
+      baseRecord({
+        terminal: { mode: "per-session", source: "inherited", state: "unavailable", reason: "startup-domain-unknown" },
+      }),
+    );
+    expect(JSON.parse(readFileSync(file, "utf8")).terminal).toEqual({
+      mode: "per-session",
+      source: "inherited",
+      state: "unavailable",
+      reason: "startup-domain-unknown",
+    });
+  } finally {
+    cleanup();
+  }
+});

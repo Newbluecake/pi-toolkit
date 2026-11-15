@@ -20,7 +20,15 @@ import {
   type TermRes,
   type TermEvent,
 } from "../../protocol/terminal.js";
-import { TerminalLimits, TerminalFault, bounded, clampSpanMs, terminalClock, sameTerminalMeta } from "./limits.js";
+import {
+  TerminalLimits,
+  TerminalFault,
+  bounded,
+  clampSpanMs,
+  terminalClock,
+  sameTerminalMeta,
+  intersectTerminalLimits,
+} from "./limits.js";
 import { TerminalCreationTickets } from "./creation-ticket.js";
 import { TerminalRevocationFence, matches } from "./revocation-fence.js";
 import { TerminalSseBindings, type LiveTerminalBinding } from "./sse-binding.js";
@@ -31,6 +39,9 @@ export type TerminalAgentTarget = {
   processIdentity: TerminalProcessIdentity;
   allowed: boolean;
   ownerInstance?: string;
+  /** Interactive declaration generation; independent of physical owner/proof. */
+  authorization?: string;
+  limits?: TerminalHubConfig;
 };
 type Scope = {
   limits: TerminalHubConfig;
@@ -83,6 +94,8 @@ export interface TerminalServiceDeps {
   /** Trusted assembly closure, not status/UI strings. Includes current plain/main guard. */
   target: (agentKey: string) => TerminalAgentTarget | undefined;
   resolveTarget?: (agentKey: string, signal: AbortSignal) => Promise<void>;
+  /** Existing resource challenges ONLY; never an interactive target grant. */
+  resourceCurrent?: (meta: TerminalIngressMeta) => boolean;
   targets?: () => readonly TerminalAgentTarget[];
   send: (meta: TerminalIngressMeta, frame: TermReq | CmdFrame) => boolean;
   /** Actual current UDS userland pending bytes, NOT trySend acknowledgement. */
@@ -120,6 +133,7 @@ export function createTerminalService(deps: TerminalServiceDeps) {
       }
   });
   const channels = new Map<string, Promise<Scope>>();
+  const ticketScopes = new Map<string, { authorization: string | undefined; expiresAt: number }>();
   const resourceChannels = new Map<
     string,
     {
@@ -210,12 +224,27 @@ export function createTerminalService(deps: TerminalServiceDeps) {
       return true;
     }
   };
-  const current = (meta: TerminalIngressMeta) => {
-    const t = safeTarget(meta.agentKey);
-    return !disposed && t?.allowed === true && sameTerminalMeta(t.meta, meta);
+  const physicalCurrent = (meta: TerminalIngressMeta) => {
+    if (disposed) return false;
+    try {
+      if (deps.resourceCurrent !== undefined) return deps.resourceCurrent(meta);
+      const t = safeTarget(meta.agentKey);
+      return t !== undefined && sameTerminalMeta(t.meta, meta);
+    } catch {
+      return false;
+    }
+  };
+  const authorized = (target: TerminalAgentTarget) => {
+    const live = safeTarget(target.meta.agentKey);
+    return (
+      !disposed &&
+      live?.allowed === true &&
+      sameTerminalMeta(live.meta, target.meta) &&
+      live.authorization === target.authorization
+    );
   };
   const commandIngress = createTerminalCommandIngress({
-    current,
+    current: physicalCurrent,
     onOffer: (meta, id, offer) => {
       const p = offers.get(id);
       if (!p || !sameTerminalMeta(meta, p.meta)) return;
@@ -224,7 +253,7 @@ export function createTerminalService(deps: TerminalServiceDeps) {
       else p.reject(new TerminalFault("E_UNSUPPORTED"));
     },
     onDedicated: (meta, raw) => {
-      if (!terminalFrameOk(raw) || !current(meta)) return;
+      if (!terminalFrameOk(raw) || !physicalCurrent(meta)) return;
       const r = raw as TermRes | TermEvent;
       if (r.sessionId !== meta.sessionId || r.epoch !== meta.epoch) return;
       if (r.t === "term_res") {
@@ -258,7 +287,10 @@ export function createTerminalService(deps: TerminalServiceDeps) {
   };
   function cancelLink(meta: TerminalIngressMeta) {
     for (const r of records.values())
-      if (r.scope.target.meta.agentKey === meta.agentKey && r.scope.target.meta.linkGen === meta.linkGen) closeRow(r);
+      if (r.scope.target.meta.agentKey === meta.agentKey && r.scope.target.meta.linkGen === meta.linkGen) {
+        clearDisplay(r);
+        closeRow(r);
+      }
     for (const [k, p] of waits)
       if (p.meta.agentKey === meta.agentKey) {
         waits.delete(k);
@@ -283,7 +315,7 @@ export function createTerminalService(deps: TerminalServiceDeps) {
       now() >= b.metadata.parentExpiresAt
     )
       throw new TerminalFault("E_AUTH");
-    if (!current(target.meta)) throw new TerminalFault("E_SESSION_CHANGED");
+    if (!authorized(target)) throw new TerminalFault("E_SESSION_CHANGED");
     if (privacyDenied(target.meta.sessionId)) throw new TerminalFault("E_PRIVACY_LOCKED");
   }
   async function exchange(
@@ -441,9 +473,8 @@ export function createTerminalService(deps: TerminalServiceDeps) {
         guard,
       );
       if (!bound.ok || bound.op !== "bind" || bound.channelId !== channelId) throw new TerminalFault("E_UNSUPPORTED");
-      const intersection = Object.fromEntries(
-        Object.entries(deps.config).map(([k, v]) => [k, Math.min(v, ready.limits[k as keyof TerminalHubConfig])]),
-      ) as TerminalHubConfig;
+      const claim = target.limits ?? deps.config;
+      const intersection = intersectTerminalLimits(deps.config, claim, ready.limits);
       return { limits: intersection, target, owner, channelId, binding: b };
     } finally {
       offers.delete(commandId);
@@ -451,7 +482,7 @@ export function createTerminalService(deps: TerminalServiceDeps) {
     }
   }
   async function scope(id: AuthIdentity, b: LiveTerminalBinding, target: TerminalAgentTarget, signal: AbortSignal) {
-    const key = JSON.stringify([b.metadata.connectionInstance, target.meta]);
+    const key = JSON.stringify([b.metadata.connectionInstance, target.meta, target.authorization]);
     let p = channels.get(key);
     if (!p) {
       if (channels.size >= 64) throw new TerminalFault("E_LIMIT");
@@ -468,6 +499,7 @@ export function createTerminalService(deps: TerminalServiceDeps) {
     }
     const s = await bounded(p, now, now() + L.bootstrapMs, signal);
     admit(id, b, target, signal);
+    admit(id, b, s.target, signal);
     return s;
   }
   function clearDisplay(r: RecordRow) {
@@ -637,6 +669,11 @@ export function createTerminalService(deps: TerminalServiceDeps) {
         ...(e.exitCode === undefined ? {} : { exitCode: e.exitCode }),
       });
     }
+    if (!authorized(r.scope.target)) {
+      clearDisplay(r);
+      dropWriter(r);
+      return;
+    }
     if (!w) return;
     const { t: _type, channelId: _channel, ...directedEvent } = e;
     const payload = {
@@ -749,9 +786,8 @@ export function createTerminalService(deps: TerminalServiceDeps) {
         records.delete(r.termId);
         continue;
       }
-      const trustedTarget = current(r.scope.target.meta);
+      const trustedTarget = authorized(r.scope.target);
       if (now() >= r.expiresAt || now() >= r.idleAt || privacyDenied(r.scope.owner.sessionId) || !trustedTarget) {
-        if (!trustedTarget) r.scope.binding.revoke();
         if (r.state !== "closing" && r.state !== "exited") {
           clearDisplay(r);
           closeRow(r);
@@ -804,6 +840,9 @@ export function createTerminalService(deps: TerminalServiceDeps) {
     if (op === "prepare" && "cols" in req) {
       deps.resourceFence.assertOpen();
       const ticket = tickets.prepare(owner, req.cols, req.rows);
+      for (const [key, value] of ticketScopes)
+        if (now() > value.expiresAt && ![...records.values()].some((r) => r.openId === key)) ticketScopes.delete(key);
+      ticketScopes.set(ticket.ticketId, { authorization: target.authorization, expiresAt: ticket.expiresAt });
       return { ok: true, openId: ticket.ticketId, createTicket: ticket } as unknown as TerminalHttpResults[K];
     }
     if (op === "list") {
@@ -816,6 +855,9 @@ export function createTerminalService(deps: TerminalServiceDeps) {
       const termId = terminalId(),
         reservationId = terminalId();
       if (req.openId !== req.createTicket.ticketId) throw new TerminalFault("E_STALE_CREATION");
+      const ticketScope = ticketScopes.get(req.createTicket.ticketId);
+      if (!ticketScope || ticketScope.authorization !== target.authorization)
+        throw new TerminalFault("E_STALE_CREATION");
       const ticketRow = tickets.verify(req.createTicket, owner, req.cols, req.rows)!;
       if (ticketRow.phase !== "issued") {
         const old = records.get(ticketRow.termId!);
@@ -965,6 +1007,7 @@ export function createTerminalService(deps: TerminalServiceDeps) {
             : undefined;
     const r = termId ? records.get(termId) : undefined;
     if (!r || !sameOwner(r.scope.owner, owner)) throw new TerminalFault("E_AUTH");
+    admit(id, b, r.scope.target, signal);
     if (op !== "state" && op !== "close" && (now() >= r.expiresAt || now() >= r.idleAt)) {
       closeRow(r);
       throw new TerminalFault("E_EXPIRED");
@@ -1134,12 +1177,12 @@ export function createTerminalService(deps: TerminalServiceDeps) {
       if (lifecycleChanged) existing.dirty = true;
       return existing.work;
     }
-    if (disposed || collections.size >= 32) return Promise.resolve();
+    if (disposed || collections.size >= 32 || !authorized(target)) return Promise.resolve();
     const controller = new AbortController();
     const expiry = clock.setTimer(2000, () => controller.abort());
     const guard = () => {
       if (controller.signal.aborted || disposed) throw new TerminalFault("E_DEADLINE");
-      if (!current(target.meta)) throw new TerminalFault("E_SESSION_CHANGED");
+      if (!physicalCurrent(target.meta)) throw new TerminalFault("E_SESSION_CHANGED");
     };
     const entry = { controller, work: Promise.resolve(), dirty: false };
     // A later verified physical revision invalidates an in-flight older snapshot.
@@ -1148,6 +1191,9 @@ export function createTerminalService(deps: TerminalServiceDeps) {
     const work = Promise.resolve()
       .then(async () => {
         for (let round = 0; round < 32; round++) {
+          // A started exact challenge may finish under its physical guard after
+          // withdrawal. Never mint a NEW challenge/channel for a revoked claim.
+          if (!authorized(target)) break;
           entry.dirty = false;
           await collectRaw(id, b, target, controller.signal, guard);
           if (!entry.dirty) break;
@@ -1289,6 +1335,7 @@ export function createTerminalService(deps: TerminalServiceDeps) {
       waits.clear();
       offers.clear();
       channels.clear();
+      ticketScopes.clear();
       auth.dispose();
     },
   };

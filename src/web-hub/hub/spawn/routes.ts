@@ -200,11 +200,14 @@ export interface SpawnRoutesDeps {
    *  failure/`E_LIMIT` fails the whole fork request (fail 方向与 store 一致 — 绝不放行无锁
    *  fork). */
   privacy?: SpawnPrivacyPort;
+  /** Machine terminal policy requires healthy internal privacy even with public privacy off. */
+  privacyRequired?: true;
 }
 
 /** The narrow privacy-store surface the fork path needs (hub.ts passes the real
  *  `PrivacyStore`; tests inject a spy). */
 export interface SpawnPrivacyPort {
+  readonly degraded?: boolean;
   isLocked(sessionId: string): boolean;
   setLocked(sessionId: string, locked: boolean): Promise<void>;
 }
@@ -1029,6 +1032,20 @@ export function createSpawnRoutes(deps: SpawnRoutesDeps): SpawnFrontendPort {
         return;
       }
 
+      // Required internal privacy is fail-closed BEFORE snapshot/body work. Do not
+      // treat missing/degraded/throwing stores as an unlocked source session.
+      let sourceLocked: boolean | undefined;
+      if (sessionIntent.mode === "fork" && deps.privacyRequired === true) {
+        try {
+          if (deps.privacy === undefined || deps.privacy.degraded !== false) throw new Error("privacy-unavailable");
+          deps.privacy.isLocked(pin.id);
+        } catch {
+          rejectAudit(io, auth, { endpoint: "spawn", reqId: intent.id, code: "E_INTERNAL" });
+          io.sendJson(res, 500, { error: "E_INTERNAL" });
+          return;
+        }
+      }
+
       // gate 9" — fork mode needs a snapshot of the pinned file BEFORE the second authorize
       let snap: ForkSnapshot | undefined;
       if (sessionIntent.mode === "fork") {
@@ -1055,7 +1072,18 @@ export function createSpawnRoutes(deps: SpawnRoutesDeps): SpawnFrontendPort {
       let forkNewId: string | undefined;
       if (sessionIntent.mode === "fork" && snap !== undefined) {
         forkNewId = randomUUID();
-        if (deps.privacy !== undefined && deps.privacy.isLocked(pin.id)) {
+        if (deps.privacyRequired === true) {
+          try {
+            if (deps.privacy === undefined || deps.privacy.degraded !== false) throw new Error("privacy-unavailable");
+            sourceLocked = deps.privacy.isLocked(pin.id);
+          } catch {
+            snap.discard();
+            rejectAudit(io, auth, { endpoint: "spawn", reqId: intent.id, code: "E_INTERNAL" });
+            io.sendJson(res, 500, { error: "E_INTERNAL" });
+            return;
+          }
+        }
+        if (deps.privacy !== undefined && (sourceLocked ?? deps.privacy.isLocked(pin.id))) {
           try {
             await deps.privacy.setLocked(forkNewId, true);
           } catch (err) {

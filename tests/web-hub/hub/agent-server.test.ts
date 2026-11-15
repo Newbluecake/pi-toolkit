@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import net from "node:net";
+import { readFileSync } from "node:fs";
+import { normalizeTerminalPolicy } from "../../../src/web-hub/hub/terminal/policy.js";
+import { encodeFrame } from "../../../src/web-hub/protocol/ndjson.js";
 import { join } from "node:path";
 import { TIMING } from "../../../src/web-hub/protocol/messages.js";
 import { createAgentServer, type AgentServer } from "../../../src/web-hub/hub/agent-server.js";
@@ -32,13 +35,18 @@ let registry: Registry;
 let sockPath: string;
 const clients: TestClient[] = [];
 
-async function setup(terminal = false): Promise<void> {
+async function setup(
+  terminal = false,
+  port?: import("../../../src/web-hub/hub/ports.js").TerminalIngressPort,
+  overrides: Partial<import("../../../src/web-hub/hub/ports.js").HubConfig> = {},
+): Promise<void> {
   sockPath = join(tmp.make("wh-as-"), "hub.sock");
   registry = createRegistry({ now: () => Date.now(), log: memLog(), pidAlive: () => true });
   server = net.createServer();
   await new Promise<void>((r) => server.listen(sockPath, () => r()));
   agentServer = createAgentServer(server, {
     registry,
+    ...(port === undefined ? {} : { terminal: port }),
     config: config({
       pluginVersion: "9.9.9",
       buildId: "9.9.9@hub",
@@ -53,6 +61,7 @@ async function setup(terminal = false): Promise<void> {
             },
           }
         : {}),
+      ...overrides,
     }),
     log: memLog(),
     now: () => Date.now(),
@@ -372,4 +381,93 @@ describe("private terminal current-socket transport", () => {
     expect(link.send({ t: "ping", ts: 1938 })).toBe(false);
     expect(agentServer.terminalLink!(key)!.meta.linkGen).toBe(2);
   });
+});
+
+describe("per-session declaration is current-socket state before ordinary publication", () => {
+  it("rejects absent/malformed/stale claims, withdraws before broadcast, restores only a fresh scope", async () => {
+    await agentServer.close();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    const failures = vi.fn();
+    await setup(true, {
+      ownsCommand: () => false,
+      consumeAgentFrame() {},
+      retireLink() {},
+      onIngressFailure: failures,
+    });
+    const c = await client();
+    c.send(hello());
+    const ack = await c.waitFrame((f) => f.t === "hello_ack");
+    const key = ack.agentKey as string;
+    const session = (sessionId: string) => ({
+      t: "session",
+      sessionId,
+      cwd: "/fixture",
+      reason: "new",
+      leafId: null,
+      mode: "tui",
+    });
+    c.send(session("one"));
+    await waitFor(() => agentServer.terminalLink!(key)?.meta.sessionId === "one");
+    expect(agentServer.terminalLink!(key)?.terminalSession).toBeUndefined();
+    const claim = {
+      v: 1,
+      enabled: true,
+      sessionId: "one",
+      epoch: "epoch-1",
+      limits: { maxPerSession: 2, maxPerPrincipal: 2, maxTotal: 8, inputIdleMs: 3600000, maxLifetimeMs: 28800000 },
+    };
+    const status = (terminalSession?: unknown) => ({
+      t: "status",
+      leafId: null,
+      busy: true,
+      pending: false,
+      ...(terminalSession === undefined ? {} : { terminalSession }),
+    });
+    const observations: unknown[] = [];
+    registry.bus.subscribe((e) => {
+      if (e.type === "status") observations.push(agentServer.terminalLink!(key)?.terminalSession);
+    });
+    c.send(status(claim));
+    await waitFor(() => observations.length === 1);
+    expect(observations[0]).toEqual(claim);
+    const version = agentServer.terminalLink!(key)!.authorizationVersion!;
+    for (const bad of [
+      undefined,
+      { ...claim, epoch: "old" },
+      { ...claim, sessionId: "stale" },
+      { ...claim, enabled: false },
+      { ...claim, limits: { ...claim.limits, maxTotal: 0 } },
+    ]) {
+      const n = observations.length;
+      c.send(status(bad));
+      await waitFor(() => observations.length === n + 1);
+      expect(observations.at(-1)).toBeUndefined();
+      expect(registry.get(key)?.status?.busy).toBe(true); // ordinary malformed nested status survives
+    }
+    expect(failures).toHaveBeenCalled();
+    c.send(status(claim));
+    await waitFor(() => agentServer.terminalLink!(key)?.terminalSession !== undefined);
+    expect(agentServer.terminalLink!(key)!.authorizationVersion!).toBeGreaterThan(version);
+    c.send(session("two"));
+    c.send(status(claim)); // delayed old-session projection must NOT revive eligibility
+    await waitFor(() => agentServer.terminalLink!(key)?.meta.sessionId === "two");
+    expect(agentServer.terminalLink!(key)?.terminalSession).toBeUndefined();
+    c.send({ t: "session_detached", reason: "new" });
+    await waitFor(() => agentServer.terminalLink!(key) === undefined);
+  });
+});
+
+it("true off raw golden: legacy config absent + legal machine off + agent off preserves exact NDJSON", async () => {
+  await agentServer.close();
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  const input = config({ home: tmp.make("wh-off-policy-"), pluginVersion: "0.0.0-test", buildId: "b1" });
+  const normalized = normalizeTerminalPolicy(input, { env: { PI_WEBHUB_TERMINAL_SOURCE: "plain" } });
+  expect(normalized).toEqual({ config: input });
+  await setup(false, undefined, normalized.config);
+  const c = await client();
+  c.send(hello());
+  const ack = await c.waitFrame((f) => f.t === "hello_ack");
+  const golden = JSON.parse(readFileSync(new URL("../terminal-legacy/trace.json", import.meta.url), "utf8"));
+  expect(encodeFrame(ack as never)).toBe(golden.helloNdjson);
+  expect(Object.hasOwn(agentServer, "terminalLink")).toBe(false);
 });

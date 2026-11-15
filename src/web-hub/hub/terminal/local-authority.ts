@@ -1,13 +1,21 @@
 /** Dedicated preflight is metadata-only. No grant/ready/PTY before local authority.
  * Old peers receive only the existing offer/prepare sequence: no new query unless
  * their private challenge explicitly advertises support. No public cap is added. */
+import { parseTerminalSession } from "../../protocol/terminal-session.js";
 import { randomBytes } from "node:crypto";
 import { createTerminalCommandIngress } from "../commands.js";
 import type { TerminalAgentLink } from "../agent-server.js";
 import type { TerminalIngressMeta, TerminalIngressPort } from "../ports.js";
 import type { CmdFrame } from "../../protocol/messages.js";
 import { terminalFrameOk, type TerminalLocalReference, type TermReq, type TermRes } from "../../protocol/terminal.js";
-import { verifyLocalAuthority, type initializeTerminalStore } from "../../protocol/terminal-local.js";
+import {
+  verifyLocalAuthority,
+  localProcess,
+  sameLocalProcess,
+  processNamespaces,
+  type TerminalAuthorityRecord,
+  type initializeTerminalStore,
+} from "../../protocol/terminal-local.js";
 import { bounded, clampSpanMs, sameTerminalMeta, TerminalFault } from "./limits.js";
 import type { TerminalAgentTarget } from "./service.js";
 const id = () => randomBytes(24).toString("base64url");
@@ -18,7 +26,12 @@ export function createTerminalLocalAuthority(deps: {
 }) {
   const known = new Map<
     string,
-    { meta: TerminalIngressMeta; ownerInstance: string; reference: TerminalLocalReference }
+    {
+      meta: TerminalIngressMeta;
+      ownerInstance: string;
+      reference: TerminalLocalReference;
+      physical: TerminalAuthorityRecord;
+    }
   >();
   const inflight = new Map<string, Promise<void>>();
   const offers = new Map<string, { resolve(value: string): void; reject(error: unknown): void }>();
@@ -60,11 +73,14 @@ export function createTerminalLocalAuthority(deps: {
         epoch: link.meta.epoch,
         ownerInstance: saved.ownerInstance,
       });
+      const claim = parseTerminalSession(link.terminalSession, link.meta);
       return {
         meta: { ...link.meta },
         processIdentity: { ...record.process },
         ownerInstance: saved.ownerInstance,
-        allowed: true,
+        allowed: claim !== undefined,
+        ...(claim === undefined ? {} : { limits: { ...claim.limits } }),
+        authorization: String(link.authorizationVersion ?? 0),
       };
     } catch {
       return undefined;
@@ -75,7 +91,9 @@ export function createTerminalLocalAuthority(deps: {
     frame: TermReq,
     at: number,
     signal: AbortSignal,
+    guard: () => void,
   ): Promise<TermRes> {
+    guard();
     if (waits.size >= 64 || !current(meta)) throw new TerminalFault("E_UNAVAILABLE");
     let resolve!: (value: TermRes) => void, reject!: (error: unknown) => void;
     const work = new Promise<TermRes>((a, b) => {
@@ -87,6 +105,7 @@ export function createTerminalLocalAuthority(deps: {
     try {
       if (!deps.link(meta.agentKey)?.send(frame)) throw new TerminalFault("E_UNAVAILABLE");
       const result = await bounded(work, deps.now, at, signal);
+      guard();
       if (!current(meta)) throw new TerminalFault("E_SESSION_CHANGED");
       return result;
     } finally {
@@ -94,8 +113,23 @@ export function createTerminalLocalAuthority(deps: {
     }
   }
   async function discover(link: TerminalAgentLink, signal: AbortSignal) {
+    const declaration = JSON.stringify([link.authorizationVersion, link.terminalSession]);
+    if (!parseTerminalSession(link.terminalSession, link.meta)) throw new TerminalFault("E_UNSUPPORTED");
     const meta = { ...link.meta },
       at = deps.now() + clampSpanMs(2000);
+    const guard = () => {
+      const live = deps.link(meta.agentKey);
+      if (
+        !current(meta) ||
+        !live ||
+        !parseTerminalSession(live.terminalSession, meta) ||
+        JSON.stringify([live.authorizationVersion, live.terminalSession]) !== declaration ||
+        signal.aborted ||
+        deps.now() >= at
+      )
+        throw new TerminalFault("E_SESSION_CHANGED");
+    };
+    guard();
     const commandId = id(),
       rid = id();
     if (!command.register(meta, { commandId, rid })) throw new TerminalFault("E_LIMIT");
@@ -123,6 +157,7 @@ export function createTerminalLocalAuthority(deps: {
       if (!current(meta) || !link.send(frame)) throw new TerminalFault("E_UNAVAILABLE");
       const offerId = await bounded(offered, deps.now, at, signal),
         hubNonce = id();
+      guard();
       const challenge = await exchange(
         meta,
         {
@@ -137,6 +172,7 @@ export function createTerminalLocalAuthority(deps: {
         },
         at,
         signal,
+        guard,
       );
       if (
         !challenge.ok ||
@@ -152,19 +188,25 @@ export function createTerminalLocalAuthority(deps: {
         { t: "term_req", v: 1, rid: id(), sessionId: meta.sessionId, epoch: meta.epoch, op: "authority" },
         at,
         signal,
+        guard,
       );
       if (!authority.ok || authority.op !== "authority" || authority.ownerInstance !== challenge.ownerInstance)
         throw new TerminalFault("E_UNAVAILABLE");
-      verifyLocalAuthority(deps.store, authority.authority, {
+      const physical = verifyLocalAuthority(deps.store, authority.authority, {
         pid: link.agentId.pid,
         agentNonce: link.agentId.nonce,
         sessionId: meta.sessionId,
         epoch: meta.epoch,
         ownerInstance: challenge.ownerInstance,
       });
-      if (!current(meta) || signal.aborted || deps.now() >= at) throw new TerminalFault("E_SESSION_CHANGED");
+      guard();
       if (!known.has(meta.agentKey) && known.size >= 64) throw new TerminalFault("E_LIMIT");
-      known.set(meta.agentKey, { meta, ownerInstance: authority.ownerInstance, reference: authority.authority });
+      known.set(meta.agentKey, {
+        meta,
+        ownerInstance: authority.ownerInstance,
+        reference: authority.authority,
+        physical,
+      });
     } finally {
       offers.delete(commandId);
       command.expire(meta, commandId);
@@ -185,6 +227,25 @@ export function createTerminalLocalAuthority(deps: {
   return {
     port,
     target,
+    /** Existing exact resource flights may finish after authority unlink/claim
+     * withdrawal. This independently rechecks the originally verified producer;
+     * it cannot discover a new owner or grant interactive admission. */
+    resourceCurrent(meta: TerminalIngressMeta): boolean {
+      const saved = known.get(meta.agentKey),
+        link = deps.link(meta.agentKey);
+      if (disposed || !saved || !link || !sameTerminalMeta(saved.meta, meta) || !sameTerminalMeta(link.meta, meta))
+        return false;
+      try {
+        return (
+          sameLocalProcess(saved.physical.process, localProcess(link.agentId.pid)) &&
+          saved.physical.agentNonce === link.agentId.nonce &&
+          JSON.stringify(saved.physical.namespaces) === JSON.stringify(processNamespaces(link.agentId.pid)) &&
+          JSON.stringify(saved.physical.namespaces) === JSON.stringify(processNamespaces(process.pid))
+        );
+      } catch {
+        return false;
+      }
+    },
     consumes(meta: TerminalIngressMeta, raw: unknown): boolean {
       if (command.ownsCommand(meta, raw)) {
         command.consumeAgentFrame(meta, raw);
@@ -198,7 +259,10 @@ export function createTerminalLocalAuthority(deps: {
       return false;
     },
     async ensure(key: string, signal: AbortSignal) {
-      if (target(key)) return;
+      if (target(key)?.allowed) return;
+      const candidate = deps.link(key);
+      if (!candidate || !parseTerminalSession(candidate.terminalSession, candidate.meta))
+        throw new TerminalFault("E_UNSUPPORTED");
       const saved = known.get(key),
         liveLink = deps.link(key);
       if (saved && liveLink && sameTerminalMeta(saved.meta, liveLink.meta)) throw new TerminalFault("E_UNAVAILABLE");

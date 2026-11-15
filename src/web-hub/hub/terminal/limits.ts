@@ -57,6 +57,22 @@ export async function bounded<T>(work: Promise<T>, now: () => number, at: number
   });
 }
 export const TERMINAL_QUEUE_ITEMS = 128;
+/** Global policy is exclusively the immutable hub boot snapshot. Only session
+ * dimensions participate in the three-way machine/declaration/private-ready min. */
+export function intersectTerminalLimits(
+  policy: TerminalHubConfig,
+  claim: TerminalHubConfig,
+  ready: TerminalHubConfig,
+): TerminalHubConfig {
+  return {
+    maxTotal: policy.maxTotal,
+    maxPerPrincipal: policy.maxPerPrincipal,
+    maxPerSession: Math.min(policy.maxPerSession, claim.maxPerSession, ready.maxPerSession),
+    inputIdleMs: Math.min(policy.inputIdleMs, claim.inputIdleMs, ready.inputIdleMs),
+    maxLifetimeMs: Math.min(policy.maxLifetimeMs, claim.maxLifetimeMs, ready.maxLifetimeMs),
+  };
+}
+
 export class TerminalLimits {
   private slots = new Map<string, { session: string; principal: string }>();
   private queues = new Map<
@@ -84,8 +100,7 @@ export class TerminalLimits {
       rows.length >= Math.min(L.hardTotal, this.config.maxTotal) ||
       rows.filter((x) => x.session === session).length >=
         Math.min(this.config.maxPerSession, intersection.maxPerSession) ||
-      rows.filter((x) => x.principal === principal).length >=
-        Math.min(this.config.maxPerPrincipal, intersection.maxPerPrincipal)
+      rows.filter((x) => x.principal === principal).length >= this.config.maxPerPrincipal
     );
   }
   reserve(id: string, session: string, principal: string, intersection: TerminalHubConfig = this.config): boolean {

@@ -55,7 +55,11 @@ export interface HubRecord {
    * 形状定义在 `protocol/privacy.ts`（agent 侧同样要读，不能放 hub/ 里）。 */
   privacy?: PrivacyHubStatus;
   /** Enabled-only local terminal prerequisite verdict; no capability/path/identity. */
-  terminal?: { state: "ready" } | { state: "unavailable"; reason: string };
+  terminal?: ({ state: "ready" } | { state: "unavailable"; reason: string }) & {
+    mode?: "per-session";
+    source?: "default" | "agentDir" | "inherited";
+    effectiveMachineLimits?: import("../protocol/terminal.js").TerminalHubConfig;
+  };
   /** web-hub-proxy plan v2 §5 (X1c): port-proxy summary for `/webhub status`. Written ONLY when
    * `config.proxy` exists (off ⇒ key absent, hub.json byte-identical). `portsStore` mirrors
    * `ProxyService.status()` (`broken` ⇒ every open answers 503 `ports-store`); re-synced from

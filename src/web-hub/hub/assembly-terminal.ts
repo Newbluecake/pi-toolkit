@@ -75,6 +75,7 @@ export async function assembleTerminal(ctx: HubAssembly) {
     now,
     resourceFence: fence,
     target,
+    ...(local ? { resourceCurrent: local.resourceCurrent } : {}),
     ...(local ? { resolveTarget: (key: string, signal: AbortSignal) => local.ensure(key, signal) } : {}),
     targets: () =>
       ctx.registry!.list().flatMap((view) => {

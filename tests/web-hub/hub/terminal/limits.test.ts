@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { TerminalLimits, TERMINAL_QUEUE_ITEMS } from "../../../../src/web-hub/hub/terminal/limits.js";
+import {
+  TerminalLimits,
+  TERMINAL_QUEUE_ITEMS,
+  intersectTerminalLimits,
+} from "../../../../src/web-hub/hub/terminal/limits.js";
 import { TERMINAL_LIMITS as L } from "../../../../src/web-hub/protocol/terminal.js";
 const config = {
   maxPerSession: 2,
@@ -140,4 +144,59 @@ describe("terminal physical and forwarding limits (§6.3)", () => {
     expect(x.queuedItems()).toBe(0);
     expect(x.queuedFrameBytes()).toBe(0);
   });
+});
+
+it("machine principal/total limits are global across agents: claims neither shrink nor expand P", () => {
+  const x = new TerminalLimits({ ...config, maxPerSession: 4, maxPerPrincipal: 3, maxTotal: 5 }, () => 0);
+  const small = { ...config, maxTotal: 1, maxPerPrincipal: 1, maxPerSession: 1 };
+  const large = { ...config, maxTotal: 32, maxPerPrincipal: 8, maxPerSession: 4 };
+  x.reserve("a1", "agent-a-session", "principal-a", small);
+  x.reserve("b1", "agent-b-session", "principal-a", small);
+  x.reserve("c1", "agent-c-session", "principal-a", large);
+  expect(() => x.reserve("d1", "agent-d-session", "principal-a", large)).toThrow("E_LIMIT");
+  x.reserve("a2", "agent-a-session", "principal-b", large);
+  x.reserve("b2", "agent-b-session", "principal-b", large);
+  expect(x.physicalUsed).toBe(5);
+  expect(() => x.reserve("d2", "agent-d-session", "principal-b", large)).toThrow("E_LIMIT");
+  expect(() => x.reserve("a3", "agent-a-session", "principal-b", small)).toThrow("E_LIMIT");
+  expect(x.physicalUsed).toBe(5); // unknown/closing never frees a slot
+});
+
+it("three-way intersection keeps global ceilings exactly P; each of the three session dimensions takes its own min", () => {
+  const policy = {
+    ...config,
+    maxPerSession: 4,
+    maxPerPrincipal: 3,
+    maxTotal: 5,
+    inputIdleMs: 600000,
+    maxLifetimeMs: 3600000,
+  };
+  const claim = {
+    ...config,
+    maxPerSession: 3,
+    maxPerPrincipal: 1,
+    maxTotal: 32,
+    inputIdleMs: 300000,
+    maxLifetimeMs: 7200000,
+  };
+  const ready = {
+    ...config,
+    maxPerSession: 2,
+    maxPerPrincipal: 8,
+    maxTotal: 1,
+    inputIdleMs: 900000,
+    maxLifetimeMs: 1800000,
+  };
+  expect(intersectTerminalLimits(policy, claim, ready)).toEqual({
+    maxPerSession: 2,
+    maxPerPrincipal: 3,
+    maxTotal: 5,
+    inputIdleMs: 300000,
+    maxLifetimeMs: 1800000,
+  });
+  expect(intersectTerminalLimits(policy, { ...claim, maxPerSession: 1 }, { ...ready, maxLifetimeMs: 7200000 })).toEqual(
+    { maxPerSession: 1, maxPerPrincipal: 3, maxTotal: 5, inputIdleMs: 300000, maxLifetimeMs: 3600000 },
+  );
+  expect(policy.maxTotal).toBe(5);
+  expect(claim.maxTotal).toBe(32);
 });

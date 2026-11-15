@@ -21,6 +21,7 @@
  * whether to ever send the `dialogs`/`ctl`/`commands` slots at all — omitting
  * `caps` here makes every hub look like a pre-P2 hub to every agent.
  */
+import { parseTerminalSession, type TerminalSession } from "../protocol/terminal-session.js";
 import type net from "node:net";
 import { isTerminalNamespace, hasReservedTerminalResult, terminalFrameOk } from "../protocol/terminal.js";
 import type { TerminalIngressPort, TerminalIngressMeta } from "./ports.js";
@@ -56,6 +57,9 @@ export interface TerminalAgentLink {
   agentId: Extract<AgentFrame, { t: "hello" }>["agentId"];
   kind: Extract<AgentFrame, { t: "hello" }>["kind"];
   pendingBytes: number;
+  /** Current positive declaration; never grants physical authority by itself. */
+  terminalSession?: TerminalSession;
+  authorizationVersion?: number;
   send(frame: HubFrame): boolean;
 }
 export interface AgentServer {
@@ -136,6 +140,20 @@ export function createAgentServer(
     let terminalMeta: TerminalIngressMeta | undefined;
     let terminalHello: Extract<AgentFrame, { t: "hello" }> | undefined;
     let terminalDetached = false;
+    let terminalSession: TerminalSession | undefined;
+    let authorizationVersion = 0;
+    let terminalSessionId = "";
+    const withdraw = () => {
+      terminalSession = undefined;
+      authorizationVersion++;
+      if (terminalMeta) {
+        try {
+          deps.terminal?.onIngressFailure?.({ ...terminalMeta, sessionId: terminalSessionId });
+        } catch {
+          /* synchronous deny */
+        }
+      }
+    };
     let hadBye = false;
     let superseded = false;
     let finished = false;
@@ -179,6 +197,16 @@ export function createAgentServer(
       send: write,
       close(reason) {
         superseded = true;
+        if (config.terminal !== undefined) {
+          withdraw();
+          if (terminalMeta) {
+            try {
+              deps.terminal?.retireLink(terminalMeta);
+            } catch {
+              /* isolated */
+            }
+          }
+        }
         destroy(reason);
       },
     };
@@ -279,6 +307,7 @@ export function createAgentServer(
       }
       const frame: AgentFrame | undefined = decodeAgentFrame(raw);
       if (frame === undefined) {
+        if (config.terminal !== undefined && rawType(raw) === "status") withdraw();
         // An oversize xs_req is refused by the decoder's 16 KiB xs cap (silent drop = a pointless
         // client-deadline unknown): answer E_XS_TOO_LARGE. Every other undecodable frame stays
         // ignored without any log (no body can reach hub.log).
@@ -393,8 +422,23 @@ export function createAgentServer(
         return;
       }
       if (config.terminal !== undefined) {
-        if (frame.t === "session_detached") terminalDetached = true;
-        else if (frame.t === "session") terminalDetached = false;
+        if (frame.t === "session_detached" || frame.t === "bye") {
+          terminalDetached = true;
+          withdraw();
+        } else if (frame.t === "session") {
+          if (terminalDetached || terminalSessionId !== frame.sessionId) withdraw();
+          terminalSessionId = frame.sessionId;
+          terminalDetached = false;
+        } else if (frame.t === "status") {
+          const next =
+            !terminalDetached && terminalSessionId && terminalMeta
+              ? parseTerminalSession(frame.terminalSession, { sessionId: terminalSessionId, epoch: terminalMeta.epoch })
+              : undefined;
+          if (JSON.stringify(next) !== JSON.stringify(terminalSession)) {
+            withdraw(); // clear old authorization BEFORE registry/broadcast/reentrant observers
+            terminalSession = next === undefined ? undefined : structuredClone(next);
+          }
+        }
       }
       registry.onFrame(agentKey, frame);
       if (frame.t === "bye") {
@@ -431,6 +475,7 @@ export function createAgentServer(
     const teardown = (): void => {
       if (finished) return;
       finished = true;
+      if (config.terminal !== undefined) withdraw();
       if (terminalMeta !== undefined) {
         try {
           deps.terminal?.retireLink(terminalMeta);
@@ -459,7 +504,8 @@ export function createAgentServer(
                 !terminalHello ||
                 registry.getLinkGen(terminalMeta.agentKey) !== terminalMeta.linkGen ||
                 !view?.session ||
-                terminalDetached
+                terminalDetached ||
+                hadBye
               )
                 return undefined;
               return {
@@ -467,6 +513,8 @@ export function createAgentServer(
                 agentId: { ...terminalHello.agentId },
                 kind: terminalHello.kind,
                 pendingBytes: sock.writableLength,
+                ...(terminalSession === undefined ? {} : { terminalSession: structuredClone(terminalSession) }),
+                authorizationVersion,
                 send: (frame) => {
                   if (
                     finished ||

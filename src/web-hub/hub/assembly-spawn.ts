@@ -292,6 +292,7 @@ export async function assembleSpawn(ctx: HubAssembly): Promise<void> {
       // source session's mark — the store was created/loaded ABOVE this assembly, so the
       // dependency is available exactly when the feature is on (off ⇒ byte-identical).
       ...(ctx.privacyStore === undefined ? {} : { privacy: ctx.privacyStore }),
+      ...(config.terminal === undefined ? {} : { privacyRequired: true }),
     });
     if (config.feishuBot !== undefined) {
       ctx.botSpawn = {

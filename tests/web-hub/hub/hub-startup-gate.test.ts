@@ -16,6 +16,8 @@ const seams = vi.hoisted(() => ({
   rotate: undefined as undefined | (() => Promise<void>),
   preview: undefined as undefined | (() => Promise<void>),
   identity: undefined as undefined | (() => Promise<void>),
+  order: [] as string[],
+  privacyFail: false,
 }));
 vi.mock("../../../src/web-hub/hub/admin.js", async (original) => {
   const mod = await original<typeof import("../../../src/web-hub/hub/admin.js")>();
@@ -48,6 +50,39 @@ vi.mock("node:fs/promises", async (original) => {
   };
 });
 
+vi.mock("../../../src/web-hub/hub/assembly-storage.js", async (original) => {
+  const mod = await original<typeof import("../../../src/web-hub/hub/assembly-storage.js")>();
+  return {
+    ...mod,
+    loadPrivacyStore: async (...args: Parameters<typeof mod.loadPrivacyStore>) => {
+      seams.order.push("privacy");
+      if (seams.privacyFail) throw new Error("fixture privacy load failure");
+      return mod.loadPrivacyStore(...args);
+    },
+  };
+});
+vi.mock("../../../src/web-hub/hub/assembly-terminal.js", async (original) => {
+  const mod = await original<typeof import("../../../src/web-hub/hub/assembly-terminal.js")>();
+  return {
+    ...mod,
+    assembleTerminal: async (...args: Parameters<typeof mod.assembleTerminal>) => {
+      seams.order.push("terminal");
+      expect(args[0].privacyStore?.degraded).toBe(false);
+      return mod.assembleTerminal(...args);
+    },
+  };
+});
+vi.mock("../../../src/web-hub/hub/assembly-spawn.js", async (original) => {
+  const mod = await original<typeof import("../../../src/web-hub/hub/assembly-spawn.js")>();
+  return {
+    ...mod,
+    assembleSpawn: async (...args: Parameters<typeof mod.assembleSpawn>) => {
+      seams.order.push("spawn");
+      return mod.assembleSpawn(...args);
+    },
+  };
+});
+
 const tmp = tmpDirs();
 const clients: TestClient[] = [];
 const hubs: RunningHub[] = [];
@@ -59,6 +94,9 @@ afterEach(async () => {
   seams.rotate = undefined;
   seams.preview = undefined;
   seams.identity = undefined;
+  seams.privacyFail = false;
+  seams.order.length = 0;
+  vi.unstubAllEnvs();
   tmp.cleanup();
 });
 
@@ -315,5 +353,81 @@ describe("startup close gate", () => {
       expect(successor.httpPort).toBe(43210);
     },
     15_000,
+  );
+});
+
+describe("terminal machine boot policy startup ordering", () => {
+  it("normalizes before assembly/admin and retains privacy→terminal→spawn ordering", () => {
+    const text = readFileSync(new URL("../../../src/web-hub/hub/hub.ts", import.meta.url), "utf8");
+    expect(text.indexOf("normalizeTerminalPolicy(config")).toBeLessThan(text.indexOf("const ctx = createHubAssembly"));
+    expect(text.indexOf("config = normalizedTerminal.config")).toBeLessThan(
+      text.indexOf("const ctx = createHubAssembly"),
+    );
+    expect(text.indexOf("await loadPrivacyStore(ctx)")).toBeLessThan(text.indexOf("await assembleTerminal(ctx)"));
+    expect(text.indexOf("await assembleTerminal(ctx)")).toBeLessThan(text.indexOf("await assembleSpawn(ctx)"));
+  });
+  it.each([false, true])(
+    "privacy=false with machine on: load failure=%s cannot bypass internal store",
+    async (fail) => {
+      const home = tmp.make("wh-boot-policy-");
+      mkdirSync(join(home, ".pi", "agent"), { recursive: true });
+      writeFileSync(
+        join(home, ".pi", "agent", "pi-toolkit.json"),
+        JSON.stringify({ webHub: { terminal: { enabled: true } } }),
+      );
+      vi.stubEnv("PI_WEBHUB_TERMINAL_SOURCE", "plain");
+      vi.stubEnv("PI_CODING_AGENT_DIR", "");
+      seams.privacyFail = fail;
+      const cfg = parseHubSpawnConfig({
+        roots: [home],
+        maxProcesses: 4,
+        maxPerPrincipal: 2,
+        ratePerMinute: 30,
+        maxLifetimeMinutes: 720,
+        registerTimeoutS: 10,
+        lan: "off",
+      });
+      if (!cfg.ok) throw new Error(cfg.detail);
+      const frontend: FrontendFactory = (args) => {
+        expect(args.privacy).toBeUndefined(); // public privacy remains OFF
+        expect(args.terminal).toBeDefined();
+        return {
+          listen: async () => ({ port: 43210 }),
+          close: async () => {},
+          clientCount: () => 0,
+          ui: {
+            serve: async () => false,
+            refresh: async () => ({ state: "unbuilt", candidates: [] }),
+            status: () => ({ state: "unbuilt", candidates: [] }),
+          },
+        };
+      };
+      const started = startHub(config({ home, privacy: false, spawn: cfg.spawn }), frontend, {
+        spawnSeams: {
+          probe: { platform: "unsupported" },
+          reaper: {
+            available: false,
+            start: async () => false,
+            track: () => {},
+            untrack: () => {},
+            close: () => {},
+            onUnavailable: () => () => {},
+            onRestart: () => () => {},
+          },
+        },
+      });
+      if (fail) {
+        await expect(started).rejects.toThrow("fixture privacy load failure");
+        expect(seams.order).toEqual(["privacy"]);
+      } else {
+        const result = await started;
+        if ("exists" in result) throw new Error("hub unavailable");
+        hubs.push(result);
+        expect(seams.order).toEqual(["privacy", "terminal", "spawn"]);
+        const record = JSON.parse(readFileSync(result.paths.hubJson, "utf8"));
+        expect(record.terminal).toMatchObject({ mode: "per-session", source: "default", state: "ready" });
+        expect(record).not.toHaveProperty("privacy");
+      }
+    },
   );
 });
