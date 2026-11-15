@@ -1,4 +1,4 @@
-#!/usr/bin/env -S npx tsx
+#!/usr/bin/env -S tsx
 /** Tier3 only: real hub/Unix agent/HTTP/SSE/PTY + the manifest-verified production UI.
  * No real pi account, user rc, existing daemon, dependency install or network fallback.
  * The only injected production seam is the audited isolated UID/rc backend fixture.
@@ -8,16 +8,18 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { startHub } from "../../src/web-hub/hub/hub.js";
 import { createHttpFrontend } from "../../src/web-hub/hub/http.js";
 import { resolveHubPaths } from "../../src/web-hub/protocol/paths.js";
 import { TERMINAL_JOURNAL_FILE } from "../../src/web-hub/protocol/terminal.js";
 import { TERMINAL_LOCAL_DIR } from "../../src/web-hub/protocol/terminal-local.js";
-import { makeTerminalFixture } from "../../tests/integration/web-hub-terminal-fixture.js";
+import { makeTerminalFixture, writeTerminalMachinePolicy } from "../../tests/integration/web-hub-terminal-fixture.js";
 import { waitUntil } from "../../tests/web-hub/agent/helpers.js";
 import { terminalFontMetrics } from "./lib/terminal-font-metrics.js";
-import { loadPlaywright } from "./lib/playwright.js";
+import { terminalBrowser } from "../../tests/integration/web-hub-terminal-compat-baseline.js";
+import { login, openSse } from "../../tests/web-hub/http/helpers.js";
 
 assert.equal(process.env.npm_config_offline, "true", "explicit offline-only cache required");
 assert(!process.env.XDG_RUNTIME_DIR && !process.env.NODE_OPTIONS, "unset XDG_RUNTIME_DIR/NODE_OPTIONS");
@@ -31,13 +33,17 @@ mkdirSync(home, { mode: 0o700 });
 // Freeze all future library HOME lookups before hub/fixture startup. Never use ~/.pi.
 process.env.HOME = home;
 process.umask(0o022);
-const fixture = makeTerminalFixture();
+const fixture = makeTerminalFixture(),
+  fixtureB = makeTerminalFixture();
+writeTerminalMachinePolicy(home);
+process.env.PI_WEBHUB_TERMINAL_SOURCE = "plain";
 const limits = { maxPerSession: 2, maxPerPrincipal: 2, maxTotal: 8, inputIdleMs: 3600000, maxLifetimeMs: 28800000 };
 const version = JSON.parse(readFileSync(resolve("package.json"), "utf8")).version;
 const result: Record<string, unknown> = { firefox: "NOT RUN — accepted GTK3/NSS limitation", steps: [] };
 const steps = result.steps as string[];
 let hub: Awaited<ReturnType<typeof startHub>> | undefined;
 let child: ReturnType<typeof spawn> | undefined;
+let childB: ReturnType<typeof spawn> | undefined;
 let browser: any;
 let page: any;
 let stage = "offline loader";
@@ -55,9 +61,13 @@ let errors = "";
 const warnings: string[] = [];
 let droppedWarnings = 0;
 try {
-  const pw = await loadPlaywright();
-  assert(pw.ok, pw.ok ? "" : pw.reason);
-  assert.equal(pw.source, "offline");
+  const entry = process.env.TPS_PLAYWRIGHT_MODULE,
+    binary = process.env.TPS_CHROMIUM;
+  assert(entry && binary, "explicit already-installed offline browser module/binary required; no npx/install fallback");
+  const pkg = JSON.parse(readFileSync(join(dirname(entry), "package.json"), "utf8"));
+  assert.equal(pkg.version, "1.63.0");
+  const loaded = await import(pathToFileURL(entry).href);
+  const pw = { chromium: loaded.chromium, version: pkg.version, executablePath: binary, source: "offline" };
   result.playwright = pw.version;
   stage = "real hub and agent";
   let deps: any;
@@ -86,7 +96,7 @@ try {
   const cfg = join(root, "agent.json");
   writeFileSync(cfg, JSON.stringify({ home, fixture: fixture.fixture, pluginVersion: version }), { mode: 0o600 });
   child = spawn(process.execPath, ["--import", "tsx", resolve("tests/integration/fixtures/terminal-agent.ts"), cfg], {
-    stdio: "pipe",
+    stdio: ["pipe", "pipe", "pipe", "ipc"],
     env: { ...process.env, HOME: home },
   });
   child.stderr!.on("data", (b: Buffer) => {
@@ -98,6 +108,114 @@ try {
   );
   const card = deps.registry.list().find((v: any) => v.session?.sessionId === "child-terminal-session");
   assert.equal(card.agentId.pid, child.pid);
+  const cfgB = join(root, "agent-B.json");
+  writeFileSync(cfgB, JSON.stringify({ home, fixture: fixtureB.fixture, sessionId: "cwd-B", pluginVersion: version }), {
+    mode: 0o600,
+  });
+  childB = spawn(process.execPath, ["--import", "tsx", resolve("tests/integration/fixtures/terminal-agent.ts"), cfgB], {
+    stdio: ["pipe", "pipe", "pipe", "ipc"],
+    env: { ...process.env, HOME: home },
+  });
+  childB.stderr!.on("data", (b: Buffer) => {
+    errors = (errors + b.toString()).slice(-8192);
+  });
+  await waitUntil(
+    () => deps.registry.list().some((v: any) => v.session?.sessionId === "cwd-B" && v.status?.terminalSession),
+    10000,
+    "second independent agent declaration",
+  );
+  const cardB = deps.registry.list().find((v: any) => v.session?.sessionId === "cwd-B");
+  assert.equal(cardB.agentId.pid, childB.pid);
+  assert.notEqual(childB.pid, child.pid);
+  const ipc = async (data: object) => {
+    const id = Date.now();
+    const reply = new Promise<any>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("owned agent IPC deadline")), 5000);
+      timer.unref();
+      const onMessage = (m: any) => {
+        if (m.id === id) {
+          child!.off("message", onMessage);
+          clearTimeout(timer);
+          resolve(m);
+        }
+      };
+      child!.on("message", onMessage);
+    });
+    child!.send({ id, ...data });
+    return reply;
+  };
+  const cookie = await login(running.httpPort, running.paths.tokenFile),
+    stream = await openSse(running.httpPort, { cookie });
+  try {
+    const hello = await stream.waitFor((e) => e.event === "hello"),
+      connection = await stream.waitFor((e) => e.event === "terminal_connection"),
+      api = terminalBrowser(running.httpPort, cookie, stream, hello, connection);
+    const waitDrained = () =>
+      waitUntil(
+        () => {
+          const d = join(running.paths.stateDir, TERMINAL_LOCAL_DIR);
+          return (
+            JSON.parse(readFileSync(join(d, TERMINAL_JOURNAL_FILE), "utf8")).resources.length === 0 &&
+            readdirSync(join(d, "receipts")).length === 0
+          );
+        },
+        60000,
+        "two-agent exact receipt drain",
+      );
+    const observe = async (c: any, t: any, expected: string, tag: string) => {
+      await api.input(c, t, `printf '${tag}=%s:%s\\n' "$$" "$(pwd -P)"\n`);
+      await waitUntil(
+        () =>
+          new RegExp(`${tag}=\\d+:${expected.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\r?\\n`).test(
+            api.output(t.termId),
+          ),
+        5000,
+        "actual canonical PTY cwd",
+      );
+      const match = new RegExp(`${tag}=(\\d+):`).exec(api.output(t.termId));
+      assert(match);
+      return Number(match[1]);
+    };
+    const a = await api.open(card),
+      b = await api.open(cardB),
+      pidA = await observe(card, a, fixture.fixture.cwd, "CWD_A"),
+      pidB = await observe(cardB, b, fixtureB.fixture.cwd, "CWD_B");
+    assert.notEqual(pidA, pidB);
+    assert.notEqual(fixture.fixture.cwd, process.cwd());
+    await api.close(cardB, b);
+    await waitUntil(
+      () =>
+        JSON.parse(readFileSync(join(running.paths.stateDir, TERMINAL_LOCAL_DIR, TERMINAL_JOURNAL_FILE), "utf8"))
+          .resources.length === 1,
+      60000,
+      "B physical release",
+    );
+    const next = join(fixture.fixture.root, "next");
+    mkdirSync(next, { mode: 0o700 });
+    await ipc({ op: "cwd", cwd: next });
+    const newer = await api.open(card);
+    await observe(card, newer, next, "CWD_CURRENT");
+    assert.equal(await observe(card, a, fixture.fixture.cwd, "CWD_PINNED"), pidA);
+    await api.close(card, a);
+    await api.close(card, newer);
+    await waitDrained();
+    await ipc({ op: "cwd", cwd: fixture.fixture.cwd });
+    result.perSessionCwd = {
+      agents: 2,
+      pidA,
+      pidB,
+      processCwd: process.cwd(),
+      cwdA: fixture.fixture.cwd,
+      cwdB: fixtureB.fixture.cwd,
+      currentCwd: next,
+      existingShellPinned: true,
+    };
+    steps.push(
+      "two independent agents: actual canonical pwd per ctx; current cwd affects new open only; old PID/cwd pinned; real receipts drained",
+    );
+  } finally {
+    stream.close();
+  }
   const url = `http://127.0.0.1:${running.httpPort}`;
   const token = readFileSync(running.paths.tokenFile, "utf8").trim();
   browser = await pw.chromium.launch({ headless: true, executablePath: pw.executablePath });
@@ -162,7 +280,14 @@ try {
     if (m.type() === "error") {
       const text = m.text();
       const path = new URL(m.location().url || url).pathname;
-      if (invalidating && /^\/api\/terminal\/(ack|input|renew|resize)$/.test(path) && /status of (401|409)/.test(text))
+      if (
+        invalidating &&
+        ((/^\/api\/terminal\/(ack|input|renew|resize)$/.test(path) && /status of (401|409)/.test(text)) ||
+          // Explicit privacy/logout synchronously destroys the original streaming
+          // gzip socket. Chromium reports its missing HTTP chunk trailer; this is
+          // NOT the corrupt private-frame ERR_CONTENT_DECODING_FAILED regression.
+          (path === "/api/events" && text === "Failed to load resource: net::ERR_INCOMPLETE_CHUNKED_ENCODING"))
+      )
         expectedRevocationErrors.push(`${path}: ${text}`);
       else consoleErrors.push(text);
     }
@@ -202,7 +327,7 @@ try {
   stage = "login and detail terminal entry";
   await page.goto(`${url}/#t=${encodeURIComponent(token)}`);
   await page.waitForSelector(".agent-card", { timeout: 15000 });
-  await page.locator(".agent-card").first().click();
+  await page.locator(`.agent-card[href="#/agent/${encodeURIComponent(card.agentKey)}"]`).click();
   await page.locator('[aria-controls="terminal-panel"]').click();
   await page.waitForSelector(".terminal-list");
   steps.push("real token login → terminal button → bottom list");
@@ -391,7 +516,7 @@ try {
     });
     await dp.goto(`${url}/#t=${encodeURIComponent(token)}`);
     await dp.waitForSelector(".agent-card");
-    await dp.locator(".agent-card").first().click();
+    await dp.locator(`.agent-card[href="#/agent/${encodeURIComponent(card.agentKey)}"]`).click();
     await dp.locator('[aria-controls="terminal-panel"]').click();
     await dp.locator("[data-terminal-create]").click();
     await dp.waitForFunction(
@@ -439,17 +564,19 @@ try {
 } finally {
   // Keep the browser connection alive through the unref'd production teardown clocks.
   // Publish PASS only after owned child + hub + browser cleanup actually finishes.
-  if (child && child.exitCode === null && child.signalCode === null) {
-    const exited = once(child, "exit");
-    child.stdin!.end("STOP\n");
-    const timer = setTimeout(() => child!.kill("SIGKILL"), 6000);
-    timer.unref();
-    await exited;
-    clearTimeout(timer);
-  }
+  for (const owned of [childB, child])
+    if (owned && owned.exitCode === null && owned.signalCode === null) {
+      const exited = once(owned, "exit");
+      owned.stdin!.end("STOP\n");
+      const timer = setTimeout(() => owned.kill("SIGKILL"), 6000);
+      timer.unref();
+      await exited;
+      clearTimeout(timer);
+    }
   if (hub && !("exists" in hub)) await hub.close("test");
   await browser?.close();
   fixture.cleanup();
+  fixtureB.cleanup();
   rmSync(root, { recursive: true, force: true });
   result.warnings = warnings;
   result.droppedWarnings = droppedWarnings;
