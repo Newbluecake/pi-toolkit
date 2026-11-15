@@ -217,6 +217,22 @@ const SYSLOAD_FILE_CLOSURE: Record<string, string[]> = {
   "src/sysload/wire.ts": ["./top.js"],
 };
 
+/** Terminal P0 mirrors stay inside protocol: pin their complete imports (including erased types),
+ * without granting hub/protocol any new escape into config/secure or other agent-side code. */
+const TERMINAL_MIRROR_CLOSURE: Record<string, Array<{ spec: string; typeOnly: boolean }>> = {
+  "src/web-hub/protocol/settings-location.ts": [
+    { spec: "node:fs", typeOnly: false },
+    { spec: "node:path", typeOnly: false },
+    { spec: "./agent-dir.js", typeOnly: true },
+  ],
+  "src/web-hub/protocol/terminal-policy.ts": [{ spec: "./terminal.js", typeOnly: false }],
+  "src/web-hub/protocol/terminal-session.ts": [
+    { spec: "@sinclair/typebox", typeOnly: false },
+    { spec: "@sinclair/typebox/value", typeOnly: false },
+    { spec: "./terminal.js", typeOnly: false },
+  ],
+};
+
 interface ImportRef {
   file: string;
   spec: string;
@@ -371,6 +387,18 @@ describe("web-hub boundary", () => {
   it.each([false, true])("hub settings import is type-only (typeOnly=%s)", (typeOnly) => {
     const file = resolve(ROOT, "src/web-hub/hub/load.ts");
     expect(hubImportAllowed(file, "../../config/settings.js", typeOnly)).toBe(typeOnly);
+  });
+
+  it("terminal protocol mirrors import exactly the internal closure; no config/secure escape", () => {
+    for (const [path, wanted] of Object.entries(TERMINAL_MIRROR_CLOSURE)) {
+      const sort = (a: { spec: string }, b: { spec: string }) => a.spec.localeCompare(b.spec);
+      const actual = scanImports(resolve(ROOT, path))
+        .map(({ spec, typeOnly }) => ({ spec, typeOnly }))
+        .sort(sort);
+      expect(actual, path).toEqual([...wanted].sort(sort));
+      expect(hubImportAllowed(resolve(ROOT, path), "../../config/settings.js", true)).toBe(false);
+      expect(hubImportAllowed(resolve(ROOT, path), "../../secure/settings-lock.js", false)).toBe(false);
+    }
   });
 
   it("the three allowlisted src/git files import EXACTLY the pinned closure table (worktree-diff §5 D1 #12)", () => {

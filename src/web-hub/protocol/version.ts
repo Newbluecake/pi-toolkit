@@ -422,5 +422,9 @@ export const WTGRAPH_FILES_HUB_CAP = "wtgraph.files.v1";
 /** Terminal r4: browser HubInfo ONLY, enabled-only at tail; NEVER hello_ack/hello. */
 export const TERMINAL_UI_CAP = "terminal.ui.v1";
 
+/** Per-session terminal r2: browser HubInfo ONLY, alongside TERMINAL_UI_CAP after successful
+ * machine-enabled startup assembly. Never hello/hello_ack; no PROTO bump. Inert in P0. */
+export const TERMINAL_SESSION_CAP = "terminal.session.v1";
+
 /** Retained exited discovery: no new wire fields; restore + platform gated. */
 export const SPAWN_EXITED_HUB_CAP = "spawn.exited.v1";

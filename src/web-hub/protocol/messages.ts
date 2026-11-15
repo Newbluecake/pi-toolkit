@@ -34,6 +34,7 @@ import {
   RunWatchSchema,
 } from "./run-transcript.js";
 import type { LanStatus } from "./lan.js";
+import type { TerminalSession } from "./terminal-session.js";
 // tokens-speed (task58): `WireEntry.piToolkitGeneration` type lives in protocol/message-generation.ts
 // (its own module); only the type is folded in here — runtime stays in keys.ts condition-spread.
 import type { GenerationMetadata } from "./message-generation.js";
@@ -793,6 +794,10 @@ export interface StatusInfo {
    *  facts). The open StatusInfoSchema forwards it through old hubs untouched; old UIs ignore it.
    *  No PROTO bump, no cap, no new frame (D6). */
   reload?: ReloadStatusWire;
+  /** Positive target declaration only; no execution authority. Deliberately NOT added to the
+   * open StatusInfoSchema: malformed future/old declarations must not discard ordinary status.
+   * Terminal consumers independently call parseTerminalSession and bind live session/epoch. */
+  terminalSession?: TerminalSession;
 }
 
 /** `StatusInfo.reload.state` — the most recent fact of the tracked lifecycle. */

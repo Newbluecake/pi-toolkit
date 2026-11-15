@@ -1439,6 +1439,29 @@ export interface LanSessionsDeps {
   revokeSse(sidHash: string): void;
 }
 
+/** Terminal per-session r2: startup-frozen machine policy, never an agent claim or late-install
+ * interface. Runtime assembly/readers are owned by the hub package, not this protocol package. */
+export type TerminalMachinePolicy = import("../protocol/terminal-policy.js").TerminalMachinePolicy;
+export type TerminalStartupReason =
+  | import("../protocol/terminal-policy.js").TerminalPolicyReason
+  | import("../protocol/settings-location.js").SettingsSelectionReason
+  | "settings-json"
+  | "settings-oversize"
+  | "settings-unsafe"
+  | "settings-conflict"
+  | "settings-timeout"
+  | "startup-domain-denied"
+  | "startup-domain-unknown";
+/** Local hub.json/status snapshot only. No paths, credentials, cwd or live eligibility counts.
+ * Off omits the entire diagnostic so existing public off bytes are unchanged. */
+export type TerminalStartupDiagnostic = {
+  mode: "per-session";
+  source: "default" | "agentDir" | "inherited";
+} & (
+  | { state: "ready"; effectiveMachineLimits: import("../protocol/terminal.js").TerminalHubConfig }
+  | { state: "unavailable"; reason: TerminalStartupReason }
+);
+
 // Terminal P1-C r4. Optional ALL the way to assembly; absent is Unavailable, never fallback.
 export interface TerminalIngressMeta {
   agentKey: string;
