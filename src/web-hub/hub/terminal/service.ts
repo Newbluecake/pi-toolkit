@@ -33,6 +33,7 @@ import { TerminalCreationTickets } from "./creation-ticket.js";
 import { TerminalRevocationFence, matches } from "./revocation-fence.js";
 import { TerminalSseBindings, type LiveTerminalBinding } from "./sse-binding.js";
 import { TerminalResourceFence } from "./resource-fence.js";
+import { TerminalCollectionQueue } from "./collection-queue.js";
 export const terminalId = () => randomBytes(24).toString("base64url");
 export type TerminalAgentTarget = {
   meta: TerminalIngressMeta;
@@ -197,6 +198,7 @@ export function createTerminalService(deps: TerminalServiceDeps) {
     string,
     { meta: TerminalIngressMeta; guard: () => void; resolve: (r: TermRes) => void; reject: (e: unknown) => void }
   >();
+  const collectionPublications = new TerminalCollectionQueue(now);
   const inventoryWaits = new Map<
     string,
     {
@@ -1262,7 +1264,17 @@ export function createTerminalService(deps: TerminalServiceDeps) {
         chain = chain
           .then(async () => {
             guard();
-            const status = await deps.resourceFence.page(target.meta, r.page, signal);
+            // Only complete snapshots mutate the shared single-writer journal.
+            // Other agents may finish physically while its fsync is pending: queue
+            // their exact flights, not a retry/new negotiation or a fresh deadline.
+            const publish = () => {
+              guard();
+              return deps.resourceFence.page(target.meta, r.page, signal);
+            };
+            const status =
+              r.page.phase === "end"
+                ? await collectionPublications.run(publish, Math.min(totalAt, challenge.deadlineAt), signal)
+                : await publish();
             if (status !== "accepted") throw new TerminalFault("E_RESOURCE_QUARANTINED", "unknown");
             if (r.page.phase === "end") resolve();
           })
