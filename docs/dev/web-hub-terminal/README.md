@@ -21,6 +21,70 @@
 | `inputIdleS`                  |    3600 | 300–86400 秒 |
 | `maxLifetimeS`                |   28800 | 900–86400 秒 |
 
+### #45：启动机器 policy 与逐目标资格
+
+终端不再由「拉起 hub 的那个会话是否合格 / launch config 是否有旧 `terminal` 键」决定。
+hub 在创建 assembly/admin/agent server/HTTP 之前，**一次性只读**其选定 agentDir 的
+`pi-toolkit.json`（新名优先、旧名只读 fallback；env agentDir 缺文件按既有继承规则）中的
+`webHub.terminal`。不迁移、不 heal、不加锁写文件。机器策略及全局上限冻结到这次 hub shutdown；
+从正确 agentDir 的 plain 会话 `/webhub restart` 才能改变。其他 agentDir 的声明不能改变当前机器策略。
+
+- 合法缺文件/缺 block/`enabled:false` 为 off；`enabled:false` 时无用坏 limits 不参与准入。
+  true off 的公共 wire/HTTP/SSE/DOM 不变，但 **新增启动 settings 读取本身不是零 I/O**。
+- 读失败、坏 JSON、非 regular/不安全路径/属主/权限、超限文件为固定 `settings-*` unavailable；
+  不继承到其他目录掩盖坏文件。enabled block 的非整数/越界/错误类型使**整块 unavailable**，不 clamp 或回落到更大默认。
+  秒键优先；合法旧 ms 必须是整秒；非法秒值不能 fallback 到旧 ms。此严格包装不同于 agent 的旧 tolerant parser。
+- 私有 bootstrap 环境只接受 `PI_WEBHUB_TERMINAL_SOURCE=plain|denied`。
+  launcher 从已冻结 domain 生成它，覆盖继承标记；plain→plain、secure/locked→denied。
+  缺失（含旧 launcher）、坏值为 unknown，**不从清洗后的 PI_SECURE 缺席推断 plain**。
+  denied/unknown 启动为 unavailable（`startup-domain-denied/unknown`），不会由后来合格目标自动解禁；
+  必须从 plain 会话及正确 agentDir 显式 `/webhub restart`。source 不明时不读取机器配置正文来猜 off。
+  该字段只是否决门，不授予任何会话或浏览器执行权；同 uid 恶意 producer 不在隔离承诺内。
+- legacy launch `config.terminal` 从新本地副本剥离；只有合法机器 policy + plain provenance 才可重新装配。
+  **旧键与机器 off 冲突时终端不再启用，这是声明式行为变化，不是旧 terminal-on 的 byte parity。**
+- 机器 `maxTotal/maxPerPrincipal` 是唯一全局 P；声明的同名值无论 1 还是 32 都不能放大或压低其他目标。
+  `maxPerSession/inputIdleMs/maxLifetimeMs` 取机器、目标有效声明、私有 ready 三者最小值；所有未知物理态继续占额。
+
+机器 enabled 时 service/fence/两个 browser cap 从启动到 shutdown 常驻，不随合格目标数变化。
+`terminal.ui.v1` + `terminal.session.v1` **均仅 browser HubInfo**，不进 hello_ack、不 bump PROTO。
+agent 的 optional `status.terminalSession` 是匹配当前 session/epoch 的闭合声明，不含 cwd/路径/秘密。
+新 hub 无声明即拒绝，不能主动探测旧 agent。正声明只是候选，实际 open 仍须完整本地 authority、独立
+/proc/namespace、真实本 boot 登录、原 SSE binding、privacy 与 quota 验证。
+
+原 status slot 永不保存正声明：每次实际 flush 先投影 XS，再重新核当前 owner readiness/authority、guard、
+session/epoch/link。异常回落为无声明原帧；重连第一张 status 不能 replay 旧资格。
+withdraw/detach/断线/epoch 变化先同步 deny；已建立的 exact resource flight 只能完成原 challenge 的物理证明，
+不得借此开新协商。A→零→B 使用同一 boot service/fence/SSE，无第二次激活或强制登录。
+
+### cwd：每次首次 open 捕获，已有 shell 不迁移
+
+生产 `wireWebHub` 提供 trusted `currentCwd()` 闭包；owner 在每个**首次 open 的同步 admission/CAS**
+读取当前事件 context 的 cwd，一次捕获给该 backend。同 creation ticket 重试不重读 cwd、不二次 fork。
+同会话 cwd 改变后，新 shell 用新 cwd，已打开 shell 保留原 PID/kernel cwd；`new/resume/fork` 的
+session_start 按既有 owner 边界清理旧 shell，再采用新 context，不承诺跨边界保活。
+空/相对/NUL/不存在/非目录/不可 traverse 的 cwd fail-closed，绝不回退 HOME、hub 或 agent process cwd；
+helper 在 exec gate 后仍真实 chdir，应对目录在预检后消失的竞争。失败依原 receipt/OS/durable 链结算，不能逻辑 close 就释放。
+保证的是 **exec 前的内核 cwd**；原生 login rc 仍可主动 cd，不禁 rc，也不在首 prompt 后注入 cd。
+cwd 仅存在于获授权 panel metadata，不加入声明、hub.json、audit、普通 list/state。
+
+### `/webhub status` 的 unknown 与重新登录
+
+本地 status 使用当前 activation settings + 同一个当次资格投影，不把 stored status 当实时声明。
+新 hub.json 的 `terminal.mode:"per-session"`、state/fixed reason/source scope/effective machine limits 是
+**经过 hub 身份校验的启动快照**，不是实时 browser ack、eligible count、physicalUsed 或当前用户登录证明。
+合法 off 省略 terminal 字段；旧记录/缺字段必须诚实显示 **unknown / off-or-legacy**，不能由版本号或 hello_ack
+猜 browser cap，更不能把本地 eligible 说成 hub 已开启。unknown 提示核对启动环境，不臆断 secure/旧版原因。
+任何 hub restart 都丢失本 boot fence 登录 proof；旧 cookie/SSE 重连不能补 proof，须真实重新登录。
+不复制 logins/bootNonce/grants/leases，也不用 authorize/touch/repair 冒充 loginComplete。
+
+### privacy=false + terminal=true：明确的旧 bug 修正
+
+内部 privacy store 始终先于 terminal/spawn 加载，并由 spawn 捕获同一实例；机器终端启用时 fork 要求
+healthy store。locked source 的 NEW sessionId **先持久化 mark，再 supervisor.start**；missing/degraded/
+unknown-health/查询异常/mark 写失败都不允许无锁 fork。公开 privacy cap/routes 仍只受 `privacy===true` 控制。
+旧实现会因内部 store 存在而错误暴露 public privacy routes；现在关闭这些意外 routes，
+**所以 privacy=false+terminal=true 路径不是字节不变**。不得把真正 machine-off + agent-off 合同套到此 terminal-on 修复路径。
+
 只有非空、实际用户输入更新 idle；输出、自动终端 response、attach、ACK、renew 不续命。硬寿命不可续期。
 
 首次 open 在 reservation 后创建全新 Python backend，并明确 await exec-ready；agent/protocol READY 不代表尚未创建的 backend 已就绪。capability probe、全局有界 proc scan、shell/exec 失败不能靠补一个测试前置 READY 消除。`E_BACKEND_CAPABILITY` 可能是暂态启动检查失败；UI 提示先从列表确认原请求再手动重试，绝不自动换票据重开 `effect:unknown` 的 shell。内部 body-free diagnostic 区分 capable/ready、probe/startup deadline、helper error/closing 等固定原因，不扩 HTTP/wire、不带环境/正文/路径。
@@ -37,9 +101,9 @@
 
 ## 不变式：off、装配、私有通道
 
-1. **Off ⇒ byte-identical**：无终端 owner/factory/service/maps/timers、journal/local state 读取/创建、cap/token/event；所有终端路径 404，旧 DOM/sprite/图标不变。不得刷新冻结 fixtures 掩盖变化。
+1. **真正 off ⇒ byte-identical**：plain 来源、机器合法 off、agent terminal off、无旧 launch terminal 时，无终端 owner/factory/service/maps/timers、journal/local state 读取/创建、cap/token/event；终端路径 404，旧 DOM/sprite/图标不变。启动 policy 的只读 settings 判读是明确 I/O 例外。machine off + agent on 仍可能由 agent 创建其本地 authority，不等同全 off。旧键冲突及 unavailable 必须分别验，不归一化成 off；冻结 fixtures 不重录。
 2. **唯一生命周期 owner 是既有 post-HOST_KEY `wireWebHub`**。不新增 pi tool/hook/command、Stack owner 或 teardown 步骤。`initSecureDomain()` 仍是 activate 第一语句。dispose/revoke 先于 connection detach；旧异步完成不得 adoption 到新会话。
-3. `terminal.ui.v1` **仅 browser HubInfo**，不进入 agent hello/hello_ack，不 bump PROTO。普通 bash 图标按 hub cap 一致切 jobs-list，目标不支持也不切回。旧 hub/off 保留原字节。
+3. `terminal.ui.v1` / `terminal.session.v1` **仅 browser HubInfo**，不进入 agent hello/hello_ack，不 bump PROTO。普通 bash 图标按 hub cap 一致切 jobs-list，目标不支持也不切回。旧 hub/off 保留原字节。
 4. 普通 cmd 只回无秘密 offer/固定拒绝，**没有敏感首次 cmd_result 例外**。先 dedicated prepare/challenge/ready CAS，才 mint/read/send 私有材料；interactive 另须 grant→bind，resource-only 只能库存/回收。旧 hub 不能诱导新 agent 发送秘密。
 5. **F1 前置隔离**：decoder→agent-server 在 registry/bus/SSE ring 之前消费保留命名空间、私有 cmd tombstone、未知/伪造/嵌套终端结构；服务缺席/抛错也绝不 fall through。普通旧帧不全局 sanitize。私有 correlation tombstone 留至 link 退休，offer 则在原截止清除能力值。
 6. 定向 `terminal_connection` / `terminal` 只向原实际 socket 发，不进普通 SSE_EVENTS、broadcast、replay ring、session/history/通知。enqueue 再核身份、expiry/fence、原 binding/attachment、socket pressure；撤销关闭原 SSE，使页面立即失效。
@@ -175,6 +239,9 @@ Ctrl-D 回归有意拉开 marker/prompt 窗口，仍核 exit code 与真实 reap
 
 ```sh
 # 先建上述私有环境并 build:web；下面两门独立，不能互相替代。
+# 指向已安装的隔离离线资产；脚本不运行 npx，不下载。
+export TPS_PLAYWRIGHT_MODULE=/tmp/webhub-terminal-p0-env-53xczH/home/.npm/_npx/6bcb61ec6d5aea22/node_modules/playwright/index.mjs
+export TPS_CHROMIUM=/tmp/webhub-terminal-p0-env-53xczH/browsers/chromium-1243/chrome-linux64/chrome
 export PLAYWRIGHT_BROWSERS_PATH=/tmp/webhub-terminal-p0-env-53xczH/browsers
 export npm_config_cache=/tmp/webhub-terminal-p0-env-53xczH/home/.npm
 export npm_config_offline=true
@@ -192,6 +259,37 @@ timeout 240s npm run probe:terminal-e2e
 七案例保留 normal/recovery、recovery失败、getContext null/throw、addon失败、negative、真实 --disable-webgl。六正例必须0 CSP违规/无可见DOM；negative 必须恰1 CSP违规+1 console error（证明捕获器有效），不混入正例统计。
 
 **Firefox：NOT RUN**（用户已接受本机 GTK3/NSS 限制，不升级系统）。Chromium结果不可外推。OS级中文 IME、移动键盘/真设备、系统剪贴板/完整拖放、preview/hold-stop/drawer 全键盘共存、8路真实持续PTY+慢renderer联合内存/公平压测仍须单独记录；没有执行不能写 PASS。
+
+## 混版与失败回滚（#45）
+
+O 精确为 `4e15fac15ee42293eac7c19943655537bd21b7c2` 完整组件，N 为当前实现；
+历史 `terminal-legacy/` 只证明 F1 ingress，不能冒充 O 真 PTY。隔离 harness 从本地对象 archive，
+记录 tar/source/package/lock/Node/SDK/工具链/adapter/UI manifest 与 artifact hash；旧 production 不 patch。
+先真实 O/O 后端登录/open/pwd/reap，再测各格。每个 UI 都经自身 manifest verifier，不伪造 build hash。
+
+| hub / agent / UI                | 明确合同与实际编码限界                                                                                                                  |
+| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| O/O/O，旧 config 有 terminal    | 真实原 #34；**O hub 有既有私帧 gzip 缺陷**，默认 gzip 浏览器连不上。identity 编码仅作为获批补充证明旧 PTY/UI 其余行为，不称 gzip PASS。 |
+| N/N/N、N/N/O                    | 合格声明目标可真实 open；N hub 必须在 gzip 下通过。O UI 仍可能在不合格目标画入口，server 必须拒绝。                                     |
+| O/N/O，旧 config 有 terminal    | N agent 保留 legacy launch config/原私有协议；O 忽略 optional 声明。O hub gzip 仍是旧缺陷，identity 补充可 open。                       |
+| O/N/N，旧 config 有 terminal    | N UI 缺 new cap 严格隐藏、零 terminal API；O hub gzip 先于 DOM 降级就失败，只有 identity 补充能观察严格隐藏。                           |
+| N/O/N、N/O/O                    | N hub 拒无声明旧 agent。N UI 隐藏零请求；O UI 点击得到固定 unsupported，零新 PTY。                                                      |
+| O/N/任意，旧 config 无 terminal | 无 cap/route404，不能动态启用；普通会话继续。无 terminal 私帧，O hub 此 off 格 gzip 正常。                                              |
+| N 由 O launcher 启动，缺 source | machine on 仍 startup-domain-unknown unavailable；plain 新 launcher 显式 restart 才恢复。                                               |
+| 机器/agent 真正 off             | raw hello/ack/session/status/HTTP/SSE 与锁定 O golden 比较，只归一化具名随机身份/时间/端口，绝不剥 features/caps/status。               |
+
+升级/回滚只在用户批准窗口执行，本项目验收不授权现场 restart。hub restart 是清理边界，不是 shell 保活；
+先停止新 open，真实 close→reaped→exact receipt/独立 OS→durable prune/ACK，确认 clean/drained 后才可回旧组件。
+隔离演练必须证明 O 真实读取 N 产生的相同 journal/witness、重新登录/open/reap；未 bump 格式不是充分证据。
+crash-dirty/unknown/poison 无法证明物理释放时不启动能重开的旧版，不删 journal/receipt/witness、不 reset、不自动换
+agentDir/忽略 marker/回退旧 config。graceful orphan receipt 若可被现有 fresh handoff 验真，仍须先完成真实结算；
+不能把缺 receipt 的实际 SIGKILL crash 当成可安全降级。回旧 hub 会失去新声明门，不能宣传保留新授权保证。
+
+#45 真实多 agent 集成另发现 O 既有的 inventory end 并发缺陷：全局 fence busy 会拒绝另一真实 end publication，
+receipt 已 reaped 仍留 unresolved。修复在 service 层用 FIFO 串行**原 exact end publication**；排队消耗原 deadline，
+轮到时重核原 producer/challenge/abort，active caller 取消不提前释放 writer，失败不毒化后继。没有重试、扩预算、
+修改 receipt/OS verifier 或放松两次 durable CAS。多 agent 连续 close 的最终门必须核 revision 至少 +2、rows=0、
+receipt ACK 删除及实际 PID gone，不能因 close200 就写 PASS。私帧 gzip 修复见上文唯一 encoder/FIFO 不变式。
 
 ## 残留风险
 

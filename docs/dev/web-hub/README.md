@@ -61,6 +61,29 @@ queue/held 镜像与空缓冲清扫）+ 路由层 `ctlCache`（`fleetCache` 同�
 终态不补 —— UI 侧已有自愈）。定向 send 不入 ring、无新 timer/模块态；同 tick 同步读保证补发不会
 旧于已收帧、也不会乱于后续实时帧。
 
+## 会话终端启动与兼容（#45）
+
+详见 [terminal README](../web-hub-terminal/README.md) 与 [验收矩阵](../web-hub-terminal/acceptance.md)。
+机器终端策略在 startHub assembly 前只读选定 agentDir 的 settings，启动冻结；不再由 launcher 自身终端设置/
+guard 或旧 config.terminal 的存在性启用。只有合法机器 enabled + 私有 source plain 才装配；secure/locked
+launcher 发 denied，旧 launcher 缺 marker/坏值为 unknown，固定 unavailable，需从正确 agentDir 的 plain 会话
+`/webhub restart`。不根据 PI_SECURE 缺席猜 plain，不动态启用。机器坏 enabled block 整块拒绝，不回落大默认。
+
+两个 browser-only cap 固定服务生命周期；逐目标 matching status.terminalSession 只是候选，本地 authority/
+/proc/真实登录/SSE/privacy/physical quota 仍是权威。raw slot 无正声明，write-time 重算；A→零→B 不重建 fence。
+本地 `/webhub status` 只读已核身份的启动 snapshot；缺 terminal 字段既可能 off 也可能旧版，诚实 unknown，
+不猜 browser cap/当前用户 proof/实时 quota。每次 hub restart 必须真实重新登录。
+首次 open 从当前会话 context 捕获 cwd，既有 shell 不迁移；无效 cwd fail-closed，不回退 HOME/hub/process；原 login rc 语义保留。
+
+privacy=false + terminal=true 仍先加载内部 store 并供 spawn fork 继承 mark，失败不许无锁 fork。
+**public privacy routes 必须 privacy===true**：修正旧版因内部 store 而误开启公开 routes 的 bug，此 terminal-on 路径
+不是 byte parity；只有真正 machine-off+agent-off 的公共 bytes 合同保持不变（新 policy 读取是 I/O 例外）。
+严格混版：N hub 拒无声明 O agent，N UI 缺 new cap 隐藏；N agent 保留对 O hub 的旧 launch config。
+精确 O=4e15fac1 有既有 terminal 私帧 gzip 缺陷，O-hub enabled 的 gzip 浏览器失败要记录为旧版已知缺陷，
+identity 编码只作明确补充，不能当默认混版 PASS。N hub 的 encoder 修复见本文 SSE 一节；另外修复了多 agent
+inventory end 同写全局 fence busy 导致 reaped receipt 不 drain，现用原 deadline 内的 exact-publication FIFO，不改物理 proof/CAS。
+回滚前须真实 reaped+prune+ACK 后 clean 状态并再次批准；dirty/poison 不删 journal/receipt/witness、不自动重开。
+
 ## Web resume (resume.v1)
 
 **Web resume
