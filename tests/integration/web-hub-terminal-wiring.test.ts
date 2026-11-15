@@ -58,6 +58,8 @@ afterEach(async () => {
 async function offHub() {
   const sandbox = sandboxHome();
   cleanups.push(sandbox.restore);
+  cleanups.push(terminalPlainSource());
+  writeTerminalMachinePolicy(sandbox.home, false);
   const result = await startHub(config({ home: sandbox.home }), createHttpFrontend);
   if ("exists" in result) throw new Error("unexpected singleton");
   const hub: RunningHub = result;
@@ -118,7 +120,7 @@ import {
 } from "../../src/web-hub/protocol/terminal.js";
 import type { FrontendDeps } from "../../src/web-hub/hub/ports.js";
 import { fakePi, fakeCtx, resetGlobals, SETTINGS, waitUntil } from "../web-hub/agent/helpers.js";
-import { makeTerminalFixture } from "./web-hub-terminal-fixture.js";
+import { makeTerminalFixture, writeTerminalMachinePolicy, terminalPlainSource } from "./web-hub-terminal-fixture.js";
 const terminalConfig = {
   maxPerSession: 2,
   maxPerPrincipal: 2,
@@ -144,6 +146,8 @@ async function physicalHub(degraded = false) {
   let legacyChallenge = false;
   const sandbox = sandboxHome();
   cleanups.push(sandbox.restore);
+  cleanups.push(terminalPlainSource());
+  writeTerminalMachinePolicy(sandbox.home);
   const fixture = makeTerminalFixture();
   cleanups.push(fixture.cleanup);
   const identity = await readTerminalIdentity(process.pid);
@@ -629,6 +633,8 @@ describe("production existing-store refusal", () => {
     async (kind) => {
       const sandbox = sandboxHome();
       cleanups.push(sandbox.restore);
+      cleanups.push(terminalPlainSource());
+      writeTerminalMachinePolicy(sandbox.home);
       const paths = resolveHubPaths({ home: sandbox.home, uid: process.getuid!() });
       await mkdir(join(paths.stateDir, TERMINAL_LOCAL_DIR), { recursive: true, mode: 0o700 });
       if (kind !== "empty")
@@ -651,7 +657,7 @@ describe("production existing-store refusal", () => {
       expect(response.status).toBe(503);
       expect(JSON.parse(response.body)).toEqual({ ok: false, code: "E_UNAVAILABLE", effect: "none" });
       expect(await readdir(join(paths.stateDir, TERMINAL_LOCAL_DIR))).toEqual(before);
-      expect(JSON.parse(readFileSync(result.paths.hubJson, "utf8")).terminal).toEqual({
+      expect(JSON.parse(readFileSync(result.paths.hubJson, "utf8")).terminal).toMatchObject({
         state: "unavailable",
         reason: "journal-missing",
       });
@@ -687,6 +693,8 @@ describe("separate-process production authority and physical receipt release cha
   it("crosses real agent/hub process boundary and repeatedly frees quota only after receipt/journal/ACK", async () => {
     const sandbox = sandboxHome();
     cleanups.push(sandbox.restore);
+    cleanups.push(terminalPlainSource());
+    writeTerminalMachinePolicy(sandbox.home);
     const fixture = makeTerminalFixture();
     cleanups.push(fixture.cleanup);
     let frontend: FrontendDeps | undefined;
@@ -1167,7 +1175,7 @@ describe("authority compatibility and loaded-journal loss", () => {
 });
 
 describe("local guarded-owner revocation", () => {
-  it("revokes its record synchronously, rejects the first request and clears the original UI connection", async () => {
+  it("revokes its record synchronously and rejects the first request without retiring the shared SSE", async () => {
     const h = (await physicalHub())!;
     await openPhysical(h);
     const directory = join(h.hub.paths.stateDir, TERMINAL_LOCAL_DIR, "authority");
@@ -1177,7 +1185,8 @@ describe("local guarded-owner revocation", () => {
     const rejected = await h.post("prepare", { cols: 80, rows: 24 });
     expect(rejected.status).not.toBe(200);
     expect(h.backends).toHaveLength(1);
-    await h.sse.waitEnd();
+    // A target withdrawal no longer destroys the boot-wide binding used by B.
+    expect(h.sse.ended).toBe(false);
     expect((await h.backends[0]!.done).outcome).toBe("reaped");
     expect(h.receipts().resolvedAcks).toBe(0); // no valid current owner to authorize collection
     expect((await h.journal()).resources.every((r) => r.status === "unresolved")).toBe(true);

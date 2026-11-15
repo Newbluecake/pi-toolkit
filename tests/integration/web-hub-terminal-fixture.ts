@@ -66,3 +66,22 @@ export function makeTerminalFixture(): { fixture: TerminalTestFixture; cleanup()
   assertTerminalFixture(f);
   return { fixture: f, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
+
+/** Startup-only policy in an owned test HOME. Not a launch-config override. */
+export function writeTerminalMachinePolicy(home: string, enabled = true, limits: object = {}): void {
+  const dir = join(home, ".pi", "agent");
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  writeFileSync(join(dir, "pi-toolkit.json"), JSON.stringify({ webHub: { terminal: { enabled, ...limits } } }), {
+    mode: 0o600,
+  });
+}
+
+/** Restore the private bootstrap marker, including its original absence. */
+export function terminalPlainSource(): () => void {
+  const before = process.env.PI_WEBHUB_TERMINAL_SOURCE;
+  process.env.PI_WEBHUB_TERMINAL_SOURCE = "plain";
+  return () => {
+    if (before === undefined) delete process.env.PI_WEBHUB_TERMINAL_SOURCE;
+    else process.env.PI_WEBHUB_TERMINAL_SOURCE = before;
+  };
+}
