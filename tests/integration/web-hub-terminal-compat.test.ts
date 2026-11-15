@@ -97,6 +97,7 @@ async function browserCase(
       ops: any[] = [],
       errors: string[] = [],
       expectedRejections: string[] = [],
+      rejectionCodes: string[] = [],
       network: any[] = [];
     page.on("requestfailed", (r: any) => network.push({ path: new URL(r.url()).pathname, failed: r.failure() }));
     page.on("response", (r: any) => {
@@ -117,8 +118,13 @@ async function browserCase(
     });
     page.on("pageerror", (e: any) => errors.push(e.message));
     page.on("response", (r: any) => {
-      if (new URL(r.url()).pathname.startsWith("/api/terminal/"))
-        ops.push({ path: new URL(r.url()).pathname, status: r.status() });
+      const path = new URL(r.url()).pathname;
+      if (path.startsWith("/api/terminal/")) ops.push({ path, status: r.status() });
+      if (path === "/api/terminal/list" && r.status() === 409)
+        void r.json().then(
+          (body: { code?: string }) => rejectionCodes.push(body.code ?? "missing-code"),
+          () => rejectionCodes.push("invalid-json"),
+        );
     });
     const token = readFileSync(h.paths.tokenFile, "utf8").trim();
     await page.goto(`${origin}/#t=${encodeURIComponent(token)}`);
@@ -175,7 +181,8 @@ async function browserCase(
         expect(existsSync(`/proc/${pid}/stat`)).toBe(false);
         expect(ops.filter((o) => o.path.endsWith("/open") && o.status === 200)).toHaveLength(1);
       } else {
-        await waitUntil(() => ops.some((o) => o.status !== 200), 10000, "old UI unsupported target rejection");
+        await waitUntil(() => rejectionCodes.length > 0, 10000, "old UI fixed unsupported target rejection");
+        expect(rejectionCodes).toEqual(["E_UNSUPPORTED"]);
         expect(ops.some((o) => o.path.endsWith("/open") && o.status === 200)).toBe(false);
       }
     } else {
@@ -245,7 +252,7 @@ describe.sequential("#45 locked real-component mixed-version matrix", () => {
         const b = await m.browser(h),
           p = await b.post(card, "prepare", { cols: 80, rows: 24 });
         expect(p.status).not.toBe(200);
-        expect(p.body).toMatchObject({ ok: false, effect: "none" });
+        expect(p.body).toMatchObject({ ok: false, code: "E_UNSUPPORTED", effect: "none" });
         expect(await count(a)).toBe(0);
       }
       if (cell.hub === "O") await browserCase(h, card, a, cell.shown, false, cell.label, "old-gzip-defect");
