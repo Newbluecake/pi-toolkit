@@ -508,3 +508,140 @@ it("canceling an active caller does not unlock the publication writer early", as
   expect(await second).toBe("published");
   expect(next).toHaveBeenCalledTimes(1);
 });
+
+// Direct queue tests intentionally omit the service's physical guard: that guard
+// must not mask a missing queue-owned recheck after the logical caller returns.
+describe("direct publication queue: expired waiters never execute (M1/d2)", () => {
+  it.each(["abort", "deadline"] as const)(
+    "%s while B waits: reject B before releasing A, then never invoke B's publication",
+    async (invalidation) => {
+      vi.useFakeTimers();
+      const queue = new TerminalCollectionQueue(Date.now);
+      const entered = deferred();
+      const held = deferred();
+      const a = queue.run(
+        () => {
+          entered.resolve();
+          return held.promise;
+        },
+        Date.now() + 10000,
+        new AbortController().signal,
+      );
+      await entered.promise;
+      const controller = new AbortController();
+      let mutations = 0;
+      const publishB = vi.fn(async () => {
+        mutations++;
+      });
+      const b = queue.run(publishB, Date.now() + 50, controller.signal);
+      const rejected = expect(b).rejects.toMatchObject({ code: "E_DEADLINE" });
+      if (invalidation === "abort") controller.abort();
+      else await vi.advanceTimersByTimeAsync(51);
+      await rejected; // B's caller is already gone, but A still owns the writer.
+      held.resolve();
+      await a;
+      await flush();
+      expect(publishB).not.toHaveBeenCalled();
+      expect(mutations).toBe(0);
+    },
+  );
+});
+
+describe("direct publication queue: a failed item cannot poison successors (M2/d3)", () => {
+  it.each(["rejected promise", "synchronous throw"] as const)(
+    "A fails by %s after its barrier: queued B and later C both publish once",
+    async (failure) => {
+      const queue = new TerminalCollectionQueue(Date.now);
+      const entered = deferred();
+      const held = deferred();
+      const error = new Error("publication A failed");
+      const failPublication = (): Promise<never> => {
+        if (failure === "synchronous throw") throw error;
+        return Promise.reject(error);
+      };
+      const a = queue.run(
+        () => {
+          entered.resolve();
+          return held.promise.then(failPublication);
+        },
+        Date.now() + 10000,
+        new AbortController().signal,
+      );
+      const rejected = expect(a).rejects.toBe(error);
+      await entered.promise;
+      const publishB = vi.fn(async () => "B published");
+      const b = queue.run(publishB, Date.now() + 10000, new AbortController().signal);
+      const bSucceeded = expect(b).resolves.toBe("B published");
+      held.resolve();
+      await rejected; // The original publication error, not a generic deadline.
+      await bSucceeded;
+      expect(publishB).toHaveBeenCalledTimes(1);
+      const publishC = vi.fn(async () => "C published");
+      await expect(queue.run(publishC, Date.now() + 10000, new AbortController().signal)).resolves.toBe("C published");
+      expect(publishC).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("a synchronous throw at publication entry also leaves queued B and later C usable", async () => {
+    const queue = new TerminalCollectionQueue(Date.now);
+    const entered = deferred();
+    const held = deferred();
+    const predecessor = queue.run(
+      () => {
+        entered.resolve();
+        return held.promise;
+      },
+      Date.now() + 10000,
+      new AbortController().signal,
+    );
+    await entered.promise;
+    const error = new Error("synchronous publication A failure");
+    const publishA = vi.fn((): Promise<never> => {
+      throw error;
+    });
+    const a = queue.run(publishA, Date.now() + 10000, new AbortController().signal);
+    const rejected = expect(a).rejects.toBe(error);
+    const publishB = vi.fn(async () => "B published");
+    const b = queue.run(publishB, Date.now() + 10000, new AbortController().signal);
+    const bSucceeded = expect(b).resolves.toBe("B published");
+    held.resolve();
+    await predecessor;
+    await rejected;
+    expect(publishA).toHaveBeenCalledTimes(1);
+    await bSucceeded;
+    expect(publishB).toHaveBeenCalledTimes(1);
+    const publishC = vi.fn(async () => "C published");
+    await expect(queue.run(publishC, Date.now() + 10000, new AbortController().signal)).resolves.toBe("C published");
+    expect(publishC).toHaveBeenCalledTimes(1);
+  });
+
+  it("an aborted middle waiter B rejects before A ends, but cannot poison queued C", async () => {
+    const queue = new TerminalCollectionQueue(Date.now);
+    const entered = deferred();
+    const held = deferred();
+    const a = queue.run(
+      () => {
+        entered.resolve();
+        return held.promise;
+      },
+      Date.now() + 10000,
+      new AbortController().signal,
+    );
+    await entered.promise;
+    const controller = new AbortController();
+    const publishB = vi.fn(async () => "B must not publish");
+    const b = queue.run(publishB, Date.now() + 5000, controller.signal);
+    const rejected = expect(b).rejects.toMatchObject({ code: "E_DEADLINE" });
+    controller.abort();
+    await rejected;
+    const publishC = vi.fn(async () => "C published");
+    const c = queue.run(publishC, Date.now() + 10000, new AbortController().signal);
+    const cSucceeded = expect(c).resolves.toBe("C published");
+    expect(publishC).not.toHaveBeenCalled();
+    held.resolve();
+    await a;
+    await cSucceeded;
+    expect(publishB).not.toHaveBeenCalled();
+    expect(publishC).toHaveBeenCalledTimes(1);
+  });
+});
