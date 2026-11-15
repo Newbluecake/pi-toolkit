@@ -1225,10 +1225,21 @@ export function createTerminalService(deps: TerminalServiceDeps) {
     if (inventoryWaits.size >= L.unresolvedResources || resourceChannels.size >= L.unresolvedResources)
       throw new TerminalFault("E_LIMIT");
     const totalAt = now() + L.httpMs;
-    const s = await negotiate(id, b, target, "resource-only", signal, guard),
+    // Discovery/negotiation is NEW authority work, even for resource-only mode.
+    // A reply may already be resolved/deleted when withdrawal runs, so cancelLink
+    // cannot replace these continuation checks. Only an established exact flight
+    // below may subsequently finish using the original producer's physical guard.
+    const negotiationGuard = () => {
+      guard();
+      if (!authorized(target)) throw new TerminalFault("E_SESSION_CHANGED");
+    };
+    negotiationGuard();
+    const s = await negotiate(id, b, target, "resource-only", signal, negotiationGuard),
       rid = terminalId();
+    negotiationGuard();
     if (inventoryWaits.size >= L.unresolvedResources || resourceChannels.size >= L.unresolvedResources)
       throw new TerminalFault("E_LIMIT");
+    negotiationGuard();
     const challenge = deps.resourceFence.begin(target.meta, s.owner.ownerInstance, target.processIdentity);
     const expiry = clock.setTimer(clampSpanMs(challenge.deadlineAt - now()), () =>
       resourceChannels.delete(challenge.challengeId),
@@ -1259,7 +1270,9 @@ export function createTerminalService(deps: TerminalServiceDeps) {
       },
     });
     try {
-      guard();
+      // Dispatch is still the first request on this newly minted challenge. No
+      // withdrawal may cross this boundary and send a fresh inventory request.
+      negotiationGuard();
       if (
         !deps.send(target.meta, {
           t: "term_req",

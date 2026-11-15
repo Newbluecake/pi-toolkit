@@ -1,25 +1,34 @@
 /** Hub unit seam: production authority file/proc verifier and service; dedicated
  * wire peer is deterministic, NOT a PTY/receipt/HTTP integration substitute. */
-import { afterEach, describe, expect, it } from "vitest";
-import { chmodSync, writeFileSync } from "node:fs";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { chmodSync, readFileSync, writeFileSync } from "node:fs";
 import {
   createLocalAuthority,
   localProcess,
   processNamespaces,
   localRecordPath,
+  writePhysicalReceipt,
+  verifyLocalReceipt,
 } from "../../../../src/web-hub/protocol/terminal-local.js";
 import type { TerminalSession } from "../../../../src/web-hub/protocol/terminal-session.js";
 import {
   terminalFrameOk,
-  type TermRes,
+  TERMINAL_JOURNAL_FILE,
   type TerminalHubConfig,
   type TerminalHttpRequests,
+  type TerminalResourceEntry,
+  type TerminalLocalReference,
 } from "../../../../src/web-hub/protocol/terminal.js";
 import type { HubFrame } from "../../../../src/web-hub/protocol/messages.js";
 import type { TerminalAgentLink } from "../../../../src/web-hub/hub/agent-server.js";
 import { createTerminalLocalAuthority } from "../../../../src/web-hub/hub/terminal/local-authority.js";
 import { createTerminalService } from "../../../../src/web-hub/hub/terminal/service.js";
-import { TerminalResourceFence } from "../../../../src/web-hub/hub/terminal/resource-fence.js";
+import {
+  TerminalResourceFence,
+  createLocalTerminalProofVerifier,
+  inventoryDigest,
+} from "../../../../src/web-hub/hub/terminal/resource-fence.js";
+import { createTerminalResourceJournal } from "../../../../src/web-hub/hub/terminal/resource-fence-journal.js";
 import type { LiveTerminalBinding } from "../../../../src/web-hub/hub/terminal/sse-binding.js";
 import type { AuthIdentity } from "../../../../src/web-hub/hub/auth-identity.js";
 import { tmpDirs } from "../helpers.js";
@@ -69,28 +78,52 @@ async function harness() {
   let readyLimits = { ...machine, maxTotal: 1, maxPerPrincipal: 1, maxPerSession: 2, maxLifetimeMs: 1800000 };
   let beforeBind: (() => void) | undefined;
   const sent: HubFrame[] = [];
+  const fork = vi.fn(); // mock-peer fork boundary; no real PTY is created in this unit harness
+  let resourceOnly = false;
+  let inventoryEvidence: { entry: TerminalResourceEntry; receipt: TerminalLocalReference } | undefined;
+  let afterResponse: ((frame: HubFrame) => void) | undefined;
+  let hold: { matches(frame: HubFrame): boolean; reached(): void; release?: () => void } | undefined;
   let local: ReturnType<typeof createTerminalLocalAuthority>;
   let service: ReturnType<typeof createTerminalService>;
   const deliver = (r: unknown) => {
     if (!local.consumes(meta, r)) service.ingress.consumeAgentFrame(meta, r);
   };
+  const respond = (frame: HubFrame, responses: unknown[]) => {
+    const dispatch = () => {
+      for (const response of responses) {
+        if ((response as { t?: string }).t === "term_res")
+          expect(terminalFrameOk(response), JSON.stringify(response)).toBe(true);
+        deliver(response);
+      }
+      afterResponse?.(frame); // deliberately AFTER ingress.resolve, BEFORE the await continuation
+    };
+    if (hold?.matches(frame)) {
+      const pending = hold;
+      hold = undefined;
+      pending.release = dispatch;
+      pending.reached();
+    } else dispatch();
+  };
   const send = (frame: HubFrame) => {
     sent.push(frame);
     queueMicrotask(() => {
       if (frame.t === "cmd") {
-        deliver({
-          t: "cmd_result",
-          rid: frame.rid,
-          id: frame.id,
-          ok: true,
-          data: {
-            op: "command",
-            kind: "builtin",
-            completion: "sync",
-            history: "none",
-            terminal: { v: 1, outcome: "handshake-required", offerId: "offer" },
+        resourceOnly = frame.cmd.op === "command" && (frame.cmd.args ?? "").includes("resource_inventory");
+        respond(frame, [
+          {
+            t: "cmd_result",
+            rid: frame.rid,
+            id: frame.id,
+            ok: true,
+            data: {
+              op: "command",
+              kind: "builtin",
+              completion: "sync",
+              history: "none",
+              terminal: { v: 1, outcome: "handshake-required", offerId: "offer" },
+            },
           },
-        });
+        ]);
         return;
       }
       if (frame.t !== "term_req") return;
@@ -121,16 +154,21 @@ async function harness() {
           offerId: frame.offerId,
           hubNonce: frame.hubNonce,
           agentChallenge: frame.agentChallenge,
-          mode: "interactive",
-          grant: "grant",
-          expiresAt: 50000,
-          backend: "linux-pty-v1",
-          limits: readyLimits,
+          ...(resourceOnly
+            ? { mode: "resource-only", channelId: "resource-channel" }
+            : {
+                mode: "interactive",
+                grant: "grant",
+                expiresAt: 50000,
+                backend: "linux-pty-v1",
+                limits: readyLimits,
+              }),
         };
       else if (frame.op === "bind") {
         beforeBind?.();
         response = { ...base, op: "bind", channelId: frame.proposedChannelId, bound: true };
-      } else if (frame.op === "open")
+      } else if (frame.op === "open") {
+        fork();
         response = {
           ...base,
           op: "open",
@@ -147,9 +185,59 @@ async function harness() {
           deadlines: { inputIdleAt: 999999, lifetimeAt: 999999, parentExpiresAt: 999999 },
           replayMode: "cold",
         };
-      else return;
-      expect(terminalFrameOk(response), JSON.stringify(response)).toBe(true);
-      deliver(response as TermRes);
+      } else if (frame.op === "inventory") {
+        const { hubBootId, challengeId, linkGen } = frame.challenge;
+        const scope = { hubBootId, challengeId, linkGen, inventoryId: "inventory", revision: 1 };
+        const entries = inventoryEvidence ? [inventoryEvidence.entry] : [];
+        const digest = inventoryDigest(entries);
+        const proofs = inventoryEvidence
+          ? [
+              {
+                ...scope,
+                identity: inventoryEvidence.entry.identity,
+                agentProcessIdentity: inventoryEvidence.entry.agentProcessIdentity,
+                proofId: "proof",
+                receipt: inventoryEvidence.receipt,
+                spawnSettled: true,
+                ptyClosed: true,
+                helperReaped: true,
+                managedGroupsGone: true,
+                identitiesChecked: [],
+                outcome: "reaped",
+              },
+            ]
+          : [];
+        const page = (data: object) => ({
+          ...base,
+          op: "inventory",
+          channelId: frame.channelId,
+          page: { ...scope, ...data },
+        });
+        respond(frame, [
+          page({
+            phase: "begin",
+            sender: {
+              agentSessionId: meta.sessionId,
+              epoch: meta.epoch,
+              ownerInstance,
+              processIdentity: localProcess(process.pid),
+            },
+            totalCount: entries.length,
+            chunkCount: entries.length ? 1 : 0,
+            digest,
+          }),
+          ...(entries.length ? [page({ phase: "chunk", chunkIndex: 0, entries, proofs })] : []),
+          page({
+            phase: "end",
+            chunkCount: entries.length ? 1 : 0,
+            totalCount: entries.length,
+            digest,
+            complete: true,
+          }),
+        ]);
+        return;
+      } else return;
+      respond(frame, [response]);
     });
     return true;
   };
@@ -169,11 +257,10 @@ async function harness() {
   disposes.push(() => local.dispose());
   const fence = new TerminalResourceFence({
     now: () => 1000,
-    journal: {
-      load: async () => ({ kind: "loaded", journal: { v: 1, revision: 0, resources: [] } }),
-      commit: async () => "committed",
-    },
-    verifyProof: async () => false,
+    journal: createTerminalResourceJournal({ stateDir: authority.store.root, now: () => 1000 }),
+    verifyProof: createLocalTerminalProofVerifier({
+      receipt: (proof, entry) => verifyLocalReceipt(authority.store, proof, entry),
+    }),
   });
   await fence.initialize(new AbortController().signal);
   service = createTerminalService({
@@ -228,6 +315,56 @@ async function harness() {
   return {
     local,
     authority,
+    fence,
+    fork,
+    collect() {
+      const target = local.target(meta.agentKey);
+      if (!target) throw new Error("fixture target unavailable");
+      return service.collect(identity, binding, target, new AbortController().signal);
+    },
+    afterResponse(fn: (frame: HubFrame) => void) {
+      afterResponse = fn;
+    },
+    holdResponse(op: "offer" | "authority" | "inventory") {
+      let reached!: () => void;
+      const pending = {
+        matches: (frame: HubFrame) => (op === "offer" ? frame.t === "cmd" : frame.t === "term_req" && frame.op === op),
+        reached: () => reached(),
+        release: undefined as (() => void) | undefined,
+      };
+      const arrived = new Promise<void>((resolve) => {
+        reached = resolve;
+      });
+      hold = pending;
+      return {
+        arrived,
+        release() {
+          if (!pending.release) throw new Error("response has not arrived");
+          pending.release();
+        },
+      };
+    },
+    async publishReapedReceipt(entry: TerminalResourceEntry) {
+      const receipt = await writePhysicalReceipt(
+        {
+          store: authority.store,
+          ownerRecordId: authority.recordId,
+          identity: entry.identity,
+          agentProcessIdentity: entry.agentProcessIdentity,
+        },
+        {
+          outcome: "reaped",
+          spawnSettled: true,
+          ptyClosed: true,
+          helperReaped: true,
+          managedGroupsGone: true,
+          identitiesChecked: [],
+          waited: [],
+        },
+      );
+      inventoryEvidence = { entry: { ...structuredClone(entry), spawnState: "settled", state: "closing" }, receipt };
+      return receipt;
+    },
     meta,
     service,
     binding,
@@ -344,4 +481,118 @@ it("authority unlink revokes interactive admission but an original exact resourc
   await expect(h.prepare()).rejects.toMatchObject({ code: "E_UNAVAILABLE" });
   h.setLive(false);
   expect(h.local.resourceCurrent(h.meta)).toBe(false);
+});
+
+describe("resource discovery cannot cross a declaration withdrawal continuation", () => {
+  it.each(["offer", "prepare_protocol", "protocol_ready"] as const)(
+    "withdraw AFTER resolved %s reply: no new negotiation/challenge/inventory",
+    async (window) => {
+      const h = await harness();
+      await h.local.ensure("agent", new AbortController().signal);
+      const begin = vi.spyOn(h.fence, "begin");
+      let withdrawnAt = -1;
+      h.afterResponse((frame) => {
+        if (withdrawnAt >= 0) return;
+        if (window === "offer" ? frame.t === "cmd" : frame.t === "term_req" && frame.op === window) {
+          withdrawnAt = h.sent.length;
+          h.setClaim(undefined);
+        }
+      });
+      await h.collect();
+      expect(withdrawnAt).toBeGreaterThan(0);
+      expect(begin).not.toHaveBeenCalled();
+      expect(
+        h.sent
+          .slice(withdrawnAt)
+          .filter(
+            (frame) => frame.t === "term_req" && ["prepare_protocol", "protocol_ready", "inventory"].includes(frame.op),
+          ),
+      ).toEqual([]);
+      expect(h.fork).not.toHaveBeenCalled();
+    },
+  );
+
+  it("an established exact challenge still resolves a real receipt and durable CAS after withdrawal", async () => {
+    const h = await harness();
+    const prepared = await h.prepare();
+    await h.request("open", {
+      ...h.base,
+      cols: 80,
+      rows: 24,
+      openId: prepared.openId,
+      createTicket: prepared.createTicket,
+    });
+    const entry = h.fence.records().resources[0]!.entry;
+    // The unit peer never forked OS children: its settled physical set is genuinely
+    // empty. This still uses a real owned receipt, production /proc verifier and
+    // durable journal, not verifyProof=true or a close ACK as a release substitute.
+    await h.publishReapedReceipt(entry);
+    const hold = h.holdResponse("inventory");
+    const collecting = h.collect();
+    await hold.arrived;
+    const inventory = h.sent.filter((f) => f.t === "term_req" && f.op === "inventory");
+    expect(inventory).toHaveLength(1);
+    const before = h.fence.records().revision;
+    expect(h.service.limits.physicalUsed).toBe(1);
+    h.setClaim(undefined);
+    h.authority.revoke();
+    expect(h.local.target("agent")).toBeUndefined();
+    expect(h.local.resourceCurrent(h.meta)).toBe(true);
+    expect(h.service.limits.physicalUsed).toBe(1); // withdrawal/close is NOT release
+    hold.release();
+    await collecting;
+    expect(h.fence.records().revision).toBeGreaterThanOrEqual(before + 2);
+    expect(h.fence.records().resources).toEqual([]);
+    expect(h.service.limits.physicalUsed).toBe(0);
+    const onDisk = JSON.parse(readFileSync(`${h.authority.store.root}/${TERMINAL_JOURNAL_FILE}`, "utf8"));
+    expect(onDisk.resources).toEqual([]);
+    const acks = h.sent.filter((frame) => frame.t === "term_req" && frame.op === "resolved_ack");
+    expect(acks).toHaveLength(1);
+    if (acks[0]?.t !== "term_req" || acks[0].op !== "resolved_ack") throw new Error("exact ACK missing");
+    expect(acks[0].resolved.identities).toEqual([entry.identity]);
+    if (inventory[0]?.t !== "term_req" || inventory[0].op !== "inventory") throw new Error("inventory missing");
+    expect(acks[0].resolved.challengeId).toBe(inventory[0].challenge.challengeId);
+    expect(h.sent.filter((frame) => frame.t === "term_req" && frame.op === "inventory")).toHaveLength(1);
+  });
+});
+
+describe("real authority discovery captures declaration generation, not merely valid identity", () => {
+  for (const window of ["offer", "authority"] as const)
+    it.each(["version-only", "valid-limit-and-version"] as const)(
+      `${window} response held: %s invalidates the old discovery`,
+      async (change) => {
+        const h = await harness();
+        const held = h.holdResponse(window);
+        const preparing = h.prepare();
+        const rejected = expect(preparing).rejects.toMatchObject({ code: "E_SESSION_CHANGED" });
+        await held.arrived;
+        const meta = { ...h.meta };
+        const claim = h.getClaim();
+        const next = structuredClone(claim);
+        if (change === "valid-limit-and-version") next.limits.maxPerSession = 2;
+        const before = h.sent.length;
+        h.setClaim(next); // session/epoch/link unchanged; declaration is STILL valid
+        expect(h.meta).toEqual(meta);
+        held.release();
+        await rejected;
+        expect(
+          h.sent
+            .slice(before)
+            .filter((frame) => frame.t === "term_req" && ["protocol_ready", "bind", "open"].includes(frame.op)),
+        ).toEqual([]);
+        expect(h.fork).not.toHaveBeenCalled();
+        expect(h.service.tickets.size()).toBe(0);
+        expect(h.local.target("agent")).toBeUndefined();
+        const discoveries = () =>
+          h.sent.filter(
+            (frame) =>
+              frame.t === "cmd" && frame.cmd.op === "command" && (frame.cmd.args ?? "").includes("resource_inventory"),
+          );
+        expect(discoveries()).toHaveLength(1);
+        expect((await h.prepare()).ok).toBe(true);
+        expect(discoveries()).toHaveLength(2); // genuinely fresh offer/proof chain
+        expect(h.local.target("agent")).toMatchObject({ allowed: true, limits: next.limits });
+        expect(h.fork).not.toHaveBeenCalled();
+      },
+    );
 });
