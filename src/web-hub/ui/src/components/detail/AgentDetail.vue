@@ -78,6 +78,7 @@ import { useActivityRail } from "../../composables/useActivityRail.js";
 import type { FleetRowWire } from "@protocol/messages.js";
 import FleetDrawer, { useFleetDrawerMode, useFleetDrawerOpen } from "../drawer/FleetDrawer.vue";
 
+import { terminalSessionSupported, terminalSessionUiEnabled } from "../../logic/terminalCapability.js";
 import { TERMINAL_ENTRY } from "../../logic/terminalContext.js";
 
 const RETRY_NOTICE_ID = "history-error";
@@ -171,20 +172,16 @@ const terminalPrivacyAllowed = computed(() => {
   const sid = (props.agent.session as { sessionId?: unknown } | undefined)?.sessionId;
   return !hubCaps.value.includes("privacy.v1") || (!!p && p.ready && typeof sid === "string" && !p.locked.has(sid));
 });
+const terminalDeclared = ref(false);
 const terminalAvailable = computed(
-  () =>
-    terminalPrivacyAllowed.value &&
-    hubCaps.value.includes("terminal.ui.v1") &&
-    agentLive.value &&
-    controlEnabled.value &&
-    typeof (props.agent.session as { sessionId?: unknown } | undefined)?.sessionId === "string" &&
-    typeof (props.agent.card as { epoch?: unknown }).epoch === "string",
+  () => terminalDeclared.value && hubLive.value && terminalPrivacyAllowed.value && controlEnabled.value,
 );
 const terminalOpen = ref(false);
 const terminalMain = ref<HTMLElement | null>(null);
 const terminalAppContext = getCurrentInstance()?.appContext;
 let terminalHost: HTMLDivElement | undefined;
 let terminalLoadGeneration = 0;
+let terminalEligibilityGeneration = 0;
 function unmountTerminal() {
   if (terminalHost) {
     render(null, terminalHost);
@@ -196,6 +193,8 @@ provide(TERMINAL_ENTRY, {
   available: terminalAvailable,
   open: terminalOpen,
   show() {
+    if (!terminalAvailable.value) return;
+    terminalLoadError.value = "";
     terminalOpen.value = true;
   },
 });
@@ -206,6 +205,41 @@ const terminalScope = computed(() => ({
     epoch: String((props.agent.card as { epoch?: unknown }).epoch ?? ""),
   },
 }));
+// Stable across ordinary status ticks, but sensitive to every declaration field (including
+// limits/unknown fields). Malformed/cyclic input is still passed to the frozen closed parser.
+const terminalDeclarationRevision = computed(() => {
+  try {
+    return JSON.stringify((props.agent.status as { terminalSession?: unknown } | undefined)?.terminalSession) ?? "";
+  } catch {
+    return "invalid";
+  }
+});
+watch(
+  [
+    () => terminalSessionSupported(hub?.state.value.hub),
+    () => props.agent.key,
+    () => (props.agent.session as { sessionId?: unknown } | undefined)?.sessionId,
+    () => (props.agent.card as { epoch?: unknown }).epoch,
+    terminalDeclarationRevision,
+    hubLive,
+    terminalPrivacyAllowed,
+    controlEnabled,
+  ],
+  async () => {
+    const mine = ++terminalEligibilityGeneration;
+    // Synchronous invalidation precedes both lazy imports and all late HTTP continuations.
+    // A withdraw/route/epoch boundary never automatically opens a successor shell/panel.
+    terminalDeclared.value = false;
+    terminalLoadGeneration++;
+    terminalOpen.value = false;
+    terminalLoadError.value = "";
+    unmountTerminal();
+    if (!hubLive.value || !terminalPrivacyAllowed.value || !controlEnabled.value) return;
+    const enabled = await terminalSessionUiEnabled(hub?.state.value.hub, props.agent);
+    if (mine === terminalEligibilityGeneration) terminalDeclared.value = enabled;
+  },
+  { immediate: true, flush: "sync" },
+);
 watch(
   [terminalAvailable, terminalOpen, () => JSON.stringify(terminalScope.value)],
   async ([available, open]) => {
@@ -214,7 +248,7 @@ watch(
     unmountTerminal();
     if (!available || !open) return;
     if (!hub?.terminal) {
-      terminalLoadError.value = "终端连接不可用，请重新登录。";
+      terminalLoadError.value = t("detail.terminalConnectionUnavailable");
       terminalOpen.value = false;
       return;
     }
@@ -223,10 +257,10 @@ watch(
       const module = await Promise.race([
         import("../terminal/terminal-feature.js"),
         new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new Error("终端组件加载超时，请重试。")), 5000);
+          timer = setTimeout(() => reject(new Error(t("detail.terminalLoadTimeout"))), 5000);
         }),
       ]);
-      if (mine !== terminalLoadGeneration || !terminalMain.value) return;
+      if (mine !== terminalLoadGeneration || !terminalAvailable.value || !terminalMain.value) return;
       terminalHost = document.createElement("div");
       terminalHost.className = "terminal-panel-host";
       terminalMain.value.insertBefore(terminalHost, terminalMain.value.querySelector(".dock"));
@@ -252,6 +286,7 @@ watch(
   { flush: "post" },
 );
 onBeforeUnmount(() => {
+  terminalEligibilityGeneration++;
   terminalLoadGeneration++;
   unmountTerminal();
 });

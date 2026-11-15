@@ -6,6 +6,9 @@ import en from "../en/detail.js";
 type Messages<T> = { [K in keyof T]: string };
 
 const detail = {
+  terminalConnectionUnavailable:
+    "终端连接不可用。请在本次 hub 启动后重新登录；若仍不可用，请在本地查看 /webhub status。不会自动新建 shell。",
+  terminalLoadTimeout: "终端组件加载超时，请重试打开面板；不会自动新建 shell。",
   selectAgentTitle: "选择一个会话",
   selectAgentBody: "在左侧选择一个会话，查看它的对话、工具调用与子代理。",
   notConnectedTitle: "该会话未连接",

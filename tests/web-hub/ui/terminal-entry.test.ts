@@ -20,7 +20,16 @@ function agent(): AgentState {
     key: "agent",
     card: { control: true, epoch: "epoch", kind: "tui", state: "live" },
     session: { sessionId: "session", name: "Test", mode: "tui" },
-    status: { busy: false },
+    status: {
+      busy: false,
+      terminalSession: {
+        v: 1,
+        enabled: true,
+        sessionId: "session",
+        epoch: "epoch",
+        limits: { maxPerSession: 2, maxPerPrincipal: 2, maxTotal: 8, inputIdleMs: 3600000, maxLifetimeMs: 28800000 },
+      },
+    },
     down: false,
     prompts: [],
     fleet: [],
@@ -91,7 +100,10 @@ describe("terminal capability gates and off parity (§7.1/§7.2)", () => {
     state.value = { ...state.value, hub: { caps: ["terminal.ui.v1"] } };
     await nextTick();
     await nextTick();
-    expect(w.find('[data-fold="terminal"]').exists()).toBe(true);
+    expect(w.find('[data-fold="terminal"]').exists()).toBe(false);
+    state.value = { ...state.value, hub: { caps: ["terminal.ui.v1", "terminal.session.v1"] } };
+    await flushPromises();
+    await vi.waitFor(() => expect(w.find('[data-fold="terminal"]').exists()).toBe(true));
     expect(request).not.toHaveBeenCalled();
     await w.setProps({ agent: { ...a, session: undefined } as any });
     expect(w.find('[data-fold="terminal"]').exists()).toBe(false);
@@ -100,7 +112,7 @@ describe("terminal capability gates and off parity (§7.1/§7.2)", () => {
     const state = ref<any>({
       control: true,
       conn: "open",
-      hub: { caps: ["terminal.ui.v1", "privacy.v1"] },
+      hub: { caps: ["terminal.ui.v1", "terminal.session.v1", "privacy.v1"] },
       privacy: { cap: true, ready: false, locked: new Set() },
     });
     const w = mount(AgentDetail, {
@@ -117,9 +129,8 @@ describe("terminal capability gates and off parity (§7.1/§7.2)", () => {
     await nextTick();
     expect(w.find('[data-fold="terminal"]').exists()).toBe(false);
     state.value = { ...state.value, privacy: { cap: true, ready: true, locked: new Set() } };
-    await nextTick();
-    await nextTick();
-    expect(w.find('[data-fold="terminal"]').exists()).toBe(true);
+    await flushPromises();
+    await vi.waitFor(() => expect(w.find('[data-fold="terminal"]').exists()).toBe(true));
   });
   it("switches bash semantics by hub cap only, not the agent backend outcome, and returns to exactly old markup off", async () => {
     const state = ref<any>({ hub: { caps: [] } });
