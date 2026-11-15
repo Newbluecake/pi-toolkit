@@ -1,4 +1,5 @@
 import {
+  chmodSync,
   linkSync,
   lstatSync,
   mkdirSync,
@@ -194,6 +195,45 @@ describe("declared differences: unsafe states are unavailable, NEVER absent/inhe
       reason: "settings-io",
       code,
     });
+  });
+  // Root bypasses directory permission bits, so it cannot exercise real EACCES here.
+  it.skipIf(process.getuid?.() === 0)("real inaccessible ancestor fails closed instead of inheriting HOME", () => {
+    file(home, NEW);
+    const parent = join(root, "blocked");
+    mkdirSync(parent);
+    dir = join(parent, "child");
+    mkdirSync(dir);
+    expect(resolveSettingsFile(home)).toMatchObject({ kind: "new", path: join(home, NEW) });
+    try {
+      chmodSync(parent, 0o000);
+      expect(() => lstatSync(dir)).toThrow(expect.objectContaining({ code: "EACCES" }));
+      expect(resolveSettingsFile(dir)).toMatchObject({ kind: "unavailable", reason: "settings-io", code: "EACCES" });
+      expect(resolveSettingsLocation(agent())).toMatchObject({
+        kind: "unavailable",
+        scope: "agentDir",
+        reason: "settings-io",
+        code: "EACCES",
+      });
+    } finally {
+      chmodSync(parent, 0o700);
+    }
+  });
+  it.each([NEW, OLD])("selects a mode-000 regular file by metadata: %s", (name) => {
+    file(dir, name);
+    file(home, NEW);
+    const path = join(dir, name);
+    try {
+      chmodSync(path, 0o000);
+      // lstat needs directory traversal, not permission to read the file body.
+      expect(resolveSettingsFile(dir)).toMatchObject({ kind: name === NEW ? "new" : "legacy", path });
+      expect(resolveSettingsLocation(agent())).toMatchObject({
+        kind: name === NEW ? "new" : "legacy",
+        scope: "agentDir",
+        path,
+      });
+    } finally {
+      chmodSync(path, 0o600);
+    }
   });
   it("directory-level EACCES is not a missing directory (deterministic even as root)", () => {
     file(home, NEW);
