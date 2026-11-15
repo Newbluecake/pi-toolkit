@@ -76,6 +76,7 @@ describe("resolveJevWiring", () => {
       maxCalls: 10,
       fastPath: { allowTags: ["testing", "ci"], denyTags: ["git-push"], cooldownMs: 12 * 3_600_000 },
       predict: {
+        diagnostics: false,
         enabled: s.jev.predict.enabled,
         childSessions: s.jev.predict.childSessions,
         maxEntries: s.jev.predict.maxEntries,
@@ -141,5 +142,18 @@ describe("background queue limit", () => {
     expect(parseMemorySettings({ jev: { backgroundQueueLimit: 7 } }).jev.backgroundQueueLimit).toBe(7);
     expect(parseMemorySettings({ jev: { backgroundQueueLimit: 0 } }).jev.backgroundQueueLimit).toBe(32);
     expect(parseMemorySettings({ jev: { backgroundQueueLimit: 9999 } }).jev.backgroundQueueLimit).toBe(32);
+  });
+});
+
+describe("P selection diagnostics settings", () => {
+  test("default off, boolean-only parsing, config mapping, and secure/locked refusal", () => {
+    expect(DEFAULT_MEMORY_SETTINGS.jev.predict.diagnostics).toBe(false);
+    for (const value of [undefined, null, "true", 1, {}, []]) {
+      expect(parseMemorySettings({ jev: { predict: { diagnostics: value } } }).jev.predict.diagnostics).toBe(false);
+    }
+    const settings = parseMemorySettings({ jev: { predict: { diagnostics: true } } });
+    expect(jevConfigOf(settings).predict.diagnostics).toBe(true);
+    for (const domain of ["secure", "locked"] as const)
+      expect(resolveJevWiring(settings, domain)).toEqual({ on: false, reason: "secure" });
   });
 });

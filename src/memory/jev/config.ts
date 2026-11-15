@@ -68,6 +68,7 @@ export function predictConfigOf(memory: MemorySettings): JevConfig["predict"] {
   const p = memory.jev.predict;
   return {
     enabled: p.enabled,
+    diagnostics: p.diagnostics,
     childSessions: p.childSessions,
     maxEntries: p.maxEntries,
     maxBytes: p.maxBytes,

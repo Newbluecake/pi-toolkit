@@ -162,6 +162,8 @@ function answersFor(questions: Record<string, JevQuestion>, rules: readonly (rea
 type UMode = "gate" | "hang" | "fail" | "fast";
 
 interface HarnessOpts {
+  diagnostics?: boolean;
+  diagAppendThrows?: boolean;
   probeGate?: Promise<void>;
   /** Recall-duty classify behavior; `gate` waits for resolveU (default `fast`). */
   uMode?: UMode;
@@ -192,6 +194,7 @@ interface Harness {
   resolveU(): void;
   report(): Promise<string>;
   predictCalls(): any[];
+  registrations: string[];
 }
 
 function harness(opts: HarnessOpts = {}): Harness {
@@ -211,6 +214,8 @@ function harness(opts: HarnessOpts = {}): Harness {
       branch.push({ type: "custom_message", id: `m${nextId++}`, ...message });
     },
     appendEntry: (customType: string, data: unknown) => {
+      if (opts.diagAppendThrows && customType === "subagent:memory-predict-diag")
+        throw new Error("diagnostic disk error");
       appended.push({ customType, data });
       branch.push({ type: "custom", id: `c${nextId++}`, customType, data });
     },
@@ -247,7 +252,11 @@ function harness(opts: HarnessOpts = {}): Harness {
     ...base,
     classifiers: CLASSIFIERS,
     ...(opts.recallWaitMs === undefined ? {} : { recall: { ...base.recall, waitMs: opts.recallWaitMs } }),
-    predict: { ...base.predict, model: modelCfg },
+    predict: {
+      ...base.predict,
+      model: modelCfg,
+      ...(opts.diagnostics === undefined ? {} : { diagnostics: opts.diagnostics }),
+    },
     ...opts.config,
   };
   const clock = new FakeClock(0);
@@ -291,6 +300,7 @@ function harness(opts: HarnessOpts = {}): Harness {
     >;
   };
   return {
+    registrations: [...handlers.keys()],
     clock,
     model,
     wire,
@@ -1070,4 +1080,129 @@ describe("model threshold parity across timely and late paths", () => {
     expect(await cancel.prompt("算了，这个先不提交了")).toBeUndefined();
     expect(await cancel.prompt("继续")).toBeUndefined();
   });
+});
+
+describe("independent P selection diagnostics", () => {
+  const prompt =
+    "[switch_context] 上下文已切换，恢复后请按交接内容核对本轮任务状态，然后继续处理尚未完成的事项并给出清晰结论";
+  test.each([0.9, 0.85])(
+    "normal-risk high score p=%s records risk/allow rejection, not a P injection",
+    async (probability) => {
+      writeFileSync(
+        join(memDir, "context.md"),
+        "# Context\n\n## Resume\n\n- 恢复会话前核对状态 <!-- mem tags=+session-context -->\n",
+      );
+      const h = harness({ diagnostics: true, fail: "System One API error (451): blocked" });
+      await goStatus(h, "partial");
+      const pending = h.promptNow(prompt);
+      h.clock.advance(400);
+      h.model.resolve(0, {
+        content: [{ type: "text", text: JSON.stringify({ tags: [{ id: "session-context", p: probability }] }) }],
+      });
+      const result = await pending;
+      expect(result).toBeUndefined();
+      const rows = h.appended.filter((a) => a.customType === "subagent:memory-predict-diag");
+      expect(rows).toHaveLength(1);
+      const diag = rows[0]!.data;
+      expect(diag).toMatchObject({
+        v: 1,
+        turnSeq: 1,
+        session: "main",
+        origin: "rules+model",
+        selected: [],
+        committed: [],
+      });
+      const t = diag.tags.find((t: any) => t.tag === "session-context");
+      expect(t.finalScore).toBeCloseTo(probability === 0.9 ? 0.8778 : 0.8557, 8);
+      expect(t).toMatchObject({ sources: ["U", "M"], highRisk: false, allow: false, deny: false, eligible: false });
+      expect(diag.counts["risk-allow"].reject).toBeGreaterThan(0);
+      expect(diag.rejected).toContainEqual(expect.objectContaining({ reason: "risk-allow" }));
+      expect(JSON.stringify(diag)).not.toContain("恢复会话前核对状态");
+      expect(diag).not.toHaveProperty("kind");
+      expect(h.sent).toHaveLength(0);
+      await h.emit("session_shutdown", { type: "session_shutdown" });
+    },
+  );
+
+  test("off/absent append sequence and hook list are byte-identical; on adds just independent entries", async () => {
+    const observe = async (diagnostics?: boolean) => {
+      const base = jevConfigOf(DEFAULT_MEMORY_SETTINGS).predict;
+      const h = harness({
+        diagnostics,
+        fail: "System One API error (451): blocked",
+        config: {
+          predict: {
+            ...base,
+            ...(diagnostics === undefined ? {} : { diagnostics }),
+            cooldownMs: 0,
+            model: { ...base.model, enabled: false },
+          },
+        },
+      });
+      await goStatus(h, "partial");
+      const r = await h.prompt("提交并推送一下");
+      await h.emit("session_shutdown", { type: "session_shutdown" });
+      return { r, appended: h.appended, registrations: h.registrations, sent: h.sent };
+    };
+    const absent = await observe();
+    const off = await observe(false);
+    const on = await observe(true);
+    expect(off.appended.length).toBeGreaterThan(0);
+    expect(JSON.stringify(off)).toBe(JSON.stringify(absent));
+    expect(off.appended.some((a) => a.customType === "subagent:memory-predict-diag")).toBe(false);
+    const diag = on.appended.filter((a) => a.customType === "subagent:memory-predict-diag");
+    expect(diag).toHaveLength(1);
+    expect({ ...on, appended: on.appended.filter((a) => a.customType !== "subagent:memory-predict-diag") }).toEqual(
+      off,
+    );
+    expect(diag[0]!.data.committed.length).toBeGreaterThan(0);
+    expect(diag[0]!.data.origin).toBe("rules");
+  });
+
+  test("child rules turns emit child diagnostics; predict off emits none", async () => {
+    const h = harness({ diagnostics: true, isChild: true });
+    await h.prompt("提交并推送一下");
+    expect(
+      h.appended.filter((a) => a.customType === "subagent:memory-predict-diag").map((a) => a.data.session),
+    ).toEqual(["child"]);
+    await h.emit("session_shutdown", { type: "session_shutdown" });
+    const base = jevConfigOf(DEFAULT_MEMORY_SETTINGS);
+    const off = harness({ config: { predict: { ...base.predict, enabled: false, diagnostics: true } } });
+    await goStatus(off, "full");
+    await off.prompt("提交并推送一下");
+    expect(off.appended.some((a) => a.customType === "subagent:memory-predict-diag")).toBe(false);
+    await off.emit("session_shutdown", { type: "session_shutdown" });
+  });
+});
+
+test("diagnostic append failure does not suppress P or rewrite its durable records", async () => {
+  const h = harness({ diagnostics: true, diagAppendThrows: true, fail: "System One API error (451): blocked" });
+  await goStatus(h, "partial");
+  const r = await h.prompt("提交并推送一下");
+  expect(r?.message?.details.predict.origin).toBe("rules");
+  expect(r?.message?.content).toContain("提交只用精确路径");
+  expect(h.appended.map((a) => a.customType)).toEqual(["subagent:memory-predict", "subagent:memory-recall"]);
+  expect(h.sent).toHaveLength(0);
+  await h.emit("session_shutdown", { type: "session_shutdown" });
+});
+
+test("model call/final records and returned output are unchanged with diagnostics on/off", async () => {
+  const run = async (diagnostics: boolean) => {
+    const h = harness({ diagnostics, fail: "System One API error (451): blocked" });
+    await goStatus(h, "partial");
+    const pending = h.promptNow("上下文已经切换，请恢复交接内容后对照本轮进度继续剩余事项，并给出详细的工作结果");
+    h.clock.advance(400);
+    h.model.resolve(0, { content: [{ type: "text", text: '{"tags":[{"id":"session-context","p":0.9}]}' }] });
+    const result = await pending;
+    await h.emit("session_shutdown", { type: "session_shutdown" });
+    return { result, entries: h.appended, sent: h.sent, registrations: h.registrations };
+  };
+  const off = await run(false);
+  const on = await run(true);
+  expect(off.entries.map((e) => e.data.kind)).toEqual(["call", "final"]);
+  expect(off.entries.every((e) => e.customType === "subagent:memory-predict")).toBe(true);
+  expect(on.entries.filter((e) => e.customType === "subagent:memory-predict-diag")).toHaveLength(1);
+  expect(
+    JSON.stringify({ ...on, entries: on.entries.filter((e) => e.customType !== "subagent:memory-predict-diag") }),
+  ).toBe(JSON.stringify(off));
 });

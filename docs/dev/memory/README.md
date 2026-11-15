@@ -162,7 +162,62 @@ Jev 是一个分类器驱动的核心 memory 子系统，职责三项：召回�
 
 **残留风险**：gate 拦截已移除（2026-11），不再有误拦形态，也不再有进程/git 证据收集（`probes.ts` 已删）；#26 移除用户令确认后——用户令可被 agent 静默作废（缓解只有三样：TUI warning、工具结果回显、skill 要求向用户转述；print、子会话、Web/headless 都没有通知；delete 可从 `.trash` 找回（保留 20 份），edit 无自动备份），手写文件保护可先翻转 provenance 再操作绕开，voided 回显仍带 heading（进入工具结果与 transcript，通知侧已不含）；Jev 判断质量依赖评测；默认开启使工具描述一次性变化、前缀缓存失效一次；dismissed 改写条目开头会重新提示整理建议；P 层的 W 信号端口（bashJobs/fleet）只在主会话 post-guard 挂载（`src/index.ts`，plan §11.1），子会话虽按 `predict.childSessions` 跑规则与 S，但 bashJobs 恒为空 ⇒ **S（发版进行中）在子会话永不触发**（R12/R13 的 git branch/dirty 部分照常）。
 
-**默认值、分类器列表、阈值以代码为准**：`src/memory/settings.ts`、`src/memory/setting-specs.ts`（28 个 `memory.jev.*` 键：原 14（#26 删 `confirmTimeoutS`）+ memory-predict 的 14 个 `memory.jev.predict.*`，plan §10；其中 `model.*` 7 键在 P1b 只解析不使用，P2（§11.2）接线后生效）。各包交付报告见 `docs/dev/memory/reports/J*-report.md`。
+**默认值、分类器列表、阈值以代码为准**：`src/memory/settings.ts`、`src/memory/setting-specs.ts`（29 个 `memory.jev.*` 键：原 14（#26 删 `confirmTimeoutS`）+ memory-predict 的 15 个 `memory.jev.predict.*`，plan §10；其中 `model.*` 7 键在 P1b 只解析不使用，P2（§11.2）接线后生效）。各包交付报告见 `docs/dev/memory/reports/J*-report.md`。
+
+## P 选择诊断与 G7 复评（2026-11-15）
+
+用户决定：**P 仍只预测 risk:high / fastPathAllowTags，减去 fastPathDenyTags**。
+0.85 选择门与 M 权重不变。normal-risk 未 allow 的 session-context 即使得 .8778/.8557
+也应拒绝；调用成功、含 M final、高分 tag、实际 P 注入是不同事件。
+
+| 设置键                           | 默认 / live                       | 行为                                                                                                                              |
+| -------------------------------- | --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `memory.jev.predict.diagnostics` | `false` / 非 live，改后 `/reload` | 每次实际执行 P 选择/提交轮，追加一条独立 `subagent:memory-predict-diag`；无 tag、无 picks 也记录。P/Jev off 或未准入 P 的轮不写。 |
+
+**customType 列表（本子系统）**：`subagent:memory-inject` 是模型可见消息；
+`subagent:memory-recall` 是注入/segment 账本；`subagent:memory-predict` 只保留原
+`kind:final|call` 承接/调用账本；新增 `subagent:memory-predict-diag` 是**本地 custom entry**，
+不是消息、不是 final，不注册 renderer，不参与 carry/segment 恢复。
+选择与现有 predict 最一致的 `pi.appendEntry`，而非额外侧车写者/锁/轮转：旧消费者按 customType
+过滤即可忽略，I10 不扩原记录语义/字段、不改 PROTO，旧条目字节和相对顺序不变。
+新条目在本轮原 final/recall 之后追加。`appendEntry` 失败丢弃，不重试、不额外 notify/log；
+SDK buffer/flush 语义沿用原账本，append 成功不承诺 fsync。总诊断量随会话轮数增长，不另设文件轮转。
+
+**字段与边界**：`v:1`、`turnSeq`、`session:main|child`、`origin`；`tags` 记录候选 tag、
+`finalScore`、`sources` 与 highRisk/allow/deny/eligible；`counts` 每门 pass/reject；
+`rejected` 是按执行顺序的前 32 个拒绝样本（block id，files 用 hash；reason），
+`selected` 含排序分数/bypass，`sSelected` 单列 S，`committed` 为实际 P 消息 items（含 S）；
+`remainingBefore/After` 是 P commit 前后 segment 剩余，`maxEntries/maxBytes` 是 P 预算。
+P 与 S 的选择不能混作同一 tag 成功。每条最终 JSON 实测 ≤16384 UTF-8 字节，
+数组最多 32、token 最多 96 UTF-16 单元、sources 最多 8；超界裁样本尾并标 `truncated`，
+计数保全（门名限制 ASCII/40 字符，最多 48 个不同门后合并 other）。
+不存记忆正文/首行、prompt、命令、模型回复；private/secret 只计数，**不落其 id**。
+
+**计数口径**：顺序短路，只对实际到达的门计数；没有计数不等于通过。
+`pool-private-secret/segment-dup/resident-global` 是物化阶段，选择内对应不带 pool 前缀的
+标志门是另一阶段，不可相加当唯一候选数。`audience` 和统一 `eligibility`（含
+`eligibility-expired/superseded/deleted/private/ledger` 原因）在物化时判；`decay-naming` 只限 P。
+选择阶段记录 tag-score、risk-allow、shared-tag、importance/type、cooldown、entry-cap、byte-budget；
+`risk-member/allow-member/deny-clear` 是 tag 集合独立成员证据，**allow=false 不是必须失败**，
+risk-allow 的实际组合为 `(highRisk || allow) && !deny`。tag 汇总与候选拒绝的同名门计的是评估次数，
+不是唯一候选数。无 eligible tag 时不伪造后续冷却/预算拒绝。
+`bypass-available/entry-cap/byte-budget/committed` 区分可用、预算与最终兑现；
+`commit-recheck` 是提交存在/rev/eligibility 的合并复检门，`commit-segment-dup` 与 `segment-cap`
+单列最终去重/总量拒绝。不把 selected 当 committed。
+
+**I9 / I1 / I4 / I5 / I8 / D8**：只有开关为 true 才构造本轮 collector、诊断字段和追加 entry；
+不开新 hook、timer、全局状态、模型调用或消息。关闭时附加落盘为零；真实 wire 差分比较
+默认/显式 false 的 hook、append 调用序列和返回/发送消息，并比较 on 去掉独立 entry 后旧输出一致。
+纯 collector/select 仍 pi-free。secure/locked 不另加 D8 leaf：现有 settings loader 强制
+`memory.jev.enabled=false`，`resolveJevWiring` 又拒绝非 plain，故即使 diagnostics:true
+偏好保留也不接线/不写诊断；不得独立于 Jev 建诊断 writer。
+
+**G7 指标**：改为[arch §6.5 / §7.4](../memory-governance/arch.md#65-p2-窗口--预算错配修复q9-已定)
+定义的高危合格场景覆盖度和最早可预测轮→实际注入的轮次/墙钟 p50/p95，连同样本数、
+门排除数、漏覆盖数报告；零合格场景是 NOT-EVALUATED，不再要求所有模型轮无条件 P >0。
+模型参与按实际注入 `origin:rules+model` / `rules+cache` 分列，没有 `origin:model`；
+aggregate origin 不证明每条 pick 的因果增益。历史 [11-05 复评](predict-eval-2026-11-05.md)
+及其它 `predict-eval-*.md` 保留，不用新口径重写历史。
 
 ## #36 blocks 治理 · 核心与生产装配（2026-11-09 更新）
 

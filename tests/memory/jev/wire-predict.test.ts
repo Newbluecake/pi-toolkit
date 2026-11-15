@@ -805,6 +805,59 @@ describe("#36 P6b P-layer naming + decay (arch §6.2)", () => {
     await sidecar("r_dec99", { "git-commit": 0.9 }, { temporal: "permanent" });
   }
 
+  test("diagnostics observe audience, expiry, privacy, resident, segment and naming gates without bodies", async () => {
+    const blocks = join(memDir, "blocks");
+    mkdirSync(blocks, { recursive: true });
+    writeFileSync(join(blocks, ".layout.json"), JSON.stringify({ v: 1, source: "migrate", gen: 1, files: [] }));
+    const freshMeta = ["authority: agent", `updated: "${iso(1)}"`];
+    writeBlock("diag.001", [...freshMeta, "audience: child"], "- audience-rejected detail");
+    writeBlock("diag.002", [...freshMeta, "expires: 2020-01-01"], "- expiry-rejected detail");
+    writeBlock("diag.003", [...freshMeta, "private: true"], "- private-rejected detail");
+    writeBlock("diag.004", ["authority: user", "scope: global"], "- resident-rejected detail");
+    writeBlock("diag.005", freshMeta, "- duplicate-rejected detail");
+    writeBlock("diag.006", freshMeta, "- run r_unnamed 5h 窗口配额已用 62%");
+    for (const needle of [
+      "audience-rejected",
+      "expiry-rejected",
+      "resident-rejected",
+      "duplicate-rejected",
+      "r_unnamed",
+    ]) {
+      await sidecar(needle, { "git-commit": 1 });
+    }
+    const dup = entries().find((e) => e.body.includes("duplicate-rejected"))!;
+    const h = harness({
+      fail: "System One API error (451): blocked",
+      config: { predict: { ...jevConfigOf(DEFAULT_MEMORY_SETTINGS).predict, diagnostics: true } },
+    });
+    h.branch.push({
+      type: "custom",
+      customType: "subagent:memory-recall",
+      data: { v: 1, layer: "U", keys: [dup.hash] },
+    });
+    await goPartial(h);
+    await h.prompt("提交这些改动，顺便跑下格式检查");
+    const rows = h.appended.filter((a) => a.customType === "subagent:memory-predict-diag");
+    expect(rows).toHaveLength(1);
+    const diag = rows[0]!.data;
+    for (const [id, reason] of [
+      ["diag.001", "audience"],
+      ["diag.002", "eligibility-expired"],
+      ["diag.004", "pool-resident-global"],
+      ["diag.005", "pool-segment-dup"],
+      ["diag.006", "decay-naming"],
+    ]) {
+      expect(diag.rejected).toContainEqual({ id, reason });
+      expect(diag.counts[reason].reject).toBeGreaterThan(0);
+    }
+    expect(diag.counts["pool-private-secret"].reject).toBe(1);
+    expect(JSON.stringify(diag)).not.toContain("diag.003");
+    expect(JSON.stringify(diag)).not.toContain("rejected detail");
+    expect(diag.selected).toEqual([]);
+    expect(diag.committed).toEqual([]);
+    await h.emit("session_shutdown", { type: "session_shutdown" });
+  });
+
   test("decisive git-commit turn that does NOT name the snapshot block ⇒ zero P injection (V26)", async () => {
     await makeNamedBlocks();
     const h = harness({ fail: "System One API error (451): blocked" });
@@ -946,13 +999,22 @@ describe("#36 P6b bypass reporting reflects the committed set (P6a leftover)", (
     // the fix: with one slot left the commit accepts only A (segment cap) —
     // selection still marked B as bypass, but the report must NOT say so
     await setupCorpus();
-    const capped = harness({ fail: "System One API error (451): blocked" });
+    const capped = harness({
+      fail: "System One API error (451): blocked",
+      config: { predict: { ...jevConfigOf(DEFAULT_MEMORY_SETTINGS).predict, diagnostics: true } },
+    });
     seedSegment(capped);
     await goPartial(capped);
     const rx = await capped.prompt(prompt);
     expect(rx?.message?.content).toContain("commit-entry-a"); // the top pick took the last slot
     expect(rx?.message?.content).not.toContain("dispatch-entry-b"); // bypass pick rejected at commit
     expect(rx?.message?.details?.predict?.bypass).toBeUndefined(); // and is NOT reported as bypassed
+    const diag = capped.appended.find((a) => a.customType === "subagent:memory-predict-diag")!.data;
+    expect(diag.counts["segment-cap"]).toEqual({ pass: 1, reject: 1 });
+    expect(diag.counts["bypass-committed"]).toEqual({ pass: 0, reject: 1 });
+    expect(diag.selected).toHaveLength(2);
+    expect(diag.committed).toHaveLength(1);
+    expect(diag.rejected).toContainEqual(expect.objectContaining({ reason: "segment-cap" }));
     // positive control in a FRESH dir: no cap ⇒ both picks committed ⇒ reported
     memDir = join(tmp, "mem2");
     mkdirSync(memDir, { recursive: true });
@@ -1061,4 +1123,20 @@ describe("#36 P6b fix round (until exempt / S gate scope)", () => {
     const mine = items.filter((i) => i.anchor === "quota.011");
     expect(mine).toHaveLength(1);
   });
+});
+
+test("independent diagnostic entries never restore carry, even with final-looking unknown payloads", () => {
+  const final = buildFinalRecord(
+    1,
+    [{ tag: "release", score: 0.9, sources: ["U"], rules: ["R06"], evidence: { todoIds: [], jobShapes: [] } }],
+    0,
+  );
+  const older = { type: "custom", customType: "subagent:memory-predict", data: final };
+  const diagnostic = {
+    type: "custom",
+    customType: "subagent:memory-predict-diag",
+    data: { ...final, turnSeq: 999, tags: [] },
+  };
+  expect(restoreCarryFromBranch([older, diagnostic])).toEqual(restoreCarryFromBranch([older]));
+  expect(restoreCarryFromBranch([diagnostic])).toBeUndefined();
 });

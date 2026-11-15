@@ -1234,6 +1234,8 @@ export interface PredictModelConfig {
 /** `memory.jev.predict.*` (memory-predict plan §10/§11.1) — the pure config
  *  J6-style `jevConfigOf` maps out of `MemorySettings.jev.predict`. */
 export interface PredictJevConfig {
+  /** Optional additive local diagnostic switch; absent equals false. */
+  readonly diagnostics?: boolean;
   readonly enabled: boolean;
   readonly childSessions: boolean;
   readonly maxEntries: number;
@@ -1272,6 +1274,8 @@ export const MEMORY_RECALL_CUSTOM_TYPE = "subagent:memory-recall";
  *  (`kind: "final" | "call"`); only `wire.ts` + `predict/carry.ts` interpret
  *  the payload — this file just reserves the customType string (I7). */
 export const MEMORY_PREDICT_CUSTOM_TYPE = "subagent:memory-predict";
+/** Independent local audit entry, never a carry final or a model message. */
+export const MEMORY_PREDICT_DIAG_CUSTOM_TYPE = "subagent:memory-predict-diag";
 
 export interface MemoryRecallItemV1 {
   readonly file: string;

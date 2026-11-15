@@ -62,6 +62,7 @@ if (process.env.GOV_SPECS_GENERATE === "1") {
     "memory.incremental.auto",
     "memory.incremental.jobCostCapUsd",
     "memory.jev.backgroundQueueLimit",
+    "memory.jev.predict.diagnostics",
     "memory.scopes.session",
     "memory.scopes.hub",
     "fabric.wake.decisionRequests",
@@ -100,6 +101,7 @@ if (process.env.GOV_SPECS_GENERATE === "1") {
       const incAnchor = oldKeys.indexOf("memory.incremental.enabled");
       const queueAnchor = oldKeys.indexOf("memory.jev.maxCalls");
       expect(queueAnchor).toBeGreaterThan(0);
+      const diagAnchor = oldKeys.indexOf("memory.jev.predict.model.maxUsdPerDay");
       const anchor = oldKeys.indexOf("memory.jev.predict.cacheTtlMin");
       expect(anchor).toBeGreaterThan(0);
       const wake = oldKeys.indexOf("fabric.wake.parkCapPerTarget");
@@ -114,7 +116,9 @@ if (process.env.GOV_SPECS_GENERATE === "1") {
         "memory.incremental.jobCostCapUsd",
         ...oldKeys.slice(incAnchor + 1, queueAnchor + 1),
         "memory.jev.backgroundQueueLimit",
-        ...oldKeys.slice(queueAnchor + 1, anchor + 1),
+        ...oldKeys.slice(queueAnchor + 1, diagAnchor + 1),
+        "memory.jev.predict.diagnostics",
+        ...oldKeys.slice(diagAnchor + 1, anchor + 1),
         "memory.scopes.session",
         "memory.scopes.hub",
         ...oldKeys.slice(anchor + 1, wake + 1),
@@ -175,3 +179,10 @@ if (process.env.GOV_SPECS_GENERATE === "1") {
     });
   });
 }
+
+it("P selection diagnostic switch is non-live and defaults off", () => {
+  const spec = SETTING_SPECS["memory.jev.predict.diagnostics"]!;
+  expect(spec).toMatchObject({ kind: "boolean", path: "memory.jev.predict.diagnostics" });
+  expect(spec.live).toBeUndefined();
+  expect(defaultOf(spec)).toBe(false);
+});

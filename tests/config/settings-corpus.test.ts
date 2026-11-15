@@ -332,6 +332,10 @@ function withoutFast(settings: typeof DEFAULT_SETTINGS, input?: unknown) {
   // Verify it explicitly, then project it out without changing frozen hashes/inputs.
   expect(memory.jev.backgroundQueueLimit).toBe(32);
   const { backgroundQueueLimit: _queueLimit, ...oldJev } = memory.jev;
+  // Declared additive diagnostics leaf only. Frozen inputs cannot enable it.
+  expect(memory.jev.predict.diagnostics).toBe(false);
+  const { diagnostics: _diagnostics, ...oldPredict } = oldJev.predict;
+  const historicalJev = { ...oldJev, predict: oldPredict };
   // #36 F1: project only the changed fallback back to the historical tiered value.
   // Explicit historical tiered/legacy values retain their original semantics.
   const layoutInput = getPath(normalizedInput, "memory.layout");
@@ -339,7 +343,7 @@ function withoutFast(settings: typeof DEFAULT_SETTINGS, input?: unknown) {
   if (layoutInput !== "tiered" && layoutInput !== "legacy" && layoutInput !== "blocks") {
     expect(memory.layout).toBe("blocks");
   }
-  const legacyMemory = { ...oldMemory, layout: historicalLayout, jev: oldJev };
+  const legacyMemory = { ...oldMemory, layout: historicalLayout, jev: historicalJev };
   const {
     fabric: {
       wake: { decisionRequests: _dr, ...oldWake },

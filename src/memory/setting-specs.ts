@@ -222,7 +222,7 @@ export const MEMORY_SETTING_SPECS: Record<string, SettingSpec> = {
     ),
     max: 720,
   } as SettingSpec,
-  // memory-predict plan.md §10/§11.1: 14 `memory.jev.predict.*` keys (P1b wires
+  // memory-predict plan.md §10/§11.1: 14 original `memory.jev.predict.*` keys + diagnostics (P1b wires
   // rules/state/carry/select off these; `model.*` is parsed here but only
   // consumed starting P2, §11.2). `model.waitS`/`model.requestBudgetS` follow
   // the shared duration convention (tui-settings requirement 2): the file and
@@ -290,6 +290,10 @@ export const MEMORY_SETTING_SPECS: Record<string, SettingSpec> = {
     max: 1,
     description: "Predict model estimated daily spend cap, USD (conditional estimate, P2)",
   },
+  "memory.jev.predict.diagnostics": bool(
+    "memory.jev.predict.diagnostics",
+    "Append bounded local P-selection diagnostics without memory bodies (default off; reload required)",
+  ),
   "memory.jev.predict.cacheTtlMin": {
     ...count("memory.jev.predict.cacheTtlMin", 1, "Session-local predict cache TTL, minutes (P2)"),
     max: 240,

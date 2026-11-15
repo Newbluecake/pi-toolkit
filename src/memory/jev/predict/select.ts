@@ -8,6 +8,7 @@
 // importance=2 跳过 type 检查、`authority=user` 加成、`fitPicks` 字节/条目
 // 预算，均按 §5.1 公式逐字实现。
 
+import type { PredictDiagnostics } from "./diagnostics.js";
 import type { StateConstraint, TagScore } from "./contracts.js";
 
 // ───────────────────────────── fastPathEligibleTags（§5.1） ─────────────────────────────
@@ -38,6 +39,8 @@ export function fastPathEligibleTags(tags: readonly TagRiskInfo[], config: FastP
 
 export interface Candidate {
   readonly hash: string;
+  /** Local diagnostics only; absent preserves existing candidate shapes. */
+  readonly diagnosticId?: string;
   readonly isPrivate: boolean;
   readonly isSecret: boolean;
   readonly isInjected: boolean;
@@ -144,13 +147,24 @@ function fitPicks(
   scored: readonly { readonly hash: string; readonly score: number; readonly byteLength: number }[],
   maxEntries: number,
   maxBytes: number,
+  diag?: PredictDiagnostics,
+  idOf: (hash: string) => string = (hash) => hash,
 ): readonly SelectedPEntry[] {
   const sorted = [...scored].sort((a, b) => b.score - a.score || a.hash.localeCompare(b.hash));
   const out: SelectedPEntry[] = [];
   let bytes = 0;
   for (const s of sorted) {
-    if (out.length >= maxEntries) break;
-    if (bytes + s.byteLength > maxBytes) continue;
+    if (out.length >= maxEntries) {
+      if (diag !== undefined)
+        for (const rest of sorted.slice(sorted.indexOf(s))) diag.gate("entry-cap", false, idOf(rest.hash));
+      break;
+    }
+    diag?.gate("entry-cap", true);
+    if (bytes + s.byteLength > maxBytes) {
+      diag?.gate("byte-budget", false, idOf(s.hash));
+      continue;
+    }
+    diag?.gate("byte-budget", true);
     out.push(s);
     bytes += s.byteLength;
   }
@@ -197,19 +211,62 @@ function starvedBypassPick(
 
 /** §5.1 全流程：eligibleTags → 逐条目打分/过滤 → `fitPicks` → §6.4 冷却
  *  饿死出口（最多追加 1 条 bypass，仍受 maxEntries/maxBytes 预算约束）。 */
-export function selectPEntries(input: SelectPInput): readonly SelectedPEntry[] {
+export function selectPEntries(input: SelectPInput, diag?: PredictDiagnostics): readonly SelectedPEntry[] {
   const eligible = eligibleTagsOf(input.tags, input.eligibleTags);
-  if (eligible.size === 0) return [];
+  if (eligible.size === 0) {
+    if (diag !== undefined)
+      for (const c of input.candidates) {
+        if (c.isPrivate || c.isSecret) {
+          diag.gate("private-secret", false);
+          continue;
+        }
+        const shared = input.tags.filter((t) => (c.tagP[t.tag] ?? 0) > 0);
+        const reason =
+          shared.length === 0 ? "shared-tag" : shared.some((t) => t.score >= 0.85) ? "risk-allow" : "tag-score";
+        diag.gate(reason, false, c.diagnosticId ?? c.hash);
+      }
+    return [];
+  }
   const scored: { hash: string; score: number; byteLength: number }[] = [];
   for (const c of input.candidates) {
+    if (diag !== undefined) {
+      const id = c.diagnosticId ?? c.hash;
+      // Observe the same short-circuit predicates as scoreCandidate; private
+      // candidates contribute counts only, never their identity.
+      if (!diag.gate("private-secret", !c.isPrivate && !c.isSecret)) continue;
+      if (!diag.gate("segment-dup", !c.isInjected, id)) continue;
+      if (!diag.gate("resident-global", !c.isStaticCore, id)) continue;
+      if (!diag.gate("cooldown", !c.coolingDown, id)) continue;
+      if (
+        !diag.gate(
+          "shared-tag",
+          Object.keys(c.tagP).some((t) => eligible.has(t)),
+          id,
+        )
+      )
+        continue;
+      if (!diag.gate("importance", c.pending || (c.importance ?? 0) >= 2, id)) continue;
+      if (!diag.gate("type", c.pending || c.type === "rule" || c.type === "pitfall" || c.type === "procedure", id))
+        continue;
+    }
     const score = scoreCandidate(c, input.tags, eligible);
     if (score !== undefined) scored.push({ hash: c.hash, score, byteLength: c.byteLength });
   }
-  const picks = fitPicks(scored, input.maxEntries, input.maxBytes);
+  const idOf = (hash: string): string => input.candidates.find((c) => c.hash === hash)?.diagnosticId ?? hash;
+  const picks = fitPicks(scored, input.maxEntries, input.maxBytes, diag, idOf);
   const bypass = starvedBypassPick(input, eligible, picks);
-  if (bypass === undefined || picks.length >= input.maxEntries) return picks;
+  diag?.gate("bypass-available", bypass !== undefined);
+  if (bypass === undefined || picks.length >= input.maxEntries) {
+    if (bypass !== undefined) diag?.gate("bypass-entry-cap", false, idOf(bypass.hash));
+    return picks;
+  }
+  diag?.gate("bypass-entry-cap", true);
   const usedBytes = picks.reduce((sum, s) => sum + s.byteLength, 0);
-  if (usedBytes + bypass.byteLength > input.maxBytes) return picks;
+  if (usedBytes + bypass.byteLength > input.maxBytes) {
+    diag?.gate("bypass-byte-budget", false, idOf(bypass.hash));
+    return picks;
+  }
+  diag?.gate("bypass-byte-budget", true);
   return [...picks, bypass];
 }
 

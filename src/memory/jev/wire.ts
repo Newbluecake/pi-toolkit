@@ -77,6 +77,7 @@ import { createJevCommandPort } from "./command-port.js";
 import {
   MEMORY_INJECT_CUSTOM_TYPE,
   MEMORY_PREDICT_CUSTOM_TYPE,
+  MEMORY_PREDICT_DIAG_CUSTOM_TYPE,
   RECALL_MAX_CANDIDATES,
   type ClassifierRegistryLike,
   type EntryHash,
@@ -138,6 +139,7 @@ import type {
 } from "./predict/contracts.js";
 import { PredictCache, turnKey } from "./predict/cache.js";
 import { readGitBranch, type GitHeadIo } from "./predict/git-head.js";
+import { PredictDiagnostics } from "./predict/diagnostics.js";
 import { runPredict } from "./predict/index.js";
 import {
   createPredictFlight,
@@ -1118,14 +1120,22 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
    *  `block`) keep their existing predicates untouched; block entries run
    * the unified verdict. A block that vanished from `blocks/` mid-cache is
    *  ineligible (the next corpus refresh drops it). */
-  const entryEligible = (e: MemEntry, dir: string, layer: EligibilityLayer, tags?: EntryTags): boolean => {
+  const entryEligibility = (
+    e: MemEntry,
+    dir: string,
+    layer: EligibilityLayer,
+    tags?: EntryTags,
+  ): { ok: boolean; why?: string } => {
     // #36 P6b: files-layout entries keep their existing per-layer predicates
     // (private/secret/static/injected live in the callers) EXCEPT the new
     // two-way audience filter (arch §6.1 — inline `audience:` key first,
     // then the sidecar tag tier).
-    if (e.block === undefined) return audienceMatches(effectiveAudience(e.inline.audience, tags), isChild);
+    if (e.block === undefined)
+      return audienceMatches(effectiveAudience(e.inline.audience, tags), isChild)
+        ? { ok: true }
+        : { ok: false, why: "audience" };
     const parsed = blocksCorpusFor(dir).blocks.find((b) => b.id === e.block?.id);
-    if (parsed === undefined) return false;
+    if (parsed === undefined) return { ok: false, why: "deleted" };
     return eligible(parsed, undefined, {
       today: localToday(now()),
       isChild: isChild,
@@ -1134,8 +1144,11 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
       // #36 P6b: the full three-tier audience (frontmatter → sidecar tag
       // inference) — the same verdict the files path applies directly above.
       audienceOf: (b) => effectiveAudience(b.meta.audience, tags),
-    }).ok;
+    });
   };
+
+  const entryEligible = (e: MemEntry, dir: string, layer: EligibilityLayer, tags?: EntryTags): boolean =>
+    entryEligibility(e, dir, layer, tags).ok;
 
   /** Commit-time recheck (arch §3.3.6 两处校验 + §3.3.5 异步 rev 丢弃),
    *  reading ONLY the picked block's file (acceptance fix: no full-corpus
@@ -1713,14 +1726,22 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     maxEntries: number,
     maxBytes: number,
     trigger: string,
-    opts: { model?: string; partial?: boolean; bFor?: string; cwd?: string } = {},
+    opts: { model?: string; partial?: boolean; bFor?: string; cwd?: string; diag?: PredictDiagnostics } = {},
   ): InjectMessage | undefined => {
     const recheckDir = opts.cwd !== undefined ? safeDirFor(opts.cwd) : undefined;
     const survived =
       recheckDir === undefined
         ? picks
-        : picks.filter((p) => commitEligible(p.entry, recheckDir, layer, p.rev, opts.cwd));
-    const fresh = survived.filter((p) => !segment.isInjected(p.entry.hash));
+        : picks.filter((p) => {
+            const ok = commitEligible(p.entry, recheckDir, layer, p.rev, opts.cwd);
+            opts.diag?.gate("commit-recheck", ok, p.entry.block?.id ?? p.entry.hash);
+            return ok;
+          });
+    const fresh = survived.filter((p) => {
+      const ok = !segment.isInjected(p.entry.hash);
+      opts.diag?.gate("commit-segment-dup", ok, p.entry.block?.id ?? p.entry.hash);
+      return ok;
+    });
     const fitted = fitPicks(fresh, maxEntries, maxBytes);
     if (fitted.length === 0) return undefined;
     const accepted = new Set(
@@ -1729,7 +1750,11 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
         fitted.map((f) => f.pick.entry.hash),
       ),
     );
-    const kept = fitted.filter((f) => accepted.has(f.pick.entry.hash));
+    const kept = fitted.filter((f) => {
+      const ok = accepted.has(f.pick.entry.hash);
+      opts.diag?.gate("segment-cap", ok, f.pick.entry.block?.id ?? f.pick.entry.hash);
+      return ok;
+    });
     if (kept.length === 0) return undefined;
     append(
       recallRecord(
@@ -2387,6 +2412,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     c: Corpus,
     cwd: string,
     turnText: string | undefined,
+    diag?: PredictDiagnostics,
   ): { pCands: PredictCandidate[]; sCands: SCandidate[]; byHash: Map<EntryHash, MemEntry> } => {
     const info = renderInfoFor(cwd);
     const dir = safeDirFor(cwd);
@@ -2395,11 +2421,35 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     const sCands: SCandidate[] = [];
     const today = localToday(now());
     for (const e of c.entries) {
-      if (e.inline.isPrivate === true || e.secret || segment.isInjected(e.hash) || isStaticCore(e, info)) continue;
+      const id = e.block?.id ?? e.hash;
+      if (diag !== undefined) {
+        if (!diag.gate("pool-private-secret", e.inline.isPrivate !== true && !e.secret)) continue;
+        if (!diag.gate("pool-segment-dup", !segment.isInjected(e.hash), id)) continue;
+        if (!diag.gate("pool-resident-global", !isStaticCore(e, info), id)) continue;
+      } else if (e.inline.isPrivate === true || e.secret || segment.isInjected(e.hash) || isStaticCore(e, info))
+        continue;
       const record = c.index.entries[e.hash];
       // #36 P3: the unified eligibility runs per layer shape — P for the
       // scored candidates, S for the release-state constraint.
-      if (dir !== undefined && !entryEligible(e, dir, "P", record)) continue;
+      if (dir !== undefined) {
+        const verdict = entryEligibility(e, dir, "P", record);
+        if (diag !== undefined) {
+          // Audience has its own gate. Other unified verdicts retain their
+          // reason (expiry/status/deleted/ledger) without re-running I/O.
+          if (
+            !diag.gate(
+              verdict.why === "audience" ? "audience" : "eligibility",
+              verdict.ok,
+              verdict.why === "audience" ? id : undefined,
+            )
+          ) {
+            if (verdict.why !== "audience")
+              diag.gate(`eligibility-${verdict.why ?? "unknown"}`, false, verdict.why === "private" ? undefined : id);
+            continue;
+          }
+          diag.gate("audience", true);
+        } else if (!verdict.ok) continue;
+      }
       if (dir !== undefined && !entryEligible(e, dir, "S", record)) continue;
       // #36 P6b（arch §6.2 点名要求，仅 P）：降权对象没被本轮文本点名 ⇒
       // 不进 P 候选（turnText 缺失同样 fail closed）；S 状态候选不受此门
@@ -2427,9 +2477,11 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
         hasReleaseTag: meta.tags.includes("release"),
         byteLength,
       });
+      if (diag !== undefined) diag.gate("decay-naming", !pExcluded, id);
       if (pExcluded) continue; // P-only naming gate (验改 #2)
       pCands.push({
         hash: e.hash,
+        ...(diag === undefined ? {} : { diagnosticId: id }),
         isPrivate: false,
         isSecret: false,
         isInjected: false,
@@ -2495,21 +2547,26 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
     }
     let message: InjectMessage | undefined;
     let bypassed = false;
+    const diag = config.predict.diagnostics === true ? new PredictDiagnostics() : undefined;
+    const remainingBefore = diag === undefined ? 0 : segment.remaining();
     {
       const eligible = fastPathEligibleTags(c.taxonomy);
       // #36 §6.4：高危 tag 集合交给 select 做冷却饿死出口。
       const highRiskTagIds = new Set(c.taxonomy.tags.filter((t) => t.risk === "high").map((t) => t.id));
       // #36 P6b（arch §6.2 点名）：本轮文本（剥 skill 块、4000 码点截断后
       // 的 prompt）作为 P 层点名判定的基准。
-      const { pCands, sCands, byHash } = predictCandidatesFor(c, cwd, r0.input.prompt);
-      const selected = selectPEntries({
-        tags,
-        eligibleTags: eligible,
-        candidates: pCands,
-        maxEntries: config.predict.maxEntries,
-        maxBytes: config.predict.maxBytes,
-        ...(highRiskTagIds.size > 0 ? { highRiskTags: highRiskTagIds } : {}),
-      });
+      const { pCands, sCands, byHash } = predictCandidatesFor(c, cwd, r0.input.prompt, diag);
+      const selected = selectPEntries(
+        {
+          tags,
+          eligibleTags: eligible,
+          candidates: pCands,
+          maxEntries: config.predict.maxEntries,
+          maxBytes: config.predict.maxBytes,
+          ...(highRiskTagIds.size > 0 ? { highRiskTags: highRiskTagIds } : {}),
+        },
+        diag,
+      );
       // #36 P6b 收口（P6a 遗留）：bypass 只在“选择带 bypass 标记”且“该条
       // 最终被 commit 接受（进入消息 items）”时才上报——commit 阶段的
       // segment 容量/去重/复检仍可能拒绝它，选择层命中不等于注入。
@@ -2532,6 +2589,7 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
         message = commit("P", picks, picks.length, config.predict.maxBytes, "predict", {
           ...(partial ? { partial: true } : {}),
           cwd,
+          ...(diag === undefined ? {} : { diag }),
         });
         if (message !== undefined) recordPInjection(c, message);
       }
@@ -2539,6 +2597,32 @@ export function wireJev(pi: ExtensionAPI, deps: WireJevDeps): WireJevResult {
         bypassHash !== undefined &&
         message !== undefined &&
         (message.details as MemoryInjectDetailsV1).items.some((i) => i.hash === bypassHash);
+      if (diag !== undefined) {
+        const committed =
+          message === undefined ? [] : (message.details as MemoryInjectDetailsV1).items.map((i) => i.hash);
+        diag.gate("bypass-committed", bypassed);
+        const data = diag.finish({
+          turnSeq,
+          isChild,
+          tags,
+          taxonomy: c.taxonomy.tags,
+          fastPath: { allowTags: config.fastPath.allowTags, denyTags: config.fastPath.denyTags },
+          selected,
+          committed,
+          idOf: (hash) => byHash.get(hash)?.block?.id ?? hash,
+          origin,
+          remainingBefore,
+          remainingAfter: segment.remaining(),
+          maxEntries: config.predict.maxEntries,
+          maxBytes: config.predict.maxBytes,
+          ...(sSelected === undefined ? {} : { sSelected: sSelected.hash }),
+        });
+        try {
+          if (typeof pi.appendEntry === "function") pi.appendEntry(MEMORY_PREDICT_DIAG_CUSTOM_TYPE, data);
+        } catch {
+          /* Diagnostics are best-effort; never disrupt injection or log recursively. */
+        }
+      }
     }
     return {
       message,

@@ -76,7 +76,7 @@ export interface MemorySettings {
   jev: MemoryJevSettings;
 }
 
-/** 14 个 `memory.jev.*` 设置键（jev-arch §9.1 原 14 + 2026-11-03 噪音修复的 fastPath×3，减去 2026-11 移除的 gate×2 与 #26 移除的 confirmTimeoutS），加上 memory-predict P1b 的 14 个 `jev.predict.*`（plan.md §10），共 28 个；`classifiersRejected` 不是设置键，只是解析结果。 */
+/** 14 个 `memory.jev.*` 设置键（jev-arch §9.1 原 14 + 2026-11-03 噪音修复的 fastPath×3，减去 2026-11 移除的 gate×2 与 #26 移除的 confirmTimeoutS），加上 memory-predict P1b 的 14 个 `jev.predict.*`（plan.md §10）+ 选择诊断 1 个，共 29 个；`classifiersRejected` 不是设置键，只是解析结果。 */
 export interface MemoryJevSettings {
   /** 总开关。false ⇒ 不接线 Jev（零注册）。Default true（Q27：有可用凭证即启用）；legacy/secure 域强制视为 false。 */
   enabled: boolean;
@@ -121,6 +121,8 @@ export interface MemoryJevSettings {
 }
 
 export interface MemoryJevPredictSettings {
+  /** Local selection diagnostics; non-live, default false. No memory bodies. */
+  diagnostics: boolean;
   /** 总开关（D3）。Default true。 */
   enabled: boolean;
   /** 子会话是否只跑规则与 S。Default true。 */
@@ -277,6 +279,7 @@ function parseJevPredict(raw: unknown, fallback: MemoryJevPredictSettings): Memo
     typeof v === "number" && Number.isFinite(v) && v >= min && v <= max ? v : fb;
   return {
     enabled: bool(obj.enabled, fallback.enabled),
+    diagnostics: bool(obj.diagnostics, fallback.diagnostics),
     childSessions: bool(obj.childSessions, fallback.childSessions),
     maxEntries: num(obj.maxEntries, fallback.maxEntries, 1, 5),
     maxBytes: num(obj.maxBytes, fallback.maxBytes, 512, 8192),
@@ -492,6 +495,7 @@ export const DEFAULT_MEMORY_SETTINGS: MemorySettings = {
     fastPathCooldownH: 24,
     predict: {
       enabled: true,
+      diagnostics: false,
       childSessions: true,
       maxEntries: 2,
       maxBytes: 2048,

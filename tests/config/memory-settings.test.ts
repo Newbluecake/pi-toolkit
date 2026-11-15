@@ -58,6 +58,7 @@ describe("memory settings", () => {
         fastPathDenyTags: [],
         fastPathCooldownH: 24,
         predict: {
+          diagnostics: false,
           enabled: true,
           childSessions: true,
           maxEntries: 2,
@@ -634,6 +635,7 @@ describe("memory settings", () => {
       },
     }).jev.predict;
     expect(parsed).toEqual({
+      diagnostics: false,
       enabled: false,
       childSessions: false,
       maxEntries: 5,
@@ -708,7 +710,8 @@ describe("memory settings", () => {
     }
   });
 
-  it("memory.jev.predict.* setting specs (14 keys) are registered with the documented ranges", () => {
+  it("memory.jev.predict.* setting specs (15 keys) are registered with the documented ranges", () => {
+    expect(Object.keys(SETTING_SPECS).filter((key) => key.startsWith("memory.jev.predict."))).toHaveLength(15);
     expect(SETTING_SPECS["memory.jev.predict.enabled"]).toMatchObject({ kind: "boolean" });
     expect(SETTING_SPECS["memory.jev.predict.childSessions"]).toMatchObject({ kind: "boolean" });
     expect(SETTING_SPECS["memory.jev.predict.maxEntries"]).toMatchObject({ kind: "number", min: 1, max: 5 });

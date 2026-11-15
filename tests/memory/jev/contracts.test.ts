@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
   INLINE_META_MAX_BYTES,
   MEMORY_INJECT_CUSTOM_TYPE,
+  MEMORY_PREDICT_DIAG_CUSTOM_TYPE,
   MEMORY_RECALL_CUSTOM_TYPE,
   MAX_ENABLED_TAGS,
   HEALTH_TABLE_MAX,
@@ -43,6 +44,7 @@ describe("frozen constants (jev-plan §2)", () => {
   });
 
   it("I7: runtime names keep the subagent: prefix and never move", () => {
+    expect(MEMORY_PREDICT_DIAG_CUSTOM_TYPE).toBe("subagent:memory-predict-diag");
     expect(MEMORY_INJECT_CUSTOM_TYPE).toBe("subagent:memory-inject");
     expect(MEMORY_RECALL_CUSTOM_TYPE).toBe("subagent:memory-recall");
   });
