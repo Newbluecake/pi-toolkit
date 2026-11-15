@@ -1,12 +1,17 @@
 /** Real node:http sockets: SSE burst regression, incremental gzip, negotiation and slow peers. */
 import { createServer, get, type IncomingMessage, type Server } from "node:http";
 import { randomBytes } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createGunzip } from "node:zlib";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createSseHub, formatSseFrame, type SseClient, type SseHub } from "../../src/web-hub/hub/sse.js";
+import { startHub } from "../../src/web-hub/hub/hub.js";
+import { resolveHubPaths } from "../../src/web-hub/protocol/paths.js";
+import { TERMINAL_LOCAL_DIR } from "../../src/web-hub/protocol/terminal-local.js";
+import { TERMINAL_UI_CAP } from "../../src/web-hub/protocol/version.js";
+import { config } from "../web-hub/hub/helpers.js";
 import { createSseOutput } from "../../src/web-hub/hub/sse-output.js";
 import { createHttpFrontend } from "../../src/web-hub/hub/http.js";
 import { fakeDeps, login, makeAgent, postJson } from "../web-hub/http/helpers.js";
@@ -317,4 +322,68 @@ describe("SSE transport over real sockets", () => {
       conn.close();
     }
   });
+});
+
+describe.each(["identity", "gzip"] as const)("early terminal unavailable over real %s HTTP", (encoding) => {
+  it.each(["missing-journal", "degraded-privacy"])(
+    "delivers headers and public capability before a normal end: %s",
+    async (reason) => {
+      const home = mkdtempSync(join(tmpdir(), "sse-unavailable-"));
+      cleanups.push(() => rmSync(home, { recursive: true, force: true }));
+      const paths = resolveHubPaths({ home, uid: process.getuid!() });
+      mkdirSync(paths.stateDir, { recursive: true, mode: 0o700 });
+      writeFileSync(
+        join(home, ".pi", "agent", "pi-toolkit.json"),
+        JSON.stringify({ webHub: { terminal: { enabled: true } } }),
+        { mode: 0o600 },
+      );
+      const previousSource = process.env.PI_WEBHUB_TERMINAL_SOURCE;
+      process.env.PI_WEBHUB_TERMINAL_SOURCE = "plain";
+      cleanups.push(() => {
+        if (previousSource === undefined) delete process.env.PI_WEBHUB_TERMINAL_SOURCE;
+        else process.env.PI_WEBHUB_TERMINAL_SOURCE = previousSource;
+      });
+      if (reason === "missing-journal") mkdirSync(join(paths.stateDir, TERMINAL_LOCAL_DIR), { mode: 0o700 });
+      else writeFileSync(join(paths.stateDir, "privacy.json"), "corrupt", { mode: 0o600 });
+      const hub = await startHub(
+        config({
+          home,
+          privacy: true,
+          terminal: {
+            maxPerSession: 2,
+            maxPerPrincipal: 2,
+            maxTotal: 8,
+            inputIdleMs: 3600000,
+            maxLifetimeMs: 28800000,
+          },
+        }),
+        createHttpFrontend,
+      );
+      if ("exists" in hub) throw new Error("unexpected singleton");
+      cleanups.push(() => hub.close("test"));
+      const cookie = await login(hub.httpPort, hub.paths.tokenFile);
+      const conn = await open(hub.httpPort, { Cookie: cookie, "Accept-Encoding": encoding });
+      await conn.end(); // real gunzip must reach a normal end, including the gzip trailer
+      expect(conn.res.statusCode).toBe(200);
+      expect(conn.res.complete).toBe(true);
+      expect(conn.res.headers["content-type"]).toBe("text/event-stream; charset=utf-8");
+      expect(conn.res.headers["content-encoding"]).toBe(encoding === "gzip" ? "gzip" : undefined);
+      const frames = conn
+        .text()
+        .trimEnd()
+        .split("\n\n")
+        .map((block) => {
+          const lines = block.split("\n");
+          return {
+            event: lines.find((line) => line.startsWith("event: "))?.slice(7),
+            data: JSON.parse(lines.find((line) => line.startsWith("data: "))!.slice(6)),
+          };
+        });
+      expect(frames[0]?.event).toBe("hello");
+      expect(frames.find((frame) => frame.event === "hub")?.data.caps).toContain(TERMINAL_UI_CAP);
+      expect(frames.some((frame) => frame.event === "agents")).toBe(true);
+      expect(frames.some((frame) => frame.event === "terminal_connection" || frame.event === "terminal")).toBe(false);
+      expect(conn.text()).not.toMatch(/connectionToken|connectionInstance/);
+    },
+  );
 });

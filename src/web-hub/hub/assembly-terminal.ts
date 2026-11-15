@@ -123,8 +123,10 @@ export async function assembleTerminal(ctx: HubAssembly) {
     openSse(req, res, id, clientId, origin, output) {
       // Legacy privacy snapshots cannot express degraded. Use observable connection loss,
       // after the hub capability burst but before issuing any private binding material.
+      // Drain that public bootstrap (including the gzip trailer); only established
+      // sensitive bindings require synchronous abort/discard on revocation.
       if (local === undefined || ctx.privacyStore === undefined || ctx.privacyStore.degraded) {
-        output.abort();
+        output.finish();
         return;
       }
       baseRoutes.openSse(req, res, id, clientId, origin, output);

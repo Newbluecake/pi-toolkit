@@ -1,8 +1,16 @@
 import { EventEmitter } from "node:events";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { Writable } from "node:stream";
 import { constants, gunzipSync, type Gzip } from "node:zlib";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { assembleTerminal } from "../../../../src/web-hub/hub/assembly-terminal.js";
+import type { HubAssembly } from "../../../../src/web-hub/hub/assembly.js";
+import { createPrivacyStore } from "../../../../src/web-hub/hub/privacy/store.js";
+import { TERMINAL_LOCAL_DIR } from "../../../../src/web-hub/protocol/terminal-local.js";
+import { TERMINAL_UI_CAP } from "../../../../src/web-hub/protocol/version.js";
+import { config, memLog, tmpDirs } from "../helpers.js";
 import type { AuthIdentity } from "../../../../src/web-hub/hub/auth-identity.js";
 import { createSseHub, formatSseFrame } from "../../../../src/web-hub/hub/sse.js";
 import { TerminalRevocationFence } from "../../../../src/web-hub/hub/terminal/revocation-fence.js";
@@ -11,12 +19,14 @@ import { TerminalSseBindings } from "../../../../src/web-hub/hub/terminal/sse-bi
 class Response extends Writable {
   chunks: Buffer[] = [];
   headers: Record<string, string> = {};
+  status = 0;
   stalled = false;
   release: (() => void) | undefined;
   constructor() {
     super({ highWaterMark: 16 });
   }
-  writeHead(_status: number, headers: Record<string, string>): void {
+  writeHead(status: number, headers: Record<string, string>): void {
+    this.status = status;
     this.headers = headers;
   }
   override _write(chunk: Buffer, _encoding: BufferEncoding, cb: () => void): void {
@@ -26,9 +36,9 @@ class Response extends Writable {
   }
 }
 
-const cleanups: Array<() => void> = [];
-afterEach(() => {
-  for (const cleanup of cleanups.splice(0)) cleanup();
+const cleanups: Array<() => void | Promise<void>> = [];
+afterEach(async () => {
+  for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 });
 
 function setup(encoding: "identity" | "gzip") {
@@ -108,6 +118,71 @@ async function until(assertion: () => void) {
 }
 
 describe.each(["identity", "gzip"] as const)("private terminal SSE through %s output", (encoding) => {
+  it.each(["local-unavailable", "privacy-missing", "privacy-degraded"])(
+    "finishes the public bootstrap before closing early %s without a private binding",
+    async (reason) => {
+      const tmp = tmpDirs();
+      cleanups.push(() => tmp.cleanup());
+      const stateDir = tmp.make("terminal-sse-");
+      if (reason === "local-unavailable") mkdirSync(join(stateDir, TERMINAL_LOCAL_DIR), { mode: 0o700 });
+      if (reason === "privacy-degraded") writeFileSync(join(stateDir, "privacy.json"), "corrupt", { mode: 0o600 });
+      const privacy = createPrivacyStore({ stateDir });
+      await privacy.load();
+      expect(privacy.degraded).toBe(reason === "privacy-degraded");
+      // Only the assembly's terminal dependencies are needed; no frontend/agent/backend is created.
+      const ctx = {
+        config: config({
+          terminal: {
+            maxPerSession: 2,
+            maxPerPrincipal: 2,
+            maxTotal: 8,
+            inputIdleMs: 3600000,
+            maxLifetimeMs: 28800000,
+          },
+        }),
+        now: () => 0,
+        paths: { stateDir },
+        log: memLog(),
+        startup: new AbortController(),
+        cleanup: [],
+        privacyStore: reason === "privacy-missing" ? undefined : privacy,
+      } as unknown as HubAssembly;
+      const terminal = (await assembleTerminal(ctx))!;
+      cleanups.push(() => terminal.dispose());
+      expect(terminal.status.state).toBe(reason === "local-unavailable" ? "unavailable" : "ready");
+      const f = setup(encoding);
+      const abort = vi.spyOn(f.client.output, "abort");
+      const finish = vi.spyOn(f.client.output, "finish");
+      const connect = vi.spyOn(terminal.service.bindings, "connect");
+      const capability = { caps: [TERMINAL_UI_CAP] };
+      f.client.send("hub", capability);
+      f.client.send("agents", { agents: [] });
+      terminal.routes.openSse(
+        f.req,
+        f.res as unknown as ServerResponse,
+        f.identity,
+        f.client.id,
+        "http://localhost",
+        f.client.output,
+      );
+      expect(finish).toHaveBeenCalledTimes(1);
+      expect(abort).not.toHaveBeenCalled();
+      expect(connect).not.toHaveBeenCalled();
+      expect(f.hub.count()).toBe(0);
+      expect(f.client.send("hub", { late: true })).toBe(false);
+      await until(() => expect(f.res.writableFinished).toBe(true));
+      expect(f.res.status).toBe(200);
+      expect(f.res.headers["Content-Type"]).toBe("text/event-stream; charset=utf-8");
+      expect(f.res.headers["Content-Encoding"]).toBe(encoding === "gzip" ? "gzip" : undefined);
+      expect(f.text(true)).toBe(
+        formatSseFrame("hello", { clientId: f.client.id }) +
+          formatSseFrame("hub", capability) +
+          formatSseFrame("agents", { agents: [] }),
+      ); // strict gunzip requires a complete trailer, not a tolerant partial decode
+      expect(f.frames().map((frame) => frame.event)).toEqual(["hello", "hub", "agents"]);
+    },
+  );
+
   it("interleaves public/private frames in one encoder FIFO, flushes private frames while open, never replays them", async () => {
     const f = setup(encoding);
     f.client.send("hub", { phase: "before" });
@@ -212,7 +287,12 @@ describe.each(["identity", "gzip"] as const)("private terminal SSE through %s ou
     f.client.send("hub", { phase: "blocked" });
     expect(binding.send("terminal", { text: "queued secret" })).toBe(true);
     const bytes = Buffer.concat(f.res.chunks);
+    const abort = vi.spyOn(f.client.output, "abort");
+    const finish = vi.spyOn(f.client.output, "finish");
     f.fence.revoke({ sidTag: f.identity.sidTag });
+    expect(abort).toHaveBeenCalledTimes(1);
+    expect(finish).not.toHaveBeenCalled();
+    expect(f.res.writableFinished).toBe(false);
     expect(binding.metadata.live).toBe(false); // fence/binding denial is synchronous
     expect(f.res.destroyed).toBe(true);
     await until(() => expect(f.res.closed).toBe(true));

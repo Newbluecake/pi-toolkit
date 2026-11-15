@@ -120,12 +120,16 @@ identity drain 处理，无新公开事件/id/cap。binding 的 64 KiB 压力检
 表示接收入队，而不是浏览器已消费。撤权先同步清 live/active 与 listeners，再 abort 原 output，
 丢弃尚未写出的队列并销毁 compressor/socket，不用 `res.end()` 绕过 encoder 的生命周期；
 已交给 socket 的 bytes 无法撤回。普通 SSE close 的排空语义仍由 output 管理。
+尚未建立 binding 的早期 local unavailable / privacy missing 或 degraded 分支没有私有材料，
+经 `output.finish()` 停止发送并排空公开 capability bootstrap 与 gzip trailer 后正常结束；
+不得在 headers/公开帧送达前 abort。已建立敏感 binding 的撤销仍同步 abort，不排空私有队列。
 terminal off 不调用该端口、不新增字节；私有材料仍不进入 replay。
 
 回归：`tests/web-hub/hub/terminal/sse-binding.test.ts` 用真实 zlib + 内存 Writable 覆盖
 identity/gzip 的交错次序、完整 trailer/逐帧解码、无后继帧仍及时 flush、drain、encoder
-积压压力、撤销丢弃队列、close/error/expiry 与 replay 隔离；真实 HTTP/双 listener 接线
-由原 `tests/integration/web-hub-terminal-http.test.ts` 验证。
+积压压力、撤销丢弃队列、close/error/expiry 与 replay 隔离，以及早期 unavailable 的公开帧排空；
+`tests/integration/web-hub-sse-output.test.ts` 以真实 HTTP 验证 unavailable/degraded 的 headers、
+capability 和完整 gzip 结束。真实双 listener 接线由原 `tests/integration/web-hub-terminal-http.test.ts` 验证。
 
 ## 权威链、物理 receipt 与冷恢复（F2）
 
