@@ -148,8 +148,11 @@ interface ProbeResult {
 
 /** §7.1 seam B: run one probe child process and parse its fingerprint blob. */
 function runParityProbe(config: Record<string, unknown>, timeoutMs = 180_000): ProbeResult {
-  const cfgFile = join(tmpdir(), `pt-parity-cfg-${process.pid}-${Math.random().toString(36).slice(2)}.json`);
-  writeFileSync(cfgFile, JSON.stringify(config));
+  // The child has live fs workers (including disposed stacks' in-flight I/O).
+  // Only its parent can safely remove ALL sandboxes after process exit.
+  const sandboxRoot = mkdtempSync(join(tmpdir(), "pt-parity-probe-"));
+  const cfgFile = join(sandboxRoot, "config.json");
+  writeFileSync(cfgFile, JSON.stringify({ ...config, sandboxRoot }));
   try {
     const result = spawnSync(process.execPath, ["--import", TSX_LOADER, PARITY_PROBE, cfgFile], {
       cwd: ROOT,
@@ -157,10 +160,13 @@ function runParityProbe(config: Record<string, unknown>, timeoutMs = 180_000): P
       timeout: timeoutMs,
       env: childEnv(),
     });
-    expect(result.status, `probe (${String(config.mode)}) failed:\n${result.stderr}`).toBe(0);
+    expect(
+      result.status,
+      `probe (${String(config.mode)}) failed: root=${sandboxRoot} config=${JSON.stringify(config)} status=${result.status} signal=${result.signal} error=${String(result.error)}\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+    ).toBe(0);
     return JSON.parse(result.stdout) as ProbeResult;
   } finally {
-    rmSync(cfgFile, { force: true });
+    rmSync(sandboxRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 }
 

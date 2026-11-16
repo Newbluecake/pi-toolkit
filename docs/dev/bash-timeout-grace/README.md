@@ -116,3 +116,18 @@ or list in the current session. It establishes neither whether the process is al
 extension took effect; do not automatically retry extend or kill. Other exceptions retain their
 existing path. Foreground bash behavior is unchanged. `tests/bash/job-tool.test.ts` covers the
 boundary; source changes do not imply an existing session has loaded them.
+
+## Host `session-id` marker lifecycle (#47)
+
+`buildBashJobManager` owns its asynchronous `mkdir → session-id` bootstrap: `dispose()` prevents a
+not-yet-started marker write after the mkdir completes, and `drain()` includes bootstrap completion
+before the ordinary store barrier. An already-started filesystem operation may still complete after
+synchronous dispose (as may live-job persistence, deliberately retained for handoff). Dispose is not
+permission to recursively remove its directory: await drain for the marker/store, and keep live-job
+writers in mind. No shutdown-wide unbounded wait or extra timer is introduced.
+
+The bundle parity harness therefore gives sandbox ownership to the **parent** of the probe process:
+only after `spawnSync` returns does it remove the per-probe root. In-process synchronous deletion and
+retry delays cannot drain fs-worker operations/JS continuations and were racing the marker even with
+`maxRetries:10`. `tests/bash/host-marker.test.ts` pins both bootstrap cancellation and drain with
+controlled filesystem barriers; existing job handoff and shutdown semantics stay unchanged.

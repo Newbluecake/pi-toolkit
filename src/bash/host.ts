@@ -104,8 +104,16 @@ export function buildBashJobManager(
     dirMode: 0o700,
     extraLogRoot: rootDir,
   });
-  void mkdir(store.dir, { recursive: true, mode: 0o700 })
-    .then(() => writeFile(join(store.dir, "session-id"), `${sessionId}\n`, { encoding: "utf8", mode: 0o600 }))
+  // Bootstrap belongs to this host too, not just to the fs thread pool. A rebuild/
+  // shutdown may dispose us while mkdir is in flight; do not start a new write
+  // afterwards. An already-started write is allowed to finish and drain awaits it.
+  let disposed = false;
+  const markerReady = mkdir(store.dir, { recursive: true, mode: 0o700 })
+    .then(() => {
+      if (!disposed)
+        return writeFile(join(store.dir, "session-id"), `${sessionId}\n`, { encoding: "utf8", mode: 0o600 });
+      return undefined;
+    })
     .catch(() => undefined);
   const processPort = createProcessPort({
     ...(config.shellPath !== undefined ? { shellPath: config.shellPath } : {}),
@@ -186,7 +194,17 @@ export function buildBashJobManager(
     },
   });
   managerRef.current = manager;
-  return manager;
+  return {
+    ...manager,
+    async drain() {
+      await markerReady;
+      await manager.drain();
+    },
+    dispose() {
+      disposed = true;
+      manager.dispose();
+    },
+  };
 }
 
 /** bash-timeout-grace plan §2.5 step 4/6 (P5): unref'd, default 10s. */

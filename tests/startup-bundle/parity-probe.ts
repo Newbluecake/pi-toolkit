@@ -24,8 +24,7 @@
  * "bundle branch never resolves src/index.ts" assertion. Test infrastructure: never import from src/**.
  */
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { registerHooks } from "node:module";
 import { pathToFileURL } from "node:url";
@@ -67,6 +66,8 @@ interface Scenario {
 
 interface ProbeConfig {
   mode: "src" | "bundle" | "dispatcher";
+  /** Parent-owned: removed only once this probe process (and its fs workers) exits. */
+  sandboxRoot: string;
   /** Package root the entry lives in (the repo, or a temp package layout). */
   entryDir: string;
   scenarios: Scenario[];
@@ -87,14 +88,8 @@ function resetActivationGlobals(): void {
   delete g[SECURE_DOMAIN_KEY];
 }
 
-/** Same retry shape as tests/integration/helpers/schedule-activate.ts (ENOTEMPTY under load). */
-function rmTemp(dir: string): void {
-  rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
-}
-
-function sandbox(): { home: string; cleanup: () => void } {
-  const home = mkdtempSync(join(tmpdir(), "pt-parity-"));
-  return { home, cleanup: () => rmTemp(home) };
+function sandbox(root: string): { home: string } {
+  return { home: mkdtempSync(join(root, "pt-parity-")) };
 }
 
 interface SpawnCapture {
@@ -139,7 +134,7 @@ async function main(): Promise<void> {
 
   for (const scenario of config.scenarios) {
     resetActivationGlobals();
-    const box = sandbox();
+    const box = sandbox(config.sandboxRoot);
     const previousHome = process.env.HOME;
     process.env.HOME = box.home;
     try {
@@ -340,11 +335,15 @@ async function main(): Promise<void> {
       }
 
       (out.scenarios as Record<string, unknown>)[scenario.name] = fingerprint;
+    } catch (error) {
+      console.error(`parity scenario failed: mode=${config.mode} scenario=${scenario.name} home=${box.home}`);
+      throw error;
     } finally {
       if (previousHome === undefined) delete process.env.HOME;
       else process.env.HOME = previousHome;
       resetActivationGlobals();
-      box.cleanup();
+      // Never rmSync a home in this process: fs worker operations can finish while
+      // synchronous retries block their JS continuations. The parent owns cleanup.
     }
   }
 
