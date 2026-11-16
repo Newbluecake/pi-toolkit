@@ -1,3 +1,4 @@
+import { deferred } from "../helpers/virtual-time.js";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -184,16 +185,22 @@ describe("secure-domain 符号源 + 异步切点（plan §6）", () => {
         handlers.get("message_end")!({ message: { role: "user", content: "b" } }, ctx());
         handlers.get("before_provider_request")!({ payload: { p: 1 } }, ctx());
         expect(state.dbPort.stats().queued).toBeGreaterThanOrEqual(3);
+        const closed = deferred();
+        const close = state.close.bind(state);
+        const closeSpy = vi.spyOn(state, "close").mockImplementation((reason) => {
+          const p = close(reason);
+          if (reason === "secure") void p.then(() => closed.resolve());
+          return p;
+        });
         // 入队之后、flush 之前切域；之后不再调用任何 record*。
         if (how === "env") process.env.PI_SECURE_SESSION = "1";
         else g[DOMAIN_KEY] = { kind: "locked", reason: "x", vaults: [], config: {} };
-        const t0 = performance.now();
-        await new Promise((r) => setTimeout(r, 30));
+        expect(await state.dbPort.whenIdle()).toBe(true);
+        expect(state.recording).toBe(false);
+        await closed.promise;
         expect(uncaught).toEqual([]);
-        expect(state.state).not.toBe("open");
-        await state.close("test");
+        expect(closeSpy).toHaveBeenCalledWith("secure");
         expect(state.state).toBe("closed");
-        expect(performance.now() - t0).toBeLessThan(1500);
         expect(state.dbPort.stats().queued).toBe(0);
         delete process.env.PI_SECURE_SESSION;
         delete g[DOMAIN_KEY];

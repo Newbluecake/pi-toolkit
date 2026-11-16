@@ -1,3 +1,4 @@
+import { virtualTime, deferred as timeDeferred, observe } from "../../../helpers/virtual-time.js";
 /**
  * web-hub-preview plan v3 §4.5.2 / PV2a acceptance — `hub/preview/stream.ts`.
  *
@@ -544,16 +545,29 @@ describe("stream: lifecycle", () => {
     const content = Buffer.alloc(150 * KIB, 0x55);
     const sink = new FakeSink({ hang: true });
     sink.backpressure = false; // every write reports backpressure
-    const t0 = Date.now();
-    const out = await readAndStream(
-      { fh: new FakeHandle(content), size: content.length, sniff: pngSniff, sample: content.subarray(0, 64 * KIB) },
-      sink,
-      opts({ streamAt: 200 }),
+    virtualTime();
+    const entered = timeDeferred();
+    const drain = sink.waitDrain.bind(sink);
+    sink.waitDrain = (...args) => {
+      entered.resolve();
+      return drain(...args);
+    };
+    const fh = new FakeHandle(content);
+    const call = observe(
+      readAndStream(
+        { fh, size: content.length, sniff: pngSniff, sample: content.subarray(0, 64 * KIB) },
+        sink,
+        opts({ streamAt: 200 }),
+      ),
     );
-    expect(out).toEqual({ ok: false, reason: "stream-deadline", headersSent: true });
+    await entered.promise;
+    await call.pendingAfter(199);
+    expect(sink.destroyed).toBe(false);
+    await call.advance(1);
+    expect(await call.promise).toEqual({ ok: false, reason: "stream-deadline", headersSent: true });
     expect(sink.destroyed).toBe(true);
     expect(sink.drainWaiters).toBeGreaterThanOrEqual(1);
-    expect(Date.now() - t0).toBeLessThan(2_000);
+    expect(fh.closeCount).toBe(1);
   });
 
   it("every timer created during a stream is unref'd", async () => {

@@ -1,3 +1,4 @@
+import { virtualTime, deferred as timeDeferred, observe } from "../../../../helpers/virtual-time.js";
 /**
  * web-hub session-history plan §4.5.7 (`snapshot.ts`): fork snapshots (PD12).
  */
@@ -8,10 +9,11 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createReqDeadline } from "../../../../../src/web-hub/hub/req-deadline.js";
 import {
   createHistoryIoGate,
+  FORK_SRC_SWEEP_STEP_MS,
   HISTORY_SNAPSHOT_MAX_BYTES,
 } from "../../../../../src/web-hub/hub/spawn/history/budget.js";
 import { createFdLedger } from "../../../../../src/web-hub/hub/spawn/history/fd-ledger.js";
-import { defaultHistoryFs } from "../../../../../src/web-hub/hub/spawn/history/fs.js";
+import { defaultHistoryFs, type HistoryFs } from "../../../../../src/web-hub/hub/spawn/history/fs.js";
 import { getPinnedFileFd, pinSession, createPinAdmission } from "../../../../../src/web-hub/hub/spawn/history/pin.js";
 import {
   createForkSrcDirState,
@@ -166,39 +168,63 @@ describe("snapshotFork", () => {
 
   it("verifier round 3 (defect 3b): a HANGING forkSrcDir lstat fails closed within the per-step bound (504), never hangs the request", async () => {
     const pin = await pinFile(HEADER);
+    virtualTime();
+    const entered = timeDeferred();
+    const late = timeDeferred<never>();
+    const state = createForkSrcDirState();
     const real = defaultHistoryFs();
     const fs: HistoryFs = {
       ...real,
-      lstat: (p) => (p === forkSrcDir ? new Promise<never>(() => undefined) : real.lstat(p)),
+      lstat: (p) => (p === forkSrcDir ? (entered.resolve(), late.promise) : real.lstat(p)),
     };
-    const start = Date.now();
-    const result = await snapshotFork(
-      pin,
-      createReqDeadline(() => 0, 10_000),
-      { ...snapDeps(), fs },
-      createForkSrcDirState(),
+    const call = observe(
+      snapshotFork(
+        pin,
+        createReqDeadline(() => 0, 10_000),
+        { ...snapDeps(), fs },
+        state,
+      ),
     );
+    await entered.promise;
+    await call.pendingAfter(FORK_SRC_SWEEP_STEP_MS - 1);
+    await call.advance(1);
+    const result = await call.promise;
     expect(result).toMatchObject({ ok: false, status: 504 });
-    expect(Date.now() - start).toBeLessThan(5_000); // the per-step race ended it, not the 10s budget
+    expect(state.verified).toBe(false);
+    late.reject(new Error("late IO failure"));
+    await call.advance(0);
+    expect(state.verified).toBe(false);
     pin.release();
   }, 8_000);
 
   it("verifier round 3 (defect 3b): a HANGING forkSrcDir mkdir fails closed within the per-step bound (504)", async () => {
     const pin = await pinFile(HEADER);
+    virtualTime();
+    const entered = timeDeferred();
+    const late = timeDeferred<never>();
+    const state = createForkSrcDirState();
     const real = defaultHistoryFs();
     const fs: HistoryFs = {
       ...real,
-      mkdir: (p, mode) => (p === forkSrcDir ? new Promise<never>(() => undefined) : real.mkdir(p, mode)),
+      mkdir: (p, mode) => (p === forkSrcDir ? (entered.resolve(), late.promise) : real.mkdir(p, mode)),
     };
-    const start = Date.now();
-    const result = await snapshotFork(
-      pin,
-      createReqDeadline(() => 0, 10_000),
-      { ...snapDeps(), fs },
-      createForkSrcDirState(),
+    const call = observe(
+      snapshotFork(
+        pin,
+        createReqDeadline(() => 0, 10_000),
+        { ...snapDeps(), fs },
+        state,
+      ),
     );
+    await entered.promise;
+    await call.pendingAfter(FORK_SRC_SWEEP_STEP_MS - 1);
+    await call.advance(1);
+    const result = await call.promise;
     expect(result).toMatchObject({ ok: false, status: 504 });
-    expect(Date.now() - start).toBeLessThan(5_000);
+    expect(state.verified).toBe(false);
+    late.reject(new Error("late IO failure"));
+    await call.advance(0);
+    expect(state.verified).toBe(false);
     pin.release();
   }, 8_000);
 });

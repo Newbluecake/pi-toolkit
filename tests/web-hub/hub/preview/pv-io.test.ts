@@ -1,3 +1,4 @@
+import { virtualTime, deferred as timeDeferred, observe } from "../../../helpers/virtual-time.js";
 /** web-hub-html-preview plan v2 §2.5 / T-H14 — `hub/preview/pv-io.ts`. */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { isPreviewIoError } from "../../../../src/web-hub/hub/preview/fs.js";
@@ -138,17 +139,33 @@ describe("pv-io gate", () => {
   });
 
   it("close: bounded for the caller, never rejects, still runs when a slot frees", async () => {
+    virtualTime();
     const g = createPvIoGate({ slots: 1, opTimeoutMs: 30 });
     const hang = deferred();
-    bg(g.run(() => hang.p, { deadlineAt: far() }));
+    const entered = timeDeferred();
+    bg(
+      g.run(
+        () => {
+          entered.resolve();
+          return hang.p;
+        },
+        { deadlineAt: far() },
+      ),
+    );
+    await entered.promise;
     const closeOp = vi.fn(async () => undefined);
-    const t0 = Date.now();
-    await g.close(closeOp); // caller released after ≈ opTimeoutMs even though no slot
-    expect(Date.now() - t0).toBeLessThan(500);
+    const close = observe(g.close(closeOp));
+    await close.pendingAfter(29);
+    expect(g.inflight).toBe(1);
     expect(closeOp).not.toHaveBeenCalled();
+    await close.advance(1);
+    await close.promise;
+    expect(closeOp).not.toHaveBeenCalled();
+    expect(g.inflight).toBe(1); // the timed-out run still owns the physical slot
     hang.resolve();
-    await tick(5);
-    expect(closeOp).toHaveBeenCalledTimes(1); // queued close ran once the slot freed
+    await close.advance(0);
+    expect(closeOp).toHaveBeenCalledTimes(1);
+    expect(g.inflight).toBe(0);
     await expect(g.close(() => Promise.reject(new Error("x")))).resolves.toBeUndefined();
   });
 

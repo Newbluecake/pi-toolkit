@@ -1,3 +1,4 @@
+import { virtualTime, deferred as timeDeferred, observe } from "../../../helpers/virtual-time.js";
 /**
  * web-hub-html-preview plan v2 T-H3 — `hub/preview/pv-admit.ts` against the REAL kernel
  * (tmp dirs + /proc/self/fd), with scripted-fs hooks for the swap-between-steps windows.
@@ -344,15 +345,48 @@ describe("admitPvFile — budgets", () => {
     const { site } = scratch();
     writeFileSync(join(site, "index.html"), "x");
     const dir = await pin(mkDeps(), site, "index.html");
-    const hung = mkDeps({ realpath: () => new Promise<string>(() => undefined) });
-    const t0 = Date.now();
-    const r = await admitPvFile(hung, { dirFd: dir.fd, dirPath: site, rel: "index.html", deadlineAt: Date.now() + 80 });
-    expect(r).toMatchObject({ ok: false, status: 504 });
-    expect(Date.now() - t0).toBeLessThan(1500);
+    virtualTime();
+    const entered = timeDeferred();
+    const late = timeDeferred<string>();
+    const hung = mkDeps({
+      realpath: () => {
+        entered.resolve();
+        return late.promise;
+      },
+    });
+    const call = observe(
+      admitPvFile(hung, { dirFd: dir.fd, dirPath: site, rel: "index.html", deadlineAt: Date.now() + 80 }),
+    );
+    await entered.promise;
+    await call.pendingAfter(79);
+    await call.advance(1);
+    expect(await call.promise).toMatchObject({ ok: false, status: 504 });
+    expect(hung.gate.inflight).toBe(1);
+    late.resolve(join(site, "index.html"));
+    await call.advance(0);
+    expect(hung.gate.inflight).toBe(0);
+    const abortEntered = timeDeferred();
+    const abortedStep = timeDeferred<string>();
     const ctl = new AbortController();
-    const p = admitPvFile(hung, { dirFd: dir.fd, dirPath: site, rel: "index.html", signal: ctl.signal });
-    setTimeout(() => ctl.abort(), 20).unref();
+    const p = admitPvFile(
+      {
+        ...hung,
+        fs: {
+          realpath: () => {
+            abortEntered.resolve();
+            return abortedStep.promise;
+          },
+        },
+      },
+      { dirFd: dir.fd, dirPath: site, rel: "index.html", signal: ctl.signal },
+    );
+    await abortEntered.promise;
+    ctl.abort();
     expect(await p).toMatchObject({ ok: false, status: 0, code: "E_ABORT" });
+    expect(ctl.signal.aborted).toBe(true);
+    abortedStep.resolve(join(site, "index.html"));
+    await call.advance(0);
+    expect(hung.gate.inflight).toBe(0);
   });
 
   it("slots exhausted by zombies ⇒ 503 busy (retryAfterS 1)", async () => {

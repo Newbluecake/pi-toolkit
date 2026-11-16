@@ -24,7 +24,7 @@
 2. **tier1 的 timing 豁免有边界（§6 已定）**：`TIER1_DECLARED` 中 `kind:"timing"` 的文件失败按 Tier 2
    分诊（单文件复跑）；其余 tier1 失败一律按真 bug。分诊不改变 release.sh 的中止行为。#47c 的全 tests 挂钟审计把仍需真实调度/磁盘/进程的
    latency、性能和 deadline 上界也显式登记为 timing（即使没有字面 ≥1 s sleep）；保留原阈值，
-   不把 fake-clock 算术门纳入豁免。能用队列状态、SQL 路径、字节/操作预算证明的断言优先改为
+   不把纯可控 Promise/假 fs 的 deadline 文件纳入豁免：先用进入步骤的 deferred 信号配合虚拟钟检查 D−1/D、abort 与迟到回收，撤回这些文件的新增 timing；原 proc/剩余词法标记仍须登记。CPU sentinel 拆入独立 `.perf.test.ts` 并保留原阈值（stderr push、connection send、preview 扫描），主行为文件继续是硬门。混合真实 CPU 门与假钟预算的文件（如 graph/budget）仍按文件整体登记 timing，不声称断言级分诊；其中所有确定性断言照常执行、失败仍中止门禁。能用队列状态、SQL 路径、字节/操作预算证明的断言优先改为
    确定性行为门；真实 IO 的超时上界不是可移植性能 SLA。登记理由在 `tests/tiers.ts` 的 `why`。
 3. **CI 覆盖面不变（D7）**：tier2 步骤条件 `!cancelled() && (steps.tier1.outcome == 'success' ||
 outcome == 'failure')` —— 只有 tier1 确实执行过才跑；npm ci / 构建失败 ⇒ tier1 被跳过 ⇒ tier2 不跑。

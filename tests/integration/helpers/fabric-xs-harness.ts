@@ -7,6 +7,27 @@ import { join, resolve } from "node:path";
  * budget (ready + live) for loaded runners; ordinary RPC/event budgets stay 12s. */
 const BOOT_MS = 30_000;
 
+/** Diagnostic hygiene for inherited-env children. Redact BEFORE applying the byte cap. */
+export function sanitizeDiagnostic(text: string): string {
+  const clean = text
+    .replace(/(authorization\s*:\s*bearer\s+)[^\s\r\n]+/gi, "$1[REDACTED]")
+    .replace(/((?:set-cookie|cookie)\s*:\s*)[^\r\n]+/gi, "$1[REDACTED]")
+    .replace(
+      /((?:[\w-]*(?:token|api[-_]?key|secret|password)[\w-]*)["']?\s*[:=]\s*)["']?[^\s,;"'\r\n}]+["']?/gi,
+      "$1[REDACTED]",
+    )
+    .replace(/\b(?:[a-f0-9]{32,}|[A-Za-z0-9+/_-]{48,}={0,2})\b/gi, "[REDACTED]");
+  const bytes = Buffer.from(clean);
+  if (bytes.length <= 12_000) return clean;
+  // Keep lifecycle fields at the head AND recent stderr, without splitting UTF-8.
+  const marker = "\n...[truncated]...\n";
+  let headEnd = 1_000;
+  while ((bytes[headEnd]! & 0xc0) === 0x80) headEnd--;
+  let tailStart = bytes.length - (12_000 - headEnd - Buffer.byteLength(marker));
+  while (tailStart < bytes.length && (bytes[tailStart]! & 0xc0) === 0x80) tailStart++;
+  return bytes.subarray(0, headEnd).toString("utf8") + marker + bytes.subarray(tailStart).toString("utf8");
+}
+
 export function bounded<T>(p: Promise<T>, label: string, ms = 12_000, diagnostic = () => ""): Promise<T> {
   const started = performance.now();
   let timer: NodeJS.Timeout;
@@ -17,7 +38,9 @@ export function bounded<T>(p: Promise<T>, label: string, ms = 12_000, diagnostic
         () =>
           reject(
             new Error(
-              `timeout: ${label}; waited=${Math.round(performance.now() - started)}ms budget=${ms}ms ${diagnostic()}`,
+              sanitizeDiagnostic(
+                `timeout: ${label}; waited=${Math.round(performance.now() - started)}ms budget=${ms}ms ${diagnostic()}`,
+              ),
             ),
           ),
         ms,
@@ -47,7 +70,9 @@ export async function until<T>(
     });
   } while (performance.now() < end);
   throw new Error(
-    `timeout: ${label}; waited=${Math.round(performance.now() - started)}ms budget=${ms}ms ${diagnostic()}`,
+    sanitizeDiagnostic(
+      `timeout: ${label}; waited=${Math.round(performance.now() - started)}ms budget=${ms}ms ${diagnostic()}`,
+    ),
   );
 }
 export interface Peer {
@@ -60,6 +85,7 @@ export class XsHarness {
   readonly home = mkdtempSync(join(tmpdir(), "xw-"));
   readonly peers: Peer[] = [];
   private seq = 0;
+  constructor(private readonly options: { processFile?: string; execPath?: string; bootMs?: number } = {}) {}
   async boot(
     role: "hub" | "agent",
     name: string = role,
@@ -72,8 +98,8 @@ export class XsHarness {
     const cwd = join(this.home, "project");
     mkdirSync(cwd, { recursive: true });
     const child = spawn(
-      process.execPath,
-      ["--import", "tsx", resolve("tests/integration/helpers/fabric-xs-process.ts"), role],
+      this.options.execPath ?? process.execPath,
+      ["--import", "tsx", this.options.processFile ?? resolve("tests/integration/helpers/fabric-xs-process.ts"), role],
       {
         cwd: resolve("."),
         stdio: ["ignore", "ignore", "pipe", "ipc"],
@@ -95,7 +121,9 @@ export class XsHarness {
       stderr = (stderr + b.toString()).slice(-12_000);
     });
     const diagnostic = () =>
-      `${role}:${name} pid=${child.pid} exit=${child.exitCode} signal=${child.signalCode} connected=${child.connected} stderr=${stderr}`;
+      sanitizeDiagnostic(
+        `${role}:${name} pid=${child.pid} exit=${child.exitCode} signal=${child.signalCode} connected=${child.connected} stderr=${stderr}`,
+      );
     const exited = new Promise<void>((r) => child.once("close", () => r()));
     const pending = new Map<number, { resolve: (value: any) => void; reject: (e: Error) => void }>();
     const events = new Map<string, Array<(value: any) => void>>();
@@ -115,12 +143,13 @@ export class XsHarness {
       if (m.event) for (const f of events.get(m.event)?.splice(0) ?? []) f(m);
     });
     child.on("error", (error) => {
-      failReady(error);
-      for (const p of pending.values()) p.reject(error);
+      const failure = new Error(sanitizeDiagnostic(`child error: ${error.message}; ${diagnostic()}`));
+      failReady(failure);
+      for (const p of pending.values()) p.reject(failure);
       pending.clear();
     });
     child.on("close", (code) => {
-      const error = new Error(`${role} exit ${code}: ${stderr}`);
+      const error = new Error(sanitizeDiagnostic(`child close code=${code}; ${diagnostic()}`));
       failReady(error);
       for (const p of pending.values()) p.reject(error);
       pending.clear();
@@ -155,13 +184,18 @@ export class XsHarness {
       },
     };
     this.peers.push(peer);
-    await bounded(started, `${role} ready`, Math.max(0, BOOT_MS - (performance.now() - bootStarted)), diagnostic);
+    await bounded(
+      started,
+      `${role} ready`,
+      Math.max(0, (this.options.bootMs ?? BOOT_MS) - (performance.now() - bootStarted)),
+      diagnostic,
+    );
     if (role === "agent")
       await until(
         () => peer.rpc("inspect"),
         (s) => s.conn?.state === "live",
         "socket live",
-        { timeoutMs: Math.max(0, BOOT_MS - (performance.now() - bootStarted)), diagnostic },
+        { timeoutMs: Math.max(0, (this.options.bootMs ?? BOOT_MS) - (performance.now() - bootStarted)), diagnostic },
       );
     return peer;
   }

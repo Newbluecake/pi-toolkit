@@ -1,3 +1,4 @@
+import { virtualTime, deferred as timeDeferred, observe } from "../../../helpers/virtual-time.js";
 /**
  * dir-plan v3.1 §2.1 (P1a) acceptance — `hub/preview/admit.ts`'s `createFsAdmitter`.
  *
@@ -676,34 +677,35 @@ describe("admit: budgets & step racing", () => {
   const STEP_CAP = 80;
   const SLOW = 400;
 
-  /** admitter whose fs is real except one injected delay; `h` wraps the opened handle so
-   * `fh.stat()` itself can be the slow step. */
+  /** Real admission up to one explicitly parked syscall; no scheduler sleeps. */
   const slowAdmitter = (method: FsMethodName, delayHandleStat = false) => {
-    const hooks: FsHooks = { counts: {}, delayMs: { [method]: SLOW } as Partial<Record<FsMethodName, number>> };
-    const fs = hookedFs(hooks);
+    const entered = timeDeferred();
+    const late = timeDeferred<never>();
+    const tracker = createPreviewIoTracker();
+    const fs = hookedFs({ counts: {} });
+    const park = () => {
+      entered.resolve();
+      return late.promise;
+    };
     const wrappedOpen = async (p: string, flags: number): Promise<PreviewHandle> => {
       const h = await fs.open(p, flags);
-      if (!delayHandleStat) return h;
-      const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms).unref());
-      return {
-        fd: h.fd,
-        stat: async () => {
-          await sleep(SLOW);
-          return h.stat();
-        },
-        read: (b, o, l, pos) => h.read(b, o, l, pos),
-        close: () => h.close(),
-      };
+      return { fd: h.fd, stat: park, read: (b, o, l, pos) => h.read(b, o, l, pos), close: () => h.close() };
     };
     const a = createFsAdmitter({
       denyCtx: CTX,
-      tracker: createPreviewIoTracker(),
-      fs: { ...fs, open: wrappedOpen },
+      tracker,
+      fs: {
+        ...fs,
+        realpath: method === "realpath" ? park : fs.realpath,
+        stat: method === "stat" ? park : fs.stat,
+        open: delayHandleStat ? wrappedOpen : method === "open" ? park : fs.open,
+        readlink: method === "readlink" ? park : fs.readlink,
+      },
       log: memLog(),
       now: Date.now,
       stepCapMs: STEP_CAP,
     });
-    return { a, counts: fs.counts };
+    return { a, entered, late, tracker };
   };
 
   it.each([
@@ -715,12 +717,18 @@ describe("admit: budgets & step racing", () => {
   ] as const)("slow %s ⇒ 504 E_DEADLINE at the step cap, not the 8s total", async (_name, method, wrapStat) => {
     const root = scratch();
     const file = okPath(root);
-    const { a } = slowAdmitter(method, wrapStat);
-    const t0 = Date.now();
-    const res = await a.admit({ path: file }, deadline(8000), neverAbort());
-    const elapsed = Date.now() - t0;
-    expect(res).toEqual({ ok: false, status: 504, code: "E_DEADLINE" });
-    expect(elapsed).toBeLessThan(STEP_CAP * 3);
+    virtualTime();
+    const { a, entered, late, tracker } = slowAdmitter(method, wrapStat);
+    const call = observe(a.admit({ path: file }, deadline(8000), neverAbort()));
+    await entered.promise;
+    await call.pendingAfter(STEP_CAP - 1);
+    expect(tracker.zombies).toBe(0);
+    await call.advance(1);
+    expect(await call.promise).toEqual({ ok: false, status: 504, code: "E_DEADLINE" });
+    expect(tracker.zombies).toBe(1);
+    late.reject(new Error("late failed syscall"));
+    await call.advance(0);
+    expect(tracker.zombies).toBe(0);
   });
 
   it("exhausted deadline ⇒ 504 without initiating the fs call (lazy)", async () => {
@@ -735,27 +743,32 @@ describe("admit: budgets & step racing", () => {
   it("a raced-out open that resolves late is closed (迟到回收)", async () => {
     const root = scratch();
     const file = okPath(root);
+    virtualTime();
     const real = defaultPreviewFs();
-    const late = new Promise<PreviewHandle>((resolve) => {
-      const t = setTimeout(() => resolve(new FakeHandle(Buffer.from("late"))), 300);
-      t.unref();
-    });
-    const fs = { ...real, open: () => late, counts: {} as Record<string, number> };
-    const a = createFsAdmitter({
-      denyCtx: CTX,
-      tracker: createPreviewIoTracker(),
-      fs,
-      log: memLog(),
-      now: Date.now,
-      stepCapMs: 60,
-    });
-    const t0 = Date.now();
-    const res = await a.admit({ path: file }, deadline(8000), neverAbort());
-    expect(res).toEqual({ ok: false, status: 504, code: "E_DEADLINE" });
-    expect(Date.now() - t0).toBeLessThan(250);
-    const handle = await late;
-    await new Promise((r) => setTimeout(r, 20));
+    const late = timeDeferred<PreviewHandle>();
+    const entered = timeDeferred();
+    const tracker = createPreviewIoTracker();
+    const fs = {
+      ...real,
+      open: () => {
+        entered.resolve();
+        return late.promise;
+      },
+      counts: {} as Record<string, number>,
+    };
+    const a = createFsAdmitter({ denyCtx: CTX, tracker, fs, log: memLog(), now: Date.now, stepCapMs: 60 });
+    const call = observe(a.admit({ path: file }, deadline(8000), neverAbort()));
+    await entered.promise;
+    await call.pendingAfter(59);
+    await call.advance(1);
+    expect(await call.promise).toEqual({ ok: false, status: 504, code: "E_DEADLINE" });
+    expect(tracker.zombies).toBe(1);
+    const handle = new FakeHandle(Buffer.from("late"));
+    expect(handle.closeCount).toBe(0);
+    late.resolve(handle);
+    await call.advance(0);
     expect(handle.closeCount).toBe(1);
+    expect(tracker.zombies).toBe(0);
   });
 
   it("abort mid-step ⇒ silent result (status 0, E_ABORT)", async () => {

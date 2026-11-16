@@ -1,3 +1,4 @@
+import { virtualTime, deferred as timeDeferred, observe } from "../../../helpers/virtual-time.js";
 /**
  * web-hub content-preview — PV3 route-layer tests (`hub/preview/routes.ts`, plan v3 §3.1/§4.5).
  *
@@ -978,9 +979,12 @@ describe("PV3 routes — HP6 fd leak / HP7 lifecycle", () => {
     mkdirSync(cwd, { recursive: true });
     const registry = makeRegistry({ agentKey, sessionId, cwd });
     const release = deferred();
+    const entered = timeDeferred<AbortSignal>();
+    virtualTime();
     const uploads: Pick<UploadStore, "openForPreview"> = {
       openForPreview: (_p, ctx) =>
         new Promise((resolve) => {
+          entered.resolve(ctx.signal);
           const onAbort = (): void => resolve({ ok: false, code: "E_DEADLINE" });
           if (ctx.signal.aborted) return onAbort();
           ctx.signal.addEventListener("abort", onAbort, { once: true });
@@ -1003,10 +1007,10 @@ describe("PV3 routes — HP6 fd leak / HP7 lifecycle", () => {
       query(agentKey, sessionId, `${join(dir, "uploads-root")}/s/x/f`),
       makeIo(),
     );
-    await sleep(30);
-    const t0 = Date.now();
+    const signal = await entered.promise;
+    expect(signal.aborted).toBe(false);
     await r.dispose("close", createReqDeadline(Date.now, 5_000));
-    expect(Date.now() - t0).toBeLessThan(1_200);
+    expect(signal.aborted).toBe(true);
     await done;
     expect(res.status).toBe(503);
     expect(previewAudits(log).at(-1)).toMatchObject({ code: "E_ABORT", reason: "hub-close" });
@@ -1696,11 +1700,15 @@ describe("P1b routes — the dir=1 branch", () => {
     const fx = fixture();
     const d = fx.dir("proj");
     // the admitted directory fd's close never settles — ⑩'s boundedClose is what must give up
+    virtualTime();
+    const closeEntered = timeDeferred();
+    const lateClose = timeDeferred();
     let fhCloseAttempts = 0;
     const neverCloseFh = new FakeHandle(Buffer.alloc(0), { ino: 4242, dev: 9 });
     neverCloseFh.close = (): Promise<void> => {
       fhCloseAttempts += 1;
-      return new Promise(() => undefined);
+      closeEntered.resolve();
+      return lateClose.promise;
     };
     const admitter: FsAdmitter = {
       admit: async (input) =>
@@ -1740,11 +1748,11 @@ describe("P1b routes — the dir=1 branch", () => {
     };
     const r = routes(fx.registry, { admitter, fs: okDirFs, uploads });
     const res = new FakeRes();
-    const tAnswer = Date.now();
-    const done = r.handle(fakeReq({ "x-pwh": "1" }), res, dirQuery(d, true), makeIo({ user: "u1" }));
+    const done = observe(r.handle(fakeReq({ "x-pwh": "1" }), res, dirQuery(d, true), makeIo({ user: "u1" })));
     await new Promise<void>((resolve) => res.once("close", resolve)); // ① the answer went out
     expect(res.status).toBe(200);
-    expect(Date.now() - tAnswer).toBeLessThan(500); // the answer did NOT wait for the fd close
+    await closeEntered.promise;
+    expect(done.settled).toBe(false); // response preceded the parked fd close
 
     // ② the D request still HOLDS its in-flight slot while ⑩'s close attempt parks: R1 takes
     // u1's second slot, R2 must answer 503 inflight
@@ -1766,15 +1774,17 @@ describe("P1b routes — the dir=1 branch", () => {
     expect((r3.json() as { error: string }).error).toBe("E_BUSY");
     expect(previewAudits(log).find((l) => l["kind"] === "dir")).toBeUndefined(); // ⑤ audit is LAST
 
-    const t0 = Date.now();
-    await done; // resolves only after ⑩'s bounded close gave up (~1 s) + slot + active + audit
-    expect(Date.now() - t0).toBeGreaterThanOrEqual(900);
-    expect(Date.now() - t0).toBeLessThan(2_500);
+    await done.pendingAfter(999);
+    await done.advance(1);
+    await done.promise; // bounded close really expired; the lateClose is still parked
     expect(fhCloseAttempts).toBe(1);
     const dirLine = previewAudits(log).find((l) => l["kind"] === "dir");
     expect(dirLine).toMatchObject({ ok: true, total: 1 });
     releaseR1.resolve();
     await r2done;
+    lateClose.resolve();
+    await done.advance(0);
+    expect(fhCloseAttempts).toBe(1);
   });
 
   it("§3.3: dispose mid-listing ⇒ 503 pre-head, dispose ≤1 s, the late close settle is silent", async () => {
@@ -1784,26 +1794,33 @@ describe("P1b routes — the dir=1 branch", () => {
     const closeGate = new Promise<void>((r) => {
       releaseClose = r;
     });
+    virtualTime();
+    const entered = timeDeferred();
+    const readLate = timeDeferred<null>();
     const parkedFs: Partial<PreviewFs> = {
       opendir: () =>
         Promise.resolve({
-          readBatch: () => new Promise(() => undefined), // parked mid-scan
+          readBatch: () => {
+            entered.resolve();
+            return readLate.promise;
+          }, // parked mid-scan
           close: () => closeGate.then(() => undefined), // …and the close parks past dispose
         }),
     };
     const r = routes(fx.registry, { fs: parkedFs });
     const res = new FakeRes();
-    const done = r.handle(fakeReq({ "x-pwh": "1" }), res, dirQuery(d, true), makeIo());
-    await sleep(30); // parked inside the listing
-    const t0 = Date.now();
+    const done = observe(r.handle(fakeReq({ "x-pwh": "1" }), res, dirQuery(d, true), makeIo()));
+    await entered.promise;
     const disposeP = r.dispose("close", createReqDeadline(Date.now, 5_000));
-    await done;
+    await done.pendingAfter(999);
+    await done.advance(1);
+    await done.promise;
     await disposeP;
-    expect(Date.now() - t0).toBeLessThan(1_600);
     expect(res.status).toBe(503);
     expect(res.json()).toEqual({ error: "E_HUB_RESTARTING" });
     releaseClose(); // the late settle must neither throw nor produce an unhandled rejection
-    await sleep(50);
+    readLate.resolve(null);
+    await done.advance(0);
     expect(previewAudits(log).at(-1)).toMatchObject({ ok: false, code: "E_ABORT", reason: "hub-close" });
   });
 });

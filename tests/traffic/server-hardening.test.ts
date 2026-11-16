@@ -466,20 +466,19 @@ describe("T2b 对接：闸门退役 + 外部持锁 ⇒ 503", () => {
     expect(body.serialize_handoff_ms).toBe(10000); // 旧键仍在（页面展示停用值）
   });
 
-  it("外部进程持写锁（busy_timeout=0）下规则写 ⇒ 503「数据库忙」，不无限重试", async () => {
+  it("同进程第二连接持写锁（busy_timeout=0）下规则写 ⇒ 503「数据库忙」，不无限重试", async () => {
     const holder = new DatabaseSyncImpl(engine.dbPath);
     try {
       holder.exec("PRAGMA busy_timeout = 0");
       holder.exec("BEGIN IMMEDIATE");
       const rule = JSON.stringify({ name: "r", priority: 100 });
-      const t0 = Date.now();
       const res = await raw(
         "/api/rewrite/rules",
         { ...tokenHeader(), "content-type": "application/json" },
         "POST",
         rule,
       );
-      expect(Date.now() - t0).toBeLessThan(2000); // 立即失败，不是挂等
+      expect(holder.isTransaction).toBe(true); // 503 arrived while the second connection STILL held the lock
       expect(res.status).toBe(503);
       expect(res.text).toContain("数据库忙");
     } finally {

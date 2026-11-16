@@ -1,3 +1,4 @@
+import { virtualTime, deferred as timeDeferred, observe } from "../helpers/virtual-time.js";
 import { describe, expect, it, vi } from "vitest";
 import { FakeClock, systemClock } from "../../src/core/clock.js";
 import { createWorkflowActivityRegistry } from "../../src/workflow/activity.js";
@@ -5,6 +6,8 @@ import { createWorkflowDeadlineController } from "../../src/workflow/deadline.js
 import {
   createBackgroundWorkflows,
   runBoundMs,
+  stopSettleBoundMs,
+  SETTLEMENT_GRACE_MS,
   type BackgroundSettlePhase,
   type BackgroundWorkflowView,
   type BackgroundWorkflowsDeps,
@@ -126,59 +129,129 @@ describe("background workflows: bounded sequence (formerly WT13/WT17 in the tool
 
   it("run() hanging past its bound fires an un-awaited stop('timeout') and takes settled()'s real outcome", async () => {
     let stopCause = "";
+    virtualTime();
+    const runEntered = timeDeferred();
+    const settleEntered = timeDeferred();
+    const late = timeDeferred<WorkflowOutcome>();
     const orch: Orchestrator = {
-      run: () => new Promise(() => {}),
+      run: () => {
+        runEntered.resolve();
+        return late.promise;
+      },
       stop: (_id, cause) => {
         stopCause = cause;
         return new Promise(() => {}); // never resolves: must not be awaited
       },
       outcomeAt1: () => outcome({ status: "timed_out", pendingReconcile: true, result: "outcomeAt1-should-not-win" }),
-      settled: () => new Promise((resolve) => setTimeout(() => resolve(outcome({ status: "timed_out" })), 30)),
+      settled: () => {
+        settleEntered.resolve();
+        return new Promise((resolve) => setTimeout(() => resolve(outcome({ status: "timed_out" })), 30));
+      },
     };
     const { runs } = registry(() => orch);
     const v = start(runs, BUDGET);
-    const w = await runs.wait(v.workflowId, { waitMs: 5_000 });
+    await runEntered.promise;
+    const call = observe(runs.wait(v.workflowId, { waitMs: 8_000 }));
+    await call.pendingAfter(runBoundMs(BUDGET) - 1);
+    expect(runs.activeCount()).toBe(1);
+    await call.advance(1);
+    await settleEntered.promise;
+    expect(stopCause).toBe("timeout");
+    await call.pendingAfter(29);
+    await call.advance(1);
+    const w = await call.promise;
     expect(stopCause).toBe("timeout");
     expect(w.ok).toBe(true);
     if (!w.ok) return;
     expect(w.view.outcome.status).toBe("timed_out");
     expect(w.view.outcome.result).toBeUndefined();
     expect(w.view.outcome.diag.degraded).toBeUndefined();
+    const terminal = runs.get(v.workflowId);
+    late.resolve(outcome({ status: "completed", result: "late must not win" }));
+    await call.advance(0);
+    expect(runs.get(v.workflowId)).toEqual(terminal);
+    expect(runs.activeCount()).toBe(0);
   }, 10_000);
 
   it("a stuck orchestrator (run and settled both hang) still reaches a degraded outcomeAt1 terminal within budget + grace", async () => {
+    virtualTime();
+    const runEntered = timeDeferred();
+    const settleEntered = timeDeferred();
+    const late = timeDeferred<WorkflowOutcome>();
     const orch: Orchestrator = {
-      run: () => new Promise(() => {}),
+      run: () => {
+        runEntered.resolve();
+        return late.promise;
+      },
       stop: async () => ({ ok: true }),
       outcomeAt1: () => outcome({ status: "timed_out", pendingReconcile: true, result: "partial" }),
-      settled: () => new Promise(() => {}),
+      settled: () => {
+        settleEntered.resolve();
+        return late.promise;
+      },
     };
     const { runs, settled } = registry(() => orch);
-    const t0 = Date.now();
     const v = start(runs, BUDGET);
-    const w = await runs.wait(v.workflowId, { waitMs: 8_000 });
-    expect(Date.now() - t0).toBeLessThan(5_000);
+    await runEntered.promise;
+    const call = observe(runs.wait(v.workflowId, { waitMs: 8_000 }));
+    await call.pendingAfter(runBoundMs(BUDGET) - 1);
+    expect(runs.activeCount()).toBe(1);
+    await call.advance(1);
+    await settleEntered.promise;
+    await call.pendingAfter(SETTLEMENT_GRACE_MS - 1);
+    expect(runs.activeCount()).toBe(1);
+    await call.advance(1);
+    const w = await call.promise;
     expect(w.ok).toBe(true);
     if (!w.ok) return;
     expect(w.view.outcome.status).toBe("timed_out");
     expect(w.view.outcome.result).toBe("partial");
     expect(w.view.outcome.diag.degraded).toBe("settlement_timeout");
     expect(settled).toHaveLength(1);
+    const terminal = runs.get(v.workflowId);
+    late.resolve(outcome({ status: "completed", result: "late must not win" }));
+    await call.advance(0);
+    expect(runs.get(v.workflowId)).toEqual(terminal);
+    expect(runs.activeCount()).toBe(0);
   }, 10_000);
 
   it("EI5 double failure (no outcomeAt1 either): an honest timed_out skeleton, never a hang", async () => {
+    virtualTime();
+    const runEntered = timeDeferred();
+    const settleEntered = timeDeferred();
+    const late = timeDeferred<WorkflowOutcome>();
     const orch: Orchestrator = {
-      run: () => new Promise(() => {}),
+      run: () => {
+        runEntered.resolve();
+        return late.promise;
+      },
       stop: async () => ({ ok: true }),
       outcomeAt1: () => undefined,
-      settled: () => new Promise(() => {}),
+      settled: () => {
+        settleEntered.resolve();
+        return late.promise;
+      },
     };
     const { runs } = registry(() => orch);
     const v = start(runs, BUDGET);
-    const w = await runs.wait(v.workflowId, { waitMs: 8_000 });
+    await runEntered.promise;
+    const call = observe(runs.wait(v.workflowId, { waitMs: 8_000 }));
+    await call.pendingAfter(runBoundMs(BUDGET) - 1);
+    expect(runs.activeCount()).toBe(1);
+    await call.advance(1);
+    await settleEntered.promise;
+    await call.pendingAfter(SETTLEMENT_GRACE_MS - 1);
+    expect(runs.activeCount()).toBe(1);
+    await call.advance(1);
+    const w = await call.promise;
     expect(w.ok && w.view.outcome.status).toBe("timed_out");
     expect(w.ok && w.view.outcome.pendingReconcile).toBe(true);
     expect(w.ok && w.view.outcome.diag.degraded).toBe("settlement_timeout");
+    const terminal = runs.get(v.workflowId);
+    late.resolve(outcome({ status: "completed", result: "late must not win" }));
+    await call.advance(0);
+    expect(runs.get(v.workflowId)).toEqual(terminal);
+    expect(runs.activeCount()).toBe(0);
   }, 10_000);
 
   it("a rejecting run() becomes a failed terminal entry (the driver never throws past the registry)", async () => {
@@ -215,21 +288,40 @@ describe("background workflows: stop (abort_subagent)", () => {
   });
 
   it("stop() on an orchestrator that never settles still yields a degraded aborted terminal within the stop bound", async () => {
+    virtualTime();
+    const runEntered = timeDeferred();
+    const settleEntered = timeDeferred();
+    const late = timeDeferred<WorkflowOutcome>();
     const orch: Orchestrator = {
-      run: () => new Promise(() => {}),
+      run: () => {
+        runEntered.resolve();
+        return late.promise;
+      },
       stop: () => new Promise(() => {}),
       outcomeAt1: () => undefined,
-      settled: () => new Promise(() => {}),
+      settled: () => {
+        settleEntered.resolve();
+        return late.promise;
+      },
     };
     const { runs } = registry(() => orch);
     const v = start(runs);
-    const t0 = Date.now();
-    const r = await runs.stop(v.workflowId, "user_stop");
-    expect(Date.now() - t0).toBeLessThan(6_000);
+    await runEntered.promise;
+    const call = observe(runs.stop(v.workflowId, "user_stop"));
+    await settleEntered.promise;
+    await call.pendingAfter(stopSettleBoundMs(LONG_BUDGET) - 1);
+    expect(runs.activeCount()).toBe(1);
+    await call.advance(1);
+    const r = await call.promise;
     expect(r).toMatchObject({ ok: true, settled: true });
     expect(r.ok && r.view.outcome?.status).toBe("aborted");
     expect(r.ok && r.view.outcome?.stopCause).toBe("user_stop");
     expect(r.ok && r.view.outcome?.diag.degraded).toBe("settlement_timeout");
+    const terminal = runs.get(v.workflowId);
+    late.resolve(outcome({ status: "completed", result: "late must not win" }));
+    await call.advance(0);
+    expect(runs.get(v.workflowId)).toEqual(terminal);
+    expect(runs.activeCount()).toBe(0);
   }, 10_000);
 
   it("unknown ids are reported, not thrown", async () => {

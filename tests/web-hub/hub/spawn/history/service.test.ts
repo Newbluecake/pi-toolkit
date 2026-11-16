@@ -1,3 +1,4 @@
+import { virtualTime, deferred as timeDeferred, observe } from "../../../../helpers/virtual-time.js";
 /**
  * web-hub session-history plan §4.5 (`service.ts`): end-to-end `createHistoryService` behavior
  * on a real tmp filesystem - `page()` listing/filtering/sorting, `resolve()` -> `prove()` ->
@@ -255,11 +256,15 @@ describe("createHistoryService.dispose (X3 #4)", () => {
     expect(service.diag().fds.pin).toBe(0);
   });
 
-  it("completes within its bound even with an outstanding lease (does not hang)", async () => {
+  it("empty dispose is idempotent, leaves zero pins and refuses later paging", async () => {
     const service = createHistoryService(baseDeps());
-    const start = Date.now();
     await service.dispose();
-    expect(Date.now() - start).toBeLessThan(3000);
+    await service.dispose();
+    expect(service.diag().fds.pin).toBe(0);
+    expect(await service.page({ kind: "all", limit: 50 }, createReqDeadline(Date.now, 5000))).toMatchObject({
+      ok: true,
+      page: { items: [], partial: { reason: "zombie" } },
+    });
   });
 
   it("verifier round 3 (defect 3c): resolves within HISTORY_DISPOSE_MS + ε even when every force-close hangs", async () => {
@@ -269,6 +274,9 @@ describe("createHistoryService.dispose (X3 #4)", () => {
     // Awaiting the gen force-close after the hard deadline would push dispose() to ~2.5s +
     // HISTORY_CLOSE_MS ≈ 3.5s (2× with a serial root→pending chain); the bound catches both.
     let hangClose = false;
+    const late = timeDeferred();
+    const actualCloses: Promise<void>[] = [];
+    let closeCalls = 0;
     const real = defaultHistoryFs();
     const fs: HistoryFs = {
       ...real,
@@ -284,8 +292,13 @@ describe("createHistoryService.dispose (X3 #4)", () => {
             h.write(buf, offset, length, position),
           truncate: (len: number) => h.truncate(len),
           close: () => {
-            void h.close(); // the REAL fd is always closed — only the returned promise hangs
-            return hangClose ? new Promise<void>(() => undefined) : Promise.resolve();
+            const closing = h.close();
+            actualCloses.push(closing);
+            if (hangClose) {
+              closeCalls++;
+              return late.promise;
+            }
+            return closing;
           },
         };
       },
@@ -296,14 +309,18 @@ describe("createHistoryService.dispose (X3 #4)", () => {
     const resolved = await service.resolve({ key: "d1/a.jsonl", id: "sess-aaaa1" }, realCwd, d());
     expect(resolved.ok).toBe(true);
 
+    virtualTime();
     hangClose = true;
-    const start = Date.now();
-    await service.dispose();
-    const elapsed = Date.now() - start;
-    // the outstanding pin keeps the wait loop alive to the full hard deadline …
-    expect(elapsed).toBeGreaterThanOrEqual(HISTORY_DISPOSE_MS - 100);
-    // … but the hanging force-closes must NOT be awaited past it (old behavior: ~3.5s+)
-    expect(elapsed).toBeLessThan(HISTORY_DISPOSE_MS + 500);
+    const call = observe(service.dispose());
+    await call.pendingAfter(HISTORY_DISPOSE_MS - 1);
+    expect(service.diag().fds.pin).toBeGreaterThan(0);
+    await call.advance(1);
+    await call.promise;
+    expect(closeCalls).toBeGreaterThan(0); // force-closes were launched but not awaited
+    await Promise.all(actualCloses);
+    late.resolve();
+    await call.advance(0);
+    expect(service.diag().fds.pin).toBe(0);
   }, 10_000);
 
   it("Linux: /proc/self/fd count returns to baseline after dispose(), even with outstanding pin/gen leases", async () => {

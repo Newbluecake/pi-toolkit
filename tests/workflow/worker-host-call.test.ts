@@ -46,8 +46,15 @@ async function bootReal(
   outcome: Promise<{ returned?: unknown; threw?: { message: string } }>;
   stageErrors: WorkflowStageError[];
   workerErrors: unknown[];
+  replies: unknown[];
 }> {
   const host = createWorkerHost({ clock: systemClock });
+  const replies: unknown[] = [];
+  const send = host.send.bind(host);
+  host.send = (message) => {
+    replies.push(message);
+    return send(message);
+  };
   const stageErrors: WorkflowStageError[] = [];
   const workerErrors: unknown[] = [];
   host.events.onStageError((e) => stageErrors.push(e));
@@ -92,7 +99,7 @@ async function bootReal(
       resolve({ threw });
     });
   });
-  return { host, outcome, stageErrors, workerErrors };
+  return { host, outcome, stageErrors, workerErrors, replies };
 }
 
 describe("real-worker agent() host-call round trip (M3.2/M3.3 Blocker B regression coverage)", () => {
@@ -430,7 +437,7 @@ describe("real-worker agent() queueing (workflow-agent-queue stage A)", () => {
       delayMsOf: (p) => (p === "good" ? 150 : 0),
       errorFor: (p) => (p === "bad" ? "unknown agent type 'nope'" : undefined),
     });
-    const { host, outcome, stageErrors, workerErrors } = await bootReal(
+    const { host, outcome, stageErrors, workerErrors, replies } = await bootReal(
       scriptWith('agent("bad", { agentType: "nope" });\nreturn await agent("good");'),
       spawner,
     );
@@ -578,38 +585,43 @@ describe("real-worker agent() model/thinking opts (per-call overrides)", () => {
   }, 10_000);
 });
 
-/**
- * workflow-experts (docs/dev/workflow-experts/plan.md §4.5, N1, §6 test
- * A#10): the worker-side JS mirror of agent-opts.ts's structural snapshot,
- * exercised through a REAL sandbox realm — only here can a genuine getter/
- * Proxy/function object literal be constructed the way a script actually
- * would. N1's core claim (never `postMessage` an unclonable value, so a
- * defect is reported *immediately* rather than after HR1's timeout) is
- * pinned by the elapsed-time assertions below: `hostCallMs` is 3s in this
- * harness, so anything that resolves in well under a second could not have
- * gone through the pre-fix DataCloneError-swallowed-by-`send()` path.
+/** Worker-side structural snapshot reports uncloneable opts before child dispatch.
+ * Exact host_ack rejection, error class/message and no spawn distinguish it from HR1 timeout.
  */
 describe("real-worker agent() opts snapshot (workflow-experts §4.5, N1)", () => {
-  it("a function value on a known key fails immediately (well under HR1's timeout), never waits for a settle", async () => {
+  it("a function on a known key gets a structural host-ack refusal, not an HR1 timeout", async () => {
+    let spawns = 0;
     const spawner: ChildSpawner = {
-      spawn: async () => ({ runId: "unused" }),
+      spawn: async () => {
+        spawns++;
+        return { runId: "unused" };
+      },
       abort: async () => true,
       waitAll: async () => ({ settled: [], pending: [] }),
     };
-    const started = Date.now();
-    const { host, outcome } = await bootReal(
+    const { host, outcome, stageErrors, workerErrors, replies } = await bootReal(
       scriptWith(
         'try { await agent("x", { label: function () {} }); return "no-reject"; }' +
-          ' catch (e) { return "caught:" + e.message; }',
+          " catch (e) { return { name: e.name, message: e.message }; }",
       ),
       spawner,
     );
     const result = await outcome;
-    const elapsedMs = Date.now() - started;
     expect(result.threw).toBeUndefined();
-    expect(result.returned).toContain("caught:");
-    expect(result.returned).toContain("plain object");
-    expect(elapsedMs).toBeLessThan(1_500); // HR1/hostCallMs here is 3_000ms
+    expect(result.returned).toEqual({
+      name: "Error",
+      message: "agent(prompt, opts?): opts must be a plain object (got an invalid value)",
+    });
+    expect(replies).toEqual([
+      expect.objectContaining({
+        kind: "host_ack",
+        ok: false,
+        error: { message: "agent(prompt, opts?): opts must be a plain object (got an invalid value)" },
+      }),
+    ]);
+    expect(spawns).toBe(0);
+    expect(stageErrors).toEqual([]);
+    expect(workerErrors).toEqual([]);
     await host.terminate("test-done");
   }, 10_000);
 

@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { bounded, until } from "./helpers/fabric-xs-harness.js";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { bounded, until, XsHarness, sanitizeDiagnostic } from "./helpers/fabric-xs-harness.js";
 
 afterEach(() => vi.useRealTimers());
 
@@ -59,5 +61,69 @@ describe("XS harness liveness barriers", () => {
     await expect(until(read, () => false, "live")).rejects.toThrow("agent exit 1: diagnostic");
     expect(read).toHaveBeenCalledTimes(1);
     expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe("XS real child startup diagnostics", () => {
+  const secrets = [
+    "fake-bearer-value",
+    "fake-cookie-value",
+    "fake-token-value",
+    "fake-api-key-value",
+    "fake-password-value",
+    "a".repeat(64),
+    "Qz7+".repeat(20),
+  ];
+  const stderr = `startup stage=before-ready\nAuthorization: Bearer ${secrets[0]}\nCookie: session=${secrets[1]}\nSet-Cookie: session=${secrets[1]}; HttpOnly\ntoken=${secrets[2]} api_key=${secrets[3]} secret=${secrets[2]} password=${secrets[4]}\nopaque ${secrets[5]} ${secrets[6]}\n`;
+  function check(message: string): void {
+    for (const secret of secrets) expect(message).not.toContain(secret);
+    expect(message).toContain("[REDACTED]");
+    expect(message).toContain("startup stage=before-ready");
+    expect(message).toMatch(/agent:early pid=\d+ exit=.*signal=.*connected=/);
+    expect(Buffer.byteLength(message)).toBeLessThanOrEqual(12_000);
+  }
+  it.each(["close", "timeout"])("real boot %s rejects with safe, useful diagnostics", async (mode) => {
+    const h = new XsHarness({ bootMs: 1500 });
+    const file = join(h.home, "early.mjs");
+    writeFileSync(
+      file,
+      `process.stderr.write(process.env.XW_DIAGNOSTIC, () => { ${mode === "close" ? "process.exit(23)" : "setInterval(() => {}, 1000)"}; });`,
+    );
+    const childHarness = new XsHarness({ processFile: file, bootMs: 1500 });
+    try {
+      const failure = await childHarness.boot("agent", "early", undefined, true, false, { XW_DIAGNOSTIC: stderr }).then(
+        () => {
+          throw new Error("unexpected boot success");
+        },
+        (e: Error) => e,
+      );
+      check(failure.message);
+      expect(failure.message).toContain(mode === "close" ? "child close code=23" : "timeout: agent ready");
+      // A close must win the startup race, not be misreported as the timeout.
+      if (mode === "close") expect(failure.message).not.toContain("timeout:");
+    } finally {
+      await childHarness.close();
+      await h.close();
+    }
+  });
+  it("real spawn error rejects before ready with lifecycle fields", async () => {
+    const h = new XsHarness({ execPath: "/nonexistent/pi-xs-test-node" });
+    try {
+      await expect(h.boot("agent", "missing")).rejects.toThrow(
+        /child error:.*ENOENT.*agent:missing pid=undefined exit=.*signal=.*connected=/,
+      );
+    } finally {
+      await h.close();
+    }
+  });
+  it("caps sanitized UTF-8 diagnostics to 12,000 bytes", () => {
+    const message = sanitizeDiagnostic(
+      "agent:early pid=42 exit=23 signal=null connected=false\n" + "ordinary diagnostic界\n".repeat(2000) + stderr,
+    );
+    expect(Buffer.byteLength(message)).toBeLessThanOrEqual(12_000);
+    expect(message).toContain("agent:early pid=42 exit=23 signal=null connected=false");
+    expect(message).toContain("[truncated]");
+    for (const secret of secrets) expect(message).not.toContain(secret);
+    expect(message).toContain("[REDACTED]");
   });
 });

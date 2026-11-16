@@ -111,55 +111,87 @@ export interface Tier1DeclaredEntry {
  * D4a baseline (mechanically generated from the pre-change 1760-file `vitest list`, then
  * hand-reviewed): every tier1 file that hits at least one D4 marker. Kind policy after the
  * manual review: mount ⇒ false-positive (required by the gate); any proc ⇒ proc; sock-only ⇒
- * proc; wait-only ⇒ timing (baseline 11 files). Explicit latency declarations below
+ * proc; wait-only ⇒ timing (10 files at e4531250). Explicit latency declarations below
  * take precedence over that lexical baseline. Entries whose file disappears fail the
  * "registered but missing" check and are removed — the table converges on deletion.
  */
 export const TIER1_DECLARED: Readonly<Record<string, Tier1DeclaredEntry>> = {
+  "tests/web-hub/agent/connection.perf.test.ts": {
+    kind: "timing",
+    why: "real paused Unix socket: send p99 <5ms; final admission <50ms (original CPU gates)",
+  },
+  "tests/web-hub/hub/spawn/stderr-sink.perf.test.ts": {
+    kind: "timing",
+    why: "CPU: 100k x 10-byte pushes <200ms with parked disk (original push O(1) sentinel)",
+  },
+  "tests/web-hub/ui/logic-preview.perf.test.ts": {
+    kind: "timing",
+    why: "CPU: original 5s whole input x scope matrix hang sentinel; charScans hard gates stay in logic-preview.test.ts",
+  },
+
   // #47c: real latency/performance gates are scheduler-sensitive even without a literal
   // ≥1s sleep/proc marker. Keep the assertions (no threshold inflation), but triage
-  // failures as Tier 2. FakeClock/vi fake-timer budget arithmetic stays a hard gate.
-  "tests/bash/process.test.ts": { kind: "timing", why: "real latency: 1_000 ms; 3_000 ms; 500 ms" },
-  "tests/context-switch/boundary.test.ts": { kind: "timing", why: "real latency: 2_000 ms" },
-  "tests/git/graph.test.ts": { kind: "timing", why: "real latency: 50 ms" },
-  "tests/memory/jev/predict/clauses.test.ts": { kind: "timing", why: "real latency: 50 ms" },
-  "tests/memory/jev/proxy-fetch.test.ts": { kind: "timing", why: "real latency: 2000 ms" },
-  "tests/reflex/core/perf.test.ts": { kind: "timing", why: "real latency: 5 ms" },
-  "tests/reflex/drafts/perf.test.ts": { kind: "timing", why: "real latency: 5 ms" },
-  "tests/web-hub/agent/worktree-sampler.test.ts": { kind: "timing", why: "real latency: 500 + 250 ms" },
-  "tests/web-hub/http/lan-cmd.test.ts": { kind: "timing", why: "real latency: 6_000 ms; 2_000 ms" },
-  "tests/web-hub/http/preview-e2e.test.ts": { kind: "timing", why: "real latency: 10_000 ms" },
-  "tests/web-hub/hub/feishu/render.test.ts": { kind: "timing", why: "real latency: 1500 ms" },
-  "tests/web-hub/hub/history.perf.test.ts": { kind: "timing", why: "real latency: 1_000 ms; 100 ms; 500 ms" },
-  "tests/web-hub/hub/preview/fs.test.ts": { kind: "timing", why: "real latency: 400 ms; 2_000 ms" },
-  "tests/web-hub/hub/preview/pv-io.test.ts": { kind: "timing", why: "real latency: 500 ms" },
-  "tests/web-hub/hub/preview/routes.test.ts": {
+  // failures as Tier 2. Pure FakeClock/vi fake-timer suites stay hard gates. Mixed
+  // CPU + fake-budget files (e.g. graph/budget) retain timing at FILE granularity;
+  // every deterministic assertion still executes and a failure still stops the gate.
+  "tests/bash/process.test.ts": { kind: "timing", why: "real child pipe exit/drain/exit-wake: <1s / <3s / <500ms" },
+  "tests/context-switch/boundary.test.ts": { kind: "timing", why: "CPU: replay a 5k-entry branch <2s" },
+  "tests/git/graph.test.ts": {
     kind: "timing",
-    why: "real latency: 1_200 ms; 500 ms; 2_500 ms; 1_600 ms",
+    why: "CPU: refs/log parse median-of-5 ≤50ms; large-ref worst-of-5 ≤200ms",
   },
-  "tests/web-hub/hub/preview/stream.test.ts": { kind: "timing", why: "real latency: 2_000 ms" },
-  "tests/web-hub/hub/proxy/service.test.ts": { kind: "timing", why: "real latency: 2000 ms" },
-  "tests/web-hub/hub/run-file-reader.perf.test.ts": { kind: "timing", why: "real latency: 2000 ms; 500 ms" },
-  "tests/web-hub/hub/spawn/history/index.test.ts": { kind: "timing", why: "real latency: 5_000 ms" },
-  "tests/web-hub/hub/spawn/history/proc.test.ts": { kind: "timing", why: "real latency: 2_000 ms" },
-  "tests/web-hub/hub/spawn/history/service.test.ts": {
+  "tests/memory/jev/predict/clauses.test.ts": {
     kind: "timing",
-    why: "real latency: 3000 ms; HISTORY_DISPOSE_MS + 500 ms",
+    why: "CPU: 10k-codepoint regex adversary <50ms (no catastrophic backtracking)",
   },
-  "tests/web-hub/hub/spawn/history/snapshot.test.ts": { kind: "timing", why: "real latency: 5_000 ms" },
-  "tests/web-hub/hub/worktree-diff/budget.test.ts": { kind: "timing", why: "real latency: WTDIFF_CLOSE_MS + 500 ms" },
-  "tests/web-hub/hub/worktree-graph/budget.test.ts": { kind: "timing", why: "real latency: 1_500 ms" },
-  "tests/web-hub/hub/worktree-graph/routes.test.ts": { kind: "timing", why: "real latency: 1_100 ms" },
-  "tests/web-hub/ui/logic-markdown-perf.test.ts": { kind: "timing", why: "real latency: 200 ms" },
-  "tests/web-hub/ui/logic-markdown.test.ts": { kind: "timing", why: "real latency: 200 ms" },
-  "tests/web-hub/ui/logic-preview.test.ts": { kind: "timing", why: "real latency: 2_000 ms; 200 ms; 5_000 ms" },
-  "tests/workflow/background.test.ts": { kind: "timing", why: "real latency: 5_000 ms; 6_000 ms" },
+  "tests/memory/jev/proxy-fetch.test.ts": {
+    kind: "timing",
+    why: "real loopback HTTP upstream never responds: request deadline <2s",
+  },
+  "tests/reflex/core/perf.test.ts": { kind: "timing", why: "CPU: evaluateGate+match p99 ≤5ms over 10k inputs" },
+  "tests/reflex/drafts/perf.test.ts": { kind: "timing", why: "CPU: 16 full drafts over 10k inputs, p99 ≤5ms" },
+  "tests/web-hub/agent/worktree-sampler.test.ts": {
+    kind: "timing",
+    why: "real SIGTERM-ignoring git process: deadline/reap <500+250ms",
+  },
+  "tests/web-hub/http/lan-cmd.test.ts": {
+    kind: "timing",
+    why: "real HTTP handler: hung touchSession <6s; slow reauth <2s",
+  },
+  "tests/web-hub/http/preview-e2e.test.ts": {
+    kind: "timing",
+    why: "real HTTP slow client: hub close and incomplete body <10s",
+  },
+  "tests/web-hub/hub/feishu/render.test.ts": { kind: "timing", why: "CPU: malformed link syntax scan <1500ms" },
+  "tests/web-hub/hub/history.perf.test.ts": {
+    kind: "timing",
+    why: "real ~44MB archive: snapshot <1s, event-loop gap <100ms, page <500ms",
+  },
+  "tests/web-hub/hub/proxy/service.test.ts": {
+    kind: "timing",
+    why: "real proxy service disposal with active work <2s",
+  },
+  "tests/web-hub/hub/run-file-reader.perf.test.ts": {
+    kind: "timing",
+    why: "real large-log tail streaming: <2s / <500ms CPU+disk sentinels",
+  },
+  "tests/web-hub/hub/worktree-graph/budget.test.ts": {
+    kind: "timing",
+    why: "CPU: full near-cap Gr→Gl projection median-of-5 ≤50ms (incl real-cap ref trimming); injected slow tail step <1500ms",
+  },
+  "tests/web-hub/ui/logic-markdown-perf.test.ts": {
+    kind: "timing",
+    why: "CPU: near-cap Markdown render <200ms (original SLA)",
+  },
+  "tests/web-hub/ui/logic-markdown.test.ts": { kind: "timing", why: "CPU: adversarial Markdown parse/render <200ms" },
   "tests/workflow/wc02-runaway-gate.test.ts": {
     kind: "timing",
-    why: "real latency: UPPER_BOUND_MS ms; GATE_BUDGET.scriptSliceMs + 1_000 ms; 15_000 ms",
+    why: "real worker CPU runaway: diagnostic upper bound, slice+1s and total <15s gates",
   },
-  "tests/workflow/worker-host-call.test.ts": { kind: "timing", why: "real latency: 1_500 ms" },
-  "tests/workflow/worker-integration.test.ts": { kind: "timing", why: "real latency: 2_000 ms; 50 + 30 ms" },
+  "tests/workflow/worker-integration.test.ts": {
+    kind: "timing",
+    why: "real worker termination/VM interrupts: <2s / <50+30ms",
+  },
   "tests/bash/tool.test.ts": { kind: "timing", why: "wait:setTimeout(…, 5_000)" },
   "tests/cache-ttl/measure-command.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/compact-hint/dynamic/telemetry-store.test.ts": { kind: "proc", why: "proc:node:child_process" },
@@ -168,9 +200,9 @@ export const TIER1_DECLARED: Readonly<Record<string, Tier1DeclaredEntry>> = {
   "tests/extensions/worktree-git-integration.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/external-agent/process.test.ts": {
     kind: "timing",
-    why: "proc:node:child_process; wait:setTimeout(…, 15000); real latency: 3000 ms",
+    why: "real process group immediate stop / orphan reap ≤3s; 15s child backstop",
   },
-  "tests/git/run.test.ts": { kind: "timing", why: "proc:node:child_process; real latency: 1000 ms" },
+  "tests/git/run.test.ts": { kind: "timing", why: "real SIGTERM-ignoring git process group: deadline kill/settle <1s" },
   "tests/git/worktrees-real-git.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/helpers/free-port.test.ts": { kind: "proc", why: 'sock:".listen("; sock:"createServer("' },
   // this gate's own synthetic fixtures contain marker literals (no real process/mount/sleep)
@@ -189,14 +221,14 @@ export const TIER1_DECLARED: Readonly<Record<string, Tier1DeclaredEntry>> = {
   "tests/quota/credentials.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/reflex/core/draft-regex-redos.test.ts": {
     kind: "timing",
-    why: "proc:node:child_process; real latency: 2_000 ms",
+    why: "real child: 1000 DRX sources x adversarial input self-reported CPU <2s",
   },
   "tests/reflex/ports/git-real.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/release/hub-restart-step.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/release/release-script.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/release/restart-hub.test.ts": {
     kind: "timing",
-    why: 'sock:".listen("; sock:"createServer("; real latency: 2_000 ms',
+    why: "real Unix socket hello_ack deadline: rejection <2s",
   },
   "tests/release/web-ui-zip.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/schedule/core/fault-injection.test.ts": { kind: "proc", why: "proc:node:child_process" },
@@ -214,13 +246,13 @@ export const TIER1_DECLARED: Readonly<Record<string, Tier1DeclaredEntry>> = {
   },
   "tests/secure/launcher-helper.test.ts": {
     kind: "timing",
-    why: "proc:node:child_process; real child/IO deadline upper bounds (scheduler-sensitive)",
+    why: "real child/proc/FUSE probe deadlines: <1500ms / <3s / <500ms",
   },
   "tests/secure/settings-file-migrate.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/secure/settings-file-secure.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/secure/settings-lock.test.ts": {
     kind: "timing",
-    why: "proc:node:child_process; real child/IO deadline upper bounds (scheduler-sensitive)",
+    why: "real flock holder: wait-budget refusal <4s, callback never runs",
   },
   "tests/secure/preflight-adapters.test.ts": {
     kind: "false-positive",
@@ -233,7 +265,7 @@ export const TIER1_DECLARED: Readonly<Record<string, Tier1DeclaredEntry>> = {
   "tests/secure/tar.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/secure/tree.test.ts": {
     kind: "timing",
-    why: 'proc:node:child_process; sock:".listen("; sock:"createServer("; real child/IO deadline upper bounds (scheduler-sensitive)',
+    why: "real helper groups/IO: hung mv/sync/stall/protocol progress <5s / <4s",
   },
   "tests/service/request-threading.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/session-nav/open-discipline.test.ts": { kind: "proc", why: "proc:node:child_process" },
@@ -253,14 +285,8 @@ export const TIER1_DECLARED: Readonly<Record<string, Tier1DeclaredEntry>> = {
     kind: "proc",
     why: 'sock:".listen("; sock:"createServer("; wait:setTimeout(…, 3000)',
   },
-  "tests/traffic/secure.test.ts": {
-    kind: "timing",
-    why: 'sock:".listen("; sock:"createServer("; real latency: 1500 ms',
-  },
-  "tests/traffic/server-hardening.test.ts": {
-    kind: "timing",
-    why: 'sock:".listen("; sock:"createServer("; real latency: 2000 ms',
-  },
+  "tests/traffic/secure.test.ts": { kind: "proc", why: 'sock:".listen("; sock:"createServer("' },
+  "tests/traffic/server-hardening.test.ts": { kind: "proc", why: 'sock:".listen("; sock:"createServer("' },
   "tests/traffic/server-start.test.ts": { kind: "proc", why: 'sock:".listen("; sock:"createServer("' },
   "tests/web-hub/agent/resume-open-discipline.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/web-hub/boundary.test.ts": { kind: "proc", why: "proc:node:child_process" },
@@ -327,15 +353,9 @@ export const TIER1_DECLARED: Readonly<Record<string, Tier1DeclaredEntry>> = {
   "tests/web-hub/hub/lan-login.test.ts": { kind: "timing", why: "wait:setTimeout(…, 5_000)" },
   "tests/web-hub/hub/lan-store-security.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/web-hub/hub/lan-store.test.ts": { kind: "proc", why: "proc:node:child_process" },
-  "tests/web-hub/hub/preview/admit.test.ts": {
-    kind: "timing",
-    why: "proc:node:child_process; real latency: STEP_CAP * 3 ms; 250 ms",
-  },
+  "tests/web-hub/hub/preview/admit.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/web-hub/hub/preview/dir.test.ts": { kind: "timing", why: "wait:setTimeout(…, 1_400); real latency: 2_000 ms" },
-  "tests/web-hub/hub/preview/pv-admit.test.ts": {
-    kind: "timing",
-    why: "proc:node:child_process; real latency: 1500 ms",
-  },
+  "tests/web-hub/hub/preview/pv-admit.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/web-hub/hub/proxy/agent-queue.test.ts": { kind: "proc", why: 'sock:"createServer("' },
   "tests/web-hub/hub/proxy/forward.test.ts": {
     kind: "timing",
@@ -359,7 +379,7 @@ export const TIER1_DECLARED: Readonly<Record<string, Tier1DeclaredEntry>> = {
   "tests/web-hub/hub/spawn/golden.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/web-hub/hub/spawn/history/proc-real.test.ts": {
     kind: "timing",
-    why: "proc:node:child_process; real latency: BUDGET_MS ms",
+    why: "real /proc census + mkfifo/O_NONBLOCK child: BUDGET_MS bound",
   },
   "tests/web-hub/hub/spawn/launcher-check.test.ts": {
     kind: "timing",
@@ -391,7 +411,7 @@ export const TIER1_DECLARED: Readonly<Record<string, Tier1DeclaredEntry>> = {
   "tests/web-hub/ui/quota-pill.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/workflow/isolation-verify.test.ts": {
     kind: "timing",
-    why: "proc:node:child_process; real latency: 300 + 500 + 2_000 ms",
+    why: "real git child verify deadlines: <300+500+2000ms",
   },
   "tests/workflow/wc14-testhooks-gate.test.ts": { kind: "proc", why: "proc:node:child_process" },
 };

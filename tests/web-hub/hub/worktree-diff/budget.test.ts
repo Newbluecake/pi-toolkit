@@ -1,3 +1,4 @@
+import { virtualTime, deferred as timeDeferred, observe } from "../../../helpers/virtual-time.js";
 /**
  * worktree-diff plan §1.9 (D3, H5): the budget ledger — pinned item by item with a fake clock.
  *
@@ -13,7 +14,6 @@
 
 import { describe, expect, it } from "vitest";
 
-import { createPreviewIoTracker } from "../../../../src/web-hub/hub/preview/fs.js";
 import { denyCtxOf } from "../../../../src/web-hub/hub/preview/admit.js";
 import { createWorktreeDiffRoutes } from "../../../../src/web-hub/hub/worktree-diff/routes.js";
 import {
@@ -51,7 +51,7 @@ import {
 const DENY = denyCtxOf("/home/tester", "/home/tester/.pi/agent");
 const recM = (path: string): string => `1 .M N... 100644 100644 100644 h1 h2 ${path}`;
 
-function budgetKit() {
+function budgetKit(onClose?: () => void) {
   const clock = { t: 1_000_000 };
   const fs = createFakeFs();
   // main worktree only — the session cwd is the repo itself
@@ -61,6 +61,19 @@ function budgetKit() {
   const runner = scriptedRunner();
   const fx = { fs, runner } as RepoFixture;
   const log = memLog();
+  const open = fs.open;
+  if (onClose)
+    fs.open = async (...args) => {
+      const h = await open(...args);
+      return {
+        ...h,
+        close: () => {
+          const p = h.close();
+          onClose();
+          return p;
+        },
+      };
+    };
   const routes = createWorktreeDiffRoutes({
     mode: "on",
     denyCtx: DENY,
@@ -263,8 +276,10 @@ describe("budget §1.9 finally (H5)", () => {
     expect(k.fs.closedFds.length).toBeGreaterThanOrEqual(3);
   });
 
-  it("a pin close that never settles: the answer goes out anyway; tracker=1 until the late settle ⇒ 0", async () => {
-    const k = budgetKit();
+  it("a pin close that never settles: the answer goes out anyway; fd=1 until the late settle ⇒ 0", async () => {
+    virtualTime();
+    const entered = timeDeferred();
+    const k = budgetKit(() => entered.resolve());
     const releaseClose = k.fs.hangNextClose();
     k.runner.push(
       okRun(`${REPO}/.git\n`),
@@ -272,24 +287,26 @@ describe("budget §1.9 finally (H5)", () => {
       okRun(`sha1\n${HEAD_SHA1}\n`),
       { ...okRun(""), code: 128 }, // Cc nonzero ⇒ 500 fast; the pins close in finally
     );
-    const tracker = createPreviewIoTracker(); // observing the mechanism directly
-    expect(tracker.zombies).toBe(0);
-    const t0 = Date.now();
     const io = fakeIo();
-    const pending = k.routes.handleFiles(
-      fakeReq({ "x-pwh": "1" }),
-      fakeRes(),
-      new URLSearchParams({ agentKey: AGENT, sessionId: SESSION, wt: REPO }),
-      io,
+    const pending = observe(
+      k.routes.handleFiles(
+        fakeReq({ "x-pwh": "1" }),
+        fakeRes(),
+        new URLSearchParams({ agentKey: AGENT, sessionId: SESSION, wt: REPO }),
+        io,
+      ),
     );
     // the ANSWER is sent long before the hanging close's 1 s bound gives up
-    await new Promise((r) => setTimeout(r, 30));
+    await entered.promise;
+    await pending.pendingAfter(WTDIFF_CLOSE_MS - 1);
     expect(io.sent[0]!.status).toBe(500);
     expect(k.fs.leakCount()).toBe(1); // exactly the hung pin fd is still open
+    await pending.advance(1);
+    await pending.promise; // the cap really fired, BEFORE the parked close settled
+    expect(k.fs.leakCount()).toBe(1);
     releaseClose(); // the late settle
-    await pending;
-    expect(Date.now() - t0).toBeLessThan(WTDIFF_CLOSE_MS + 500); // ≤1 s + ε overall
+    await pending.advance(0);
     expect(k.fs.leakCount()).toBe(0);
-    void tracker;
+    expect(k.fs.closedFds.length).toBeGreaterThanOrEqual(3);
   });
 });

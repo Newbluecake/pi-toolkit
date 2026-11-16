@@ -1,3 +1,4 @@
+import { virtualTime, deferred as timeDeferred, observe } from "../../../../helpers/virtual-time.js";
 /**
  * web-hub session-history plan §4.5.3 (`index.ts`): the verifier-rejection-round-2 fixes for
  * `page()`'s directory-open fault classification (Finding 3) and the per-file fstat TOCTOU
@@ -202,6 +203,7 @@ function statFaultFs(
     faultOn(): boolean;
     onAttempt(): void;
     mode: "eio" | "hang";
+    onStat?: () => Promise<never>;
   },
 ): HistoryFs {
   return {
@@ -219,7 +221,7 @@ function statFaultFs(
         close: () => h.close(),
         stat: () =>
           opts.mode === "hang"
-            ? new Promise<never>(() => undefined) // never settles — the deadline race must fire
+            ? (opts.onStat?.() ?? new Promise<never>(() => undefined)) // deadline race must fire
             : Promise.reject(Object.assign(new Error("EIO"), { code: "EIO" })),
       };
     },
@@ -330,11 +332,17 @@ describe("pageHistory — pinned-dir stat failure classification (verifier round
     writeFileSync(join(sessionsDir, "d1", "a.jsonl"), header("sess-aaaa1", realCwd));
     writeFileSync(join(sessionsDir, "d2", "b.jsonl"), header("sess-bbbb1", realCwd));
     let faultOn = false;
+    const entered = timeDeferred();
+    const late = timeDeferred<never>();
     const fs = statFaultFs(defaultHistoryFs(), {
       dirName: "d2",
       faultOn: () => faultOn,
       onAttempt: () => undefined,
       mode: "hang",
+      onStat: () => {
+        entered.resolve();
+        return late.promise;
+      },
     });
     const service = createHistoryService(baseDeps(), { fs });
     const warm = await service.page(
@@ -343,21 +351,26 @@ describe("pageHistory — pinned-dir stat failure classification (verifier round
     );
     expect(warm.ok).toBe(true);
 
+    virtualTime();
     faultOn = true;
-    const start = Date.now();
-    const page = await service.page(
-      { kind: "all", limit: 50 },
-      createReqDeadline(() => Date.now(), 400),
+    const call = observe(
+      service.page(
+        { kind: "all", limit: 50 },
+        createReqDeadline(() => Date.now(), 400),
+      ),
     );
-    const elapsed = Date.now() - start;
+    await entered.promise;
+    await call.pendingAfter(399);
+    await call.advance(1);
+    const page = await call.promise;
     expect(page.ok).toBe(true);
     if (!page.ok) return;
     expect(page.page.partial).toEqual({ reason: "io" });
     expect(page.page.stats.changed).toBe(0);
     expect(page.page.stats.skipped).toBe(0);
     expect(page.page.items.some((it2) => it2.id === "sess-bbbb1")).toBe(false);
-    expect(elapsed).toBeGreaterThanOrEqual(350); // the deadline race is what ended the stat
-    expect(elapsed).toBeLessThan(5_000); // and it never hung the request
+    late.reject(new Error("late stat failure"));
+    await call.advance(0);
     await service.dispose();
   }, 10_000);
 });

@@ -226,6 +226,7 @@ describe("慢盘与内存上界（#10 硬门槛）", () => {
     const h = hangingFs();
     const s = sink(h.fs);
     const chunk = Buffer.from("0123456789");
+    // The original 200ms push CPU bound remains in stderr-sink.perf.test.ts.
     for (let i = 0; i < 100_000; i++) s.push(chunk);
     await waitFor(() => h.handle.writes.length === 1);
     expect(s.stats().written).toBe(0); // the disk has not completed even one write

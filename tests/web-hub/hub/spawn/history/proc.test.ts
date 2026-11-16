@@ -1,3 +1,4 @@
+import { virtualTime, deferred as timeDeferred, observe } from "../../../../helpers/virtual-time.js";
 /**
  * web-hub session-history plan §4.5.5 (`proc.ts`): `scanAsync` classification + `rescanSync`'s
  * PID-reuse matrix (the evidence #1 closing move — full re-stat, no diffing, no cmdline).
@@ -10,7 +11,7 @@ import {
   type ProcFs,
   type ProcSyncFs,
 } from "../../../../../src/web-hub/hub/spawn/history/proc.js";
-import { PROC_SCAN_PID_MAX } from "../../../../../src/web-hub/hub/spawn/history/budget.js";
+import { PROC_SCAN_PID_MAX, PROC_CALL_MS } from "../../../../../src/web-hub/hub/spawn/history/budget.js";
 
 interface FakeProcEntry {
   uid: number;
@@ -116,16 +117,30 @@ describe("scanAsync", () => {
   });
 
   it("Finding 5 fix: a per-pid call exceeding PROC_CALL_MS (but within the overall scan budget) fails that pid/scan the same way a real error would, never hangs", async () => {
+    virtualTime();
+    const entered = timeDeferred();
+    const late = timeDeferred<number>();
     const table = new Map<number, FakeProcEntry>([[41, { uid: UID, comm: "pi", startTicks: 1 }]]);
     const base = fakeAsyncProcFs(table);
     const procFs: ProcFs = {
       ...base,
-      statUid: () => new Promise<number>(() => undefined), // never settles
+      statUid: () => {
+        entered.resolve();
+        return late.promise;
+      }, // never settles
     };
-    const token = await scanAsync({ procFs, uid: UID, hubPid: HUB_PID, now, budgetMs: 10_000 });
+    const scan = observe(scanAsync({ procFs, uid: UID, hubPid: HUB_PID, now, budgetMs: 10_000 }));
+    await entered.promise;
+    await scan.pendingAfter(PROC_CALL_MS - 1);
+    await scan.advance(1);
+    expect(scan.settled).toBe(true); // the per-call deadline fired exactly at D
+    const token = await scan.promise;
     // the per-call bound (PROC_CALL_MS, far shorter than the 10s scan budget) is what actually
     // ends this — if it only had the whole-scan budget it would hang for the full 10s.
     expect(token.complete).toBe(false);
+    late.resolve(UID);
+    await scan.advance(0);
+    expect(token.complete).toBe(false); // late success cannot upgrade a partial proof
   });
 
   it("ESRCH/ENOENT mid-scan ⇒ process treated as exited, not recorded", async () => {
@@ -183,17 +198,30 @@ describe("scanAsync", () => {
   });
 
   it("verifier round 3 (defect 3a): a HANGING readdirProc fails closed within PROC_CALL_MS — scan resolves partial, never hangs the scan budget", async () => {
+    virtualTime();
+    const entered = timeDeferred();
+    const late = timeDeferred<string[]>();
     const procFs: ProcFs = {
-      readdirProc: () => new Promise<string[]>(() => undefined), // never settles
+      readdirProc: () => {
+        entered.resolve();
+        return late.promise;
+      }, // never settles
       statUid: () => Promise.reject(new Error("unused")),
       readStat: () => Promise.reject(new Error("unused")),
       readCmdline: () => Promise.reject(new Error("unused")),
     };
-    const start = Date.now();
-    const token = await scanAsync({ procFs, uid: UID, hubPid: HUB_PID, now, budgetMs: 10_000 });
+    const scan = observe(scanAsync({ procFs, uid: UID, hubPid: HUB_PID, now, budgetMs: 10_000 }));
+    await entered.promise;
+    await scan.pendingAfter(PROC_CALL_MS - 1);
+    await scan.advance(1);
+    expect(scan.settled).toBe(true); // the per-call deadline fired exactly at D
+    const token = await scan.promise;
     expect(token.complete).toBe(false); // fail closed ⇒ the proof is never free
     expect(token.pids.size).toBe(0);
-    expect(Date.now() - start).toBeLessThan(2_000); // the per-call race ended it, not the 10s budget
+
+    late.resolve([]);
+    await scan.advance(0);
+    expect(token.complete).toBe(false); // late success cannot upgrade a partial proof
   });
 });
 

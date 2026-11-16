@@ -1,3 +1,4 @@
+import { virtualTime, deferred as timeDeferred, observe } from "../../../helpers/virtual-time.js";
 /**
  * worktree-graph plan v2 §2.6 (P2): the route pipeline over the fake fs + scripted runner —
  * the error matrix row by row, empty-tips (no Gl run), the Gr→Gl tip-snapshot invariant (a ref
@@ -497,10 +498,15 @@ describe("worktree-graph routes — audit whitelist + 429 throttle", () => {
 
 describe("worktree-graph routes — dispose", () => {
   it("dispose aborts in-flight requests (503 hub-close), closes pins, and settles within ~1s; idempotent", async () => {
+    virtualTime();
+    const entered = timeDeferred<AbortSignal>();
     const fx = repoFixture();
     scriptGraphAdmission(fx);
     fx.runner.push(okRun(grStdout([MAIN_REF])));
-    fx.runner.push(hangUntilAbort);
+    fx.runner.push((args) => {
+      entered.resolve(args.opts.signal!);
+      return hangUntilAbort(args);
+    });
     const k = kit({ fs: fx.fs, runner: fx.runner });
     const io = fakeIo();
     const pending = k.routes.handle(
@@ -509,12 +515,12 @@ describe("worktree-graph routes — dispose", () => {
       query({ agentKey: AGENT, sessionId: SESSION, wt: LINKED }),
       io,
     );
-    await new Promise((r) => setTimeout(r, 10)); // past Gr, into the hanging Gl
+    const signal = await entered.promise;
+    expect(signal.aborted).toBe(false);
     expect(fx.fs.leakCount()).toBe(3); // the three pins are open
     const deadline = { at: Date.now() + 1_000, remaining: () => 1_000, expired: () => false };
-    const startedAt = Date.now();
     await k.routes.dispose("close", deadline);
-    expect(Date.now() - startedAt).toBeLessThan(1_100);
+    expect(signal.aborted).toBe(true);
     await k.routes.dispose("close", deadline); // idempotent
     await pending;
     expect(io.sent[0]).toMatchObject({ status: 503, body: { error: "E_HUB_RESTARTING" } });

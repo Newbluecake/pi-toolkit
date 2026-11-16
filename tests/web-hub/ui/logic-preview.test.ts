@@ -271,34 +271,32 @@ describe("logic/preview.js findPathRefs — property & performance", () => {
     }
   });
 
-  it("1 MiB of path-free prose scans in linear time (loose CI-safe bound)", () => {
+  it("1 MiB of path-free prose scans with bounded linear work", () => {
     const text = "这是一段没有路径的正文。lorem ipsum dolor sit amet. ".repeat(20_000);
-    const t0 = Date.now();
+    __resetPreviewScanStats();
     const segs = findPathRefs(text, SCOPE) as Seg[];
-    const ms = Date.now() - t0;
     expect(refs(segs)).toEqual([]);
-    expect(ms).toBeLessThan(2_000);
+    expect(__previewScanStats.charScans).toBeLessThanOrEqual(10 * text.length + 10_000);
   });
 
   it("1 MiB of dense non-start slashes (worst-case rescan) also stays linear", () => {
     const text = "x/y".repeat(350_000); // every '/' fails the start-context rule
-    const t0 = Date.now();
+    __resetPreviewScanStats();
     findPathRefs(text, SCOPE);
-    expect(Date.now() - t0).toBeLessThan(2_000);
+    expect(__previewScanStats.charScans).toBeLessThanOrEqual(10 * text.length + 10_000);
   });
 
-  it("pathological '=/'.repeat (verifier P1: was O(n²), 25.5s at 64KB) — 64KB scans < 200ms", () => {
+  it("pathological '=/'.repeat (verifier P1: was O(n²), 25.5s at 64KB) — 64KB has bounded charScans", () => {
     // `=` and `/` are both non-terminators and `=` is a START_CHAR, so every '/' in this
     // string is a legal candidate start whose candidate runs to the end of the string —
     // the exact shape that made the pre-fix rescan quadratic (remote main-thread freeze
     // over the transcript, U3). The fix memoizes per terminator-free run.
     const text = "=/".repeat(32_768); // 65_536 chars
-    const t0 = Date.now();
+    __resetPreviewScanStats();
     const segs = findPathRefs(text, SCOPE) as Seg[];
-    const ms = Date.now() - t0;
     expect(concat(segs)).toBe(text);
     expect(refs(segs)).toEqual([]); // nothing in scope — all candidates rejected
-    expect(ms).toBeLessThan(200);
+    expect(__previewScanStats.charScans).toBeLessThanOrEqual(10 * text.length + 10_000);
   });
 
   it("nested candidate after a rejected one is still found (why rejection can't jump to the run end)", () => {
@@ -1916,14 +1914,6 @@ describe("logic/preview.js findPathRefs — §2.5.2 operation-count performance 
     const ratio = big / small;
     expect(ratio).toBeGreaterThanOrEqual(8);
     expect(ratio).toBeLessThanOrEqual(24);
-  });
-
-  it("5 s wall-clock hang sentinel: the whole input × scope matrix completes (guards exponential regressions only)", () => {
-    const t0 = Date.now();
-    for (const [, text] of PERF_INPUTS) {
-      for (const [, scope] of PERF_SCOPES) findPathRefs(text, scope);
-    }
-    expect(Date.now() - t0).toBeLessThan(5_000);
   });
 });
 

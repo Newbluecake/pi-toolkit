@@ -1,3 +1,4 @@
+import { virtualTime, deferred as timeDeferred, observe } from "../../../helpers/virtual-time.js";
 /**
  * web-hub-preview plan v3 §4.3 (mapping table) / PV2a — `hub/preview/fs.ts`.
  *
@@ -131,15 +132,35 @@ describe("previewFsStep (budget + lazy initiation)", () => {
   });
 
   it("a hung call surfaces as deadline at the step cap (min(cap, remaining))", async () => {
-    const t0 = Date.now();
-    await expect(
-      previewFsStep(() => new Promise<number>(() => undefined), deadline(8000), neverAbort(), {
-        stepCapMs: 60,
-        now: Date.now,
-        tracker: createPreviewIoTracker(),
-      }),
-    ).rejects.toMatchObject({ ioFail: "deadline" });
-    expect(Date.now() - t0).toBeLessThan(400);
+    virtualTime();
+    const entered = timeDeferred();
+    const late = timeDeferred<number>();
+    const tracker = createPreviewIoTracker();
+    const call = observe(
+      previewFsStep(
+        () => {
+          entered.resolve();
+          return late.promise;
+        },
+        deadline(8000),
+        neverAbort(),
+        {
+          stepCapMs: 60,
+          now: Date.now,
+          tracker,
+        },
+      ),
+    );
+    await entered.promise;
+    const failure = expect(call.promise).rejects.toMatchObject({ ioFail: "deadline" });
+    await call.pendingAfter(59);
+    expect(tracker.zombies).toBe(0);
+    await call.advance(1);
+    await failure;
+    expect(tracker.zombies).toBe(1);
+    late.resolve(7);
+    await call.advance(0);
+    expect(tracker.zombies).toBe(0);
   });
 });
 
@@ -612,13 +633,25 @@ describe("dir primitives (P1b: opendir wrapper / lstat / boundedClose)", () => {
     const gate = new Promise<void>((r) => {
       release = r;
     });
-    const t0 = Date.now();
-    await boundedClose(() => gate.then(() => undefined), { now: Date.now, tracker, log: memLog() });
-    expect(Date.now() - t0).toBeGreaterThanOrEqual(900);
-    expect(Date.now() - t0).toBeLessThan(2_000);
+    virtualTime();
+    const entered = timeDeferred();
+    const close = observe(
+      boundedClose(
+        () => {
+          entered.resolve();
+          return gate;
+        },
+        { now: Date.now, tracker, log: memLog() },
+      ),
+    );
+    await entered.promise;
+    await close.pendingAfter(999);
+    expect(tracker.zombies).toBe(0);
+    await close.advance(1);
+    await close.promise;
     expect(tracker.zombies).toBe(1);
     release();
-    await new Promise((r) => setTimeout(r, 20).unref?.());
+    await close.advance(0);
     expect(tracker.zombies).toBe(0);
   });
 
