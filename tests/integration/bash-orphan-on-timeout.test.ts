@@ -1,3 +1,4 @@
+import { ProcessStartup } from "./helpers/process-startup.js";
 import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -59,6 +60,7 @@ describe.skipIf(process.platform !== "linux")("sealAndKill reaps SIGTERM-resista
       model: { provider: "test", id: "test-model" },
     } as unknown as ExtensionContext;
 
+    const boot = new ProcessStartup();
     const result = (await tools
       .get("bash")!
       .execute("c1", { command: fixture.command("alive"), run_in_background: true }, undefined, undefined, ctx)) as {
@@ -67,23 +69,42 @@ describe.skipIf(process.platform !== "linux")("sealAndKill reaps SIGTERM-resista
     const jobId = result.details?.jobId;
     expect(jobId).toBeTruthy();
 
-    let pid: number | undefined;
-    expect(
-      await until(() => {
-        return fixture!.workerPid() !== undefined;
-      }),
-    ).toBe(true);
-    const status = (await tools
-      .get("bash_job")!
-      .execute("c2", { action: "status", job_id: jobId }, undefined, undefined, ctx)) as { details?: { pid?: number } };
-    pid = status.details?.pid;
+    type Status = {
+      details?: { pid?: number; terminal?: boolean; exitCode?: number | null };
+      content?: Array<{ text?: string }>;
+    };
+    let latest: Status | undefined;
+    boot.observeManaged(
+      () =>
+        latest?.details === undefined
+          ? undefined
+          : {
+              ...(latest.details.pid === undefined ? {} : { pid: latest.details.pid }),
+              state: latest.details.terminal ? "exited" : "starting",
+              exit: { code: latest.details.exitCode ?? null, signal: "unknown" },
+            },
+      () => latest?.content?.map((c) => c.text ?? "").join("\n") ?? "",
+      "bash node fixture",
+    );
+    await boot.wait(
+      async () => {
+        latest = (await tools
+          .get("bash_job")!
+          .execute("ready-status", { action: "status", job_id: jobId }, undefined, undefined, ctx)) as Status;
+        // Own group only; retain cleanup coordinates even on failed startup.
+        pgid = latest.details?.pid;
+        return fixture!.workerPid();
+      },
+      (worker) => worker !== undefined,
+      "node worker installed SIGTERM handler and wrote pidfile",
+    );
+    const pid = latest?.details?.pid;
     expect(pid).toBeTruthy();
-    pgid = pid;
     expect(liveGroupMembers(pid!)).toBeGreaterThanOrEqual(2);
 
     const sealed = getChildBashRegistry().sealAndKill(sessionId, 300);
     expect(sealed).toBeDefined();
     await sealed!.done;
     expect(await until(() => liveGroupMembers(pid!) === 0, 5_000)).toBe(true);
-  }, 15_000);
+  }, 45_000);
 });

@@ -25,6 +25,7 @@
  * deliberately relaxed vs the wire constants (L3's 12s bound asserted as ≤14s wall clock):
  * these are real schedulers, not fake timers.
  */
+import { ProcessStartup } from "./helpers/process-startup.js";
 import {
   copyFileSync,
   existsSync,
@@ -184,6 +185,26 @@ function stderrLog(stateDir: string, spawnId: string): string {
   return existsSync(file) ? readFileSync(file, "utf8") : "";
 }
 
+// Scoped to test-owned state directories; managed grandchildren expose lifecycle
+// through spawns.json and their own stderr log, not a machine-wide process scan.
+const managedBoots = new Map<string, ProcessStartup>();
+function rememberBoot(stateDir: string, body: string, boot: ProcessStartup): { spawnId: string; state: string } {
+  const accepted = JSON.parse(body) as { spawnId: string; state: string };
+  boot.observeManaged(
+    () => recordOf(stateDir, accepted.spawnId),
+    () => stderrLog(stateDir, accepted.spawnId),
+    `managed ${accepted.spawnId}`,
+  );
+  managedBoots.set(`${stateDir}/${accepted.spawnId}`, boot);
+  return accepted;
+}
+function managedBoot(stateDir: string, spawnId: string): ProcessStartup {
+  const boot = managedBoots.get(`${stateDir}/${spawnId}`);
+  if (!boot) throw new Error(`missing test startup budget for ${spawnId}`);
+  return boot;
+}
+afterEach(() => managedBoots.clear());
+
 let idCounter = 0;
 function spawnReqId(): string {
   idCounter += 1;
@@ -292,11 +313,12 @@ describe.skipIf(!IS_LINUX || PLAN === undefined)("web-hub headless e2e — real 
 
   /** Two-step loopback spawn (a sandbox cwd is never in the known set); returns the 202 body. */
   async function spawnFake(hub: ChildHub, cwd: string, body: Record<string, unknown> = {}) {
+    const boot = new ProcessStartup();
     const id = spawnReqId();
     const headers = { Cookie: hub.cookie, Origin: `http://127.0.0.1:${hub.port}` };
     const first = await postJson(hub.port, "/api/headless", { id, cwd, ...body }, headers);
     expect([202, 409]).toContain(first.status);
-    if (first.status === 202) return JSON.parse(first.body) as { spawnId: string; state: string };
+    if (first.status === 202) return rememberBoot(hub.stateDir, first.body, boot);
     const resolved = JSON.parse(first.body) as { resolvedCwd: string };
     const second = await postJson(
       hub.port,
@@ -305,7 +327,7 @@ describe.skipIf(!IS_LINUX || PLAN === undefined)("web-hub headless e2e — real 
       headers,
     );
     expect(second.status).toBe(202);
-    return JSON.parse(second.body) as { spawnId: string; state: string };
+    return rememberBoot(hub.stateDir, second.body, boot);
   }
 
   async function waitPidOf(hub: ChildHub, spawnId: string): Promise<number> {
@@ -550,7 +572,11 @@ describe.skipIf(!IS_LINUX || PLAN === undefined)("web-hub headless e2e — real 
     writeFileSync(jsonlFile, jsonlSentinel);
 
     // live: hello+session negotiate normally (only EOF/TERM are ignored)
-    await waitUntil(() => recordOf(hub.stateDir, accepted.spawnId)?.state === "live", 15_000, "managed child live");
+    await managedBoot(hub.stateDir, accepted.spawnId).wait(
+      () => recordOf(hub.stateDir, accepted.spawnId)?.state,
+      (state) => state === "live",
+      "managed child live",
+    );
 
     const ownerRes = await rawRequest(hub.port, {
       path: "/api/headless",
@@ -712,12 +738,13 @@ describe.skipIf(!IS_LINUX)("web-hub headless e2e — real assembly × real fake-
     cwd: string,
     body: Record<string, unknown> = {},
   ): Promise<{ spawnId: string; state: string }> {
+    const boot = new ProcessStartup();
     const id = spawnReqId();
     const headers = { Cookie: h.cookie, Origin: originOf(h.port) };
     const first = await postJson(h.port, "/api/headless", { id, cwd, ...body }, headers);
     if (first.status === 503) console.error(`[H9] first POST 503: ${first.body}`);
     expect([202, 409]).toContain(first.status);
-    if (first.status === 202) return JSON.parse(first.body) as { spawnId: string; state: string };
+    if (first.status === 202) return rememberBoot(h.stateDir, first.body, boot);
     const resolved = JSON.parse(first.body) as { resolvedCwd: string };
     const second = await postJson(
       h.port,
@@ -726,7 +753,7 @@ describe.skipIf(!IS_LINUX)("web-hub headless e2e — real assembly × real fake-
       headers,
     );
     expect(second.status).toBe(202);
-    return JSON.parse(second.body) as { spawnId: string; state: string };
+    return rememberBoot(h.stateDir, second.body, boot);
   }
 
   async function getHeadless(
@@ -918,7 +945,11 @@ describe.skipIf(!IS_LINUX)("web-hub headless e2e — real assembly × real fake-
     sseConns.push(sse);
     await sse.waitFor((e) => e.event === "hello");
     const accepted = await spawnOverHttp(h, cwd);
-    await waitRecord(h.stateDir, accepted.spawnId, (r) => r.state === "live", 15_000, "live");
+    await managedBoot(h.stateDir, accepted.spawnId).wait(
+      () => recordOf(h.stateDir, accepted.spawnId)?.state,
+      (state) => state === "live",
+      "managed child live",
+    );
     const pid = await trackChild(h, accepted.spawnId);
     const owner = await getHeadless(h.port, h.cookie);
     const mine = owner.items.find((i) => i.spawnId === accepted.spawnId)!;
@@ -1361,8 +1392,12 @@ describe.skipIf(!IS_LINUX)("web-hub headless e2e — H9 default model, in-proces
     expect(res.status).toBe(200);
   }
 
-  async function readArgv(): Promise<string[]> {
-    await waitUntil(() => existsSync(argvFileOf()), 5_000, "fake-pi wrote FAKE_ARGV_OUT");
+  async function readArgv(h: ProcHub, spawnId: string): Promise<string[]> {
+    await managedBoot(h.stateDir, spawnId).wait(
+      () => existsSync(argvFileOf()),
+      (ready) => ready,
+      "fake-pi wrote FAKE_ARGV_OUT",
+    );
     return JSON.parse(readFileSync(argvFileOf(), "utf8")) as string[];
   }
 
@@ -1373,12 +1408,13 @@ describe.skipIf(!IS_LINUX)("web-hub headless e2e — H9 default model, in-proces
     cwd: string,
     body: Record<string, unknown> = {},
   ): Promise<{ spawnId: string; state: string }> {
+    const boot = new ProcessStartup();
     const id = spawnReqId();
     const headers = { Cookie: h.cookie, Origin: originOf(h.port) };
     const first = await postJson(h.port, "/api/headless", { id, cwd, ...body }, headers);
     if (first.status === 503) console.error(`[H9] first POST 503: ${first.body}`);
     expect([202, 409]).toContain(first.status);
-    if (first.status === 202) return JSON.parse(first.body) as { spawnId: string; state: string };
+    if (first.status === 202) return rememberBoot(h.stateDir, first.body, boot);
     const resolved = JSON.parse(first.body) as { resolvedCwd: string };
     const second = await postJson(
       h.port,
@@ -1387,7 +1423,7 @@ describe.skipIf(!IS_LINUX)("web-hub headless e2e — H9 default model, in-proces
       headers,
     );
     expect(second.status).toBe(202);
-    return JSON.parse(second.body) as { spawnId: string; state: string };
+    return rememberBoot(h.stateDir, second.body, boot);
   }
 
   it('H9a: preference ⇒ argv carries `--model <ref>` as TWO independent elements; body model wins; "" forks with no tail', async () => {
@@ -1395,20 +1431,20 @@ describe.skipIf(!IS_LINUX)("web-hub headless e2e — H9 default model, in-proces
     process.env.FAKE_ARGV_OUT = argvFileOf();
     await setPrefs(h, "p1/pref-model");
     rmSync(argvFileOf(), { force: true });
-    await spawnTwoStep(h, projDir(sandbox!.home, "h9a-pref"));
-    let argv = await readArgv();
+    let accepted = await spawnTwoStep(h, projDir(sandbox!.home, "h9a-pref"));
+    let argv = await readArgv(h, accepted.spawnId);
     expect(argv.slice(-2)).toEqual(["--model", "p1/pref-model"]);
     expect(argv).toContain("--mode");
     expect(argv[argv.indexOf("--model") + 1]).toBe("p1/pref-model"); // separate element, never joined
 
     rmSync(argvFileOf(), { force: true });
-    await spawnTwoStep(h, projDir(sandbox!.home, "h9a-body"), { model: "p2/explicit-model" });
-    argv = await readArgv();
+    accepted = await spawnTwoStep(h, projDir(sandbox!.home, "h9a-body"), { model: "p2/explicit-model" });
+    argv = await readArgv(h, accepted.spawnId);
     expect(argv.slice(-2)).toEqual(["--model", "p2/explicit-model"]);
 
     rmSync(argvFileOf(), { force: true });
-    await spawnTwoStep(h, projDir(sandbox!.home, "h9a-clear"), { model: "" });
-    argv = await readArgv();
+    accepted = await spawnTwoStep(h, projDir(sandbox!.home, "h9a-clear"), { model: "" });
+    argv = await readArgv(h, accepted.spawnId);
     expect(argv.includes("--model")).toBe(false); // explicit pi default — no tail at all
     expect(argv.slice(-2)).toEqual(["--mode", "rpc"]);
   }, 30_000);
@@ -1937,15 +1973,21 @@ describe.skipIf(!IS_LINUX)("web-hub spawn restore — in-process graceful paths 
     const home = sandbox.home;
     const cwd = projDir(home, "legacy", ["--no-hello", "--ignore-eof"]);
     const spawnId = spawnReqId();
+    const startup = new ProcessStartup();
     const child = spawnChild(process.execPath, [FAKE_PI, "--mode", "rpc"], {
       cwd,
       detached: true,
-      stdio: "ignore",
+      stdio: ["ignore", "ignore", "pipe"],
       env: { ...process.env, HOME: home, PI_WEBHUB_SPAWN_ID: spawnId },
     });
+    startup.observe(child, "orphan fixture");
     const pid = child.pid!;
     procChildren.add(pid);
-    await waitUntil(() => forkArgvs(cwd).length === 1, 5_000, "orphan up");
+    await startup.wait(
+      () => forkArgvs(cwd).length,
+      (n) => n === 1,
+      "orphan up",
+    );
     const st = statSync(cwd);
     const bootId = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
     const paths = resolveHubPaths({ home, uid: process.getuid?.() ?? 0 });

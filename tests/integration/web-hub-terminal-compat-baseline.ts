@@ -1,5 +1,6 @@
 /** Complete locked baseline + real separate-process harness. No production patching,
  * target.allowed substitution, fake authority, fake receipts or dependency installation. */
+import { ProcessStartup } from "./helpers/process-startup.js";
 import assert from "node:assert/strict";
 import { get } from "node:http";
 import { spawn, execFileSync, type ChildProcess } from "node:child_process";
@@ -178,6 +179,7 @@ export function processPeer(script: string, args: string[], options: { home: str
   delete env.PI_CODING_AGENT_DIR;
   delete env.PI_WEBHUB_TERMINAL_SOURCE;
   if (options.source !== undefined) env.PI_WEBHUB_TERMINAL_SOURCE = options.source;
+  const boot = new ProcessStartup();
   const child = spawn(
     process.execPath,
     ["--import", pathToFileURL(join(CURRENT_ROOT, "node_modules/tsx/dist/loader.mjs")).href, script, ...args],
@@ -187,6 +189,7 @@ export function processPeer(script: string, args: string[], options: { home: str
       stdio: ["pipe", "pipe", "pipe", "ipc"],
     },
   );
+  boot.observe(child, "terminal peer");
   const messages: any[] = [];
   let errors = "",
     output = "";
@@ -203,12 +206,12 @@ export function processPeer(script: string, args: string[], options: { home: str
     messages,
     errors: () => errors,
     async ready() {
-      await waitUntil(() => output.includes("READY") || child.exitCode !== null, 15000, "separate process ready").catch(
-        (e) => {
-          throw new Error(`${e}; ${errors}`);
-        },
+      await boot.wait(
+        () => output.includes("READY"),
+        (ready) => ready,
+        "separate process ready",
       );
-      assert.equal(child.exitCode, null, errors);
+      assert.equal(child.exitCode, null, boot.diagnostic());
       return messages.find((m) => m.event === "ready");
     },
     async command(op: string, data: object = {}) {
@@ -562,10 +565,11 @@ if (process.argv[2] === "--hub") {
     const a = fakePi(),
       c = fakeCtx({ sessionId: "unqualified-launcher", mode: "rpc" });
     const paths = resolveHubPaths({ home: input.home, uid: process.getuid!() });
+    const boot = new ProcessStartup();
     let child: ChildProcess | undefined, launchConfig: any;
     const observeSpawn = (...args: any[]) => {
       launchConfig = JSON.parse(args[2].env.PI_WEBHUB_CONFIG);
-      child = (spawn as any)(...args);
+      child = boot.spawn(...(args as Parameters<typeof spawn>));
       return child;
     };
     if (input.oldLauncherRoot) {
@@ -592,7 +596,11 @@ if (process.argv[2] === "--hub") {
         observeSpawn,
       );
       assert.equal(launched.blocked, false);
-      await waitUntil(() => existsSync(paths.hubJson), 15000, "actual old spawnHub starts new main");
+      await boot.wait(
+        () => existsSync(paths.hubJson),
+        (ready) => ready,
+        "actual old spawnHub starts new main",
+      );
       assert(Object.hasOwn(launchConfig, "terminal"), "old launcher supplies its actual legacy config");
     } else {
       const ctl = wireWebHub(a.pi, {
@@ -606,9 +614,9 @@ if (process.argv[2] === "--hub") {
         spawnImpl: observeSpawn,
       });
       a.fire("session_start", { type: "session_start" }, c.ctx);
-      await waitUntil(
+      await boot.wait(
         () => existsSync(paths.hubJson) && ctl.status().state === "live",
-        15000,
+        (ready) => ready,
         "real spawnHub main entry",
       );
       assert(!Object.hasOwn(launchConfig, "terminal"), "unqualified launcher must not supply terminal config");

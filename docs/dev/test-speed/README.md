@@ -84,6 +84,16 @@ missing-getfattr。真实 fixture 的固定 PATH 只桥接选定 gocryptfs，不
 `test-tiers-actual` 只启动 `vitest list --filesOnly` 检查三个分区，不收集/运行真实挂载文件。
 无挂载门通过不替代另行授权、独占机器上的正式 secure 项目运行。
 
+## 真实子进程启动 barrier（#47d）
+
+`tests/integration/helpers/process-startup.ts` 提供单次冷启动共享的 30s 单调钟预算：
+spawn/ready/live 多阶段不重置预算。经已有 spawn seam 观察每个 singleton contender，
+只有全部退出才早失败（exit/error 事件；managed grandchildren 用自有 spawns.json / bash_job status 的终态，
+25ms 采样，不把记录缺席当退出）。失败附每个 pid/exit/signal 和先脱敏再按 UTF-8 截断的
+stderr；managed 磁盘未记录的字段明确为 unknown，不猜测、不扫描或 signal 现场进程。
+XS harness 继续原预算与行为，仅复用抽出的 sanitizer。进程已经 ready 之后的协议事件、
+pid 持久化、清理/退出、register timeout 等非冷启动门保持原上限；实际 >15s 的旧启动门不在本轮改动范围。
+
 ## 日常命令
 
 ```sh

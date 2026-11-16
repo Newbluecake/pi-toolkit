@@ -1,4 +1,5 @@
 /** Production assembly contract gates. No browser, no fake physical-release proof. */
+import { ProcessStartup } from "./helpers/process-startup.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { readdir } from "node:fs/promises";
 import { readFileSync, readdirSync, existsSync } from "node:fs";
@@ -707,11 +708,13 @@ describe("separate-process production authority and physical receipt release cha
     cleanups.push(() => hub.close("test"));
     const configFile = join(fixture.fixture.root, "agent.json");
     await writeFile(configFile, JSON.stringify({ home: sandbox.home, fixture: fixture.fixture }), { mode: 0o600 });
+    const boot = new ProcessStartup();
     const child = spawn(
       process.execPath,
       ["--import", "tsx", resolve("tests/integration/fixtures/terminal-agent.ts"), configFile],
       { stdio: "pipe", env: { ...process.env, HOME: sandbox.home } },
     );
+    boot.observe(child, "terminal agent");
     let ready = false,
       errors = "";
     child.stdout.on("data", (data: Buffer) => {
@@ -728,13 +731,13 @@ describe("separate-process production authority and physical receipt release cha
       await exited;
       clearTimeout(deadline);
     });
-    try {
-      await waitUntil(() => ready || child.exitCode !== null, 10000, "real child agent ready");
-    } catch (error) {
-      throw new Error(`${String(error)}; ${errors}; cards=${frontend!.registry.list().length}`);
-    }
-    expect(child.exitCode, errors).toBeNull();
-    expect(ready, errors).toBe(true);
+    await boot.wait(
+      () => ready,
+      (value) => value,
+      "real child agent ready",
+    );
+    expect(child.exitCode, boot.diagnostic()).toBeNull();
+    expect(ready, boot.diagnostic()).toBe(true);
     const view = frontend!.registry.list().find((v) => v.session?.sessionId === "child-terminal-session")!;
     expect(view.agentId.pid).toBe(child.pid);
     expect(child.pid).not.toBe(process.pid);

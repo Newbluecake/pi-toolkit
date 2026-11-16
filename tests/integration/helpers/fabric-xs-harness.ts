@@ -3,35 +3,12 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
+import { sanitizeDiagnostic } from "./process-startup.js";
+export { sanitizeDiagnostic } from "./process-startup.js";
+
 /** Startup is a liveness barrier, not a latency benchmark. Keep one 30s total boot
  * budget (ready + live) for loaded runners; ordinary RPC/event budgets stay 12s. */
 const BOOT_MS = 30_000;
-
-/** Diagnostic hygiene for inherited-env children. Redact BEFORE applying the byte cap. */
-export function sanitizeDiagnostic(text: string): string {
-  const clean = text
-    .replace(/(authorization\s*:\s*bearer\s+)[^\s\r\n]+/gi, "$1[REDACTED]")
-    .replace(/((?:set-cookie|cookie)\s*:\s*)[^\r\n]+/gi, "$1[REDACTED]")
-    .replace(
-      /((?:[\w-]*(?:token|api[-_]?key|secret|password)[\w-]*)["']?\s*[:=]\s*)["']?[^\s,;"'\r\n}]+["']?/gi,
-      "$1[REDACTED]",
-    )
-    .replace(/\b(?:[a-f0-9]{32,}|[A-Za-z0-9+/_-]{48,}={0,2})\b/gi, "[REDACTED]")
-    // Whole secret-named identifiers can be echoed by parsers without a key=value context.
-    .replace(
-      /[A-Za-z0-9_.-]*(?:token|secret|passw(?:or)?d|api[_-]?key|cookie|credential|bearer)[A-Za-z0-9_.-]*/gi,
-      (word) => (word.length >= 12 || /[_-]/.test(word) ? "[REDACTED]" : word),
-    );
-  const bytes = Buffer.from(clean);
-  if (bytes.length <= 12_000) return clean;
-  // Keep lifecycle fields at the head AND recent stderr, without splitting UTF-8.
-  const marker = "\n...[truncated]...\n";
-  let headEnd = 1_000;
-  while ((bytes[headEnd]! & 0xc0) === 0x80) headEnd--;
-  let tailStart = bytes.length - (12_000 - headEnd - Buffer.byteLength(marker));
-  while (tailStart < bytes.length && (bytes[tailStart]! & 0xc0) === 0x80) tailStart++;
-  return bytes.subarray(0, headEnd).toString("utf8") + marker + bytes.subarray(tailStart).toString("utf8");
-}
 
 export function bounded<T>(p: Promise<T>, label: string, ms = 12_000, diagnostic = () => ""): Promise<T> {
   const started = performance.now();

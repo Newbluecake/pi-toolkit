@@ -11,6 +11,7 @@
  * dir never followed) live in web-hub-history-enum.test.ts; the libuv starvation suite lives in
  * web-hub-history-starvation.test.ts.
  */
+import { ProcessStartup } from "./helpers/process-startup.js";
 import { spawn as spawnChild, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
@@ -189,6 +190,7 @@ interface HistHub {
   cookie: string;
   home: string;
   agentDir: string;
+  startups: Map<string, ProcessStartup>;
   allowPi: Set<number>;
   commOverride: Map<number, string>;
 }
@@ -237,6 +239,7 @@ async function bootHistoryHub(
   histHubs.push(started);
   const cookie = await login(started.httpPort, started.paths.tokenFile);
   return {
+    startups: new Map(),
     hub: started,
     port: started.httpPort,
     stateDir: started.paths.stateDir,
@@ -280,7 +283,20 @@ interface SessionOpen409 {
 }
 
 async function postSpawn(h: HistHub, body: Record<string, unknown>): Promise<{ status: number; body: string }> {
+  const boot = new ProcessStartup();
   const res = await postJson(h.port, "/api/headless", body, { Cookie: h.cookie, Origin: origin(h) });
+  if (res.status === 202) {
+    const { spawnId } = JSON.parse(res.body) as { spawnId: string };
+    boot.observeManaged(
+      () => recordOf(h.stateDir, spawnId),
+      () => {
+        const file = join(webHubSpawnFiles(h.stateDir).logDir, `${spawnId}.stderr.log`);
+        return existsSync(file) ? readFileSync(file, "utf8") : "";
+      },
+      `managed ${spawnId}`,
+    );
+    h.startups.set(spawnId, boot);
+  }
   return { status: res.status, body: res.body };
 }
 
@@ -290,7 +306,16 @@ function sessionBody(cwd: string, s: HistSession, mode: "resume" | "fork"): Reco
 }
 
 async function waitRecordLive(h: HistHub, spawnId: string, ms = 15_000): Promise<void> {
-  await waitUntil(() => recordOf(h.stateDir, spawnId)?.state === "live", ms, `record ${spawnId} live`);
+  // The one explicit 40s call is outside the <=15s cold-start audit.
+  if (ms > 15_000) {
+    await waitUntil(() => recordOf(h.stateDir, spawnId)?.state === "live", ms, `record ${spawnId} live`);
+  } else {
+    await h.startups.get(spawnId)!.wait(
+      () => recordOf(h.stateDir, spawnId)?.state,
+      (s) => s === "live",
+      `record ${spawnId} live`,
+    );
+  }
 }
 
 async function waitRecordTerminal(h: HistHub, spawnId: string, what: string): Promise<StoredRecord> {
@@ -565,14 +590,16 @@ describe.skipIf(!IS_LINUX)("web-hub session history — HH integration (in-proce
     const s = writeSessionFile(agentDir, { dirName: "d1", id: "hh9main00", cwd: work, kind: "main" });
     const h = await bootHistoryHub(home);
 
+    const strayBoot = new ProcessStartup();
     const stray = spawnChild(process.execPath, [FAKE_PI, "--mode", "rpc", "--title-only"], {
       cwd: work,
       env: { ...process.env },
-      stdio: ["ignore", "ignore", "ignore"],
+      stdio: ["ignore", "ignore", "pipe"],
     });
+    strayBoot.observe(stray, "stray pi");
     extraPids.add(stray.pid!);
     h.allowPi.add(stray.pid!); // visible to the scan on purpose — no card/record will match it
-    await waitUntil(
+    await strayBoot.wait(
       () => {
         try {
           return readFileSync(`/proc/${stray.pid}/stat`, "utf8").includes("(pi)");
@@ -580,7 +607,7 @@ describe.skipIf(!IS_LINUX)("web-hub session history — HH integration (in-proce
           return false;
         }
       },
-      5_000,
+      (ready) => ready,
       "stray pi title visible in /proc",
     );
 

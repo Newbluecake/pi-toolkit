@@ -33,6 +33,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { THREAD_CAP, THREAD_REBIND_CAP } from "../../src/web-hub/protocol/version.js";
 import { resolveHubPaths } from "../../src/web-hub/protocol/paths.js";
 import { messageEnvelope } from "../fixtures/feishu/f6.js";
+import { ProcessStartup } from "./helpers/process-startup.js";
 import { bounded, until } from "./helpers/fabric-xs-harness.js";
 
 // ----------------------------------------------------------------- child harness
@@ -69,6 +70,7 @@ class Rig {
   private seq = 0;
 
   async boot(role: "hub" | "agent", name: string, extraEnv: Record<string, string> = {}): Promise<Peer> {
+    const boot = new ProcessStartup();
     mkdirSync(join(this.home, "project"), { recursive: true });
     const child = spawn(
       process.execPath,
@@ -86,10 +88,7 @@ class Rig {
         },
       },
     );
-    let stderr = "";
-    child.stderr!.on("data", (b: Buffer) => {
-      stderr = (stderr + b.toString()).slice(-16_000);
-    });
+    boot.observe(child, `${role}:${name}`);
     const exited = new Promise<void>((r) => child.once("close", () => r()));
     const pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
     let ready!: () => void;
@@ -107,7 +106,7 @@ class Rig {
       }
     });
     child.on("close", (code) => {
-      const error = new Error(`${role} exit ${code}: ${stderr}`);
+      const error = new Error(`${role} exit ${code}: ${boot.diagnostic()}`);
       failReady(error);
       for (const p of pending.values()) p.reject(error);
       pending.clear();
@@ -131,9 +130,13 @@ class Rig {
       },
     };
     this.peers.push(peer);
-    await bounded(started, `${role} ready`);
+    await boot.wait(
+      () => started.then(() => true),
+      (ready) => ready,
+      `${role} ready`,
+    );
     if (role === "agent")
-      await until(
+      await boot.wait(
         () => peer.rpc<AgentInspect>("inspect"),
         (s) => s.conn?.state === "live",
         "agent hub link live",
