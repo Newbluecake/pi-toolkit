@@ -405,7 +405,7 @@ describe("connection over a real unix socket (fake hub)", () => {
     conn.attach(binding(), SESSION);
     await waitUntil(() => conn.status().state === "live", 3_000, "live");
     const payload = "x".repeat(2_000);
-    // Per-send p99/final-admission CPU bounds remain in connection.perf.test.ts.
+    // Per-send p99/max-admission CPU bounds remain in connection.perf.test.ts.
     let maxBuffered = 0;
     let sends = 0;
     let sawBackoff = false;

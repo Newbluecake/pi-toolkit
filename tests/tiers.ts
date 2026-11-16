@@ -118,7 +118,7 @@ export interface Tier1DeclaredEntry {
 export const TIER1_DECLARED: Readonly<Record<string, Tier1DeclaredEntry>> = {
   "tests/web-hub/agent/connection.perf.test.ts": {
     kind: "timing",
-    why: "real paused Unix socket: send p99 <5ms; final admission <50ms (original CPU gates)",
+    why: "real paused Unix socket: send p99 <5ms; max admission <50ms (original CPU gates)",
   },
   "tests/web-hub/hub/spawn/stderr-sink.perf.test.ts": {
     kind: "timing",
@@ -379,7 +379,7 @@ export const TIER1_DECLARED: Readonly<Record<string, Tier1DeclaredEntry>> = {
   "tests/web-hub/hub/spawn/golden.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/web-hub/hub/spawn/history/proc-real.test.ts": {
     kind: "timing",
-    why: "real /proc census + mkfifo/O_NONBLOCK child: BUDGET_MS bound",
+    why: "real /proc readers and child title/prctl visibility: BUDGET_MS bound",
   },
   "tests/web-hub/hub/spawn/launcher-check.test.ts": {
     kind: "timing",

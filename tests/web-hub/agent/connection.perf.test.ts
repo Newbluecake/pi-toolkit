@@ -16,7 +16,7 @@ afterEach(async () => {
   tmp.cleanup();
 });
 
-it("paused real hub: send p99 <5ms and final admission <50ms (original bounds)", async () => {
+it("paused real hub: send p99 <5ms and max admission <50ms (original bounds)", async () => {
   hub = await startFakeHub(pathsIn(tmp.dir).socketPath, { pauseAfterAck: true });
   const conn = acquireConnection({
     buildId: "1.0.0@perf",
@@ -48,16 +48,15 @@ it("paused real hub: send p99 <5ms and final admission <50ms (original bounds)",
   for (let i = 0; i < 10_000; i++) {
     const start = performance.now();
     conn.send({ t: "ev", seq: conn.nextSeq(), e: { type: "message_end", message: { role: "assistant", payload } } });
-    samples.push(performance.now() - start);
     if (i % 100 === 0) conn.setSlot("status", { t: "status", leafId: `e${i}`, busy: true, pending: false });
+    samples.push(performance.now() - start);
     maxBuffered = Math.max(maxBuffered, conn.bufferedBytes);
     if (conn.status().state === "backoff") sawBackoff = true;
   }
-  const last = samples.at(-1)!;
   samples.sort((a, b) => a - b);
   expect(maxBuffered).toBeLessThanOrEqual(LIMITS.hardQueueBytes + 4_096);
   expect(sawBackoff).toBe(true);
   expect(conn.bufferedBytes).toBe(0);
   expect(samples[Math.floor(samples.length * 0.99)]!).toBeLessThan(5);
-  expect(last).toBeLessThan(50);
+  expect(samples.at(-1)!).toBeLessThan(50);
 });
