@@ -345,21 +345,19 @@ describe("T5-g B5+V4 错误通道", () => {
 });
 
 describe("T5-h 快照短路与兼容性", () => {
-  it("空规则快照不读 body、不 spawn，1000 次低于 500ms", async () => {
+  it("空规则快照不读 body、不 spawn（1000 次）", async () => {
     const before = jq.spawnCount();
     let reads = 0;
     const reader = async () => {
       reads++;
       return jsonBody("{}");
     };
-    const started = performance.now();
     for (let i = 0; i < 1000; i++) {
       expect(await applyRequest([], defaultSettings, context, reader, { "X-Test": "1" }, env)).toBeNull();
     }
-    const elapsed = performance.now() - started;
     expect(jq.spawnCount()).toBe(before);
     expect(reads).toBe(0);
-    expect(elapsed).toBeLessThan(500);
+    // Zero body reads and zero jq spawns prove the short-circuit independent of CPU load.
   });
 
   it("规则快照经 loadEnabledRules + getEngineSettings 加载后生效", async () => {

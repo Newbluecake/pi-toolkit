@@ -9,7 +9,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   STDERR_FILE_MAX,
   STDERR_FILES_MAX,
@@ -222,13 +222,16 @@ describe("慢盘与内存上界（#10 硬门槛）", () => {
     expect(fin.written + fin.dropped).toBe(10 * 1024 * 1024); // byte conservation
   });
 
-  it("100k × 10-byte pushes complete in <200 ms (push is O(1))", async () => {
-    const s = sink(); // real fs on a real tmpdir
+  it("100k × 10-byte pushes preserve bytes without waiting for disk", async () => {
+    const h = hangingFs();
+    const s = sink(h.fs);
     const chunk = Buffer.from("0123456789");
-    const t0 = performance.now();
     for (let i = 0; i < 100_000; i++) s.push(chunk);
-    const elapsed = performance.now() - t0;
-    expect(elapsed).toBeLessThan(200);
+    await waitFor(() => h.handle.writes.length === 1);
+    expect(s.stats().written).toBe(0); // the disk has not completed even one write
+    expect(s.stats().dropped).toBeGreaterThan(0); // bounded admission, not queued 1 MiB
+    expect(Buffer.byteLength(s.tail())).toBeGreaterThan(0);
+    h.releaseAll();
     await s.close(deadline(2_000));
     const st = s.stats();
     expect(st.written + st.dropped).toBe(1_000_000);
@@ -333,11 +336,20 @@ describe("close(deadline) 预算（plan §SP5: raceDeadline）", () => {
     await waitFor(() => h.handle.writes.length === 1);
     s.push(Buffer.from("queued")); // stays queued while the write hangs
 
-    const t0 = Date.now();
-    await s.close(deadline(50));
-    const elapsed = Date.now() - t0;
-    expect(elapsed).toBeGreaterThanOrEqual(40);
-    expect(elapsed).toBeLessThanOrEqual(60);
+    vi.useFakeTimers();
+    try {
+      let settled = false;
+      const closing = s.close(deadline(50)).then(() => {
+        settled = true;
+      });
+      await vi.advanceTimersByTimeAsync(49);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await closing;
+      expect(settled).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
     const abandoned = s.stats();
     expect(abandoned.dropped).toBe(15); // queue (6) + the in-flight write charged up front
     expect(abandoned.written).toBe(0);

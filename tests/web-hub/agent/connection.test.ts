@@ -406,13 +406,18 @@ describe("connection over a real unix socket (fake hub)", () => {
     await waitUntil(() => conn.status().state === "live", 3_000, "live");
     const payload = "x".repeat(2_000);
     let maxBuffered = 0;
-    const sendMs: number[] = [];
+    let sends = 0;
     let sawBackoff = false;
     for (let i = 0; i < 10_000; i++) {
-      const t0 = performance.now();
-      conn.send({ t: "ev", seq: conn.nextSeq(), e: { type: "message_end", message: { role: "assistant", payload } } });
+      const returned = conn.send({
+        t: "ev",
+        seq: conn.nextSeq(),
+        e: { type: "message_end", message: { role: "assistant", payload } },
+      });
+      // A synchronous admission returns void, never a Promise waiting for hub IO.
+      expect(returned).toBeUndefined();
+      sends++;
       if (i % 100 === 0) conn.setSlot("status", { t: "status", leafId: `e${i}`, busy: true, pending: false });
-      sendMs.push(performance.now() - t0);
       if (conn.bufferedBytes > maxBuffered) maxBuffered = conn.bufferedBytes;
       if (conn.status().state === "backoff") sawBackoff = true;
     }
@@ -420,9 +425,7 @@ describe("connection over a real unix socket (fake hub)", () => {
     expect(maxBuffered).toBeLessThanOrEqual(LIMITS.hardQueueBytes + 4_096); // + one ~2 KiB frame
     expect(sawBackoff).toBe(true); // destroy → backoff
     expect(conn.bufferedBytes).toBe(0);
-    sendMs.sort((a, b) => a - b);
-    expect(sendMs[Math.floor(sendMs.length * 0.99)]!).toBeLessThan(5); // p99 < 5ms
-    expect(sendMs.at(-1)!).toBeLessThan(50); // headroom for a GC pause, still synchronous
+    expect(sends).toBe(10_000); // all admissions completed before the event loop could read again
   });
 
   it("hub accepts but never acks ⇒ 2s disconnect; ev meanwhile is not queued", async () => {

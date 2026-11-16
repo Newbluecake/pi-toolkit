@@ -22,7 +22,10 @@
    任一失败都打印分诊提示并以非零码退出，**不进入提交/tag**；分诊只能把红判为 flake（复跑绿 ⇒ 重跑
    release），不能绕过中止。stub-npm 用例（`tests/release/release-script.test.ts`）钉住三种路径。
 2. **tier1 的 timing 豁免有边界（§6 已定）**：`TIER1_DECLARED` 中 `kind:"timing"` 的文件失败按 Tier 2
-   分诊（单文件复跑）；其余 tier1 失败一律按真 bug。分诊不改变 release.sh 的中止行为。
+   分诊（单文件复跑）；其余 tier1 失败一律按真 bug。分诊不改变 release.sh 的中止行为。#47c 的全 tests 挂钟审计把仍需真实调度/磁盘/进程的
+   latency、性能和 deadline 上界也显式登记为 timing（即使没有字面 ≥1 s sleep）；保留原阈值，
+   不把 fake-clock 算术门纳入豁免。能用队列状态、SQL 路径、字节/操作预算证明的断言优先改为
+   确定性行为门；真实 IO 的超时上界不是可移植性能 SLA。登记理由在 `tests/tiers.ts` 的 `why`。
 3. **CI 覆盖面不变（D7）**：tier2 步骤条件 `!cancelled() && (steps.tier1.outcome == 'success' ||
 outcome == 'failure')` —— 只有 tier1 确实执行过才跑；npm ci / 构建失败 ⇒ tier1 被跳过 ⇒ tier2 不跑。
    runner 上无 FUSE，real-mount 套件继续自跳过（现状）。

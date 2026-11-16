@@ -516,7 +516,7 @@ describe("run-file-reader walkBranch parity (fullReaderParity)", () => {
 // ---------------------------------------------------------------------------
 
 describe("run-file-reader P scenarios", () => {
-  it("P1: a tail snapshot scans only a small fraction of the file, with a time bound", async () => {
+  it("P1: a tail snapshot scans only a small fraction of the file and yields per chunk", async () => {
     const stats = createRunFileReaderStats();
     const reader = createRunFileReader({ stats, scanChunkBytes: 4096 });
     const filler = Array.from({ length: 400 }, (_, i) => fillerLine(`f${i}`, 400)).join("");
@@ -524,9 +524,7 @@ describe("run-file-reader P scenarios", () => {
     const file = writeJsonl("big.jsonl", filler + raws.map(line).join(""));
     const size = statSync(file).size;
 
-    const t0 = Date.now();
     const r = await reader.read(file, "e249", q({ limit: 200 }));
-    const elapsed = Date.now() - t0;
 
     const entries = okEntries(r);
     expect(entries).toHaveLength(200);
@@ -536,7 +534,7 @@ describe("run-file-reader P scenarios", () => {
     expect(stats.bytes).toBeLessThan(size * 0.3); // tail-only scan, not the whole file
     expect(stats.bytes).toBeGreaterThan(0);
     expect(stats.yields).toBe(stats.chunks); // one event-loop yield per chunk
-    expect(elapsed).toBeLessThan(2000); // loose anti-regression bound
+    // Bytes scanned and yields above guard the bounded work, not disk/CPU latency.
     reader.dispose();
   });
 

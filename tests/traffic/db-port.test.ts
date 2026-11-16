@@ -136,9 +136,9 @@ describe("基本落库与合并", () => {
 describe("锁竞争", () => {
   it("第二连接持锁 ⇒ BEGIN IMMEDIATE 立即 BUSY、退避让出（无同步等待），释放后补齐", async () => {
     const other = lock();
-    const t0 = performance.now();
     for (let i = 0; i < 5; i++) insert(port, `{"i":${i}}`);
-    await new Promise((r) => setTimeout(r, 120));
+    // Wait for observed retries, not a number of scheduler turns in 120 ms.
+    await vi.waitFor(() => expect(port.stats().busyBackoffs).toBeGreaterThanOrEqual(2), { timeout: 5_000 });
     const s = port.stats();
     expect(s.busyBackoffs).toBeGreaterThanOrEqual(2);
     expect(s.backoffMs).toBeGreaterThanOrEqual(10);
@@ -149,7 +149,7 @@ describe("锁竞争", () => {
     expect(await port.whenIdle(2000)).toBe(true);
     expect(count()).toBe(5);
     expect(port.stats().backoffMs).toBe(0);
-    expect(performance.now() - t0).toBeLessThan(2000);
+    expect(port.stats().queued).toBe(0);
   });
 
   it("有界：超过条数上限 FIFO 丢最旧并计数；被丢插入的依赖补丁 / chunk 跳过（orphanOps），不写到别的行", async () => {
@@ -186,7 +186,7 @@ describe("锁竞争", () => {
         port,
         lazyText(() => JSON.stringify({ i, big })),
       );
-    await new Promise((r) => setTimeout(r, 100));
+    await vi.waitFor(() => expect(port.stats().droppedByKind.insert).toBeGreaterThanOrEqual(3), { timeout: 5_000 });
     const s = port.stats();
     expect(s.queuedBytes).toBeLessThanOrEqual(3 * 1024 * 1024 + 1024);
     expect(s.droppedByKind.insert).toBeGreaterThanOrEqual(3);
@@ -269,15 +269,22 @@ describe("关闭", () => {
     insert(port, "{}");
     await port.close(500);
     expect(count()).toBe(1);
-    port = make();
     const other = lock();
+    // The deadline is a logical boundary; CPU descheduling is not a DB-port failure.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    port = make({ now: Date.now });
     insert(port, "{}");
-    const t0 = performance.now();
-    await port.close(150);
-    expect(performance.now() - t0).toBeLessThan(800);
-    expect(port.stats().droppedRows).toBe(1);
-    other.exec("COMMIT");
-    other.close();
+    try {
+      const closing = port.close(150);
+      await vi.advanceTimersByTimeAsync(150);
+      await closing;
+      expect(port.stats().droppedRows).toBe(1);
+      expect(port.stats().queued).toBe(0);
+    } finally {
+      vi.useRealTimers();
+      other.exec("COMMIT");
+      other.close();
+    }
     expect(count()).toBe(1);
   });
 });
@@ -309,7 +316,7 @@ describe("安全评审修复", () => {
       });
       insert(port, '{"a":1}');
       insert(port, '{"a":2}');
-      await new Promise((r) => setTimeout(r, 30));
+      expect(await port.whenIdle()).toBe(true);
       expect(uncaught).toEqual([]);
       expect(count()).toBe(0);
       expect(port.stats().queued).toBe(0);
@@ -388,7 +395,7 @@ describe("安全评审修复", () => {
         port,
         lazyText(() => text),
       );
-      await new Promise((r) => setTimeout(r, 30)); // 物化 tick（不需要锁）
+      await vi.waitFor(() => expect(ref.dropped).toBe(true), { timeout: 5_000 }); // 物化 tick（不需要锁）
       expect(ref.dropped).toBe(true);
       expect(port.stats().droppedByKind.oversize).toBe(1);
       expect(port.stats().queuedBytes).toBe(0);
@@ -410,6 +417,9 @@ describe("安全评审修复", () => {
       await port.whenIdle(5000);
     }
     expect(walFileBytes(path)!).toBeGreaterThan(8 * 1024 * 1024); // 读者挡住了 checkpoint 推进
+    const checkpointsBeforeRelease = port.stats().checkpoints;
+    const deferredBeforeRelease = port.stats().checkpointsDeferred;
+    const exec = vi.spyOn(db, "exec");
     reader.exec("COMMIT");
     reader.close();
     for (let i = 0; i < 4; i++) {
@@ -419,8 +429,13 @@ describe("安全评审修复", () => {
     const s = port.stats();
     expect(s.checkpointsDeferred).toBeGreaterThan(0);
     expect(s.walBytes!).toBeGreaterThan(2 * 1024 * 1024);
-    // 修复前：释放后第一次 PASSIVE 复制 ≥16 MiB 积压（实测 45ms）。
-    expect(s.maxCheckpointMs).toBeLessThan(10);
+    // A PASSIVE checkpoint has no page budget. The regression was copying the entire
+    // ≥16 MiB backlog after the reader released, not a particular disk's ms/MiB rate.
+    // Check both the accounting and the actual SQL path: no checkpoint may run here.
+    expect(s.checkpoints).toBe(checkpointsBeforeRelease);
+    expect(s.checkpointsDeferred).toBeGreaterThan(deferredBeforeRelease);
+    expect(exec.mock.calls.some(([sql]) => /wal_checkpoint/i.test(sql))).toBe(false);
+    exec.mockRestore();
     expect(count()).toBe(20);
   }, 30_000);
 

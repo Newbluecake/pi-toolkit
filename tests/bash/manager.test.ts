@@ -178,11 +178,17 @@ async function flushLog(manager: BashJobManager, jobId: string): Promise<void> {
  * effect rather than for a fixed number of event-loop turns.
  */
 async function waitFor(predicate: () => boolean, label: string): Promise<void> {
-  for (let i = 0; i < 500; i++) {
+  // Real filesystem notifications have no fixed number of scheduler turns. This is
+  // a bounded liveness wait, not a sub-second IO benchmark.
+  const started = performance.now();
+  const timeoutMs = 5_000;
+  while (performance.now() - started < timeoutMs) {
     if (predicate()) return;
-    await new Promise((resolve) => setTimeout(resolve, 1));
+    await new Promise((resolve) => setTimeout(resolve, 10));
   }
-  throw new Error(`timed out waiting for ${label}`);
+  throw new Error(
+    `timed out waiting for ${label}; waited=${Math.round(performance.now() - started)}ms matched=${predicate()}`,
+  );
 }
 
 async function harness(

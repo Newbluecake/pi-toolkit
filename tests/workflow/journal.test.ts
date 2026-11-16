@@ -372,16 +372,19 @@ describe("JournalStore (§6.6 JS1/JS2/JS3): async append, batched flush, corrupt
     expect(result).toEqual({ entries: [], corruptLines: 0 });
   });
 
-  it("append() returns synchronously (JS1) — does not block the caller on disk I/O", () => {
+  it("append() returns synchronously (JS1) and only queues until flush", async () => {
     const store = createJournalStore({ clock });
-    const start = Date.now();
-    store.append(dir, makeEntry());
+    const entry = makeEntry();
+    const returned = store.append(dir, entry);
     // JS1: append() must be a plain synchronous function call, not an
     // (even resolved) Promise — asserting on wall-clock elapsed time here
     // would be flaky; the real guarantee is the *type signature* (`void`,
     // not `Promise<void>`) plus the JS1 end-to-end coverage in host.test.ts
     // (asserting `agent()`'s own settle round trip never awaits a flush).
-    expect(Date.now() - start).toBeLessThan(50);
+    expect(returned).toBeUndefined();
+    await expect(readFile(join(dir, "journal.jsonl"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await store.flush(dir, 5_000)).toEqual({ written: 1, pending: 0 });
+    expect(parseEntry((await readFile(join(dir, "journal.jsonl"), "utf8")).trim())).toEqual(entry);
   });
 
   it("flush() writes every appended entry to journal.jsonl, batched into one file", async () => {

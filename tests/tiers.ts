@@ -12,7 +12,7 @@
  *   are lexical and deliberately over-approximate; they cannot catch sleeps hidden behind
  *   helpers, indirect spawns, or slow real I/O — new tests still get a human tier review (D4a
  *   residual, plan r3-2).
- * - kind "timing" = tier1 file with real ≥1 s waits: its failures are TRIAGED like Tier 2
+ * - kind "timing" = tier1 file with real latency/performance measurements or ≥1 s waits: its failures are TRIAGED like Tier 2
  *   (rerun; green on rerun ⇒ flake) but never bypass a failing release gate (plan §6).
  * - kind "false-positive" = the mount marker matched, but no real gocryptfs mount happens
  *   (fake gocryptfs binaries, string literals). The D4 gate REQUIRES this kind for any
@@ -100,7 +100,7 @@ export const SECURE_MOUNT_FILES: readonly string[] = [
 export type Tier1Kind = "proc" | "timing" | "false-positive";
 
 export interface Tier1DeclaredEntry {
-  /** proc = real child processes / sockets · timing = real ≥1 s waits (Tier 2 triage on
+  /** proc = real child processes / sockets · timing = real latency/performance measurements or ≥1 s waits (Tier 2 triage on
    *  failure) · false-positive = mount marker matched but no real mount. */
   kind: Tier1Kind;
   /** Which D4 markers hit (evidence; over-approximate by design). */
@@ -111,18 +111,66 @@ export interface Tier1DeclaredEntry {
  * D4a baseline (mechanically generated from the pre-change 1760-file `vitest list`, then
  * hand-reviewed): every tier1 file that hits at least one D4 marker. Kind policy after the
  * manual review: mount ⇒ false-positive (required by the gate); any proc ⇒ proc; sock-only ⇒
- * proc; wait-only ⇒ timing (11 files). Entries whose file disappears fail the
+ * proc; wait-only ⇒ timing (baseline 11 files). Explicit latency declarations below
+ * take precedence over that lexical baseline. Entries whose file disappears fail the
  * "registered but missing" check and are removed — the table converges on deletion.
  */
 export const TIER1_DECLARED: Readonly<Record<string, Tier1DeclaredEntry>> = {
+  // #47c: real latency/performance gates are scheduler-sensitive even without a literal
+  // ≥1s sleep/proc marker. Keep the assertions (no threshold inflation), but triage
+  // failures as Tier 2. FakeClock/vi fake-timer budget arithmetic stays a hard gate.
+  "tests/bash/process.test.ts": { kind: "timing", why: "real latency: 1_000 ms; 3_000 ms; 500 ms" },
+  "tests/context-switch/boundary.test.ts": { kind: "timing", why: "real latency: 2_000 ms" },
+  "tests/git/graph.test.ts": { kind: "timing", why: "real latency: 50 ms" },
+  "tests/memory/jev/predict/clauses.test.ts": { kind: "timing", why: "real latency: 50 ms" },
+  "tests/memory/jev/proxy-fetch.test.ts": { kind: "timing", why: "real latency: 2000 ms" },
+  "tests/reflex/core/perf.test.ts": { kind: "timing", why: "real latency: 5 ms" },
+  "tests/reflex/drafts/perf.test.ts": { kind: "timing", why: "real latency: 5 ms" },
+  "tests/web-hub/agent/worktree-sampler.test.ts": { kind: "timing", why: "real latency: 500 + 250 ms" },
+  "tests/web-hub/http/lan-cmd.test.ts": { kind: "timing", why: "real latency: 6_000 ms; 2_000 ms" },
+  "tests/web-hub/http/preview-e2e.test.ts": { kind: "timing", why: "real latency: 10_000 ms" },
+  "tests/web-hub/hub/feishu/render.test.ts": { kind: "timing", why: "real latency: 1500 ms" },
+  "tests/web-hub/hub/history.perf.test.ts": { kind: "timing", why: "real latency: 1_000 ms; 100 ms; 500 ms" },
+  "tests/web-hub/hub/preview/fs.test.ts": { kind: "timing", why: "real latency: 400 ms; 2_000 ms" },
+  "tests/web-hub/hub/preview/pv-io.test.ts": { kind: "timing", why: "real latency: 500 ms" },
+  "tests/web-hub/hub/preview/routes.test.ts": {
+    kind: "timing",
+    why: "real latency: 1_200 ms; 500 ms; 2_500 ms; 1_600 ms",
+  },
+  "tests/web-hub/hub/preview/stream.test.ts": { kind: "timing", why: "real latency: 2_000 ms" },
+  "tests/web-hub/hub/proxy/service.test.ts": { kind: "timing", why: "real latency: 2000 ms" },
+  "tests/web-hub/hub/run-file-reader.perf.test.ts": { kind: "timing", why: "real latency: 2000 ms; 500 ms" },
+  "tests/web-hub/hub/spawn/history/index.test.ts": { kind: "timing", why: "real latency: 5_000 ms" },
+  "tests/web-hub/hub/spawn/history/proc.test.ts": { kind: "timing", why: "real latency: 2_000 ms" },
+  "tests/web-hub/hub/spawn/history/service.test.ts": {
+    kind: "timing",
+    why: "real latency: 3000 ms; HISTORY_DISPOSE_MS + 500 ms",
+  },
+  "tests/web-hub/hub/spawn/history/snapshot.test.ts": { kind: "timing", why: "real latency: 5_000 ms" },
+  "tests/web-hub/hub/worktree-diff/budget.test.ts": { kind: "timing", why: "real latency: WTDIFF_CLOSE_MS + 500 ms" },
+  "tests/web-hub/hub/worktree-graph/budget.test.ts": { kind: "timing", why: "real latency: 1_500 ms" },
+  "tests/web-hub/hub/worktree-graph/routes.test.ts": { kind: "timing", why: "real latency: 1_100 ms" },
+  "tests/web-hub/ui/logic-markdown-perf.test.ts": { kind: "timing", why: "real latency: 200 ms" },
+  "tests/web-hub/ui/logic-markdown.test.ts": { kind: "timing", why: "real latency: 200 ms" },
+  "tests/web-hub/ui/logic-preview.test.ts": { kind: "timing", why: "real latency: 2_000 ms; 200 ms; 5_000 ms" },
+  "tests/workflow/background.test.ts": { kind: "timing", why: "real latency: 5_000 ms; 6_000 ms" },
+  "tests/workflow/wc02-runaway-gate.test.ts": {
+    kind: "timing",
+    why: "real latency: UPPER_BOUND_MS ms; GATE_BUDGET.scriptSliceMs + 1_000 ms; 15_000 ms",
+  },
+  "tests/workflow/worker-host-call.test.ts": { kind: "timing", why: "real latency: 1_500 ms" },
+  "tests/workflow/worker-integration.test.ts": { kind: "timing", why: "real latency: 2_000 ms; 50 + 30 ms" },
   "tests/bash/tool.test.ts": { kind: "timing", why: "wait:setTimeout(…, 5_000)" },
   "tests/cache-ttl/measure-command.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/compact-hint/dynamic/telemetry-store.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/config/agent-dir-sandbox.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/config/package-root-sites.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/extensions/worktree-git-integration.test.ts": { kind: "proc", why: "proc:node:child_process" },
-  "tests/external-agent/process.test.ts": { kind: "proc", why: "proc:node:child_process; wait:setTimeout(…, 15000)" },
-  "tests/git/run.test.ts": { kind: "proc", why: "proc:node:child_process" },
+  "tests/external-agent/process.test.ts": {
+    kind: "timing",
+    why: "proc:node:child_process; wait:setTimeout(…, 15000); real latency: 3000 ms",
+  },
+  "tests/git/run.test.ts": { kind: "timing", why: "proc:node:child_process; real latency: 1000 ms" },
   "tests/git/worktrees-real-git.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/helpers/free-port.test.ts": { kind: "proc", why: 'sock:".listen("; sock:"createServer("' },
   // this gate's own synthetic fixtures contain marker literals (no real process/mount/sleep)
@@ -139,11 +187,17 @@ export const TIER1_DECLARED: Readonly<Record<string, Tier1DeclaredEntry>> = {
   },
   "tests/memory/safe-fs.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/quota/credentials.test.ts": { kind: "proc", why: "proc:node:child_process" },
-  "tests/reflex/core/draft-regex-redos.test.ts": { kind: "proc", why: "proc:node:child_process" },
+  "tests/reflex/core/draft-regex-redos.test.ts": {
+    kind: "timing",
+    why: "proc:node:child_process; real latency: 2_000 ms",
+  },
   "tests/reflex/ports/git-real.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/release/hub-restart-step.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/release/release-script.test.ts": { kind: "proc", why: "proc:node:child_process" },
-  "tests/release/restart-hub.test.ts": { kind: "proc", why: 'sock:".listen("; sock:"createServer("' },
+  "tests/release/restart-hub.test.ts": {
+    kind: "timing",
+    why: 'sock:".listen("; sock:"createServer("; real latency: 2_000 ms',
+  },
   "tests/release/web-ui-zip.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/schedule/core/fault-injection.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/schedule/core/reader.test.ts": { kind: "proc", why: "proc:node:child_process" },
@@ -158,10 +212,16 @@ export const TIER1_DECLARED: Readonly<Record<string, Tier1DeclaredEntry>> = {
     kind: "false-positive",
     why: 'proc:node:child_process; mount:"\\"gocryptfs\\""',
   },
-  "tests/secure/launcher-helper.test.ts": { kind: "proc", why: "proc:node:child_process" },
+  "tests/secure/launcher-helper.test.ts": {
+    kind: "timing",
+    why: "proc:node:child_process; real child/IO deadline upper bounds (scheduler-sensitive)",
+  },
   "tests/secure/settings-file-migrate.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/secure/settings-file-secure.test.ts": { kind: "proc", why: "proc:node:child_process" },
-  "tests/secure/settings-lock.test.ts": { kind: "proc", why: "proc:node:child_process" },
+  "tests/secure/settings-lock.test.ts": {
+    kind: "timing",
+    why: "proc:node:child_process; real child/IO deadline upper bounds (scheduler-sensitive)",
+  },
   "tests/secure/preflight-adapters.test.ts": {
     kind: "false-positive",
     why: "synthetic fs/spawn adapters and fake-clock mountguard only; no host probes",
@@ -171,7 +231,10 @@ export const TIER1_DECLARED: Readonly<Record<string, Tier1DeclaredEntry>> = {
     why: "synthetic verdict/task trees and injected global setup only; no host probes",
   },
   "tests/secure/tar.test.ts": { kind: "proc", why: "proc:node:child_process" },
-  "tests/secure/tree.test.ts": { kind: "proc", why: 'proc:node:child_process; sock:".listen("; sock:"createServer("' },
+  "tests/secure/tree.test.ts": {
+    kind: "timing",
+    why: 'proc:node:child_process; sock:".listen("; sock:"createServer("; real child/IO deadline upper bounds (scheduler-sensitive)',
+  },
   "tests/service/request-threading.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/session-nav/open-discipline.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/setup/sandbox-home-guard.test.ts": { kind: "proc", why: "proc:node:child_process" },
@@ -181,14 +244,23 @@ export const TIER1_DECLARED: Readonly<Record<string, Tier1DeclaredEntry>> = {
     why: 'sock:".listen("; sock:"createServer("; wait:setTimeout(…, 1000)',
   },
   "tests/traffic/jq.test.ts": { kind: "proc", why: "proc:node:child_process" },
-  "tests/traffic/replay-cleanup.test.ts": { kind: "proc", why: 'sock:".listen("; sock:"createServer("' },
+  "tests/traffic/replay-cleanup.test.ts": {
+    kind: "timing",
+    why: 'sock:".listen("; sock:"createServer("; real latency: 2000 ms',
+  },
   "tests/traffic/replay.test.ts": { kind: "proc", why: 'sock:".listen("; sock:"createServer("' },
   "tests/traffic/rewrite-api.test.ts": {
     kind: "proc",
     why: 'sock:".listen("; sock:"createServer("; wait:setTimeout(…, 3000)',
   },
-  "tests/traffic/secure.test.ts": { kind: "proc", why: 'sock:".listen("; sock:"createServer("' },
-  "tests/traffic/server-hardening.test.ts": { kind: "proc", why: 'sock:".listen("; sock:"createServer("' },
+  "tests/traffic/secure.test.ts": {
+    kind: "timing",
+    why: 'sock:".listen("; sock:"createServer("; real latency: 1500 ms',
+  },
+  "tests/traffic/server-hardening.test.ts": {
+    kind: "timing",
+    why: 'sock:".listen("; sock:"createServer("; real latency: 2000 ms',
+  },
   "tests/traffic/server-start.test.ts": { kind: "proc", why: 'sock:".listen("; sock:"createServer("' },
   "tests/web-hub/agent/resume-open-discipline.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/web-hub/boundary.test.ts": { kind: "proc", why: "proc:node:child_process" },
@@ -206,7 +278,10 @@ export const TIER1_DECLARED: Readonly<Record<string, Tier1DeclaredEntry>> = {
   "tests/web-hub/http/api-preview.test.ts": { kind: "proc", why: 'sock:".listen("' },
   "tests/web-hub/http/api-privacy.test.ts": { kind: "proc", why: 'sock:".listen("' },
   "tests/web-hub/http/api-run.test.ts": { kind: "proc", why: 'sock:".listen("' },
-  "tests/web-hub/http/api-upload.test.ts": { kind: "proc", why: 'sock:".listen("' },
+  "tests/web-hub/http/api-upload.test.ts": {
+    kind: "timing",
+    why: 'sock:".listen("; real latency: 1_500 ms; UPLOAD_TOTAL_MS ms',
+  },
   "tests/web-hub/http/api-version.test.ts": { kind: "proc", why: 'sock:".listen("' },
   "tests/web-hub/http/api-worktree-diff.test.ts": { kind: "proc", why: 'sock:".listen("' },
   "tests/web-hub/http/api-worktree-graph.test.ts": { kind: "proc", why: 'sock:".listen("' },
@@ -224,19 +299,25 @@ export const TIER1_DECLARED: Readonly<Record<string, Tier1DeclaredEntry>> = {
   "tests/web-hub/http/proxy-lifecycle.test.ts": { kind: "proc", why: 'sock:".listen("' },
   "tests/web-hub/http/proxy-redaction.test.ts": { kind: "timing", why: "wait:setTimeout(…, 3_000)" },
   "tests/web-hub/http/proxy-wiring.test.ts": { kind: "timing", why: "wait:setTimeout(…, 3_000)" },
-  "tests/web-hub/http/security.test.ts": { kind: "proc", why: 'sock:".listen("' },
+  "tests/web-hub/http/security.test.ts": { kind: "timing", why: 'sock:".listen("; real latency: 2_500 ms' },
   "tests/web-hub/http/sse.test.ts": { kind: "proc", why: 'sock:".listen("; sock:"createServer("' },
   "tests/web-hub/http/static.test.ts": { kind: "proc", why: 'sock:".listen("; sock:"createServer("' },
   "tests/web-hub/hub/agent-server-admin.test.ts": { kind: "proc", why: 'sock:".listen("; sock:"createServer("' },
   "tests/web-hub/hub/agent-server-log.test.ts": { kind: "proc", why: 'sock:".listen("; sock:"createServer("' },
   "tests/web-hub/hub/agent-server.test.ts": { kind: "proc", why: 'sock:".listen("; sock:"createServer("' },
-  "tests/web-hub/hub/avatar/routes.test.ts": { kind: "proc", why: 'sock:".listen("; sock:"createServer("' },
+  "tests/web-hub/hub/avatar/routes.test.ts": {
+    kind: "timing",
+    why: 'sock:".listen("; sock:"createServer("; real latency: 500 ms; 14_000 ms',
+  },
   "tests/web-hub/hub/command-complete.test.ts": { kind: "timing", why: "wait:setTimeout(…, 3000)" },
   "tests/web-hub/hub/db-child-sqlite-unavailable.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/web-hub/hub/db-child.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/web-hub/hub/db-client.test.ts": { kind: "proc", why: "proc:node:child_process; wait:setTimeout(…, 1000)" },
   "tests/web-hub/hub/epoch-up-compat.test.ts": { kind: "proc", why: 'sock:".listen("' },
-  "tests/web-hub/hub/feishu/service.test.ts": { kind: "timing", why: "wait:setTimeout(…, 5_600)" },
+  "tests/web-hub/hub/feishu/service.test.ts": {
+    kind: "timing",
+    why: "wait:setTimeout(…, 5_600); real latency: 4_000 ms",
+  },
   "tests/web-hub/hub/hub-lan.test.ts": { kind: "timing", why: "wait:setTimeout(…, 2_200)" },
   "tests/web-hub/hub/hub-spawn.test.ts": {
     kind: "proc",
@@ -246,11 +327,20 @@ export const TIER1_DECLARED: Readonly<Record<string, Tier1DeclaredEntry>> = {
   "tests/web-hub/hub/lan-login.test.ts": { kind: "timing", why: "wait:setTimeout(…, 5_000)" },
   "tests/web-hub/hub/lan-store-security.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/web-hub/hub/lan-store.test.ts": { kind: "proc", why: "proc:node:child_process" },
-  "tests/web-hub/hub/preview/admit.test.ts": { kind: "proc", why: "proc:node:child_process" },
-  "tests/web-hub/hub/preview/dir.test.ts": { kind: "timing", why: "wait:setTimeout(…, 1_400)" },
-  "tests/web-hub/hub/preview/pv-admit.test.ts": { kind: "proc", why: "proc:node:child_process" },
+  "tests/web-hub/hub/preview/admit.test.ts": {
+    kind: "timing",
+    why: "proc:node:child_process; real latency: STEP_CAP * 3 ms; 250 ms",
+  },
+  "tests/web-hub/hub/preview/dir.test.ts": { kind: "timing", why: "wait:setTimeout(…, 1_400); real latency: 2_000 ms" },
+  "tests/web-hub/hub/preview/pv-admit.test.ts": {
+    kind: "timing",
+    why: "proc:node:child_process; real latency: 1500 ms",
+  },
   "tests/web-hub/hub/proxy/agent-queue.test.ts": { kind: "proc", why: 'sock:"createServer("' },
-  "tests/web-hub/hub/proxy/forward.test.ts": { kind: "proc", why: 'sock:"createServer("' },
+  "tests/web-hub/hub/proxy/forward.test.ts": {
+    kind: "timing",
+    why: 'sock:"createServer("; real latency: 11500 ms; 1250 ms',
+  },
   "tests/web-hub/hub/proxy/listener-allowlist.test.ts": { kind: "timing", why: "wait:setTimeout(…, 3000)" },
   "tests/web-hub/hub/reload-status-passthrough.test.ts": {
     kind: "proc",
@@ -261,25 +351,37 @@ export const TIER1_DECLARED: Readonly<Record<string, Tier1DeclaredEntry>> = {
   "tests/web-hub/hub/schedule-service.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/web-hub/hub/singleton-hardening.test.ts": { kind: "proc", why: 'sock:".listen("; sock:"createServer("' },
   "tests/web-hub/hub/singleton.test.ts": {
-    kind: "proc",
-    why: 'proc:node:child_process; sock:".listen("; sock:"createServer("',
+    kind: "timing",
+    why: 'proc:node:child_process; sock:".listen("; sock:"createServer("; real latency: 2_000 ms; 6_000 ms; 2_500 ms; 500 ms',
   },
   "tests/web-hub/hub/spawn/created-dirs.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/web-hub/hub/spawn/dirs.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/web-hub/hub/spawn/golden.test.ts": { kind: "proc", why: "proc:node:child_process" },
-  "tests/web-hub/hub/spawn/history/proc-real.test.ts": { kind: "proc", why: "proc:node:child_process" },
-  "tests/web-hub/hub/spawn/launcher-check.test.ts": { kind: "timing", why: "wait:setTimeout(…, 5_000)" },
-  "tests/web-hub/hub/spawn/reaper.test.ts": { kind: "proc", why: "proc:node:child_process" },
+  "tests/web-hub/hub/spawn/history/proc-real.test.ts": {
+    kind: "timing",
+    why: "proc:node:child_process; real latency: BUDGET_MS ms",
+  },
+  "tests/web-hub/hub/spawn/launcher-check.test.ts": {
+    kind: "timing",
+    why: "wait:setTimeout(…, 5_000); real latency: 1_400 ms",
+  },
+  "tests/web-hub/hub/spawn/reaper.test.ts": {
+    kind: "timing",
+    why: "proc:node:child_process; real latency: 1_000 ms; REAPER_HARD_CAP_MS + 2_000 ms",
+  },
   "tests/web-hub/hub/spawn/supervisor.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/web-hub/hub/startup-cancel.test.ts": { kind: "proc", why: 'sock:".listen("; sock:"createServer("' },
   "tests/web-hub/hub/supersede-handshake.test.ts": { kind: "proc", why: 'sock:".listen("; sock:"createServer("' },
   "tests/web-hub/hub/totp-key.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/web-hub/hub/ui-root.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/web-hub/hub/version-git.test.ts": {
-    kind: "proc",
-    why: 'proc:node:child_process; sock:".listen("; sock:"createServer("',
+    kind: "timing",
+    why: 'proc:node:child_process; sock:".listen("; sock:"createServer("; real latency: 4000 ms',
   },
-  "tests/web-hub/hub/version-info.test.ts": { kind: "proc", why: "proc:node:child_process" },
+  "tests/web-hub/hub/version-info.test.ts": {
+    kind: "timing",
+    why: "proc:node:child_process; real latency: 500 ms; 1000 ms",
+  },
   "tests/web-hub/hub/worktree-diff/source-scan.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/web-hub/hub/worktree-graph/commit-files.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/web-hub/hub/worktree-graph/source-scan.test.ts": { kind: "proc", why: "proc:node:child_process" },
@@ -287,7 +389,10 @@ export const TIER1_DECLARED: Readonly<Record<string, Tier1DeclaredEntry>> = {
   "tests/web-hub/protocol/pid.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/web-hub/ui/hub-http-integration.test.ts": { kind: "proc", why: 'sock:".listen("' },
   "tests/web-hub/ui/quota-pill.test.ts": { kind: "proc", why: "proc:node:child_process" },
-  "tests/workflow/isolation-verify.test.ts": { kind: "proc", why: "proc:node:child_process" },
+  "tests/workflow/isolation-verify.test.ts": {
+    kind: "timing",
+    why: "proc:node:child_process; real latency: 300 + 500 + 2_000 ms",
+  },
   "tests/workflow/wc14-testhooks-gate.test.ts": { kind: "proc", why: "proc:node:child_process" },
 };
 

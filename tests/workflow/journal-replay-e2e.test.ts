@@ -338,16 +338,13 @@ describe("M3.5 JS1: journal writes never block the host_settle round trip", () =
     });
     expect(boot.ok).toBe(true);
 
-    const start = Date.now();
     const returned = await new Promise<unknown>((resolve) => {
       host.events.onScriptReturned(resolve);
       host.events.onScriptThrew((e) => resolve({ threw: e }));
     });
-    const elapsedMs = Date.now() - start;
     expect(returned).toBe("ok"); // the fake spawner always resolves child text to "ok", independent of prompt.
-    // Generous bound (well under the never-resolving flush) — the point is
-    // "not tied to the flush", not a tight microbenchmark.
-    expect(elapsedMs).toBeLessThan(2_000);
+    // flush never resolves: reaching script_returned with the appended entry below
+    // proves settle is independent of disk completion, regardless of scheduler delay.
     expect(appended).toHaveLength(1); // append() *was* called (fire-and-forget), just never awaited.
     await host.terminate("test_done");
   });
