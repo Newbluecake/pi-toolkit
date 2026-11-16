@@ -11,7 +11,7 @@
  * dir never followed) live in web-hub-history-enum.test.ts; the libuv starvation suite lives in
  * web-hub-history-starvation.test.ts.
  */
-import { ProcessStartup } from "./helpers/process-startup.js";
+import { ProcessStartup, startupBudget, STARTUP_MARGIN_MS } from "./helpers/process-startup.js";
 import { spawn as spawnChild, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
@@ -421,128 +421,140 @@ describe.skipIf(!IS_LINUX)("web-hub session history — HH integration (in-proce
     expect(found.items.map((i) => i.id)).toEqual(["hh1main0"]);
   }, 60_000);
 
-  it('HH2: resume argv tail is exactly ["--session", abs]; live; from "history"; spawns.json carries no `from`', async () => {
-    const { home, agentDir } = fresh();
-    const work = join(home, "work");
-    mkdirSync(work, { recursive: true });
-    const s = writeSessionFile(agentDir, { dirName: "d1", id: "hh2main00", cwd: work, kind: "main" });
-    const h = await bootHistoryHub(home);
+  it(
+    'HH2: resume argv tail is exactly ["--session", abs]; live; from "history"; spawns.json carries no `from`',
+    async () => {
+      const { home, agentDir } = fresh();
+      const work = join(home, "work");
+      mkdirSync(work, { recursive: true });
+      const s = writeSessionFile(agentDir, { dirName: "d1", id: "hh2main00", cwd: work, kind: "main" });
+      const h = await bootHistoryHub(home);
 
-    const res = await postSpawn(h, sessionBody(work, s, "resume"));
-    expect(res.status).toBe(202);
-    const spawnId = (JSON.parse(res.body) as { spawnId: string }).spawnId;
-    await waitRecordLive(h, spawnId);
-    const pid = await childPidOf(h, spawnId);
-    extraPids.add(pid);
-    h.allowPi.add(pid);
+      const res = await postSpawn(h, sessionBody(work, s, "resume"));
+      expect(res.status).toBe(202);
+      const spawnId = (JSON.parse(res.body) as { spawnId: string }).spawnId;
+      await waitRecordLive(h, spawnId);
+      const pid = await childPidOf(h, spawnId);
+      extraPids.add(pid);
+      h.allowPi.add(pid);
 
-    const argv = argvOf(work, pid);
-    expect(argv[argv.length - 2]).toBe("--session");
-    expect(argv[argv.length - 1]).toBe(s.abs); // byte-exact literal path
-    expect(argv).not.toContain("--model");
+      const argv = argvOf(work, pid);
+      expect(argv[argv.length - 2]).toBe("--session");
+      expect(argv[argv.length - 1]).toBe(s.abs); // byte-exact literal path
+      expect(argv).not.toContain("--model");
 
-    const list = await headlessGet(h);
-    const item = list.items?.find((i) => i["spawnId"] === spawnId);
-    expect(item?.["from"]).toBe("history");
-    const stored = recordOf(h.stateDir, spawnId);
-    expect(stored).toBeDefined();
-    expect(Object.keys(stored!)).not.toContain("from");
-    expect((stored as { sessionFile?: string }).sessionFile).toBeUndefined(); // restore off ⇒ never persisted
-  }, 60_000);
+      const list = await headlessGet(h);
+      const item = list.items?.find((i) => i["spawnId"] === spawnId);
+      expect(item?.["from"]).toBe("history");
+      const stored = recordOf(h.stateDir, spawnId);
+      expect(stored).toBeDefined();
+      expect(Object.keys(stored!)).not.toContain("from");
+      expect((stored as { sessionFile?: string }).sessionFile).toBeUndefined(); // restore off ⇒ never persisted
+    },
+    startupBudget(1) + STARTUP_MARGIN_MS,
+  );
 
-  it("HH3: live card on the same session ⇒ 409 open/card ⇒ fork's argv tail is [--fork <snap> --session-id <uuid>]; source sha unchanged; snapshot unlinked after live", async () => {
-    const { home, agentDir } = fresh();
-    const work = join(home, "work");
-    mkdirSync(work, { recursive: true });
-    const s = writeSessionFile(agentDir, {
-      dirName: "d1",
-      id: "hh3main00",
-      cwd: work,
-      kind: "main",
-      firstMessage: "hh3 source",
-    });
-    const sourceSha = sha(s.abs);
-    const h = await bootHistoryHub(home);
+  it(
+    "HH3: live card on the same session ⇒ 409 open/card ⇒ fork's argv tail is [--fork <snap> --session-id <uuid>]; source sha unchanged; snapshot unlinked after live",
+    async () => {
+      const { home, agentDir } = fresh();
+      const work = join(home, "work");
+      mkdirSync(work, { recursive: true });
+      const s = writeSessionFile(agentDir, {
+        dirName: "d1",
+        id: "hh3main00",
+        cwd: work,
+        kind: "main",
+        firstMessage: "hh3 source",
+      });
+      const sourceSha = sha(s.abs);
+      const h = await bootHistoryHub(home);
 
-    // a fake TUI holding the SAME session id as a live registry card (C1)
-    const tui = spawnChild(process.execPath, [FAKE_PI, "--mode", "rpc", "--session-id", s.id], {
-      cwd: work,
-      env: { ...process.env },
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    extraPids.add(tui.pid!);
-    h.allowPi.add(tui.pid!);
-    const sse = await openSse(h.port, { cookie: h.cookie });
-    sseConns.push(sse);
-    // the registry broadcasts `agents` on register (before the session slot lands) and a
-    // `session` frame once the card reports — the latter is the observable "card holds sid"
-    await sse.waitFor((e) => e.event === "session" && JSON.stringify(e.data).includes(s.id), 15_000, "card session");
+      // a fake TUI holding the SAME session id as a live registry card (C1)
+      const tui = spawnChild(process.execPath, [FAKE_PI, "--mode", "rpc", "--session-id", s.id], {
+        cwd: work,
+        env: { ...process.env },
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      extraPids.add(tui.pid!);
+      h.allowPi.add(tui.pid!);
+      const sse = await openSse(h.port, { cookie: h.cookie });
+      sseConns.push(sse);
+      // the registry broadcasts `agents` on register (before the session slot lands) and a
+      // `session` frame once the card reports — the latter is the observable "card holds sid"
+      await sse.waitFor((e) => e.event === "session" && JSON.stringify(e.data).includes(s.id), 15_000, "card session");
 
-    const open = await postSpawn(h, sessionBody(work, s, "resume"));
-    expect(open.status).toBe(409);
-    const openBody = JSON.parse(open.body) as SessionOpen409;
-    expect(openBody.reason).toBe("session-open");
-    expect(openBody.forkReason).toBe("open");
-    expect(openBody.live?.by).toBe("card");
-    expect(openBody.live?.pid).toBe(tui.pid);
+      const open = await postSpawn(h, sessionBody(work, s, "resume"));
+      expect(open.status).toBe(409);
+      const openBody = JSON.parse(open.body) as SessionOpen409;
+      expect(openBody.reason).toBe("session-open");
+      expect(openBody.forkReason).toBe("open");
+      expect(openBody.live?.by).toBe("card");
+      expect(openBody.live?.pid).toBe(tui.pid);
 
-    const fork = await postSpawn(h, sessionBody(work, s, "fork"));
-    expect(fork.status).toBe(202);
-    const spawnId = (JSON.parse(fork.body) as { spawnId: string }).spawnId;
-    await waitRecordLive(h, spawnId);
-    const pid = await childPidOf(h, spawnId);
-    extraPids.add(pid);
-    h.allowPi.add(pid);
+      const fork = await postSpawn(h, sessionBody(work, s, "fork"));
+      expect(fork.status).toBe(202);
+      const spawnId = (JSON.parse(fork.body) as { spawnId: string }).spawnId;
+      await waitRecordLive(h, spawnId);
+      const pid = await childPidOf(h, spawnId);
+      extraPids.add(pid);
+      h.allowPi.add(pid);
 
-    const argv = argvOf(work, pid);
-    const forkSrcDir = webHubSpawnFiles(h.stateDir).forkSrcDir;
-    expect(argv[argv.length - 4]).toBe("--fork");
-    const snapPath = argv[argv.length - 3]!;
-    expect(snapPath.startsWith(`${forkSrcDir}/`)).toBe(true);
-    expect(argv[argv.length - 2]).toBe("--session-id");
-    const newId = argv[argv.length - 1]!;
-    expect(RESTORE_SESSION_ID_RE.test(newId)).toBe(true);
+      const argv = argvOf(work, pid);
+      const forkSrcDir = webHubSpawnFiles(h.stateDir).forkSrcDir;
+      expect(argv[argv.length - 4]).toBe("--fork");
+      const snapPath = argv[argv.length - 3]!;
+      expect(snapPath.startsWith(`${forkSrcDir}/`)).toBe(true);
+      expect(argv[argv.length - 2]).toBe("--session-id");
+      const newId = argv[argv.length - 1]!;
+      expect(RESTORE_SESSION_ID_RE.test(newId)).toBe(true);
 
-    expect(sha(s.abs)).toBe(sourceSha); // fork never touched the source
-    await waitUntil(() => !existsSync(snapPath), 10_000, "fork snapshot unlinked after live");
-    expect(readdirSync(forkSrcDir)).toEqual([]); // the whole dir is empty again
-    // the fake wrote the new session file (outside forkSrcDir), parentSession dangling at the snapshot
-    const newFile = join(h.agentDir, "sessions", "fake", `${newId}.jsonl`);
-    expect(existsSync(newFile)).toBe(true);
-    const header = JSON.parse(readFileSync(newFile, "utf8").split("\n", 1)[0]!) as {
-      id?: string;
-      parentSession?: string;
-    };
-    expect(header.id).toBe(newId);
-    expect(header.parentSession).toBe(snapPath);
+      expect(sha(s.abs)).toBe(sourceSha); // fork never touched the source
+      await waitUntil(() => !existsSync(snapPath), 10_000, "fork snapshot unlinked after live");
+      expect(readdirSync(forkSrcDir)).toEqual([]); // the whole dir is empty again
+      // the fake wrote the new session file (outside forkSrcDir), parentSession dangling at the snapshot
+      const newFile = join(h.agentDir, "sessions", "fake", `${newId}.jsonl`);
+      expect(existsSync(newFile)).toBe(true);
+      const header = JSON.parse(readFileSync(newFile, "utf8").split("\n", 1)[0]!) as {
+        id?: string;
+        parentSession?: string;
+      };
+      expect(header.id).toBe(newId);
+      expect(header.parentSession).toBe(snapPath);
 
-    const list = await headlessGet(h);
-    const item = list.items?.find((i) => i["spawnId"] === spawnId);
-    expect(item?.["from"]).toBe("fork");
-    tui.kill("SIGKILL");
-  }, 90_000);
-  it("HH4: a second resume while the first record is starting ⇒ 409 open/managed", async () => {
-    const { home, agentDir } = fresh();
-    const work = join(home, "work");
-    mkdirSync(work, { recursive: true });
-    const s = writeSessionFile(agentDir, { dirName: "d1", id: "hh4main00", cwd: work, kind: "main" });
-    const h = await bootHistoryHub(home);
+      const list = await headlessGet(h);
+      const item = list.items?.find((i) => i["spawnId"] === spawnId);
+      expect(item?.["from"]).toBe("fork");
+      tui.kill("SIGKILL");
+    },
+    startupBudget(1) + 60_000,
+  );
+  it(
+    "HH4: a second resume while the first record is starting ⇒ 409 open/managed",
+    async () => {
+      const { home, agentDir } = fresh();
+      const work = join(home, "work");
+      mkdirSync(work, { recursive: true });
+      const s = writeSessionFile(agentDir, { dirName: "d1", id: "hh4main00", cwd: work, kind: "main" });
+      const h = await bootHistoryHub(home);
 
-    const first = await postSpawn(h, sessionBody(work, s, "resume"));
-    expect(first.status).toBe(202);
-    const spawnId = (JSON.parse(first.body) as { spawnId: string }).spawnId;
-    const pid = await childPidOf(h, spawnId);
-    extraPids.add(pid);
-    h.allowPi.add(pid);
+      const first = await postSpawn(h, sessionBody(work, s, "resume"));
+      expect(first.status).toBe(202);
+      const spawnId = (JSON.parse(first.body) as { spawnId: string }).spawnId;
+      const pid = await childPidOf(h, spawnId);
+      extraPids.add(pid);
+      h.allowPi.add(pid);
 
-    const second = await postSpawn(h, sessionBody(work, s, "resume"));
-    expect(second.status).toBe(409);
-    const body = JSON.parse(second.body) as SessionOpen409;
-    expect(body.reason).toBe("session-open");
-    expect(body.forkReason).toBe("open");
-    expect(body.live?.by).toBe("managed");
-    await waitRecordLive(h, spawnId);
-  }, 60_000);
+      const second = await postSpawn(h, sessionBody(work, s, "resume"));
+      expect(second.status).toBe(409);
+      const body = JSON.parse(second.body) as SessionOpen409;
+      expect(body.reason).toBe("session-open");
+      expect(body.forkReason).toBe("open");
+      expect(body.live?.by).toBe("managed");
+      await waitRecordLive(h, spawnId);
+    },
+    startupBudget(1) + STARTUP_MARGIN_MS,
+  );
 
   it("HH5: deleted source file ⇒ 400 session-missing; no fork happened", async () => {
     const { home, agentDir } = fresh();
@@ -583,54 +595,58 @@ describe.skipIf(!IS_LINUX)("web-hub session history — HH integration (in-proce
     expect(JSON.parse(res.body)).toMatchObject({ error: "E_DIR", reason: "moved" });
   }, 30_000);
 
-  it("HH9: unconnected comm=pi process (—-title-only) ⇒ 409 maybe/unconnected-pi with its pid; killing it unblocks the resume", async () => {
-    const { home, agentDir } = fresh();
-    const work = join(home, "work");
-    mkdirSync(work, { recursive: true });
-    const s = writeSessionFile(agentDir, { dirName: "d1", id: "hh9main00", cwd: work, kind: "main" });
-    const h = await bootHistoryHub(home);
+  it(
+    "HH9: unconnected comm=pi process (—-title-only) ⇒ 409 maybe/unconnected-pi with its pid; killing it unblocks the resume",
+    async () => {
+      const { home, agentDir } = fresh();
+      const work = join(home, "work");
+      mkdirSync(work, { recursive: true });
+      const s = writeSessionFile(agentDir, { dirName: "d1", id: "hh9main00", cwd: work, kind: "main" });
+      const h = await bootHistoryHub(home);
 
-    const strayBoot = new ProcessStartup();
-    const stray = spawnChild(process.execPath, [FAKE_PI, "--mode", "rpc", "--title-only"], {
-      cwd: work,
-      env: { ...process.env },
-      stdio: ["ignore", "ignore", "pipe"],
-    });
-    strayBoot.observe(stray, "stray pi");
-    extraPids.add(stray.pid!);
-    h.allowPi.add(stray.pid!); // visible to the scan on purpose — no card/record will match it
-    await strayBoot.wait(
-      () => {
-        try {
-          return readFileSync(`/proc/${stray.pid}/stat`, "utf8").includes("(pi)");
-        } catch {
-          return false;
-        }
-      },
-      (ready) => ready,
-      "stray pi title visible in /proc",
-    );
+      const strayBoot = new ProcessStartup();
+      const stray = spawnChild(process.execPath, [FAKE_PI, "--mode", "rpc", "--title-only"], {
+        cwd: work,
+        env: { ...process.env },
+        stdio: ["ignore", "ignore", "pipe"],
+      });
+      strayBoot.observe(stray, "stray pi");
+      extraPids.add(stray.pid!);
+      h.allowPi.add(stray.pid!); // visible to the scan on purpose — no card/record will match it
+      await strayBoot.wait(
+        () => {
+          try {
+            return readFileSync(`/proc/${stray.pid}/stat`, "utf8").includes("(pi)");
+          } catch {
+            return false;
+          }
+        },
+        (ready) => ready,
+        "stray pi title visible in /proc",
+      );
 
-    const blocked = await postSpawn(h, sessionBody(work, s, "resume"));
-    expect(blocked.status).toBe(409);
-    const body = JSON.parse(blocked.body) as SessionOpen409;
-    expect(body.reason).toBe("session-open");
-    expect(body.forkReason).toBe("maybe");
-    expect(body.proofGap).toBe("unconnected-pi");
-    expect(body.live?.pid).toBe(stray.pid);
+      const blocked = await postSpawn(h, sessionBody(work, s, "resume"));
+      expect(blocked.status).toBe(409);
+      const body = JSON.parse(blocked.body) as SessionOpen409;
+      expect(body.reason).toBe("session-open");
+      expect(body.forkReason).toBe("maybe");
+      expect(body.proofGap).toBe("unconnected-pi");
+      expect(body.live?.pid).toBe(stray.pid);
 
-    kill9(stray.pid);
-    extraPids.delete(stray.pid);
-    // SIGKILL delivery is fast but not instantaneous — the next prove must not see it dying
-    await waitUntil(() => !pidAlive(stray.pid), 5_000, "stray fully gone");
-    const okRes = await postSpawn(h, sessionBody(work, s, "resume"));
-    expect(okRes.status).toBe(202);
-    const spawnId = (JSON.parse(okRes.body) as { spawnId: string }).spawnId;
-    const pid = await childPidOf(h, spawnId);
-    extraPids.add(pid);
-    h.allowPi.add(pid);
-    await waitRecordLive(h, spawnId);
-  }, 60_000);
+      kill9(stray.pid);
+      extraPids.delete(stray.pid);
+      // SIGKILL delivery is fast but not instantaneous — the next prove must not see it dying
+      await waitUntil(() => !pidAlive(stray.pid), 5_000, "stray fully gone");
+      const okRes = await postSpawn(h, sessionBody(work, s, "resume"));
+      expect(okRes.status).toBe(202);
+      const spawnId = (JSON.parse(okRes.body) as { spawnId: string }).spawnId;
+      const pid = await childPidOf(h, spawnId);
+      extraPids.add(pid);
+      h.allowPi.add(pid);
+      await waitRecordLive(h, spawnId);
+    },
+    startupBudget(2) + STARTUP_MARGIN_MS,
+  );
 
   it("HH9b (PID reuse shape): prove saw pid P as bash, the sync re-prove sees its real comm ⇒ 409 new-process, start never called", async () => {
     const { home, agentDir } = fresh();

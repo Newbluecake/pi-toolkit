@@ -23,7 +23,7 @@ import type { HubConfig } from "../../src/web-hub/hub/ports.js";
 import { resolveHubPaths } from "../../src/web-hub/protocol/paths.js";
 import { fakeCtx, fakePi, resetGlobals, waitUntil } from "../web-hub/agent/helpers.js";
 import { config as hubConfig } from "../web-hub/hub/helpers.js";
-import { ProcessStartup } from "./helpers/process-startup.js";
+import { ProcessStartup, startupBudget, STARTUP_MARGIN_MS } from "./helpers/process-startup.js";
 import { sandboxHome } from "./helpers/home-sandbox.js";
 
 const PI_CLI = resolve("node_modules/@earendil-works/pi-coding-agent/dist/cli.js");
@@ -122,88 +122,96 @@ describe("web-hub spawn (real child processes)", () => {
     }
   });
 
-  it("3 concurrent hub spawns converge to exactly one live hub pid", async () => {
-    const plan = launcherOrSkip();
-    if (plan === undefined) return;
-    const paths = resolveHubPaths({ home: home!.home, uid: process.getuid?.() ?? 0 });
+  it(
+    "3 concurrent hub spawns converge to exactly one live hub pid",
+    async () => {
+      const plan = launcherOrSkip();
+      if (plan === undefined) return;
+      const paths = resolveHubPaths({ home: home!.home, uid: process.getuid?.() ?? 0 });
 
-    const boot = new ProcessStartup();
-    startups.push(boot);
-    for (let i = 0; i < 3; i++) spawnHub(plan, HUB_MAIN, cfg, boot.spawn);
+      const boot = new ProcessStartup();
+      startups.push(boot);
+      for (let i = 0; i < 3; i++) spawnHub(plan, HUB_MAIN, cfg, boot.spawn);
 
-    await boot.wait(
-      () => hubPidOf(paths.hubJson),
-      (pid) => pid !== undefined,
-      "hub.json written",
-    );
-    const winner = hubPidOf(paths.hubJson)!;
-    startedPids.add(winner);
-    await waitUntil(() => pidAlive(winner), 5_000, "winner alive");
+      await boot.wait(
+        () => hubPidOf(paths.hubJson),
+        (pid) => pid !== undefined,
+        "hub.json written",
+      );
+      const winner = hubPidOf(paths.hubJson)!;
+      startedPids.add(winner);
+      await waitUntil(() => pidAlive(winner), 5_000, "winner alive");
 
-    // Losers exit 0 (singleton {exists:true}); the winner stays. Give losers
-    // a moment to exit, then verify hub.json still names exactly the winner
-    // and only one hub process for this state dir is alive.
-    await new Promise((r) => setTimeout(r, 3_000));
-    expect(hubPidOf(paths.hubJson)).toBe(winner);
-    expect(pidAlive(winner)).toBe(true);
-    expect(boot.children).toHaveLength(3);
-    expect(boot.children.filter((c) => c.pid !== undefined && pidAlive(c.pid))).toHaveLength(1);
-    for (const loser of boot.children.filter((c) => c.pid !== winner)) {
-      expect(loser.exitCode, boot.diagnostic()).toBe(0);
-      expect(loser.signalCode, boot.diagnostic()).toBeNull();
-    }
-  }, 45_000);
+      // Losers exit 0 (singleton {exists:true}); the winner stays. Give losers
+      // a moment to exit, then verify hub.json still names exactly the winner
+      // and only one hub process for this state dir is alive.
+      await new Promise((r) => setTimeout(r, 3_000));
+      expect(hubPidOf(paths.hubJson)).toBe(winner);
+      expect(pidAlive(winner)).toBe(true);
+      expect(boot.children).toHaveLength(3);
+      expect(boot.children.filter((c) => c.pid !== undefined && pidAlive(c.pid))).toHaveLength(1);
+      for (const loser of boot.children.filter((c) => c.pid !== winner)) {
+        expect(loser.exitCode, boot.diagnostic()).toBe(0);
+        expect(loser.signalCode, boot.diagnostic()).toBeNull();
+      }
+    },
+    startupBudget(1) + 15_000,
+  );
 
-  it("kill -9 the hub ⇒ agent respawns it inside the spawn window and re-registers", async () => {
-    const plan = launcherOrSkip();
-    if (plan === undefined) return;
-    const paths = resolveHubPaths({ home: home!.home, uid: process.getuid?.() ?? 0 });
+  it(
+    "kill -9 the hub ⇒ agent respawns it inside the spawn window and re-registers",
+    async () => {
+      const plan = launcherOrSkip();
+      if (plan === undefined) return;
+      const paths = resolveHubPaths({ home: home!.home, uid: process.getuid?.() ?? 0 });
 
-    // Initial hub is spawned by the TEST, so the agent's own lastSpawnAt stays
-    // undefined and the post-crash respawn is not delayed by the 30s throttle.
-    const initial = new ProcessStartup();
-    startups.push(initial);
-    spawnHub(plan, HUB_MAIN, cfg, initial.spawn);
-    await initial.wait(
-      () => hubPidOf(paths.hubJson),
-      (pid) => pid !== undefined,
-      "first hub.json",
-    );
-    const firstPid = hubPidOf(paths.hubJson)!;
-    startedPids.add(firstPid);
+      // Initial hub is spawned by the TEST, so the agent's own lastSpawnAt stays
+      // undefined and the post-crash respawn is not delayed by the 30s throttle.
+      const initial = new ProcessStartup();
+      startups.push(initial);
+      spawnHub(plan, HUB_MAIN, cfg, initial.spawn);
+      await initial.wait(
+        () => hubPidOf(paths.hubJson),
+        (pid) => pid !== undefined,
+        "first hub.json",
+      );
+      const firstPid = hubPidOf(paths.hubJson)!;
+      startedPids.add(firstPid);
 
-    // A fresh budget starts at the crash, not while the first hub is booting.
-    let respawn = initial;
-    const { pi, fire } = fakePi();
-    const control = wireWebHub(pi, {
-      settings: { enabled: true, autoStart: true, port: 0, idleExitMinutes: 10, nodeLoader: "" },
-      fleet: () => [],
-      env: { HOME: home!.home },
-      buildInfo: async () => ({ pluginVersion: cfg.pluginVersion, buildId: cfg.buildId }),
-      spawnImpl: (...args) => respawn.spawn(...args),
-      argv1: PI_CLI,
-    });
-    const { ctx } = fakeCtx({ mode: "tui" });
-    fire("session_start", { type: "session_start", reason: "startup" }, ctx);
-    await waitUntil(() => control.status().state === "live", 10_000, "agent live on first hub");
+      // A fresh budget starts at the crash, not while the first hub is booting.
+      let respawn = initial;
+      const { pi, fire } = fakePi();
+      const control = wireWebHub(pi, {
+        settings: { enabled: true, autoStart: true, port: 0, idleExitMinutes: 10, nodeLoader: "" },
+        fleet: () => [],
+        env: { HOME: home!.home },
+        buildInfo: async () => ({ pluginVersion: cfg.pluginVersion, buildId: cfg.buildId }),
+        spawnImpl: (...args) => respawn.spawn(...args),
+        argv1: PI_CLI,
+      });
+      const { ctx } = fakeCtx({ mode: "tui" });
+      fire("session_start", { type: "session_start", reason: "startup" }, ctx);
+      await waitUntil(() => control.status().state === "live", 10_000, "agent live on first hub");
 
-    respawn = new ProcessStartup();
-    startups.push(respawn);
-    process.kill(firstPid, "SIGKILL");
-    await respawn.wait(
-      () => {
-        const pid = hubPidOf(paths.hubJson);
-        return pid !== undefined && pid !== firstPid && pidAlive(pid);
-      },
-      (ready) => ready,
-      "new hub pid after kill -9",
-    );
-    const secondPid = hubPidOf(paths.hubJson)!;
-    startedPids.add(secondPid);
-    // re-registered: the agent completed a fresh hello against the new hub
-    await waitUntil(() => control.status().state === "live", 12_000, "agent live on respawned hub");
-    expect(control.status().agentKey).toBeDefined();
+      respawn = new ProcessStartup();
+      startups.push(respawn);
+      process.kill(firstPid, "SIGKILL");
+      await respawn.wait(
+        () => {
+          const pid = hubPidOf(paths.hubJson);
+          return pid !== undefined && pid !== firstPid && pidAlive(pid);
+        },
+        (ready) => ready,
+        "new hub pid after kill -9",
+      );
+      const secondPid = hubPidOf(paths.hubJson)!;
+      startedPids.add(secondPid);
+      // re-registered: the agent completed a fresh hello against the new hub
+      await waitUntil(() => control.status().state === "live", 12_000, "agent live on respawned hub");
+      expect(control.status().agentKey).toBeDefined();
 
-    fire("session_shutdown", { type: "session_shutdown", reason: "quit" }, ctx);
-  }, 90_000);
+      fire("session_shutdown", { type: "session_shutdown", reason: "quit" }, ctx);
+    },
+    startupBudget(2) + STARTUP_MARGIN_MS,
+  );
 });

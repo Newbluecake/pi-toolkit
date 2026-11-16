@@ -33,7 +33,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { THREAD_CAP, THREAD_REBIND_CAP } from "../../src/web-hub/protocol/version.js";
 import { resolveHubPaths } from "../../src/web-hub/protocol/paths.js";
 import { messageEnvelope } from "../fixtures/feishu/f6.js";
-import { ProcessStartup } from "./helpers/process-startup.js";
+import { ProcessStartup, startupBudget, STARTUP_MARGIN_MS } from "./helpers/process-startup.js";
 import { bounded, until } from "./helpers/fabric-xs-harness.js";
 
 // ----------------------------------------------------------------- child harness
@@ -268,7 +268,7 @@ function disk(r: Rig): {
 describe("fabric-thread rebind E2E (rebind-plan r3 §7)", () => {
   it(
     "A18 main chain: rebind → message_session(sid) → acquire → subscribe ⇒ events steer to the worker run, Router turns frozen",
-    { timeout: 120_000 },
+    { timeout: startupBudget(2) + 60_000 },
     async () => {
       const { r, hub, router, worker, routerSid, workerSid } = await bootPair();
       expect((await hubOf(hub)).caps).toContain(THREAD_REBIND_CAP);
@@ -339,7 +339,7 @@ describe("fabric-thread rebind E2E (rebind-plan r3 §7)", () => {
 
   it(
     "A18 degrade: the worker NEVER acquires ⇒ subscribe answers E_THREAD_UNKNOWN, the event takes the main-session native path",
-    { timeout: 120_000 },
+    { timeout: startupBudget(2) + 60_000 },
     async () => {
       const { hub, router, worker, routerSid, workerSid } = await bootPair();
       const h = await routerHoldsTopic(hub, router, routerSid);
@@ -371,7 +371,7 @@ describe("fabric-thread rebind E2E (rebind-plan r3 §7)", () => {
 
   it(
     "A13 full-chain: the worker rebinds BACK to the Router ⇒ Router acquires (reopen) and subscribes a run of its own",
-    { timeout: 120_000 },
+    { timeout: startupBudget(2) + 60_000 },
     async () => {
       const { hub, router, worker, routerSid, workerSid } = await bootPair();
       const h = await routerHoldsTopic(hub, router, routerSid);
@@ -413,7 +413,7 @@ describe("fabric-thread rebind E2E (rebind-plan r3 §7)", () => {
 
   it(
     "A10 full-chain: rebind-on hub × OLD agent (no thr.rebind.v1) ⇒ cmd.thread has NO rev and keeps the legacy shape; NEW agent gets rev",
-    { timeout: 120_000 },
+    { timeout: startupBudget(2) + 60_000 },
     async () => {
       const r = rig();
       const hub = await r.boot("hub", "hub"); // hub rebind ON

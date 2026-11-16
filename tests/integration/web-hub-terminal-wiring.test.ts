@@ -1,5 +1,5 @@
 /** Production assembly contract gates. No browser, no fake physical-release proof. */
-import { ProcessStartup } from "./helpers/process-startup.js";
+import { ProcessStartup, startupBudget, STARTUP_MARGIN_MS } from "./helpers/process-startup.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { readdir } from "node:fs/promises";
 import { readFileSync, readdirSync, existsSync } from "node:fs";
@@ -691,206 +691,210 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { resolve } from "node:path";
 describe("separate-process production authority and physical receipt release chain", () => {
-  it("crosses real agent/hub process boundary and repeatedly frees quota only after receipt/journal/ACK", async () => {
-    const sandbox = sandboxHome();
-    cleanups.push(sandbox.restore);
-    cleanups.push(terminalPlainSource());
-    writeTerminalMachinePolicy(sandbox.home);
-    const fixture = makeTerminalFixture();
-    cleanups.push(fixture.cleanup);
-    let frontend: FrontendDeps | undefined;
-    const result = await startHub(config({ home: sandbox.home, privacy: true, terminal: terminalConfig }), (deps) => {
-      frontend = deps;
-      return createHttpFrontend(deps);
-    });
-    if ("exists" in result) throw new Error("unexpected singleton");
-    const hub = result;
-    cleanups.push(() => hub.close("test"));
-    const configFile = join(fixture.fixture.root, "agent.json");
-    await writeFile(configFile, JSON.stringify({ home: sandbox.home, fixture: fixture.fixture }), { mode: 0o600 });
-    const boot = new ProcessStartup();
-    const child = spawn(
-      process.execPath,
-      ["--import", "tsx", resolve("tests/integration/fixtures/terminal-agent.ts"), configFile],
-      { stdio: "pipe", env: { ...process.env, HOME: sandbox.home } },
-    );
-    boot.observe(child, "terminal agent");
-    let ready = false,
-      errors = "";
-    child.stdout.on("data", (data: Buffer) => {
-      ready ||= data.toString().includes("READY");
-    });
-    child.stderr.on("data", (data: Buffer) => {
-      errors = (errors + data.toString()).slice(-4096);
-    });
-    const exited = once(child, "exit");
-    cleanups.push(async () => {
-      child.stdin.end("STOP\n");
-      const deadline = setTimeout(() => child.kill("SIGKILL"), 6000);
-      deadline.unref();
-      await exited;
-      clearTimeout(deadline);
-    });
-    await boot.wait(
-      () => ready,
-      (value) => value,
-      "real child agent ready",
-    );
-    expect(child.exitCode, boot.diagnostic()).toBeNull();
-    expect(ready, boot.diagnostic()).toBe(true);
-    const view = frontend!.registry.list().find((v) => v.session?.sessionId === "child-terminal-session")!;
-    expect(view.agentId.pid).toBe(child.pid);
-    expect(child.pid).not.toBe(process.pid);
-    const cookie = await login(hub.httpPort, hub.paths.tokenFile);
-    const sse = await openSse(hub.httpPort, { cookie });
-    cleanups.push(() => sse.close());
-    const connection = await sse.waitFor((e) => e.event === "terminal_connection"),
-      hello = await sse.waitFor((e) => e.event === "hello");
-    const scope = {
-      agentKey: view.agentKey,
-      expect: { sessionId: view.session!.sessionId, epoch: view.epoch },
-      clientId: hello.data.clientId,
-      connectionInstance: connection.data.connectionInstance,
-      connectionToken: connection.data.connectionToken,
-    };
-    const headers = { Cookie: cookie, Origin: `http://127.0.0.1:${hub.httpPort}` };
-    const post = async (op: keyof TerminalHttpRequests, extra: object) => {
-      const response = await postJson(hub.httpPort, TERMINAL_HTTP_PATHS[op], { ...scope, ...extra }, headers);
-      expect(response.status, `${response.body}; op=${op}; agent=${errors}`).toBe(200);
-      return JSON.parse(response.body);
-    };
-    const root = join(hub.paths.stateDir, TERMINAL_LOCAL_DIR),
-      journalPath = join(root, TERMINAL_JOURNAL_FILE);
-    for (let round = 0; round < 4; round++) {
-      const prepared = await post("prepare", { cols: 80, rows: 24 });
-      const a = await post("open", {
-        openId: prepared.openId,
-        createTicket: prepared.createTicket,
-        tabId: "child-tab",
-        cols: 80,
-        rows: 24,
+  it(
+    "crosses real agent/hub process boundary and repeatedly frees quota only after receipt/journal/ACK",
+    async () => {
+      const sandbox = sandboxHome();
+      cleanups.push(sandbox.restore);
+      cleanups.push(terminalPlainSource());
+      writeTerminalMachinePolicy(sandbox.home);
+      const fixture = makeTerminalFixture();
+      cleanups.push(fixture.cleanup);
+      let frontend: FrontendDeps | undefined;
+      const result = await startHub(config({ home: sandbox.home, privacy: true, terminal: terminalConfig }), (deps) => {
+        frontend = deps;
+        return createHttpFrontend(deps);
       });
-      const attachWritable = async (attachment: TerminalHttpResults["open"]) => {
-        const begin = await sse.waitFor(
-          (e) =>
-            e.event === "terminal" &&
-            e.data.attachmentId === attachment.attachmentId &&
-            e.data.event.kind === "replay_begin",
-        );
-        await post("ack", {
-          ...writer(attachment),
-          ack: {
-            phase: "replay_ready",
-            attemptId: begin.data.event.attemptId,
-            replayEpoch: begin.data.event.replayEpoch,
-            renderedThrough: begin.data.event.N0,
-          },
+      if ("exists" in result) throw new Error("unexpected singleton");
+      const hub = result;
+      cleanups.push(() => hub.close("test"));
+      const configFile = join(fixture.fixture.root, "agent.json");
+      await writeFile(configFile, JSON.stringify({ home: sandbox.home, fixture: fixture.fixture }), { mode: 0o600 });
+      const boot = new ProcessStartup();
+      const child = spawn(
+        process.execPath,
+        ["--import", "tsx", resolve("tests/integration/fixtures/terminal-agent.ts"), configFile],
+        { stdio: "pipe", env: { ...process.env, HOME: sandbox.home } },
+      );
+      boot.observe(child, "terminal agent");
+      let ready = false,
+        errors = "";
+      child.stdout.on("data", (data: Buffer) => {
+        ready ||= data.toString().includes("READY");
+      });
+      child.stderr.on("data", (data: Buffer) => {
+        errors = (errors + data.toString()).slice(-4096);
+      });
+      const exited = once(child, "exit");
+      cleanups.push(async () => {
+        child.stdin.end("STOP\n");
+        const deadline = setTimeout(() => child.kill("SIGKILL"), 6000);
+        deadline.unref();
+        await exited;
+        clearTimeout(deadline);
+      });
+      await boot.wait(
+        () => ready,
+        (value) => value,
+        "real child agent ready",
+      );
+      expect(child.exitCode, boot.diagnostic()).toBeNull();
+      expect(ready, boot.diagnostic()).toBe(true);
+      const view = frontend!.registry.list().find((v) => v.session?.sessionId === "child-terminal-session")!;
+      expect(view.agentId.pid).toBe(child.pid);
+      expect(child.pid).not.toBe(process.pid);
+      const cookie = await login(hub.httpPort, hub.paths.tokenFile);
+      const sse = await openSse(hub.httpPort, { cookie });
+      cleanups.push(() => sse.close());
+      const connection = await sse.waitFor((e) => e.event === "terminal_connection"),
+        hello = await sse.waitFor((e) => e.event === "hello");
+      const scope = {
+        agentKey: view.agentKey,
+        expect: { sessionId: view.session!.sessionId, epoch: view.epoch },
+        clientId: hello.data.clientId,
+        connectionInstance: connection.data.connectionInstance,
+        connectionToken: connection.data.connectionToken,
+      };
+      const headers = { Cookie: cookie, Origin: `http://127.0.0.1:${hub.httpPort}` };
+      const post = async (op: keyof TerminalHttpRequests, extra: object) => {
+        const response = await postJson(hub.httpPort, TERMINAL_HTTP_PATHS[op], { ...scope, ...extra }, headers);
+        expect(response.status, `${response.body}; op=${op}; agent=${errors}`).toBe(200);
+        return JSON.parse(response.body);
+      };
+      const root = join(hub.paths.stateDir, TERMINAL_LOCAL_DIR),
+        journalPath = join(root, TERMINAL_JOURNAL_FILE);
+      for (let round = 0; round < 4; round++) {
+        const prepared = await post("prepare", { cols: 80, rows: 24 });
+        const a = await post("open", {
+          openId: prepared.openId,
+          createTicket: prepared.createTicket,
+          tabId: "child-tab",
+          cols: 80,
+          rows: 24,
         });
-        return (
-          await sse.waitFor(
+        const attachWritable = async (attachment: TerminalHttpResults["open"]) => {
+          const begin = await sse.waitFor(
             (e) =>
               e.event === "terminal" &&
               e.data.attachmentId === attachment.attachmentId &&
-              e.data.event.kind === "cutover",
-          )
-        ).data.event.newLiveEpoch;
-      };
-      let epoch = await attachWritable(a);
-      const output = () =>
-        sse.events
-          .filter((e) => e.event === "terminal" && e.data.event.termId === a.termId && e.data.event.kind === "output")
-          .map((e) => Buffer.from(e.data.event.bytesB64, "base64").toString())
-          .join("");
-      await post("input", {
-        ...writer(a),
-        inputSeq: a.nextInputSeq,
-        inputKind: "user",
-        streamEpoch: epoch,
-        bytesB64: Buffer.from('printf "CHILD_PID=%s\\n" "$$"\n').toString("base64"),
-      });
-      await waitUntil(() => /CHILD_PID=\d+/.test(output()), 5000, "real cross-process shell echo");
-      const pid = Number(/CHILD_PID=(\d+)/.exec(output())![1]);
-      expect(pid).toBeGreaterThan(0);
-      await post("detach", writer(a));
-      const attached = await post("attach", {
-        termId: a.termId,
-        attachId: `child-attach-${round}`,
-        tabId: "child-tab",
-        cols: 80,
-        rows: 24,
-      });
-      epoch = await attachWritable(attached);
-      await post("input", {
-        ...writer(attached),
-        inputSeq: attached.nextInputSeq,
-        inputKind: "user",
-        streamEpoch: epoch,
-        bytesB64: Buffer.from('printf "REATTACHED=%s\\n" "$$"\n').toString("base64"),
-      });
-      await waitUntil(() => output().includes(`REATTACHED=${pid}`), 5000, "same PID after attach");
-      const beforeClose = JSON.parse(readFileSync(journalPath, "utf8")) as TerminalJournal;
-      expect(beforeClose.resources.some((row) => row.entry.identity.termId === a.termId)).toBe(true);
-      await post("close", { termId: a.termId, closeId: `child-close-${round}`, expectedRevision: attached.revision });
-      let stage = "durable resolve/prune";
-      try {
-        // Physical completion can take the production escalating-reaper budget (60s).
-        // A close/exit event is NOT a durable-release barrier: retain both journal
-        // assertions and the separate exact-receipt ACK assertion below.
-        await waitUntil(
-          () => {
-            const j = JSON.parse(readFileSync(journalPath, "utf8")) as TerminalJournal;
-            return j.revision >= beforeClose.revision + 2 && j.resources.length === 0;
-          },
-          TERMINAL_LIMITS.reapRetryMs,
-          "real cross-process durable resolution",
-        );
-        stage = "receipt ACK/delete";
-        await waitUntil(
-          () => readdirSync(join(root, "receipts")).length === 0,
-          5000,
-          "ACK deletes exact persisted receipt",
-        );
-      } catch (error) {
-        const journal = JSON.parse(readFileSync(journalPath, "utf8")) as TerminalJournal;
-        const receipts = readdirSync(join(root, "receipts")).map((file) => {
-          const receipt = JSON.parse(readFileSync(join(root, "receipts", file), "utf8"));
-          // Body-free physical diagnostics only; never print capabilities/nonces.
-          return { identity: receipt.identity, physical: receipt.physical };
-        });
-        const processState = existsSync(`/proc/${pid}/stat`) ? readFileSync(`/proc/${pid}/stat`, "utf8") : "gone";
-        throw new Error(
-          `${String(error)}; ${JSON.stringify({
-            stage,
-            round,
-            pid,
-            reaper: {
-              budgetMs: TERMINAL_LIMITS.reapRetryMs,
-              shell: processState,
-              managed: journal.resources
-                .flatMap((row) => row.entry.managed)
-                .map((identity) => {
-                  try {
-                    return { identity, stat: readFileSync(`/proc/${identity.pid}/stat`, "utf8") };
-                  } catch {
-                    return { identity, stat: "gone-or-unreadable" };
-                  }
-                }),
+              e.data.event.kind === "replay_begin",
+          );
+          await post("ack", {
+            ...writer(attachment),
+            ack: {
+              phase: "replay_ready",
+              attemptId: begin.data.event.attemptId,
+              replayEpoch: begin.data.event.replayEpoch,
+              renderedThrough: begin.data.event.N0,
             },
-            journal: { revision: journal.revision, resources: journal.resources },
-            receipts,
-            agentExit: child.exitCode,
-            agentDiagnostics: errors,
-            lifecycle: sse.events
-              .filter((e) => e.event === "terminal" && e.data.event.kind === "exit")
-              .map((e) => ({ kind: e.data.event.kind, reap: e.data.event.reap, reason: e.data.event.reason })),
-          })}`,
-        );
+          });
+          return (
+            await sse.waitFor(
+              (e) =>
+                e.event === "terminal" &&
+                e.data.attachmentId === attachment.attachmentId &&
+                e.data.event.kind === "cutover",
+            )
+          ).data.event.newLiveEpoch;
+        };
+        let epoch = await attachWritable(a);
+        const output = () =>
+          sse.events
+            .filter((e) => e.event === "terminal" && e.data.event.termId === a.termId && e.data.event.kind === "output")
+            .map((e) => Buffer.from(e.data.event.bytesB64, "base64").toString())
+            .join("");
+        await post("input", {
+          ...writer(a),
+          inputSeq: a.nextInputSeq,
+          inputKind: "user",
+          streamEpoch: epoch,
+          bytesB64: Buffer.from('printf "CHILD_PID=%s\\n" "$$"\n').toString("base64"),
+        });
+        await waitUntil(() => /CHILD_PID=\d+/.test(output()), 5000, "real cross-process shell echo");
+        const pid = Number(/CHILD_PID=(\d+)/.exec(output())![1]);
+        expect(pid).toBeGreaterThan(0);
+        await post("detach", writer(a));
+        const attached = await post("attach", {
+          termId: a.termId,
+          attachId: `child-attach-${round}`,
+          tabId: "child-tab",
+          cols: 80,
+          rows: 24,
+        });
+        epoch = await attachWritable(attached);
+        await post("input", {
+          ...writer(attached),
+          inputSeq: attached.nextInputSeq,
+          inputKind: "user",
+          streamEpoch: epoch,
+          bytesB64: Buffer.from('printf "REATTACHED=%s\\n" "$$"\n').toString("base64"),
+        });
+        await waitUntil(() => output().includes(`REATTACHED=${pid}`), 5000, "same PID after attach");
+        const beforeClose = JSON.parse(readFileSync(journalPath, "utf8")) as TerminalJournal;
+        expect(beforeClose.resources.some((row) => row.entry.identity.termId === a.termId)).toBe(true);
+        await post("close", { termId: a.termId, closeId: `child-close-${round}`, expectedRevision: attached.revision });
+        let stage = "durable resolve/prune";
+        try {
+          // Physical completion can take the production escalating-reaper budget (60s).
+          // A close/exit event is NOT a durable-release barrier: retain both journal
+          // assertions and the separate exact-receipt ACK assertion below.
+          await waitUntil(
+            () => {
+              const j = JSON.parse(readFileSync(journalPath, "utf8")) as TerminalJournal;
+              return j.revision >= beforeClose.revision + 2 && j.resources.length === 0;
+            },
+            TERMINAL_LIMITS.reapRetryMs,
+            "real cross-process durable resolution",
+          );
+          stage = "receipt ACK/delete";
+          await waitUntil(
+            () => readdirSync(join(root, "receipts")).length === 0,
+            5000,
+            "ACK deletes exact persisted receipt",
+          );
+        } catch (error) {
+          const journal = JSON.parse(readFileSync(journalPath, "utf8")) as TerminalJournal;
+          const receipts = readdirSync(join(root, "receipts")).map((file) => {
+            const receipt = JSON.parse(readFileSync(join(root, "receipts", file), "utf8"));
+            // Body-free physical diagnostics only; never print capabilities/nonces.
+            return { identity: receipt.identity, physical: receipt.physical };
+          });
+          const processState = existsSync(`/proc/${pid}/stat`) ? readFileSync(`/proc/${pid}/stat`, "utf8") : "gone";
+          throw new Error(
+            `${String(error)}; ${JSON.stringify({
+              stage,
+              round,
+              pid,
+              reaper: {
+                budgetMs: TERMINAL_LIMITS.reapRetryMs,
+                shell: processState,
+                managed: journal.resources
+                  .flatMap((row) => row.entry.managed)
+                  .map((identity) => {
+                    try {
+                      return { identity, stat: readFileSync(`/proc/${identity.pid}/stat`, "utf8") };
+                    } catch {
+                      return { identity, stat: "gone-or-unreadable" };
+                    }
+                  }),
+              },
+              journal: { revision: journal.revision, resources: journal.resources },
+              receipts,
+              agentExit: child.exitCode,
+              agentDiagnostics: errors,
+              lifecycle: sse.events
+                .filter((e) => e.event === "terminal" && e.data.event.kind === "exit")
+                .map((e) => ({ kind: e.data.event.kind, reap: e.data.event.reap, reason: e.data.event.reason })),
+            })}`,
+          );
+        }
+        expect(() => process.kill(pid, 0)).toThrow();
+        expect(sse.events.filter((e) => e.event === "terminal").every((e) => e.id === undefined)).toBe(true);
       }
-      expect(() => process.kill(pid, 0)).toThrow();
-      expect(sse.events.filter((e) => e.event === "terminal").every((e) => e.id === undefined)).toBe(true);
-    }
-    expect(await readdir(join(root, "authority"))).toHaveLength(1);
-  }, 300000);
+      expect(await readdir(join(root, "authority"))).toHaveLength(1);
+    },
+    startupBudget(1) + 270_000,
+  );
 });
 
 import { chmodSync, writeFileSync, unlinkSync, symlinkSync } from "node:fs";

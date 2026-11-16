@@ -1,5 +1,13 @@
 import { spawn, type ChildProcess } from "node:child_process";
 
+/** Per independent boot; ready/live share this budget, concurrent boots use the critical path. */
+export const PROCESS_STARTUP_MS = 30_000;
+/** Setup + post-ready protocol/exit allowance. Individual event limits are NOT changed. */
+export const STARTUP_MARGIN_MS = 30_000;
+export function startupBudget(serialBoots: number, perBootMs = PROCESS_STARTUP_MS): number {
+  return serialBoots * perBootMs;
+}
+
 /** Diagnostic hygiene for inherited-env children. Redact BEFORE applying the byte cap. */
 export function sanitizeDiagnostic(text: string): string {
   const clean = text
@@ -36,7 +44,7 @@ export class ProcessStartup {
   private readonly ended: Array<() => boolean> = [];
   private readonly diagnostics: Array<() => string> = [];
 
-  constructor(private readonly budgetMs = 30_000) {}
+  constructor(private readonly budgetMs = PROCESS_STARTUP_MS) {}
 
   observe(child: ChildProcess, label = "child"): ChildProcess {
     this.children.push(child);

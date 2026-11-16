@@ -25,7 +25,7 @@
  * deliberately relaxed vs the wire constants (L3's 12s bound asserted as ≤14s wall clock):
  * these are real schedulers, not fake timers.
  */
-import { ProcessStartup } from "./helpers/process-startup.js";
+import { ProcessStartup, startupBudget, STARTUP_MARGIN_MS } from "./helpers/process-startup.js";
 import {
   copyFileSync,
   existsSync,
@@ -203,6 +203,13 @@ function managedBoot(stateDir: string, spawnId: string): ProcessStartup {
   if (!boot) throw new Error(`missing test startup budget for ${spawnId}`);
   return boot;
 }
+async function waitManagedLive(stateDir: string, spawnId: string): Promise<void> {
+  await managedBoot(stateDir, spawnId).wait(
+    () => recordOf(stateDir, spawnId)?.state,
+    (state) => state === "live",
+    "managed child live before protocol observation",
+  );
+}
 afterEach(() => managedBoots.clear());
 
 let idCounter = 0;
@@ -345,302 +352,330 @@ describe.skipIf(!IS_LINUX || PLAN === undefined)("web-hub headless e2e — real 
     sandbox = undefined;
   });
 
-  it("HH7: history off (real main.ts hub) ⇒ caps/route/schema byte-identical to pre-feature; a history:true re-boot carries the cap and answers the list", async () => {
-    sandbox = sandboxHome();
-    let hub = await bootHub(sandbox.home);
-    const origin = `http://127.0.0.1:${hub.port}`;
-    const hdrs = { Cookie: hub.cookie, Origin: origin, "X-PWH": "1" };
+  it(
+    "HH7: history off (real main.ts hub) ⇒ caps/route/schema byte-identical to pre-feature; a history:true re-boot carries the cap and answers the list",
+    async () => {
+      sandbox = sandboxHome();
+      let hub = await bootHub(sandbox.home);
+      const origin = `http://127.0.0.1:${hub.port}`;
+      const hdrs = { Cookie: hub.cookie, Origin: origin, "X-PWH": "1" };
 
-    // caps: spawn.v1 present, spawn.history.v1 absent (the conditional tail's off shape)
-    const sse = await openSse(hub.port, { cookie: hub.cookie });
-    const hubEv = await sse.waitFor((e) => e.event === "hub", 15_000, "SSE hub frame");
-    const caps = (hubEv.data as { caps?: string[] }).caps ?? [];
-    expect(caps).toContain("spawn.v1");
-    expect(caps).not.toContain("spawn.history.v1");
-    sse.close();
+      // caps: spawn.v1 present, spawn.history.v1 absent (the conditional tail's off shape)
+      const sse = await openSse(hub.port, { cookie: hub.cookie });
+      const hubEv = await sse.waitFor((e) => e.event === "hub", 15_000, "SSE hub frame");
+      const caps = (hubEv.data as { caps?: string[] }).caps ?? [];
+      expect(caps).toContain("spawn.v1");
+      expect(caps).not.toContain("spawn.history.v1");
+      sse.close();
 
-    // route: GET /api/headless/history is BYTE-IDENTICAL to an unknown path (same status, body)
-    const histOff = await rawRequest(hub.port, { path: "/api/headless/history", headers: hdrs });
-    const unknown = await rawRequest(hub.port, { path: "/api/headless/zzz", headers: hdrs });
-    expect(histOff.status).toBe(unknown.status);
-    expect(histOff.body).toBe(unknown.body);
+      // route: GET /api/headless/history is BYTE-IDENTICAL to an unknown path (same status, body)
+      const histOff = await rawRequest(hub.port, { path: "/api/headless/history", headers: hdrs });
+      const unknown = await rawRequest(hub.port, { path: "/api/headless/zzz", headers: hdrs });
+      expect(histOff.status).toBe(unknown.status);
+      expect(histOff.body).toBe(unknown.body);
 
-    // schema: a `session` field is rejected exactly like any unknown field (parse without opts)
-    const cwd = projDir(sandbox.home, "hh7");
-    const withSession = await postJson(
-      hub.port,
-      "/api/headless",
-      { id: spawnReqId(), cwd, session: { key: "d/x.jsonl", id: "x", mode: "resume" } },
-      hdrs,
-    );
-    const withBogus = await postJson(hub.port, "/api/headless", { id: spawnReqId(), cwd, bogus: 1 }, hdrs);
-    expect(withSession.status).toBe(withBogus.status);
-    expect(withSession.body).toBe(withBogus.body);
-    expect(withSession.status).toBe(400);
+      // schema: a `session` field is rejected exactly like any unknown field (parse without opts)
+      const cwd = projDir(sandbox.home, "hh7");
+      const withSession = await postJson(
+        hub.port,
+        "/api/headless",
+        { id: spawnReqId(), cwd, session: { key: "d/x.jsonl", id: "x", mode: "resume" } },
+        hdrs,
+      );
+      const withBogus = await postJson(hub.port, "/api/headless", { id: spawnReqId(), cwd, bogus: 1 }, hdrs);
+      expect(withSession.status).toBe(withBogus.status);
+      expect(withSession.body).toBe(withBogus.body);
+      expect(withSession.status).toBe(400);
 
-    // re-boot with history:true — main.ts's strict parse accepts it; cap declared; list answers
-    kill9(hub.pid);
-    hubPids.delete(hub.pid);
-    await waitUntil(() => !pidAlive(hub.pid), 5_000, "off hub dead");
-    hub = await bootHub(sandbox.home, hub.pid, { history: true });
-    const hdrs2 = { Cookie: hub.cookie, Origin: `http://127.0.0.1:${hub.port}`, "X-PWH": "1" };
-    const sse2 = await openSse(hub.port, { cookie: hub.cookie });
-    const hubEv2 = await sse2.waitFor((e) => e.event === "hub", 15_000, "SSE hub frame (history on)");
-    const caps2 = (hubEv2.data as { caps?: string[] }).caps ?? [];
-    expect(caps2).toContain("spawn.history.v1");
-    sse2.close();
-    const list = await rawRequest(hub.port, { path: "/api/headless/history?kind=all", headers: hdrs2 });
-    expect(list.status).toBe(200);
-    const page = JSON.parse(list.body) as { items?: unknown[]; stats?: { enum?: { complete?: unknown } } };
-    expect(Array.isArray(page.items)).toBe(true);
-  }, 90_000);
+      // re-boot with history:true — main.ts's strict parse accepts it; cap declared; list answers
+      kill9(hub.pid);
+      hubPids.delete(hub.pid);
+      await waitUntil(() => !pidAlive(hub.pid), 5_000, "off hub dead");
+      hub = await bootHub(sandbox.home, hub.pid, { history: true });
+      const hdrs2 = { Cookie: hub.cookie, Origin: `http://127.0.0.1:${hub.port}`, "X-PWH": "1" };
+      const sse2 = await openSse(hub.port, { cookie: hub.cookie });
+      const hubEv2 = await sse2.waitFor((e) => e.event === "hub", 15_000, "SSE hub frame (history on)");
+      const caps2 = (hubEv2.data as { caps?: string[] }).caps ?? [];
+      expect(caps2).toContain("spawn.history.v1");
+      sse2.close();
+      const list = await rawRequest(hub.port, { path: "/api/headless/history?kind=all", headers: hdrs2 });
+      expect(list.status).toBe(200);
+      const page = JSON.parse(list.body) as { items?: unknown[]; stats?: { enum?: { complete?: unknown } } };
+      expect(Array.isArray(page.items)).toBe(true);
+    },
+    startupBudget(2, 15_000 * SLOW) + 65_000,
+  );
 
-  it("H1: hub SIGKILL ⇒ stdin-EOF-answering child exits ≤4s (the orderly shutdown lever)", async () => {
-    sandbox = sandboxHome();
-    const hub = await bootHub(sandbox.home);
-    const cwd = projDir(sandbox.home, "proj");
-    const accepted = await spawnFake(hub, cwd);
-    expect(accepted.state).toBe("starting");
-    const childPid = await waitPidOf(hub, accepted.spawnId);
-    kill9(hub.pid);
-    await waitPidGone(childPid, 4_000, "H1 child exits after hub kill -9 (stdin EOF)");
-  }, 40_000);
+  it(
+    "H1: hub SIGKILL ⇒ stdin-EOF-answering child exits ≤4s (the orderly shutdown lever)",
+    async () => {
+      sandbox = sandboxHome();
+      const hub = await bootHub(sandbox.home);
+      const cwd = projDir(sandbox.home, "proj");
+      const accepted = await spawnFake(hub, cwd);
+      expect(accepted.state).toBe("starting");
+      const childPid = await waitPidOf(hub, accepted.spawnId);
+      kill9(hub.pid);
+      await waitPidGone(childPid, 4_000, "H1 child exits after hub kill -9 (stdin EOF)");
+    },
+    startupBudget(1, 15_000 * SLOW) + 49_000,
+  );
 
-  it("H2: hub SIGKILL, ignore-eof child, no further hub ⇒ reaper ladder kills it ≤14s; reaper exits ≤11s (L2/L3)", async () => {
-    sandbox = sandboxHome();
-    const hub = await bootHub(sandbox.home);
-    const cwd = projDir(sandbox.home, "proj", ["--ignore-eof", "--ignore-term"]);
-    const accepted = await spawnFake(hub, cwd);
-    const childPid = await waitPidOf(hub, accepted.spawnId);
-    extraPids.add(childPid);
-    await waitUntil(() => findReaperPid(hub.pid) !== undefined, 8_000, "reaper child visible in /proc");
-    const reaperPid = findReaperPid(hub.pid)!;
+  it(
+    "H2: hub SIGKILL, ignore-eof child, no further hub ⇒ reaper ladder kills it ≤14s; reaper exits ≤11s (L2/L3)",
+    async () => {
+      sandbox = sandboxHome();
+      const hub = await bootHub(sandbox.home);
+      const cwd = projDir(sandbox.home, "proj", ["--ignore-eof", "--ignore-term"]);
+      const accepted = await spawnFake(hub, cwd);
+      const childPid = await waitPidOf(hub, accepted.spawnId);
+      extraPids.add(childPid);
+      await waitUntil(() => findReaperPid(hub.pid) !== undefined, 8_000, "reaper child visible in /proc");
+      const reaperPid = findReaperPid(hub.pid)!;
 
-    kill9(hub.pid);
-    hubPids.delete(hub.pid);
-    // no new hub is ever started for this home — the orphan must vanish via the reaper alone
-    await waitPidGone(childPid, 14_000, "H2 orphan gone ≤14s (5s grace + TERM + 3s + KILL + slack)");
-    await waitPidGone(reaperPid, 11_000, "H2 reaper itself exits ≤11s (10s hard cap + slack)");
-  }, 45_000);
+      kill9(hub.pid);
+      hubPids.delete(hub.pid);
+      // no new hub is ever started for this home — the orphan must vanish via the reaper alone
+      await waitPidGone(childPid, 14_000, "H2 orphan gone ≤14s (5s grace + TERM + 3s + KILL + slack)");
+      await waitPidGone(reaperPid, 11_000, "H2 reaper itself exits ≤11s (10s hard cap + slack)");
+    },
+    startupBudget(1, 15_000 * SLOW) + 78_000,
+  );
 
   // hub/comm.ts contract on real processes: the hub daemon and its reaper watchdog carry named
   // kernel comms (pi-webhub / pi-webhub-reap) while /proc/<pid>/cmdline stays byte-untouched —
   // `looksLikeHubArgv` (the agent-side restart fallback's stored-argv shape check) still accepts
   // the hub's cmdline, and the reaper is still locatable by its inline-script cmdline literal.
-  it("H10: process naming — named kernel comm, cmdline deliberately untouched", async () => {
-    sandbox = sandboxHome();
-    const hub = await bootHub(sandbox.home);
+  it(
+    "H10: process naming — named kernel comm, cmdline deliberately untouched",
+    async () => {
+      sandbox = sandboxHome();
+      const hub = await bootHub(sandbox.home);
 
-    const hubComm = readFileSync(`/proc/${hub.pid}/comm`, "utf8").trimEnd();
-    expect(hubComm).toBe("pi-webhub");
-    const hubArgv = parseCmdline(readFileSync(`/proc/${hub.pid}/cmdline`, "utf8"));
-    expect(hubArgv[0]).toContain("node");
-    expect(looksLikeHubArgv(hubArgv)).toBe(true);
+      const hubComm = readFileSync(`/proc/${hub.pid}/comm`, "utf8").trimEnd();
+      expect(hubComm).toBe("pi-webhub");
+      const hubArgv = parseCmdline(readFileSync(`/proc/${hub.pid}/cmdline`, "utf8"));
+      expect(hubArgv[0]).toContain("node");
+      expect(looksLikeHubArgv(hubArgv)).toBe(true);
 
-    await waitUntil(() => findReaperPid(hub.pid) !== undefined, 8_000, "reaper child visible in /proc");
-    const reaperPid = findReaperPid(hub.pid)!;
-    const reaperComm = readFileSync(`/proc/${reaperPid}/comm`, "utf8").trimEnd();
-    expect(reaperComm).toBe("pi-webhub-reap");
-    const reaperArgv = parseCmdline(readFileSync(`/proc/${reaperPid}/cmdline`, "utf8"));
-    expect(reaperArgv[0]).toContain("node");
-    expect(reaperArgv[1]).toBe("--disable-warning=ExperimentalWarning");
-    expect(reaperArgv[2]).toBe("-e");
-    expect(reaperArgv[3]).toContain("web-hub spawn reaper");
-    // history occupancy scan safety: none of the names is comm "pi" or node* (proc.ts classifies
-    // all three as "other")
-    for (const comm of [hubComm, reaperComm]) {
-      expect(comm).not.toBe("pi");
-      expect(comm.startsWith("node")).toBe(false);
-    }
-  }, 40_000);
+      await waitUntil(() => findReaperPid(hub.pid) !== undefined, 8_000, "reaper child visible in /proc");
+      const reaperPid = findReaperPid(hub.pid)!;
+      const reaperComm = readFileSync(`/proc/${reaperPid}/comm`, "utf8").trimEnd();
+      expect(reaperComm).toBe("pi-webhub-reap");
+      const reaperArgv = parseCmdline(readFileSync(`/proc/${reaperPid}/cmdline`, "utf8"));
+      expect(reaperArgv[0]).toContain("node");
+      expect(reaperArgv[1]).toBe("--disable-warning=ExperimentalWarning");
+      expect(reaperArgv[2]).toBe("-e");
+      expect(reaperArgv[3]).toContain("web-hub spawn reaper");
+      // history occupancy scan safety: none of the names is comm "pi" or node* (proc.ts classifies
+      // all three as "other")
+      for (const comm of [hubComm, reaperComm]) {
+        expect(comm).not.toBe("pi");
+        expect(comm.startsWith("node")).toBe(false);
+      }
+    },
+    startupBudget(1, 15_000 * SLOW) + 38_000,
+  );
 
-  it("H6 (flood/RSS cells): 50 MiB stderr flood ⇒ sink file capped, real hub process RSS growth <32 MiB", async () => {
-    sandbox = sandboxHome();
-    const hub = await bootHub(sandbox.home);
-    const cwd = projDir(sandbox.home, "flood", ["--stderr-flood", "50"]);
-    const vmRssKb = (): number => {
-      const status = readFileSync(`/proc/${hub.pid}/status`, "utf8");
-      const m = /VmRSS:\s+(\d+) kB/.exec(status);
-      if (m === null) throw new Error("no VmRSS in hub /proc status");
-      return Number(m[1]);
-    };
-    // Warmup first: a first 50 MiB burst grows V8's old space by ~30 MiB of pure allocator
-    // retention (the ~800 pipe-chunk buffers await an idle major GC that a quiet hub may not
-    // run for a long time) — that is Node behavior, not sink behavior. The gate's intent is
-    // BOUNDED sink memory, so the measurement is the marginal steady-state delta: warm the
-    // allocator with one small flood, settle, THEN measure the real 50 MiB pass against it.
-    const warmup = await spawnFake(hub, projDir(sandbox!.home, "warm", ["--stderr-flood", "10"]));
-    extraPids.add(await waitPidOf(hub, warmup.spawnId));
-    const warmSink = join(webHubSpawnFiles(hub.stateDir).logDir, `${warmup.spawnId}.stderr.log`);
-    await waitUntil(
-      () => existsSync(warmSink) && readFileSync(warmSink, "utf8").includes("[truncated "),
-      20_000,
-      "warmup flood absorbed",
-    );
-    await new Promise((r) => setTimeout(r, 2_000)); // let the hub settle after boot+warmup
-    const rssBeforeKb = vmRssKb();
-    const accepted = await spawnFake(hub, cwd);
-    const childPid = await waitPidOf(hub, accepted.spawnId);
-    extraPids.add(childPid);
-    const sinkFile = join(webHubSpawnFiles(hub.stateDir).logDir, `${accepted.spawnId}.stderr.log`);
-    // The sink STOPS writing at STDERR_FILE_MAX with a `[truncated N bytes]` marker — the
-    // fake's own trailing STDERR-FLOOD-DONE line can never land in the capped file, so the
-    // marker IS the "flood fully absorbed" signal.
-    await waitUntil(
-      () => existsSync(sinkFile) && readFileSync(sinkFile, "utf8").includes("[truncated "),
-      30_000,
-      "stderr flood absorbed (sink hit its file cap)",
-    );
-    expect(statSync(sinkFile).size).toBeLessThanOrEqual(STDERR_FILE_MAX + 1_024);
-    await new Promise((r) => setTimeout(r, 3_000));
-    expect(vmRssKb() - rssBeforeKb).toBeLessThan(32 * 1024);
-  }, 120_000);
+  it(
+    "H6 (flood/RSS cells): 50 MiB stderr flood ⇒ sink file capped, real hub process RSS growth <32 MiB",
+    async () => {
+      sandbox = sandboxHome();
+      const hub = await bootHub(sandbox.home);
+      const cwd = projDir(sandbox.home, "flood", ["--stderr-flood", "50"]);
+      const vmRssKb = (): number => {
+        const status = readFileSync(`/proc/${hub.pid}/status`, "utf8");
+        const m = /VmRSS:\s+(\d+) kB/.exec(status);
+        if (m === null) throw new Error("no VmRSS in hub /proc status");
+        return Number(m[1]);
+      };
+      // Warmup first: a first 50 MiB burst grows V8's old space by ~30 MiB of pure allocator
+      // retention (the ~800 pipe-chunk buffers await an idle major GC that a quiet hub may not
+      // run for a long time) — that is Node behavior, not sink behavior. The gate's intent is
+      // BOUNDED sink memory, so the measurement is the marginal steady-state delta: warm the
+      // allocator with one small flood, settle, THEN measure the real 50 MiB pass against it.
+      const warmup = await spawnFake(hub, projDir(sandbox!.home, "warm", ["--stderr-flood", "10"]));
+      extraPids.add(await waitPidOf(hub, warmup.spawnId));
+      const warmSink = join(webHubSpawnFiles(hub.stateDir).logDir, `${warmup.spawnId}.stderr.log`);
+      await waitUntil(
+        () => existsSync(warmSink) && readFileSync(warmSink, "utf8").includes("[truncated "),
+        20_000,
+        "warmup flood absorbed",
+      );
+      await new Promise((r) => setTimeout(r, 2_000)); // let the hub settle after boot+warmup
+      const rssBeforeKb = vmRssKb();
+      const accepted = await spawnFake(hub, cwd);
+      const childPid = await waitPidOf(hub, accepted.spawnId);
+      extraPids.add(childPid);
+      const sinkFile = join(webHubSpawnFiles(hub.stateDir).logDir, `${accepted.spawnId}.stderr.log`);
+      // The sink STOPS writing at STDERR_FILE_MAX with a `[truncated N bytes]` marker — the
+      // fake's own trailing STDERR-FLOOD-DONE line can never land in the capped file, so the
+      // marker IS the "flood fully absorbed" signal.
+      await waitUntil(
+        () => existsSync(sinkFile) && readFileSync(sinkFile, "utf8").includes("[truncated "),
+        30_000,
+        "stderr flood absorbed (sink hit its file cap)",
+      );
+      expect(statSync(sinkFile).size).toBeLessThanOrEqual(STDERR_FILE_MAX + 1_024);
+      await new Promise((r) => setTimeout(r, 3_000));
+      expect(vmRssKb() - rssBeforeKb).toBeLessThan(32 * 1024);
+    },
+    startupBudget(1, 15_000 * SLOW) + 115_000,
+  );
 
-  it("H3: hub+reaper both SIGKILL ⇒ next hub's boot recovery TERM→KILL, record exited{orphan}; corrupted starttime ⇒ no signal", async () => {
-    sandbox = sandboxHome();
-    // ---- round 1: healthy recovery --------------------------------------
-    let hub = await bootHub(sandbox.home);
-    const cwd = projDir(sandbox.home, "proj", ["--ignore-eof", "--ignore-term"]);
-    const accepted = await spawnFake(hub, cwd);
-    const childPid = await waitPidOf(hub, accepted.spawnId);
-    extraPids.add(childPid);
-    await waitUntil(() => findReaperPid(hub.pid) !== undefined, 8_000, "reaper visible");
-    const reaperPid = findReaperPid(hub.pid)!;
-    kill9(reaperPid);
-    kill9(hub.pid);
-    hubPids.delete(hub.pid);
-    await waitUntil(() => !pidAlive(hub.pid) && !pidAlive(reaperPid), 3_000, "hub+reaper dead");
-    expect(pidAlive(childPid)).toBe(true); // orphaned; its record stays non-terminal on disk
+  it(
+    "H3: hub+reaper both SIGKILL ⇒ next hub's boot recovery TERM→KILL, record exited{orphan}; corrupted starttime ⇒ no signal",
+    async () => {
+      sandbox = sandboxHome();
+      // ---- round 1: healthy recovery --------------------------------------
+      let hub = await bootHub(sandbox.home);
+      const cwd = projDir(sandbox.home, "proj", ["--ignore-eof", "--ignore-term"]);
+      const accepted = await spawnFake(hub, cwd);
+      const childPid = await waitPidOf(hub, accepted.spawnId);
+      extraPids.add(childPid);
+      await waitUntil(() => findReaperPid(hub.pid) !== undefined, 8_000, "reaper visible");
+      const reaperPid = findReaperPid(hub.pid)!;
+      kill9(reaperPid);
+      kill9(hub.pid);
+      hubPids.delete(hub.pid);
+      await waitUntil(() => !pidAlive(hub.pid) && !pidAlive(reaperPid), 3_000, "hub+reaper dead");
+      expect(pidAlive(childPid)).toBe(true); // orphaned; its record stays non-terminal on disk
 
-    hub = await bootHub(sandbox.home, hub.pid); // the new hub's init() owns the recovery
-    await waitUntil(
-      () => recordOf(hub.stateDir, accepted.spawnId)?.endReason === "orphan",
-      15_000,
-      "recovered record exited{orphan}",
-    );
-    await waitPidGone(childPid, 12_000, "H3 orphan killed by boot recovery (setImmediate TERM, +3s KILL)");
-    extraPids.delete(childPid);
-    expect(recordOf(hub.stateDir, accepted.spawnId)!.state).toBe("exited");
+      hub = await bootHub(sandbox.home, hub.pid); // the new hub's init() owns the recovery
+      await waitUntil(
+        () => recordOf(hub.stateDir, accepted.spawnId)?.endReason === "orphan",
+        15_000,
+        "recovered record exited{orphan}",
+      );
+      await waitPidGone(childPid, 12_000, "H3 orphan killed by boot recovery (setImmediate TERM, +3s KILL)");
+      extraPids.delete(childPid);
+      expect(recordOf(hub.stateDir, accepted.spawnId)!.state).toBe("exited");
 
-    // ---- round 2: corrupted starttime ⇒ L5 verify fails ⇒ NO signal ever ------------
-    const cwd2 = projDir(sandbox.home, "proj2", ["--ignore-eof", "--ignore-term"]);
-    const accepted2 = await spawnFake(hub, cwd2);
-    const child2 = await waitPidOf(hub, accepted2.spawnId);
-    extraPids.add(child2);
-    await waitUntil(() => findReaperPid(hub.pid) !== undefined, 8_000, "reaper 2 visible");
-    const reaper2 = findReaperPid(hub.pid)!;
-    kill9(reaper2);
-    kill9(hub.pid);
-    hubPids.delete(hub.pid);
-    await waitUntil(() => !pidAlive(hub.pid), 3_000, "hub 2 dead");
-    // corrupt the persisted starttime while nobody owns the file
-    const spawnsFile = webHubSpawnFiles(hub.stateDir).spawnsJson;
-    const raw = JSON.parse(readFileSync(spawnsFile, "utf8")) as { records?: StoredRecord[]; writer?: unknown };
-    const rec2 = (raw.records ?? []).find((r) => r.spawnId === accepted2.spawnId);
-    expect(rec2?.procStartTicks).toBeDefined();
-    rec2!.procStartTicks = (rec2!.procStartTicks ?? 0) + 40;
-    writeFileSync(spawnsFile, JSON.stringify(raw));
+      // ---- round 2: corrupted starttime ⇒ L5 verify fails ⇒ NO signal ever ------------
+      const cwd2 = projDir(sandbox.home, "proj2", ["--ignore-eof", "--ignore-term"]);
+      const accepted2 = await spawnFake(hub, cwd2);
+      const child2 = await waitPidOf(hub, accepted2.spawnId);
+      extraPids.add(child2);
+      await waitUntil(() => findReaperPid(hub.pid) !== undefined, 8_000, "reaper 2 visible");
+      const reaper2 = findReaperPid(hub.pid)!;
+      kill9(reaper2);
+      kill9(hub.pid);
+      hubPids.delete(hub.pid);
+      await waitUntil(() => !pidAlive(hub.pid), 3_000, "hub 2 dead");
+      // corrupt the persisted starttime while nobody owns the file
+      const spawnsFile = webHubSpawnFiles(hub.stateDir).spawnsJson;
+      const raw = JSON.parse(readFileSync(spawnsFile, "utf8")) as { records?: StoredRecord[]; writer?: unknown };
+      const rec2 = (raw.records ?? []).find((r) => r.spawnId === accepted2.spawnId);
+      expect(rec2?.procStartTicks).toBeDefined();
+      rec2!.procStartTicks = (rec2!.procStartTicks ?? 0) + 40;
+      writeFileSync(spawnsFile, JSON.stringify(raw));
 
-    const hub3 = await bootHub(sandbox.home, hub.pid);
-    await waitUntil(
-      () => recordOf(hub3.stateDir, accepted2.spawnId)?.endReason === "orphan",
-      15_000,
-      "corrupt round also finalizes the record (terminal without any signal)",
-    );
-    await new Promise((r) => setTimeout(r, 5_000)); // a mis-sent TERM would have landed by now
-    expect(pidAlive(child2)).toBe(true); // L5: wrong starttime ⇒ no signal, process untouched
-  }, 90_000);
+      const hub3 = await bootHub(sandbox.home, hub.pid);
+      await waitUntil(
+        () => recordOf(hub3.stateDir, accepted2.spawnId)?.endReason === "orphan",
+        15_000,
+        "corrupt round also finalizes the record (terminal without any signal)",
+      );
+      await new Promise((r) => setTimeout(r, 5_000)); // a mis-sent TERM would have landed by now
+      expect(pidAlive(child2)).toBe(true); // L5: wrong starttime ⇒ no signal, process untouched
+    },
+    startupBudget(3, 15_000 * SLOW) + 129_000,
+  );
 
-  it("web-hub-delete-session plan v2 §7.3-4 (A9): live managed session remove() persists removeIntent → hub SIGKILL → next hub's boot recovery (TERM→KILL) + the §2.6 reconciliation timer confirm-delete it; the session jsonl is never touched", async () => {
-    sandbox = sandboxHome();
-    const hub = await bootHub(sandbox.home);
-    // ignore-eof + ignore-term: the child must still be ALIVE the instant we SIGKILL the hub
-    // (otherwise a plain stdin-EOF exit would race the crash and prove nothing about recovery).
-    const cwd = projDir(sandbox.home, "proj", ["--ignore-eof", "--ignore-term"]);
-    const accepted = await spawnFake(hub, cwd);
-    const childPid = await waitPidOf(hub, accepted.spawnId);
-    extraPids.add(childPid);
+  it(
+    "web-hub-delete-session plan v2 §7.3-4 (A9): live managed session remove() persists removeIntent → hub SIGKILL → next hub's boot recovery (TERM→KILL) + the §2.6 reconciliation timer confirm-delete it; the session jsonl is never touched",
+    async () => {
+      sandbox = sandboxHome();
+      const hub = await bootHub(sandbox.home);
+      // ignore-eof + ignore-term: the child must still be ALIVE the instant we SIGKILL the hub
+      // (otherwise a plain stdin-EOF exit would race the crash and prove nothing about recovery).
+      const cwd = projDir(sandbox.home, "proj", ["--ignore-eof", "--ignore-term"]);
+      const accepted = await spawnFake(hub, cwd);
+      const childPid = await waitPidOf(hub, accepted.spawnId);
+      extraPids.add(childPid);
 
-    // A real `pi` would own a session transcript under `<home>/.pi/agent/sessions/*.jsonl`;
-    // fake-pi speaks no session protocol and writes none, so a sentinel file stands in for it —
-    // the point is proving the WHOLE delete+recovery pipeline never touches anything outside
-    // `spawns.json`, not re-deriving pi's own session-file naming scheme.
-    const sessionsDir = join(sandbox.home, ".pi", "agent", "sessions");
-    mkdirSync(sessionsDir, { recursive: true });
-    const jsonlFile = join(sessionsDir, "dummy-session.jsonl");
-    const jsonlSentinel = `{"sentinel":"${Date.now().toString(36)}"}\n`;
-    writeFileSync(jsonlFile, jsonlSentinel);
+      // A real `pi` would own a session transcript under `<home>/.pi/agent/sessions/*.jsonl`;
+      // fake-pi speaks no session protocol and writes none, so a sentinel file stands in for it —
+      // the point is proving the WHOLE delete+recovery pipeline never touches anything outside
+      // `spawns.json`, not re-deriving pi's own session-file naming scheme.
+      const sessionsDir = join(sandbox.home, ".pi", "agent", "sessions");
+      mkdirSync(sessionsDir, { recursive: true });
+      const jsonlFile = join(sessionsDir, "dummy-session.jsonl");
+      const jsonlSentinel = `{"sentinel":"${Date.now().toString(36)}"}\n`;
+      writeFileSync(jsonlFile, jsonlSentinel);
 
-    // live: hello+session negotiate normally (only EOF/TERM are ignored)
-    await managedBoot(hub.stateDir, accepted.spawnId).wait(
-      () => recordOf(hub.stateDir, accepted.spawnId)?.state,
-      (state) => state === "live",
-      "managed child live",
-    );
+      // live: hello+session negotiate normally (only EOF/TERM are ignored)
+      await managedBoot(hub.stateDir, accepted.spawnId).wait(
+        () => recordOf(hub.stateDir, accepted.spawnId)?.state,
+        (state) => state === "live",
+        "managed child live",
+      );
 
-    const ownerRes = await rawRequest(hub.port, {
-      path: "/api/headless",
-      headers: { Cookie: hub.cookie, "X-PWH": "1" },
-    });
-    expect(ownerRes.status).toBe(200);
-    const owner = JSON.parse(ownerRes.body) as { items: SpawnRecordOwner[] };
-    const agentKey = owner.items.find((i) => i.spawnId === accepted.spawnId)?.agentKey;
-    expect(agentKey).toBeDefined();
+      const ownerRes = await rawRequest(hub.port, {
+        path: "/api/headless",
+        headers: { Cookie: hub.cookie, "X-PWH": "1" },
+      });
+      expect(ownerRes.status).toBe(200);
+      const owner = JSON.parse(ownerRes.body) as { items: SpawnRecordOwner[] };
+      const agentKey = owner.items.find((i) => i.spawnId === accepted.spawnId)?.agentKey;
+      expect(agentKey).toBeDefined();
 
-    const rm = await postJson(
-      hub.port,
-      "/api/agents/remove",
-      { agentKey },
-      { Cookie: hub.cookie, Origin: `http://127.0.0.1:${hub.port}` },
-    );
-    expect(rm.status).toBe(202);
-    expect(JSON.parse(rm.body)).toMatchObject({ removed: false, pending: true, state: "stopping" });
+      const rm = await postJson(
+        hub.port,
+        "/api/agents/remove",
+        { agentKey },
+        { Cookie: hub.cookie, Origin: `http://127.0.0.1:${hub.port}` },
+      );
+      expect(rm.status).toBe(202);
+      expect(JSON.parse(rm.body)).toMatchObject({ removed: false, pending: true, state: "stopping" });
 
-    // §2.2 L1 discipline: the remove intent is synced to spawns.json BEFORE anything else, so it
-    // survives a crash landing anywhere after the 202.
-    await waitUntil(
-      () => recordOf(hub.stateDir, accepted.spawnId)?.state === "stopping",
-      5_000,
-      "record entered stopping",
-    );
-    const spawnsFile = webHubSpawnFiles(hub.stateDir).spawnsJson;
-    const onDiskBeforeKill = JSON.parse(readFileSync(spawnsFile, "utf8")) as {
-      records?: Array<Record<string, unknown>>;
-    };
-    const recBeforeKill = (onDiskBeforeKill.records ?? []).find((r) => r["spawnId"] === accepted.spawnId);
-    expect(recBeforeKill?.["removeIntent"]).toBe(true);
-    expect(pidAlive(childPid)).toBe(true); // ignore-eof/ignore-term: still alive, deletion only pending
+      // §2.2 L1 discipline: the remove intent is synced to spawns.json BEFORE anything else, so it
+      // survives a crash landing anywhere after the 202.
+      await waitUntil(
+        () => recordOf(hub.stateDir, accepted.spawnId)?.state === "stopping",
+        5_000,
+        "record entered stopping",
+      );
+      const spawnsFile = webHubSpawnFiles(hub.stateDir).spawnsJson;
+      const onDiskBeforeKill = JSON.parse(readFileSync(spawnsFile, "utf8")) as {
+        records?: Array<Record<string, unknown>>;
+      };
+      const recBeforeKill = (onDiskBeforeKill.records ?? []).find((r) => r["spawnId"] === accepted.spawnId);
+      expect(recBeforeKill?.["removeIntent"]).toBe(true);
+      expect(pidAlive(childPid)).toBe(true); // ignore-eof/ignore-term: still alive, deletion only pending
 
-    // crash the hub mid-delete — the intent is already on disk, the child is still orphaned-alive
-    kill9(hub.pid);
-    hubPids.delete(hub.pid);
-    await waitUntil(() => !pidAlive(hub.pid), 3_000, "hub dead");
-    expect(pidAlive(childPid)).toBe(true); // orphaned, not yet reaped
+      // crash the hub mid-delete — the intent is already on disk, the child is still orphaned-alive
+      kill9(hub.pid);
+      hubPids.delete(hub.pid);
+      await waitUntil(() => !pidAlive(hub.pid), 3_000, "hub dead");
+      expect(pidAlive(childPid)).toBe(true); // orphaned, not yet reaped
 
-    // the next hub's init() owns the recovery: boot-recovery TERM→KILL (same ladder as H3) kills
-    // the orphan, and the §2.6 reconciliation timer (RECOVER_KILL_AFTER_MS + EXIT_GUARD_MS ≈ 8s
-    // after boot) deletes the now-confirmed-dead record once probeIdentity sees it gone.
-    const hub2 = await bootHub(sandbox.home, hub.pid);
-    await waitPidGone(childPid, 14_000, "§7.3-4 orphan killed by boot recovery (setImmediate TERM, +3s KILL)");
-    extraPids.delete(childPid);
-    await waitUntil(
-      () => recordOf(hub2.stateDir, accepted.spawnId) === undefined,
-      15_000,
-      "§2.6 reconciliation timer deleted the confirmed-dead record",
-    );
+      // the next hub's init() owns the recovery: boot-recovery TERM→KILL (same ladder as H3) kills
+      // the orphan, and the §2.6 reconciliation timer (RECOVER_KILL_AFTER_MS + EXIT_GUARD_MS ≈ 8s
+      // after boot) deletes the now-confirmed-dead record once probeIdentity sees it gone.
+      const hub2 = await bootHub(sandbox.home, hub.pid);
+      await waitPidGone(childPid, 14_000, "§7.3-4 orphan killed by boot recovery (setImmediate TERM, +3s KILL)");
+      extraPids.delete(childPid);
+      await waitUntil(
+        () => recordOf(hub2.stateDir, accepted.spawnId) === undefined,
+        15_000,
+        "§2.6 reconciliation timer deleted the confirmed-dead record",
+      );
 
-    // the new hub's own card/record listing never carries the deleted session
-    const after = await rawRequest(hub2.port, {
-      path: "/api/headless",
-      headers: { Cookie: hub2.cookie, "X-PWH": "1" },
-    });
-    const afterBody = JSON.parse(after.body) as { items: SpawnRecordOwner[] };
-    expect(afterBody.items.find((i) => i.spawnId === accepted.spawnId)).toBeUndefined();
+      // the new hub's own card/record listing never carries the deleted session
+      const after = await rawRequest(hub2.port, {
+        path: "/api/headless",
+        headers: { Cookie: hub2.cookie, "X-PWH": "1" },
+      });
+      const afterBody = JSON.parse(after.body) as { items: SpawnRecordOwner[] };
+      expect(afterBody.items.find((i) => i.spawnId === accepted.spawnId)).toBeUndefined();
 
-    // B-alive/B-stream were exercised above; the session jsonl — the one file the whole feature
-    // is forbidden from ever touching — is byte-identical to what it was before any of this ran.
-    expect(readFileSync(jsonlFile, "utf8")).toBe(jsonlSentinel);
-  }, 60_000);
+      // B-alive/B-stream were exercised above; the session jsonl — the one file the whole feature
+      // is forbidden from ever touching — is byte-identical to what it was before any of this ran.
+      expect(readFileSync(jsonlFile, "utf8")).toBe(jsonlSentinel);
+    },
+    startupBudget(2, 15_000 * SLOW) + startupBudget(1) + 65_000,
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -822,68 +857,74 @@ describe.skipIf(!IS_LINUX)("web-hub headless e2e — real assembly × real fake-
     return pid;
   }
 
-  it("closure: POST → 202/record → fork → hello/session → live → SSE spawns sequence → first prompt delivered once → stop → exited{user}", async () => {
-    const h = await bringUp();
-    const cwd = projDir(sandbox!.home, "proj", ["--cmd-echo"]);
-    const sse = await openSse(h.port, { cookie: h.cookie });
-    sseConns.push(sse);
-    await sse.waitFor((e) => e.event === "hello");
+  it(
+    "closure: POST → 202/record → fork → hello/session → live → SSE spawns sequence → first prompt delivered once → stop → exited{user}",
+    async () => {
+      const h = await bringUp();
+      const cwd = projDir(sandbox!.home, "proj", ["--cmd-echo"]);
+      const sse = await openSse(h.port, { cookie: h.cookie });
+      sseConns.push(sse);
+      await sse.waitFor((e) => e.event === "hello");
 
-    const secret = `SECRETFP-${Date.now().toString(36)}`;
-    const accepted = await spawnOverHttp(h, cwd, {
-      firstPrompt: { text: `please echo ${secret}`, deliver: "followUp" },
-    });
-    expect(accepted.state).toBe("starting");
+      const secret = `SECRETFP-${Date.now().toString(36)}`;
+      const accepted = await spawnOverHttp(h, cwd, {
+        firstPrompt: { text: `please echo ${secret}`, deliver: "followUp" },
+      });
+      expect(accepted.state).toBe("starting");
 
-    // SSE pushes: starting … live for THIS spawnId; payload is the Public projection only
-    await sse.waitFor(
-      (e) =>
-        e.event === "spawns" &&
-        ((e.data as SpawnsPayload).items ?? []).some((i) => i.spawnId === accepted.spawnId && i.state === "live"),
-      15_000,
-    );
-    const spawnsEvents = sse.events.filter((e) => e.event === "spawns");
-    const states = spawnsEvents
-      .flatMap((e) => (e.data as SpawnsPayload).items ?? [])
-      .filter((i) => i.spawnId === accepted.spawnId)
-      .map((i) => i.state);
-    expect(states).toContain("starting");
-    expect(states).toContain("live");
-    for (const e of spawnsEvents) {
-      expect(JSON.stringify(e.data)).not.toContain(secret);
-      expect(JSON.stringify(e.data)).not.toContain('"cwd"');
-    }
+      await waitManagedLive(h.stateDir, accepted.spawnId);
 
-    // first prompt: exactly one fp_<spawnId> cmd reached the child over the agent socket
-    await waitUntil(
-      () => stderrLog(h.stateDir, accepted.spawnId).includes(`CMD fp_${accepted.spawnId}`),
-      15_000,
-      "fp cmd reached the child",
-    );
-    await waitRecord(h.stateDir, accepted.spawnId, (r) => r.firstPrompt?.state === "delivered", 10_000, "delivered");
-    const log = stderrLog(h.stateDir, accepted.spawnId);
-    expect(log.split(`CMD fp_${accepted.spawnId}`).length - 1).toBe(1);
-    expect(log).toContain("FAKE-PI pid=");
-    expect(log).toContain("umask=0o022"); // children inherit the USER's umask, not the hub's 0o077
-    await trackChild(h, accepted.spawnId);
+      // SSE pushes: starting … live for THIS spawnId; payload is the Public projection only
+      await sse.waitFor(
+        (e) =>
+          e.event === "spawns" &&
+          ((e.data as SpawnsPayload).items ?? []).some((i) => i.spawnId === accepted.spawnId && i.state === "live"),
+        15_000,
+      );
+      const spawnsEvents = sse.events.filter((e) => e.event === "spawns");
+      const states = spawnsEvents
+        .flatMap((e) => (e.data as SpawnsPayload).items ?? [])
+        .filter((i) => i.spawnId === accepted.spawnId)
+        .map((i) => i.state);
+      expect(states).toContain("starting");
+      expect(states).toContain("live");
+      for (const e of spawnsEvents) {
+        expect(JSON.stringify(e.data)).not.toContain(secret);
+        expect(JSON.stringify(e.data)).not.toContain('"cwd"');
+      }
 
-    // owner GET: loopback sees owner fields; the first-prompt text never rides any GET
-    const owner = await getHeadless(h.port, h.cookie);
-    const mine = owner.items.find((i) => i.spawnId === accepted.spawnId)!;
-    expect(mine.cwd).toBe(cwd);
-    expect(JSON.stringify(mine)).not.toContain(secret);
+      // first prompt: exactly one fp_<spawnId> cmd reached the child over the agent socket
+      await waitUntil(
+        () => stderrLog(h.stateDir, accepted.spawnId).includes(`CMD fp_${accepted.spawnId}`),
+        15_000,
+        "fp cmd reached the child",
+      );
+      await waitRecord(h.stateDir, accepted.spawnId, (r) => r.firstPrompt?.state === "delivered", 10_000, "delivered");
+      const log = stderrLog(h.stateDir, accepted.spawnId);
+      expect(log.split(`CMD fp_${accepted.spawnId}`).length - 1).toBe(1);
+      expect(log).toContain("FAKE-PI pid=");
+      expect(log).toContain("umask=0o022"); // children inherit the USER's umask, not the hub's 0o077
+      await trackChild(h, accepted.spawnId);
 
-    // stop → exited{user}; the fake answers EOF instantly
-    expect(await stopSpawn(h, accepted.spawnId)).toBe(202);
-    const final = await waitRecord(
-      h.stateDir,
-      accepted.spawnId,
-      (r) => r.state === "exited",
-      10_000,
-      "exited after stop",
-    );
-    expect(final.endReason).toBe("user");
-  }, 60_000);
+      // owner GET: loopback sees owner fields; the first-prompt text never rides any GET
+      const owner = await getHeadless(h.port, h.cookie);
+      const mine = owner.items.find((i) => i.spawnId === accepted.spawnId)!;
+      expect(mine.cwd).toBe(cwd);
+      expect(JSON.stringify(mine)).not.toContain(secret);
+
+      // stop → exited{user}; the fake answers EOF instantly
+      expect(await stopSpawn(h, accepted.spawnId)).toBe(202);
+      const final = await waitRecord(
+        h.stateDir,
+        accepted.spawnId,
+        (r) => r.state === "exited",
+        10_000,
+        "exited after stop",
+      );
+      expect(final.endReason).toBe("user");
+    },
+    startupBudget(1) + 60_000,
+  );
 
   it("dup replay: same id + same intent ⇒ 202 with dup:true, exactly one record", async () => {
     const h = await bringUp();
@@ -904,22 +945,27 @@ describe.skipIf(!IS_LINUX)("web-hub headless e2e — real assembly × real fake-
     await trackChild(h, spawnId);
   }, 30_000);
 
-  it("browser-off delivery: no SSE at all ⇒ snapshot still shows delivered (delivery is hub-side)", async () => {
-    const h = await bringUp();
-    const cwd = projDir(sandbox!.home, "proj", ["--cmd-echo"]);
-    const accepted = await spawnOverHttp(h, cwd, { firstPrompt: { text: "hello there", deliver: "followUp" } });
-    await waitRecord(
-      h.stateDir,
-      accepted.spawnId,
-      (r) => r.firstPrompt?.state === "delivered",
-      15_000,
-      "delivered w/o browser",
-    );
-    await trackChild(h, accepted.spawnId);
-    const snap = await getHeadless(h.port, h.cookie);
-    const mine = snap.items.find((i) => i.spawnId === accepted.spawnId)!;
-    expect(mine.firstPrompt?.state).toBe("delivered");
-  }, 30_000);
+  it(
+    "browser-off delivery: no SSE at all ⇒ snapshot still shows delivered (delivery is hub-side)",
+    async () => {
+      const h = await bringUp();
+      const cwd = projDir(sandbox!.home, "proj", ["--cmd-echo"]);
+      const accepted = await spawnOverHttp(h, cwd, { firstPrompt: { text: "hello there", deliver: "followUp" } });
+      await waitManagedLive(h.stateDir, accepted.spawnId);
+      await waitRecord(
+        h.stateDir,
+        accepted.spawnId,
+        (r) => r.firstPrompt?.state === "delivered",
+        15_000,
+        "delivered w/o browser",
+      );
+      await trackChild(h, accepted.spawnId);
+      const snap = await getHeadless(h.port, h.cookie);
+      const mine = snap.items.find((i) => i.spawnId === accepted.spawnId)!;
+      expect(mine.firstPrompt?.state).toBe("delivered");
+    },
+    startupBudget(1) + STARTUP_MARGIN_MS,
+  );
 
   it("--no-hello ⇒ failed{register_timeout} + hint register-timeout-hello", async () => {
     const h = await bringUp((home) => procSpawnCfg({ roots: [home], registerTimeoutS: 2 }));
@@ -938,39 +984,43 @@ describe.skipIf(!IS_LINUX)("web-hub headless e2e — real assembly × real fake-
     return postJson(h.port, "/api/agents/remove", body, { Cookie: h.cookie, Origin: originOf(h.port) });
   }
 
-  it("§7.3-1 (A4): live managed session remove(agentKey) → 202 pending → confirmed exit → removed; spawns.json loses the record; the hub keeps serving", async () => {
-    const h = await bringUp();
-    const cwd = projDir(sandbox!.home, "proj", ["--cmd-echo"]);
-    const sse = await openSse(h.port, { cookie: h.cookie });
-    sseConns.push(sse);
-    await sse.waitFor((e) => e.event === "hello");
-    const accepted = await spawnOverHttp(h, cwd);
-    await managedBoot(h.stateDir, accepted.spawnId).wait(
-      () => recordOf(h.stateDir, accepted.spawnId)?.state,
-      (state) => state === "live",
-      "managed child live",
-    );
-    const pid = await trackChild(h, accepted.spawnId);
-    const owner = await getHeadless(h.port, h.cookie);
-    const mine = owner.items.find((i) => i.spawnId === accepted.spawnId)!;
-    const agentKey = mine.agentKey!;
-    expect(agentKey).toBeDefined();
+  it(
+    "§7.3-1 (A4): live managed session remove(agentKey) → 202 pending → confirmed exit → removed; spawns.json loses the record; the hub keeps serving",
+    async () => {
+      const h = await bringUp();
+      const cwd = projDir(sandbox!.home, "proj", ["--cmd-echo"]);
+      const sse = await openSse(h.port, { cookie: h.cookie });
+      sseConns.push(sse);
+      await sse.waitFor((e) => e.event === "hello");
+      const accepted = await spawnOverHttp(h, cwd);
+      await managedBoot(h.stateDir, accepted.spawnId).wait(
+        () => recordOf(h.stateDir, accepted.spawnId)?.state,
+        (state) => state === "live",
+        "managed child live",
+      );
+      const pid = await trackChild(h, accepted.spawnId);
+      const owner = await getHeadless(h.port, h.cookie);
+      const mine = owner.items.find((i) => i.spawnId === accepted.spawnId)!;
+      const agentKey = mine.agentKey!;
+      expect(agentKey).toBeDefined();
 
-    const res = await removeOverHttp(h, { agentKey });
-    expect(res.status).toBe(202);
-    expect(JSON.parse(res.body)).toMatchObject({ removed: false, pending: true, state: "stopping" });
+      const res = await removeOverHttp(h, { agentKey });
+      expect(res.status).toBe(202);
+      expect(JSON.parse(res.body)).toMatchObject({ removed: false, pending: true, state: "stopping" });
 
-    // B-stream: the hub broadcasts agent_removed once death is confirmed (stdin EOF ⇒ the fake
-    // exits promptly, so this settles well inside the escalation ladder's first stage).
-    await sse.waitFor((e) => e.event === "agent_removed" && e.data.agentKey === agentKey, 15_000);
-    await waitPidGone(pid, 15_000, "removed child exited");
-    await waitUntil(() => recordOf(h.stateDir, accepted.spawnId) === undefined, 15_000, "spawns.json record gone");
+      // B-stream: the hub broadcasts agent_removed once death is confirmed (stdin EOF ⇒ the fake
+      // exits promptly, so this settles well inside the escalation ladder's first stage).
+      await sse.waitFor((e) => e.event === "agent_removed" && e.data.agentKey === agentKey, 15_000);
+      await waitPidGone(pid, 15_000, "removed child exited");
+      await waitUntil(() => recordOf(h.stateDir, accepted.spawnId) === undefined, 15_000, "spawns.json record gone");
 
-    // the hub itself is unharmed — GET reflects the deletion, no crash
-    const after = await getHeadless(h.port, h.cookie);
-    expect(after.status).toBe(200);
-    expect(after.items.find((i) => i.spawnId === accepted.spawnId)).toBeUndefined();
-  }, 30_000);
+      // the hub itself is unharmed — GET reflects the deletion, no crash
+      const after = await getHeadless(h.port, h.cookie);
+      expect(after.status).toBe(200);
+      expect(after.items.find((i) => i.spawnId === accepted.spawnId)).toBeUndefined();
+    },
+    startupBudget(1) + STARTUP_MARGIN_MS,
+  );
 
   it("§7.3-2 (A5): starting-phase (no hello yet) remove(spawnId) → 202 pending → the child is stopped → record deleted", async () => {
     const h = await bringUp((home) => procSpawnCfg({ roots: [home], registerTimeoutS: 30 }));
@@ -1025,50 +1075,55 @@ describe.skipIf(!IS_LINUX)("web-hub headless e2e — real assembly × real fake-
     expect(readSpawnsJson(h.stateDir)).toHaveLength(0); // no new record of any spawnId appeared
   }, 30_000);
 
-  it("H5: 1 MiB ui lines answered cancelled from the head ≤1.5s; bad head ⇒ failed{protocol_error} and the child is stopped", async () => {
-    const h = await bringUp();
-    const cwd = projDir(sandbox!.home, "proj");
-    for (const method of ["select", "confirm", "editor"] as const) {
-      const dir = projDir(sandbox!.home, `huge-${method}`, [`--emit-ui-huge`, method]);
-      const accepted = await spawnOverHttp(h, dir);
-      await waitUntil(
-        () => {
-          const log = stderrLog(h.stateDir, accepted.spawnId);
-          return log.includes(`UI-SENT ui-huge-${method}-`) && log.includes(`UI-RESP ui-huge-${method}-`);
-        },
-        15_000,
-        `huge ${method} answered`,
-      );
-      const log = stderrLog(h.stateDir, accepted.spawnId);
-      const sent = new RegExp(`UI-SENT (ui-huge-${method}-\\S+) (\\d+)`).exec(log)!;
-      const resp = new RegExp(`UI-RESP ${sent[1]} cancelled=(\\S+) (\\d+) (\\d+)`).exec(log)!;
-      expect(resp[1]).toBe("true");
-      const latency = Number(resp[2]) - Number(resp[3]);
-      expect(latency).toBeGreaterThanOrEqual(0);
-      expect(latency).toBeLessThanOrEqual(1_500); // answered from the ≤512B head, not the 1 MiB line
-      // the session CONTINUES: record reaches live and stays there until we stop it
-      await waitRecord(h.stateDir, accepted.spawnId, (r) => r.state === "live", 10_000, "still live after huge ui");
-      await trackChild(h, accepted.spawnId);
-      expect(await stopSpawn(h, accepted.spawnId)).toBe(202);
-      await waitRecord(h.stateDir, accepted.spawnId, (r) => r.state === "exited", 10_000, "stopped");
-      void cwd;
-    }
+  it(
+    "H5: 1 MiB ui lines answered cancelled from the head ≤1.5s; bad head ⇒ failed{protocol_error} and the child is stopped",
+    async () => {
+      const h = await bringUp();
+      const cwd = projDir(sandbox!.home, "proj");
+      for (const method of ["select", "confirm", "editor"] as const) {
+        const dir = projDir(sandbox!.home, `huge-${method}`, [`--emit-ui-huge`, method]);
+        const accepted = await spawnOverHttp(h, dir);
+        await waitManagedLive(h.stateDir, accepted.spawnId);
+        await waitUntil(
+          () => {
+            const log = stderrLog(h.stateDir, accepted.spawnId);
+            return log.includes(`UI-SENT ui-huge-${method}-`) && log.includes(`UI-RESP ui-huge-${method}-`);
+          },
+          15_000,
+          `huge ${method} answered`,
+        );
+        const log = stderrLog(h.stateDir, accepted.spawnId);
+        const sent = new RegExp(`UI-SENT (ui-huge-${method}-\\S+) (\\d+)`).exec(log)!;
+        const resp = new RegExp(`UI-RESP ${sent[1]} cancelled=(\\S+) (\\d+) (\\d+)`).exec(log)!;
+        expect(resp[1]).toBe("true");
+        const latency = Number(resp[2]) - Number(resp[3]);
+        expect(latency).toBeGreaterThanOrEqual(0);
+        expect(latency).toBeLessThanOrEqual(1_500); // answered from the ≤512B head, not the 1 MiB line
+        // the session CONTINUES: record reaches live and stays there until we stop it
+        await waitRecord(h.stateDir, accepted.spawnId, (r) => r.state === "live", 10_000, "still live after huge ui");
+        await trackChild(h, accepted.spawnId);
+        expect(await stopSpawn(h, accepted.spawnId)).toBe(202);
+        await waitRecord(h.stateDir, accepted.spawnId, (r) => r.state === "exited", 10_000, "stopped");
+        void cwd;
+      }
 
-    const badDir = projDir(sandbox!.home, "bad-head", ["--emit-ui-bad-head"]);
-    const bad = await spawnOverHttp(h, badDir);
-    // The bad line is emitted AFTER the session went live, so SP7's terminalState for a
-    // protocol error on a live session is `exited` (failed is reserved for never-lived) —
-    // endReason + hint are the protocol-error verdict either way.
-    const rec = await waitRecord(
-      h.stateDir,
-      bad.spawnId,
-      (r) => r.state === "exited" || r.state === "failed",
-      15_000,
-      "bad head terminalizes the record",
-    );
-    expect(rec.endReason).toBe("protocol_error");
-    expect(rec.hint).toBe("protocol-error");
-  }, 120_000);
+      const badDir = projDir(sandbox!.home, "bad-head", ["--emit-ui-bad-head"]);
+      const bad = await spawnOverHttp(h, badDir);
+      // The bad line is emitted AFTER the session went live, so SP7's terminalState for a
+      // protocol error on a live session is `exited` (failed is reserved for never-lived) —
+      // endReason + hint are the protocol-error verdict either way.
+      const rec = await waitRecord(
+        h.stateDir,
+        bad.spawnId,
+        (r) => r.state === "exited" || r.state === "failed",
+        15_000,
+        "bad head terminalizes the record",
+      );
+      expect(rec.endReason).toBe("protocol_error");
+      expect(rec.hint).toBe("protocol-error");
+    },
+    startupBudget(4) + 150_000,
+  );
 
   it("H6: principal/global limits 409, lifetime ⇒ exited{lifetime}, stderr flood capped, hub RSS bounded", async () => {
     // -- principal limit: maxPerPrincipal=1 ⇒ second same-principal POST 409 --------------
@@ -1426,28 +1481,32 @@ describe.skipIf(!IS_LINUX)("web-hub headless e2e — H9 default model, in-proces
     return rememberBoot(h.stateDir, second.body, boot);
   }
 
-  it('H9a: preference ⇒ argv carries `--model <ref>` as TWO independent elements; body model wins; "" forks with no tail', async () => {
-    const h = await bringUp();
-    process.env.FAKE_ARGV_OUT = argvFileOf();
-    await setPrefs(h, "p1/pref-model");
-    rmSync(argvFileOf(), { force: true });
-    let accepted = await spawnTwoStep(h, projDir(sandbox!.home, "h9a-pref"));
-    let argv = await readArgv(h, accepted.spawnId);
-    expect(argv.slice(-2)).toEqual(["--model", "p1/pref-model"]);
-    expect(argv).toContain("--mode");
-    expect(argv[argv.indexOf("--model") + 1]).toBe("p1/pref-model"); // separate element, never joined
+  it(
+    'H9a: preference ⇒ argv carries `--model <ref>` as TWO independent elements; body model wins; "" forks with no tail',
+    async () => {
+      const h = await bringUp();
+      process.env.FAKE_ARGV_OUT = argvFileOf();
+      await setPrefs(h, "p1/pref-model");
+      rmSync(argvFileOf(), { force: true });
+      let accepted = await spawnTwoStep(h, projDir(sandbox!.home, "h9a-pref"));
+      let argv = await readArgv(h, accepted.spawnId);
+      expect(argv.slice(-2)).toEqual(["--model", "p1/pref-model"]);
+      expect(argv).toContain("--mode");
+      expect(argv[argv.indexOf("--model") + 1]).toBe("p1/pref-model"); // separate element, never joined
 
-    rmSync(argvFileOf(), { force: true });
-    accepted = await spawnTwoStep(h, projDir(sandbox!.home, "h9a-body"), { model: "p2/explicit-model" });
-    argv = await readArgv(h, accepted.spawnId);
-    expect(argv.slice(-2)).toEqual(["--model", "p2/explicit-model"]);
+      rmSync(argvFileOf(), { force: true });
+      accepted = await spawnTwoStep(h, projDir(sandbox!.home, "h9a-body"), { model: "p2/explicit-model" });
+      argv = await readArgv(h, accepted.spawnId);
+      expect(argv.slice(-2)).toEqual(["--model", "p2/explicit-model"]);
 
-    rmSync(argvFileOf(), { force: true });
-    accepted = await spawnTwoStep(h, projDir(sandbox!.home, "h9a-clear"), { model: "" });
-    argv = await readArgv(h, accepted.spawnId);
-    expect(argv.includes("--model")).toBe(false); // explicit pi default — no tail at all
-    expect(argv.slice(-2)).toEqual(["--mode", "rpc"]);
-  }, 30_000);
+      rmSync(argvFileOf(), { force: true });
+      accepted = await spawnTwoStep(h, projDir(sandbox!.home, "h9a-clear"), { model: "" });
+      argv = await readArgv(h, accepted.spawnId);
+      expect(argv.includes("--model")).toBe(false); // explicit pi default — no tail at all
+      expect(argv.slice(-2)).toEqual(["--mode", "rpc"]);
+    },
+    startupBudget(3) + STARTUP_MARGIN_MS,
+  );
 
   it("H9b: nosuch/* preference ⇒ failed{exited_early, hint:model-rejected} per child; FIVE in a row never open the breaker; a normal spawn still works", async () => {
     const h = await bringUp();
@@ -1552,54 +1611,62 @@ describe.skipIf(!IS_LINUX || PLAN === undefined)(
       return prefs.defaultModel;
     }
 
-    it("H9c: POST ⇒ SIGTERM ⇒ reboot ⇒ value kept (graceful); POST 200 then immediate SIGKILL ⇒ value kept (rename-before-200)", async () => {
-      sandbox = sandboxHome();
-      const home = sandbox.home;
+    it(
+      "H9c: POST ⇒ SIGTERM ⇒ reboot ⇒ value kept (graceful); POST 200 then immediate SIGKILL ⇒ value kept (rename-before-200)",
+      async () => {
+        sandbox = sandboxHome();
+        const home = sandbox.home;
 
-      const h1 = await boot(home);
-      await writePrefs(h1, "p1/survives-term");
-      process.kill(h1.pid, "SIGTERM");
-      await waitPidGone(h1.pid, 8_000, "hub exited on SIGTERM");
-      const h2 = await boot(home, h1.pid);
-      expect(await readPrefs(h2)).toBe("p1/survives-term");
+        const h1 = await boot(home);
+        await writePrefs(h1, "p1/survives-term");
+        process.kill(h1.pid, "SIGTERM");
+        await waitPidGone(h1.pid, 8_000, "hub exited on SIGTERM");
+        const h2 = await boot(home, h1.pid);
+        expect(await readPrefs(h2)).toBe("p1/survives-term");
 
-      await writePrefs(h2, "p1/survives-kill");
-      kill9(h2.pid); // crash right after the 200 — the rename already landed
-      await waitPidGone(h2.pid, 5_000, "hub killed");
-      const h3 = await boot(home, h2.pid);
-      expect(await readPrefs(h3)).toBe("p1/survives-kill");
-    }, 60_000);
+        await writePrefs(h2, "p1/survives-kill");
+        kill9(h2.pid); // crash right after the 200 — the rename already landed
+        await waitPidGone(h2.pid, 5_000, "hub killed");
+        const h3 = await boot(home, h2.pid);
+        expect(await readPrefs(h3)).toBe("p1/survives-kill");
+      },
+      startupBudget(3, 15_000 * SLOW) + 43_000,
+    );
 
-    it("H9d: leftover `.tmp-*` residue is swept at boot (regular only); a symlinked prefs file reads as null, untouched", async () => {
-      sandbox = sandboxHome();
-      const home = sandbox.home;
+    it(
+      "H9d: leftover `.tmp-*` residue is swept at boot (regular only); a symlinked prefs file reads as null, untouched",
+      async () => {
+        sandbox = sandboxHome();
+        const home = sandbox.home;
 
-      const h1 = await boot(home);
-      await writePrefs(h1, "p1/real");
-      const prefsJson = prefsJsonOf(h1);
-      kill9(h1.pid);
-      await waitPidGone(h1.pid, 5_000, "hub killed");
+        const h1 = await boot(home);
+        await writePrefs(h1, "p1/real");
+        const prefsJson = prefsJsonOf(h1);
+        kill9(h1.pid);
+        await waitPidGone(h1.pid, 5_000, "hub killed");
 
-      // plant a regular tmp residue + a non-regular one; only the regular file may vanish
-      writeFileSync(`${prefsJson}.tmp-residue`, "partial", { mode: 0o600 });
-      mkdirSync(`${prefsJson}.tmp-dir`);
-      // swap the real file for a symlink (an attacker-planted or accidentally linked prefs)
-      const target = join(home, "prefs-target.json");
-      writeFileSync(target, JSON.stringify({ v: 1, defaultModel: "evil/model" }), { mode: 0o600 });
-      rmSync(prefsJson);
-      symlinkSync(target, prefsJson);
+        // plant a regular tmp residue + a non-regular one; only the regular file may vanish
+        writeFileSync(`${prefsJson}.tmp-residue`, "partial", { mode: 0o600 });
+        mkdirSync(`${prefsJson}.tmp-dir`);
+        // swap the real file for a symlink (an attacker-planted or accidentally linked prefs)
+        const target = join(home, "prefs-target.json");
+        writeFileSync(target, JSON.stringify({ v: 1, defaultModel: "evil/model" }), { mode: 0o600 });
+        rmSync(prefsJson);
+        symlinkSync(target, prefsJson);
 
-      const h2 = await boot(home, h1.pid);
-      expect(await readPrefs(h2)).toBe(null); // read as null — never followed the symlink
-      expect(existsSync(`${prefsJson}.tmp-residue`)).toBe(false); // swept
-      expect(existsSync(`${prefsJson}.tmp-dir`)).toBe(true); // non-regular residue untouched
-      expect(lstatSync(prefsJson).isSymbolicLink()).toBe(true); // the file itself untouched (lstat never follows)
-      // and a fresh write replaces the symlink with a real 0600 file
-      await writePrefs(h2, "p1/fresh");
-      expect(lstatSync(prefsJson).isSymbolicLink()).toBe(false);
-      expect(lstatSync(prefsJson).mode & 0o777).toBe(0o600);
-      rmSync(`${prefsJson}.tmp-dir`, { recursive: true });
-    }, 60_000);
+        const h2 = await boot(home, h1.pid);
+        expect(await readPrefs(h2)).toBe(null); // read as null — never followed the symlink
+        expect(existsSync(`${prefsJson}.tmp-residue`)).toBe(false); // swept
+        expect(existsSync(`${prefsJson}.tmp-dir`)).toBe(true); // non-regular residue untouched
+        expect(lstatSync(prefsJson).isSymbolicLink()).toBe(true); // the file itself untouched (lstat never follows)
+        // and a fresh write replaces the symlink with a real 0600 file
+        await writePrefs(h2, "p1/fresh");
+        expect(lstatSync(prefsJson).isSymbolicLink()).toBe(false);
+        expect(lstatSync(prefsJson).mode & 0o777).toBe(0o600);
+        rmSync(`${prefsJson}.tmp-dir`, { recursive: true });
+      },
+      startupBudget(2, 15_000 * SLOW) + 35_000,
+    );
   },
 );
 
@@ -1968,65 +2035,69 @@ describe.skipIf(!IS_LINUX)("web-hub spawn restore — in-process graceful paths 
     expect(forkArgvs(cwd)).toHaveLength(1); // never forked
   }, 60_000);
 
-  it("HR3: legacy spawns.json (v2, live, full identity, NO sessionId) + a real orphan ⇒ exactly H3's outcome: TERM, exited{orphan}, no fork, no restore field", async () => {
-    sandbox = sandboxHome();
-    const home = sandbox.home;
-    const cwd = projDir(home, "legacy", ["--no-hello", "--ignore-eof"]);
-    const spawnId = spawnReqId();
-    const startup = new ProcessStartup();
-    const child = spawnChild(process.execPath, [FAKE_PI, "--mode", "rpc"], {
-      cwd,
-      detached: true,
-      stdio: ["ignore", "ignore", "pipe"],
-      env: { ...process.env, HOME: home, PI_WEBHUB_SPAWN_ID: spawnId },
-    });
-    startup.observe(child, "orphan fixture");
-    const pid = child.pid!;
-    procChildren.add(pid);
-    await startup.wait(
-      () => forkArgvs(cwd).length,
-      (n) => n === 1,
-      "orphan up",
-    );
-    const st = statSync(cwd);
-    const bootId = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
-    const paths = resolveHubPaths({ home, uid: process.getuid?.() ?? 0 });
-    mkdirSync(paths.stateDir, { recursive: true, mode: 0o700 });
-    const t = Date.now();
-    writeFileSync(
-      webHubSpawnFiles(paths.stateDir).spawnsJson,
-      JSON.stringify({
-        v: 2,
-        gen: 1,
-        writer: { pid: 1, startedAt: 0, bootId },
-        records: [
-          {
-            spawnId,
-            state: "live",
-            cwd,
-            dev: st.dev,
-            ino: st.ino,
-            createdAt: t - 60_000,
-            updatedAt: t - 1_000,
-            owner: { listener: "loopback", reqId: "r-legacy-0000001" },
-            pid,
-            procStartTicks: startTicksOf(pid),
-            bootId,
-            uid: process.getuid?.() ?? 0,
-            agentKey: "k-legacy",
-          },
-        ],
-      }),
-      { mode: 0o600 },
-    );
-    const h = await boot(home);
-    await waitRestoreRec(h.stateDir, spawnId, (r) => r.endReason === "orphan", 10_000, "orphan finalized");
-    await waitPidGone(pid, 12_000, "HR3 orphan killed by the legacy recovery");
-    const rec = restoreRecOf(h.stateDir, spawnId)!;
-    expect(rec.state).toBe("exited");
-    expect(rec.restore).toBeUndefined();
-    expect(forkArgvs(cwd)).toHaveLength(1); // spawnFn never ran for it
-  }, 45_000);
+  it(
+    "HR3: legacy spawns.json (v2, live, full identity, NO sessionId) + a real orphan ⇒ exactly H3's outcome: TERM, exited{orphan}, no fork, no restore field",
+    async () => {
+      sandbox = sandboxHome();
+      const home = sandbox.home;
+      const cwd = projDir(home, "legacy", ["--no-hello", "--ignore-eof"]);
+      const spawnId = spawnReqId();
+      const startup = new ProcessStartup();
+      const child = spawnChild(process.execPath, [FAKE_PI, "--mode", "rpc"], {
+        cwd,
+        detached: true,
+        stdio: ["ignore", "ignore", "pipe"],
+        env: { ...process.env, HOME: home, PI_WEBHUB_SPAWN_ID: spawnId },
+      });
+      startup.observe(child, "orphan fixture");
+      const pid = child.pid!;
+      procChildren.add(pid);
+      await startup.wait(
+        () => forkArgvs(cwd).length,
+        (n) => n === 1,
+        "orphan up",
+      );
+      const st = statSync(cwd);
+      const bootId = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+      const paths = resolveHubPaths({ home, uid: process.getuid?.() ?? 0 });
+      mkdirSync(paths.stateDir, { recursive: true, mode: 0o700 });
+      const t = Date.now();
+      writeFileSync(
+        webHubSpawnFiles(paths.stateDir).spawnsJson,
+        JSON.stringify({
+          v: 2,
+          gen: 1,
+          writer: { pid: 1, startedAt: 0, bootId },
+          records: [
+            {
+              spawnId,
+              state: "live",
+              cwd,
+              dev: st.dev,
+              ino: st.ino,
+              createdAt: t - 60_000,
+              updatedAt: t - 1_000,
+              owner: { listener: "loopback", reqId: "r-legacy-0000001" },
+              pid,
+              procStartTicks: startTicksOf(pid),
+              bootId,
+              uid: process.getuid?.() ?? 0,
+              agentKey: "k-legacy",
+            },
+          ],
+        }),
+        { mode: 0o600 },
+      );
+      const h = await boot(home);
+      await waitRestoreRec(h.stateDir, spawnId, (r) => r.endReason === "orphan", 10_000, "orphan finalized");
+      await waitPidGone(pid, 12_000, "HR3 orphan killed by the legacy recovery");
+      const rec = restoreRecOf(h.stateDir, spawnId)!;
+      expect(rec.state).toBe("exited");
+      expect(rec.restore).toBeUndefined();
+      expect(forkArgvs(cwd)).toHaveLength(1); // spawnFn never ran for it
+    },
+    startupBudget(1) + 52_000,
+  );
 
   it("HR4: the session file was observed, then deleted ⇒ restart ends failed{spawn_error}+never-forked+session-missing, no fork; remove ⇒ 200", async () => {
     sandbox = sandboxHome();
@@ -2250,7 +2321,7 @@ describe.skipIf(!IS_LINUX || PLAN === undefined)(
         expect(maxProcs).toBeGreaterThanOrEqual(1);
         expect(maxProcs).toBeLessThanOrEqual(1);
       },
-      60_000 * SLOW,
+      startupBudget(3, 15_000 * SLOW) + startupBudget(1, 25_000 * SLOW) + 30_000,
     );
 
     it(
@@ -2277,7 +2348,7 @@ describe.skipIf(!IS_LINUX || PLAN === undefined)(
         expect(restoreRecOf(hub2.stateDir, spawnId)!.restore).toBeUndefined();
         expect(forkArgvs(cwd)).toHaveLength(1);
       },
-      45_000 * SLOW,
+      startupBudget(3, 15_000 * SLOW) + 65_000,
     );
 
     it(
@@ -2321,7 +2392,7 @@ describe.skipIf(!IS_LINUX || PLAN === undefined)(
         await new Promise((r) => setTimeout(r, 1_000));
         expect(forkArgvs(cwd)).toHaveLength(4); // no 4th restore fork
       },
-      120_000 * SLOW,
+      startupBudget(7, 15_000 * SLOW) + startupBudget(3, 25_000 * SLOW) + 31_000,
     );
 
     it(
@@ -2402,7 +2473,7 @@ describe.skipIf(!IS_LINUX || PLAN === undefined)(
           if (r.state === "live" && r.pid !== undefined) extraPids.add(r.pid);
         }
       },
-      150_000 * SLOW,
+      startupBudget(5, 15_000 * SLOW) + startupBudget(2, 30_000 * SLOW) + 125_000,
     );
   },
 );

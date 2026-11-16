@@ -1,4 +1,4 @@
-import { ProcessStartup } from "./helpers/process-startup.js";
+import { ProcessStartup, startupBudget, STARTUP_MARGIN_MS } from "./helpers/process-startup.js";
 import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -47,64 +47,68 @@ afterEach(() => {
 });
 
 describe.skipIf(process.platform !== "linux")("sealAndKill reaps SIGTERM-resistant group members", () => {
-  it("leader + resistant worker ⇒ whole group empty after sealAndKill(…, 300)", async () => {
-    const { pi, tools } = fakePi();
-    const sessionId = randomUUID();
-    const dir = mkdtempSync(join(tmpdir(), "pi-toolkit-orphan-seal-"));
-    dirs.push(dir);
-    fixture = createOrphanFixture();
-    wireChildBashJobs(pi, { settings: { ...DEFAULT_SETTINGS, bashJobs: { ...DEFAULT_SETTINGS.bashJobs, dir } } });
-    const ctx = {
-      cwd: dir,
-      sessionManager: { getSessionId: () => sessionId, getSessionFile: () => undefined },
-      model: { provider: "test", id: "test-model" },
-    } as unknown as ExtensionContext;
+  it(
+    "leader + resistant worker ⇒ whole group empty after sealAndKill(…, 300)",
+    async () => {
+      const { pi, tools } = fakePi();
+      const sessionId = randomUUID();
+      const dir = mkdtempSync(join(tmpdir(), "pi-toolkit-orphan-seal-"));
+      dirs.push(dir);
+      fixture = createOrphanFixture();
+      wireChildBashJobs(pi, { settings: { ...DEFAULT_SETTINGS, bashJobs: { ...DEFAULT_SETTINGS.bashJobs, dir } } });
+      const ctx = {
+        cwd: dir,
+        sessionManager: { getSessionId: () => sessionId, getSessionFile: () => undefined },
+        model: { provider: "test", id: "test-model" },
+      } as unknown as ExtensionContext;
 
-    const boot = new ProcessStartup();
-    const result = (await tools
-      .get("bash")!
-      .execute("c1", { command: fixture.command("alive"), run_in_background: true }, undefined, undefined, ctx)) as {
-      details?: { jobId?: string };
-    };
-    const jobId = result.details?.jobId;
-    expect(jobId).toBeTruthy();
+      const boot = new ProcessStartup();
+      const result = (await tools
+        .get("bash")!
+        .execute("c1", { command: fixture.command("alive"), run_in_background: true }, undefined, undefined, ctx)) as {
+        details?: { jobId?: string };
+      };
+      const jobId = result.details?.jobId;
+      expect(jobId).toBeTruthy();
 
-    type Status = {
-      details?: { pid?: number; terminal?: boolean; exitCode?: number | null };
-      content?: Array<{ text?: string }>;
-    };
-    let latest: Status | undefined;
-    boot.observeManaged(
-      () =>
-        latest?.details === undefined
-          ? undefined
-          : {
-              ...(latest.details.pid === undefined ? {} : { pid: latest.details.pid }),
-              state: latest.details.terminal ? "exited" : "starting",
-              exit: { code: latest.details.exitCode ?? null, signal: "unknown" },
-            },
-      () => latest?.content?.map((c) => c.text ?? "").join("\n") ?? "",
-      "bash node fixture",
-    );
-    await boot.wait(
-      async () => {
-        latest = (await tools
-          .get("bash_job")!
-          .execute("ready-status", { action: "status", job_id: jobId }, undefined, undefined, ctx)) as Status;
-        // Own group only; retain cleanup coordinates even on failed startup.
-        pgid = latest.details?.pid;
-        return fixture!.workerPid();
-      },
-      (worker) => worker !== undefined,
-      "node worker installed SIGTERM handler and wrote pidfile",
-    );
-    const pid = latest?.details?.pid;
-    expect(pid).toBeTruthy();
-    expect(liveGroupMembers(pid!)).toBeGreaterThanOrEqual(2);
+      type Status = {
+        details?: { pid?: number; terminal?: boolean; exitCode?: number | null };
+        content?: Array<{ text?: string }>;
+      };
+      let latest: Status | undefined;
+      boot.observeManaged(
+        () =>
+          latest?.details === undefined
+            ? undefined
+            : {
+                ...(latest.details.pid === undefined ? {} : { pid: latest.details.pid }),
+                state: latest.details.terminal ? "exited" : "starting",
+                exit: { code: latest.details.exitCode ?? null, signal: "unknown" },
+              },
+        () => latest?.content?.map((c) => c.text ?? "").join("\n") ?? "",
+        "bash node fixture",
+      );
+      await boot.wait(
+        async () => {
+          latest = (await tools
+            .get("bash_job")!
+            .execute("ready-status", { action: "status", job_id: jobId }, undefined, undefined, ctx)) as Status;
+          // Own group only; retain cleanup coordinates even on failed startup.
+          pgid = latest.details?.pid;
+          return fixture!.workerPid();
+        },
+        (worker) => worker !== undefined,
+        "node worker installed SIGTERM handler and wrote pidfile",
+      );
+      const pid = latest?.details?.pid;
+      expect(pid).toBeTruthy();
+      expect(liveGroupMembers(pid!)).toBeGreaterThanOrEqual(2);
 
-    const sealed = getChildBashRegistry().sealAndKill(sessionId, 300);
-    expect(sealed).toBeDefined();
-    await sealed!.done;
-    expect(await until(() => liveGroupMembers(pid!) === 0, 5_000)).toBe(true);
-  }, 45_000);
+      const sealed = getChildBashRegistry().sealAndKill(sessionId, 300);
+      expect(sealed).toBeDefined();
+      await sealed!.done;
+      expect(await until(() => liveGroupMembers(pid!) === 0, 5_000)).toBe(true);
+    },
+    startupBudget(1) + 15_000,
+  );
 });

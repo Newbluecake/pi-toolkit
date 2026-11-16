@@ -1,3 +1,4 @@
+import { startupBudget, STARTUP_MARGIN_MS } from "./helpers/process-startup.js";
 /** Real 4e15fac1 components, not new code with stripped fields/version flags. */
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -218,22 +219,26 @@ async function browserCase(
 const offlineBrowserProvided = !!(process.env.TPS_PLAYWRIGHT_MODULE && process.env.TPS_CHROMIUM);
 function registerMatrix(browser: boolean) {
   let oldHappyPath = false;
-  it("O/O/O baseline first: real old login/SSE/authority/PTY/pwd/reap", async () => {
-    const m = machine(),
-      h = await m.hub(baseline.root, { legacy: true, uiRoot: baseline.root }),
-      a = await m.agent(baseline.root);
-    const card = await cardFor(h, a.sessionId, false),
-      evidence = await physical(h, m, card, a);
-    expect(await count(a)).toBe(1);
-    if (browser) {
-      await browserCase(h, card, a, true, true, "OOO", "old-gzip-defect");
+  it(
+    "O/O/O baseline first: real old login/SSE/authority/PTY/pwd/reap",
+    async () => {
+      const m = machine(),
+        h = await m.hub(baseline.root, { legacy: true, uiRoot: baseline.root }),
+        a = await m.agent(baseline.root);
+      const card = await cardFor(h, a.sessionId, false),
+        evidence = await physical(h, m, card, a);
       expect(await count(a)).toBe(1);
-      await browserCase(h, card, a, true, true, "OOO-identity-supplement", "identity");
-      expect(await count(a)).toBe(2);
-    }
-    oldHappyPath = true;
-    writeFileSync(join(baseline.root, "old-happy-path.json"), JSON.stringify(evidence, null, 2));
-  }, 120000);
+      if (browser) {
+        await browserCase(h, card, a, true, true, "OOO", "old-gzip-defect");
+        expect(await count(a)).toBe(1);
+        await browserCase(h, card, a, true, true, "OOO-identity-supplement", "identity");
+        expect(await count(a)).toBe(2);
+      }
+      oldHappyPath = true;
+      writeFileSync(join(baseline.root, "old-happy-path.json"), JSON.stringify(evidence, null, 2));
+    },
+    startupBudget(2) + 120_000,
+  );
   const cells = [
     { label: "NNN", hub: "N", agent: "N", ui: "N", shown: true, allowed: true },
     { label: "NNO", hub: "N", agent: "N", ui: "O", shown: true, allowed: true },
@@ -243,38 +248,42 @@ function registerMatrix(browser: boolean) {
     { label: "NOO", hub: "N", agent: "O", ui: "O", shown: true, allowed: false },
   ];
   for (const cell of cells)
-    it(`${cell.label}: real independently selected components`, async () => {
-      expect(oldHappyPath, "old-old-old must really open first").toBe(true);
-      const m = machine(),
-        h = await m.hub(cell.hub === "O" ? baseline.root : CURRENT_ROOT, {
-          source: "plain",
-          legacy: cell.hub === "O",
-          uiRoot: cell.ui === "O" ? baseline.root : CURRENT_ROOT,
-        });
-      const a = await m.agent(cell.agent === "O" ? baseline.root : CURRENT_ROOT),
-        card = await cardFor(h, a.sessionId, cell.hub === "N" && cell.agent === "N");
-      if (cell.allowed) await physical(h, m, card, a);
-      else {
-        const b = await m.browser(h),
-          p = await b.post(card, "prepare", { cols: 80, rows: 24 });
-        expect(p.status).not.toBe(200);
-        expect(p.body).toMatchObject({ ok: false, code: "E_UNSUPPORTED", effect: "none" });
-        expect(await count(a)).toBe(0);
-      }
-      if (browser) {
-        if (cell.hub === "O") await browserCase(h, card, a, cell.shown, false, cell.label, "old-gzip-defect");
-        await browserCase(
-          h,
-          card,
-          a,
-          cell.shown,
-          cell.allowed && cell.shown,
-          cell.label,
-          cell.hub === "O" ? "identity" : "gzip",
-        );
-      }
-      expect(await count(a)).toBe(cell.allowed ? (browser && cell.shown ? 2 : 1) : 0);
-    }, 120000);
+    it(
+      `${cell.label}: real independently selected components`,
+      async () => {
+        expect(oldHappyPath, "old-old-old must really open first").toBe(true);
+        const m = machine(),
+          h = await m.hub(cell.hub === "O" ? baseline.root : CURRENT_ROOT, {
+            source: "plain",
+            legacy: cell.hub === "O",
+            uiRoot: cell.ui === "O" ? baseline.root : CURRENT_ROOT,
+          });
+        const a = await m.agent(cell.agent === "O" ? baseline.root : CURRENT_ROOT),
+          card = await cardFor(h, a.sessionId, cell.hub === "N" && cell.agent === "N");
+        if (cell.allowed) await physical(h, m, card, a);
+        else {
+          const b = await m.browser(h),
+            p = await b.post(card, "prepare", { cols: 80, rows: 24 });
+          expect(p.status).not.toBe(200);
+          expect(p.body).toMatchObject({ ok: false, code: "E_UNSUPPORTED", effect: "none" });
+          expect(await count(a)).toBe(0);
+        }
+        if (browser) {
+          if (cell.hub === "O") await browserCase(h, card, a, cell.shown, false, cell.label, "old-gzip-defect");
+          await browserCase(
+            h,
+            card,
+            a,
+            cell.shown,
+            cell.allowed && cell.shown,
+            cell.label,
+            cell.hub === "O" ? "identity" : "gzip",
+          );
+        }
+        expect(await count(a)).toBe(cell.allowed ? (browser && cell.shown ? 2 : 1) : 0);
+      },
+      startupBudget(2) + 120_000,
+    );
   it.each(["O", "N"])(
     "O/N/%s old config without terminal never dynamically enables",
     async (ui) => {
@@ -298,44 +307,52 @@ function registerMatrix(browser: boolean) {
       if (browser) await browserCase(h, card, a, false, false, `ON${ui}-off`);
       expect(await count(a)).toBe(0);
     },
-    40000,
+    startupBudget(2) + 120_000,
   );
-  it("T3 true off: locked-old and new raw hello/ack/session/status/HTTP/SSE equal the frozen old output", async () => {
-    for (const root of [baseline.root, currentSourceSnapshot()]) {
-      const m = machine(false),
-        h = await m.hub(root, { source: "plain", uiRoot: baseline.root }),
-        a = await m.agent(root, { terminalOff: true });
-      expect(await offBytes(h, a)).toEqual(OFF_RAW_GOLDEN);
-      expect(existsSync(join(h.paths.stateDir, "terminal-v1"))).toBe(false);
-      if (browser)
-        await browserCase(
-          h,
-          await cardFor(h, a.sessionId, false),
-          a,
-          false,
-          false,
-          root === baseline.root ? "OOO-true-off" : "NNO-true-off",
-        );
-    }
-  }, 40000);
+  it(
+    "T3 true off: locked-old and new raw hello/ack/session/status/HTTP/SSE equal the frozen old output",
+    async () => {
+      for (const root of [baseline.root, currentSourceSnapshot()]) {
+        const m = machine(false),
+          h = await m.hub(root, { source: "plain", uiRoot: baseline.root }),
+          a = await m.agent(root, { terminalOff: true });
+        expect(await offBytes(h, a)).toEqual(OFF_RAW_GOLDEN);
+        expect(existsSync(join(h.paths.stateDir, "terminal-v1"))).toBe(false);
+        if (browser)
+          await browserCase(
+            h,
+            await cardFor(h, a.sessionId, false),
+            a,
+            false,
+            false,
+            root === baseline.root ? "OOO-true-off" : "NNO-true-off",
+          );
+      }
+    },
+    startupBudget(4) + 120_000,
+  );
   if (!browser)
-    it("N from O launcher (missing source) is unavailable despite legacy terminal key; plain restart recovers", async () => {
-      expect(oldHappyPath).toBe(true);
-      const m = machine(),
-        h = await m.hub(undefined, { viaLauncher: true, oldLauncherRoot: baseline.root });
-      const a = await m.agent();
-      await cardFor(h, a.sessionId, false);
-      expect(JSON.parse(readFileSync(h.paths.hubJson, "utf8")).terminal).toMatchObject({
-        state: "unavailable",
-        reason: "startup-domain-unknown",
-      });
-      expect(h.caps).not.toContain("terminal.ui.v1");
-      expect(await count(a)).toBe(0);
-      await h.peer.close();
-      const h2 = await m.hub(undefined, { source: "plain" });
-      const card = await cardFor(h2, a.sessionId);
-      await physical(h2, m, card, a);
-    }, 90000);
+    it(
+      "N from O launcher (missing source) is unavailable despite legacy terminal key; plain restart recovers",
+      async () => {
+        expect(oldHappyPath).toBe(true);
+        const m = machine(),
+          h = await m.hub(undefined, { viaLauncher: true, oldLauncherRoot: baseline.root });
+        const a = await m.agent();
+        await cardFor(h, a.sessionId, false);
+        expect(JSON.parse(readFileSync(h.paths.hubJson, "utf8")).terminal).toMatchObject({
+          state: "unavailable",
+          reason: "startup-domain-unknown",
+        });
+        expect(h.caps).not.toContain("terminal.ui.v1");
+        expect(await count(a)).toBe(0);
+        await h.peer.close();
+        const h2 = await m.hub(undefined, { source: "plain" });
+        const card = await cardFor(h2, a.sessionId);
+        await physical(h2, m, card, a);
+      },
+      startupBudget(3) + STARTUP_MARGIN_MS,
+    );
 }
 
 describe.sequential("#45 locked real-component backend matrix (always run)", () => registerMatrix(false));

@@ -92,7 +92,29 @@ spawn/ready/live 多阶段不重置预算。经已有 spawn seam 观察每个 si
 25ms 采样，不把记录缺席当退出）。失败附每个 pid/exit/signal 和先脱敏再按 UTF-8 截断的
 stderr；managed 磁盘未记录的字段明确为 unknown，不猜测、不扫描或 signal 现场进程。
 XS harness 继续原预算与行为，仅复用抽出的 sanitizer。进程已经 ready 之后的协议事件、
-pid 持久化、清理/退出、register timeout 等非冷启动门保持原上限；实际 >15s 的旧启动门不在本轮改动范围。
+pid 持久化、清理/退出、register timeout 等非冷启动门保持原上限；实际 >15s 的旧启动屏障本身不改，
+但其外层用例预算必须完整容纳这些旧预算。
+
+返工约束：helper 导出 `PROCESS_STARTUP_MS`（30s）、`startupBudget(serialBoots, perBootMs)` 和
+`STARTUP_MARGIN_MS`（30s）。消费用例的外层 timeout 使用预算表达式：串行相加、并行取关键路径，
+同一 boot 的 ready/live 不重复加；terminal launcher 的父 peer 与内嵌 hub 属于同一外层启动路径，
+不机械相加。headless 原有 `15_000 * SLOW` hub 启动仍按 45s 计；restore 的既有 75s/90s
+live 门也按其原预算计入。额外余量为明确有限的 setup/协议/退出步骤留空间，而不是改其事件上限。
+常规余量 30s；A9 65s（pid/stopping/退出/恢复删除）、H5 150s（三轮 UI/停止及坏头终态）、
+rollback dirty 100s（包含原 65s 孤儿退出门）；wiring 保留原总计 300s。
+
+`process-startup.test.ts` 的独立清单对 57 个注册点做 AST timeout 算术检查（含 `it.each` 和 options
+写法），不运行被扫描的测试、不 eval 源码：外层预算须 ≥ 启动关键路径 + 清单中的有限余量，
+且有界（最多 900s；多轮 legacy restore 的真实预算大于 300s，但外部运行命令仍可用 300s 截停）。
+H9a 另以可注入的 `perBootMs=35_000` 缩放算术模型验证 3×35s+30s，不用长 sleep 造负载。
+loser/winner 用真实 IPC child + 假钟推进退出采样，在放行 winner ready 前明确经历一次 loser
+已退出的检查，保证 `ended.every`→`some` 变异确定性失败。
+
+firstPrompt delivery、closure SSE live、H5 三种巨大 UI 的协议观察之前，先用该次 POST 起算的共享
+managed startup 等 live（生命周期早失败 + 安全 stderr）；随后原 15s/1.5s 协议/latency 门不变。
+T8 healthy fork 则把 `.privacy-entry.json` 作为 child 执行入口 ready 事件，以 POST 前创建的同一预算
+观察私有 spawns.json 终态和 spawn stderr；故障路径仍按原拒绝合同，不等待不存在的 child。
+刻意触发坏协议头的分支只观察原终态门，不等待可能已消失的瞬态 live（否则会与正确退出竞态）。
 
 ## 日常命令
 
