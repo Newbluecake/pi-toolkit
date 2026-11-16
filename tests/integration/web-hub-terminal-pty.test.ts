@@ -60,6 +60,15 @@ const roots: string[] = [],
   owners: TerminalOwner[] = [],
   outputs: Array<() => string> = [];
 const pause = (ms = 20) => new Promise<void>((r) => setTimeout(r, ms));
+function vanishedOrZombie(pid: number): boolean {
+  try {
+    return readFileSync(`/proc/${pid}/stat`, "utf8").split(") ")[1]?.startsWith("Z") === true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT" || (error as NodeJS.ErrnoException).code === "ESRCH")
+      return true;
+    throw error;
+  }
+}
 function ptyTail(): string {
   return JSON.stringify(
     outputs.slice(-2).map((output) => {
@@ -353,7 +362,7 @@ describe("Linux agent-owned terminal §§5.1–5.4, T-ISO/T-SUBREAPER", () => {
     await until(async () => {
       for (const i of identities) {
         const current = await readTerminalIdentity(i.pid);
-        if (current && !readFileSync(`/proc/${i.pid}/stat`, "utf8").split(") ")[1]?.startsWith("Z")) return false;
+        if (current && !vanishedOrZombie(i.pid)) return false;
       }
       return true;
     });
@@ -857,7 +866,7 @@ describe("Q4 physical half / §5.5: close ACK ≠ reaped proof", () => {
       const current = await readTerminalIdentity(shell.pid);
       if (!current) return true;
       // Orphan zombie in a non-reaping container is still NOT a success proof.
-      return readFileSync(`/proc/${shell.pid}/stat`, "utf8").split(") ")[1]?.startsWith("Z") === true;
+      return vanishedOrZombie(shell.pid);
     });
     await h.owner.dispose();
     // This fixture intentionally cannot produce a proof. Stop its test-local retry
