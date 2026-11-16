@@ -106,6 +106,35 @@ describe("XS real child startup diagnostics", () => {
       await h.close();
     }
   });
+  it("redacts secret-named identifiers but preserves ordinary prose", () => {
+    expect(sanitizeDiagnostic("token bucket refill; cookie expires; bearer arrived")).toBe(
+      "token bucket refill; cookie expires; bearer arrived",
+    );
+    expect(sanitizeDiagnostic("FAKE_TOKEN_DO_NOT_LEAK_47c x-secret longcredential shortTOKEN1")).toBe(
+      "[REDACTED] [REDACTED] [REDACTED] shortTOKEN1",
+    );
+  });
+  it("redacts an invalid channels value echoed by the real child parser", async () => {
+    const h = new XsHarness();
+    try {
+      const failure = await h
+        .boot("agent", "parse", undefined, true, false, {
+          XW_CHANNELS_JSON: "FAKE_TOKEN_DO_NOT_LEAK_47c",
+        })
+        .then(
+          () => {
+            throw new Error("unexpected boot success");
+          },
+          (e: Error) => e,
+        );
+      expect(failure.message).not.toContain("FAKE_TOKEN_DO_NOT_LEAK_47c");
+      expect(failure.message).toContain("[REDACTED]");
+      expect(failure.message).toMatch(/agent:parse pid=\d+ exit=\d+ signal=.*connected=/);
+      expect(failure.message).toContain("child close code=");
+    } finally {
+      await h.close();
+    }
+  });
   it("real spawn error rejects before ready with lifecycle fields", async () => {
     const h = new XsHarness({ execPath: "/nonexistent/pi-xs-test-node" });
     try {
