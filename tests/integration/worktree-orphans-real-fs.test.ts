@@ -197,13 +197,11 @@ describe("workflow-worktree plan §3 (P4 fix): real-fs startup scan wiring", () 
     vi.stubGlobal("setTimeout", setTimeoutSpy);
 
     const env = makeCtx("/tmp/wt-realfs-b");
-    const startedAt = Date.now();
     const stack = buildSessionStack(fakePi(), env.ctx, testSettings(), emptyTypes, []);
-    const elapsedMs = Date.now() - startedAt;
     try {
       // The hung readdir() never resolves, yet buildSessionStack returned immediately —
       // the startup scan is fire-and-forget and never awaited from session_start's path.
-      expect(elapsedMs).toBeLessThan(500);
+      expect(stack.rpc.close).toBeTypeOf("function"); // a usable stack, not a pending startup scan Promise
       expect(sawUnrefFor5s).toBe(true);
 
       // Real-time wait past the 5s overall budget: the scan must abandon silently — no

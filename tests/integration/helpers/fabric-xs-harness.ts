@@ -3,27 +3,52 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-export function bounded<T>(p: Promise<T>, label: string, ms = 12_000): Promise<T> {
+/** Startup is a liveness barrier, not a latency benchmark. Keep one 30s total boot
+ * budget (ready + live) for loaded runners; ordinary RPC/event budgets stay 12s. */
+const BOOT_MS = 30_000;
+
+export function bounded<T>(p: Promise<T>, label: string, ms = 12_000, diagnostic = () => ""): Promise<T> {
+  const started = performance.now();
   let timer: NodeJS.Timeout;
   return Promise.race([
     p,
     new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error(`timeout: ${label}`)), ms);
+      timer = setTimeout(
+        () =>
+          reject(
+            new Error(
+              `timeout: ${label}; waited=${Math.round(performance.now() - started)}ms budget=${ms}ms ${diagnostic()}`,
+            ),
+          ),
+        ms,
+      );
       timer.unref();
     }),
   ]).finally(() => clearTimeout(timer));
 }
-export async function until<T>(read: () => Promise<T>, accept: (value: T) => boolean, label: string): Promise<T> {
-  const end = Date.now() + 12_000;
+export async function until<T>(
+  read: () => Promise<T>,
+  accept: (value: T) => boolean,
+  label: string,
+  options: { timeoutMs?: number; diagnostic?: () => string } = {},
+): Promise<T> {
+  const ms = options.timeoutMs ?? 12_000;
+  const started = performance.now();
+  const end = started + ms;
+  let last: T | undefined;
+  const diagnostic = () => `last=${JSON.stringify(last)} ${options.diagnostic?.() ?? ""}`;
   do {
-    const value = await read();
-    if (accept(value)) return value;
+    // An individual RPC must not extend the enclosing barrier's total budget.
+    last = await bounded(read(), label, Math.max(0, end - performance.now()), diagnostic);
+    if (accept(last)) return last;
     await new Promise<void>((r) => {
-      const timer = setTimeout(r, 30);
+      const timer = setTimeout(r, Math.min(30, Math.max(0, end - performance.now())));
       timer.unref();
     });
-  } while (Date.now() < end);
-  throw new Error(`timeout: ${label}`);
+  } while (performance.now() < end);
+  throw new Error(
+    `timeout: ${label}; waited=${Math.round(performance.now() - started)}ms budget=${ms}ms ${diagnostic()}`,
+  );
 }
 export interface Peer {
   child: ChildProcess;
@@ -43,6 +68,7 @@ export class XsHarness {
     autoJoin = false,
     extraEnv: Record<string, string> = {},
   ): Promise<Peer> {
+    const bootStarted = performance.now();
     const cwd = join(this.home, "project");
     mkdirSync(cwd, { recursive: true });
     const child = spawn(
@@ -68,6 +94,8 @@ export class XsHarness {
     child.stderr!.on("data", (b: Buffer) => {
       stderr = (stderr + b.toString()).slice(-12_000);
     });
+    const diagnostic = () =>
+      `${role}:${name} pid=${child.pid} exit=${child.exitCode} signal=${child.signalCode} connected=${child.connected} stderr=${stderr}`;
     const exited = new Promise<void>((r) => child.once("close", () => r()));
     const pending = new Map<number, { resolve: (value: any) => void; reject: (e: Error) => void }>();
     const events = new Map<string, Array<(value: any) => void>>();
@@ -86,6 +114,11 @@ export class XsHarness {
       }
       if (m.event) for (const f of events.get(m.event)?.splice(0) ?? []) f(m);
     });
+    child.on("error", (error) => {
+      failReady(error);
+      for (const p of pending.values()) p.reject(error);
+      pending.clear();
+    });
     child.on("close", (code) => {
       const error = new Error(`${role} exit ${code}: ${stderr}`);
       failReady(error);
@@ -103,6 +136,8 @@ export class XsHarness {
             child.send({ ...extra, id, op });
           }),
           `${role}:${op}`,
+          12_000,
+          diagnostic,
         ).finally(() => pending.delete(id));
       },
       event: (name) =>
@@ -111,6 +146,8 @@ export class XsHarness {
             events.set(name, [...(events.get(name) ?? []), r]);
           }),
           `${role}:${name}`,
+          12_000,
+          diagnostic,
         ),
       kill: async () => {
         if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
@@ -118,12 +155,13 @@ export class XsHarness {
       },
     };
     this.peers.push(peer);
-    await bounded(started, `${role} ready`);
+    await bounded(started, `${role} ready`, Math.max(0, BOOT_MS - (performance.now() - bootStarted)), diagnostic);
     if (role === "agent")
       await until(
         () => peer.rpc("inspect"),
         (s) => s.conn?.state === "live",
         "socket live",
+        { timeoutMs: Math.max(0, BOOT_MS - (performance.now() - bootStarted)), diagnostic },
       );
     return peer;
   }

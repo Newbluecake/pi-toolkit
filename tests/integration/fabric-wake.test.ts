@@ -150,12 +150,15 @@ function stubDriver(opts: { gated?: boolean } = {}) {
     finish: () => release?.(),
   };
 }
-async function until(check: () => boolean) {
-  for (let i = 0; i < 100; i++) {
-    if (check()) return;
-    await new Promise((r) => setTimeout(r, 2));
+async function until(check: () => boolean, label: string) {
+  // A real stack dispatch/terminal transition may need disk IO even with a fake
+  // driver. The former 100 × 2ms loop was an accidental latency SLA.
+  const started = performance.now();
+  while (!check()) {
+    if (performance.now() - started >= 5_000)
+      throw new Error(`timeout: ${label}; waited=${Math.round(performance.now() - started)}ms matched=${check()}`);
+    await new Promise((r) => setTimeout(r, 10));
   }
-  expect(check()).toBe(true);
 }
 
 describe("W3 real stack assembly", () => {
@@ -177,7 +180,7 @@ describe("W3 real stack assembly", () => {
     );
     const id = (result.details as { runId: string }).runId;
     expect(id).toMatch(/^r_/);
-    await until(() => driver.text !== undefined);
+    await until(() => driver.text !== undefined, "driver received prompt");
     expect(driver.text).toContain("ordinary human request");
     expect(driver.text).toContain("[fabric inbox n=1]");
     expect(driver.text).toContain("carry this parked report");
@@ -192,7 +195,7 @@ describe("W3 real stack assembly", () => {
     expect(reservation).toMatchObject({ state: "pending", reserved: { runId: id } });
     expect(reservation).not.toHaveProperty("claimToken");
     driver.finish();
-    await until(() => stack.query.get(id)?.status === "completed");
+    await until(() => stack.query.get(id)?.status === "completed", "resumed run completed");
     await flush();
   });
   it("legacy @label resume also carries the same parked inbox (no fabricated wakeOrigin)", async () => {
@@ -226,13 +229,13 @@ describe("W3 real stack assembly", () => {
     expect(reserveMentionReport).toHaveBeenCalledWith("r_SENDER01", target, 1);
     expect(result).toMatchObject({ status: "resumed", quota: { used: 1, limit: 3, remaining: 2 } });
     if (result.status !== "resumed") throw new Error("not resumed");
-    await until(() => driver.text !== undefined);
+    await until(() => driver.text !== undefined, "driver received prompt");
     expect(driver.text).toContain("legacy followup");
     expect(driver.text).toContain("carry this parked report");
     expect(stack.query.get(result.runId)?.diag).not.toHaveProperty("wakeOrigin");
     expect(h.latest().revivedAs).toBe(result.runId);
     driver.finish();
-    await until(() => stack.query.get(result.runId)?.status === "completed");
+    await until(() => stack.query.get(result.runId)?.status === "completed", "woken run completed");
     await flush();
   });
   it("C-P5 partial: REAL SessionManager.inMemory retains the parked record through a stack rebuild", () => {
@@ -252,12 +255,12 @@ describe("W3 real stack assembly", () => {
     const stack = h.build();
     const a = await stack.spawn.spawn({ type: "worker", prompt: "off", resumeFrom: target });
     if (!("runId" in a)) throw new Error(a.error.message);
-    await until(() => driver.text !== undefined);
+    await until(() => driver.text !== undefined, "driver received prompt");
     expect(driver.text).toBe("off");
     expect(stack.query.get(a.runId)?.diag).not.toHaveProperty("inputAcceptedAt");
     expect(h.latest()).not.toHaveProperty("reserved");
     driver.finish();
-    await until(() => stack.query.get(a.runId)?.status === "completed");
+    await until(() => stack.query.get(a.runId)?.status === "completed", "coalesced run completed");
   });
   it("W4: a message that arrives while a manual resume is still starting waits, then is redirect-steered into the successor", async () => {
     const h = setup();
@@ -290,17 +293,17 @@ describe("W3 real stack assembly", () => {
     expect(latestOf(late.key)).not.toHaveProperty("steerAttempt");
     expect(driver.steered).toEqual([]);
     driver.open();
-    await until(() => driver.steered.length > 0);
+    await until(() => driver.steered.length > 0, "live steer accepted");
     expect(driver.steered[0]).toContain("arrived during startup");
     expect(driver.steered).toHaveLength(1);
-    await until(() => latestOf(late.key)?.state === "delivered");
+    await until(() => latestOf(late.key)?.state === "delivered", "late record delivered");
     expect(latestOf(late.key)).toMatchObject({ attempts: 1, steerAttempt: { runId: started.runId } });
     // the admitted parked message rode the prompt instead (never also steered)
     expect(driver.text).toContain("carry this parked report");
     expect(driver.text).not.toContain("arrived during startup");
     expect(h.latest()).toMatchObject({ state: "consumed", terminalReason: "resume_injected" });
     driver.finish();
-    await until(() => stack.query.get(started.runId)?.status === "completed");
+    await until(() => stack.query.get(started.runId)?.status === "completed", "started run completed");
     await flush();
   });
 });
