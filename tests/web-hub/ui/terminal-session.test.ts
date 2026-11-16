@@ -250,7 +250,8 @@ describe("per-session terminal declaration gate (r2 §6)", () => {
       await entry(w).trigger("click");
       await flushPromises();
       expect(lazy.mounted).toHaveBeenCalledWith({ agentKey: "B", expect: { sessionId: "B", epoch: "B" } });
-      expect(w.find("[data-test-panel]").exists()).toBe(true);
+      expect(w.find("#fleet-drawer [data-test-panel]").exists()).toBe(true);
+      expect(w.find(".detail-main [data-test-panel]").exists()).toBe(false);
       // Ordinary ticks with an equivalent declaration do not dispose/recreate an open panel.
       send("status", { busy: true, terminalSession: declaration("B", "B") });
       await flushPromises();

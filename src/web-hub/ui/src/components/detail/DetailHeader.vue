@@ -620,10 +620,10 @@ function updateTerminalButton() {
       style: { minWidth: "44px", minHeight: "44px" },
       type: "button",
       "data-fold": "terminal",
-      "aria-controls": "terminal-panel",
+      "aria-controls": "fleet-drawer",
       "aria-expanded": terminalEntry.open.value,
       "aria-label": t("terminal.title"),
-      onClick: () => terminalEntry.show(),
+      onClick: (event: MouseEvent) => terminalEntry.show(event),
     },
     [
       h(AppIcon, { name: "terminal", class: "icon" }),

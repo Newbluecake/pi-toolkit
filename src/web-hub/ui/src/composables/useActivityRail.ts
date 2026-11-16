@@ -2,7 +2,7 @@
 import { computed, onScopeDispose, ref, shallowRef, watch, type Ref } from "vue";
 import type { FleetDrawerMode } from "../contracts.js";
 
-export type ActivityPanel = "agent" | "bash";
+export type ActivityPanel = "agent" | "bash" | "terminal";
 export type ActivityOrigin = "pointer" | "keyboard" | "restore";
 
 const PANEL_KEY = "webhub.fleetDrawer.panel";
@@ -17,6 +17,8 @@ function readPanel(): ActivityPanel | null {
 }
 
 function savePanel(panel: ActivityPanel): void {
+  // Terminal is an explicit, ephemeral view: never restore private material on eligibility changes.
+  if (panel === "terminal") return;
   try {
     window.localStorage.setItem(PANEL_KEY, panel);
   } catch {
@@ -29,9 +31,15 @@ export function useActivityRail(options: {
   drawerOpen: Ref<boolean>;
   hasAgent: Readonly<Ref<boolean>>;
   hasBash: Readonly<Ref<boolean>>;
+  hasTerminal?: Readonly<Ref<boolean>>;
   deselectRun(): void;
 }) {
-  const available = (kind: ActivityPanel) => (kind === "agent" ? options.hasAgent.value : options.hasBash.value);
+  const available = (kind: ActivityPanel) =>
+    kind === "terminal"
+      ? options.hasTerminal?.value === true
+      : kind === "agent"
+        ? options.hasAgent.value
+        : options.hasBash.value;
   // Frames can arrive after the detail mounts. Until the saved panel becomes available,
   // show the original default without overwriting the saved user preference.
   let pendingRestore = readPanel();
@@ -50,25 +58,29 @@ export function useActivityRail(options: {
     options.drawerOpen.value = false;
     options.deselectRun();
   }
-  function toggle(kind: ActivityPanel, via: "pointer" | "keyboard", el?: HTMLElement | null) {
+  function show(kind: ActivityPanel, via: "pointer" | "keyboard", el?: HTMLElement | null) {
     if (!available(kind)) return;
     cancelRestore();
     savePanel(kind);
     if (el) trigger.value = el;
-    if (options.drawerOpen.value && panel.value === kind) {
-      close();
-      return;
-    }
-    if (kind === "bash") options.deselectRun();
+    if (kind !== "agent") options.deselectRun();
     panel.value = kind;
     origin.value = via;
     options.drawerOpen.value = true;
+  }
+  function toggle(kind: ActivityPanel, via: "pointer" | "keyboard", el?: HTMLElement | null) {
+    if (!available(kind)) return;
+    if (open.value && panel.value === kind) {
+      savePanel(kind); // Closing a temporary fallback is still an explicit legacy-panel choice.
+      if (el) trigger.value = el;
+      close();
+    } else show(kind, via, el);
   }
   watch(options.mode, (mode) => {
     origin.value = "restore";
     if (mode !== "docked") options.deselectRun();
   });
-  watch([options.hasAgent, options.hasBash], () => {
+  watch([options.hasAgent, options.hasBash, () => options.hasTerminal?.value], () => {
     if (pendingRestore !== null && available(pendingRestore)) {
       if (pendingRestore === "bash" && panel.value !== "bash") options.deselectRun();
       panel.value = pendingRestore;
@@ -80,5 +92,5 @@ export function useActivityRail(options: {
     panel.value = options.hasAgent.value ? "agent" : "bash";
   });
   onScopeDispose(() => options.deselectRun());
-  return { panel, open, trigger, origin, close, toggle, cancelRestore };
+  return { panel, open, trigger, origin, close, show, toggle, cancelRestore };
 }

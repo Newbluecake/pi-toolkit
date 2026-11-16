@@ -328,9 +328,9 @@ try {
   await page.goto(`${url}/#t=${encodeURIComponent(token)}`);
   await page.waitForSelector(".agent-card", { timeout: 15000 });
   await page.locator(`.agent-card[href="#/agent/${encodeURIComponent(card.agentKey)}"]`).click();
-  await page.locator('[aria-controls="terminal-panel"]').click();
+  await page.locator('[data-fold="terminal"]').click();
   await page.waitForSelector(".terminal-list");
-  steps.push("real token login → terminal button → bottom list");
+  steps.push("real token login → terminal button → drawer list");
   await page.locator("[data-terminal-create]").click();
   await writable();
   const initialFont = await terminalFontMetrics(page);
@@ -352,6 +352,36 @@ try {
   assert(pid > 0);
   await shot("01-echo");
   steps.push("echo and real shell PID rendered through PTY/SSE/WebGL");
+  stage = "drawer modes and shell continuity";
+  for (const [width, mode] of [
+    [1440, "docked"],
+    [1000, "overlay"],
+    [390, "fullscreen"],
+  ] as const) {
+    await page.setViewportSize({ width, height: 1000 });
+    await page.waitForSelector(`.detail[data-drawer="${mode}"]`);
+    if (!(await page.locator(".terminal-panel").isVisible())) {
+      await page.locator('.fleet-summary-bar[data-panel="terminal"]').click();
+      await page.locator(".terminal-list").getByRole("button", { name: "接回", exact: true }).click();
+    }
+    await writable();
+    assert.equal(await page.locator(".detail-main .terminal-panel").count(), 0);
+    assert.equal(await page.locator('#fleet-drawer[data-panel="terminal"] .terminal-panel').count(), 1);
+    await send(`printf '\\nP46_${mode}=%s\\n' "$$"`, `P46_${mode}=${pid}\r\n`);
+    assert.equal(ops.filter((o) => o.op === "open").length, 1);
+    assert.equal(ops.filter((o) => o.op === "close").length, 0);
+    await shot(`drawer-${width}-${mode}`);
+    steps.push(`${width}px ${mode}: drawer terminal, attach original PID, zero new shell/close`);
+  }
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.waitForSelector('.detail[data-drawer="docked"]');
+  // Dashboard's existing 1025px branch remounts AgentDetail. Terminal selection is
+  // intentionally ephemeral: explicitly reopen the list instead of assuming restored input.
+  if (!(await page.locator(".terminal-panel").isVisible())) {
+    await page.locator('.fleet-summary-bar[data-panel="terminal"]').click();
+    await page.locator(".terminal-list").getByRole("button", { name: "接回", exact: true }).click();
+  }
+  await writable();
   stage = "maximize and Escape";
   await button("最大化").click();
   await page.locator(".xterm-helper-textarea").focus();
@@ -363,6 +393,7 @@ try {
   steps.push("maximize → Esc preserves panel, maximization and shell");
   stage = "renderer loss same physical shell";
   const beforeLoss = ops.filter((o) => ["prepare", "open", "close"].includes(o.op)).length;
+  const attachesBeforeLoss = ops.filter((o) => o.op === "attach").length;
   await page.evaluate(() => {
     const canvas = [...document.querySelectorAll<HTMLCanvasElement>(".xterm canvas")].find((c) =>
       c.getContext("webgl2"),
@@ -372,7 +403,7 @@ try {
     lose.loseContext();
   });
   // Writable disappears during recovery; wait for a new renderer/attach cutover via HTTP ops.
-  await waitUntil(() => ops.some((o) => o.op === "attach"), 10000, "recovery attach");
+  await waitUntil(() => ops.filter((o) => o.op === "attach").length > attachesBeforeLoss, 10000, "recovery attach");
   await writable();
   await send("printf '\\nP3_RECOVERED=%s\\n' \"$$\"", `P3_RECOVERED=${pid}\r\n`);
   assert.equal(ops.filter((o) => ["prepare", "open", "close"].includes(o.op)).length, beforeLoss);
@@ -393,8 +424,8 @@ try {
   result.sameCookies = result.cookieBefore === result.cookieAfter;
   assert.equal(result.cookieAfter, result.cookieBefore, "same Page reload must retain the original login SID");
   assert.equal(browser.contexts().length, 1, "reload must not create a new BrowserContext");
-  await page.waitForSelector('[aria-controls="terminal-panel"]');
-  await page.locator('[aria-controls="terminal-panel"]').click();
+  await page.waitForSelector('[data-fold="terminal"]');
+  await page.locator('[data-fold="terminal"]').click();
   await page.locator(".terminal-list").getByRole("button", { name: "接回", exact: true }).click();
   await writable();
   await send("printf '\\nP3_AFTER=%s\\n' \"$$\"", `P3_AFTER=${pid}\r\n`);
@@ -446,7 +477,7 @@ try {
   }, card.agentKey);
   await captureDocumentCsp();
   await page.reload();
-  await page.locator('[aria-controls="terminal-panel"]').click();
+  await page.locator('[data-fold="terminal"]').click();
   await page.locator("[data-terminal-create]").click();
   await writable();
   stage = "auth revoke immediate invalidation";
@@ -517,7 +548,7 @@ try {
     await dp.goto(`${url}/#t=${encodeURIComponent(token)}`);
     await dp.waitForSelector(".agent-card");
     await dp.locator(`.agent-card[href="#/agent/${encodeURIComponent(card.agentKey)}"]`).click();
-    await dp.locator('[aria-controls="terminal-panel"]').click();
+    await dp.locator('[data-fold="terminal"]').click();
     await dp.locator("[data-terminal-create]").click();
     await dp.waitForFunction(
       () =>

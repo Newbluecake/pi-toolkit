@@ -61,7 +61,7 @@ describe("terminal capability gates and off parity (§7.1/§7.2)", () => {
     available.value = true;
     await nextTick();
     const button = b.get('[data-fold="terminal"]');
-    expect(button.attributes("aria-controls")).toBe("terminal-panel");
+    expect(button.attributes("aria-controls")).toBe("fleet-drawer");
     expect(button.attributes("aria-expanded")).toBe("false");
     expect((button.element as HTMLElement).style.minHeight).toBe("44px");
     await button.trigger("click");

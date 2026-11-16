@@ -120,3 +120,22 @@
 .terminal-panel-host {
   display: contents;
 }
+
+/* The drawer owns sizing in all three modes; no transcript-space reservation or splitter. */
+.drawer-terminal-content {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+.drawer-terminal-content .terminal-panel:not(.is-maximized) {
+  flex: 1;
+  height: 100%;
+  min-height: 0;
+  max-height: none;
+  border-top: 0;
+  overflow-y: auto;
+}
+.drawer-terminal-content .terminal-resize {
+  display: none;
+}

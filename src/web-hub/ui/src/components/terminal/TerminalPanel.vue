@@ -172,7 +172,10 @@ function inputAllowed() {
     !confirmRow.value &&
     paste.value === null &&
     !!surface.value?.contains(document.activeElement) &&
-    !document.querySelector('[aria-modal="true"]')
+    // Our fullscreen drawer is the containing modal, not a higher-priority confirmation.
+    ![...document.querySelectorAll('[aria-modal="true"]')].some(
+      (modal) => modal.id !== "fleet-drawer" || !root.value || !modal.contains(root.value),
+    )
   );
 }
 function wireInput() {

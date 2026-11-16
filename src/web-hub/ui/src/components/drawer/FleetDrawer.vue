@@ -238,8 +238,8 @@ const treeEmpty = computed(() => {
   const om = props.agent.fleetOmitted;
   return treeNodes.value.length === 0 && !((om?.active ?? 0) > 0 || (om?.terminal ?? 0) > 0);
 });
-const showAgent = computed(() => props.panel !== "bash");
-const showBash = computed(() => props.panel !== "agent");
+const showAgent = computed(() => props.panel === undefined || props.panel === "agent");
+const showBash = computed(() => props.panel === undefined || props.panel === "bash");
 const selectedRunId = computed(() => (showAgent.value ? (props.agent.runSel ?? null) : null));
 
 // 2026-10-15 bash→fleet 迁移(用户拍板 L1):主会话后台 bash 任务作为树视图末尾的独立
@@ -488,6 +488,7 @@ function onKey(ev: KeyboardEvent): void {
     }
     return;
   }
+  if (props.panel === "terminal") return; // Esc belongs to the terminal, never closes its drawer.
   if (ev.key !== "Escape" || ev.isComposing || ev.defaultPrevented) return;
   const target = ev.target as HTMLElement | null;
   if (target && /^(input|textarea|select)$/i.test(target.tagName)) return;
@@ -577,14 +578,21 @@ watch(
     :data-open="open || undefined"
     :role="mode === 'docked' ? undefined : 'dialog'"
     :aria-modal="mode === 'fullscreen' ? true : undefined"
-    :aria-label="t(panel === 'bash' ? 'fleet.commandsTitle' : 'fleet.panelTitle')"
+    :aria-label="
+      t(panel === 'terminal' ? 'terminal.title' : panel === 'bash' ? 'fleet.commandsTitle' : 'fleet.panelTitle')
+    "
     @click.capture="onDrawerClick"
   >
     <!-- The activity host remains mounted across tree/run transitions. -->
     <div class="drawer-head">
       <template v-if="selectedRunId === null">
-        <AppIcon :name="panel === 'bash' ? 'terminal' : 'bot'" class="icon-sm drawer-title-icon" />
-        <span class="drawer-title">{{ t(panel === "bash" ? "fleet.commandsTitle" : "fleet.panelTitle") }}</span>
+        <AppIcon
+          :name="panel === 'bash' || panel === 'terminal' ? 'terminal' : 'bot'"
+          class="icon-sm drawer-title-icon"
+        />
+        <span class="drawer-title">{{
+          t(panel === "terminal" ? "terminal.title" : panel === "bash" ? "fleet.commandsTitle" : "fleet.panelTitle")
+        }}</span>
       </template>
       <RunHeader v-else :agent="agent" :mode="mode" @back="onBackToTree" />
       <slot name="activity"></slot>
@@ -597,7 +605,10 @@ watch(
         <AppIcon name="x" class="icon-sm" />
       </button>
     </div>
-    <template v-if="selectedRunId !== null">
+    <template v-if="panel === 'terminal'">
+      <slot name="terminal"></slot>
+    </template>
+    <template v-else-if="selectedRunId !== null">
       <RunTranscript :key="selectedRunId" :agent="agent" :now="now" />
     </template>
     <template v-else>

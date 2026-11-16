@@ -53,6 +53,57 @@ describe("activity rail intent state machine", () => {
     rail.toggle("bash", "pointer", button);
     expect(rail.open.value).toBe(false);
   });
+  it("terminal show is explicit and idempotent, retains the saved legacy panel, and revocation falls back", async () => {
+    const scope = effectScope();
+    cleanups.push(() => scope.stop());
+    const deps = {
+      mode: ref<FleetDrawerMode>("docked"),
+      drawerOpen: ref(true),
+      hasAgent: ref(false),
+      hasBash: ref(false),
+      hasTerminal: ref(true),
+      deselectRun: vi.fn(),
+    };
+    const rail = scope.run(() => useActivityRail(deps))!;
+    expect(rail.open.value).toBe(false); // no eager terminal loading from persisted open
+    deps.hasBash.value = true;
+    await nextTick();
+    rail.show("bash", "pointer");
+    rail.show("terminal", "keyboard");
+    rail.show("terminal", "keyboard");
+    expect(rail.open.value).toBe(true);
+    expect(rail.panel.value).toBe("terminal");
+    expect(localStorage.getItem("webhub.fleetDrawer.panel")).toBe("bash");
+    deps.hasTerminal.value = false;
+    await nextTick();
+    expect(rail.panel.value).toBe("bash");
+    deps.hasTerminal.value = true;
+    await nextTick();
+    expect(rail.panel.value).toBe("bash");
+    rail.toggle("terminal", "pointer");
+    rail.toggle("terminal", "pointer");
+    expect(rail.open.value).toBe(false);
+  });
+  it("closing an active fallback still saves that legacy panel and cancels delayed restoration", async () => {
+    localStorage.setItem("webhub.fleetDrawer.panel", "agent");
+    const scope = effectScope();
+    cleanups.push(() => scope.stop());
+    const deps = {
+      mode: ref<FleetDrawerMode>("docked"),
+      drawerOpen: ref(true),
+      hasAgent: ref(false),
+      hasBash: ref(true),
+      deselectRun: vi.fn(),
+    };
+    const rail = scope.run(() => useActivityRail(deps))!;
+    expect(rail.panel.value).toBe("bash");
+    rail.toggle("bash", "pointer");
+    expect(localStorage.getItem("webhub.fleetDrawer.panel")).toBe("bash");
+    deps.hasAgent.value = true;
+    await nextTick();
+    expect(rail.panel.value).toBe("bash");
+    expect(rail.open.value).toBe(false);
+  });
   it("data disappearance falls back to available type", async () => {
     const { rail, deps } = setup();
     rail.toggle("agent", "pointer");

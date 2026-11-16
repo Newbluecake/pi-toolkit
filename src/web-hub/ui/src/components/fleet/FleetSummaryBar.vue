@@ -1,6 +1,8 @@
 <!-- #41/#42 supersede the 2026-10-15 merged badge: independent agent/bash counts.
-     Both buttons remain usable while docked; AgentDetail owns the common split anchor. -->
+     An eligible session adds a terminal entry; AgentDetail owns the common split anchor. -->
 <script setup lang="ts">
+import { TERMINAL_ENTRY } from "../../logic/terminalContext.js";
+import type { ActivityPanel } from "../../composables/useActivityRail.js";
 import { terminalUiEnabled } from "../../logic/terminalCapability.js";
 import { HUB_CTX } from "../control/controlContext.js";
 import { computed, inject } from "vue";
@@ -12,6 +14,7 @@ import AppIcon from "../../icons/AppIcon.vue";
 import { fleetSummary } from "./summary.js";
 import { summaryCounts } from "../detail/bashJobsView.js";
 
+const terminalEntry = inject(TERMINAL_ENTRY, null);
 const terminalHub = inject(HUB_CTX, null);
 const jobsIcon = computed(() =>
   terminalUiEnabled(terminalHub?.state.value.hub) ? ("jobs-list" as const) : ("terminal" as const),
@@ -62,10 +65,17 @@ const buttons = computed(() => {
         t("detail.bashJobsDone", { n: (bash?.done ?? 0) + (bash?.failed ?? 0) }),
       ].join(" · "),
     },
+    {
+      kind: "terminal" as const,
+      icon: "terminal" as const,
+      running: 0,
+      available: terminalEntry?.available.value === true,
+      label: t("terminal.title"),
+    },
   ].filter((b) => b.available);
 });
 const selectedPanel = computed(() => (props.open ? (props.panel ?? (hasAgent.value ? "agent" : "bash")) : null));
-function toggle(kind: "agent" | "bash", event: MouseEvent): void {
+function toggle(kind: ActivityPanel, event: MouseEvent): void {
   emit("toggle-panel", kind, event.detail === 0 ? "keyboard" : "pointer", event.currentTarget as HTMLElement);
   // Retain the legacy no-argument event; production only listens to toggle-panel.
   emit("toggle");

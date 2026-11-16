@@ -176,8 +176,7 @@ const terminalDeclared = ref(false);
 const terminalAvailable = computed(
   () => terminalDeclared.value && hubLive.value && terminalPrivacyAllowed.value && controlEnabled.value,
 );
-const terminalOpen = ref(false);
-const terminalMain = ref<HTMLElement | null>(null);
+const terminalMount = ref<HTMLElement | null>(null);
 const terminalAppContext = getCurrentInstance()?.appContext;
 let terminalHost: HTMLDivElement | undefined;
 let terminalLoadGeneration = 0;
@@ -189,15 +188,6 @@ function unmountTerminal() {
     terminalHost = undefined;
   }
 }
-provide(TERMINAL_ENTRY, {
-  available: terminalAvailable,
-  open: terminalOpen,
-  show() {
-    if (!terminalAvailable.value) return;
-    terminalLoadError.value = "";
-    terminalOpen.value = true;
-  },
-});
 const terminalScope = computed(() => ({
   agentKey: props.agent.key,
   expect: {
@@ -231,7 +221,6 @@ watch(
     // A withdraw/route/epoch boundary never automatically opens a successor shell/panel.
     terminalDeclared.value = false;
     terminalLoadGeneration++;
-    terminalOpen.value = false;
     terminalLoadError.value = "";
     unmountTerminal();
     if (!hubLive.value || !terminalPrivacyAllowed.value || !controlEnabled.value) return;
@@ -239,51 +228,6 @@ watch(
     if (mine === terminalEligibilityGeneration) terminalDeclared.value = enabled;
   },
   { immediate: true, flush: "sync" },
-);
-watch(
-  [terminalAvailable, terminalOpen, () => JSON.stringify(terminalScope.value)],
-  async ([available, open]) => {
-    const scope = terminalScope.value;
-    const mine = ++terminalLoadGeneration;
-    unmountTerminal();
-    if (!available || !open) return;
-    if (!hub?.terminal) {
-      terminalLoadError.value = t("detail.terminalConnectionUnavailable");
-      terminalOpen.value = false;
-      return;
-    }
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      const module = await Promise.race([
-        import("../terminal/terminal-feature.js"),
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new Error(t("detail.terminalLoadTimeout"))), 5000);
-        }),
-      ]);
-      if (mine !== terminalLoadGeneration || !terminalAvailable.value || !terminalMain.value) return;
-      terminalHost = document.createElement("div");
-      terminalHost.className = "terminal-panel-host";
-      terminalMain.value.insertBefore(terminalHost, terminalMain.value.querySelector(".dock"));
-      const vnode = h(module.TerminalPanel, {
-        hub,
-        scope,
-        onBackground() {
-          terminalOpen.value = false;
-          void nextTick(() => document.querySelector<HTMLButtonElement>('[data-fold="terminal"]')?.focus());
-        },
-      });
-      if (terminalAppContext) vnode.appContext = terminalAppContext;
-      render(vnode, terminalHost);
-    } catch (error) {
-      if (mine === terminalLoadGeneration) {
-        terminalOpen.value = false;
-        terminalLoadError.value = error instanceof Error ? error.message : "E_UNAVAILABLE";
-      }
-    } finally {
-      clearTimeout(timer);
-    }
-  },
-  { flush: "post" },
 );
 onBeforeUnmount(() => {
   terminalEligibilityGeneration++;
@@ -698,12 +642,82 @@ const rail = useActivityRail({
   drawerOpen: persistedOpen,
   hasAgent: computed(() => hasFleet.value || selectedRunId.value !== null),
   hasBash: hasBashJobs,
+  hasTerminal: terminalAvailable,
   deselectRun,
 });
 const drawerOpen = rail.open;
 const drawerPanel = rail.panel;
 const openOrigin = rail.origin;
 const trigger = rail.trigger;
+
+// Closing/switching unmounts the view, whose controller only detaches the writer. The shell
+// remains in the terminal list; no hidden renderer or private metadata survives a revocation.
+const terminalOpen = computed(() => terminalAvailable.value && drawerOpen.value && drawerPanel.value === "terminal");
+provide(TERMINAL_ENTRY, {
+  available: terminalAvailable,
+  open: terminalOpen,
+  show(event) {
+    if (!terminalAvailable.value) return;
+    terminalLoadError.value = "";
+    rail.show(
+      "terminal",
+      event?.detail === 0 || !event ? "keyboard" : "pointer",
+      event?.currentTarget instanceof HTMLElement ? event.currentTarget : null,
+    );
+  },
+});
+
+watch(
+  [terminalAvailable, terminalOpen, () => JSON.stringify(terminalScope.value)],
+  async ([available, open]) => {
+    const scope = terminalScope.value;
+    const mine = ++terminalLoadGeneration;
+    unmountTerminal();
+    if (!available || !open) return;
+    if (!hub?.terminal) {
+      rail.close();
+      terminalLoadError.value = t("detail.terminalConnectionUnavailable");
+      return;
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const module = await Promise.race([
+        import("../terminal/terminal-feature.js"),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(t("detail.terminalLoadTimeout"))), 5000);
+        }),
+      ]);
+      if (mine !== terminalLoadGeneration || !terminalAvailable.value || !terminalOpen.value || !terminalMount.value)
+        return;
+      terminalHost = document.createElement("div");
+      terminalHost.className = "terminal-panel-host";
+      terminalMount.value.append(terminalHost);
+      const vnode = h(module.TerminalPanel, {
+        hub,
+        scope,
+        onBackground() {
+          rail.close();
+          void nextTick(() =>
+            (
+              document.querySelector<HTMLButtonElement>('[data-fold="terminal"]') ??
+              document.querySelector<HTMLButtonElement>('.fleet-summary-bar[data-panel="terminal"]')
+            )?.focus(),
+          );
+        },
+      });
+      if (terminalAppContext) vnode.appContext = terminalAppContext;
+      render(vnode, terminalHost);
+    } catch (error) {
+      if (mine === terminalLoadGeneration) {
+        rail.close();
+        terminalLoadError.value = error instanceof Error ? error.message : "E_UNAVAILABLE";
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+  },
+  { flush: "post" },
+);
 
 // One rail instance moves between the closed floating host and the open drawer header.
 const floatingHostEl = ref<HTMLElement | null>(null);
@@ -746,7 +760,7 @@ function onCloseDrawer(): void {
     <DetailHeader :agent="agent" :narrow="narrow" @back="emit('back')" />
 
     <div class="detail-split">
-      <div ref="terminalMain" class="detail-main">
+      <div class="detail-main">
         <!-- #65 outdated-reload（预览 §1–§4）：落后会话的顶部提示条，无 provider/不落后时自隐。 -->
         <OutdatedReloadBanner :agent-key="agent.key" />
         <NoticeBanner v-for="notice in notices" :key="notice.id" :notice="notice" @action="onNoticeAction" />
@@ -816,10 +830,10 @@ function onCloseDrawer(): void {
         </Teleport>
       </div>
       <!-- §6.1: 抽屉在 CONTROL_CTX 的 provide 作用域内(原为树上的行内动作,2026-10-17 已移除);
-           有 fleet 行、正数 omitted 或有选中 run 才挂载;`id="fleet-drawer"` 在
+           有 fleet 行、正数 omitted、选中 run 或终端资格才挂载;`id="fleet-drawer"` 在
            FleetDrawer 根元素上(§6.1 的锚点,FleetSummaryBar 的 aria-controls 指它)。 -->
       <FleetDrawer
-        v-if="hasFleet || hasBashJobs || selectedRunId !== null"
+        v-if="hasFleet || hasBashJobs || selectedRunId !== null || terminalAvailable"
         :agent="agent"
         :now="now"
         :mode="drawerMode"
@@ -830,6 +844,9 @@ function onCloseDrawer(): void {
         @close="onCloseDrawer"
         @intent="rail.cancelRestore"
       >
+        <template #terminal>
+          <div ref="terminalMount" class="drawer-terminal-content"></div>
+        </template>
         <!-- 公共头部宿主在 tree/run 分支切换间保持不变。 -->
         <template #activity>
           <div ref="headerHostEl" data-rail-host="header"></div>

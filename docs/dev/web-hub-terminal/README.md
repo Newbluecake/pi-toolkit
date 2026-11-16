@@ -177,7 +177,7 @@ publication 2s logical deadline、late-write seal；同步文件系统调用不�
 - 单 writer CAS，15s lease/5s renew；stream epoch、raw-byte offset、input seq 幂等，未知已接受输入只查原 seq，不重打命令。creation ticket 10min、live/closing/poison pin，不因票据 TTL 重复 fork。
 - raw ring 1MiB/term，scrollback1000；output8KiB、input4KiB、input pending32KiB、live64KiB、helper/UDS128KiB。hub 同时限制 raw64KiB、128项、实际序列化 frame128KiB，零 raw 控制帧也计费；只合并同 writer 相邻 state，不跨 output/gap/cutover。
 - replay 固定≤16KiB suffix、0 live staging、最多8 attempts、绝对3s，write callback→replay_ready→cutover barrier 后可写，明确 gap。ResizeObserver 的 resize 在 writable 前不发送；cutover 统一发送当前最新尺寸，避免抢在 replay_ready 前被 agent 正确拒为 E_LEASE_EXPIRED 后 UI 误 detach。总512KiB/s 内预留 replay128KiB/s；慢 viewer≤2s detach，shell 继续。不能追满 ring 或声称 screen snapshot/完整 VT 历史恢复；同尺寸 resize/SIGWINCH 促重绘。
-- UI bottom panel 位于 body 后/dock 前；页面内最大化，不用 Fullscreen API；**Esc 不关闭、不退出最大化**。Ctrl+Shift+F6 退出输入焦点；其他按键归 TTY，高层确认框优先。多行 paste/drop 确认，4KiB 上限；确认先移 modal、恢复焦点再 paste。原生 keyboard capture/bubble 门不能卸载宿主热键。
+- UI 位于右侧 `FleetDrawer`，与 Agents 树、Bash 后台任务并列为第三个面板，不占对话区/dock 上方空间。沿用 ≥1280 docked / 768–1279 overlay / ≤767 fullscreen 与原打开状态持久化；rail 终端按钮或 header `TERMINAL_ENTRY.show` 显式打开抽屉并切到终端（header 的 aria-controls 指向 fleet-drawer）。只有终端可用也会挂载抽屉，但不自动加载终端 feature/renderer/API。终端面板选择不持久化，保留既有 agent/bash 偏好，防止资格恢复/刷新自动载入私有界面。关闭抽屉、切到别的面板或跨模式关闭时卸载终端 UI，沿用 `controller.dispose` 仅 detach writer、清屏/metadata/待处理材料，**不 close shell**；从终端列表显式接回。相较隐藏保活可释放 WebGL/监听且避免保留撤权材料，原 eligibility generation 同步撤销仍是最终门。页面内最大化，不用 Fullscreen API；**终端面板内 Esc 不关闭抽屉、不退出最大化**（确认框仍只取消自身）。Fullscreen 抽屉自身的 modal 是终端容器，不应被误判为高优先级确认框；其他 modal 仍阻断输入。Ctrl+Shift+F6 退出输入焦点；其他按键归 TTY，高层确认框优先。多行 paste/drop 确认，4KiB 上限；确认先移 modal、恢复焦点再 paste。原生 keyboard capture/bubble 门不能卸载宿主热键。
 - optional metadata 来自 hub/validated uid/login shell/host/initial ctx，不来自 OSC/title/output；list/state 无 cwd/user/host/shell，panel 文本渲染。缺省内联英文 `unknown`；撤权清所有 metadata/屏幕/pending。
 - controller 每个 HTTP/action await 前后绑定不可变 authority snapshot（认证、writer代、原 connection 对象/instance/token/expiry、client/session/epoch、AbortSignal）；迟到成功/错误/finally 不能写后继状态。忽略 abort 的 transport 也必须被挡住。卸载 detach 使用独立旧 lease 快照，不恢复 UI。
 
@@ -258,7 +258,7 @@ timeout 240s npm run probe:terminal-e2e
 ```
 
 真跨层脚本使用随机短路径私有 HOME/port0/Unix socket、真实 guarded authority/receipt/journal/OS verifier，**只 DI 审核过的隔离 uid/rc fixture**；不碰用户真实 ~/.pi、rc、凭据、运行中 hub。agent 版本随 package 以免触发 supersede。
-生产 manifest-verified UI 经真实 token login→按钮→bottom list→echo/PID→max/Esc→真实 loss 同 PID/零新open→后台完成→刷新接回同 PID→确认关闭→物理回收/配额再开→privacy/revoke立即失效→禁用 WebGL 中文拒启。监听原 SSE 仅观测输出，不替换后端/渲染器，不读 xterm 私有 buffer；网络路由仅允许该私有 loopback origin。
+生产 manifest-verified UI 经真实 token login→按钮→drawer list→echo/PID→max/Esc→真实 loss 同 PID/零新open→后台完成→刷新接回同 PID→确认关闭→物理回收/配额再开→privacy/revoke立即失效→禁用 WebGL 中文拒启。监听原 SSE 仅观测输出，不替换后端/渲染器，不读 xterm 私有 buffer；网络路由仅允许该私有 loopback origin。
 截图（返工版-r2后缀）、JSON/操作计数、CSP与console错误写 evidence 目录；warnings单独有界保存（最多64条、每条2048字符、另记droppedWarnings），主/禁用WebGL页面均采集，不混入错误判定；任何异常 exit1，不把没有测试/只截图当 PASS。先等后台 action 完成再刷新，否则人为取消尚未送出的 detach 不能当成功后台的证明。
 
 七案例保留 normal/recovery、recovery失败、getContext null/throw、addon失败、negative、真实 --disable-webgl。六正例必须0 CSP违规/无可见DOM；negative 必须恰1 CSP违规+1 console error（证明捕获器有效），不混入正例统计。

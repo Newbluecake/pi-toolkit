@@ -293,7 +293,7 @@ ruling — `agent/redact.ts`'s secret scrubbing is HYGIENE ONLY, never a securit
 
 ## Activity rail（#41/#42）
 
-Two independent right-edge buttons now expose agent and background-bash activity: each has its
+Independent right-edge buttons expose agent and background-bash activity (plus a third terminal entry only for a terminal-eligible session): each has its
 own running count (bash includes staged), `99+` visual cap with the full accessible count, and
 no-record classes render nothing. The user explicitly rejected a white card / square outlined
 rail: only bot/terminal icons and corner badges are visible, with transparent 44px hit targets.
@@ -316,7 +316,15 @@ mode. Clicking the other rail icon switches the panel without closing the drawer
 Viewport layout rules are unchanged: ≥1280 docked (grid shrinks main), 768–1279 overlay,
 ≤767 fullscreen. `useFleetDrawerOpen` exclusively owns `webhub.fleetDrawer.open`: docked-mode
 open/close state is persisted there, with the existing default-open and breakpoint-reset behavior;
-no new key/wire/setting. `data-docked-open` alone drives grid allocation. Production always
+no new key/wire/setting. `data-docked-open` alone drives grid allocation. The session terminal is an explicit third `terminal` panel: the rail and detail-header button
+open the same drawer. With only terminal eligibility the drawer may mount, but remains closed
+until an explicit terminal action; no cap/declaration keeps the original mounting/DOM path.
+Terminal selection is ephemeral (the existing agent/bash preference is retained), while docked
+open-state persistence is unchanged. Leaving/closing terminal disposes the view and detaches
+its writer, never terminates the shell; revocation still synchronously unmounts and clears it.
+Terminal Escape does not close the drawer; fullscreen treats its containing drawer modal as
+its input scope, not a higher confirmation. See [terminal UI invariants](../web-hub-terminal/README.md).
+Production always
 passes an explicit `panel`, while undefined panel is legacy combined-render/fill-budget compatibility.
 
 Run subscribe/unsubscribe still belongs solely to useHub. Only keyboard Enter/Space opens focus

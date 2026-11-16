@@ -341,9 +341,9 @@ export type FleetDrawerMode = "docked" | "overlay" | "fullscreen";
 
 export interface FleetSummaryBarProps {
   readonly rows: readonly FleetRowWire[];
-  /** Actual visibility; panel disambiguates the two independent aria-expanded values. */
+  /** Actual visibility; panel disambiguates the independent aria-expanded values. */
   readonly open: boolean;
-  readonly panel?: "agent" | "bash";
+  readonly panel?: "agent" | "bash" | "terminal";
   /** Main-session bash rows; #41 keeps their badge separate from agent activity. */
   readonly bashJobs?: BashJobsWire | undefined;
   /** Rows omitted by the bounded fleet projection. Positive counts keep the agent entry
@@ -352,7 +352,7 @@ export interface FleetSummaryBarProps {
 }
 export interface FleetSummaryBarEmits {
   toggle: [];
-  "toggle-panel": [panel: "agent" | "bash", origin: "pointer" | "keyboard", trigger: HTMLElement];
+  "toggle-panel": [panel: "agent" | "bash" | "terminal", origin: "pointer" | "keyboard", trigger: HTMLElement];
 }
 
 /** 2026-10-15 bash→fleet 迁移(components/fleet/FleetBashJobs.vue):fleet 抽屉树视图末尾
@@ -408,7 +408,7 @@ export interface FleetTreeEmits {
 
 export interface FleetDrawerProps {
   /** Absent only for legacy combined callers; production always supplies an explicit panel. */
-  readonly panel?: "agent" | "bash";
+  readonly panel?: "agent" | "bash" | "terminal";
   readonly openOrigin?: "pointer" | "keyboard" | "restore";
   readonly trigger?: HTMLElement | null;
   readonly agent: AgentState;
