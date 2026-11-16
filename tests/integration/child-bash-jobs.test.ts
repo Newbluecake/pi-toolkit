@@ -707,11 +707,29 @@ describe("§3.5 T21 (a)-(f): fixed FakeClock timelines for the round-budget cap"
       const clock = new FakeClock(0);
       // A shorter grace (30s, vs. the 60s default) keeps a job's own kill-trigger instant strictly
       // before the NEXT job's onset (60s apart) — real production code doesn't care about this, it's
-      // only needed so this test's own `settleReal()` checkpoints (see the class comment above) land
-      // in an unambiguous order.
+      // only needed so the terminal-state checkpoints below precede the next grace onset.
       wireChildBashJobs(pi, { settings: settingsWith({ timeoutGraceMs: 30_000 }, dir), clock });
       const ctx = fakeCtx(sessionId, dir);
       const bash = tools.get("bash")!;
+      const bashJob = tools.get("bash_job")!;
+
+      async function waitForStatus(jobId: string, status: "running" | "timed_out"): Promise<void> {
+        // FakeClock advances deadlines, but SIGTERM/exit and terminal-state persistence use
+        // the real event loop. Observe the transition, never assume a 200ms sleep drained it.
+        await vi.waitFor(
+          async () => {
+            const result = (await bashJob.execute(
+              `status-${jobId}`,
+              { action: "status", job_id: jobId },
+              undefined,
+              undefined,
+              ctx,
+            )) as { details?: { status?: string; terminal?: boolean } };
+            expect(result.details).toMatchObject({ status, terminal: status === "timed_out" });
+          },
+          { timeout: 5_000, interval: 15 },
+        );
+      }
 
       async function createJob(label: string, timeoutS: number): Promise<string> {
         const r = (await bash.execute(
@@ -727,7 +745,7 @@ describe("§3.5 T21 (a)-(f): fixed FakeClock timelines for the round-budget cap"
       const jobA = await createJob("call-a", 100);
       const jobB = await createJob("call-b", 160);
       const jobC = await createJob("call-c", 220);
-      await settleReal(200);
+      for (const jobId of [jobA, jobB, jobC]) await waitForStatus(jobId, "running");
 
       attachHost(sessionId, {
         watchdogDueAt: () => 1_800_000,
@@ -735,7 +753,7 @@ describe("§3.5 T21 (a)-(f): fixed FakeClock timelines for the round-budget cap"
         maxExtensions: () => 3,
       });
 
-      async function round(steps: { advanceMs: number; settle?: boolean }[]): Promise<string> {
+      async function round(steps: { advanceMs: number; waitForTerminal?: string }[]): Promise<string> {
         const p = emit(
           "agent_before_settle",
           { outcome: "completed", context: { canContinue: false }, entries: [] },
@@ -743,7 +761,7 @@ describe("§3.5 T21 (a)-(f): fixed FakeClock timelines for the round-budget cap"
         );
         for (const step of steps) {
           clock.advance(step.advanceMs);
-          if (step.settle) await settleReal(200);
+          if (step.waitForTerminal) await waitForStatus(step.waitForTerminal, "timed_out");
         }
         const [result] = (await p) as [{ entries: { content?: string }[]; continue: boolean } | undefined];
         expect(result?.continue).toBe(true);
@@ -759,14 +777,14 @@ describe("§3.5 T21 (a)-(f): fixed FakeClock timelines for the round-budget cap"
 
       // Round 2 (100s -> 130s A's kill trigger, settle, -> 160s B's onset): A dead before B ever
       // enters grace ⇒ the reminder's job set is {B} alone, never {A,B}.
-      const r2 = await round([{ advanceMs: 30_000, settle: true }, { advanceMs: 30_000 }]);
+      const r2 = await round([{ advanceMs: 30_000, waitForTerminal: jobA }, { advanceMs: 30_000 }]);
       expect(r2).toMatch(/grace window/);
       expect(r2).not.toContain(jobA);
       expect(r2).toContain(jobB);
       expect(r2).not.toContain(jobC);
 
       // Round 3 (160s -> 190s B's kill trigger, settle, -> 220s C's onset): same shape, job set {C}.
-      const r3 = await round([{ advanceMs: 30_000, settle: true }, { advanceMs: 30_000 }]);
+      const r3 = await round([{ advanceMs: 30_000, waitForTerminal: jobB }, { advanceMs: 30_000 }]);
       expect(r3).toMatch(/grace window/);
       expect(r3).not.toContain(jobA);
       expect(r3).not.toContain(jobB);
@@ -774,7 +792,7 @@ describe("§3.5 T21 (a)-(f): fixed FakeClock timelines for the round-budget cap"
 
       // Round 4 (220s -> 250s C's kill trigger, settle): C's own death resolves `waitAllExit`
       // immediately (it was the only job left) ⇒ "all done", no further reminder.
-      const r4 = await round([{ advanceMs: 30_000, settle: true }]);
+      const r4 = await round([{ advanceMs: 30_000, waitForTerminal: jobC }]);
       expect(r4).toMatch(/finished/i);
       expect(r4).toContain(jobC);
 

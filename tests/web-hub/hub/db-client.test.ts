@@ -267,6 +267,8 @@ skipIfNoSqlite("createDbClient (plan §4.2 real subprocess)", () => {
     try {
       const realSpawn = (await import("node:child_process")).spawn;
       let capturedChild: ReturnType<typeof realSpawn> | undefined;
+      let spawnCount = 0;
+      let spawnCountAtQueuedRejection: number | undefined;
       const c = make(t.dbFile, {
         interactiveSlots: 1,
         queueSlots: 5,
@@ -279,6 +281,7 @@ skipIfNoSqlite("createDbClient (plan §4.2 real subprocess)", () => {
         backoffMs: [50, 100, 200],
         spawnFn: ((...args: Parameters<typeof realSpawn>) => {
           const child = realSpawn(...args);
+          spawnCount++;
           capturedChild = child;
           return child;
         }) as typeof realSpawn,
@@ -287,22 +290,26 @@ skipIfNoSqlite("createDbClient (plan §4.2 real subprocess)", () => {
       // Give the __block call a moment to actually dispatch (become in-flight, occupying the
       // single interactive slot) before the second call is admitted — it must land in the queue.
       await new Promise((resolve) => setTimeout(resolve, 50));
-      const queued = c.call("getUser", { username: "admin" }).catch((e: unknown) => e);
-      const killedAt = Date.now();
-      capturedChild?.kill("SIGKILL");
+      const queued = c.call("getUser", { username: "admin" }).catch((e: unknown) => {
+        spawnCountAtQueuedRejection = spawnCount;
+        return e;
+      });
+      expect(capturedChild).toBeDefined();
+      capturedChild!.kill("SIGKILL");
       const [inFlightErr, queuedErr] = await Promise.all([inFlight, queued]);
-      const elapsedMs = Date.now() - killedAt;
       expect(inFlightErr).toBeInstanceOf(DbClientError);
       expect((inFlightErr as DbClientError).code).toBe("E_DB");
       expect(queuedErr).toBeInstanceOf(DbClientError);
       expect((queuedErr as DbClientError).code).toBe("E_DB");
-      // Rejected essentially synchronously with the exit event — well before the first
-      // backoff respawn (50ms) could ever have redispatched it to a fresh child.
-      expect(elapsedMs).toBeLessThan(40);
+      // Rejection precedes any replacement spawn, independent of OS SIGKILL → exit latency.
+      // The old implementation redispatches queued to child #2 and resolves with a user row:
+      // both the E_DB assertion and this rejection-time spawn count guard that regression.
+      expect(spawnCountAtQueuedRejection).toBe(1);
       // The client still recovers after respawn: a fresh call succeeds.
       await new Promise((resolve) => setTimeout(resolve, 150));
       const after = await c.call("getUser", { username: "admin" });
       expect((after as { username: string }).username).toBe("admin");
+      expect(spawnCount).toBe(2);
     } finally {
       t.cleanup();
     }

@@ -1272,6 +1272,9 @@ describe("hard gate 5: deadline propagation and poisoning (§2.2.5 #7)", () => {
       { principal: P1, id: p.id, offset: 0, bytes: Buffer.from("abc") },
       { at: clock.now() + 120 },
     );
+    // Observe rejection before yielding: the request timer can win before the injected I/O
+    // hook (or this poll) runs on a loaded worker. The original promise is still asserted below.
+    void chunkP.catch(() => undefined);
     await waitFor(() => releaseWrite !== undefined);
     await expectCode(() => chunkP, "E_DEADLINE");
     await expectCode(
@@ -1303,6 +1306,7 @@ describe("hard gate 5: deadline propagation and poisoning (§2.2.5 #7)", () => {
     await store.begin(p, dl());
     await store.chunk({ principal: P1, id: p.id, offset: 0, bytes: Buffer.from("abc") }, dl());
     const commitP = store.commit({ principal: P1, id: p.id }, { at: clock.now() + 120 });
+    void commitP.catch(() => undefined); // attach before waiting for the fault-injection hook
     await waitFor(() => releaseLink !== undefined);
     await expectCode(() => commitP, "E_DEADLINE");
     releaseLink!();
@@ -1377,6 +1381,7 @@ describe("hard gate 5: deadline propagation and poisoning (§2.2.5 #7)", () => {
     await store.chunk({ principal: P1, id: p.id, offset: 0, bytes: Buffer.from("abc") }, dl());
     const idDir = `${root}/s-sess123/${p.id}`;
     const commitP = store.commit({ principal: P1, id: p.id }, { at: clock.now() + 200 });
+    void commitP.catch(() => undefined); // queued deadline may fire before waitFor resumes
     await waitFor(() => releaseRename !== undefined);
     // no success reply is ever produced (§2.2.5)
     await expectCode(() => commitP, "E_DEADLINE");
@@ -1533,6 +1538,7 @@ describe("all timers are unref'd (hasRef() === false)", () => {
         { principal: P1, id: p.id, offset: 0, bytes: Buffer.from("abc") },
         { at: clock.now() + 80 },
       );
+      void chunkP.catch(() => undefined); // observe the short request deadline immediately
       while (releaseWrite === undefined) await realSleep(5);
       await expectCode(() => chunkP, "E_DEADLINE");
       // chunkP can reject from runLocked's request timer BEFORE the write step's own deadline timer
