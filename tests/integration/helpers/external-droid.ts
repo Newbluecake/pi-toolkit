@@ -29,21 +29,38 @@ export interface DroidStack {
 
 /** 生成一个可执行 wrapper 脚本当 droid binary（模式/参数烤进脚本；观测文件经 env 注入）。 */
 export function makeBinary(root: string, argsIn: readonly string[]): string {
-  // 会话库默认落在 binary 同目录：resume 起的新 fake 进程才能 load_session 到上一个进程建的会话。
-  const args = argsIn.includes("--memory-file")
-    ? argsIn
-    : [...argsIn, "--memory-file", join(root, "fake-droid-mem.json")];
   const dir = join(root, "bin");
   mkdirSync(dir, { recursive: true });
   const path = join(
     dir,
     `droid-${argsIn.join("_").replaceAll(/[^A-Za-z0-9._-]/g, "") || "default"}-${Math.random().toString(36).slice(2, 8)}`,
   );
-  const script = [
-    "#!/bin/sh",
-    `exec "${process.execPath}" "${FAKE_DROID}" ${args.map((a) => `"${a}"`).join(" ")} "$@"`,
-    "",
-  ].join("\n");
+  // The frozen fake uses an unlocked whole-file JSON read/modify/write, unlike droid's
+  // per-session native files. Catalog and runs MUST NOT share that file: a late catalog
+  // snapshot can overwrite the completed run's session. Resume pins the original cwd,
+  // so binary + cwd is a stable namespace across resume processes, not across probes.
+  const launcher = `${path}.mjs`;
+  writeFileSync(
+    launcher,
+    `
+    import { createHash } from "node:crypto";
+    import { appendFileSync } from "node:fs";
+    import { pathToFileURL } from "node:url";
+    const args = ${JSON.stringify(argsIn)};
+    let index = args.indexOf("--memory-file");
+    if (index < 0) {
+      args.push("--memory-file", ${JSON.stringify(`${path}.fake-droid-mem.json`)});
+      index = args.length - 2;
+    }
+    args[index + 1] += "." + createHash("sha256").update(process.cwd()).digest("hex");
+    if (process.env.DROID_TRACE_FILE) {
+      appendFileSync(process.env.DROID_TRACE_FILE, "process:" + process.cwd() + "\\n");
+    }
+    process.argv = [process.execPath, ${JSON.stringify(FAKE_DROID)}, ...args, ...process.argv.slice(2)];
+    await import(pathToFileURL(${JSON.stringify(FAKE_DROID)}).href);
+  `,
+  );
+  const script = ["#!/bin/sh", `exec "${process.execPath}" "${launcher}" "$@"`, ""].join("\n");
   writeFileSync(path, script, { mode: 0o755 });
   chmodSync(path, 0o755);
   return path;

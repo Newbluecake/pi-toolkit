@@ -48,7 +48,7 @@ describe("external droid integration — chain (§7.2)", () => {
     stacks.push(s);
     const runId = await spawnDroid(s, "say done");
     const { status, outcome } = await waitFor(s.stack, runId, 30_000);
-    expect(status).toBe("completed");
+    expect(status, JSON.stringify({ status, outcome, trace: readLines(s.traceFile) })).toBe("completed");
     expect(outcome?.text).toBe("DONE");
     expect(outcome?.usage).toMatchObject({ input: 120, output: 12 });
     // transcript：头行 + user + assistant（externalSessionPath 布局）。
@@ -125,7 +125,7 @@ describe("external droid integration — chain (§7.2)", () => {
       .then((r) => ("runId" in r ? (r.runId as string) : undefined));
     expect(ok).toBeDefined();
     const done = await waitFor(s.stack, ok!, 30_000);
-    expect(done.status).toBe("completed");
+    expect(done.status, JSON.stringify({ result: done, trace: readLines(s.traceFile) })).toBe("completed");
     expect(done.outcome?.structuredResult).toEqual({ v: 7 });
 
     const badScript = join(tmpRoot(), "schema-bad.jsonl");
@@ -166,7 +166,7 @@ describe("external droid integration — chain (§7.2)", () => {
       })
       .then((r) => ("runId" in r ? (r.runId as string) : undefined));
     const failed = await waitFor(s2.stack, bad!, 30_000);
-    expect(failed.status).toBe("failed");
+    expect(failed.status, JSON.stringify({ result: failed, trace: readLines(s2.traceFile) })).toBe("failed");
     expect(failed.outcome?.error?.kind).toBe("schema");
   }, 60_000);
 
@@ -175,7 +175,7 @@ describe("external droid integration — chain (§7.2)", () => {
     stacks.push(s);
     const first = await spawnDroid(s, "first");
     const done = await waitFor(s.stack, first, 30_000);
-    expect(done.status).toBe("completed");
+    expect(done.status, JSON.stringify({ result: done, trace: readLines(s.traceFile) })).toBe("completed");
     const snap = s.stack.query.get(first as never);
     const sessionFile = snap?.diag.sessionFile;
     expect(sessionFile).toBeDefined();
@@ -186,7 +186,7 @@ describe("external droid integration — chain (§7.2)", () => {
       return r.runId as string;
     });
     const done2 = await waitFor(s.stack, second, 30_000);
-    expect(done2.status).toBe("completed");
+    expect(done2.status, JSON.stringify({ result: done2, trace: readLines(s.traceFile) })).toBe("completed");
     const after = readFileSync(sessionFile!, "utf8");
     expect(after.length).toBeGreaterThan(before.length);
     expect(after).toContain("subagent:external-resume");
@@ -197,6 +197,64 @@ describe("external droid integration — chain (§7.2)", () => {
     expect(snap2?.diag.model).toEqual({ provider: "droid", id: "gpt-6-luna" });
   }, 90_000);
 
+  it("catalog 迟到的旧快照写回不能抹掉 run 会话（确定性写屏障）", async () => {
+    const root = tmpRoot();
+    const gate = mkdtempSync(join(tmpdir(), "droid-store-gate-"));
+    tmpDirs.push(gate);
+    const ready = join(gate, "ready");
+    const release = join(gate, "release");
+    const written = join(gate, "written");
+    const preload = join(gate, "barrier.mjs");
+    // Pause catalog after its read-modify step, before its write. The real run then
+    // persists its session, and the stale catalog write is released LAST. No timing lottery.
+    writeFileSync(
+      preload,
+      `
+      import fs from "node:fs";
+      import { syncBuiltinESMExports } from "node:module";
+      const write = fs.writeFileSync;
+      let gated = false;
+      fs.writeFileSync = function(path, data, ...args) {
+        if (!gated && process.cwd().includes("/cache/external-agent/") &&
+            String(path).includes("fake-droid-mem")) {
+          gated = true;
+          write(${JSON.stringify(ready)}, "ready");
+          const deadline = Date.now() + 20000;
+          while (!fs.existsSync(${JSON.stringify(release)})) {
+            if (Date.now() > deadline) throw new Error("catalog write gate timed out");
+            Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+          }
+          const result = write.call(this, path, data, ...args);
+          write(${JSON.stringify(written)}, "written");
+          return result;
+        }
+        return write.call(this, path, data, ...args);
+      };
+      syncBuiltinESMExports();
+    `,
+    );
+    const binary = makeBinary(root, []);
+    const wrapper = join(gate, "droid");
+    writeFileSync(wrapper, `#!/bin/sh\nNODE_OPTIONS='--import ${preload}' exec "${binary}" "$@"\n`, { mode: 0o755 });
+    const s = buildDroidStack({ binary: wrapper });
+    stacks.push(s);
+    try {
+      await waitForFile(ready, s);
+      const first = await spawnDroid(s, "remember CODE-retained47");
+      const done = await waitFor(s.stack, first, 30_000);
+      expect(done.status, JSON.stringify({ result: done, trace: readLines(s.traceFile) })).toBe("completed");
+      writeFileSync(release, "release");
+      await waitForFile(written, s);
+      const second = await s.stack.spawn.spawn({ type: "worker", prompt: "RECALL?", resumeFrom: first });
+      if (!("runId" in second)) throw new Error(`resume rejected: ${JSON.stringify(second)}`);
+      const resumed = await waitFor(s.stack, second.runId, 30_000);
+      expect(resumed.status, JSON.stringify({ result: resumed, trace: readLines(s.traceFile) })).toBe("completed");
+      expect(resumed.outcome?.text).toContain("CODE-retained47");
+    } finally {
+      writeFileSync(release, "release");
+    }
+  }, 60_000);
+
   it("resume 恢复历史（load_session）：第二 run 记得第一 run 的暗号；累计用量不重复计费", async () => {
     const root = tmpRoot();
     const mem = join(root, "mem.json");
@@ -204,14 +262,14 @@ describe("external droid integration — chain (§7.2)", () => {
     stacks.push(s);
     const first = await spawnDroid(s, "remember CODE-ZX81 please");
     const d1 = await waitFor(s.stack, first, 30_000);
-    expect(d1.status).toBe("completed");
+    expect(d1.status, JSON.stringify({ result: d1, trace: readLines(s.traceFile) })).toBe("completed");
     expect(d1.outcome?.usage).toMatchObject({ input: 120, output: 12 });
     const second = await s.stack.spawn.spawn({ type: "worker", prompt: "RECALL?", resumeFrom: first }).then((r) => {
       if (!("runId" in r)) throw new Error(`resume rejected: ${JSON.stringify(r)}`);
       return r.runId as string;
     });
     const d2 = await waitFor(s.stack, second, 30_000);
-    expect(d2.status).toBe("completed");
+    expect(d2.status, JSON.stringify({ result: d2, trace: readLines(s.traceFile) })).toBe("completed");
     expect(d2.outcome?.text).toContain("CODE-ZX81"); // 暗号来自 load_session 恢复的 live 历史
     // 计费：load 恢复的累计（120/12…）只是基线，第二 run 只记本 run 增量（120/12，而非 240/24）。
     expect(d2.outcome?.usage).toMatchObject({ input: 120, output: 12 });
@@ -229,7 +287,7 @@ describe("external droid integration — chain (§7.2)", () => {
     stacks.push(s);
     const first = await spawnDroid(s, "in A", { cwd: dirA });
     const done = await waitFor(s.stack, first, 30_000);
-    expect(done.status).toBe("completed");
+    expect(done.status, JSON.stringify({ result: done, trace: readLines(s.traceFile) })).toBe("completed");
     // 目录探测（catalog probe，cwd 在 <agentDir>/cache 下）是后台的，负载下可能晚于 run 落行——
     // 按 cwd 排除它，且只断 run 自己的行（进程退出时必然已写，不能再数「探测+run ≥ 2」，CI 慢机翻过车）。
     const runEchoes = (): { processCwd: string; initCwd: string | null; via?: string }[] =>
@@ -249,7 +307,7 @@ describe("external droid integration — chain (§7.2)", () => {
         return r.runId as string;
       });
     const done2 = await waitFor(s.stack, second, 30_000);
-    expect(done2.status).toBe("completed");
+    expect(done2.status, JSON.stringify({ result: done2, trace: readLines(s.traceFile) })).toBe("completed");
     const resumeEcho = runEchoes().at(-1)!;
     expect(runEchoes()).toHaveLength(2); // run + resume（探测已排除）
     expect(resumeEcho.processCwd).toBe(dirA); // 进程 cwd = 头行 cwd（≠ spec.cwd=B）
@@ -263,9 +321,16 @@ describe("external droid integration — chain (§7.2)", () => {
     const s = buildDroidStack({ binary: makeBinary(tmpRoot(), ["--mode", "echo-cwd"]) });
     stacks.push(s);
     const first = await spawnDroid(s, "in A", { cwd: dirA });
-    expect((await waitFor(s.stack, first, 30_000)).status).toBe("completed");
+    const done = await waitFor(s.stack, first, 30_000);
+    expect(done.status, JSON.stringify({ result: done, trace: readLines(s.traceFile) })).toBe("completed");
     rmSync(dirA, { recursive: true, force: true });
-    const traceBefore = readLines(s.traceFile).length;
+    const processStarts = () =>
+      readLines(s.traceFile).filter(
+        (line) =>
+          line.startsWith("process:") && line !== `process:${join(s.agentDir, "cache", "external-agent", "probe-cwd")}`,
+      );
+    const traceBefore = processStarts();
+    expect(traceBefore).toHaveLength(1);
     const second = await s.stack.spawn
       .spawn({ type: "worker", prompt: "resume after A gone", resumeFrom: first })
       .then((r) => {
@@ -273,10 +338,12 @@ describe("external droid integration — chain (§7.2)", () => {
         return r.runId as string;
       });
     const failed = await waitFor(s.stack, second, 30_000);
-    expect(failed.status).toBe("failed");
+    expect(failed.status, JSON.stringify({ result: failed, trace: readLines(s.traceFile) })).toBe("failed");
     expect(failed.outcome?.error?.message).toContain("no longer exists");
-    // 未起进程：trace 无新增（探测在 build 时已结束）。
-    expect(readLines(s.traceFile).length).toBe(traceBefore);
+    expect(failed.outcome?.error?.kind).toBe("config");
+    // Catalog may still append RPCs. Count the actual run process-start markers,
+    // not unrelated probe traffic; a vanished pinned cwd must not start a child.
+    expect(processStarts(), JSON.stringify(readLines(s.traceFile))).toEqual(traceBefore);
   }, 90_000);
 
   it("abort 两路：query.stop（interrupt ⇒ cancelled 结算）；信号路（no-exit-on-eof + ignore-interrupt ⇒ killGrace 后 SIGKILL）", async () => {
@@ -303,7 +370,7 @@ describe("external droid integration — chain (§7.2)", () => {
     const t0 = Date.now();
     const runId = await spawnDroid(s, "will crash");
     const failed = await waitFor(s.stack, runId, 30_000);
-    expect(failed.status).toBe("failed");
+    expect(failed.status, JSON.stringify({ result: failed, trace: readLines(s.traceFile) })).toBe("failed");
     expect(Date.now() - t0).toBeLessThan(10_000); // 早退监听接管（initTimeout=20s）
     expect(failed.outcome?.error?.message).toContain("exited unexpectedly during session setup");
   }, 60_000);
@@ -313,7 +380,7 @@ describe("external droid integration — chain (§7.2)", () => {
     stacks.push(s);
     const runId = await spawnDroid(s, "spawn grandchild");
     const done = await waitFor(s.stack, runId, 30_000);
-    expect(done.status).toBe("completed");
+    expect(done.status, JSON.stringify({ result: done, trace: readLines(s.traceFile) })).toBe("completed");
     // grandchild pid 记录在 trace（`grandchild:<pid>`）；run 终态后组内全灭。
     const line = readLines(s.traceFile).find((l) => l.startsWith("grandchild:"));
     expect(line).toBeDefined();
@@ -327,7 +394,7 @@ describe("external droid integration — chain (§7.2)", () => {
     stacks.push(s);
     const runId = await spawnDroid(s, "echo env");
     const done = await waitFor(s.stack, runId, 30_000);
-    expect(done.status).toBe("completed");
+    expect(done.status, JSON.stringify({ result: done, trace: readLines(s.traceFile) })).toBe("completed");
     const lines = readLines(s.traceFile);
     expect(lines).toContain("env:DISABLE_AUTO_UPDATE=1");
     expect(lines).toContain("env:FACTORYD_DISABLE_AUTO_UPDATE=1");
@@ -361,7 +428,7 @@ describe("external droid integration — chain (§7.2)", () => {
         return r.runId as string;
       });
     const failed = await waitFor(s.stack, runId, 30_000);
-    expect(failed.status).toBe("failed");
+    expect(failed.status, JSON.stringify({ result: failed, trace: readLines(s.traceFile) })).toBe("failed");
     expect(failed.outcome?.error?.message).toContain("update_session_settings rejected");
     expect(readLines(s.traceFile)).not.toContain("droid.add_user_message");
   }, 90_000);
@@ -412,4 +479,12 @@ async function sleepUntilCatalog(s: DroidStack, timeoutMs: number): Promise<void
     await sleep(100);
   }
   throw new Error("catalog probe did not complete");
+}
+
+async function waitForFile(path: string, s: DroidStack): Promise<void> {
+  const deadline = Date.now() + 20_000;
+  while (!existsSync(path)) {
+    if (Date.now() > deadline) throw new Error(`missing gate ${path}; trace=${JSON.stringify(readLines(s.traceFile))}`);
+    await sleep(10);
+  }
 }

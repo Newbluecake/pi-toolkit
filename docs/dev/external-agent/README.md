@@ -121,3 +121,20 @@ succeed without usable login/model access); a successful droid turn clears all t
 `/reload` re-evaluates, no persistence/timers. Missing binary/collision/strict drift remain blocked.
 Protocol drift is guarded by a strict/warn check plus `tests/conformance/droid-protocol.test.ts` (real droid, opt-in
 `PI_TOOLKIT_DROID_CONFORMANCE=1`; run it manually before any pi/droid upgrade).
+
+## Offline fake-droid harness isolation (#47)
+
+The frozen `tests/external-agent/fixtures/fake-droid.mjs` stores every session in a single JSON
+read/modify/write file without locking; real droid uses native per-session files. Sharing that fake
+file between the background catalog probe and a run can lose the run's session when a stale catalog
+snapshot writes last, producing resume `config / Session not found (-32004)` despite a completed run.
+`tests/integration/helpers/external-droid.ts` namespaces its memory path by generated binary and cwd
+(explicit `--memory-file` paths also receive the cwd suffix). Resume's pinned cwd preserves history;
+the catalog's separate probe cwd cannot overwrite it. Parallel runs in the **same** binary/cwd remain
+unsupported by this fake aggregate store; tests needing that must provide separate memory namespaces.
+
+The launcher adds `process:<cwd>` trace markers so the deleted-cwd test proves **no non-catalog child
+started**, not that unrelated catalog RPC traffic has stopped. The chain suite's stale-write
+regression pauses catalog at its write via a generated preload, completes the first run, releases the
+stale write and then verifies resume plus recalled text. The barriers wait on observed files, not
+fixed sleeps. Neither the frozen fake nor product resume/error/budget contracts are changed.
