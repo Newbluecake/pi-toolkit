@@ -55,6 +55,7 @@ export type RecoveryStage =
  * AFTER the named syscall returned; SIGKILL tests do not simulate power failure. */
 export interface AuthorityRecoveryTestDeps {
   stage?(event: { stage: RecoveryStage; ordinal: number; completed: readonly string[] }): Promise<void>;
+  write?(fd: number, bytes: Buffer): number;
   beforeSyscall?(op: "snapshot-fsync" | "manifest-fsync" | "rename" | "source-dir-fsync" | "target-dir-fsync"): void;
   afterLastRenameBeforeFinalCheck?(): Promise<void>;
   onFinalValidationAttempt?(attempt: number): void;
@@ -93,7 +94,13 @@ const fingerprint = (st: Stats, bytes: Buffer): Fingerprint => ({
   hash: localHash(bytes),
 });
 function readExact(path: string, max = 131072, links = 1) {
-  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  let fd: number;
+  try {
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  } catch (error) {
+    if (["ELOOP", "EACCES", "EPERM"].includes((error as NodeJS.ErrnoException).code ?? "")) fail("unsafe-file");
+    throw error;
+  }
   try {
     const st = fstatSync(fd);
     if (
@@ -184,10 +191,10 @@ export function scanAuthorityArchive(path: string) {
           if (files.length > 256) fail("authority-archive-unsafe");
           for (const file of files) {
             if (!FILE.test(file)) fail("authority-archive-unsafe");
-            bytes += readExact(join(sub, file)).st.size;
+            bytes += archiveFileBytes(join(sub, file), 131072);
           }
         } else if (["manifest.json", ".pending-manifest.json", "complete.json"].includes(entry)) {
-          bytes += readExact(join(dir, entry), 2 * 1024 * 1024).st.size;
+          bytes += archiveFileBytes(join(dir, entry), 2 * 1024 * 1024);
         } else fail("authority-archive-unsafe");
         if (bytes > TERMINAL_AUTHORITY_ARCHIVE_MAX_BYTES) fail("authority-archive-capacity");
       }
@@ -198,6 +205,25 @@ export function scanAuthorityArchive(path: string) {
     throw new TerminalLocalError("authority-archive-unsafe");
   }
 }
+function archiveFileBytes(path: string, max: number): number {
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const st = fstatSync(fd);
+    if (
+      !st.isFile() ||
+      st.uid !== process.getuid?.() ||
+      (st.mode & 0o777) !== 0o600 ||
+      st.nlink !== 1 ||
+      !Number.isSafeInteger(st.size) ||
+      st.size < 0 ||
+      st.size > max
+    )
+      fail("authority-archive-unsafe");
+    return st.size;
+  } finally {
+    closeSync(fd);
+  }
+}
 type AssemblyOwner = Pick<HubAssembly, "paths" | "socketIdentity" | "startup" | "isClosing" | "log">;
 /** Deliberately accepts real assembly ownership, not an abstract lock or boolean.
  * Only production caller is assembleTerminal, after acquireSingleton succeeds. */
@@ -205,7 +231,14 @@ export async function prepareTerminalStore(ctx: AssemblyOwner, test: AuthorityRe
   const started = Date.now(),
     deadlineAt = started + 2000;
   let recovering = false,
-    moved = 0;
+    moved = 0,
+    publicationPending = false,
+    audited = false;
+  const audit = (ok: boolean, code: string) => {
+    if (audited || !recovering) return;
+    audited = true;
+    auditTerminal(ctx.log, { op: "authority-recovery", ok, code, n: moved, ms: Date.now() - started });
+  };
   return localBounded(
     async (ioSignal) => {
       const signal = AbortSignal.any([ioSignal, ctx.startup.signal]);
@@ -347,7 +380,7 @@ export async function prepareTerminalStore(ctx: AssemblyOwner, test: AuthorityRe
             0o600,
           );
           try {
-            if (writeSync(fd, bytes) !== bytes.length) fail("authority-archive-io");
+            if ((test.write ?? writeSync)(fd, bytes) !== bytes.length) fail("authority-archive-io");
             if (op === "snapshot-fsync")
               await test.stage?.({
                 stage: "snapshot-written-not-durable",
@@ -470,6 +503,7 @@ export async function prepareTerminalStore(ctx: AssemblyOwner, test: AuthorityRe
               names.filter((n) => FILE.test(n) && identityEquals(lstatSync(authority.at(n)), p.st)).length !== 1
             )
               fail("unsafe-file");
+          publicationPending = true;
           test.onPublicationPending?.();
           if (attempt >= 8 || Date.now() >= deadlineAt) fail("authority-publication-unsettled");
           const delay = Math.min(5 * 2 ** attempt, Math.max(0, deadlineAt - Date.now() - 1));
@@ -481,34 +515,27 @@ export async function prepareTerminalStore(ctx: AssemblyOwner, test: AuthorityRe
         tx.sync();
         archive.sync();
         tick();
-        auditTerminal(ctx.log, {
-          op: "authority-recovery",
-          ok: true,
-          code: "E_AUTHORITY_RECOVERED",
-          n: moved,
-          ms: Date.now() - started,
-        });
+        audit(true, "E_AUTHORITY_RECOVERED");
         return store;
       } catch (error) {
         const typed =
           error instanceof TerminalLocalError
             ? error
             : new TerminalLocalError(recovering ? "authority-archive-io" : "local-store-unavailable");
-        if (recovering)
-          auditTerminal(ctx.log, {
-            op: "authority-recovery",
-            ok: false,
-            code: typed.reason === "io-deadline" ? "E_AUTHORITY_DEADLINE" : "E_AUTHORITY_BLOCKED",
-            n: moved,
-            ms: Date.now() - started,
-          });
+        audit(false, typed.reason === "io-deadline" ? "E_AUTHORITY_DEADLINE" : "E_AUTHORITY_BLOCKED");
         throw typed;
       } finally {
         for (const dir of held.reverse()) dir.close();
       }
     },
     Math.max(0, deadlineAt - Date.now()),
-  );
+  ).catch((error: unknown) => {
+    const reason = error instanceof TerminalLocalError ? error.reason : "local-store-unavailable";
+    audit(false, reason === "io-deadline" ? "E_AUTHORITY_DEADLINE" : "E_AUTHORITY_BLOCKED");
+    if (reason === "io-deadline" && publicationPending && !ctx.startup.signal.aborted)
+      throw new TerminalLocalError("authority-publication-unsettled");
+    throw error;
+  });
 }
 
 function validatePublishedRecord(raw: unknown, name: string, storeId: string) {

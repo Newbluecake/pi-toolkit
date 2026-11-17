@@ -13,6 +13,7 @@ import {
   statSync,
   symlinkSync,
   writeFileSync,
+  writeSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -642,5 +643,94 @@ describe("real guarded producer and PTY after retirement", () => {
       expect((await a.peer.command("snapshot")).ownerAttempts).toBe(agentFirst ? 2 : 1);
     },
     120000,
+  );
+});
+
+describe("single startup budget and fail-closed test seams", () => {
+  it("logical timeout does not release held work into a late rename or a second recovery", async () => {
+    const f = fixture();
+    seed(f);
+    const old = snapshotFiles(f),
+      before = immutable(f);
+    let release!: () => void,
+      stages = 0,
+      renames = 0;
+    const hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await start(f, {
+      async stage(event) {
+        if (event.stage === "prepared-durable-before-rename") {
+          stages++;
+          await hold;
+        }
+      },
+      beforeSyscall(op) {
+        if (op === "rename") renames++;
+      },
+    });
+    expect(status(f)).toMatchObject({ state: "unavailable", reason: "io-deadline" });
+    release();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(stages).toBe(1);
+    expect(renames).toBe(0);
+    expect(snapshotFiles(f)).toEqual(old);
+    assertImmutable(before);
+    const records = readFileSync(f.paths.logFile, "utf8")
+      .split("\n")
+      .filter((line) => line.includes('"op":"authority-recovery"'));
+    expect(records).toHaveLength(1);
+    expect(records[0]).toContain("E_AUTHORITY_DEADLINE");
+  });
+  it.each(["short-write", "ENOSPC"])(
+    "injected-sync-fs-fault %s cannot retire before durable evidence",
+    async (fault) => {
+      const f = fixture();
+      seed(f);
+      const old = snapshotFiles(f);
+      let renames = 0;
+      await start(f, {
+        write(fd, bytes) {
+          if (fault === "ENOSPC") throw Object.assign(new Error("private"), { code: "ENOSPC" });
+          return writeSync(fd, bytes.subarray(0, bytes.length - 1));
+        },
+        beforeSyscall(op) {
+          if (op === "rename") renames++;
+        },
+      });
+      expect(status(f)).toMatchObject({ state: "unavailable", reason: "authority-archive-io" });
+      expect(renames).toBe(0);
+      expect(snapshotFiles(f)).toEqual(old);
+    },
+  );
+  it.each(["off", "denied", "unknown", "secure"])(
+    "policy %s leaves stale material untouched and creates no archive",
+    async (mode) => {
+      const f = fixture();
+      seed(f);
+      const old = snapshotFiles(f),
+        before = immutable(f);
+      if (mode === "off")
+        writeFileSync(
+          join(f.home, ".pi/agent/pi-toolkit.json"),
+          JSON.stringify({ webHub: { terminal: { enabled: false } } }),
+        );
+      if (mode === "denied") vi.stubEnv("PI_WEBHUB_TERMINAL_SOURCE", "denied");
+      if (mode === "unknown") vi.stubEnv("PI_WEBHUB_TERMINAL_SOURCE", "unknown");
+      if (mode === "secure") vi.stubEnv("PI_SECURE_SESSION", "1");
+      let called = 0;
+      await start(f, {
+        onFinalValidationAttempt() {
+          called++;
+        },
+        stage: async () => {
+          called++;
+        },
+      });
+      expect(called).toBe(0);
+      expect(transactions(f)).toEqual([]);
+      expect(snapshotFiles(f)).toEqual(old);
+      assertImmutable(before);
+    },
   );
 });

@@ -474,7 +474,7 @@ export function inspectTerminalResidue(store: Store) {
   const current: typeof stale = [];
   let receiptCount = 0;
   for (const kind of ["authority", "receipts"] as const) {
-    const names = readdirSync(join(store.root, kind));
+    const names = readdirSync(join(store.root, kind)).sort();
     if (names.length > (kind === "authority" ? 256 : 32)) throw new TerminalLocalError("local-capacity");
     for (const name of names) {
       if (!/^[A-Za-z0-9_-]{32,64}\.json$/.test(name)) throw new TerminalLocalError("unresolved-local-state");
