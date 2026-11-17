@@ -78,7 +78,11 @@ import { useActivityRail } from "../../composables/useActivityRail.js";
 import type { FleetRowWire } from "@protocol/messages.js";
 import FleetDrawer, { useFleetDrawerMode, useFleetDrawerOpen } from "../drawer/FleetDrawer.vue";
 
-import { terminalSessionSupported, terminalSessionUiEnabled } from "../../logic/terminalCapability.js";
+import {
+  terminalSessionSupported,
+  terminalSessionUiEnabled,
+  terminalUnavailableReason,
+} from "../../logic/terminalCapability.js";
 import { TERMINAL_ENTRY } from "../../logic/terminalContext.js";
 
 const RETRY_NOTICE_ID = "history-error";
@@ -102,6 +106,16 @@ const historyErrorNotice = computed<Notice | null>(() => {
 const notices = computed<readonly Notice[]>(() => [
   ...agentNotices.value,
   ...(historyErrorNotice.value ? [historyErrorNotice.value] : []),
+  ...(terminalUnavailable.value
+    ? [
+        {
+          id: "terminal-unavailable",
+          tone: "danger" as const,
+          title: t("detail.terminalUnavailable", { reason: terminalUnavailable.value }),
+          persistent: true,
+        },
+      ]
+    : []),
   ...(terminalLoadError.value
     ? [{ id: "terminal-load", tone: "danger" as const, title: terminalLoadError.value, persistent: false }]
     : []),
@@ -172,6 +186,7 @@ const terminalPrivacyAllowed = computed(() => {
   const sid = (props.agent.session as { sessionId?: unknown } | undefined)?.sessionId;
   return !hubCaps.value.includes("privacy.v1") || (!!p && p.ready && typeof sid === "string" && !p.locked.has(sid));
 });
+const terminalUnavailable = computed(() => terminalUnavailableReason(hub?.state.value.hub));
 const terminalDeclared = ref(false);
 const terminalAvailable = computed(
   () => terminalDeclared.value && hubLive.value && terminalPrivacyAllowed.value && controlEnabled.value,
@@ -207,6 +222,7 @@ const terminalDeclarationRevision = computed(() => {
 watch(
   [
     () => terminalSessionSupported(hub?.state.value.hub),
+    terminalUnavailable,
     () => props.agent.key,
     () => (props.agent.session as { sessionId?: unknown } | undefined)?.sessionId,
     () => (props.agent.card as { epoch?: unknown }).epoch,

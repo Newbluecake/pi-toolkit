@@ -6,6 +6,7 @@ import en from "../en/detail.js";
 type Messages<T> = { [K in keyof T]: string };
 
 const detail = {
+  terminalUnavailable: "终端不可用（{reason}）。聊天与历史仍可使用。请检查本地 /webhub status；不会自动打开 shell。",
   terminalConnectionUnavailable:
     "终端连接不可用。请在本次 hub 启动后重新登录；若仍不可用，请在本地查看 /webhub status。不会自动新建 shell。",
   terminalLoadTimeout: "终端组件加载超时，请重试打开面板；不会自动新建 shell。",

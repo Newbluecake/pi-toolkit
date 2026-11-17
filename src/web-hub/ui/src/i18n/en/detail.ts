@@ -3,6 +3,8 @@
  * info, metrics, agent-level notices and the bottom dock.
  */
 const detail = {
+  terminalUnavailable:
+    "Terminal unavailable ({reason}). Chat and history remain available. Check local /webhub status; no shell is opened automatically.",
   terminalConnectionUnavailable:
     "The terminal connection is unavailable. Sign in again in this hub boot, then check the local /webhub status if it remains unavailable. No shell is opened automatically.",
   terminalLoadTimeout: "The terminal component timed out. Retry opening the panel; no shell is opened automatically.",

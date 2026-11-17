@@ -137,6 +137,27 @@ describe("per-session terminal declaration gate (r2 §6)", () => {
     expect(request).not.toHaveBeenCalled();
     expect(lazy.loaded).not.toHaveBeenCalled();
   });
+  it("shows initial terminal unavailability without a declaration, API call or private panel load", async () => {
+    const a = { ...agent(), status: { busy: false } } as unknown as AgentState;
+    const { w, state, request } = setup(a);
+    state.value.hub = { ...hubInfo, terminal: { state: "unavailable", reason: "local-store-unavailable" } };
+    await flushPromises();
+    expect(w.text()).toContain("local-store-unavailable");
+    expect(entry(w).exists()).toBe(false);
+    expect(request).not.toHaveBeenCalled();
+    expect(lazy.loaded).not.toHaveBeenCalled();
+    expect(await terminalSessionUiEnabled(state.value.hub, agent())).toBe(false);
+    // No new-field requirement for old hubs; absence is not an authority grant.
+    state.value.hub = hubInfo;
+    await w.setProps({ agent: agent() });
+    await visible(w);
+    expect(w.text()).not.toContain("local-store-unavailable");
+    state.value.hub = { ...hubInfo, terminal: { state: "unavailable", reason: "privacy-unavailable" } };
+    await nextTick();
+    expect(entry(w).exists()).toBe(false);
+    expect(w.text()).toContain("privacy-unavailable");
+    expect(request).not.toHaveBeenCalled();
+  });
   it("withdraws on identity/liveness/privacy/control boundaries, and only current target status can restore an entry", async () => {
     const a = agent();
     const { w, state, request } = setup(a);

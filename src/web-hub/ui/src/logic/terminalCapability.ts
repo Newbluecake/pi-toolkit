@@ -12,6 +12,14 @@ export function terminalSessionSupported(hub: unknown): boolean {
   return terminalUiEnabled(hub) && Array.isArray(caps) && caps.includes(TERMINAL_SESSION_CAP);
 }
 
+/** Optional negative hint only; legacy absence is not proof of readiness. */
+export function terminalUnavailableReason(hub: unknown): string | undefined {
+  if (!terminalSessionSupported(hub)) return undefined;
+  const status = (hub as { terminal?: { state?: unknown; reason?: unknown } } | null)?.terminal;
+  if (status?.state !== "unavailable") return undefined;
+  return typeof status.reason === "string" && /^[a-z0-9-]{1,80}$/.test(status.reason) ? status.reason : "unavailable";
+}
+
 /** Positive declaration only, never authority. Keep the closed protocol parser/schema lazy:
  * an off/legacy hub must not eagerly load the terminal schema closure (or xterm/CSS).
  * Callers must invalidate pending validation on every observable scope/eligibility boundary. */
@@ -23,7 +31,7 @@ export async function terminalSessionUiEnabled(
     status?: unknown;
   },
 ): Promise<boolean> {
-  if (!terminalSessionSupported(hub)) return false;
+  if (!terminalSessionSupported(hub) || terminalUnavailableReason(hub) !== undefined) return false;
   const sessionId = (agent.session as { sessionId?: unknown } | undefined)?.sessionId;
   const epoch = (agent.card as { epoch?: unknown } | undefined)?.epoch;
   const declaration = (agent.status as { terminalSession?: unknown } | undefined)?.terminalSession;
