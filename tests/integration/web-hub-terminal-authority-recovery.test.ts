@@ -913,3 +913,47 @@ it("startup abort returns without waiting for held IO and fences the late contin
   expect(renames).toBe(0);
   expect(snapshotFiles(f)).toEqual(old);
 });
+
+it("two independent hub processes retire only once under the existing singleton", async () => {
+  const f = fixture();
+  seed(f);
+  const old = snapshotFiles(f),
+    before = immutable(f);
+  const children = [0, 1].map(() =>
+    fork(worker, ["hub", f.home, "none"], { execArgv: ["--import", "tsx"], stdio: ["ignore", "pipe", "pipe", "ipc"] }),
+  );
+  for (const child of children)
+    cleanup.push(async () => {
+      if (child.exitCode !== null || child.signalCode !== null) return;
+      const done = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+      const timer = setTimeout(() => child.kill("SIGKILL"), 5000);
+      timer.unref();
+      if (child.connected) child.send({ close: true });
+      else child.kill("SIGKILL");
+      await done;
+      clearTimeout(timer);
+    });
+  const verdicts = await Promise.all(
+    children.map(
+      (child) =>
+        new Promise<string>((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error("private hub startup verdict deadline")), 10000);
+          timer.unref();
+          child.once("error", reject);
+          child.on("message", (value) => {
+            const type = (value as { type?: string }).type;
+            if (type === "ready" || type === "exists") {
+              clearTimeout(timer);
+              resolve(type);
+            }
+          });
+        }),
+    ),
+  );
+  expect(verdicts.sort()).toEqual(["exists", "ready"]);
+  expect(status(f).state).toBe("ready");
+  assertRetirement(f, old);
+  assertImmutable(before);
+  const log = readFileSync(f.paths.logFile, "utf8");
+  expect([...log.matchAll(/E_AUTHORITY_RECOVERED/g)]).toHaveLength(1);
+}, 20000);

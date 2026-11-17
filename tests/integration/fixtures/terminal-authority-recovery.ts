@@ -38,7 +38,10 @@ if (mode === "seed") {
       },
     },
   });
-  if (!("exists" in result)) {
+  if ("exists" in result && result.exists) {
+    process.send?.({ type: "exists" });
+    process.disconnect?.();
+  } else if (!("exists" in result)) {
     process.send?.({ type: "ready", port: result.httpPort });
     process.once("message", () => {
       void result.close("test").then(() => process.exit(0));
