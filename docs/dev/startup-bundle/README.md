@@ -14,6 +14,6 @@
 
 ## 升级与验证
 
-重建不会自动更新正在运行的父 pi；需要 `/agent reload` 或重启。hub 是独立进程，`/webhub restart` 不更新父 pi。已有修复前进程能否直接接收新 dispatcher，由真实 pi 同进程升级回归验证；不要只测新启动进程。
+重建不会自动更新正在运行的父 pi；需要 `/agent reload` 或重启。hub 是独立进程，`/webhub restart` 不更新父 pi。已实测 pi 1.5.0 / Node 22.22.1：先用 `477701ab` 的 dispatcher + bundle-entry 启动旧 bundle，再在同一安装路径换入修复后的 dispatcher/bridge/helper 并重建，真 Web `/agent reload` 即加载新行为、同 pid/key 换 epoch、版本到位且 completed 关联成功；该环境无需先重启一次 agent。实际部署仍需将 bridge 与 dispatcher 一起安装并完成 build；不对其他 pi/Node 版本作未验证保证，不曾操作现场会话。
 
 回归入口：`tests/integration/startup-bundle-reload.test.ts`（真 hub、真 pi RPC、私有 HOME/socket、跨 rebuild 与同构建预期、旧路径反例、修复前进程升级），最小 jiti/native probe 在 `tests/startup-bundle/`。布局/错误测试在 `dispatcher.test.ts`，内容标识测试在 `tests/core/bundle-entry.test.ts`。构建后执行 `tests/governance/bundle-parity.test.ts` 验证 identity 与 frozen activation/off/secure/child parity；不得重生 fixtures。

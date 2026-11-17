@@ -64,7 +64,7 @@ async function rebuild(version: string, marker: string): Promise<void> {
   // independently of the live package.json version reader and hello metadata.
   const result = await build({
     stdin: {
-      contents: `import activate from ${JSON.stringify(join(root, "src/index.ts"))};\nexport default async function(pi) { await activate(pi); pi.registerCommand("t48-code", { description: ${JSON.stringify(marker)}, handler: async () => {} }); }`,
+      contents: `import activate from ${JSON.stringify(join(root, "src/index.ts"))};\nexport default async function(pi) { await activate(pi); pi.registerCommand("t48-code", { description: ${JSON.stringify(marker)} + ":" + crypto.randomUUID(), handler: async () => {} }); }`,
       resolveDir: root,
       loader: "ts",
       sourcefile: "t48-behavior.ts",
@@ -200,8 +200,9 @@ try {
   const old = { ...card() };
   assert.equal(old.pluginVersion, oldVersion);
   assert.equal(old.outdated, true);
-  assert.equal(await marker(), "old-code");
-  console.log("BEFORE", JSON.stringify(summary(old)));
+  const oldActivation = await marker();
+  assert(oldActivation.startsWith("old-code:"));
+  console.log("BEFORE", JSON.stringify({ card: summary(old), code: oldActivation }));
 
   if (mode === "upgrade") installDispatcher(false);
   await rebuild(newVersion, "new-code");
@@ -229,7 +230,7 @@ try {
   if (process.env.PI_TOOLKIT_TEST_LEGACY_IMPORT === "1" && mode === "fixed") {
     await until(() => card()?.status?.reload?.cmdIds?.includes(id), "legacy reload started");
     await sleep(1_000);
-    console.log("MUTATION_STALE", JSON.stringify(summary(card())));
+    console.log("MUTATION_STALE", JSON.stringify({ card: summary(card()), code: await marker() }));
     // Deliberately the SAME success assertion as the fixed path. Mutation must make this red.
     assert.equal(card().pluginVersion, newVersion, "rebuilt code must replace stale namespace");
   }
@@ -243,7 +244,9 @@ try {
   assert.equal(after.agentKey, old.agentKey);
   assert.notEqual(after.epoch, old.epoch);
   assert.equal(after.outdated, false);
-  assert.equal(await marker(), "new-code");
+  const afterActivation = await marker();
+  assert(afterActivation.startsWith("new-code:"));
+  assert.notEqual(afterActivation, oldActivation);
   assert.equal(after.status.reload.version, newVersion);
   assert.equal(after.status.reload.epoch, after.epoch);
   assert.equal(after.status.reload.open, false);
@@ -261,15 +264,23 @@ try {
     ),
   );
   assert(events.some((e) => e.type === "gap" && e.agentKey === old.agentKey));
-  console.log("AFTER", JSON.stringify(summary(after)));
+  console.log("AFTER", JSON.stringify({ card: summary(after), code: afterActivation }));
 
   const sameId = await command();
   await until(
     () => card()?.status?.reload?.cmdIds?.includes(sameId) && card()?.status?.reload?.state === "started",
     "same-build started",
   );
-  // RPC get_commands is served after reload's resource load; it is a barrier, not a sleep-only assertion.
-  assert.equal(await marker(), "new-code");
+  // A per-activation command description is an observable reload barrier. Waiting only for
+  // started would race the actual resource load and could pass before reactivation happened.
+  const activationDeadline = Date.now() + 10_000;
+  let sameActivation = await marker();
+  while (sameActivation === afterActivation) {
+    assert(Date.now() < activationDeadline, "same-build activation must actually execute");
+    await sleep(25);
+    sameActivation = await marker();
+  }
+  assert(sameActivation.startsWith("new-code:"));
   assert.equal((await rpc("get_state")).isStreaming, false);
   const same = card();
   assert.equal(same.epoch, after.epoch);
@@ -281,7 +292,7 @@ try {
   assert(!same.status.reload.cmdIds.includes(id));
   assert.equal(child.exitCode, null);
   assert.equal(child.signalCode, null);
-  console.log("SAME_BUILD_REUSED", JSON.stringify(summary(same)));
+  console.log("SAME_BUILD_REUSED", JSON.stringify({ card: summary(same), code: sameActivation }));
   console.log(`PASS ${mode}: real pi 1.5 native rebuild/reload, same pid, code, identity and correlated result`);
 } finally {
   await stopAgent();

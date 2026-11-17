@@ -81,11 +81,14 @@ describe("bundle availability", () => {
     try {
       const file = join(t.dir, "bundle.js");
       writeFileSync(file, "export const value = 1;");
-      const stamp = statSync(file);
+      const stamp = new Date(1_700_000_000_000);
+      utimesSync(file, stamp, stamp);
+      const size = statSync(file).size;
       const old = bundleUrl({ bundleFile: file });
       writeFileSync(file, "export const value = 2;");
-      utimesSync(file, stamp.atime, stamp.mtime);
-      expect(statSync(file).size).toBe(stamp.size);
+      utimesSync(file, stamp, stamp);
+      expect(statSync(file).mtimeMs).toBe(stamp.getTime());
+      expect(statSync(file).size).toBe(size);
       expect(bundleUrl({ bundleFile: file })).not.toBe(old);
       writeFileSync(file, "export const value = 1;");
       expect(bundleUrl({ bundleFile: file })).toBe(old);

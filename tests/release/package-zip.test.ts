@@ -6,6 +6,19 @@ import { describe, expect, it } from "vitest";
 
 const root = process.cwd();
 describe("release total archive", () => {
+  it("npm pack includes the native bundle bridge without running lifecycle scripts", () => {
+    const packed = JSON.parse(
+      execFileSync("npm", ["pack", "--dry-run", "--ignore-scripts", "--json"], {
+        cwd: root,
+        encoding: "utf8",
+        timeout: 30_000,
+      }),
+    );
+    const paths = packed[0].files.map((file: { path: string }) => file.path);
+    expect(paths).toContain("index.ts");
+    expect(paths).toContain("bundle-bridge.cjs");
+    expect(paths).toContain("dist/bundle/index.js");
+  });
   it("contains the pi source entrypoint, skills, and built UI", { timeout: 280_000 }, () => {
     const out = mkdtempSync(join(tmpdir(), "pwh-release-"));
     const version = JSON.parse(require("node:fs").readFileSync(join(root, "package.json"), "utf8")).version;

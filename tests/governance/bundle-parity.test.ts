@@ -463,6 +463,20 @@ function makeLayout(bundleContent: string | undefined): Layout {
 }
 
 describe("§7.1 bad bundle / fallback layouts (real loadExtensions)", () => {
+  it("bundle present but bridge missing ⇒ one error, zero tools, no source fallback", () => {
+    const l = makeLayout("export default async function activate() {}\n");
+    rmSync(join(l.dir, "bundle-bridge.cjs"));
+    try {
+      const r = runLoaderProbe(join(l.dir, "index.ts"), l.dir);
+      expect(r.errors).toHaveLength(1);
+      expect(r.errors[0]).toContain("bundle-bridge.cjs");
+      expect(r.toolNames).toEqual([]);
+      expect(r.commandNames).toEqual([]);
+    } finally {
+      l.cleanup();
+    }
+  });
+
   it("syntactically broken bundle ⇒ exactly one error, zero tools — never a silent source fallback", () => {
     const l = makeLayout("export default async function (");
     try {

@@ -571,9 +571,11 @@ export PI_TOOLKIT_ENTRY=src     # ~/.bashrc / ~/.zshrc
 #### 6.1.3 父 pi 与 hub 的新鲜度不同步（复审第 5 条，删除错误保证）
 
 - 父 pi 进程执行的是**启动时**加载的模块图；重建 bundle **不会**影响已运行的父 pi。
-- `/reload` 的实际语义（ESM 模块缓存 + `registerHooks` 已装标记共同决定它是否重读 bundle 文件）
-  **本轮未实测**，因此文档不把它当作"能更新"的手段：**恢复一律以重启 pi 为准**。
-  该行为列为 §7.3 的待验收项（`/reload` 行），验收结论回填本节。
+- **#48 修复后的语义（2026-11-17 实测）**：dispatcher 通过 Node CJS bridge 原生 import，内容
+  SHA-256 改变才使用新 namespace。重建后字节改变 + `/agent reload` 在 pi 1.5.0 / Node 22.22.1
+  下可更新代码、同 pid/key 换 epoch 并回传 completed；从修复前 dispatcher 启动的进程在原位
+  换入修复文件并重建后，也可直接 reload 接收修复，不要求预先重启。**同构建（未重建或字节相同）
+  /reload 仍复用模块**，不保证新 epoch/completed；本方案未选择 A+。见 README 与真实 loader 回归。
 - `web-hub` 的 hub 子进程按 `packageRoot()/src/web-hub/hub/main.ts` 用 jiti 启动 ⇒ 它读的是
   **当时的 `src/` 源码**，与父 pi 跑的 bundle **可能不同代**。
 - **`/webhub restart` 只重启 hub 子进程**（于是 hub 拿到最新源码），**不能**让执行旧 bundle 的父 pi
@@ -583,12 +585,12 @@ export PI_TOOLKIT_ENTRY=src     # ~/.bashrc / ~/.zshrc
 
 ⇒ **恢复步骤（各自独立，写清给运维）**：
 
-| 想要                   | 操作                                                                                                                   |
-| ---------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| 父 pi 用上新代码       | `npm run build:bundle` 后**重启 pi**（不依赖 `/reload`，其重读语义未实测）；或 `PI_TOOLKIT_ENTRY=src` 重启             |
-| hub 用上新源码         | `/webhub restart`（hub 本来就 jiti 读源码，不需重建）                                                                  |
-| 两者都对且同代         | 先 `npm run build:bundle`，再重启 pi，再 `/webhub restart`                                                             |
-| 只想确认当前跑的是哪份 | （陈旧告警已移除）启动 ~1 s ⇒ 跑 bundle，不保证新鲜；改源码后需 `npm run build:bundle` 重启，或 `PI_TOOLKIT_ENTRY=src` |
+| 想要                   | 操作                                                                                                                       |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| 父 pi 用上新代码       | 修复后 `npm run build:bundle`，字节改变后 `/agent reload`（pi 1.5 已实测）；重启 pi 或 `PI_TOOLKIT_ENTRY=src` 重启仍可兜底 |
+| hub 用上新源码         | `/webhub restart`（hub 本来就 jiti 读源码，不需重建）                                                                      |
+| 两者都对且同代         | 先 `npm run build:bundle`，再重启 pi，再 `/webhub restart`                                                                 |
+| 只想确认当前跑的是哪份 | （陈旧告警已移除）启动 ~1 s ⇒ 跑 bundle，不保证新鲜；改源码后需 `npm run build:bundle` 重启，或 `PI_TOOLKIT_ENTRY=src`     |
 
 ---
 
@@ -709,18 +711,18 @@ profile 上比对（`child`/`thread-child` 等子会话 profile 按 fixture 现�
 
 ### 7.3 运维面冒烟（评审第 8 条，补 §6.3 缺口）
 
-| 面                                  | 动作                                                                                               | 断言                                                                                                                                                                              |
-| ----------------------------------- | -------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| hub 进程                            | `/webhub` 启动                                                                                     | 子进程 argv 结尾是 `<pkg>/src/web-hub/hub/main.ts`（不是 `dist/hub/...`），且 `hub.json` 出现                                                                                     |
-| UI 目录                             | `packageUiDistDir()`                                                                               | 返回**带尾 `/`** 的 `<pkg>/dist/web-hub-ui/`；`build-info.json` 存在时 UI 能加载                                                                                                  |
-| traffic 页                          | `/record on` 后取页面                                                                              | `app.js` 与 `vendor/vue.global.prod.js` 都成功读出（非候选全空抛错）                                                                                                              |
-| HUD                                 | 启动后 footer                                                                                      | 版本/分支非空（`pluginRoot()` 未返回 undefined）                                                                                                                                  |
-| Feishu                              | 配置存在时                                                                                         | `ownPackageRoot()` 非空（降级分支未被触发）                                                                                                                                       |
-| 子会话                              | `pi install <repo>` 正规装配（隔离 HOME），**禁用 `pi -e`**                                        | 子会话工具/命令集合与「允许集合」相等（不是「零注册」——子会话本来就注册 bash/traffic 等；比对现状 `src` 路径的同一集合）                                                          |
-| **改源码未重建**（复审第 5 条）     | 已有 bundle → 触碰 `src/**`（不重建）→ 重启 pi                                                     | ① stderr **无** `bundle is stale` 行（告警已移除）；② 启动仍 ~1 s（跑 bundle）；③ 新代码**未生效**（预先埋一个可观测差异，如工具描述串）——用户需自行 `build:bundle`               |
-| 陈旧后重建                          | 接上条，`npm run build:bundle` 后重启 pi                                                           | 新代码生效                                                                                                                                                                        |
-| `/reload`（含精确语义，**待实测**） | 已有 bundle 会话内改 `settings.json` 后 `/reload`；再在**重建 bundle 后**（文件内容已变）`/reload` | ① 设置生效（重激活）② 钩子未重复安装（`Symbol.for` 标记）③ **记录**重建后 `/reload` 是否读到新 bundle（ESM 缓存行为，未定论）⇒ 结论回填 §6.1.3；无论结果如何，恢复手段仍是重启 pi |
-| 父/hub 代差（复审第 5 条）          | 父 pi 跑 bundle；hub 由 `/webhub` 启动                                                             | hub 子进程 argv 指向 `<pkg>/src/web-hub/hub/main.ts`（jiti 读源码）；文档明确 **`/webhub restart` 只更新 hub、不更新父 pi**，不写「restart 后一致」                               |
+| 面                              | 动作                                                                                               | 断言                                                                                                                                                                          |
+| ------------------------------- | -------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| hub 进程                        | `/webhub` 启动                                                                                     | 子进程 argv 结尾是 `<pkg>/src/web-hub/hub/main.ts`（不是 `dist/hub/...`），且 `hub.json` 出现                                                                                 |
+| UI 目录                         | `packageUiDistDir()`                                                                               | 返回**带尾 `/`** 的 `<pkg>/dist/web-hub-ui/`；`build-info.json` 存在时 UI 能加载                                                                                              |
+| traffic 页                      | `/record on` 后取页面                                                                              | `app.js` 与 `vendor/vue.global.prod.js` 都成功读出（非候选全空抛错）                                                                                                          |
+| HUD                             | 启动后 footer                                                                                      | 版本/分支非空（`pluginRoot()` 未返回 undefined）                                                                                                                              |
+| Feishu                          | 配置存在时                                                                                         | `ownPackageRoot()` 非空（降级分支未被触发）                                                                                                                                   |
+| 子会话                          | `pi install <repo>` 正规装配（隔离 HOME），**禁用 `pi -e`**                                        | 子会话工具/命令集合与「允许集合」相等（不是「零注册」——子会话本来就注册 bash/traffic 等；比对现状 `src` 路径的同一集合）                                                      |
+| **改源码未重建**（复审第 5 条） | 已有 bundle → 触碰 `src/**`（不重建）→ 重启 pi                                                     | ① stderr **无** `bundle is stale` 行（告警已移除）；② 启动仍 ~1 s（跑 bundle）；③ 新代码**未生效**（预先埋一个可观测差异，如工具描述串）——用户需自行 `build:bundle`           |
+| 陈旧后重建                      | 接上条，`npm run build:bundle` 后重启 pi                                                           | 新代码生效                                                                                                                                                                    |
+| `/reload`（#48 已实测）         | 已有 bundle 会话内改 `settings.json` 后 `/reload`；再在**重建 bundle 后**（文件内容已变）`/reload` | ① 设置生效（重激活）② 钩子未重复安装（`Symbol.for` 标记）③ 字节改变后加载新 bundle / 新 epoch / completed；同构建不换 epoch、保持 started（方案 A 的已知边界）；结论见 §6.1.3 |
+| 父/hub 代差（复审第 5 条）      | 父 pi 跑 bundle；hub 由 `/webhub` 启动                                                             | hub 子进程 argv 指向 `<pkg>/src/web-hub/hub/main.ts`（jiti 读源码）；文档明确 **`/webhub restart` 只更新 hub、不更新父 pi**，不写「restart 后一致」                           |
 
 ### 7.4 现有 golden
 
