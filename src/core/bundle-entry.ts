@@ -11,8 +11,9 @@
  * - I4: no module-scope mutable state; the only cross-activation memory is the
  *   `Symbol.for("pi-subagent:bundle-hooks")` marker, which is process-global by design (the
  *   resolution hook itself is process-global and one-shot).
- * - I8: pi-free — `node:fs` / `node:path` / `node:url` / `node:module` only.
- * - Nothing blocks: every fs call is synchronous but bounded by the src walk (§6.1.1 says 28-33 ms).
+ * - I8: pi-free — Node builtins only (plus the pi-free host-modules helper).
+ * - Startup reads/hashes the single bundle synchronously; it never scans the source tree.
+ *   The legacy staleness helper below still supports an explicit diagnostic source walk.
  */
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";

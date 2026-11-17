@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 
 const root = process.cwd();
 describe("release total archive", () => {
-  it("npm pack includes the native bundle bridge without running lifecycle scripts", () => {
+  it("npm pack includes the native bundle bridge without running lifecycle scripts", { timeout: 60_000 }, () => {
     const packed = JSON.parse(
       execFileSync("npm", ["pack", "--dry-run", "--ignore-scripts", "--json"], {
         cwd: root,
