@@ -61,6 +61,21 @@ export async function assembleTerminal(ctx: HubAssembly) {
     })),
   );
   const target = (key: string) => local?.target(key);
+  const unavailableReason = () =>
+    local === undefined
+      ? reason
+      : ctx.privacyStore === undefined || ctx.privacyStore.degraded
+        ? "privacy-unavailable"
+        : undefined;
+  const projectAvailability = () => {
+    if (!ctx.info) return false;
+    const next = unavailableReason();
+    const previous = ctx.info.terminal?.reason;
+    if (next === undefined) delete ctx.info.terminal;
+    else ctx.info.terminal = { state: "unavailable", reason: next };
+    return previous !== next;
+  };
+  projectAvailability();
   const listeners = new Set<() => void>();
   ctx.terminalPrivacyChanged = () => {
     // Service installs deny/clears writers first; then the browser sees original SSE loss.
@@ -68,6 +83,7 @@ export async function assembleTerminal(ctx: HubAssembly) {
       for (const listener of listeners) listener();
     } finally {
       service.bindings.revokeAll();
+      if (projectAvailability()) ctx.registry?.publish({ type: "hub" });
     }
   };
   const service = createTerminalService({
@@ -107,7 +123,7 @@ export async function assembleTerminal(ctx: HubAssembly) {
     ...baseRoutes,
     async handle(req, res, context, identity, signal) {
       const path = (req.url ?? "").split("?")[0];
-      if (local === undefined && Object.values(TERMINAL_HTTP_PATHS).some((p) => p === path)) {
+      if (unavailableReason() !== undefined && Object.values(TERMINAL_HTTP_PATHS).some((p) => p === path)) {
         req.resume();
         const body = JSON.stringify(terminalUnavailable());
         res.writeHead(503, {
@@ -121,14 +137,11 @@ export async function assembleTerminal(ctx: HubAssembly) {
       return baseRoutes.handle(req, res, context, identity, signal);
     },
     openSse(req, res, id, clientId, origin, output) {
-      // Legacy privacy snapshots cannot express degraded. Use observable connection loss,
-      // after the hub capability burst but before issuing any private binding material.
-      // Drain that public bootstrap (including the gzip trailer); only established
-      // sensitive bindings require synchronous abort/discard on revocation.
-      if (local === undefined || ctx.privacyStore === undefined || ctx.privacyStore.degraded) {
-        output.finish();
-        return;
-      }
+      // No binding or private material exists yet: terminal prerequisites must not
+      // retire the PUBLIC clientId and break ordinary chat/history subscriptions.
+      // HubInfo carries the negative availability hint. Established bindings still
+      // synchronously abort this original output on revocation (sse-binding.ts).
+      if (unavailableReason() !== undefined) return;
       baseRoutes.openSse(req, res, id, clientId, origin, output);
     },
   };

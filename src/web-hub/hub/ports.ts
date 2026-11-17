@@ -723,6 +723,9 @@ export interface HubInfo {
   startedAt: number;
   proto: typeof PROTO;
   caps: readonly string[];
+  /** Negative browser-only availability projection, never terminal authority. Omitted
+   * for machine-off/legacy and healthy hubs; fixed body-free prerequisite reason only. */
+  terminal?: { state: "unavailable"; reason: string };
   state?: "running" | "stopping" | "restarting";
   nextVersion?: string;
   supersedePending?: boolean;

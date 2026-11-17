@@ -119,7 +119,7 @@ async function until(assertion: () => void) {
 
 describe.each(["identity", "gzip"] as const)("private terminal SSE through %s output", (encoding) => {
   it.each(["local-unavailable", "privacy-missing", "privacy-degraded"])(
-    "finishes the public bootstrap before closing early %s without a private binding",
+    "keeps public SSE and client alive for early %s without a private binding",
     async (reason) => {
       const tmp = tmpDirs();
       cleanups.push(() => tmp.cleanup());
@@ -165,21 +165,23 @@ describe.each(["identity", "gzip"] as const)("private terminal SSE through %s ou
         "http://localhost",
         f.client.output,
       );
-      expect(finish).toHaveBeenCalledTimes(1);
+      expect(finish).not.toHaveBeenCalled();
       expect(abort).not.toHaveBeenCalled();
       expect(connect).not.toHaveBeenCalled();
-      expect(f.hub.count()).toBe(0);
-      expect(f.client.send("hub", { late: true })).toBe(false);
-      await until(() => expect(f.res.writableFinished).toBe(true));
+      expect(f.hub.count()).toBe(1);
+      expect(f.client.send("ping", { late: true })).toBe(true);
+      await until(() => expect(f.frames().at(-1)?.event).toBe("ping"));
+      expect(f.res.writableFinished).toBe(false);
       expect(f.res.status).toBe(200);
       expect(f.res.headers["Content-Type"]).toBe("text/event-stream; charset=utf-8");
       expect(f.res.headers["Content-Encoding"]).toBe(encoding === "gzip" ? "gzip" : undefined);
-      expect(f.text(true)).toBe(
+      expect(f.text()).toBe(
         formatSseFrame("hello", { clientId: f.client.id }) +
           formatSseFrame("hub", capability) +
-          formatSseFrame("agents", { agents: [] }),
-      ); // strict gunzip requires a complete trailer, not a tolerant partial decode
-      expect(f.frames().map((frame) => frame.event)).toEqual(["hello", "hub", "agents"]);
+          formatSseFrame("agents", { agents: [] }) +
+          formatSseFrame("ping", { late: true }),
+      );
+      expect(f.frames().map((frame) => frame.event)).toEqual(["hello", "hub", "agents", "ping"]);
     },
   );
 

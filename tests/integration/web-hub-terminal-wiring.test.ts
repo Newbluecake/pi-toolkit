@@ -294,9 +294,20 @@ async function physicalHub(degraded = false) {
   const initialStream = sse;
   cleanups.push(() => initialStream.close());
   if (degraded) {
-    await sse.waitEnd();
+    await sse.waitFor((e) => e.event === "agents");
     expect(sse.events.some((e) => e.event === "hub" && e.data.caps.includes(TERMINAL_UI_CAP))).toBe(true);
-    expect(sse.events.some((e) => e.event === "terminal_connection")).toBe(false);
+    expect(sse.events.find((e) => e.event === "hub")!.data.terminal).toEqual({
+      state: "unavailable",
+      reason: "privacy-unavailable",
+    });
+    const headers = { Cookie: cookie, Origin: `http://127.0.0.1:${hub.httpPort}` };
+    const clientId = sse.events.find((e) => e.event === "hello")!.data.clientId;
+    expect(
+      (await postJson(hub.httpPort, "/api/subscribe", { clientId, agentKey: view.agentKey }, headers)).status,
+    ).toBe(202);
+    expect((await postJson(hub.httpPort, TERMINAL_HTTP_PATHS.prepare, {}, headers)).status).toBe(503);
+    expect(sse.ended).toBe(false);
+    expect(sse.events.some((e) => e.event === "terminal_connection" || e.event === "terminal")).toBe(false);
     expect(backends).toEqual([]);
     return undefined;
   }
@@ -623,7 +634,7 @@ describe("terminal authority loss is observable before another request can act",
     expect(h.backends).toHaveLength(1);
     await waitUntil(() => h.receipts().resolvedAcks === 1, 8000);
   }, 20000);
-  it("degraded privacy emits hub capability then closes SSE without any binding token or backend", async () => {
+  it("degraded privacy keeps public SSE/subscription without any binding token or backend", async () => {
     expect(await physicalHub(true)).toBeUndefined();
   });
 });
@@ -647,7 +658,11 @@ describe("production existing-store refusal", () => {
       const cookie = await login(result.httpPort, result.paths.tokenFile);
       const sse = await openSse(result.httpPort, { cookie });
       cleanups.push(() => sse.close());
-      await sse.waitEnd();
+      await sse.waitFor((e) => e.event === "agents");
+      expect(sse.events.find((e) => e.event === "hub")!.data.terminal).toEqual({
+        state: "unavailable",
+        reason: "journal-missing",
+      });
       expect(sse.events.some((e) => e.event === "terminal_connection")).toBe(false);
       const response = await postJson(
         result.httpPort,
@@ -656,6 +671,7 @@ describe("production existing-store refusal", () => {
         { Cookie: cookie, Origin: `http://127.0.0.1:${result.httpPort}` },
       );
       expect(response.status).toBe(503);
+      expect(sse.ended).toBe(false);
       expect(JSON.parse(response.body)).toEqual({ ok: false, code: "E_UNAVAILABLE", effect: "none" });
       expect(await readdir(join(paths.stateDir, TERMINAL_LOCAL_DIR))).toEqual(before);
       expect(JSON.parse(readFileSync(result.paths.hubJson, "utf8")).terminal).toMatchObject({

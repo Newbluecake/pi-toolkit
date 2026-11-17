@@ -9,9 +9,16 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createSseHub, formatSseFrame, type SseClient, type SseHub } from "../../src/web-hub/hub/sse.js";
 import { startHub } from "../../src/web-hub/hub/hub.js";
 import { resolveHubPaths } from "../../src/web-hub/protocol/paths.js";
-import { TERMINAL_LOCAL_DIR } from "../../src/web-hub/protocol/terminal-local.js";
+import {
+  TERMINAL_LOCAL_DIR,
+  createLocalAuthority,
+  localProcess,
+  processNamespaces,
+} from "../../src/web-hub/protocol/terminal-local.js";
+import { TERMINAL_HTTP_PATHS } from "../../src/web-hub/protocol/terminal-paths.js";
 import { TERMINAL_UI_CAP } from "../../src/web-hub/protocol/version.js";
-import { config } from "../web-hub/hub/helpers.js";
+import { config, connectClient, hello } from "../web-hub/hub/helpers.js";
+import { freePort } from "../helpers/free-port.js";
 import { createSseOutput } from "../../src/web-hub/hub/sse-output.js";
 import { createHttpFrontend } from "../../src/web-hub/hub/http.js";
 import { fakeDeps, login, makeAgent, postJson } from "../web-hub/http/helpers.js";
@@ -325,9 +332,17 @@ describe("SSE transport over real sockets", () => {
 });
 
 describe.each(["identity", "gzip"] as const)("early terminal unavailable over real %s HTTP", (encoding) => {
-  it.each(["missing-journal", "degraded-privacy"])(
-    "delivers headers and public capability before a normal end: %s",
-    async (reason) => {
+  it.each([
+    ["missing-journal", "loopback"],
+    ["degraded-privacy", "loopback"],
+    ["stale-pid", "loopback"],
+    ["stale-boot", "loopback"],
+    ["stale-pid", "lan"],
+    ["stale-boot", "lan"],
+    ["degraded-privacy", "lan"],
+  ] as const)(
+    "keeps public SSE/subscriptions alive, exposes unavailable, denies terminal: %s / %s",
+    async (reason, listener) => {
       const home = mkdtempSync(join(tmpdir(), "sse-unavailable-"));
       cleanups.push(() => rmSync(home, { recursive: true, force: true }));
       const paths = resolveHubPaths({ home, uid: process.getuid!() });
@@ -344,11 +359,38 @@ describe.each(["identity", "gzip"] as const)("early terminal unavailable over re
         else process.env.PI_WEBHUB_TERMINAL_SOURCE = previousSource;
       });
       if (reason === "missing-journal") mkdirSync(join(paths.stateDir, TERMINAL_LOCAL_DIR), { mode: 0o700 });
-      else writeFileSync(join(paths.stateDir, "privacy.json"), "corrupt", { mode: 0o600 });
+      else if (reason === "degraded-privacy")
+        writeFileSync(join(paths.stateDir, "privacy.json"), "corrupt", { mode: 0o600 });
+      else {
+        // Real initialized store + valid-shaped authority from an obsolete process/boot.
+        // No production state, no bypass of cold-start residue validation.
+        await createLocalAuthority(
+          paths.stateDir,
+          {
+            agentNonce: "old-agent",
+            sessionId: "old-session",
+            epoch: "old-epoch",
+            ownerInstance: "old-owner",
+            process: {
+              ...localProcess(process.pid),
+              ...(reason === "stale-pid" ? { pid: 2147483647 } : { bootId: "previous-boot" }),
+            },
+            namespaces: processNamespaces(process.pid),
+            domain: "plain",
+            main: true,
+            active: true,
+          },
+          () => true,
+        );
+      }
       const hub = await startHub(
         config({
           home,
           privacy: true,
+          control: true,
+          ...(listener === "lan"
+            ? { lan: { port: await freePort(), extraHosts: [], trustProxyFrom: [], externalOrigins: [] } }
+            : {}),
           terminal: {
             maxPerSession: 2,
             maxPerPrincipal: 2,
@@ -361,11 +403,34 @@ describe.each(["identity", "gzip"] as const)("early terminal unavailable over re
       );
       if ("exists" in hub) throw new Error("unexpected singleton");
       cleanups.push(() => hub.close("test"));
-      const cookie = await login(hub.httpPort, hub.paths.tokenFile);
-      const conn = await open(hub.httpPort, { Cookie: cookie, "Accept-Encoding": encoding });
-      await conn.end(); // real gunzip must reach a normal end, including the gzip trailer
+      const peer = await connectClient(hub.paths.socketPath);
+      cleanups.push(() => {
+        peer.sock.destroy();
+      });
+      peer.send(hello({ agentId: { pid: process.pid, nonce: "unavailable-test-peer" } }));
+      const ack = await peer.waitFrame((f) => f.t === "hello_ack");
+      let port = hub.httpPort;
+      let cookie: string;
+      if (listener === "lan") {
+        await vi.waitFor(() => expect(hub.lanStatus()?.state).toBe("on"));
+        const status = hub.lanStatus();
+        if (status?.state !== "on") throw new Error("LAN not listening");
+        port = status.port;
+        peer.send({ t: "lan_req", rid: "login-info", op: "info" });
+        const result = await peer.waitFrame((f) => f.t === "lan_res" && f.rid === "login-info");
+        const info = result.info as { username: string; initialPassword: string };
+        expect(result.ok).toBe(true);
+        const loggedIn = await lanPostJson(port, "/api/login", {
+          username: info.username,
+          password: info.initialPassword,
+        });
+        expect(loggedIn.status).toBe(200);
+        cookie = loggedIn.headers["set-cookie"]![0]!.split(";")[0]!;
+      } else cookie = await login(port, hub.paths.tokenFile);
+      const conn = await open(port, { Cookie: cookie, "Accept-Encoding": encoding });
+      await conn.wait("event: agents\n");
       expect(conn.res.statusCode).toBe(200);
-      expect(conn.res.complete).toBe(true);
+      expect(conn.res.complete).toBe(false);
       expect(conn.res.headers["content-type"]).toBe("text/event-stream; charset=utf-8");
       expect(conn.res.headers["content-encoding"]).toBe(encoding === "gzip" ? "gzip" : undefined);
       const frames = conn
@@ -381,9 +446,38 @@ describe.each(["identity", "gzip"] as const)("early terminal unavailable over re
         });
       expect(frames[0]?.event).toBe("hello");
       expect(frames.find((frame) => frame.event === "hub")?.data.caps).toContain(TERMINAL_UI_CAP);
+      const terminal = frames.find((frame) => frame.event === "hub")?.data.terminal;
+      expect(terminal).toMatchObject({ state: "unavailable", reason: expect.any(String) });
+      if (reason === "stale-pid") expect(terminal.reason).toBe("local-store-unavailable");
+      if (reason === "stale-boot") expect(terminal.reason).toBe("residual-authority-state");
+      if (reason === "degraded-privacy") expect(terminal.reason).toBe("privacy-unavailable");
       expect(frames.some((frame) => frame.event === "agents")).toBe(true);
+      const headers = { Cookie: cookie, Origin: `http://127.0.0.1:${port}` };
+      const subscription = { clientId: frames[0]!.data.clientId, agentKey: ack.agentKey };
+      const subscribed = await postJson(port, "/api/subscribe", subscription, headers);
+      expect(subscribed.status, subscribed.body).toBe(202);
+      for (const path of Object.values(TERMINAL_HTTP_PATHS)) {
+        const denied = await postJson(
+          port,
+          path,
+          {
+            ...subscription,
+            connectionInstance: "forged",
+            connectionToken: "forged",
+            expect: { sessionId: "old-session", epoch: "old-epoch" },
+          },
+          headers,
+        );
+        expect(denied.status, path).toBe(503);
+        expect(JSON.parse(denied.body)).toEqual({ ok: false, code: "E_UNAVAILABLE", effect: "none" });
+      }
+      // After real HTTP round trips the ORIGINAL public stream/clientId is still usable.
+      expect((await postJson(port, "/api/subscribe", subscription, headers)).status).toBe(202);
+      expect(conn.res.readableEnded).toBe(false);
+      expect(conn.res.destroyed).toBe(false);
+      expect(conn.res.complete).toBe(false);
       expect(frames.some((frame) => frame.event === "terminal_connection" || frame.event === "terminal")).toBe(false);
-      expect(conn.text()).not.toMatch(/connectionToken|connectionInstance/);
+      expect(conn.text()).not.toMatch(/connectionToken|connectionInstance|event: terminal(?:_connection)?\n/);
     },
   );
 });

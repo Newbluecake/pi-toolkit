@@ -1184,7 +1184,10 @@ capability、末跳 pure-witness trusted-CODE 边界及 stock tokenizer/template
 binding；私有 `terminal_connection` / `terminal` 同样经过此 encoder/FIFO/逐帧 flush，
 不进入公开事件表或 replay ring。binding 按 output 的总 pending bytes 检查原 64 KiB
 压力界；撤销通过 output.abort 丢弃未写队列并关闭原连接，不得旁路 `res.write/end`。
-终端关闭时无私有帧、SSE 字节不变。私有通道回归见
+初始 terminal local/privacy 不可用且尚无私有 binding 时保留公共 SSE/clientId，拒绝终端写操作；
+browser HubInfo 的 optional `terminal:{state:"unavailable",reason}` 只作负面提示，不是执行权。
+这是 #49 P0 对 early `finish()` 的声明式修正，避免 hello 后 subscribe 404/重连循环；已绑定后的撤权仍同步 abort。
+终端关闭时无该字段/私有帧、SSE 字节不变。私有通道回归见
 `tests/web-hub/hub/terminal/sse-binding.test.ts`。
 
 所有帧进入同一 FIFO；identity write=false 后等 socket drain，gzip 一次只处理一帧，

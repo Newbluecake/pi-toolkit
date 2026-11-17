@@ -612,6 +612,28 @@ describe("T-REV/T-SSE/T-ID/T-BIND dual listener terminal (§3/4)", () => {
     },
     15000,
   );
+  it.each([0, 1])(
+    "listener %i established private binding revocation still closes the original public SSE",
+    async (i) => {
+      const h = await harness();
+      const c = await h.connection(i);
+      expect(c.stream.events.some((event) => event.event === "terminal_connection")).toBe(true);
+      h.service.auth.revoke("all");
+      await c.stream.waitEnd();
+      const subscription = await postJson(
+        h.ports[i]!,
+        "/api/subscribe",
+        {
+          clientId: c.identity.clientId,
+          agentKey: h.agentKey,
+        },
+        { Cookie: h.cookies[i]!, Origin: `http://127.0.0.1:${h.ports[i]}` },
+      );
+      expect(subscription.status).toBe(404);
+      expect(JSON.parse(subscription.body).message).toBe("unknown clientId");
+      expect(h.counts().opens).toBe(0);
+    },
+  );
   it("strict missing/null/cross Origin, forged SSE token/instance/clientId and cross-listener identities never spawn", async () => {
     const h = await harness(),
       c = await h.connection(0);

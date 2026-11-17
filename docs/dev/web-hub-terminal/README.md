@@ -121,15 +121,22 @@ identity drain 处理，无新公开事件/id/cap。binding 的 64 KiB 压力检
 丢弃尚未写出的队列并销毁 compressor/socket，不用 `res.end()` 绕过 encoder 的生命周期；
 已交给 socket 的 bytes 无法撤回。普通 SSE close 的排空语义仍由 output 管理。
 尚未建立 binding 的早期 local unavailable / privacy missing 或 degraded 分支没有私有材料，
-经 `output.finish()` 停止发送并排空公开 capability bootstrap 与 gzip trailer 后正常结束；
-不得在 headers/公开帧送达前 abort。已建立敏感 binding 的撤销仍同步 abort，不排空私有队列。
+**保留公共 SSE 与 clientId**，不创建 terminal binding、不 mint/send 私有 token/event，并拒绝全部终端 POST。
+旧 `output.finish()` 会同步删除公共 clientId，导致 hello 后 subscribe 404 与无限重连，连带阻断聊天/历史/fleet；
+#49 P0 明确改变该 early-unavailable 设计，不放松 local authority、privacy 或冷恢复校验、不清理残留 store。
+公开 browser HubInfo 仅在不可用时追加 optional `terminal:{state:"unavailable",reason}`，reason 是固定无秘密前置原因；
+不新增事件/cap、不 bump PROTO、不进 agent hello_ack；健康/真正 off 省略该字段。privacy 健康变化重投影此负面提示，
+旧 UI 忽略未知字段仍可使用公共流，新 UI 显示不可用原因并隐藏终端执行入口，不加载私有面板/API。
+缺字段只代表 legacy/未否决，绝非 ready 或授权。混版/回滚不依赖此提示授予权限。
+已建立敏感 binding 的撤销仍同步 abort 原 SSE，不排空私有队列；source/Origin 例外不扩权。
 terminal off 不调用该端口、不新增字节；私有材料仍不进入 replay。
 
 回归：`tests/web-hub/hub/terminal/sse-binding.test.ts` 用真实 zlib + 内存 Writable 覆盖
 identity/gzip 的交错次序、完整 trailer/逐帧解码、无后继帧仍及时 flush、drain、encoder
-积压压力、撤销丢弃队列、close/error/expiry 与 replay 隔离，以及早期 unavailable 的公开帧排空；
-`tests/integration/web-hub-sse-output.test.ts` 以真实 HTTP 验证 unavailable/degraded 的 headers、
-capability 和完整 gzip 结束。真实双 listener 接线由原 `tests/integration/web-hub-terminal-http.test.ts` 验证。
+积压压力、撤销丢弃队列、close/error/expiry 与 replay 隔离；
+`tests/integration/web-hub-sse-output.test.ts` 以真实 startHub/HTTP 验证 unavailable/degraded 及旧 boot authority
+在两个 listener 上公共 SSE 保持、subscribe 202、负面状态、无私密帧和终端 POST 拒绝。
+真实双 listener 撤权接线由 `tests/integration/web-hub-terminal-http.test.ts` 验证。
 
 ## 权威链、物理 receipt 与冷恢复（F2）
 
