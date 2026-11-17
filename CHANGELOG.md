@@ -7,6 +7,119 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.2] - 2026-11-17
+
+### Added
+
+- **web-hub**: move session terminal into the activity drawer (`28a01624`)
+- **web-hub**: enforce boot machine policy and per-session terminal admission (`6f4a3ff5`)
+- **web-hub**: gate terminal UI by current session declaration (`dbc6e62f`)
+- **web-hub**: declare terminal eligibility at status write time (`81e9b27e`)
+- **web-hub**: define per-session terminal policy contracts (`60f58e95`)
+- **memory**: add opt-in P selection diagnostics (`4969929f`)
+- **web-hub**: discover retained exited sessions and retry recovery (`0d27c99c`)
+- **web-hub**: advertise exited discovery and wire history-independent guards (`4c6af15d`)
+- **web-hub**: retain proven exited coordinates and gate every restore read (`010d4fcf`)
+- **web-hub**: add bounded retained-session proofs and disk constraints (`426b3677`)
+- **webhub**: verify local terminal authority and durable receipt consumption (`16b808a8`)
+- **webhub**: wire terminal owners and fail-closed hub assembly (`6bacd439`)
+- **webhub**: implement private terminal hub control and durable fences (`1ace64be`)
+- **webhub**: add lazy session terminal panels and private attachment UI (`07636db2`)
+- **webhub**: implement agent-owned Linux PTY backend and physical reap proofs (`612e4803`)
+- **webhub**: acknowledge durably resolved terminal receipts privately (`06549566`)
+- **webhub**: add optional private terminal display metadata (`38073df6`)
+- **memory**: add explicit one-shot direct transport to P50 probe (`8193354b`)
+- **webhub**: freeze private terminal contracts and fail-closed ingress (`8f09efa5`)
+- **memory**: add a read-only credential bridge and frozen LIVE manifest to the P50 probe (`e5e1309e`)
+- **web-hub**: show which fleet drawer view is selected (`d928f30e`)
+- **memory**: add a suggest-only stock-estimate profile for P50 revisions (`79c63cfb`)
+
+### Fixed
+
+- **bash**: fence host marker writes and isolate parity cleanup (`56df3ce7`)
+- **ci**: preserve terminal baseline history and gate offline browser matrix (`0794d483`)
+- **web-hub**: finish unavailable terminal SSE streams gracefully (`adf9e534`)
+- **web-hub**: serialize exact terminal inventory publications (`a36ffcdf`)
+- **web-hub**: route private terminal SSE frames through the negotiated encoder (`32b60187`)
+- **web-hub**: fence resource negotiation across declaration changes (`0833040c`)
+- **memory**: filter late predict results by the model threshold (`83400a9e`)
+- **web-hub**: validate session cwd and preserve relaunch death evidence (`a390d164`)
+- **web-hub**: keep drawer header icons fixed between list and run detail (`34c4d6cc`)
+- **web-hub**: harden retained recovery layout and generation guards (`7ed9e206`)
+- **web-hub**: stop blaming another hub for every socket fence failure (`60b2e838`)
+- **webhub**: use system monospace fonts and retain terminal reap witnesses (`f4e3c1b3`)
+- **webhub**: defer terminal resize until replay cutover (`f5ce23a8`)
+- **webhub**: reclaim terminal capacity and bound retained control frames (`55b4231c`)
+- **webhub**: fence uncontactable terminal inventory agents as lost (`0bc96060`)
+- **webhub**: revalidate cold terminal fences and acknowledge durable receipts (`63e2e0d7`)
+- **webhub**: fence terminal async continuations by authority (`9bea322f`)
+- **webhub**: limit browser schema projection to public HTTP operations (`b1828183`)
+- **webhub**: restore terminal focus before confirmed paste (`90c9592d`)
+- **webhub**: keep terminal validation inside the lazy UI budget (`46a9cb39`)
+- **webhub**: clear private terminal sinks on UI teardown (`764d4d62`)
+- **webhub**: fence retired PTYs, absolute deadlines and durable receipt acknowledgements (`cd5b45c5`)
+- **webhub**: bound terminal reaper attempts and preserve uncertain open effects (`96ca91e4`)
+- **webhub**: isolate eager terminal paths from private schemas (`8eb793e4`)
+- **memory**: diagnose P50 closure failures and admit exact DeepSeek thinking-off framing (`bec327f2`)
+- **webhub**: expire and scrub terminal handshake offers (`85c2a577`)
+- **webhub**: bind private terminal command owners by challenge CAS (`092a1d32`)
+- **web-hub**: scale ask_user, preview and fleet dialog text with the font-size setting (`3936c8fe`)
+
+### Changed
+
+- **memory**: extract legacy error relevance baseline (`4e15fac1`)
+- **web-hub**: stream /api/events with optional gzip and drain-aware bounded output (`40307452`)
+- **web-hub**: trim history snapshots against the wire budget in linear time (`42b0bb42`)
+
+### Documentation
+
+- **web-hub**: specify machine terminal policy and mixed-version rollback (`586dae4f`)
+- **memory**: add the post-migration predict injection field re-evaluation (`fbff8a03`)
+- **memory**: record the approved P50 standalone LIVE pass (`738f7d9f`)
+- **webhub**: drop duplicated terminal README sections from parallel merges (`a02cc490`)
+- **webhub**: document terminal reclamation and queue repair invariants (`92feb3d9`)
+
+### Tests
+
+- **integration**: preserve full startup budgets in outer deadlines (`4acf1695`)
+- **integration**: bound cold-start barriers and diagnose exited children (`d986d5da`)
+- **integration**: redact secret-named identifiers echoed in XS child diagnostics (`ba40cea2`)
+- **web-hub**: restore max-latency sampling in the connection perf gate (`be068521`)
+- determinize controlled deadlines and redact XS child diagnostics (`6de67696`)
+- **integration**: bound readiness waits and diagnose stalled peers (`3e22e4ef`)
+- **tier1**: replace wall-clock checks with behavioral gates (`3776ee74`)
+- synchronize db restart and child bash deadline assertions (`e4531250`)
+- **external-agent**: isolate fake droid catalog and resume stores (`2cad797b`)
+- **web-hub**: treat vanished /proc entries as reaped in the PTY unref check (`1ae24588`)
+- **web-hub**: start new hub through the locked old launcher (`6b082ae7`)
+- **web-hub**: pin exact unsupported responses in mixed terminal UI (`878ac2f6`)
+- **web-hub**: probe two real terminal agents and current context cwd (`8decdc89`)
+- **web-hub**: verify locked mixed components and true terminal-off bytes (`20b0c0a9`)
+- **web-hub**: pin terminal publication queue cancellation and recovery (`187ad08e`)
+- **web-hub**: verify privacy forks and conservative terminal rollback (`27c3b1d5`)
+- **web-hub**: exercise per-session terminals across real agent processes (`064bb63a`)
+- **web-hub**: cover real EACCES settings-location selection (`f051f8a6`)
+- **config**: count the retained-session proof as an agentDir consumer (`f472e949`)
+- **web-hub**: verify retained exited sessions across hub lifecycles (`6e3a6c08`)
+- **web-hub**: pin boot proof preparation after original reaper tracking (`bd5b171a`)
+- **webhub**: isolate terminal rc and wait for interactive readiness (`b07e5a81`)
+- **webhub**: accept root-owned symlinked system rc files in the terminal fixture preflight (`3d534cc5`)
+- **webhub**: retain terminal CSP evidence across reloads (`924a685f`)
+- **webhub**: document and probe real terminal browser lifecycle (`d31343d9`)
+- **webhub**: falsify terminal binding guards individually (`a9595f74`)
+- **web-hub**: require WebGL and bound terminal UI recovery (`ece9c542`)
+- **web-hub**: spike lazy xterm styles and WebGL with CSP gates (`d9e5908c`)
+- **web-hub**: pin terminal spike dependencies and record CSP blocker (`105cf86a`)
+- add completion barriers to P50 wire and Feishu mirror tests on loaded runners (`2d802f1f`)
+- **feishu**: give the dialog deep-link PATCH wait room on loaded runners (`e884c49a`)
+
+### Chores
+
+- drop group/world write bits from runner system rc files before terminal tier 2 (`2a2b4582`)
+- install zsh so terminal PTY tier 2 covers both login shells (`231b8696`)
+
+Stats: 22 feat, 28 fix, 3 refactor/perf, 5 docs, 31 test, 2 chore
+
 ## [0.12.1] - 2026-11-13
 
 ### Added
@@ -2026,7 +2139,8 @@ First public release: anti-hang subagent extension for pi — drop-in replacemen
 
 Stats: 30 feat, 12 fix, 1 refactor, 1 docs, 3 chore/test · 970+ tests (state-machine transition matrix, seeded property invariants, widget rendering)
 
-[Unreleased]: https://github.com/Newbluecake/pi-toolkit/compare/v0.12.1...HEAD
+[Unreleased]: https://github.com/Newbluecake/pi-toolkit/compare/v0.12.2...HEAD
+[0.12.2]: https://github.com/Newbluecake/pi-toolkit/compare/v0.12.1...v0.12.2
 [0.12.1]: https://github.com/Newbluecake/pi-toolkit/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/Newbluecake/pi-toolkit/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/Newbluecake/pi-toolkit/compare/v0.10.6...v0.11.0
