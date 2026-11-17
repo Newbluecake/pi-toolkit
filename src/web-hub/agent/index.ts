@@ -1697,7 +1697,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     // hook to republish the xs_member slot from FRESH membership state — a membership change
     // that landed while disconnected would otherwise have its STALE stored slot replayed by the
     // hello_ack slot machinery (X1-report §6 note 6: only a NEW xs_member revives a member).
-    ...(cmdCompleteOn || xsBridge !== undefined || schedulePort !== undefined
+    ...(cmdCompleteOn || xsBridge !== undefined || schedulePort !== undefined || terminal !== undefined
       ? {
           onHubCaps: () => {
             if (cmdCompleteOn) publishCommands();
@@ -1706,6 +1706,25 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
             // the hub AFTER publishMember — a bounded read-only get, applied only if still the same link + session.
             xsBridge?.onHubCapsAlias();
             schedulePort?.onHubCaps(); // scheduled-reports A0: announce the session once per hello_ack
+            if (terminal !== undefined) {
+              const gen = generation,
+                link = conn?.terminalConnectionInstance;
+              void terminal
+                .retryLocalAfterHubLink(link)
+                .then((changed) => {
+                  if (
+                    changed &&
+                    gen === generation &&
+                    attached &&
+                    link !== undefined &&
+                    conn?.terminalConnectionInstance === link
+                  )
+                    publishStatus();
+                })
+                .catch(() => {
+                  /* failed compensation remains unsupported */
+                });
+            }
           },
         }
       : {}),

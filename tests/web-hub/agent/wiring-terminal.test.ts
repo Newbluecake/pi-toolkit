@@ -1,5 +1,6 @@
 /** Real wireWebHub/commands/connection; only physical owner factory replaced.
  * True PTY plus real hub belongs to integration/web-hub-terminal-wiring. */
+import { TerminalLocalError } from "../../../src/web-hub/protocol/terminal-local.js";
 import { writeFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { TerminalOwnerOptions } from "../../../src/web-hub/agent/terminal/owner.js";
@@ -161,4 +162,18 @@ describe("enabled-only unavailable-store status", () => {
     const off = setup(false);
     expect(off.control.ui.statusLines().join("\n")).not.toContain("终端不可用");
   });
+});
+
+it("real hello_ack without browser caps triggers one guarded owner compensation and fresh status", async () => {
+  const a = setup(true, () => true);
+  factory.create.mockRejectedValueOnce(new TerminalLocalError("stale-authority-prev-boot"));
+  const socket = await a.start(); // ack contains only cmd.v1 + command.v1
+  expect(factory.create).toHaveBeenCalledTimes(2);
+  const statuses = socket.frames().filter((f) => f.t === "status");
+  expect(statuses.some((f) => f.terminalSession !== undefined)).toBe(true);
+  a.fire("turn_end", { type: "turn_end" }, a.ctx);
+  await vi.advanceTimersByTimeAsync(0);
+  expect(factory.create).toHaveBeenCalledTimes(2);
+  expect(a.o.dispose).not.toHaveBeenCalled();
+  a.fire("session_shutdown", { reason: "quit" }, a.ctx);
 });

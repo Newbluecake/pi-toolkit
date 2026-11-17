@@ -1,3 +1,4 @@
+import { TerminalLocalError } from "../../../src/web-hub/protocol/terminal-local.js";
 import { describe, expect, it, vi } from "vitest";
 import { createTerminalWiring } from "../../../src/web-hub/agent/terminal/wiring.js";
 import type { TerminalOwnerOptions, TerminalOwner } from "../../../src/web-hub/agent/terminal/owner.js";
@@ -163,5 +164,104 @@ describe("positive declaration readiness", () => {
     await w.start({ ...options, current: () => current });
     expect(w.declaration()).toBeUndefined();
     w.dispose();
+  });
+});
+
+describe("one guarded prev-boot compensation per new link", () => {
+  const live = (link = "L1") => ({ localConnectionInstance: link, sessionId: options.sessionId, epoch: options.epoch });
+  it("initial prev-boot failure + real live link retries once and never recreates an owner", async () => {
+    let current: ReturnType<typeof live> | undefined;
+    const o = owner(),
+      factory = vi
+        .fn()
+        .mockRejectedValueOnce(new TerminalLocalError("stale-authority-prev-boot"))
+        .mockResolvedValueOnce(o);
+    const w = createTerminalWiring(factory);
+    await w.start({ ...options, current: () => current });
+    expect(await w.retryLocalAfterHubLink(undefined)).toBe(false);
+    expect(await w.retryLocalAfterHubLink("L1")).toBe(false);
+    current = live();
+    expect(await w.retryLocalAfterHubLink("L1")).toBe(true);
+    expect(w.declaration()).toBeDefined();
+    expect(await w.retryLocalAfterHubLink("L1")).toBe(false);
+    current = live("L2");
+    expect(await w.retryLocalAfterHubLink("L2")).toBe(false);
+    expect(factory).toHaveBeenCalledTimes(2);
+    expect(o.dispose).not.toHaveBeenCalled();
+    w.dispose();
+  });
+  it.each([
+    new Error("stale-authority-prev-boot"),
+    new TerminalLocalError("stale-authority-same-boot"),
+    new TerminalLocalError("authority-corrupt"),
+    new TerminalLocalError("unresolved-local-state"),
+  ])("only typed initial previous-boot is retryable: %s", async (error) => {
+    const factory = vi.fn().mockRejectedValue(error),
+      w = createTerminalWiring(factory);
+    await w.start({ ...options, current: () => live() });
+    expect(await w.retryLocalAfterHubLink("L1")).toBe(false);
+    expect(factory).toHaveBeenCalledTimes(1);
+    w.dispose();
+  });
+  it("failure consumes this link once, another genuine link may compensate; no in-flight duplication", async () => {
+    let current = live();
+    const held = pending<ReturnType<typeof owner>>();
+    const factory = vi
+      .fn()
+      .mockRejectedValueOnce(new TerminalLocalError("stale-authority-prev-boot"))
+      .mockRejectedValueOnce(new TerminalLocalError("unresolved-local-state"))
+      .mockReturnValueOnce(held.promise);
+    const w = createTerminalWiring(factory);
+    await w.start({ ...options, current: () => current });
+    expect(await w.retryLocalAfterHubLink("L1")).toBe(false);
+    expect(await w.retryLocalAfterHubLink("L1")).toBe(false);
+    expect(factory).toHaveBeenCalledTimes(2);
+    current = live("L2");
+    const retry = w.retryLocalAfterHubLink("L2");
+    expect(await w.retryLocalAfterHubLink("L2")).toBe(false);
+    held.resolve(owner());
+    expect(await retry).toBe(true);
+    expect(factory).toHaveBeenCalledTimes(3);
+    w.dispose();
+  });
+  it.each(["dispose", "guard", "link", "session"])(
+    "late compensation cannot adopt after %s changes",
+    async (change) => {
+      let allowed = true,
+        current = live();
+      const held = pending<ReturnType<typeof owner>>(),
+        o = owner();
+      const factory = vi
+        .fn()
+        .mockRejectedValueOnce(new TerminalLocalError("stale-authority-prev-boot"))
+        .mockReturnValueOnce(held.promise);
+      const w = createTerminalWiring(factory);
+      await w.start({ ...options, allowed: () => allowed, current: () => current });
+      const retry = w.retryLocalAfterHubLink("L1");
+      if (change === "dispose") w.dispose();
+      if (change === "guard") {
+        allowed = false;
+        expect(w.check()).toBe(false);
+        allowed = true;
+      }
+      if (change === "link") current = live("L2");
+      if (change === "session") current = { ...live(), sessionId: "successor" };
+      held.resolve(o);
+      expect(await retry).toBe(false);
+      expect(o.dispose).toHaveBeenCalledTimes(1);
+      expect(w.declaration()).toBeUndefined();
+      w.dispose();
+    },
+  );
+  it("guard withdrawal without an owner seals eligibility permanently for this session", async () => {
+    let allowed = true;
+    const factory = vi.fn().mockRejectedValue(new TerminalLocalError("stale-authority-prev-boot")),
+      w = createTerminalWiring(factory);
+    await w.start({ ...options, allowed: () => allowed, current: () => live() });
+    allowed = false;
+    expect(w.check()).toBe(false);
+    allowed = true;
+    expect(await w.retryLocalAfterHubLink("L1")).toBe(false);
+    expect(factory).toHaveBeenCalledTimes(1);
   });
 });

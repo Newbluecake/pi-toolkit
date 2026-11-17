@@ -37,6 +37,7 @@ import {
 import { TERMINAL_JOURNAL_FILE } from "../../src/web-hub/protocol/terminal.js";
 import { config, connectClient, hello } from "../web-hub/hub/helpers.js";
 import { login, openSse, postJson } from "../web-hub/http/helpers.js";
+import { waitUntil } from "../web-hub/agent/helpers.js";
 import { isolatedMachine, cardFor, drained } from "./web-hub-terminal-compat-baseline.js";
 const worker = fileURLToPath(new URL("./fixtures/terminal-authority-recovery.ts", import.meta.url));
 const archive = ".terminal-authority-archive-v1";
@@ -590,5 +591,56 @@ describe("archive safety, capacity, resource and crash evidence", () => {
       expect(transactions(f)).toHaveLength(moved === stale.length ? 1 : 2);
     },
     20000,
+  );
+});
+
+describe("real guarded producer and PTY after retirement", () => {
+  it.each([false, true])(
+    "private scene-shaped store, real login/open/reap/prune/ACK (agent-first=%s)",
+    async (agentFirst) => {
+      const m = isolatedMachine();
+      cleanup.push(() => m.close());
+      const paths = resolveHubPaths({ home: m.home, uid: process.getuid!() });
+      mkdirSync(paths.stateDir, { recursive: true, mode: 0o700 });
+      const f = {
+        paths,
+        root: join(paths.stateDir, "terminal-v1"),
+        auth: join(paths.stateDir, "terminal-v1/authority"),
+      };
+      seed(f);
+      const before = immutable(f as Fixture),
+        old = snapshotFiles(f as Fixture);
+      const pendingAgent = agentFirst ? m.agent(undefined, { sessionId: "agent-first" }) : undefined;
+      if (agentFirst)
+        await waitUntil(
+          () =>
+            m.peers[0]!.messages.some(
+              (x) => x.event === "terminal-owner-failed" && x.reason === "stale-authority-prev-boot",
+            ),
+          10000,
+          "initial agent failed before hub recovery",
+        );
+      const h = await m.hub(undefined, { source: "plain" });
+      const a = pendingAgent ? await pendingAgent : await m.agent();
+      const card = await cardFor(h, a.sessionId),
+        b = await m.browser(h);
+      const initial = await a.peer.command("snapshot");
+      expect(initial.ownerAttempts).toBe(agentFirst ? 2 : 1);
+      expect(initial.backendCount).toBe(0); // NO auto shell
+      assertRetirement(f as Fixture, old);
+      assertImmutable(before);
+      const t = await b.open(card);
+      await b.input(card, t, "printf 'P1_PID=%s\n' \"$$\"\n");
+      await waitUntil(() => /P1_PID=\d+\r?\n/.test(b.output(t.termId)), 5000, "real PTY echo");
+      const pid = Number(/P1_PID=(\d+)/.exec(b.output(t.termId))![1]);
+      expect(existsSync(`/proc/${pid}/stat`)).toBe(true);
+      const revision = JSON.parse(readFileSync(join(f.root, TERMINAL_JOURNAL_FILE), "utf8")).revision;
+      await b.close(card, t);
+      await drained(h, revision + 2);
+      expect(existsSync(`/proc/${pid}/stat`)).toBe(false);
+      expect(files(join(f.root, "receipts"))).toEqual([]);
+      expect((await a.peer.command("snapshot")).ownerAttempts).toBe(agentFirst ? 2 : 1);
+    },
+    120000,
   );
 });

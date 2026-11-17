@@ -22,12 +22,13 @@ const { wireWebHub } = await load("src/web-hub/agent/index.ts");
 const { createTerminalOwner } = await load("src/web-hub/agent/terminal/owner.ts");
 const { createTerminalTestBackend } = await load("src/web-hub/agent/terminal/backend.ts");
 const { currentConnection } = await load("src/web-hub/agent/connection.ts");
-const { localPlainEnvironment } = await load("src/web-hub/protocol/terminal-local.ts");
+const { localPlainEnvironment, TerminalLocalError } = await load("src/web-hub/protocol/terminal-local.ts");
 const { resolveHubPaths } = await load("src/web-hub/protocol/paths.ts");
 const { fakePi, fakeCtx, SETTINGS } = await load("tests/web-hub/agent/helpers.ts");
 let allowed = true,
   guardThrows = false,
   backendCount = 0,
+  ownerAttempts = 0,
   validatedConstructor = false;
 const backends: any[] = [];
 const a = fakePi(),
@@ -90,31 +91,40 @@ const control = wireWebHub(a.pi, {
   },
   buildInfo: async () => ({ pluginVersion: input.pluginVersion ?? "1.2.3", buildId: "child-terminal-integration" }),
   terminalOwnerFactory: async (options: any) => {
-    owner = await createTerminalOwner({
-      ...options,
-      backend: (opts: any) => {
-        backendCount++;
-        // Only the audited uid/rc fixture changes. opts.cwd is the production
-        // currentCwd capture, not a fixture override of it.
-        // Negative cwd tests reuse the constructor from an already-created REAL
-        // backend and its already-audited uid/rc fixture. This avoids having the
-        // fixture's containment/mode check mask production cwd preflight. opts is
-        // untouched; even a broken fallback could only exec the isolated fixture.
-        const backend = validatedConstructor
-          ? new backends[0].constructor(opts, input.fixture)
-          : createTerminalTestBackend(opts, { ...input.fixture, cwd: opts.cwd });
-        backends.push(backend);
-        void backend.ready.catch(() =>
-          process.stderr.write(`BACKEND_READY_FAILURE ${JSON.stringify(backend.diagnostic)}\n`),
-        );
-        void backend.done.then(() => {
-          if (backend.diagnostic?.failure)
-            process.stderr.write(`BACKEND_DONE_DIAGNOSTIC ${JSON.stringify(backend.diagnostic)}\n`);
-        });
-        return backend;
-      },
-    });
-    return owner;
+    ownerAttempts++;
+    try {
+      owner = await createTerminalOwner({
+        ...options,
+        backend: (opts: any) => {
+          backendCount++;
+          // Only the audited uid/rc fixture changes. opts.cwd is the production
+          // currentCwd capture, not a fixture override of it.
+          // Negative cwd tests reuse the constructor from an already-created REAL
+          // backend and its already-audited uid/rc fixture. This avoids having the
+          // fixture's containment/mode check mask production cwd preflight. opts is
+          // untouched; even a broken fallback could only exec the isolated fixture.
+          const backend = validatedConstructor
+            ? new backends[0].constructor(opts, input.fixture)
+            : createTerminalTestBackend(opts, { ...input.fixture, cwd: opts.cwd });
+          backends.push(backend);
+          void backend.ready.catch(() =>
+            process.stderr.write(`BACKEND_READY_FAILURE ${JSON.stringify(backend.diagnostic)}\n`),
+          );
+          void backend.done.then(() => {
+            if (backend.diagnostic?.failure)
+              process.stderr.write(`BACKEND_DONE_DIAGNOSTIC ${JSON.stringify(backend.diagnostic)}\n`);
+          });
+          return backend;
+        },
+      });
+      return owner;
+    } catch (error) {
+      process.send?.({
+        event: "terminal-owner-failed",
+        reason: error instanceof TerminalLocalError ? error.reason : "unknown",
+      });
+      throw error;
+    }
   },
 });
 a.fire("session_start", { type: "session_start" }, c.ctx);
@@ -162,6 +172,7 @@ process.on("message", async (raw: any) => {
       id: raw.id,
       rawStatus: entry?.frame,
       backendCount,
+      ownerAttempts,
       backendSuccesses: backends.length,
       pid: process.pid,
       processCwd: process.cwd(),
