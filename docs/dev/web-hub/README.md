@@ -1186,8 +1186,14 @@ binding；私有 `terminal_connection` / `terminal` 同样经过此 encoder/FIFO
 下游可写通知（一次性、绝对2s、timer unref），不 mint/send 私有能力；超时仅放弃 binding，
 原连接收到完整 HubInfo 的 optional negative `terminal.reason="sse-admission-timeout"`，公共流与
 clientId 保留，刷新新 SSE 才重试。close/error/fence/privacy/dispose 封等待；准入重核原 proof。
-成功建立敏感 binding 后，仍按 output 总 pending bytes 检查原64KiB压力界，撤销通过 output.abort
-同步丢弃未写队列并关闭原连接，不得旁路 `res.write/end`。初始公共 burst 不再触发这条私有撤权门，
+成功建立 binding 后，#50 返工再区分公共-only 与私有在途：shared pending >64KiB 且原 binding
+source 仍有私有 bytes 才同步 output.abort，丢弃未写队列并关闭原连接；私有 source 为0则拒绝本次
+私帧、撤销 binding/writer，但保留公共 SSE/clientId，完整 HubInfo 追加 optional negative
+`terminal.reason="sse-public-pressure"`；UI 提示刷新重试，新 SSE/同有效登录重新准入，不自动开 shell。
+proof/fence/privacy/expiry/显式撤权的同步 abort 不变。来源计量在同一 FIFO/gzip 内追踪实际私有 UTF-8
+输入及压缩 chunk/readable/socket write callback（flush+readable 排空才切下一来源），不使用总 backlog
+相减或压缩比猜测，zero 不会被后续公共 history/fleet 冒充；详细归属、保守阶段重叠及 Node write
+callback 的界限见 terminal README。不得在 binding 旁路 res.write/end。初始公共 burst 不再触发这条私有撤权门，
 公共24MiB准入帽及净进展期限保持独立。细节、固定限频诊断与风险见 terminal README。
 初始 terminal local/privacy 不可用且尚无私有 binding 时保留公共 SSE/clientId，拒绝终端写操作；
 browser HubInfo 的 optional `terminal:{state:"unavailable",reason}` 只作负面提示，不是执行权。

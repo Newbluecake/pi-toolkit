@@ -3,9 +3,13 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { constants, createGzip, type Gzip } from "node:zlib";
 
 export interface SseOutput {
-  send(frame: string): boolean;
-  /** Conservative queued input + encoder + socket bytes, including the in-flight frame. */
-  pendingBytes(): number;
+  send(frame: string, source?: object): boolean;
+  /** Conservative queued input + encoder + socket bytes, including the in-flight frame.
+   * Optional opaque source selects ONLY that producer's stages; zero proves no private
+   * frame remains locally queued/in zlib/unacknowledged by response write callbacks.
+   * During gzip flush, input and compressed output can conservatively overlap.
+   */
+  pendingBytes(source?: object): number;
   /** One-shot local encoder/socket drain observation; cancellation never closes the stream. */
   onIdle(fn: () => void): () => void;
   /** Stop admission, finish accepted frames (or replace queued frames with a terminal auth frame). */
@@ -30,7 +34,24 @@ export function createSseOutput(
 ): SseOutput {
   const stallMs = Math.min(5_000, clampSpanMs(opts.stallMs) ?? 5_000);
   const gzip: Gzip | undefined = opts.gzip ? createGzip() : undefined;
-  let queue: Array<{ frame: string; bytes: number }> = [];
+  let queue: Array<{ frame: string; bytes: number; source?: object }> = [];
+  // Per-source stage accounting, never a subtraction from the public backlog. Entries
+  // disappear at zero; callbacks after abort cannot resurrect them.
+  const sources = new Map<object, number>();
+  let encodingSource: object | undefined;
+  const writes = new Set<() => void>();
+  function settleWrites(): void {
+    // Writable can drop writableLength synchronously and defer its write callbacks
+    // to nextTick. Retire that already-consumed batch before a later public write
+    // can make it appear that an old private frame is still in flight.
+    if (res.writableLength === 0) for (const done of writes) done();
+  }
+  function charge(source: object | undefined, bytes: number): void {
+    if (source === undefined || closed) return;
+    const remaining = (sources.get(source) ?? 0) + bytes;
+    if (remaining === 0) sources.delete(source);
+    else sources.set(source, remaining);
+  }
   let head = 0;
   let queuedBytes = 0;
   // Count the WHOLE frame until its flush completes, not just gzip.writableLength (which can
@@ -66,7 +87,10 @@ export function createSseOutput(
     timer = undefined;
   }
 
-  function pendingBytes(): number {
+  function pendingBytes(source?: object): number {
+    settleWrites();
+    if (source !== undefined)
+      return (sources.get(source) ?? 0) + (source === encodingSource ? (gzip?.readableLength ?? 0) : 0);
     return queuedBytes + inputBytes + (gzip?.readableLength ?? 0) + res.writableLength;
   }
 
@@ -113,13 +137,18 @@ export function createSseOutput(
     queue = [];
     head = 0;
     queuedBytes = inputBytes = 0;
+    sources.clear();
+    writes.clear();
+    encodingSource = undefined;
     req.removeListener("error", abort);
     res.removeListener("drain", onDrain);
     res.removeListener("close", onClose);
     res.removeListener("finish", onFinish);
     res.removeListener("error", abort);
     if (gzip !== undefined) {
-      gzip.unpipe(res);
+      gzip.removeListener("data", onEncoded);
+      gzip.removeListener("end", onEncodedEnd);
+      res.emit("unpipe", gzip);
       // Keep the error guard until close: an in-flight native callback may still report an
       // error after destroy. The close handler removes itself and the guard afterwards.
       gzip.destroy();
@@ -143,13 +172,52 @@ export function createSseOutput(
 
   function onDrain(): void {
     blocked = false;
+    gzip?.resume();
     pump();
+  }
+
+  function writeBytes(bytes: string | Buffer, source: object | undefined): boolean {
+    settleWrites();
+    const n = Buffer.byteLength(bytes);
+    charge(source, n);
+    const done = () => {
+      if (!writes.delete(done)) return;
+      charge(source, -n);
+    };
+    if (source !== undefined) writes.add(done);
+    return res.write(bytes, () => {
+      done();
+      notifyIdle();
+    });
+  }
+
+  function onEncoded(bytes: Buffer): void {
+    // Only one frame enters zlib until Z_SYNC_FLUSH AND readable/drain completion.
+    // Therefore every compressed chunk (including its sync marker) has exactly that
+    // frame's source, even when zlib's dictionary spans public/private frames.
+    try {
+      blocked = !writeBytes(bytes, encodingSource);
+      if (blocked) gzip!.pause();
+      else queueMicrotask(pump);
+    } catch {
+      abort();
+    }
+  }
+
+  function onEncodedEnd(): void {
+    res.end();
   }
 
   function pump(): void {
     if (closed) return;
     try {
-      while (!blocked && !res.writableNeedDrain && !flushing && head < queue.length) {
+      while (
+        !blocked &&
+        !res.writableNeedDrain &&
+        !flushing &&
+        (gzip?.readableLength ?? 0) === 0 &&
+        head < queue.length
+      ) {
         const item = queue[head]!;
         queue[head++] = undefined as unknown as (typeof queue)[number];
         queuedBytes -= item.bytes;
@@ -161,26 +229,41 @@ export function createSseOutput(
           head = 0;
         }
         if (gzip === undefined) {
-          blocked = !res.write(item.frame, () => notifyIdle());
+          // Transfer the queued charge to the exact response write callback.
+          charge(item.source, -item.bytes);
+          blocked = !writeBytes(item.frame, item.source);
         } else {
           flushing = true;
           inputBytes = item.bytes;
+          encodingSource = item.source;
           // Exactly one frame is in zlib at a time. flush's callback is after its write;
           // if write returned false, writableNeedDrain additionally gates the next frame.
           gzip.write(item.frame);
           gzip.flush(constants.Z_SYNC_FLUSH, () => {
             if (closed) return;
             inputBytes = 0;
+            charge(item.source, -item.bytes);
             flushing = false;
             if (!gzip.writableNeedDrain) pump();
             else checkStall();
           });
         }
       }
-      if (ending && head === queue.length && !flushing && !blocked && !res.writableNeedDrain && !ended) {
+      if (
+        ending &&
+        head === queue.length &&
+        !flushing &&
+        (gzip?.readableLength ?? 0) === 0 &&
+        !blocked &&
+        !res.writableNeedDrain &&
+        !ended
+      ) {
         ended = true;
         if (gzip === undefined) res.end();
-        else gzip.end(); // pipe emits the gzip trailer before ending the response
+        else {
+          encodingSource = undefined; // trailer has no frame payload/source
+          gzip.end(); // onEncodedEnd ends the response after the trailer
+        }
       }
       checkStall();
       notifyIdle();
@@ -201,7 +284,12 @@ export function createSseOutput(
       gzip.removeListener("error", abort);
       gzip.removeListener("drain", pump);
     });
-    gzip.pipe(res);
+    // Explicit pipe preserves response write callbacks for source attribution. The
+    // default Readable.pipe discards those callbacks; socket drain alone is not a
+    // per-source delivery boundary. Retain the standard pipe/unpipe notifications.
+    gzip.on("data", onEncoded);
+    gzip.once("end", onEncodedEnd);
+    res.emit("pipe", gzip);
   }
 
   return {
@@ -222,15 +310,16 @@ export function createSseOutput(
         idle.delete(run);
       };
     },
-    send(frame) {
+    send(frame, source) {
       if (closed || ending) return false;
       const bytes = Buffer.byteLength(frame, "utf8");
       if (pendingBytes() + bytes > MAX_PENDING_BYTES) {
         abort(); // reconnect resyncs/re-snapshots instead of retaining an unbounded FIFO
         return false;
       }
-      queue.push({ frame, bytes });
+      queue.push({ frame, bytes, ...(source === undefined ? {} : { source }) });
       queuedBytes += bytes;
+      charge(source, bytes);
       pump();
       return !closed;
     },
@@ -243,6 +332,7 @@ export function createSseOutput(
           abort();
           return;
         }
+        for (let i = head; i < queue.length; i++) charge(queue[i]!.source, -queue[i]!.bytes);
         queue = [{ frame: terminal, bytes }];
         head = 0;
         queuedBytes = queue[0]!.bytes;

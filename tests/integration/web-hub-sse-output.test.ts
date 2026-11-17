@@ -21,6 +21,8 @@ import { TERMINAL_UI_CAP } from "../../src/web-hub/protocol/version.js";
 import { config, connectClient, hello } from "../web-hub/hub/helpers.js";
 import { freePort } from "../helpers/free-port.js";
 import { createSseOutput } from "../../src/web-hub/hub/sse-output.js";
+import { TerminalSseBindings } from "../../src/web-hub/hub/terminal/sse-binding.js";
+import type { TerminalFrontendPort } from "../../src/web-hub/hub/terminal/routes.js";
 import { createHttpFrontend } from "../../src/web-hub/hub/http.js";
 import { fakeDeps, login, makeAgent, postJson } from "../web-hub/http/helpers.js";
 import { startLan, seedLanUser, lanPostJson } from "../web-hub/http/lan-helpers.js";
@@ -485,13 +487,15 @@ describe.each(["identity", "gzip"] as const)("early terminal unavailable over re
 
 describe.each(["identity", "gzip"] as const)("ready terminal large public bootstrap / %s", (encoding) => {
   it.each([
-    ["loopback", false],
-    ["lan", false],
-    ["loopback", true],
-    ["lan", true],
+    ["loopback", false, false],
+    ["lan", false, false],
+    ["loopback", true, false],
+    ["lan", true, false],
+    ["loopback", false, true],
+    ["lan", false, true],
   ] as const)(
-    "keeps public stream after real logout/relogin / %s / lost drain notification=%s",
-    async (listener, lostDrain) => {
+    "keeps public stream after real logout/relogin / %s / lost drain notification=%s / bound burst=%s",
+    async (listener, lostDrain, boundBurst) => {
       const home = mkdtempSync(join(tmpdir(), "sse-ready-"));
       cleanups.push(() => rmSync(home, { recursive: true, force: true }));
       const paths = resolveHubPaths({ home, uid: process.getuid!() });
@@ -509,6 +513,17 @@ describe.each(["identity", "gzip"] as const)("ready terminal large public bootst
       });
       let fleetSeen = false;
       const pending: number[] = [];
+      let manager: TerminalSseBindings | undefined;
+      let sseArgs: Parameters<TerminalFrontendPort["openSse"]> | undefined;
+      const originalConnect = TerminalSseBindings.prototype.connect;
+      const connectSpy = vi.spyOn(TerminalSseBindings.prototype, "connect").mockImplementation(function (
+        this: TerminalSseBindings,
+        ...args: Parameters<TerminalSseBindings["connect"]>
+      ) {
+        manager = this;
+        return originalConnect.apply(this, args);
+      });
+      cleanups.push(() => connectSpy.mockRestore());
       const h = await startHub(
         config({
           home,
@@ -537,6 +552,7 @@ describe.each(["identity", "gzip"] as const)("ready terminal large public bootst
                       >
                     ) {
                       pending.push(args[5].pendingBytes());
+                      sseArgs = args;
                       // Fault injection: encoder still drains normally, but its one-shot notification is lost.
                       // This exercises the REAL admission deadline and the HTTP negative-HubInfo projection.
                       if (lostDrain) args[5] = { ...args[5], onIdle: () => () => {} };
@@ -654,6 +670,65 @@ describe.each(["identity", "gzip"] as const)("ready terminal large public bootst
         );
         expect(denied.status).toBe(401);
         expect(JSON.parse(denied.body)).toEqual({ ok: false, code: "E_AUTH", effect: "none" });
+      }
+      if (boundBurst) {
+        const [, , identity, , , output] = sseArgs!;
+        const connection = blocks.at(-1)!.data;
+        const binding = manager!.resolve(identity, { clientId, ...connection });
+        await vi.waitFor(() => expect(output.pendingBytes()).toBe(0), { interval: 5 });
+        // Inject at the original public producer port in one turn with the private
+        // send. This gives deterministic pressure on real HTTP sockets (not a fake
+        // pending counter or fake res.destroy), with the actual shared encoder.
+        const history = { entries: [{ text: "public-history-".repeat(8192) }] };
+        const historyFrame = formatSseFrame("history", history);
+        const fleetFrame = formatSseFrame("fleet", { agentKey: ack.agentKey, runs });
+        expect(Buffer.byteLength(historyFrame)).toBeGreaterThan(65536);
+        expect(output.send(historyFrame)).toBe(true);
+        expect(output.send(fleetFrame)).toBe(true);
+        expect(output.pendingBytes()).toBeGreaterThan(65536);
+        expect(binding.send("terminal", { text: "rework-private-must-not-escape" })).toBe(false);
+        expect(binding.metadata.live).toBe(false);
+        expect(sseArgs![1].destroyed).toBe(false); // synchronous public survival
+        await conn.wait('"reason":"sse-public-pressure"');
+        expect(conn.text()).toContain(historyFrame + fleetFrame);
+        expect(conn.text()).not.toContain("rework-private-must-not-escape");
+        expect(conn.text().split("event: terminal_connection\n")).toHaveLength(2);
+        const hintBlock = conn.text().trimEnd().split("\n\n").at(-1)!;
+        const hint = JSON.parse(/^data: (.+)$/m.exec(hintBlock)![1]!);
+        expect(hint.terminal).toEqual({ state: "unavailable", reason: "sse-public-pressure" });
+        expect(hint.caps).toContain(TERMINAL_UI_CAP);
+        expect(
+          (
+            await postJson(
+              port,
+              TERMINAL_HTTP_PATHS.list,
+              {
+                clientId,
+                connectionInstance: connection.connectionInstance,
+                connectionToken: connection.connectionToken,
+                agentKey: ack.agentKey,
+                expect: { sessionId: "session", epoch: "epoch" },
+              },
+              headers,
+            )
+          ).status,
+        ).toBe(401);
+        expect((await postJson(port, "/api/subscribe", { clientId, agentKey: ack.agentKey }, headers)).status).toBe(
+          202,
+        );
+        // User refresh: SAME real login, NEW SSE, fresh private capability, no
+        // forced login/restart and no automatic shell creation/replay of old secrets.
+        const refreshed = await open(port, { Cookie: cookie, "Accept-Encoding": encoding });
+        await refreshed.wait("event: terminal_connection\n");
+        const freshBlocks = refreshed.text().trimEnd().split("\n\n");
+        const freshHello = JSON.parse(/^data: (.+)$/m.exec(freshBlocks[0]!)![1]!);
+        const freshConnection = JSON.parse(/^data: (.+)$/m.exec(freshBlocks.at(-1)!)![1]!);
+        expect(freshHello.clientId).not.toBe(clientId);
+        expect(freshConnection.connectionInstance).not.toBe(connection.connectionInstance);
+        const recovered = manager!.resolve(sseArgs![2], { clientId: freshHello.clientId, ...freshConnection });
+        expect(recovered.send("terminal", { text: "rework-recovered" })).toBe(true);
+        await refreshed.wait('"text":"rework-recovered"');
+        expect(conn.res.destroyed).toBe(false);
       }
       // A subsequent real producer frame proves this same public stream is still live.
       peer.send({ t: "fleet", runs: [] });

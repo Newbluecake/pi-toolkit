@@ -158,18 +158,21 @@ describe("per-session terminal declaration gate (r2 §6)", () => {
     expect(w.text()).toContain("privacy-unavailable");
     expect(request).not.toHaveBeenCalled();
   });
-  it("shows a retryable public-stream admission hint and keeps terminal APIs and lazy code inert", async () => {
-    const { w, state, request } = setup();
-    state.value.hub = { ...hubInfo, terminal: { state: "unavailable", reason: "sse-admission-timeout" } };
-    await flushPromises();
-    expect(w.text()).toContain("Terminal temporarily unavailable");
-    expect(w.text()).toContain("Refresh the page to retry");
-    expect(w.text()).toContain("Chat and history remain available");
-    expect(entry(w).exists()).toBe(false);
-    expect(request).not.toHaveBeenCalled();
-    expect(lazy.loaded).not.toHaveBeenCalled();
-    expect(await terminalSessionUiEnabled(state.value.hub, agent())).toBe(false);
-  });
+  it.each(["sse-admission-timeout", "sse-public-pressure"])(
+    "shows retryable %s hint and keeps terminal APIs and lazy code inert",
+    async (reason) => {
+      const { w, state, request } = setup();
+      state.value.hub = { ...hubInfo, terminal: { state: "unavailable", reason } };
+      await flushPromises();
+      expect(w.text()).toContain("Terminal temporarily unavailable");
+      expect(w.text()).toContain("Refresh the page to retry");
+      expect(w.text()).toContain("Chat and history remain available");
+      expect(entry(w).exists()).toBe(false);
+      expect(request).not.toHaveBeenCalled();
+      expect(lazy.loaded).not.toHaveBeenCalled();
+      expect(await terminalSessionUiEnabled(state.value.hub, agent())).toBe(false);
+    },
+  );
   it("withdraws on identity/liveness/privacy/control boundaries, and only current target status can restore an entry", async () => {
     const a = agent();
     const { w, state, request } = setup(a);

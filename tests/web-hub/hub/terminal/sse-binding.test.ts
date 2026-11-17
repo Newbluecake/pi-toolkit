@@ -97,7 +97,7 @@ function setup(encoding: "identity" | "gzip", audit = vi.fn()) {
     return { req, res, client, text, frames, compressor: () => compressor };
   }
   const conn = attach();
-  async function connect() {
+  async function connect(unavailable = vi.fn()) {
     bindings.connect(
       conn.req,
       conn.res as unknown as ServerResponse,
@@ -105,6 +105,7 @@ function setup(encoding: "identity" | "gzip", audit = vi.fn()) {
       conn.client.id,
       "http://localhost",
       conn.client.output,
+      unavailable,
     );
     await until(() => expect(conn.frames().some((f) => f.event === "terminal_connection")).toBe(true));
     const connection = conn.frames().find((f) => f.event === "terminal_connection")!.data;
@@ -440,18 +441,68 @@ describe.each(["identity", "gzip"] as const)("private terminal SSE through %s ou
     expect(binding.metadata.live).toBe(true);
   });
 
-  it("counts queued/compressor input as pressure, revokes and discards frames not yet written", async () => {
+  it("rejects private send on public-only pressure without aborting public SSE; refresh re-admits", async () => {
+    const f = setup(encoding);
+    const unavailable = vi.fn();
+    const binding = await f.connect(unavailable);
+    await until(() => expect(f.client.output.pendingBytes()).toBe(0));
+    const prefix = f.text();
+    const abort = vi.spyOn(f.client.output, "abort");
+    f.res.stalled = true;
+    const payload = { text: "x".repeat(96 * 1024) };
+    f.client.send("history", payload);
+    expect(f.client.output.pendingBytes()).toBeGreaterThan(65_536);
+    expect(binding.send("terminal", { text: "must not escape" })).toBe(false);
+    expect(binding.metadata.live).toBe(false);
+    expect(binding.active).toBe(false);
+    expect(abort).not.toHaveBeenCalled();
+    expect(f.res.destroyed).toBe(false);
+    expect(unavailable).toHaveBeenCalledTimes(1);
+    expect(unavailable).toHaveBeenCalledWith("sse-public-pressure");
+    expect(() =>
+      f.bindings.resolve(f.identity, {
+        clientId: f.client.id,
+        connectionInstance: binding.metadata.connectionInstance,
+        connectionToken: binding.metadata.connectionToken,
+      }),
+    ).toThrow("E_AUTH");
+    // Nor can the revoked handle write after the negative hint.
+    expect(binding.send("terminal", { text: "late secret" })).toBe(false);
+    f.res.stalled = false;
+    f.res.release?.();
+    expect(f.client.send("ping", { alive: true })).toBe(true);
+    await until(() => expect(f.client.output.pendingBytes()).toBe(0));
+    expect(f.text()).toBe(prefix + formatSseFrame("history", payload) + formatSseFrame("ping", { alive: true }));
+    expect(f.hub.get(f.client.id)).toBe(f.client);
+    const refreshed = f.attach();
+    f.bindings.connect(
+      refreshed.req,
+      refreshed.res as unknown as ServerResponse,
+      f.identity,
+      refreshed.client.id,
+      "http://localhost",
+      refreshed.client.output,
+    );
+    await until(() => expect(refreshed.frames().at(-1)?.event).toBe("terminal_connection"));
+    const next = f.bindings.resolve(f.identity, { clientId: refreshed.client.id, ...refreshed.frames().at(-1)!.data });
+    expect(next.send("terminal", { text: "recovered" })).toBe(true);
+    await until(() => expect(refreshed.frames().at(-1)?.data).toEqual({ text: "recovered" }));
+    expect(f.res.destroyed).toBe(false);
+  });
+
+  it("synchronously aborts pressure with private bytes still in flight, even mixed with public frames", async () => {
     const f = setup(encoding);
     const binding = await f.connect();
-    await until(() => expect(f.frames()).toHaveLength(2));
+    await until(() => expect(f.client.output.pendingBytes()).toBe(0));
     f.res.stalled = true;
+    expect(binding.send("terminal", { text: "in-flight private" })).toBe(true);
     f.client.send("history", { text: "x".repeat(96 * 1024) });
     expect(f.client.output.pendingBytes()).toBeGreaterThan(65_536);
-    // In gzip mode the large input is still in the encoder, not response.writableLength.
-    if (encoding === "gzip") expect(f.res.writableLength).toBe(0);
+    const abort = vi.spyOn(f.client.output, "abort");
     expect(binding.send("terminal", { text: "must not escape" })).toBe(false);
     expect(binding.metadata.live).toBe(false);
     expect(f.res.destroyed).toBe(true);
+    expect(abort).toHaveBeenCalledTimes(1);
     const bytes = Buffer.concat(f.res.chunks);
     await until(() => expect(f.hub.count()).toBe(0));
     expect(Buffer.concat(f.res.chunks)).toEqual(bytes);

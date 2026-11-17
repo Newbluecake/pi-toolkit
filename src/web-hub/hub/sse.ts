@@ -122,9 +122,9 @@ export function createSseHub(opts: {
     }
   }
 
-  function write(state: ClientState, frame: string): boolean {
+  function write(state: ClientState, frame: string, source?: object): boolean {
     if (state.closed || state.client.revoked === true) return false;
-    return state.output.send(frame);
+    return state.output.send(frame, source);
   }
 
   function drop(state: ClientState, terminal?: string): void {
@@ -188,8 +188,8 @@ export function createSseHub(opts: {
       id,
       subscribed,
       output: {
-        send: (frame) => write(state, frame),
-        pendingBytes: () => output.pendingBytes(),
+        send: (frame, source) => write(state, frame, source),
+        pendingBytes: (source) => output.pendingBytes(source),
         onIdle: (fn) => output.onIdle(fn),
         finish: () => drop(state),
         abort: () => output.abort(),

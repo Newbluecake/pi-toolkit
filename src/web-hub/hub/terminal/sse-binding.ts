@@ -92,6 +92,8 @@ export class TerminalSseBindings {
     const establish = (): LiveTerminalBinding | undefined => {
       let active = false;
       let published = false;
+      const source = {}; // unique to this exact binding, never shared with public frames
+      let publicPressure = false;
       const listeners = new Set<() => void>();
       const clock = terminalClock(this.now);
       const meta = {
@@ -139,6 +141,10 @@ export class TerminalSseBindings {
           // Bypass publish/replay, never the original connection's encoder/FIFO.
           if (output.pendingBytes() > 65_536) {
             note("E_SSE_PRESSURE", published ? "bound" : "admission");
+            // A public-only backlog must not kill chat/history/fleet. No new private
+            // frame is accepted. If our source still owns queued/encoded/socket bytes,
+            // revoke MUST synchronously abort the shared stream instead.
+            publicPressure = output.pendingBytes(source) === 0;
             b.revoke();
             return false;
           }
@@ -148,7 +154,7 @@ export class TerminalSseBindings {
             return false;
           }
           try {
-            const ok = output.send(frame);
+            const ok = output.send(frame, source);
             if (!ok) b.revoke();
             else published = true;
             return ok;
@@ -175,14 +181,16 @@ export class TerminalSseBindings {
           // original SSE also prevents a stale browser from retaining rendered private data.
           // No token-bearing invalidation frame enters the legacy event ring.
           note("E_SSE_REVOKED", published ? "bound" : "admission");
-          if (published) output.abort();
-          else unavailable();
+          res.off("close", b.revoke);
+          res.off("error", b.revoke);
+          if (published && !publicPressure) output.abort();
+          else unavailable(publicPressure ? "sse-public-pressure" : undefined);
         },
       };
       const timer = clock.setTimer(clampSpanMs(meta.parentExpiresAt - this.now()), () => b.revoke());
       this.bindings.set(k, b);
-      res.once("close", () => b.revoke());
-      res.once("error", () => b.revoke());
+      res.once("close", b.revoke);
+      res.once("error", b.revoke);
       b.send("terminal_connection", {
         connectionInstance: meta.connectionInstance,
         connectionToken: meta.connectionToken,

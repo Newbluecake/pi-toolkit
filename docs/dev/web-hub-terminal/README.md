@@ -121,9 +121,33 @@ identity drain 处理，无新公开事件/id/cap。#50 将初始准入与敏感
 64 KiB 门约束；不等待浏览器消费 ACK。没有 sleep/polling，也不直写 response。
 等待及已建 binding 合计最多2048；close/error/fence/privacy revoke/dispose 取消等待，迟到通知不准入。
 超时或初始准入失败只放弃本次终端，保留公共 clientId/流；共享公共输出原有24MiB硬帽/无净进展
-期限仍独立生效，不承诺保留一个已被公共管线本身判死的流。成功后 binding 的64KiB撤权门不变，
-仍按 output 保守 pending bytes（队列 + 在途输入 + encoder + socket）fail-closed；不能仅看
-`res.writableLength`，也不能固定减去 connect 时的公共 pending（那会永久掩盖后来的私有积压）。
+期限仍独立生效，不承诺保留一个已被公共管线本身判死的流。
+
+#50 返工将**建立 binding 后**的公共突发与私有在途材料也分开。共享 pending >64KiB 时，
+只在该 binding **仍有私有 bytes 在本地输出管线中**才同步 abort 整条 SSE；若其私有计量已为零，
+本次私帧不入队，同步清 live/active、注销 binding/expiry/listeners、通知原 onRevoke 撤 writer，
+但保留公共 SSE/clientId；对原连接投影完整 HubInfo 的 optional negative
+`terminal:{state:"unavailable",reason:"sse-public-pressure"}`。旧 token 立即不能 resolve，
+迟到旧 handle 也不能 send；UI 复用暂不可用/刷新重试提示并卸载私有面板，不自动开 shell。
+用户刷新（新 SSE、同一有效登录）才重新准入。此例外仅适用于**压力且私有在途为零**，
+普通 proof/fence/privacy/expiry/显式撤权仍按原合同同步 abort，不以公共压力为由放宽安全门。
+
+私有计量由原共享 encoder 的 optional opaque `source` 提供，binding 每次建立各自一个新对象，
+公共 send 无 source。FIFO 用实际 UTF-8 bytes 计入该 source，identity 移交给精确 response.write
+callback；gzip 在原单帧 `Z_SYNC_FLUSH` 完成前保留该帧输入计量，readable 缓冲仍属于当前帧，
+每个实际压缩输出 chunk（含该帧 sync marker）按该帧 source 计入 socket pending，到对应 write
+callback 才扣除。原 Readable.pipe 不暴露逐 chunk 的 write callback，因此共享 output 内显式
+接管同一个 gzip 的 data→response.write/pause→drain/resume/end/cleanup（不是 binding 直写，也没有第二个
+encoder）。**前帧 flush 完成且 readableLength=0 才开始后帧**，所以公共/私有交织也不混来源；
+字典跨帧保留并不改变 chunk 的生成归属，不是按压缩比猜测或固定减公共基线。callback 可能被
+Writable 推迟至 nextTick，而 writableLength 已为0，此时在后续 write 前退役已消费批次，防止
+过去已消化的私帧被新的公共 bytes 冒充在途。来源 entry 在0时删除，abort 清空且迟到 callback 不复活。
+
+各阶段计量只含本 binding 自己的 bytes；输入与压缩输出在 flush 前可保守重叠计量，不能将其视作
+精确 heap 帽，但 **zero 判据精确覆盖 FIFO/未完成 flush/readable/未完成 response write**，
+不受公共 bytes 数量干扰。shared output 无参 pending 的24MiB帽/净进展门不变，不承诺浏览器已消费或
+内核 TCP ACK；Node socket 已消化的 bytes 无法撤回。不能仅看 res.writableLength、仅在 flush 扣掉
+私有状态，或固定减 connect 公共基线。
 每次 enqueue 前的身份、原 proof、expiry/active/fence 与 24 KiB 单帧检查不变；send=true
 表示接收入队，而不是浏览器已消费。撤权先同步清 live/active 与 listeners，再 abort 原 output，
 丢弃尚未写出的队列并销毁 compressor/socket，不用 `res.end()` 绕过 encoder 的生命周期；
@@ -142,15 +166,20 @@ identity drain 处理，无新公开事件/id/cap。#50 将初始准入与敏感
 尝试；UI 显示暂不可用、聊天/历史可用及刷新重试提示，隐藏终端入口，不加载私有面板/API。
 固定 body-free `audit:"terminal",op:"sse"` 只记 E_SSE_* 原因、admission/bound 阶段、identity/gzip 编码、
 pending 数字与 listener；每 service 1s 窗最多8条，失败 fail-soft；不记 cookie/token、帧正文或路径。
-已建立敏感 binding 的撤销仍同步 abort 原 SSE，不排空私有队列；source/Origin 例外不扩权。
+除上述“压力且私有在途为零”的降级之外，已建立敏感 binding 的撤销仍同步 abort 原 SSE，
+不排空私有队列；source/Origin 例外不扩权。
 terminal off 不调用该端口、不新增字节；私有材料仍不进入 replay。
 
 回归：`tests/web-hub/hub/terminal/sse-binding.test.ts` 用真实 zlib + 内存 Writable 覆盖
 identity/gzip 的交错次序、完整 trailer/逐帧解码、无后继帧仍及时 flush、drain、encoder
-积压压力、撤销丢弃队列、close/error/expiry 与 replay 隔离；
+积压压力、公共-only 压力保流+撤销 binding+刷新重新准入、私有在途混公共积压同步 abort、
+撤销丢弃队列、close/error/expiry 与 replay 隔离；`tests/web-hub/hub/sse-output.test.ts`
+另验证来源计量在 FIFO、压缩 readable、socket callback、交织、清理/迟到回调各阶段不串账；
 `tests/integration/web-hub-sse-output.test.ts` 以真实 startHub/HTTP 验证 unavailable/degraded 及旧 boot authority
 在两个 listener 上公共 SSE 保持、subscribe 202、负面状态、无私密帧和终端 POST 拒绝。
-真实双 listener 撤权接线由 `tests/integration/web-hub-terminal-http.test.ts` 验证。
+该集成还保留原8格大 bootstrap/丢通知准入 deadline，并新增真实登录后已绑定的双 listener ×
+identity/gzip 四格公共 history/fleet >64KiB 突发：原 SSE200完整保流、旧 token401、负面 HubInfo、
+同登录刷新取得新 token 并能送终端私帧，无旧拒绝私帧外泄。真实双 listener 撤权接线由 `tests/integration/web-hub-terminal-http.test.ts` 验证。
 
 ## 权威链、物理 receipt 与冷恢复（F2）
 

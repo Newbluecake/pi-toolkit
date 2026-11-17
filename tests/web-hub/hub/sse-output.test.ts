@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { Writable } from "node:stream";
@@ -332,5 +333,78 @@ describe.each([false, true])("one-shot drained encoder observation (gzip=%s)", (
     await Promise.resolve();
     expect(ready).not.toHaveBeenCalled();
     expect(res.destroyed).toBe(true);
+  });
+});
+
+describe.each([false, true])("source accounting (gzip=%s)", (compressed) => {
+  it("tracks only the producer through FIFO, compression and exact response completion", async () => {
+    const { res, output } = setup(compressed, 2 ** 21, 5000);
+    const privateSource = {};
+    const otherSource = {};
+    const privateFrame = "private 中文🙂".repeat(256);
+    res.stalled = true;
+    output.send("public prefix".repeat(1024));
+    output.send(privateFrame, privateSource);
+    expect(output.pendingBytes(privateSource)).toBe(Buffer.byteLength(privateFrame));
+    expect(output.pendingBytes(otherSource)).toBe(0);
+    await vi.waitFor(() => expect(res.release).toBeDefined(), { interval: 5 });
+    res.stalled = false;
+    res.release!();
+    await vi.waitFor(() => expect(output.pendingBytes()).toBe(0), { interval: 5 });
+    expect(output.pendingBytes(privateSource)).toBe(0);
+    // The already completed private frame cannot be charged for a later public
+    // write, even if its write callback was deferred to nextTick by Writable.
+    res.stalled = true;
+    output.send("public suffix".repeat(8192));
+    expect(output.pendingBytes()).toBeGreaterThan(65536);
+    expect(output.pendingBytes(privateSource)).toBe(0);
+    output.send("another producer", otherSource);
+    expect(output.pendingBytes(otherSource)).toBe(Buffer.byteLength("another producer"));
+    output.abort();
+    expect(output.pendingBytes(privateSource)).toBe(0);
+    expect(output.pendingBytes(otherSource)).toBe(0);
+    res.stalled = false;
+    res.release?.();
+    await Promise.resolve();
+    expect(output.pendingBytes(otherSource)).toBe(0);
+  });
+
+  it.each(["drain", "abort"])(
+    "keeps large compressed readable chunks assigned across public interleaving until %s",
+    async (stop) => {
+      const { res, output, compressor } = setup(compressed, 2 ** 21, 5000);
+      const privateSource = {};
+      const privateFrame = randomBytes(128 * 1024).toString("base64");
+      res.stalled = true;
+      output.send(privateFrame, privateSource);
+      output.send("public suffix".repeat(8192));
+      await vi.waitFor(() => expect(res.release).toBeDefined(), { interval: 5 });
+      if (compressed) await vi.waitFor(() => expect(compressor()!.readableLength).toBeGreaterThan(0), { interval: 5 });
+      expect(output.pendingBytes(privateSource)).toBeGreaterThan(0);
+      if (stop === "abort") output.abort();
+      res.stalled = false;
+      res.release!();
+      await vi.waitFor(() => expect(output.pendingBytes(privateSource)).toBe(0), { interval: 5 });
+      output.abort();
+    },
+  );
+
+  it("does not retire a compressed private frame at flush while its socket write is blocked", async () => {
+    const { res, output } = setup(compressed, 2 ** 21, 5000);
+    const privateSource = {};
+    res.stalled = true;
+    output.send("private text".repeat(1024), privateSource);
+    await vi.waitFor(() => expect(res.release).toBeDefined(), { interval: 5 });
+    // Native gzip has ample time to finish its flush. The write callback is held.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(output.pendingBytes(privateSource)).toBeGreaterThan(0);
+    const owned = output.pendingBytes(privateSource);
+    output.send("public text".repeat(8192));
+    expect(output.pendingBytes(privateSource)).toBe(owned);
+    res.stalled = false;
+    res.release!();
+    await vi.waitFor(() => expect(output.pendingBytes()).toBe(0), { interval: 5 });
+    expect(output.pendingBytes(privateSource)).toBe(0);
+    output.abort();
   });
 });
