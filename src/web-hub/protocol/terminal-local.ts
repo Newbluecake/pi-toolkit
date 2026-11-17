@@ -9,6 +9,7 @@ import {
   readSync,
   readlinkSync,
   realpathSync,
+  readdirSync,
   unlinkSync,
 } from "node:fs";
 import { link, lstat, mkdir, open, readdir, unlink } from "node:fs/promises";
@@ -200,9 +201,10 @@ export function checkTerminalStore(stateDir: string): Store {
 }
 /** Only absence of BOTH terminal root and durable parent witness permits first use.
  * Existing/partial/unknown stores are NEVER reset. A concurrent initializer fails closed. */
-export async function initializeTerminalStore(stateDir: string): Promise<Store> {
+export async function initializeTerminalStore(stateDir: string, sharedSignal?: AbortSignal): Promise<Store> {
   if (!localPlainEnvironment()) throw new TerminalLocalError("secure-domain");
-  return localBounded(async (signal) => {
+  const work = async (signal: AbortSignal) => {
+    if (signal.aborted) throw new TerminalLocalError("io-deadline");
     checkLocalDirectory(stateDir);
     const root = join(stateDir, TERMINAL_LOCAL_DIR);
     let exists = true;
@@ -214,7 +216,8 @@ export async function initializeTerminalStore(stateDir: string): Promise<Store> 
     }
     if (exists) {
       const store = checkTerminalStore(stateDir);
-      await checkLocalResidue(store);
+      const inspection = inspectTerminalResidue(store);
+      if (inspection.stale.length) throw new TerminalLocalError("stale-authority-prev-boot");
       return store;
     }
     // A pre-local-authority journal is prior terminal state, not permission to reset.
@@ -243,7 +246,8 @@ export async function initializeTerminalStore(stateDir: string): Promise<Store> 
     await syncDir(stateDir);
     if (signal.aborted) throw new TerminalLocalError("io-deadline");
     return checkTerminalStore(stateDir);
-  });
+  };
+  return sharedSignal ? work(sharedSignal) : localBounded(work);
 }
 export function processNamespaces(pid: number) {
   return {
@@ -287,6 +291,10 @@ export function localRecordPath(store: Store, kind: "authority" | "receipts", re
   checkLocalDirectory(join(store.root, kind));
   return join(store.root, kind, `${recordId}.json`);
 }
+export interface TerminalPublicationTestHooks {
+  afterTempDurable?(): Promise<void>;
+  afterLinkBeforeTempUnlink?(): Promise<void>;
+}
 async function publish(
   store: Store,
   kind: "authority" | "receipts",
@@ -294,6 +302,7 @@ async function publish(
   signal: AbortSignal,
   valid: () => boolean,
   beforePublish?: () => Promise<void>,
+  testHooks?: TerminalPublicationTestHooks,
 ): Promise<TerminalLocalReference> {
   const path = localRecordPath(store, kind, record.recordId),
     bytes = JSON.stringify(record);
@@ -306,9 +315,11 @@ async function publish(
   try {
     await exclusive(temp, bytes, signal);
     await beforePublish?.();
+    await testHooks?.afterTempDurable?.();
     if (!valid() || signal.aborted) throw new TerminalLocalError("producer-revoked");
     await link(temp, path);
     linked = true;
+    await testHooks?.afterLinkBeforeTempUnlink?.();
     await unlink(temp);
     await syncDir(join(store.root, kind));
     if (kind === "receipts" && (await readdir(join(store.root, kind))).length > 32)
@@ -326,6 +337,7 @@ export async function createLocalAuthority(
   stateDir: string,
   input: Omit<TerminalAuthorityRecord, "v" | "recordId" | "nonce" | "storeId" | "createdAt">,
   valid: () => boolean,
+  testHooks?: TerminalPublicationTestHooks,
 ) {
   const store = await initializeTerminalStore(stateDir);
   const record: TerminalAuthorityRecord = {
@@ -346,7 +358,7 @@ export async function createLocalAuthority(
     throw new TerminalLocalError("producer-revoked");
   let active = true;
   const reference = await localBounded((signal) =>
-    publish(store, "authority", record, signal, () => active && valid()),
+    publish(store, "authority", record, signal, () => active && valid(), undefined, testHooks),
   );
   return {
     store,
@@ -446,16 +458,26 @@ export function verifyLocalReceipt(store: Store, proof: TerminalReapProof, entry
     return false;
   }
 }
-async function checkLocalResidue(store: Store): Promise<void> {
+/** Read-only residue inspection. A candidate is NOT authorization to mutate it. */
+export function inspectTerminalResidue(store: Store) {
   const journal = JSON.parse(readLocalFile(join(store.root, TERMINAL_JOURNAL_FILE), 2097152).toString()) as Static<
     typeof TerminalJournalSchema
   >;
+  const stale: Array<{ name: string; record: TerminalAuthorityRecord; bytes: Buffer }> = [];
+  const current: typeof stale = [];
+  let receiptCount = 0;
   for (const kind of ["authority", "receipts"] as const) {
-    const names = await readdir(join(store.root, kind));
+    const names = readdirSync(join(store.root, kind));
     if (names.length > (kind === "authority" ? 256 : 32)) throw new TerminalLocalError("local-capacity");
     for (const name of names) {
       if (!/^[A-Za-z0-9_-]{32,64}\.json$/.test(name)) throw new TerminalLocalError("unresolved-local-state");
-      const raw: unknown = JSON.parse(readLocalFile(join(store.root, kind, name)).toString());
+      const bytes = readLocalFile(join(store.root, kind, name));
+      let raw: unknown;
+      try {
+        raw = JSON.parse(bytes.toString());
+      } catch {
+        throw new TerminalLocalError(kind === "authority" ? "authority-corrupt" : "residual-receipt-state");
+      }
       if (kind === "authority") {
         if (
           !Value.Check(TerminalAuthorityRecordSchema, raw) ||
@@ -464,27 +486,126 @@ async function checkLocalResidue(store: Store): Promise<void> {
           !raw.active ||
           !raw.main ||
           raw.domain !== "plain" ||
-          raw.process.uid !== process.getuid?.() ||
-          !sameLocalProcess(raw.process, localProcess(raw.process.pid)) ||
-          JSON.stringify(raw.namespaces) !== JSON.stringify(processNamespaces(raw.process.pid)) ||
-          JSON.stringify(raw.namespaces) !== JSON.stringify(processNamespaces(process.pid))
+          raw.process.uid !== process.getuid?.()
         )
-          throw new TerminalLocalError("residual-authority-state");
-      } else if (
-        !Value.Check(TerminalPhysicalReceiptSchema, raw) ||
-        `${raw.recordId}.json` !== name ||
-        raw.storeId !== store.storeId ||
-        raw.agentProcessIdentity.uid !== process.getuid?.() ||
-        journal.resources.some(
-          (row) =>
-            row.entry.identity.reservationId === raw.identity.reservationId &&
-            (terminalIdentityKey(row.entry.identity) !== terminalIdentityKey(raw.identity) ||
-              !sameLocalProcess(row.entry.agentProcessIdentity, raw.agentProcessIdentity)),
+          throw new TerminalLocalError("authority-corrupt");
+        // Finish structural validation of the whole directory before probing any process.
+        current.push({ name, record: raw, bytes });
+      } else {
+        if (
+          !Value.Check(TerminalPhysicalReceiptSchema, raw) ||
+          `${raw.recordId}.json` !== name ||
+          raw.storeId !== store.storeId ||
+          raw.agentProcessIdentity.uid !== process.getuid?.() ||
+          journal.resources.some(
+            (row) =>
+              row.entry.identity.reservationId === raw.identity.reservationId &&
+              (terminalIdentityKey(row.entry.identity) !== terminalIdentityKey(raw.identity) ||
+                !sameLocalProcess(row.entry.agentProcessIdentity, raw.agentProcessIdentity)),
+          )
         )
-      )
-        throw new TerminalLocalError("residual-receipt-state");
+          throw new TerminalLocalError("residual-receipt-state");
+        receiptCount++;
+      }
     }
   }
+  const live: typeof current = [];
+  for (const item of current) {
+    if (classifyLocalAuthority(item.record) === "previous-boot") stale.push(item);
+    else live.push(item);
+  }
+  return { journal, stale, current: live, receiptCount };
+}
+
+const BOOT_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+type Namespaces = TerminalAuthorityRecord["namespaces"];
+export type LocalProcessProbe =
+  | { kind: "present"; process: ReturnType<typeof localProcess>; namespaces: Namespaces }
+  | { kind: "absent" }
+  | { kind: "unavailable" };
+/** Internal facts port, passed explicitly in tests; never settings, env or mutable globals. */
+export interface LocalProcessProbeDeps {
+  identity(pid: number): ReturnType<typeof localProcess>;
+  namespaces(pid: number): Namespaces;
+  directory(pid: number): void;
+}
+const procDeps: LocalProcessProbeDeps = {
+  identity: localProcess,
+  namespaces: processNamespaces,
+  directory: (pid) => {
+    if (!lstatSync(`/proc/${pid}`).isDirectory()) throw new Error("proc-directory");
+  },
+};
+const validNamespaces = (ns: Namespaces) =>
+  /^(pid):\[\d+\]$/.test(ns.pid) && /^mnt:\[\d+\]$/.test(ns.mnt) && /^user:\[\d+\]$/.test(ns.user);
+function healthySelf(deps: LocalProcessProbeDeps) {
+  deps.directory(process.pid);
+  const identity = deps.identity(process.pid),
+    namespaces = deps.namespaces(process.pid);
+  if (!BOOT_UUID.test(identity.bootId) || !validNamespaces(namespaces) || identity.uid !== process.getuid?.())
+    throw new TerminalLocalError("authority-proc-unavailable");
+  return { identity, namespaces };
+}
+/** stat ENOENT alone is insufficient: confirm directory absence and healthy self before/after.
+ * status/ns disappearance gets just one fresh sample, never polling for process death. */
+export function probeLocalProcess(pid: number, deps: LocalProcessProbeDeps = procDeps): LocalProcessProbe {
+  try {
+    const before = healthySelf(deps);
+    let result: LocalProcessProbe = { kind: "unavailable" };
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const identity = deps.identity(pid),
+          namespaces = deps.namespaces(pid);
+        if (!validNamespaces(namespaces) || identity.bootId !== before.identity.bootId) break;
+        result = { kind: "present", process: identity, namespaces };
+        break;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") break;
+        try {
+          deps.directory(pid);
+        } catch (directoryError) {
+          if ((directoryError as NodeJS.ErrnoException).code === "ENOENT") result = { kind: "absent" };
+          break;
+        }
+      }
+    }
+    const after = healthySelf(deps);
+    if (
+      !sameLocalProcess(before.identity, after.identity) ||
+      JSON.stringify(before.namespaces) !== JSON.stringify(after.namespaces)
+    )
+      return { kind: "unavailable" };
+    return result;
+  } catch {
+    return { kind: "unavailable" };
+  }
+}
+export function classifyLocalAuthority(
+  record: TerminalAuthorityRecord,
+  deps: LocalProcessProbeDeps = procDeps,
+): "current" | "previous-boot" {
+  let self: ReturnType<typeof healthySelf>;
+  try {
+    self = healthySelf(deps);
+  } catch {
+    throw new TerminalLocalError("authority-proc-unavailable");
+  }
+  const probe = probeLocalProcess(record.process.pid, deps);
+  if (probe.kind === "unavailable") throw new TerminalLocalError("authority-proc-unavailable");
+  if (record.process.bootId !== self.identity.bootId) {
+    if (!BOOT_UUID.test(record.process.bootId) || !validNamespaces(record.namespaces))
+      throw new TerminalLocalError("authority-corrupt");
+    if (probe.kind !== "absent") throw new TerminalLocalError("stale-authority-prev-boot-pid-present");
+    return "previous-boot";
+  }
+  if (probe.kind === "absent" || !sameLocalProcess(record.process, probe.process))
+    throw new TerminalLocalError("stale-authority-same-boot");
+  if (
+    JSON.stringify(record.namespaces) !== JSON.stringify(probe.namespaces) ||
+    JSON.stringify(probe.namespaces) !== JSON.stringify(self.namespaces)
+  )
+    throw new TerminalLocalError("authority-namespace-mismatch");
+  return "current";
 }
 export function deletePhysicalReceipt(store: Store, reference: TerminalLocalReference): void {
   try {

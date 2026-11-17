@@ -17,6 +17,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   initializeTerminalStore,
+  createLocalAuthority,
+  processNamespaces,
   TERMINAL_LOCAL_DIR,
   TerminalLocalError,
   writePhysicalReceipt,
@@ -301,5 +303,39 @@ describe("hub independently checks managed groups, not only dead leader identiti
     expect(verifyLocalReceipt(c.store, proof, entry)).toBe(true); // exact immutable local witness positive control
     const verify = createLocalTerminalProofVerifier({ receipt: (p, e) => verifyLocalReceipt(c.store, p, e) });
     expect(await verify(proof, entry, new AbortController().signal)).toBe(false);
+  });
+});
+
+describe("typed stale authority diagnostics", () => {
+  it.each([false, true])("does not mutate a dead PID authority (previous boot=%s)", async (previous) => {
+    const dir = state();
+    const authority = await createLocalAuthority(
+      dir,
+      {
+        process: localProcess(process.pid),
+        namespaces: processNamespaces(process.pid),
+        agentNonce: "agent",
+        sessionId: "session",
+        epoch: "epoch",
+        ownerInstance: "owner",
+        domain: "plain",
+        main: true,
+        active: true,
+      },
+      () => true,
+    );
+    const path = join(authority.store.root, "authority", `${authority.recordId}.json`);
+    const raw = JSON.parse(readFileSync(path, "utf8"));
+    raw.process.pid = 2147483647;
+    if (previous) raw.process.bootId = "00000000-0000-4000-8000-000000000000";
+    writeFileSync(path, JSON.stringify(raw));
+    const before = readFileSync(path),
+      journal = readFileSync(join(authority.store.root, TERMINAL_JOURNAL_FILE));
+    await expect(initializeTerminalStore(dir)).rejects.toMatchObject({
+      reason: previous ? "stale-authority-prev-boot" : "stale-authority-same-boot",
+    });
+    expect(readFileSync(path)).toEqual(before);
+    expect(readFileSync(join(authority.store.root, TERMINAL_JOURNAL_FILE))).toEqual(journal);
+    expect(readdirSync(dir).sort()).toEqual([".terminal-initialized-v1", "terminal-v1"]);
   });
 });
