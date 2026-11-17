@@ -195,48 +195,60 @@ describe("#49 singleton-owned conservative authority retirement", () => {
     expect(readFileSync(join(f.auth, live.name))).toEqual(live.bytes);
     expect(statSync(join(f.auth, live.name)).ino).toBe(live.ino);
   });
-  it.each(["same-dead", "same-reuse", "previous-present", "corrupt", "permissions", "symlink", "hardlink", "pending"])(
-    "refuses %s with fixed diagnosis and zero retirement",
-    async (kind) => {
-      const f = fixture();
-      seed(f, kind !== "same-dead" && kind !== "same-reuse");
-      const name = files(f.auth)[0]!,
-        path = join(f.auth, name),
-        raw = JSON.parse(readFileSync(path, "utf8"));
-      if (kind === "same-reuse" || kind === "previous-present") {
-        raw.process.pid = process.pid;
-        raw.process.starttime = "0";
-        writeFileSync(path, JSON.stringify(raw));
-      }
-      if (kind === "corrupt") writeFileSync(path, "{");
-      if (kind === "permissions") chmodSync(path, 0o644);
-      const sentinel = join(f.home, "sentinel");
-      writeFileSync(sentinel, "unchanged", { mode: 0o600 });
-      if (kind === "symlink") {
-        rmSync(path);
-        symlinkSync(sentinel, path);
-      }
-      if (kind === "hardlink") linkSync(path, join(f.home, "hardlink"));
-      if (kind === "pending") writeFileSync(join(f.auth, ".pending-" + "p".repeat(32)), "", { mode: 0o600 });
-      const expected: Record<string, string> = {
-        "same-dead": "stale-authority-same-boot",
-        "same-reuse": "stale-authority-same-boot",
-        "previous-present": "stale-authority-prev-boot-pid-present",
-        corrupt: "authority-corrupt",
-        permissions: "unsafe-file",
-        symlink: "unsafe-file",
-        hardlink: "unsafe-file",
-        pending: "unresolved-local-state",
-      };
-      const before = immutable(f);
-      await start(f);
-      expect(status(f)).toMatchObject({ state: "unavailable", reason: expected[kind] });
-      expect(transactions(f)).toEqual([]);
-      expect(existsSync(path)).toBe(true);
-      expect(readFileSync(sentinel, "utf8")).toBe("unchanged");
-      assertImmutable(before);
-    },
-  );
+  it.each([
+    "same-dead",
+    "same-reuse",
+    "previous-present",
+    "corrupt",
+    "permissions",
+    "symlink",
+    "hardlink",
+    "fifo",
+    "pending",
+  ])("refuses %s with fixed diagnosis and zero retirement", async (kind) => {
+    const f = fixture();
+    seed(f, kind !== "same-dead" && kind !== "same-reuse");
+    const name = files(f.auth)[0]!,
+      path = join(f.auth, name),
+      raw = JSON.parse(readFileSync(path, "utf8"));
+    if (kind === "same-reuse" || kind === "previous-present") {
+      raw.process.pid = process.pid;
+      raw.process.starttime = "0";
+      writeFileSync(path, JSON.stringify(raw));
+    }
+    if (kind === "corrupt") writeFileSync(path, "{");
+    if (kind === "permissions") chmodSync(path, 0o644);
+    const sentinel = join(f.home, "sentinel");
+    writeFileSync(sentinel, "unchanged", { mode: 0o600 });
+    if (kind === "symlink") {
+      rmSync(path);
+      symlinkSync(sentinel, path);
+    }
+    if (kind === "hardlink") linkSync(path, join(f.home, "hardlink"));
+    if (kind === "fifo") {
+      rmSync(path);
+      execFileSync("mkfifo", ["-m", "600", path]);
+    }
+    if (kind === "pending") writeFileSync(join(f.auth, ".pending-" + "p".repeat(32)), "", { mode: 0o600 });
+    const expected: Record<string, string> = {
+      "same-dead": "stale-authority-same-boot",
+      "same-reuse": "stale-authority-same-boot",
+      "previous-present": "stale-authority-prev-boot-pid-present",
+      corrupt: "authority-corrupt",
+      permissions: "unsafe-file",
+      symlink: "unsafe-file",
+      hardlink: "unsafe-file",
+      fifo: "unsafe-file",
+      pending: "unresolved-local-state",
+    };
+    const before = immutable(f);
+    await start(f);
+    expect(status(f)).toMatchObject({ state: "unavailable", reason: expected[kind] });
+    expect(transactions(f)).toEqual([]);
+    expect(existsSync(path)).toBe(true);
+    expect(readFileSync(sentinel, "utf8")).toBe("unchanged");
+    assertImmutable(before);
+  });
   it("normal exact live authority is retained, with no archive IO", async () => {
     const f = fixture();
     await createLocalAuthority(f.paths.stateDir, input(), () => true);
