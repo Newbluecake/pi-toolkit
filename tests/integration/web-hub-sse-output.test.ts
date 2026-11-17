@@ -8,6 +8,7 @@ import { createGunzip } from "node:zlib";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createSseHub, formatSseFrame, type SseClient, type SseHub } from "../../src/web-hub/hub/sse.js";
 import { startHub } from "../../src/web-hub/hub/hub.js";
+import { decodeAgentFrame } from "../../src/web-hub/protocol/messages.js";
 import { resolveHubPaths } from "../../src/web-hub/protocol/paths.js";
 import {
   TERMINAL_LOCAL_DIR,
@@ -478,6 +479,188 @@ describe.each(["identity", "gzip"] as const)("early terminal unavailable over re
       expect(conn.res.complete).toBe(false);
       expect(frames.some((frame) => frame.event === "terminal_connection" || frame.event === "terminal")).toBe(false);
       expect(conn.text()).not.toMatch(/connectionToken|connectionInstance|event: terminal(?:_connection)?\n/);
+    },
+  );
+});
+
+describe.each(["identity", "gzip"] as const)("ready terminal large public bootstrap / %s", (encoding) => {
+  it.each([
+    ["loopback", false],
+    ["lan", false],
+    ["loopback", true],
+    ["lan", true],
+  ] as const)(
+    "keeps public stream after real logout/relogin / %s / lost drain notification=%s",
+    async (listener, lostDrain) => {
+      const home = mkdtempSync(join(tmpdir(), "sse-ready-"));
+      cleanups.push(() => rmSync(home, { recursive: true, force: true }));
+      const paths = resolveHubPaths({ home, uid: process.getuid!() });
+      mkdirSync(paths.stateDir, { recursive: true, mode: 0o700 });
+      writeFileSync(
+        join(home, ".pi/agent/pi-toolkit.json"),
+        JSON.stringify({ webHub: { terminal: { enabled: true } } }),
+        { mode: 0o600 },
+      );
+      const previous = process.env.PI_WEBHUB_TERMINAL_SOURCE;
+      process.env.PI_WEBHUB_TERMINAL_SOURCE = "plain";
+      cleanups.push(() => {
+        if (previous === undefined) delete process.env.PI_WEBHUB_TERMINAL_SOURCE;
+        else process.env.PI_WEBHUB_TERMINAL_SOURCE = previous;
+      });
+      let fleetSeen = false;
+      const pending: number[] = [];
+      const h = await startHub(
+        config({
+          home,
+          control: true,
+          privacy: true,
+          ...(listener === "lan"
+            ? { lan: { port: await freePort(), extraHosts: [], trustProxyFrom: [], externalOrigins: [] } }
+            : {}),
+        }),
+        (deps) => {
+          cleanups.push(
+            deps.bus.subscribe((event) => {
+              if (event.type === "fleet") fleetSeen = true;
+            }),
+          );
+          const terminal = deps.terminal;
+          return createHttpFrontend({
+            ...deps,
+            ...(terminal && "openSse" in terminal
+              ? {
+                  terminal: {
+                    ...terminal,
+                    openSse(
+                      ...args: Parameters<
+                        import("../../src/web-hub/hub/terminal/routes.js").TerminalFrontendPort["openSse"]
+                      >
+                    ) {
+                      pending.push(args[5].pendingBytes());
+                      // Fault injection: encoder still drains normally, but its one-shot notification is lost.
+                      // This exercises the REAL admission deadline and the HTTP negative-HubInfo projection.
+                      if (lostDrain) args[5] = { ...args[5], onIdle: () => () => {} };
+                      (terminal as import("../../src/web-hub/hub/terminal/routes.js").TerminalFrontendPort).openSse(
+                        ...args,
+                      );
+                    },
+                  },
+                }
+              : {}),
+          });
+        },
+      );
+      if ("exists" in h) throw new Error("unexpected singleton");
+      cleanups.push(() => h.close("test"));
+      const peer = await connectClient(h.paths.socketPath);
+      cleanups.push(() => {
+        peer.sock.destroy();
+      });
+      peer.send(hello({ agentId: { pid: process.pid, nonce: "ready-bootstrap-test-peer" } }));
+      const ack = await peer.waitFrame((f) => f.t === "hello_ack");
+      let port = h.httpPort;
+      let realLogin: () => Promise<string>;
+      if (listener === "lan") {
+        await vi.waitFor(() => expect(h.lanStatus()?.state).toBe("on"));
+        const status = h.lanStatus();
+        if (status?.state !== "on") throw new Error("LAN not listening");
+        port = status.port;
+        peer.send({ t: "lan_req", rid: "bootstrap-login", op: "info" });
+        const result = await peer.waitFrame((f) => f.t === "lan_res" && f.rid === "bootstrap-login");
+        expect(result.ok).toBe(true);
+        const info = result.info as { username: string; initialPassword: string };
+        realLogin = async () => {
+          const result = await lanPostJson(port, "/api/login", {
+            username: info.username,
+            password: info.initialPassword,
+          });
+          expect(result.status).toBe(200);
+          return result.headers["set-cookie"]![0]!.split(";")[0]!;
+        };
+      } else realLogin = () => login(port, h.paths.tokenFile);
+      const originalCookie = await realLogin();
+      expect(
+        (await postJson(port, "/api/logout", {}, { Cookie: originalCookie, Origin: `http://127.0.0.1:${port}` }))
+          .status,
+      ).toBe(200);
+      const cookie = await realLogin();
+      const runs = Array.from({ length: 64 }, (_, i) => ({
+        runId: `large-${i}`,
+        status: "completed",
+        phaseLabel: "done",
+        elapsedMs: 100,
+        phaseMs: 100,
+        highlight: "none",
+        terminal: true,
+        toolTrail: "t".repeat(1200),
+        streamLine: "s".repeat(1200),
+      }));
+      const frame = { t: "fleet", runs };
+      expect(decodeAgentFrame(frame)).toBeDefined();
+      expect(Buffer.byteLength(JSON.stringify(frame))).toBeGreaterThan(65_536);
+      peer.send(frame);
+      await vi.waitFor(() => expect(fleetSeen).toBe(true));
+      const conn = await open(port, { Cookie: cookie, "Accept-Encoding": encoding });
+      await conn.wait(lostDrain ? '"reason":"sse-admission-timeout"' : "event: terminal_connection\n");
+      expect(pending).toHaveLength(1);
+      expect(pending[0]).toBeGreaterThan(65_536);
+      expect(conn.res.statusCode).toBe(200);
+      expect(conn.res.headers["content-encoding"]).toBe(encoding === "gzip" ? "gzip" : undefined);
+      const blocks = conn
+        .text()
+        .trimEnd()
+        .split("\n\n")
+        .map((block) => ({
+          event: /^event: (.+)$/m.exec(block)?.[1],
+          data: JSON.parse(/^data: (.+)$/m.exec(block)![1]!),
+        }));
+      expect(blocks.map((b) => b.event)).toEqual([
+        "hello",
+        "hub",
+        "privacy",
+        "agents",
+        "fleet",
+        lostDrain ? "hub" : "terminal_connection",
+      ]);
+      expect(blocks.find((b) => b.event === "fleet")!.data.runs).toEqual(runs);
+      expect(blocks.find((b) => b.event === "hub")!.data.terminal).toBeUndefined();
+      if (lostDrain) {
+        const hint = blocks.at(-1)!.data;
+        expect(hint.terminal).toEqual({ state: "unavailable", reason: "sse-admission-timeout" });
+        expect(hint.caps).toContain(TERMINAL_UI_CAP);
+        expect(hint.port).toBe(port);
+        expect(conn.text()).not.toMatch(/connectionToken|terminal_connection/);
+      } else {
+        const connection = blocks.at(-1)!.data;
+        expect(connection.connectionToken).toEqual(expect.any(String));
+        expect(connection.connectionInstance).toEqual(expect.any(String));
+        expect(connection.expiresAt).toBeGreaterThan(Date.now());
+      }
+      const clientId = blocks[0]!.data.clientId;
+      const headers = { Cookie: cookie, Origin: `http://127.0.0.1:${port}` };
+      expect((await postJson(port, "/api/subscribe", { clientId, agentKey: ack.agentKey }, headers)).status).toBe(202);
+      if (lostDrain) {
+        const denied = await postJson(
+          port,
+          TERMINAL_HTTP_PATHS.list,
+          {
+            clientId,
+            agentKey: ack.agentKey,
+            connectionInstance: "forged",
+            connectionToken: "forged",
+            expect: { sessionId: "session", epoch: "epoch" },
+          },
+          headers,
+        );
+        expect(denied.status).toBe(401);
+        expect(JSON.parse(denied.body)).toEqual({ ok: false, code: "E_AUTH", effect: "none" });
+      }
+      // A subsequent real producer frame proves this same public stream is still live.
+      peer.send({ t: "fleet", runs: [] });
+      await conn.wait(formatSseFrame("fleet", { agentKey: ack.agentKey, runs: [] }).trimEnd());
+      expect(conn.res.destroyed).toBe(false);
+      expect(conn.res.readableEnded).toBe(false);
+      expect(conn.res.complete).toBe(false);
     },
   );
 });

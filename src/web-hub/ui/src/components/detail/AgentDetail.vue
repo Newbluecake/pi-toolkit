@@ -111,7 +111,10 @@ const notices = computed<readonly Notice[]>(() => [
         {
           id: "terminal-unavailable",
           tone: "danger" as const,
-          title: t("detail.terminalUnavailable", { reason: terminalUnavailable.value }),
+          title:
+            terminalUnavailable.value === "sse-admission-timeout"
+              ? t("detail.terminalAdmissionUnavailable")
+              : t("detail.terminalUnavailable", { reason: terminalUnavailable.value }),
           persistent: true,
         },
       ]
