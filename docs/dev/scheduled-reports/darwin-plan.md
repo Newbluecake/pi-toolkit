@@ -94,11 +94,15 @@ export interface PathBackend {
    *  linux：逐字保持 `/proc/self/fd/<fd>[/<name>]`（含历史上接受带 "/" 的 name）；
    *  darwin：`name` 必须满足 `isPlainName`（不含 "/"），否则抛 SchedFsError("bad-name")。 */
   path(fd: number, name?: string): string;
-  /** 相对 `dirFd` 的多段相对路径 lstat —— **唯一** 允许多段的入口（评审 #1 选定方案，见 P2-a）。
-   *  linux：`lstatSync(fdPath(dirFd, rel))`，抛出原始 ErrnoException，字节同今天；
-   *  darwin：逐级 `openDirAt` 打开并登记中间目录（O_NOFOLLOW + 类型/owner/mode + dev/ino 快照链），仅对末段基名经 `path()` lstat；
-   *  中间段缺失 ⇒ 抛 `{ code: "ENOENT" }` 形态的 Error（调用方 `errCode(err)==="ENOENT"` 语义不变）；符号链接/非目录/owner/mode ⇒ SchedFsError。 */
-  lstatAt(dirFd: number, rel: string): Stats;
+  /** 相对 `fd` 目录的相对路径 lstat —— **唯一** 允许多段 `rel` 的入口（评审 Blocker #1 方案 b，见 P2-a）。
+   *  `rel` 约束：非空、≤ 8 段、每段 `isPlainName`（否则 `SchedFsError("bad-name")`）。
+   *  linux：`lstatSync(fdPath(fd, rel))`（实现体为具名函数 `linuxLstatAt`），抛出原始 ErrnoException，行为逐字不变；
+   *        不打开中间 fd、不触碰注册表。
+   *  darwin：逐级 `openDirAt(cur, seg, opts)` 打开中间目录——每级经 `fdBackendOf(parent)` 的 `prepare → open → fstat → checkStat →
+   *        confirm` 完成登记与快照校验——末段基名经 `path(cur, base)`（含 chain 重核）后 `lstatSync`；调用返回前**关闭并注销**全部中间 fd。
+   *        中间段缺失 ⇒ 抛 `{ code: "ENOENT" }` 形态的 Error（调用方 `errCode(err)==="ENOENT"` 语义不变）；
+   *        符号链接/非目录/owner/mode ⇒ SchedFsError。完整契约见下文「lstatAt 契约」。 */
+  lstatAt(fd: number, rel: string, opts?: FsCheckOpts): Stats;
   /** 已打开目录 fd 的「当前位置」（M3：判断打开的对象而非陈旧路径串）。 */
   locate(fd: number): string;
   /** 打开前对目标路径取快照（linux: undefined；darwin: lstat，符号链接/缺失按现有 reason 拒绝）。 */
@@ -110,12 +114,18 @@ export interface FsCheckOpts { uid?: number; backend?: PathBackend }   // backen
 export interface StoreRoot { literal: string; real: string; dev: number; ino: number; backend?: PathBackend } // 仅显式传入时才出现 ⇒ 现有 toEqual 断言不变
 export const linuxPathBackend: PathBackend;      // 把今天的 fdPath/fdRealPath/fdAnchoringAvailable 原样搬进来
 export function defaultPathBackend(): PathBackend; // P0: 恒 linux；P2: process.platform==="darwin" ? darwinPathBackend : linuxPathBackend
-export function lstatAt(dirFd: number, rel: string): Stats;   // = fdBackendOf(dirFd).lstatAt(dirFd, rel)
+export function lstatAt(fd: number, rel: string, opts?: FsCheckOpts): Stats;   // = fdBackendOf(fd).lstatAt(fd, rel, opts)
 ```
 - **fd 注册表**（P0 只建骨架，P2 填实现；生命周期见 P2-b）：`globalThis[Symbol.for("pi-subagent:sched-fd-paths:v1")]` = `{ map: Map<number, FdRecord>, lastSweepAt: number }`，**惰性创建**——Linux 生产路径永远不创建它。`FdRecord` 为纯数据（`backend: "darwin"` 名字而非对象、`path`、`dev`、`ino`、`chain`、`lastUsed`），带 `:v1` 版本后缀，使 `/reload` 后新旧模块实例可安全共享同一张表。
 - `fdBackendOf(fd)`：`reg = globalThis[KEY]`；`reg === undefined || reg.map.size === 0` ⇒ 直接 `linuxPathBackend`；命中记录且 `fstat` dev/ino 与记录一致 ⇒ darwin 后端；命中但不一致 ⇒ 删除记录并回落默认后端。
 - **开销口径（评审 #4：不再声称「零开销」）**：Linux 生产路径每次 `fdPath` 额外成本 = 一次 `globalThis[Symbol.for-key]` 属性读取（注册表未创建时返回 `undefined`）。预算：`fdPath` p50 相对冻结的 v0 实现 **≤ +150 ns/次**；一次 `transact`（空写、tmpfs）中位数 **≤ +2 %**（一次事务约 17 次 `fdPath`，总增量 ≲ 3 µs，而 2-3 次 `flock` 子进程 + `fsync` 在毫秒级）。度量脚本放在 `seam-contract.test.ts` 的 `it.skipIf(!process.env.PI_TOOLKIT_SCHED_BENCH)`（计时不进 CI 门禁，避免 flake），数字记录进 `darwin-report.md`；超预算 ⇒ P0 不合入。
-- 自由函数签名**不变**（`fdPath(fd,name?)`、`fdRealPath(fd)`、`openDirPath(path,opts)`、`openDirPathUnchecked(path)`、`openDirAt(parentFd,name,opts)`、`readFileAt(dirFd,name,max,opts)`、`closeQuiet(fd)`、`fdAnchoringAvailable()`），新增 `lstatAt(dirFd, rel)`；内部改走后端：入口函数用 `opts.backend ?? defaultPathBackend()`，子级函数用 `fdBackendOf(parentFd)`；`closeQuiet` 在 `closeSync` 同时删注册表项。
+- 自由函数签名**不变**（`fdPath(fd,name?)`、`fdRealPath(fd)`、`openDirPath(path,opts)`、`openDirPathUnchecked(path)`、`openDirAt(parentFd,name,opts)`、`readFileAt(dirFd,name,max,opts)`、`closeQuiet(fd)`、`fdAnchoringAvailable()`），新增 `lstatAt(fd, rel, opts?)`（与 `openDirAt` 一样接受并透传 `opts`，`uid` 生效；`opts.backend` 只在入口函数读取，子级一律 `fdBackendOf(parentFd)`）；内部改走后端：入口函数用 `opts.backend ?? defaultPathBackend()`，子级函数用 `fdBackendOf(parentFd)`；`closeQuiet` 在 `closeSync` 同时删注册表项。
+- **`lstatAt` 契约（复审 R2-#1.2：把实现链写成契约；P0 只定义签名与 Linux 实现，Darwin 实现在 P2）**：
+  1. **调用链**：`lstatAt(fd, rel, opts) → fdBackendOf(fd).lstatAt(fd, rel, opts)`；Darwin 实现对 `rel` 的每个中间段调用 `openDirAt(cur, seg, opts)`，后者对子级用 `fdBackendOf(cur)` 取后端，执行 `prepare(path,"dir") → openSync(O_RDONLY|O_DIRECTORY|O_NOFOLLOW) → fstatSync → checkStat(owner/mode/type) → confirm(snap,{fd,path,st,kind:"dir",parentFd:cur})`。**`openDirAt` 接受并透传 `opts`**（`uid` 参与 owner 检查；`backend` 字段对子级无意义，被忽略）。
+  2. **登记原子性**：`confirm` 的最后一步才写注册表——成功 ⇒ 已登记且校验通过；抛错（含容量满拒绝 `io`）⇒ **无记录残留**。`openDirAt` 在 open 之后任一步失败（`fstat`/`checkStat`/`confirm`）都先 `closeQuiet(fd)`（同时删可能存在的记录）再重抛——不泄漏临时 fd。
+  3. **失败清理**：`lstatAt` 用 `opened: number[]` 记录本次调用打开的中间 fd，`try { … } finally { for (fd of opened.reverse()) closeQuiet(fd) }`；任一级失败（`symlink`/`not-dir`/`owner`/`mode`/`moved`/`io`，以及把 `missing` 转成 `{code:"ENOENT"}` 的路径）都经 `finally` 关闭已打开的中间 fd。
+  4. **中间 fd 的归属（选择：立即关闭并注销，不随调用方）**：`lstatAt` 的返回值是 `Stats`，**不外泄任何 fd**，调用方无从关闭；末段 `lstat` 之后中间 fd 即无用途，于是在同一次调用内 `closeQuiet`（`closeQuiet` 同时删注册项）。理由：①若不注销，条目只能等 §3.P2-b 的空闲 TTL（10 min）清扫，与「合法目录 fd 生命期 ≤ 一次事务」及容量 1024 冲突——`writeReportLocked` 的报告名分配循环最坏 4096 次 `lstatAt`（`INVENTORY_SCAN_MAX`），会直接顶满容量并触发 fail-closed；②每次调用都重新「开 + 快照 + 校验」，每个 `lstatAt` 都是一次完整的链校验，语义清晰、无跨调用的陈旧快照；③成本仅 `(段数−1)` 次 open/close（现仅 1 个站点、1 个中间段 `reports`），可忽略。
+  5. **资源不变量（测试断言）**：成功 / `ENOENT`（中间缺失）/ `symlink` / `not-dir` / owner·mode 违规 / 中途 `moved` 各路径，调用前后注册表 `size` 与进程打开的 fd 数**完全相等**；连续 4096 次 `lstatAt` 后 `size` 不增长。Linux 实现不开 fd、不碰注册表，用同一测试断言「注册表未被创建」。
 - `resolveStoreRoot(storeDir, opts)`：若 `opts.backend` 给出，写入 `StoreRoot.backend`；`openStoreRoot(root, opts)`：`opts.backend ?? root.backend ?? default`。
 
 #### P0-b `recovery.ts`（无新增 import）
@@ -252,6 +262,7 @@ function resolveIdentity(opts): IdentityDeps {
 export interface DarwinBackendOpts {            // 全部仅供测试注入；生产用 darwinPathBackend = createDarwinPathBackend()
   now?: () => number;                           // 注册表 lastUsed/TTL 时钟
   capacity?: number;                            // 默认 1024
+  birthtime?: "auto" | "off";                    // 默认 auto；off ⇒ 所有快照 bt=null（模拟无 birthtime 的文件系统）
   ttlMs?: number;                               // 默认 600_000（空闲 10 min）
   hooks?: { beforeVerify?(point: string): void; afterVerify?(point: string): void };  // 确定性竞态测试：point ∈ "path"|"locate"|"confirm-post"|"lstatAt"
 }
@@ -259,15 +270,19 @@ export function createDarwinPathBackend(o?: DarwinBackendOpts): PathBackend;
 export const darwinPathBackend: PathBackend;
 ```
 
-**注册表记录**：`FdRecord = { backend: "darwin"; path: string; dev; ino; chain: Array<{dev, ino, birthtimeMs}> /* 从 "/" 到本目录每一级 */; lastUsed: number }`。`birthtimeMs` 随 dev/ino 一并快照，降低 APFS inode 复用造成的误等（见 U5）。
+**注册表记录**：`FdRecord = { backend: "darwin"; path: string; dev; ino; chain: Array<{dev: number; ino: number; bt: number | null}> /* 从 "/" 到本目录每一级 */; lastUsed: number }`。`bt` 是**可信的** `birthtimeMs`（不可信时为 `null`，规则见下「birthtime 兜底」），随 dev/ino 一并快照，降低 APFS inode 复用造成的误等（见 U5）。
 
 - `available()`：恒 `true`。
 - `prepare(path, kind)`：`lstatSync(path)`（ENOENT ⇒ `missing`；`isSymbolicLink()` ⇒ `symlink`；`kind==="dir"` 非目录 ⇒ `not-dir`；`kind==="file"` 非普通文件 ⇒ `not-file`）→ 返回 pre 快照。**FIFO**：文件分支 `lstat` 判定非普通文件即拒绝，且 open 仍带 `O_NOFOLLOW|O_NONBLOCK`，不会阻塞。
-- `confirm(snap, {fd, path, st, kind, parentFd})`：`hooks.beforeVerify("confirm-post")`；`post = lstatSync(path)`；要求 `pre.dev/ino === st.dev/ino === post.dev/ino`，否则 `moved`；`kind==="dir"` ⇒ 登记：有 `parentFd` ⇒ `chain = parentRecord.chain + [{st.dev, st.ino, st.birthtimeMs}]`、`path = join(parentRecord.path, name)`；无 parent（入口 `openDirPath*`）⇒ 对 `path` 逐级 `lstat`（任一级为符号链接/非目录 ⇒ `moved`）生成 chain，并要求末级 dev/ino = fstat。
+- `confirm(snap, {fd, path, st, kind, parentFd})`：`hooks.beforeVerify("confirm-post")`；`post = lstatSync(path)`；要求 `pre.dev/ino === st.dev/ino === post.dev/ino`，否则 `moved`；`kind==="dir"` ⇒ 登记：有 `parentFd` ⇒ `chain = parentRecord.chain + [{ dev: st.dev, ino: st.ino, bt: birthOf(st) }]`、`path = join(parentRecord.path, name)`；无 parent（入口 `openDirPath*`）⇒ 对 `path` 逐级 `lstat`（任一级为符号链接/非目录 ⇒ `moved`；每级 `bt = birthOf(lstat)`）生成 chain，并要求末级 dev/ino = fstat。`confirm` 是原子的：全部校验通过后最后一步才登记，抛错则无记录残留。
+- **birthtime 兜底（复审 R2-#1.3；选择：降级为 dev/ino-only 并列残余，不 fail closed）**：
+  - `birthOf(st) := darwinBirthTrusted(st) ? st.birthtimeMs : null`，`darwinBirthTrusted(st) := Number.isFinite(st.birthtimeMs) && st.birthtimeMs > 0 && st.birthtimeMs < st.ctimeMs`（测试旋钮 `birthtime:"off"` 恒为 `null`）。不可信的情形：`0`/`NaN`（文件系统不提供）；`birthtime ≥ ctime`（libuv 在无 btime 时可能回填 ctime 的伪值——而目录 ctime 随内容变化，直接比较会产生**假 `moved`**；刚创建、尚未被修改的目录 birth≈ctime 也落入此类）；精度不足（如 1 s/2 s 粒度）不单独判定，只会让同一粒度内的重建无法区分，退化为 dev/ino-only，不引入新的误拒。
+  - **比较函数**（纯函数，导出 `darwinSnapshotEqual(snap, cur)` 供表驱动测试）：`dev`、`ino` 必须相等；`snap.bt !== null && cur.bt === null`（原先可信现在不可信）⇒ **不等**（fail closed，视为对象/文件系统已变）；二者均非 `null` ⇒ 必须 `===`；`snap.bt === null` ⇒ 只比较 dev/ino。
+  - **为何降级而不 fail closed**：①birthtime 只是对 U5（inode 复用）的**补充缓解**，主身份仍是 dev/ino；②fail closed 会让 schedule 在不提供 birthtime 的文件系统（NFS/SMB/exFAT/FUSE、旧 macOS 卷，以及 Linux 辅助测试的 tmpfs）上整体不可用，违背「完整支持」，伪 birthtime 还会制造假 `moved`；③降级的代价只是 U5 窗口在这些目录上仅靠 dev/ino，已并入 U5 残余并写入 README/report。
 - **`path(fd, name?)` 的多段语义（评审 Blocker #1 的接口决议）**：
   - Darwin `path()` **只接受目录本身或单个基名**：`name !== undefined && !isPlainName(name)`（含任何 `/`、`.`、`..`、NUL）⇒ `SchedFsError("bad-name")`。因此「拼接多段后只验证 fd 祖先链、不验证中间段」这种用法在 Darwin 上**无法表达**。
-  - 取记录（缺 ⇒ `SchedFsError("io","fd has no verified path")`）；`hooks.beforeVerify("path")`；`fstatSync(fd)` dev/ino 须等于记录（否则**删记录**并抛 `moved`）；**逐级重核 chain**（每个前缀 `lstat`：非符号链接、是目录、dev/ino/birthtimeMs 与记录一致，否则**删记录**并抛 `moved`）；刷新 `lastUsed`；`hooks.afterVerify("path")`；返回 `join(record.path, name)`。
-  - **多段只走 `lstatAt(dirFd, rel)`**（P0 已把 `writer.ts:1106` 迁入）：`rel` 拆段，除末段外每段 `openDirAt(cur, seg)`（`O_DIRECTORY|O_NOFOLLOW` + 类型/owner/mode 检查 + 登记 + 快照链），末段基名走 `path(cur, base)` 后 `lstatSync`；沿途中间 fd 在 `finally` 以 `closeQuiet` 关闭（并删记录）。中间段符号链接（含指向外部）⇒ `symlink`；非目录 ⇒ `not-dir`；中间段缺失 ⇒ 抛 `{code:"ENOENT"}` 形态 Error（保持调用方 `errCode(err)==="ENOENT"` 判据）。
+  - 取记录（缺 ⇒ `SchedFsError("io","fd has no verified path")`）；`hooks.beforeVerify("path")`；`fstatSync(fd)` dev/ino 须等于记录（否则**删记录**并抛 `moved`）；**逐级重核 chain**（每个前缀 `lstat`：非符号链接、是目录、与记录按 `darwinSnapshotEqual` 一致，否则**删记录**并抛 `moved`）；刷新 `lastUsed`；`hooks.afterVerify("path")`；返回 `join(record.path, name)`。
+  - **多段只走 `lstatAt(fd, rel, opts?)`**（P0 已把 `writer.ts:1106` 迁入；Darwin 实现严格按 §3.P0-a「lstatAt 契约」1-5 条）：`rel` 拆段，除末段外每段 `openDirAt(cur, seg, opts)`（`O_DIRECTORY|O_NOFOLLOW` + 类型/owner/mode 检查 + `confirm` 登记 + 快照链），末段基名走 `path(cur, base)`（含 chain 重核与 `hooks`）后 `lstatSync`；**返回前（含任一级失败）在 `finally` 里关闭并注销全部中间 fd**。中间段符号链接（含指向外部）⇒ `symlink`；非目录 ⇒ `not-dir`；中间段缺失 ⇒ 抛 `{code:"ENOENT"}` 形态 Error（保持调用方 `errCode(err)==="ENOENT"` 判据）。
   - **选择（b）「先开后验中间目录、只对基名 syscall」而非（a）「`path()` 内逐级 lstat」的理由**：(1) 中间目录因此获得与 `openDirAt` 完全相同的 O_NOFOLLOW、类型、owner、mode、dev/ino+birthtime 快照链，并受后续 `path()` 逐次重核；(a) 的逐级 lstat 没有「更早快照」可比较，只能证明「此刻不是符号链接」，无法绑定到后续 syscall；(2) 全仓只有 1 个多段站点，(b) 让「Darwin `path()` 拒 `/`」可被机械断言，未来新增多段用法会被 `bad-name` 立即拦下；(3) Linux 侧 `lstatAt` 保持 `lstatSync(fdPath(...))` 原样，零行为变化。**不得**把「Linux 也跟随中间符号链接」当作 Darwin 放行的安全依据——该事实只说明 Linux 现状有同类弱点，不构成 Darwin 的论据（本期不改 Linux）。
 - `locate(fd)`：同 `path()` 的核验序列（`hooks.beforeVerify("locate")`）后返回 `record.path`（即「核验过的当前位置」；与 Linux 的 readlink 语义同位，残余见 §3.P2-d）。
 - **错误码映射**：沿用 `mapOpenError`；Darwin `openDirAt` **不再**把穿透失败误映射 `missing`——因 syscall 路径是真实路径，ENOENT 即真缺失；`platform` 仅在后端 `available()` 为假时抛。
@@ -277,7 +292,7 @@ export const darwinPathBackend: PathBackend;
 
 #### P2-b fd 注册表生命周期（评审 #7）
 
-1. **关闭路径全量盘点（grep 实测，基线 = CLOSE_MANIFEST）**：登记只发生在 `openDirPath`、`openDirPathUnchecked`、`openDirAt`（及 `lstatAt` 的中间目录，同走 `openDirAt`）。目录 fd 的关闭**全部**经 `closeQuiet`（paths.ts:259-265，现 `closeSync` 在 263）；`src/schedule/core` 里其余 `closeSync(` 站点作用对象均为**非目录 fd**，永不登记：
+1. **关闭路径全量盘点（grep 实测，基线 = CLOSE_MANIFEST）**：登记只发生在 `openDirPath`、`openDirPathUnchecked`、`openDirAt`（及 `lstatAt` 的中间目录，同走 `openDirAt`，但**每次调用内即开即关即注销**，见 §3.P0-a「lstatAt 契约」）。目录 fd 的关闭**全部**经 `closeQuiet`（paths.ts:259-265，现 `closeSync` 在 263）；`src/schedule/core` 里其余 `closeSync(` 站点作用对象均为**非目录 fd**，永不登记：
 
    | 站点 | 对象 | 登记? |
    |---|---|---|
@@ -292,7 +307,7 @@ export const darwinPathBackend: PathBackend;
 2. **回收策略（I4 要求的 stated capacity/TTL）**：容量 **1024**；空闲 TTL **10 min**（`lastUsed` 在每次 `path/locate/lstatAt/confirm` 刷新）。清扫（sweep）触发：登记时 `size ≥ 256` 或距上次清扫 ≥ 60 s。清扫删除：(a) `fstatSync(fd)` 抛 EBADF 或 dev/ino 与记录不符的条目（可证明失效）；(b) 空闲超过 TTL 的条目（对仍打开但空闲的 fd，后果只是其后 `path()` 以 `io` fail closed，**绝不误路由**——合法目录 fd 的生命期 ≤ 一次事务：锁等待 ≤ `SCHED_LOCK_TIMEOUT_MS`(2 s) + 事务体，代码库中无跨 await 长期持有 `OpenedDir` 的路径）。清扫后仍满 ⇒ 拒绝登记并抛 `SchedFsError("io","fd registry full")`（fail closed，**不**逐出近期使用的条目）。
 3. **fd 号复用兜底**：`path()/locate()/lstatAt()` 每次 `fstat` 比对 dev/ino；不符 ⇒ 删记录 + `moved`，不会按陈旧路径操作新 fd。
 4. **`/reload` / 多模块实例**：注册表键带 `:v1` 后缀、记录纯数据（`backend` 以名字存储，不存对象/闭包），新旧模块实例互读安全；被 dispose 实例遗留条目由清扫回收。进程退出时 fd 与注册表同亡；注册表**不跨进程**，崩溃子进程不会留下跨进程状态。
-5. **测试（`paths-backend.test.ts`，E-AUX）**：重复开关 ×10 000 后 `size` 回到基线；`confirm` 失败/`openDirAt` 抛错路径无残留；测试直接 `closeSync` 已登记 fd 后以文件复用同一 fd 号 ⇒ `path()` 抛 `moved` 且记录被删；容量 = 小值（注入 `capacity: 8`）时第 9 次登记 `io` 拒绝、已登记者仍可用；注入 `now` 推进 > TTL ⇒ 空闲条目被清扫、其 `path()` 抛 `io`；`vi.resetModules()` 后重新 import 模块，新实例可读/删旧实例登记的记录。
+5. **测试（`paths-backend.test.ts`，E-AUX）**：重复开关 ×10 000 后 `size` 回到基线；`confirm` 失败/`openDirAt` 抛错路径无残留；测试直接 `closeSync` 已登记 fd 后以文件复用同一 fd 号 ⇒ `path()` 抛 `moved` 且记录被删；容量 = 小值（注入 `capacity: 8`）时第 9 次登记 `io` 拒绝、已登记者仍可用；注入 `now` 推进 > TTL ⇒ 空闲条目被清扫、其 `path()` 抛 `io`；`vi.resetModules()` 后重新 import 模块，新实例可读/删旧实例登记的记录；**`lstatAt` 资源不变量**（§3.P0-a 契约第 5 条：各成功/失败路径前后 `size` 与 fd 数相等，4096 次循环不增长）。
 
 #### P2-c `fdPath` 全点位清单与自动扫描基线（评审 #5）
 
@@ -300,11 +315,12 @@ export const darwinPathBackend: PathBackend;
 - **调用表达式**：去注释后 `\bfdPath\(` 出现次数，**不含** `export function fdPath` 声明；一行可含多个表达式（如 `renameSync(fdPath(..), fdPath(..))` 为 2 个表达式 / 1 个调用点）。
 - **调用点**：含 ≥1 个表达式的不同源码行。
 - **内部原语**：`paths.ts` 内部使用者（`openDirAt`/`readFileAt`/`fdRealPath`），经后端分发，不属于「外部调用点」。
-- 另设两条独立扫描：`fdRealPath(` 调用表达式（不含声明）、`lstatAt(` 调用表达式（不含声明与后端方法定义）。
+- **`lstatAt` 一并纳入口径（复审 R2-#1.1）**：`FDPATH_MANIFEST` 同时登记两类「路径派生」表达式——`fdPath(`（按上两条口径）与 `lstatAt(` 的**外部调用**（`paths.ts` 之外、去注释、不含 `function lstatAt` 声明、接口/对象方法定义行与自由函数体内的 `.lstatAt(` 转发，后三者归入 `paths.ts` 内部原语）。Linux 后端的实现体必须写成具名函数 `linuxLstatAt`（其内的 `lstatSync(fdPath(dirFd, rel))` 是 1 个 `fdPath` 表达式，外层函数名因此可被扫描器识别）。
+- 另设独立扫描：`fdRealPath(` 调用表达式（不含声明）。
 
 **扫描范围仅限 `src/schedule/**` 与 `src/web-hub/hub/schedule/**`**（`src/web-hub/hub/preview/pv-admit.ts`、`src/web-hub/hub/spawn/history/*` 里另有同名但无关的 `fdPath`，不属本期，不入清单）。
 
-**HEAD 实测基线（本文档修订时 `grep -n "fdPath(" src/schedule/core/*.ts` 结果）**：`fdPath(` 共 **26 个调用表达式 / 24 个调用点**（另有 1 个声明 `paths.ts:67`）；`fdRealPath(` 5 个调用表达式（writer.ts:253,268；paths.ts:314,336,350；另有声明 :178）；`fdAnchoringAvailable(` 2 个内部调用（paths.ts:157,188；声明 :71；无外部调用方）；`SCHED_FD_ROOT` 仅 paths.ts 内部（:38,68,73）。**P0 之后**（`writer.ts:1106` 迁到 `lstatAt`）：`fdPath(` **25 表达式 / 23 调用点**，`lstatAt(` 1 个调用表达式（writer.ts `writeReportLocked`）。
+**HEAD 实测基线（本文档修订时 `grep -n "fdPath(" src/schedule/core/*.ts` 结果）**：`fdPath(` 共 **26 个调用表达式 / 24 个调用点**（另有 1 个声明 `paths.ts:67`）；`fdRealPath(` 5 个调用表达式（writer.ts:253,268；paths.ts:314,336,350；另有声明 :178）；`fdAnchoringAvailable(` 2 个内部调用（paths.ts:157,188；声明 :71；无外部调用方）；`SCHED_FD_ROOT` 仅 paths.ts 内部（:38,68,73）。**P0 之后**（`writer.ts:1106` 迁到 `lstatAt`，Linux 实现体 `linuxLstatAt` 落在 paths.ts）：`fdPath(` 仍为 **26 调用表达式 / 24 调用点**（writer.ts 少 1、paths.ts `linuxLstatAt` 多 1），另有 `lstatAt(` **1 个外部调用表达式**（writer.ts `writeReportLocked`）。路径派生表达式合计 26 + 1 = **27**。
 
 **`FDPATH_MANIFEST`（P0 后期望，按「文件 + 外层函数」逐项；seam-contract 扫描后逐项比对，并断言「含 `fdPath(` 的文件集合」恰好是下表文件集合，新文件使用 `fdPath` 而未登记 ⇒ 红）**：
 
@@ -315,6 +331,7 @@ export const darwinPathBackend: PathBackend;
 | paths.ts | `fdRealPath` | 1 | 内部原语（Linux readlink；Darwin 改走 `locate`） | — |
 | paths.ts | `openDirAt` | 1 | 内部原语（open 子目录） | `prepare/confirm` |
 | paths.ts | `readFileAt` | 1 | 内部原语（open 文件） | `prepare/confirm` |
+| paths.ts | `linuxLstatAt` | 1 | 内部原语：Linux 后端 `lstatAt` 实现体 `lstatSync(fdPath(dirFd, rel))`（P0 新增，逐字等于被迁出的 writer.ts:1106 表达式） | Darwin 不经此处（走 `darwinLstatAt`，不含 `fdPath(`） |
 | reader.ts | `listSessionDirs` | 1 | `opendirSync(fdPath(rootFd))` | 目录本身 |
 | writer.ts | `atomicWriteAt` | 4 | tmp `openSync(O_EXCL)`、`renameSync`（2 个表达式）、失败路径 `unlinkSync` | 全部单基名 |
 | writer.ts | `ensureStoreRoot` | 1 | `mkdirSync` | 父 fd 已登记 |
@@ -327,17 +344,17 @@ export const darwinPathBackend: PathBackend;
 | writer.ts | `writeReportLocked` | 1 | `mkdirSync(reports)`（原 1106 的 `lstat` 已迁 `lstatAt`） | |
 | writer.ts | `recycleSessionDir` | 4 | `rmdirSync(reports)`、`unlinkSync`×2（循环 + lock）、`rmdirSync(rootFd/dirName)` | |
 
-合计 25 = lock 2 + paths 3 + reader 1 + writer 19 ✓。`fdRealPath` 调用方基线：`writer.ensureStoreRoot` 2、`paths.resolveStoreRoot` 1、`paths.openStoreRoot` 1、`paths.openSessionDirAt` 1。
+合计 26 = lock 2 + paths 4 + reader 1 + writer 19 ✓（与 HEAD 的 26 相等：writer 1106 迁出、`linuxLstatAt` 迁入）。**`lstatAt(` 外部调用清单**（同样自动比对）：`writer.ts::writeReportLocked` ×1（报告名分配循环，≤ `INVENTORY_SCAN_MAX`=4096 次/事务，Darwin 每次即开即关）。`fdRealPath` 调用方基线：`writer.ensureStoreRoot` 2、`paths.resolveStoreRoot` 1、`paths.openStoreRoot` 1、`paths.openSessionDirAt` 1。
 
 **直接 syscall 而不经 `fdPath` 的路径（同样入清单，`ABS_SYSCALL_MANIFEST`，防遗漏）**：`paths.ts::openDirPath` / `openDirPathUnchecked`（绝对规范路径 `openSync`，由后端 `prepare/confirm` 覆盖）、`paths.ts::resolveStoreRoot`（`realpathSync`）、`writer.ts::ensureStoreRoot`（`statSync`/`realpathSync` 祖先规范化，先判 vault 后创建，顺序不变）、`lock.ts::tryLock`（`lstatSync(path)`，path 取自 `fdPath`）。`session-proof.ts` 的 `openSync/closeSync` 针对 pi 会话文件的绝对路径，**不属于 schedule store**，登记为「域外」。fd 直操作（`fsyncSync(dirFd)`、`fstatSync(fd)`、`writeSync`、`closeSync`）Darwin 原生可用，不需要后端化，登记为「fd-native」。
 
-**自动扫描断言（P0 写入 seam-contract，P2 回归）**：①`FDPATH_MANIFEST` 与实际逐 (文件,函数) 相等（外层函数用「向上回溯最近的 `function`/`async function` 声明」识别）；②`fdRealPath(`/`lstatAt(` 两条独立清单相等；③`/proc/self/fd` 字面量仅出现在 `paths.ts`（扫 `src/schedule/**` 与 `src/web-hub/hub/schedule/**`）；④任何 Darwin 后端 `path(fd,name)` 对含 `/` 的 `name` 抛 `bad-name`（单元断言，证明清单里的 `fdPath` 点位都是单基名）。
+**自动扫描断言（P0 写入 seam-contract，P2 回归）**：①`FDPATH_MANIFEST` 与实际逐 (文件,函数) 相等（外层函数用「向上回溯最近的 `function`/`async function` 声明」识别）；②`fdRealPath(` 调用清单与 `lstatAt(` 外部调用清单分别相等（路径派生表达式合计 27）；③`/proc/self/fd` 字面量仅出现在 `paths.ts`（扫 `src/schedule/**` 与 `src/web-hub/hub/schedule/**`）；④任何 Darwin 后端 `path(fd,name)` 对含 `/` 的 `name` 抛 `bad-name`（单元断言，证明清单里的 `fdPath` 点位都是单基名）。
 
 #### P2-d 威胁模型与保证边界（评审 Blocker #2：已拍板接受「弱于 Linux」，此处只把保证说清、验收判据降为可验证）
 
 **能提供的有限保证（G）**
 - **G1**：校验时刻沿路径不跟随任何符号链接（祖先链逐级 `lstat`、每个被打开的组件 `O_NOFOLLOW`、中间目录经 `openDirAt`）。
-- **G2**：在某次**校验点**（`path()` / `locate()` / `lstatAt()` 入口 / `confirm` 的 post-lstat）**之前已完成**的目录替换（换成别的目录、符号链接、文件，或删除后重建）会被 dev/ino/birthtime 链比对检出 ⇒ 拒绝（`moved`/`symlink`/`missing`/`io`），且该 fd 的记录被删除，之后同 fd 的使用也一并拒绝——**检测到之后不再用旧记录返回内容**。
+- **G2**：在某次**校验点**（`path()` / `locate()` / `lstatAt()` 入口 / `confirm` 的 post-lstat）**之前已完成**的目录替换（换成别的目录、符号链接、文件，或删除后重建）会被 dev/ino（birthtime 可信时一并比对，规则见 P2-a「birthtime 兜底」）链比对检出 ⇒ 拒绝（`moved`/`symlink`/`missing`/`io`），且该 fd 的记录被删除，之后同 fd 的使用也一并拒绝——**检测到之后不再用旧记录返回内容**。
 - **G3**：fd 号复用不会误路由（每次 `fstat` 复核）。
 - **G4**：被打开对象的 owner / mode / 类型 / 大小策略与 Linux 逐对象相同。
 
@@ -346,13 +363,14 @@ export const darwinPathBackend: PathBackend;
 - **U2**：替换后在窗口内恢复原状（A→B→A）：不可检测。
 - **U3**：基于路径的 `opendir`/`readdir` 枚举同样受 U1 约束。
 - **U4**：威胁模型前提——攻击者需与本进程**同 uid** 且能写入 store 的某个祖先目录；异 uid 受 owner/mode 检查阻断；这与 arch §9.4 已接受的残余一致。
-- **U5**：inode 号复用（删除目录后立即新建）使 dev/ino 偶然相等；用 `birthtimeMs` 一并比对降低概率，但不保证消除。
+- **U5**：inode 号复用（删除目录后立即新建）使 dev/ino 偶然相等；`birthtimeMs` **可信**时一并比对以降低概率，但不保证消除；`bt===null`（文件系统不提供 / 伪值 / 刚创建的目录 / 旋钮 off）的目录**仅靠 dev/ino**，此时 U5 无任何额外缓解——作为已知残余写入 README 与 report。
 - **U6**：Darwin 无「fd 当前物理位置」内核视图（无 `/proc/self/fd`），`locate()` 返回的是「核验过的记录路径」，不是内核对该 fd 的实时回答（M3 能力差距，arch §9.4）。
 
 **竞态测试判据（取代原「绝不读到被换目录内容」）**
-- **D1 确定性（`hooks.beforeVerify` 内完成替换）**：替换在校验点前完成 ⇒ 操作**必须**以 `SchedFsError`（reason ∈ `moved|symlink|missing|io`）拒绝；断言未返回旧目录内容、记录已删除、对同一 fd 的第二次调用也拒绝。
+- **D1 确定性（`hooks.beforeVerify` 内完成替换）**：替换在校验点前完成 ⇒ 操作**必须**以 `SchedFsError`（reason ∈ `moved|symlink|missing|io`）拒绝；断言未返回旧目录内容、记录已删除、对同一 fd 的第二次调用也拒绝。**须在 `birthtime:"auto"` 与 `birthtime:"off"` 两种配置下各跑一遍，判据完全相同**（真实替换会改变 inode，必被 dev/ino 检出，不依赖 birthtime；off 模式即「文件系统无 birthtime」情形的断言）。
 - **D2 确定性（`hooks.afterVerify` 内完成替换，即 U1 窗口）**：测试名与注释显式标注「UNCOVERED WINDOW U1 (documented, not guaranteed)」；只断言：除普通 fs 错误外无异常、注册表一致（无泄漏）、**下一个校验点检出该替换并拒绝**（即「检测到后拒绝」，不对窗口内那一次 syscall 的结果作任何断言）。
-- **D3 中间目录**：对 `lstatAt`/`writeReportLocked` 分配循环/`atomicWriteAt` 写入 reports：`reports` 在调用前被换成指向外部的符号链接 ⇒ `symlink` 拒绝，外部目录无任何新增文件；已登记的 `repFd` 在其后 `reports` 被 rename 走并以新目录替换 ⇒ 下一次 `path(repFd, …)` 抛 `moved`（Linux 后端对照用例标注「Linux 跟随语义不同，仅作行为记录」）。
+- **D3 中间目录**：对 `lstatAt`/`writeReportLocked` 分配循环/`atomicWriteAt` 写入 reports：`reports` 在调用前被换成指向外部的符号链接 ⇒ `symlink` 拒绝，外部目录无任何新增文件；已登记的 `repFd` 在其后 `reports` 被 rename 走并以新目录替换 ⇒ 下一次 `path(repFd, …)` 抛 `moved`（Linux 后端对照用例标注「Linux 跟随语义不同，仅作行为记录」）；同样在 `auto`/`off` 两配置下各跑一遍，判据不变。
+- **D5 birthtime 比较器（表驱动，复审 R2-#1.3）**：`darwinSnapshotEqual`：同 dev/ino 且 bt 均相等 ⇒ 等；bt 不同 ⇒ 不等；`snap.bt=null`、`cur.bt` 有值 ⇒ 等（仅比 dev/ino）；`snap.bt` 有值、`cur.bt=null` 或 `0` ⇒ **不等**；dev 或 ino 不同 ⇒ 不等（与 bt 无关）。`darwinBirthTrusted`：`0`/`NaN`/`birth≥ctime` ⇒ 不可信，`0<birth<ctime` ⇒ 可信。inode 复用无法确定性构造，故 U5 仅以比较器单测 + 文档残余表达，**不**写「无法发生」的断言。
 - **D4 压力集成（`schedule-darwin-paths-race.test.ts`，tier2，信息性判据）**：N=2000 轮，替换进程交替把 `reports`/session 目录在「真实目录」与「指向外部的符号链接」之间切换，工作进程循环 `reportInventory + writeReportLocked + read`。**通过判据**：每轮结果 ∈ {成功, `SchedFsError(moved|symlink|missing|io)`, 事务 `E_DEGRADED`}；无未捕获异常、无挂起（单轮 >5 s 即失败）、结束后注册表 `size` 回基线、`fd` 数不增长。**不**断言「外部目录从未被触碰」——U1 允许其发生；脚本打印触碰计数作为残余证据写入 `darwin-report.md`（若 >0，如实记录，不判失败）。
 
 #### P2-e `writer.ts::ensureStoreRoot`（226-275 行，P2 在 writer.ts 的唯一改动）
@@ -360,7 +378,7 @@ export const darwinPathBackend: PathBackend;
 - 顺序保持「先判 vault、再创建」：`inVault(storeDir)` → 最长已存在祖先 `statSync` → `realpathSync` → `inVault(canonical)`/`inVault(canonical+rest)` → 打开祖先 → 逐级 mkdir（`fdPath(parent.fd, comp)` 现为后端分发，`comp` 经 `isPlainName` 校验）→ `openDirAt` → `fdRealPath` 复核 vault。
 
 #### P2 测试
-- `tests/schedule/core/paths-backend.test.ts`（tier1 + 登记 `TIER1_DECLARED`，因 FIFO 用例 `spawnSync("mkfifo")`，见 §5.3；**E-AUX**）：`describe.each` 两后端 `[linuxPathBackend(仅当 /proc/self/fd 可用), darwinPathBackend]`——darwin 后端在 Linux CI 上也跑：reason 对齐表（含「有意差异」单列）；vault 字面量 + canonical 两路；`dev/ino` pin；`openStoreRoot` 祖先被换成符号链接 ⇒ `moved`；`path()` 拒 `/`（`bad-name`）与 `lstatAt` 中间符号链接 ⇒ `symlink`、中间缺失 ⇒ `ENOENT`；D1/D2/D3 确定性竞态（见 P2-d）；P2-b 第 5 点的生命周期用例；写原语词静态断言（C7）；「全点位覆盖」：对 `darwinPathBackend` 根创建的 store 依次跑 `transact` / `writeReportLocked` / `gcSessionReports` / `repair` / `recycleSessionDir` / `listSessionDirs`，结果与 linux 后端同一场景一致。
+- `tests/schedule/core/paths-backend.test.ts`（tier1 + 登记 `TIER1_DECLARED`，因 FIFO 用例 `spawnSync("mkfifo")`，见 §5.3；**E-AUX**）：`describe.each` 两后端 `[linuxPathBackend(仅当 /proc/self/fd 可用), darwinPathBackend]`——darwin 后端在 Linux CI 上也跑：reason 对齐表（含「有意差异」单列）；vault 字面量 + canonical 两路；`dev/ino` pin；`openStoreRoot` 祖先被换成符号链接 ⇒ `moved`；`path()` 拒 `/`（`bad-name`）与 `lstatAt` 中间符号链接 ⇒ `symlink`、中间缺失 ⇒ `ENOENT`；D1/D2/D3 确定性竞态（`birthtime` auto/off 各一遍）+ D5 比较器（见 P2-d）；`lstatAt` 资源不变量（§3.P0-a 契约第 5 条）；P2-b 第 5 点的生命周期用例；写原语词静态断言（C7）；「全点位覆盖」：对 `darwinPathBackend` 根创建的 store 依次跑 `transact` / `writeReportLocked` / `gcSessionReports` / `repair` / `recycleSessionDir` / `listSessionDirs`，结果与 linux 后端同一场景一致。
 - `tests/integration/schedule-darwin-paths-race.test.ts`（integration ⇒ tier2；D4；`mkfifo`/平台不可用时 skip；Linux 与 mac 均可跑，darwin 后端强制）。
 - 现有 `reader.test.ts`、`writer.test.ts`、`fault-injection.test.ts`、`schedule-scan.test.ts`：P2 阶段在 Linux 上必须零改动全绿（Linux 默认 linux 后端）。
 
@@ -599,7 +617,7 @@ npx vitest run tests/integration/schedule-*.test.ts   # tier2 的 schedule 部�
 | R2 | P1 | `ps lstart` 格式差异（locale/TZ/个位日空格）、同秒复用 | 固定 `LC_ALL=C TZ=UTC0`；严格解析+回读校验；格式异常 ⇒ `"error"` ⇒ unprovable（只可能延迟恢复）；子进程启动有预算与触发条件（§3.P1-b） | revert P1：mac 回到「无 identity ⇒ 不执行」，Linux 无影响 |
 | R3 | P1 | hub boundary：protocol 新文件引入 `child_process` | 精确钉子覆盖 type-only 且零相对 import；已读 `hubImportAllowed` 确认 `node:*` 允许 | 同 R2 |
 | R3b | P1 | probe 漏传到某条 `judgeHolder` 链 ⇒ mac 上判不出 pid 复用 | `JUDGE_MANIFEST` 扫描 + 每条链专属测试（含 clock 的「漏传 probe」负向用例） | 同 R2 |
-| R4 | P2 | Darwin 快照算法漏洞：reason 不对齐、`fdPath`/`lstatAt` 抛错出现在未设防调用点；**窗口 U1-U6 无法覆盖**（见 §3.P2-d） | 对齐表双后端参数化；`path()` 拒 `/`；多段只走 `lstatAt`；D1/D3 确定性用例证明「校验点前的替换必被拒」，D2/D4 只记录窗口、不作超出算法的保证；逐点核对 `FDPATH_MANIFEST` 的 25+1 个点位 | revert P2：`defaultPathBackend()` 回到 linux ⇒ mac 回到 fail closed `platform`；Linux 无影响（唯一 writer 改动是 `ensureStoreRoot` 的可选参数） |
+| R4 | P2 | Darwin 快照算法漏洞：reason 不对齐、`fdPath`/`lstatAt` 抛错出现在未设防调用点；**窗口 U1-U6 无法覆盖**（见 §3.P2-d） | 对齐表双后端参数化；`path()` 拒 `/`；多段只走 `lstatAt`；D1/D3 确定性用例证明「校验点前的替换必被拒」，D2/D4 只记录窗口、不作超出算法的保证；逐点核对 `FDPATH_MANIFEST` 的 26 个 `fdPath` 表达式 + 1 个 `lstatAt` 外部调用 | revert P2：`defaultPathBackend()` 回到 linux ⇒ mac 回到 fail closed `platform`；Linux 无影响（唯一 writer 改动是 `ensureStoreRoot` 的可选参数） |
 | R5 | P2 | fd 注册表残留/误路由/`/reload` 共享 | 关闭路径盘点（`CLOSE_MANIFEST`）+ 容量 1024 + 空闲 TTL 10 min + 清扫 + fstat 复核 + `:v1` 数据化记录（§3.P2-b）；5 项生命周期测试 | 同 R4 |
 | R6 | P2 | Darwin `path()` 每次 lstat 整条链 ⇒ 事务变慢 | 仅 mac；schedule 操作低频；P5 实测记录 p50/p95（若 >50 ms/事务再议缓存，不属本期） | 同 R4 |
 | R7 | P3 | perl 缺失/被 CLT 提示/沙箱禁用；`/usr/bin/perl` 在未来 macOS 移除 | fail closed + 明确 warning；`perlBin` 可注入；不回退无锁；ENOENT/超时/信号/非冲突退出均独立文案与测试（T-P2…T-P5） | revert P3：mac `flock` 缺失 ⇒ E_BUSY（与今天同）；Linux 无影响 |
@@ -638,7 +656,7 @@ npx vitest run tests/integration/schedule-*.test.ts   # tier2 的 schedule 部�
 | M4b | probe 与 acquire 同参 | `npx vitest run tests/schedule/core/lock-acquire.test.ts` | T-P8 `toEqual` 通过 | E-CI |
 | M5 | Darwin 路径算法 | Linux/CI 或 mac：`npx vitest run tests/schedule/core/paths-backend.test.ts` | reason 对齐表绿（「有意差异」单列且断言 Darwin 更严）；`path()` 拒 `/`；`lstatAt` 中间符号链接 ⇒ `symlink`；D1（校验点前替换 ⇒ 必拒、记录已删、二次调用也拒）、D3（中间目录换符号链接 ⇒ 拒，外部目录零新增）通过；D2 用例存在且标注 U1 | **E-AUX**（Linux 上强制）；同命令在 **mac 真机**运行 ⇒ E-MAC，方可签收「Darwin 路径可用」 |
 | M5b | 路径竞态压力（信息性） | `npx vitest run tests/integration/schedule-darwin-paths-race.test.ts`（mac 与 Linux 各一份结果） | 判据仅为：每轮结果 ∈ {成功, `moved|symlink|missing|io` 拒绝, `E_DEGRADED`}；无未捕获异常/挂起；`size` 与 fd 数回基线；**不**断言「外部目录从未被触碰」；报告记录触碰计数与 U1-U6 | E-MAC（主）；E-AUX |
-| M6 | `fdPath` 点位与关闭路径自动核对 | `npx vitest run tests/schedule/core/seam-contract.test.ts`；人工对照命令：`grep -n "fdPath(" src/schedule/core/*.ts \| wc -l`（仅 `src/schedule/core/`：`grep -n` 行数含声明 **P0 前 25 / P0 后 24**；`grep -o` 表达式数含声明 **27 / 26**，即调用表达式 26 / 25 + 1 声明；口径见 §3.P2-c）、`grep -n "fdRealPath(\|lstatAt(" src/schedule/core/*.ts`、`grep -n "closeSync(" src/schedule/core/*.ts` | 测试读 `FDPATH_MANIFEST`/`CLOSE_MANIFEST`/`ABS_SYSCALL_MANIFEST` 并全等；`/proc/self/fd` 字面量仅 `paths.ts`；Darwin `path()` 含 `/` ⇒ `bad-name` | E-CI |
+| M6 | `fdPath` 点位与关闭路径自动核对 | `npx vitest run tests/schedule/core/seam-contract.test.ts`；人工对照命令：`grep -n "fdPath(" src/schedule/core/*.ts \| wc -l`（仅 `src/schedule/core/`：`grep -n` 行数含声明 **P0 前 25 / P0 后 25**；`grep -o` 表达式数含声明 **27 / 27**，即调用表达式 26 / 26 + 1 声明（writer.ts:1106 迁出、paths.ts `linuxLstatAt` 迁入）；另 `grep -rn "lstatAt(" src/schedule/core` 的外部调用 0 / 1；口径见 §3.P2-c）、`grep -n "fdRealPath(\|lstatAt(" src/schedule/core/*.ts`、`grep -n "closeSync(" src/schedule/core/*.ts` | 测试读 `FDPATH_MANIFEST`/`CLOSE_MANIFEST`/`ABS_SYSCALL_MANIFEST` 并全等；`/proc/self/fd` 字面量仅 `paths.ts`；Darwin `path()` 含 `/` ⇒ `bad-name` | E-CI |
 | M6b | fd 注册表生命周期 | `npx vitest run tests/schedule/core/paths-backend.test.ts -t "registry"` | 10 000 次开关后 `size` 回基线；直接 `closeSync`+fd 复用 ⇒ `moved`；容量上限 `io` 拒绝且既有 fd 可用；TTL 清扫；`vi.resetModules` 后互读 | E-AUX → mac 复跑为 E-MAC |
 | M7 | mac agent 全链路 | mac：`npx vitest run tests/integration/schedule-darwin-e2e.test.ts tests/integration/schedule-wiring.test.ts tests/integration/schedule-p2-producer.test.ts tests/integration/schedule-surface-wiring.test.ts` | create/run_now/时钟触发/list/history 全绿；非 skipped | E-MAC |
 | M8 | mac hub 只读投影 | mac：`npx vitest run tests/integration/schedule-hub.test.ts tests/web-hub/hub/schedule-service.test.ts` + e2e 中 hub 段 | hub pin root、投影含任务、未知运行预测、receipt 清理通过；hub 前后账本目录快照一致（零写） | E-MAC |
@@ -684,7 +702,7 @@ verifier 阅读 `docs/dev/scheduled-reports/README.md` 的「macOS（Darwin）�
 | #2 | Blocker | **采纳** | §3.P2-d（保证 G1-G4 / 窗口 U1-U6 / 判据 D1-D4）、§7 R4、§8 M5/M5b、§8.2 R-a | 不推翻已拍板的「弱于 Linux」降级。威胁模型与有限保证单列：「校验点之前已完成的替换必被检出并拒绝，且记录删除、之后不再用旧记录返回内容」；窗口 U1（校验后 syscall 前）、U2（A→B→A）、U3、U4（同 uid 前提）、U5（inode 复用，加 birthtime 缓解）、U6（无内核 fd 位置视图）单列并写入 README/report。竞态验收改为：D1 确定性（`beforeVerify` 内替换 ⇒ 必拒）、D2 确定性（`afterVerify` 内替换＝U1，测试名标注 UNCOVERED，仅断言下一校验点检出）、D3 中间目录、D4 压力（结果 ∈ {成功, moved/symlink/missing/io, E_DEGRADED}、无挂起/泄漏，**不**断言「外部目录从未被触碰」，触碰计数作为残余证据记录）。 |
 | #3 | Major | **采纳** | §1 C1/C8、§3.P1 测试（boundary 钉子）、§6 boundary 行 | 写明结论：`hubImportAllowed`（boundary.test.ts:292-307）对越界相对 import 不因 type-only 放行（仅 hub→`config/settings.ts` 例外）；`protocol files may not escape` 含 type-only；`files are discovered`（:323-336）是 `arrayContaining` 代表项，非全等、非逐文件闭包。P1 新增钉子**不过滤 `typeOnly`**、断言 import 恰为 `node:child_process`+`node:os`、零相对 import；明确不把 discovery 当闭包保证。 |
 | #4 | Major | **采纳** | §3.P0-a（开销口径）、§3.P0 测试资产、§5.4 契约表、§7 R1、§8 L1/L7 | 删除「Map.size===0 ⇒ 零开销」。改为有预算：注册表惰性创建，Linux 每次 `fdPath` 仅多一次全局属性读取；`fdPath` p50 ≤ +150 ns、`transact` 中位数 ≤ +2 %（`PI_TOOLKIT_SCHED_BENCH=1` 信息性度量并记录，不进 CI 门禁以免 flake）。Linux 对照扩展为冻结快照 `tests/schedule/compat/paths-v0.ts` 的差分：输出矩阵、全部 reason+message、异常路径（ErrnoException 透传、已关 fd 行为）、flock argv/stdio/timeout/无 env。 |
-| #5 | Major | **采纳** | §3.P2-c、§1 C2、§3.P0 测试资产、§8 M6 | 重新用命令生成清单并定义口径：调用表达式（`fdPath(` 去注释不含声明）/ 调用点（行）/ 内部原语；HEAD 实测 `fdPath(` **26 表达式 / 24 调用点 + 1 声明**（lock 2、paths 3 内部原语+1 声明、reader 1、writer 20），补上评审指出的 `lock.ts:77`、`paths.ts:180/203/235`；另列 `fdRealPath(` 5 调用、`fdAnchoringAvailable(` 2 内部调用、`lstatAt(` P0 后 1 调用，以及不经 `fdPath` 的绝对路径 syscall（`ABS_SYSCALL_MANIFEST`）与 fd-native 操作。清单落成 `tests/schedule/core/fdpath-manifest.ts` 数据，`seam-contract.test.ts` 读数组按「文件+外层函数」比对，不手抄行号；P0 后期望 25 表达式。已注明 hub 的 preview/spawn-history 里同名 `fdPath` 不在范围。 |
+| #5 | Major | **采纳** | §3.P2-c、§1 C2、§3.P0 测试资产、§8 M6 | 重新用命令生成清单并定义口径：调用表达式（`fdPath(` 去注释不含声明）/ 调用点（行）/ 内部原语；HEAD 实测 `fdPath(` **26 表达式 / 24 调用点 + 1 声明**（lock 2、paths 3 内部原语+1 声明、reader 1、writer 20），补上评审指出的 `lock.ts:77`、`paths.ts:180/203/235`；另列 `fdRealPath(` 5 调用、`fdAnchoringAvailable(` 2 内部调用、`lstatAt(` P0 后 1 调用，以及不经 `fdPath` 的绝对路径 syscall（`ABS_SYSCALL_MANIFEST`）与 fd-native 操作。清单落成 `tests/schedule/core/fdpath-manifest.ts` 数据，`seam-contract.test.ts` 读数组按「文件+外层函数」比对，不手抄行号；P0 后期望 26 个 `fdPath` 表达式 + 1 个 `lstatAt` 外部调用。已注明 hub 的 preview/spawn-history 里同名 `fdPath` 不在范围。 |
 | #6 | Major | **采纳** | §3.P1-b（J1-J7 表）、§3.P4-A、§7 R3b、§8 M3b | 逐条列出全部链：`judgeHolder(` 7 个直接调用（note 172/217、digest 222、service 376/382，recovery 170/190 为经 opts 的间接）；`recoverDeadRuns`←`claim.recoverRuns`(339)←`clock.ts:291`←`wire.ts:467` 的 `judge` 配置（P1 补 probe）；`unknownRunKeys` **当前无生产调用方**，登记契约「将来调用必须传 probe」并由 `JUDGE_MANIFEST` 扫描强制；`closeEpoch*` 不判活无需 probe。每条链给出 probe 到达路径与专属测试，clock 链含「漏传 probe」负向用例。 |
 | #7 | Major | **采纳** | §3.P2-b、§6 I4 行、§7 R5、§8 M6b | 盘点全部 `closeSync(` 站点（`CLOSE_MANIFEST`）：目录 fd 只经 `closeQuiet` 关闭，其余站点对象为锁/会话/临时文件 fd 与 `fs.Dir` 句柄，永不登记；测试可能直接 `closeSync` ⇒ 以回收策略兜底。回收策略：容量 1024、空闲 TTL 10 min、登记时清扫（fstat 失效/dev-ino 不符/空闲超 TTL）、清扫后仍满则 fail closed（不逐出近期使用项）、`path()` 每次 fstat 复核、记录纯数据+`:v1` 键保障 `/reload` 共享。补 5 类测试：重复开关、异常路径无残留、直接 closeSync+fd 复用、容量上限、TTL、`vi.resetModules` 互读。取代原「4096 上限」表述。 |
 | #8 | Major | **采纳** | §3.P3-a/b/测试（T-P1…T-P9）、§7 R7/R8、§8 M4/M4b | 脚本改用显式 `-MFcntl=:flock -MErrno=EWOULDBLOCK,EAGAIN` 与数值比较，不依赖 `$!{…}` 键（本机 perl 5.34.1 实测导出、busy=75、`spawnSync` 超时为 `ETIMEDOUT/SIGTERM`、`kill -9` 为 `SIGKILL`）。结果映射表给出 ENOENT / ETIMEDOUT / 其他 error / 信号 / 0 / 75 / 其余退出码各自固定 fail-closed 文案（超时/信号一律 fail 非 busy）。probe 直接复用 `perlFlockAcquire`（同函数同 `PERL_FLOCK_ARGS` 同 env），T-P8 以注入 spawn 断言两路参数一致。`held` 之后的 dev/ino 复核保留，T-P7 覆盖锁文件被替换。各边界独立成条。 |
@@ -697,3 +715,12 @@ verifier 阅读 `docs/dev/scheduled-reports/README.md` 的「macOS（Darwin）�
 - `grep -o "fdPath(" src/schedule/core/*.ts | sort | uniq -c` → lock 2 / paths 4（含 1 声明）/ reader 1 / writer 20，共 27（含声明）⇒ 调用表达式 26；`grep -n "fdPath(" src/schedule/core/*.ts | wc -l` = 25 行（含声明）⇒ 24 个调用点。
 - `grep -rn "fdRealPath(" src` = 6（含 1 声明）⇒ 5 个调用；`grep -rn "judgeHolder(" src` = 8（含 `recovery.ts:103` 声明）⇒ 7 个调用（recovery 170/190、note 172/217、digest 222、service 376/382）；`recoverDeadRuns(` 1 个调用（`claim.ts:339`）；`recoverRuns(` 1 个调用（`clock.ts:291`）；`unknownRunKeys(` 0 个调用。
 - 以上数字与 §3.P1-b J1-J7 表、§3.P2-c 清单、§8 M3b/M6 一致。
+
+### 第 2 轮（复审，2026-11-17）
+
+| 复审编号 | 严重度 | 处置 | 落点小节 | 说明 |
+|---|---|---|---|---|
+| R2-#1（①lstatAt 进接口） | 必修 | **采纳** | §3.P0-a（`PathBackend.lstatAt(fd, rel, opts?)` 成员 + 自由函数 `lstatAt(fd, rel, opts?)` + 自由函数清单）、§3.P2-c（口径与 `FDPATH_MANIFEST`）、§7 R4、§8 M6 | 接口成员签名补全 `opts?: FsCheckOpts`，并写明 `rel` 约束（非空、≤ 8 段、每段 `isPlainName`）、Linux 实现（具名函数 `linuxLstatAt` = 现 `lstatSync(fdPath(fd, rel))`，行为逐字不变、不开 fd、不碰注册表）与 Darwin 语义。manifest 口径把 `lstatAt` 纳入：`fdPath(` 仍 26 调用表达式 / 24 调用点（writer 少 1、paths.ts `linuxLstatAt` 多 1），另登记 `lstatAt(` 外部调用 1（`writeReportLocked`），路径派生合计 27；表格新增 `linuxLstatAt` 行，M6 与 R4 的数字同步（P0 前后 `grep -n` 均 25 行、`grep -o` 均 27 含声明）。 |
+| R2-#1（②实现链写成契约） | 必修 | **采纳** | §3.P0-a「lstatAt 契约」第 1-5 条、§3.P2-a（多段 bullet）、§3.P2-b（关闭路径与测试） | 契约链：`lstatAt → fdBackendOf(fd).lstatAt → openDirAt(cur, seg, opts) → prepare/open/fstat/checkStat/confirm`；`openDirAt` 接受并透传 `opts`（`uid` 生效，`backend` 对子级忽略）；`confirm` 原子（最后一步才登记，抛错无残留）；`openDirAt` 失败先 `closeQuiet` 再重抛；`lstatAt` 以 `opened[]` + `finally` 反序关闭，任一级失败不泄漏。**中间 fd 归属：立即关闭并注销，不随调用方**——返回值只有 `Stats`、无 fd 可外泄；若不注销只能等 TTL（10 min），与「合法 fd 生命期 ≤ 一次事务」及容量 1024 冲突（分配循环最坏 4096 次 `lstatAt`）；且每次调用都是一次完整链校验。测试断言：各成功/失败路径前后注册表 `size` 与 fd 数相等，4096 次循环不增长；Linux 路径断言注册表未被创建。 |
+| R2-#1（③birthtime 兜底） | 必修 | **采纳（降级为 dev/ino-only，不 fail closed）** | §3.P2-a「birthtime 兜底」、`FdRecord.chain.bt`、`DarwinBackendOpts.birthtime`、§3.P2-d（G2/U5/D1/D3/D5）、§8.2 R-a | 快照条目改为 `{dev, ino, bt: number\|null}`；`birthOf` 仅在 `birthtimeMs` 有限、`>0` 且 `<ctimeMs` 时可信（排除 0/NaN、libuv 回填 ctime 的伪值、刚创建的目录）。比较函数 `darwinSnapshotEqual`：dev/ino 必须相等；原可信现不可信 ⇒ 不等（fail closed）；两侧可信 ⇒ 须 `===`；快照为 `null` ⇒ 只比 dev/ino。选择降级的理由：birthtime 仅是 U5 的补充缓解、主身份是 dev/ino；fail closed 会让 NFS/SMB/exFAT/FUSE/旧卷及 Linux 辅助测试 tmpfs 上整体不可用，且伪 birthtime 会造成假 `moved`；代价（`bt===null` 的目录 U5 窗口仅靠 dev/ino）并入 U5 残余并写入 README/report。测试：D1、D3 在 `birthtime:"auto"` 与 `"off"` 下各跑一遍、判据相同（必拒）；新增 D5 表驱动比较器用例（含「原可信现 null/0 ⇒ 不等」）；inode 复用不可确定性构造，不写「无法发生」断言。 |
+| R2 自查 | — | 已执行 | 本节末 | `grep -n "fdPath(" src/schedule/core/*.ts \| wc -l` = 25（含声明）、`grep -o` = 27（含声明）与文档 P0 前数字一致；P0 后数字由 manifest 测试在落地时核对（迁出 1 / 迁入 1，总数不变）。 |
