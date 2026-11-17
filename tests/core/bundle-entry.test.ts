@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -67,9 +67,32 @@ describe("bundle availability", () => {
 
   it("bundlePath() and bundleUrl() point at dist/bundle/index.js under the package root", () => {
     expect(bundlePath()).toMatch(/\/dist\/bundle\/index\.js$/);
-    // The ?v= query is the cache buster (see bundleUrl's docstring): without it a /reload after
-    // rebuilding would keep the stale module from Node's ESM cache.
-    expect(bundleUrl()).toMatch(/^file:\/\/.*\/dist\/bundle\/index\.js(\?v=\d+)?$/);
+    const t = tmp();
+    try {
+      const file = writeBundle(t.dir);
+      expect(bundleUrl({ bundleFile: file })).toMatch(/^file:.*\?v=[a-f0-9]{64}$/);
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  it("hash changes for same-size edits with preserved mtime, but identical rebuilds reuse the URL", () => {
+    const t = tmp();
+    try {
+      const file = join(t.dir, "bundle.js");
+      writeFileSync(file, "export const value = 1;");
+      const stamp = statSync(file);
+      const old = bundleUrl({ bundleFile: file });
+      writeFileSync(file, "export const value = 2;");
+      utimesSync(file, stamp.atime, stamp.mtime);
+      expect(statSync(file).size).toBe(stamp.size);
+      expect(bundleUrl({ bundleFile: file })).not.toBe(old);
+      writeFileSync(file, "export const value = 1;");
+      expect(bundleUrl({ bundleFile: file })).toBe(old);
+      expect(() => bundleUrl({ bundleFile: join(t.dir, "absent.js") })).toThrow();
+    } finally {
+      t.cleanup();
+    }
   });
 
   it("PI_TOOLKIT_ENTRY=src (case/space tolerant) forces the source path; anything else does not", () => {

@@ -15,6 +15,7 @@ describe("release total archive", () => {
     for (const path of [
       "index.ts",
       "index.js",
+      "bundle-bridge.cjs",
       "src/",
       "skills/",
       "package.json",

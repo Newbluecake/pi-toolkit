@@ -3,8 +3,8 @@
  *
  * The package-root `index.ts` is a dispatcher: it either forwards to the TypeScript source (slow,
  * always correct) or imports the pre-built `dist/bundle/index.js` natively (fast). This module
- * holds everything that decision needs, minus the `import()` itself — the dynamic import stays in
- * the root entry because `tests/boundary/pi-free.test.ts` rejects unresolvable import expressions
+ * holds everything that decision needs, minus the `import()` itself — the native import lives in
+ * the root CJS bridge because `tests/boundary/pi-free.test.ts` rejects unresolvable import expressions
  * anywhere under `src/core/` (a computed specifier is exactly that).
  *
  * Constraints baked in here:
@@ -14,7 +14,8 @@
  * - I8: pi-free — `node:fs` / `node:path` / `node:url` / `node:module` only.
  * - Nothing blocks: every fs call is synchronous but bounded by the src walk (§6.1.1 says 28-33 ms).
  */
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import * as nodeModule from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -36,23 +37,17 @@ export function bundlePath(): string {
   return fileURLToPath(new URL("../../dist/bundle/index.js", import.meta.url));
 }
 
-/** Absolute `file://` URL of the bundle — the computed specifier the dispatcher imports.
+/** Absolute bundle URL, keyed by content rather than filesystem timestamp granularity.
  *
- * The `?v=<mtime>` query is a CACHE BUSTER, not decoration: `.js` goes through Node's native ESM
- * loader (jiti only transforms what native can't load), whose module cache is keyed by the full
- * URL and never evicted. Without the query a `/reload` after `npm run build:bundle` would import
- * the modules already in the cache — i.e. keep running the OLD bundle for the whole process
- * lifetime, which is exactly the silent staleness the build step is supposed to avoid. */
+ * Read/hash on each activation (no mutable cache, I4). Same bytes => same module, including an
+ * identical rebuild; changed bytes => new module even with preserved mtime and size. The root
+ * dispatcher MUST pass this URL through the native CJS bridge: jiti rewrites TS import(url) and
+ * loses its query. Read errors propagate (a present but unreadable artifact is not a fallback).
+ */
 export function bundleUrl(deps: BundleEntryDeps = {}): string {
   const file = deps.bundleFile ?? bundlePath();
-  const href = pathToFileURL(file).href;
-  let stamp: number;
-  try {
-    stamp = statSync(file).mtimeMs;
-  } catch {
-    return href; // missing ⇒ the caller's existsSync gate handles it
-  }
-  return `${href}?v=${Math.floor(stamp)}`;
+  const digest = createHash("sha256").update(readFileSync(file)).digest("hex");
+  return `${pathToFileURL(file).href}?v=${digest}`;
 }
 
 /** Package root, derived from the same anchor. Used for the staleness scan only. */

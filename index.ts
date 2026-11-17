@@ -2,7 +2,7 @@
  * pi 唯一入口（package.json `pi.extensions: ["./index.ts"]`）。
  *
  * 两条路径（startup-bundle plan r3 §3.1/§3.2）：
- *   - 有 `dist/bundle/index.js` ⇒ 先装宿主模块解析钩子，再原生 import 单文件 bundle（~1 s）；
+ *   - 有 `dist/bundle/index.js` ⇒ 先装宿主模块解析钩子，再经 Node CJS bridge 原生 import 单文件 bundle（~1 s）；
  *   - 无（git 安装 / 未构建）或 `PI_TOOLKIT_ENTRY=src` ⇒ 转发 `./src/index.ts`（慢但正确，现状语义）。
  *
  * 不可变项（改动前先读 docs/dev/startup-bundle/plan.md）：
@@ -14,8 +14,12 @@
  *     `src/index.ts` 层继续存在，那里才是对外契约。
  *
  * 错误约定：`existsSync` 为假才走源码；bundle 存在但加载失败 ⇒ 抛错，绝不静默降级。
+ * bundle-bridge.cjs 必须由 createRequire 加载：TS 内的 import(url) 会被 jiti 重写并丢失 query。
+ * query 按 bundle 内容 SHA-256 标识构建；同构建（未重建或字节相同）/reload 仍复用模块，
+ * 不承诺新 epoch / reload completed；不使用每次 activate 的随机 generation（方案 A，非 A+）。
  * 逃生阀：`PI_TOOLKIT_ENTRY=src pi`（见 plan §6.1.2，settings.json 无法设置它）。
  */
+import { createRequire } from "node:module";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 /** 动态 import 的源码入口。字面量 ⇒ 类型可解析；jiti 把 `.js` 后缀解析到 `.ts`。 */
@@ -47,6 +51,9 @@ export default async function activate(pi: ExtensionAPI): Promise<void> {
 
   // 计算式 specifier：干净 checkout 没有 dist/，字面量会让 typecheck 报 TS2307（plan §3.6）。
   const bundleUrl: string = entry.bundleUrl();
-  const bundle = await import(bundleUrl);
+  // createRequire is Node-owned: jiti must never transform the bridge or its import(url).
+  // A missing/broken bridge is a broken installation, not permission to run the source.
+  const nativeImport = createRequire(import.meta.url)("./bundle-bridge.cjs") as (url: string) => Promise<unknown>;
+  const bundle = await nativeImport(bundleUrl);
   await entry.pickBundleFactory(bundle)(pi);
 }

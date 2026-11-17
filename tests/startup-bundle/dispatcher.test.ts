@@ -48,6 +48,7 @@ function layout(bundle: string | undefined): Layout {
 
   writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "pi-toolkit", type: "module" }));
   copyFileSync(join(ROOT, "index.ts"), join(dir, "index.ts"));
+  copyFileSync(join(ROOT, "bundle-bridge.cjs"), join(dir, "bundle-bridge.cjs"));
 
   mkdirSync(join(dir, "src", "core"), { recursive: true });
   copyFileSync(join(ROOT, "src", "core", "bundle-entry.ts"), join(dir, "src", "core", "bundle-entry.ts"));
@@ -166,6 +167,24 @@ describe("root entry dispatcher (plan §3.2)", () => {
     const r = run(l, { PI_TOOLKIT_ENTRY: "src" });
     expect(r.stdout).toContain('{"via":"source"}');
     expect(r.stdout).not.toContain('{"via":"bundle"}');
+  });
+
+  it("bundle present but native bridge missing throws, without source fallback", () => {
+    const l = layout(OK_BUNDLE);
+    rmSync(join(l.dir, "bundle-bridge.cjs"));
+    const r = run(l);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain("bundle-bridge.cjs");
+    expect(r.stdout).not.toContain('{"via":"source"}');
+  });
+
+  it("bundle present but native bridge throws propagates the error", () => {
+    const l = layout(OK_BUNDLE);
+    writeFileSync(join(l.dir, "bundle-bridge.cjs"), 'throw new Error("broken-native-bridge");');
+    const r = run(l);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain("broken-native-bridge");
+    expect(r.stdout).not.toContain('{"via":"source"}');
   });
 
   it("a syntactically broken bundle throws — it must NOT silently fall back to source", () => {

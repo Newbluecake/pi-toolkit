@@ -333,7 +333,7 @@ describe("§7.1 three-path activation parity × 7 profiles", () => {
   });
 
   it("dispatcher resolves the bundle and NEVER the source entry (recorded resolutions, not timing)", () => {
-    const urls = dispatcher.resolvedUrls.map((u) => u.replace("file://", "").replace(/\?v=\d+$/, ""));
+    const urls = dispatcher.resolvedUrls.map((u) => u.replace("file://", "").replace(/\?v=[a-f0-9]+$/, ""));
     expect(urls).toContain(BUNDLE);
     expect(
       urls.some((u) => u.endsWith("/src/index.ts") || u.endsWith("/src/index.js")),
@@ -448,6 +448,7 @@ function makeLayout(bundleContent: string | undefined): Layout {
       JSON.stringify({ name: "pi-toolkit", type: "module", pi: { extensions: ["./index.ts"] } }),
     );
     copyFileSync(join(ROOT, "index.ts"), join(dir, "index.ts"));
+    copyFileSync(join(ROOT, "bundle-bridge.cjs"), join(dir, "bundle-bridge.cjs"));
     cpSync(join(ROOT, "src"), join(dir, "src"), { recursive: true });
     symlinkSync(join(ROOT, "node_modules"), join(dir, "node_modules"), "dir");
     if (bundleContent !== undefined) {

@@ -1,0 +1,19 @@
+# Startup bundle · 开发者要点
+
+设计历史见 [plan.md](./plan.md)。本节覆盖历史文档中关于动态 import / reload 的旧推断。
+
+## 原生加载边界（#48，方案 A）
+
+- pi 1.5 用 jiti 加载根 `index.ts`。TS 内的 `import(bundleUrl)` 会被 jiti 重写，file URL 的 query 在路径解析时丢失；仅把 import 移到另一个 TS 文件无效。
+- 根 dispatcher 在原有宿主身份钩子安装之后，用 `node:module` 的 `createRequire(import.meta.url)` 加载根 `bundle-bridge.cjs`。bridge 是 **Node CJS**，内部的 `import(url)` 才是真正的原生 ESM import；不能改成 jiti import / TS 包装。
+- `bundleUrl()` 每次 activation 读取 bundle，计算 SHA-256 内容标识作为 `?v=`。不依赖 mtime 粒度、size 或包版本；保留时间戳的等长编辑也产生新 URL。没有模块级可变 cache。成本是一次约 6 MB 的同步读取/hash，不扫描源码。
+- 相同字节复用同一 URL / Node ESM namespace；不同字节才重新求值。不在每次 activate 生成随机 generation（未选择 A+），不在 session_start 生成 generation。
+- **同构建（未重建，或重建后字节相同）`/reload` 仍复用模块**。设置可重新装配，但不保证新 MODULE_INSTANCE/epoch 或 `status.reload=completed`；tracker 的跨 epoch 防伪门槛不变。这不是「任意 reload 都升级」的方案。
+- 无 bundle 或 `PI_TOOLKIT_ENTRY=src` 仍走源码；Node 缺 registerHooks 保持既有显式源码降级。有 bundle 但 bridge 丢失、bridge 加载失败、bundle 读/hash/import 失败均抛错，不静默 fallback。
+- `bundle-bridge.cjs` 同时列入 npm `files` 与 release zip 白名单。bridge 不进单文件 bundle；根入口无业务图静态值边，只有 default 导出。宿主 identity、off/secure/child 注册顺序、wire/caps/fixtures 均不改变。
+
+## 升级与验证
+
+重建不会自动更新正在运行的父 pi；需要 `/agent reload` 或重启。hub 是独立进程，`/webhub restart` 不更新父 pi。已有修复前进程能否直接接收新 dispatcher，由真实 pi 同进程升级回归验证；不要只测新启动进程。
+
+回归入口：`tests/integration/startup-bundle-reload.test.ts`（真 hub、真 pi RPC、私有 HOME/socket、跨 rebuild 与同构建预期、旧路径反例、修复前进程升级），最小 jiti/native probe 在 `tests/startup-bundle/`。布局/错误测试在 `dispatcher.test.ts`，内容标识测试在 `tests/core/bundle-entry.test.ts`。构建后执行 `tests/governance/bundle-parity.test.ts` 验证 identity 与 frozen activation/off/secure/child parity；不得重生 fixtures。

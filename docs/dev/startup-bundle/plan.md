@@ -8,6 +8,15 @@
 
 ---
 
+## #48 修正（2026-11-17，方案 A）
+
+当前实现契约以 [README.md](./README.md) 为准。下文为 r3 历史设计；其中「TS 计算式
+import 绕过 jiti」「仅生成 query 即能刷新」的推断已被真实 pi 1.5 复现推翻：jiti 会去掉
+file URL query。根入口现经 Node `createRequire` 加载 `bundle-bridge.cjs`，由 bridge
+执行原生 import；`?v=` 改为 bundle 内容 SHA-256，避免 mtime/size 碰撞。bridge 必须
+同时进 npm files 与 release zip 白名单，缺失/加载失败不降级。同构建（未重建或字节相同）
+/reload 仍复用模块，不保证新 epoch/completed；未选择每次 activation 新 generation 的 A+。
+
 ## 1. 背景与目标
 
 ### 1.1 问题
