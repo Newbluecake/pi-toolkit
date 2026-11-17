@@ -62,6 +62,8 @@ export interface HubAssemblyBase {
 export interface HubAssembly extends HubAssemblyBase {
   close?: RunningHub["close"];
   socketIdentity?: SocketIdentity;
+  /** Existing singleton owner, not a second lifecycle owner or an abstract recovery lock. */
+  singletonOwner?: Extract<import("./singleton.js").SingletonResult, { kind: "owner" }>;
   kdfInFlight: number;
   lanBlockedByRotate: boolean;
   lanClosedByRotateScan: boolean;

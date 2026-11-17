@@ -5,6 +5,15 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { Writable } from "node:stream";
 import { constants, gunzipSync, type Gzip } from "node:zlib";
 import { afterEach, describe, expect, it, vi } from "vitest";
+// Composition-only test: no singleton/socket is constructed here. Substitute the
+// recovery boundary with the REAL read-only initializer, not a usable-store stub.
+// Ownership/retirement is separately exercised through real startHub in tier2.
+vi.mock("../../../../src/web-hub/hub/terminal/authority-recovery.js", async () => {
+  const { initializeTerminalStore } = await import("../../../../src/web-hub/protocol/terminal-local.js");
+  return {
+    prepareTerminalStore: (ctx: { paths: { stateDir: string } }) => initializeTerminalStore(ctx.paths.stateDir),
+  };
+});
 import { assembleTerminal } from "../../../../src/web-hub/hub/assembly-terminal.js";
 import type { HubAssembly } from "../../../../src/web-hub/hub/assembly.js";
 import { createPrivacyStore } from "../../../../src/web-hub/hub/privacy/store.js";
@@ -140,6 +149,7 @@ describe.each(["identity", "gzip"] as const)("private terminal SSE through %s ou
             maxLifetimeMs: 28800000,
           },
         }),
+        deps: {},
         now: () => 0,
         paths: { stateDir },
         log: memLog(),

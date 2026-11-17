@@ -265,3 +265,27 @@ describe("one guarded prev-boot compensation per new link", () => {
     expect(factory).toHaveBeenCalledTimes(1);
   });
 });
+
+it("late compensation cannot overwrite an already-created successor session owner", async () => {
+  const held = pending<ReturnType<typeof owner>>(),
+    old = owner(),
+    next = owner();
+  const live = { localConnectionInstance: "L1", sessionId: options.sessionId, epoch: options.epoch };
+  const factory = vi
+    .fn()
+    .mockRejectedValueOnce(new TerminalLocalError("stale-authority-prev-boot"))
+    .mockReturnValueOnce(held.promise)
+    .mockResolvedValueOnce(next);
+  const w = createTerminalWiring(factory);
+  await w.start({ ...options, current: () => live });
+  const retry = w.retryLocalAfterHubLink("L1");
+  await w.start({ ...options, sessionId: "next", current: () => ({ ...live, sessionId: "next" }) });
+  held.resolve(old);
+  expect(await retry).toBe(false);
+  expect(old.dispose).toHaveBeenCalledTimes(1);
+  expect(next.dispose).not.toHaveBeenCalled();
+  w.receive(request);
+  expect(next.receive).toHaveBeenCalledTimes(1);
+  expect(old.receive).not.toHaveBeenCalled();
+  w.dispose();
+});

@@ -8,6 +8,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  renameSync,
   readdirSync,
   rmSync,
   statSync,
@@ -20,7 +21,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { startHub, type StartHubDeps } from "../../src/web-hub/hub/hub.js";
 import { createHttpFrontend } from "../../src/web-hub/hub/http.js";
-import { resolveHubPaths } from "../../src/web-hub/protocol/paths.js";
+import { resolveHubPaths, verifyBoundSocket } from "../../src/web-hub/protocol/paths.js";
 import {
   createLocalAuthority,
   initializeTerminalStore,
@@ -315,8 +316,10 @@ describe("#49 singleton-owned conservative authority retirement", () => {
     "last rename publish window: %s",
     async (mode) => {
       const f = fixture();
+      const existing = await createLocalAuthority(f.paths.stateDir, input(), () => true);
+      const original = snapshotFiles(f)[0]!;
       seed(f);
-      const old = snapshotFiles(f),
+      const old = snapshotFiles(f).filter((x) => !x.name.startsWith(existing.recordId)),
         before = immutable(f);
       let release!: () => void, reached!: () => void;
       const barrier = new Promise<void>((r) => {
@@ -357,10 +360,13 @@ describe("#49 singleton-owned conservative authority retirement", () => {
         },
       });
       release();
-      await publisher;
+      await expect(publisher).resolves.toMatchObject({ store: { root: f.root } });
       expect(transient).toBeGreaterThan(0);
       if (!["receipt-change", "journal-change"].includes(mode)) expect(attempts).toBeGreaterThan(1);
       assertRetirement(f, old);
+      expect(readFileSync(join(f.auth, original.name))).toEqual(original.bytes);
+      expect(statSync(join(f.auth, original.name)).ino).toBe(original.ino);
+      expect(statSync(join(f.auth, original.name)).nlink).toBe(1);
       if (["pending", "linked"].includes(mode)) {
         expect(status(f).state).toBe("ready");
         await expect(initializeTerminalStore(f.paths.stateDir)).resolves.toBeDefined();
@@ -733,4 +739,83 @@ describe("single startup budget and fail-closed test seams", () => {
       assertImmutable(before);
     },
   );
+});
+
+it("a symlink to otherwise valid candidate bytes is rejected before archive; target inode/bytes untouched", async () => {
+  const f = fixture();
+  seed(f);
+  const old = snapshotFiles(f),
+    source = join(f.auth, old[0]!.name),
+    target = join(f.home, "valid-sentinel");
+  writeFileSync(target, old[0]!.bytes, { mode: 0o600 });
+  const ino = statSync(target).ino;
+  rmSync(source);
+  symlinkSync(target, source);
+  await start(f);
+  expect(status(f)).toMatchObject({ state: "unavailable", reason: "unsafe-file" });
+  expect(transactions(f)).toEqual([]);
+  expect(readFileSync(target)).toEqual(old[0]!.bytes);
+  expect(statSync(target).ino).toBe(ino);
+});
+it("new unsafe pending is not granted transient retry even after a real retirement", async () => {
+  const f = fixture();
+  seed(f);
+  const target = join(f.home, "pending-sentinel");
+  writeFileSync(target, "unchanged", { mode: 0o600 });
+  let attempts = 0,
+    transient = 0;
+  await start(f, {
+    async afterLastRenameBeforeFinalCheck() {
+      symlinkSync(target, join(f.auth, ".pending-" + "p".repeat(32)));
+    },
+    onFinalValidationAttempt() {
+      attempts++;
+    },
+    onPublicationPending() {
+      transient++;
+    },
+  });
+  expect(status(f).state).toBe("unavailable");
+  expect(attempts).toBe(1);
+  expect(transient).toBe(0);
+  expect(readFileSync(target, "utf8")).toBe("unchanged");
+});
+
+it("a copied bound-socket identity without the held singleton owner is not recovery authority", async () => {
+  const f = fixture();
+  await start(f);
+  seed(f);
+  const old = snapshotFiles(f);
+  const identity = await verifyBoundSocket(f.paths.socketPath, { dev: 0, ino: 0 });
+  await expect(
+    prepareTerminalStore({
+      paths: f.paths,
+      socketIdentity: identity,
+      startup: new AbortController(),
+      isClosing: () => false,
+      log: { info() {}, warn() {}, error() {}, close() {} },
+    }),
+  ).rejects.toMatchObject({ reason: "authority-recovery-not-owner" });
+  expect(transactions(f)).toEqual([]);
+  expect(snapshotFiles(f)).toEqual(old);
+});
+it("an exchanged physical authority directory is detected through held directory identity", async () => {
+  const f = fixture();
+  seed(f);
+  const old = snapshotFiles(f),
+    saved = join(f.root, "authority-before-swap");
+  await start(f, {
+    async stage(event) {
+      if (event.stage !== "prepared-durable-before-rename") return;
+      renameSync(f.auth, saved);
+      mkdirSync(f.auth, { mode: 0o700 });
+      for (const x of old) writeFileSync(join(f.auth, x.name), x.bytes, { mode: 0o600 });
+    },
+  });
+  expect(status(f)).toMatchObject({ state: "unavailable", reason: "authority-recovery-state-changed" });
+  expect(transactions(f).flatMap((tx) => files(join(tx, "retired")))).toEqual([]);
+  for (const x of old) {
+    expect(readFileSync(join(saved, x.name))).toEqual(x.bytes);
+    expect(statSync(join(saved, x.name)).ino).toBe(x.ino);
+  }
 });

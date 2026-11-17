@@ -224,7 +224,7 @@ function archiveFileBytes(path: string, max: number): number {
     closeSync(fd);
   }
 }
-type AssemblyOwner = Pick<HubAssembly, "paths" | "socketIdentity" | "startup" | "isClosing" | "log">;
+type AssemblyOwner = Pick<HubAssembly, "paths" | "socketIdentity" | "singletonOwner" | "startup" | "isClosing" | "log">;
 /** Deliberately accepts real assembly ownership, not an abstract lock or boolean.
  * Only production caller is assembleTerminal, after acquireSingleton succeeds. */
 export async function prepareTerminalStore(ctx: AssemblyOwner, test: AuthorityRecoveryTestDeps = {}) {
@@ -245,7 +245,14 @@ export async function prepareTerminalStore(ctx: AssemblyOwner, test: AuthorityRe
       const held: HeldDirectory[] = [];
       const tick = () => {
         if (signal.aborted || Date.now() >= deadlineAt) fail("io-deadline");
-        if (ctx.isClosing() || !ctx.socketIdentity) fail("authority-recovery-not-owner");
+        if (
+          ctx.isClosing() ||
+          !ctx.socketIdentity ||
+          ctx.singletonOwner?.kind !== "owner" ||
+          !ctx.singletonOwner.server.listening ||
+          ctx.singletonOwner.identity !== ctx.socketIdentity
+        )
+          fail("authority-recovery-not-owner");
         for (const dir of held) dir.check();
       };
       const current = async () => {

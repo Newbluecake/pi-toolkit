@@ -320,6 +320,7 @@ export async function startHub(
     }
     if (single.kind === "failed") throw new Error(`web-hub: ${single.error}`);
     ctx.socketIdentity = single.identity;
+    ctx.singletonOwner = single;
     const owner = single; // narrow once here; closures defined below (e.g. `close`) don't retain flow narrowing
     cleanup.push(() => owner.release());
     startup.signal.throwIfAborted();
