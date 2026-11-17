@@ -523,7 +523,18 @@ describe("archive safety, capacity, resource and crash evidence", () => {
       );
       const before = immutable(f),
         receipts = files(join(f.root, "receipts"));
-      await start(f);
+      // Repeated real startups at logical +5/30/60s never age out physical metadata.
+      const anchor = Date.now();
+      const advances = kind === "nonzero-empty" ? [0] : [0, 5000, 30000, 60000];
+      for (const advance of advances) {
+        const h = await start(f, undefined, { now: () => anchor + advance });
+        assertImmutable(before);
+        if (kind !== "nonzero-empty") {
+          expect(status(f).state).toBe("unavailable");
+          expect(transactions(f)).toEqual([]);
+        }
+        if (advance !== advances.at(-1)) await h.close("test-clock");
+      }
       assertImmutable(before);
       expect(files(join(f.root, "receipts"))).toEqual(receipts);
       if (kind === "nonzero-empty") expect(status(f).state).toBe("ready");
