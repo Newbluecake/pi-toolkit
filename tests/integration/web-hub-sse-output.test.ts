@@ -448,8 +448,8 @@ describe.each(["identity", "gzip"] as const)("early terminal unavailable over re
       expect(frames.find((frame) => frame.event === "hub")?.data.caps).toContain(TERMINAL_UI_CAP);
       const terminal = frames.find((frame) => frame.event === "hub")?.data.terminal;
       expect(terminal).toMatchObject({ state: "unavailable", reason: expect.any(String) });
-      if (reason === "stale-pid") expect(terminal.reason).toBe("local-store-unavailable");
-      if (reason === "stale-boot") expect(terminal.reason).toBe("residual-authority-state");
+      if (reason === "stale-pid") expect(terminal.reason).toBe("stale-authority-same-boot");
+      if (reason === "stale-boot") expect(terminal.reason).toBe("authority-corrupt");
       if (reason === "degraded-privacy") expect(terminal.reason).toBe("privacy-unavailable");
       expect(frames.some((frame) => frame.event === "agents")).toBe(true);
       const headers = { Cookie: cookie, Origin: `http://127.0.0.1:${port}` };

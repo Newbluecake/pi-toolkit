@@ -142,6 +142,9 @@ const HISTORY_SERVICE_DISPOSE_MS = 2_500;
  */
 export const RESTORE_REASONS: ReadonlySet<string> = new Set(["restart", "superseded", "crash"]);
 export interface StartHubDeps {
+  /** Programmatic test-only stage/syscall barriers; main.ts never supplies this.
+   * No config/env/wire path. Ignored entirely when terminal policy is off/denied. */
+  terminalAuthorityRecoveryTestDeps?: import("./terminal/authority-recovery.js").AuthorityRecoveryTestDeps;
   now?: () => number;
   uid?: number;
   xdgRuntimeDir?: string;

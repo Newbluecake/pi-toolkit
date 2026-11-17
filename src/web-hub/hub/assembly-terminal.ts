@@ -1,5 +1,6 @@
 /** Enabled-only terminal composition. Missing local authority is unavailable, not
  * permission inferred from a status/card, wire booleans or an absent journal. */
+import { prepareTerminalStore } from "./terminal/authority-recovery.js";
 import type { HubAssembly } from "./assembly.js";
 import { auditTerminal } from "./audit.js";
 import { TerminalResourceFence, createLocalTerminalProofVerifier } from "./terminal/resource-fence.js";
@@ -22,11 +23,11 @@ import type { TerminalIngressPort, TerminalResourceJournalPort } from "./ports.j
 export async function assembleTerminal(ctx: HubAssembly) {
   const config = ctx.config.terminal;
   if (config === undefined) return undefined;
-  const { now, paths, log } = ctx;
+  const { now, log } = ctx;
   let store: Awaited<ReturnType<typeof initializeTerminalStore>> | undefined;
   let reason = "local-store-unavailable";
   try {
-    store = await initializeTerminalStore(paths.stateDir);
+    store = await prepareTerminalStore(ctx, ctx.deps.terminalAuthorityRecoveryTestDeps);
   } catch (error) {
     reason = error instanceof TerminalLocalError ? error.reason : "local-store-unavailable";
     log.warn("web-hub terminal unavailable", { reason });

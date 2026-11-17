@@ -45,3 +45,28 @@ describe("terminal audit §11", () => {
     ).toBe(false);
   });
 });
+
+it("authority retirement emits only fixed outcome/count, never evidence material", () => {
+  const out: object[] = [];
+  auditTerminal(
+    {
+      info: (_m, data) => {
+        out.push(data!);
+      },
+    },
+    {
+      op: "authority-recovery",
+      ok: true,
+      code: "E_AUTHORITY_RECOVERED",
+      n: 2,
+      ms: 10,
+      path: "/private",
+      nonce: "secret",
+      hash: "secret",
+      manifest: "secret",
+    } as never,
+  );
+  expect(out).toEqual([
+    { audit: "terminal", op: "authority-recovery", ok: true, code: "E_AUTHORITY_RECOVERED", n: 2, ms: 10 },
+  ]);
+});

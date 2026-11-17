@@ -1010,6 +1010,7 @@ export function auditTerminal(log: Pick<HubLog, "info">, record: TerminalAuditRe
           "reap",
           "reap-incomplete",
           "aggregate",
+          "authority-recovery",
         ].includes(v))
     )
       continue;

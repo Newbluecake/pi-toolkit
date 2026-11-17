@@ -124,7 +124,14 @@ export function checkLocalDirectory(path: string): void {
 }
 /** O_NONBLOCK + regular file + bounded exact read, including all synchronous final guards. */
 export function readLocalFile(path: string, max = 131072): Buffer {
-  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  let fd: number;
+  try {
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  } catch (error) {
+    if (["ELOOP", "EACCES", "EPERM"].includes((error as NodeJS.ErrnoException).code ?? ""))
+      throw new TerminalLocalError("unsafe-file");
+    throw error;
+  }
   try {
     const st = fstatSync(fd);
     if (!st.isFile() || st.uid !== process.getuid?.() || (st.mode & 0o777) !== 0o600 || st.nlink !== 1 || st.size > max)
@@ -564,7 +571,9 @@ export function probeLocalProcess(pid: number, deps: LocalProcessProbeDeps = pro
         try {
           deps.directory(pid);
         } catch (directoryError) {
-          if ((directoryError as NodeJS.ErrnoException).code === "ENOENT") result = { kind: "absent" };
+          if ((directoryError as NodeJS.ErrnoException).code !== "ENOENT") break;
+          if (attempt === 0) continue;
+          result = { kind: "absent" };
           break;
         }
       }
