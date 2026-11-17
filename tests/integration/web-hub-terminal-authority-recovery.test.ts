@@ -19,6 +19,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { acquireSingleton } from "../../src/web-hub/hub/singleton.js";
 import { startHub, type StartHubDeps } from "../../src/web-hub/hub/hub.js";
 import { createHttpFrontend } from "../../src/web-hub/hub/http.js";
 import { resolveHubPaths, verifyBoundSocket } from "../../src/web-hub/protocol/paths.js";
@@ -818,4 +819,60 @@ it("an exchanged physical authority directory is detected through held directory
     expect(readFileSync(join(saved, x.name))).toEqual(x.bytes);
     expect(statSync(join(saved, x.name)).ino).toBe(x.ino);
   }
+});
+
+it("startup abort returns without waiting for held IO and fences the late continuation", async () => {
+  const f = fixture();
+  seed(f);
+  const old = snapshotFiles(f),
+    controller = new AbortController();
+  const single = await acquireSingleton(f.paths);
+  if (single.kind !== "owner") throw new Error("private singleton required");
+  cleanup.push(() => single.release());
+  let release!: () => void,
+    reached!: () => void,
+    renames = 0,
+    settled = false;
+  const hold = new Promise<void>((resolve) => {
+      release = resolve;
+    }),
+    barrier = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+  const pending = prepareTerminalStore(
+    {
+      paths: f.paths,
+      singletonOwner: single,
+      socketIdentity: single.identity,
+      startup: controller,
+      isClosing: () => false,
+      log: { info() {}, warn() {}, error() {}, close() {} },
+    },
+    {
+      async stage(event) {
+        if (event.stage === "prepared-durable-before-rename") {
+          reached();
+          await hold;
+        }
+      },
+      beforeSyscall(op) {
+        if (op === "rename") renames++;
+      },
+    },
+  );
+  const result = pending.catch((error) => {
+    settled = true;
+    return error;
+  });
+  await barrier;
+  controller.abort();
+  try {
+    await vi.waitFor(() => expect(settled).toBe(true), { timeout: 300, interval: 5 });
+  } finally {
+    release();
+  }
+  expect(await result).toMatchObject({ reason: "io-deadline" });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  expect(renames).toBe(0);
+  expect(snapshotFiles(f)).toEqual(old);
 });

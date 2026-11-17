@@ -239,7 +239,7 @@ export async function prepareTerminalStore(ctx: AssemblyOwner, test: AuthorityRe
     audited = true;
     auditTerminal(ctx.log, { op: "authority-recovery", ok, code, n: moved, ms: Date.now() - started });
   };
-  return localBounded(
+  const pending = localBounded(
     async (ioSignal) => {
       const signal = AbortSignal.any([ioSignal, ctx.startup.signal]);
       const held: HeldDirectory[] = [];
@@ -536,7 +536,8 @@ export async function prepareTerminalStore(ctx: AssemblyOwner, test: AuthorityRe
       }
     },
     Math.max(0, deadlineAt - Date.now()),
-  ).catch((error: unknown) => {
+  );
+  return withStartupAbort(pending, ctx.startup.signal).catch((error: unknown) => {
     const reason = error instanceof TerminalLocalError ? error.reason : "local-store-unavailable";
     audit(false, reason === "io-deadline" ? "E_AUTHORITY_DEADLINE" : "E_AUTHORITY_BLOCKED");
     if (reason === "io-deadline" && publicationPending && !ctx.startup.signal.aborted)
@@ -571,6 +572,30 @@ function pause(ms: number, signal: AbortSignal): Promise<void> {
     }, ms);
     timer.unref();
     signal.addEventListener("abort", aborted, { once: true });
+    if (signal.aborted) aborted();
+  });
+}
+
+/** Startup cancellation returns immediately even if a private IO/barrier has not
+ * settled. The merged signal fences its late continuation; only the real worker's
+ * finally closes held fds. This is cancellation, not cancellation of kernel IO. */
+function withStartupAbort<T>(pending: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const aborted = () => {
+      signal.removeEventListener("abort", aborted);
+      reject(new TerminalLocalError("io-deadline"));
+    };
+    signal.addEventListener("abort", aborted, { once: true });
+    pending.then(
+      (value) => {
+        signal.removeEventListener("abort", aborted);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener("abort", aborted);
+        reject(error);
+      },
+    );
     if (signal.aborted) aborted();
   });
 }
