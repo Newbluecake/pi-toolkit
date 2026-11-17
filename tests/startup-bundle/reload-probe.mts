@@ -87,6 +87,13 @@ let stderr = "";
 let stdout = "";
 let hub: Awaited<ReturnType<typeof startHub>> | undefined;
 let deps: Parameters<typeof createHttpFrontend>[0] | undefined;
+// Independent of the vitest parent's process-group watchdog: if the parent dies, this
+// private hub/agent pair must still have a finite lifetime. Normal exits use finally below.
+const lifetime = setTimeout(() => {
+  child?.kill("SIGKILL");
+  process.exit(124);
+}, 90_000);
+lifetime.unref();
 const events: Array<{ type: string; [key: string]: unknown }> = [];
 const replies = new Map<string, any>();
 const rpc = async (type: string): Promise<any> => {
@@ -297,6 +304,7 @@ try {
 } finally {
   await stopAgent();
   if (hub && !("exists" in hub)) await hub.close("t48-private-probe-finished");
+  clearTimeout(lifetime);
   // No token/cookie in evidence; only bounded diagnostics on failure are printed by the parent.
   rmSync(base, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 }
