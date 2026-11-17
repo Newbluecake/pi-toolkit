@@ -27,6 +27,7 @@ describe("single authority archive accounting", () => {
     else expect(() => authorityArchiveBudget({ ...base, snapshotBytes })).toThrowError("authority-archive-capacity");
   });
   it("all planned files including retained inode, manifest and completion are charged", () => {
+    expect(MAX).toBe(256 * 1024 * 1024);
     expect(authorityArchiveBudget(base)).toBe(7);
     for (const key of ["snapshotBytes", "manifestBytes", "completionBytes"] as const)
       expect(() => authorityArchiveBudget({ ...base, existingBytes: MAX - 7, [key]: base[key] + 1 })).toThrowError(

@@ -60,6 +60,8 @@ export interface AuthorityRecoveryTestDeps {
   afterLastRenameBeforeFinalCheck?(): Promise<void>;
   onFinalValidationAttempt?(attempt: number): void;
   onPublicationPending?(): void;
+  /** Deterministic backoff/count tests only. Default remains real unref/abort-aware pause. */
+  sleep?(ms: number, signal: AbortSignal): Promise<void>;
 }
 export function authorityArchiveBudget(input: {
   transactions: number;
@@ -514,7 +516,7 @@ export async function prepareTerminalStore(ctx: AssemblyOwner, test: AuthorityRe
           test.onPublicationPending?.();
           if (attempt >= 8 || Date.now() >= deadlineAt) fail("authority-publication-unsettled");
           const delay = Math.min(5 * 2 ** attempt, Math.max(0, deadlineAt - Date.now() - 1));
-          await pause(delay, signal); // shared absolute deadline; never reset 2s
+          await (test.sleep ?? pause)(delay, signal); // shared absolute deadline; never reset 2s
         }
         await current();
         invariant();

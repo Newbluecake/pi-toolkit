@@ -329,7 +329,7 @@ describe("#49 singleton-owned conservative authority retirement", () => {
       expect(transactions(f).flatMap((tx) => files(join(tx, "retired")))).toEqual([]);
     },
   );
-  it.each(["pending", "linked", "stalled", "bad-final", "receipt-change", "journal-change"])(
+  it.each(["pending", "linked", "stalled", "bounded-rounds", "bad-final", "receipt-change", "journal-change"])(
     "last rename publish window: %s",
     async (mode) => {
       const f = fixture();
@@ -345,6 +345,7 @@ describe("#49 singleton-owned conservative authority retirement", () => {
         hold = new Promise<void>((r) => {
           release = r;
         });
+      const delays: number[] = [];
       let publisher: ReturnType<typeof createLocalAuthority> | undefined,
         attempts = 0,
         transient = 0;
@@ -355,6 +356,13 @@ describe("#49 singleton-owned conservative authority retirement", () => {
       const hooks: TerminalPublicationTestHooks =
         mode === "linked" ? { afterLinkBeforeTempUnlink: hook } : { afterTempDurable: hook };
       await start(f, {
+        ...(mode === "bounded-rounds"
+          ? {
+              sleep: async (ms: number) => {
+                delays.push(ms);
+              },
+            }
+          : {}),
         async afterLastRenameBeforeFinalCheck() {
           publisher = createLocalAuthority(f.paths.stateDir, input(), () => true, hooks);
           await barrier;
@@ -364,7 +372,7 @@ describe("#49 singleton-owned conservative authority retirement", () => {
         },
         onPublicationPending() {
           transient++;
-          if (mode !== "stalled") release();
+          if (mode !== "stalled" && mode !== "bounded-rounds") release();
           if (mode === "bad-final") writeFileSync(join(f.auth, "b".repeat(32) + ".json"), "{}", { mode: 0o600 });
           if (mode === "receipt-change")
             writeFileSync(join(f.root, "receipts", "r".repeat(32) + ".json"), "{}", { mode: 0o600 });
@@ -390,9 +398,10 @@ describe("#49 singleton-owned conservative authority retirement", () => {
         assertImmutable(before);
       } else {
         expect(status(f).state).toBe("unavailable");
-        if (mode === "stalled") {
+        if (mode === "stalled" || mode === "bounded-rounds") {
           expect(status(f).reason).toBe("authority-publication-unsettled");
           expect(attempts).toBe(9);
+          if (mode === "bounded-rounds") expect(delays).toEqual([5, 10, 20, 40, 80, 160, 320, 640]);
         }
       }
     },
