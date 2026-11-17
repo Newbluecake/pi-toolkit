@@ -1391,7 +1391,15 @@ async function handleLanRequestInner(
         boundOrigin: ctx.externalOrigin,
         verifiedAt: rt.now(),
       });
-      terminalFrontend(rt.terminal)?.openSse(req, res, session.identity, client.id, ctx.externalOrigin, client.output);
+      terminalFrontend(rt.terminal)?.openSse(
+        req,
+        res,
+        session.identity,
+        client.id,
+        ctx.externalOrigin,
+        client.output,
+        (reason) => rt.routes.terminalUnavailable?.(client, reason),
+      );
       // §4.2 review fix (LC #1): a db-independent hard ceiling — cleared on the connection's own
       // `close` (natural disconnect, logout/passwd revoke, or the 55s tick's own "expired" revoke).
       rt.sseClientIps?.set(client, ctx.clientIp);

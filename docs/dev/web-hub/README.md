@@ -1182,8 +1182,13 @@ capability、末跳 pure-witness trusted-CODE 边界及 stock tokenizer/template
 
 终端开启时，两个 listener 经 terminal routes/assembly 显式传递原 `SseClient.output` 给
 binding；私有 `terminal_connection` / `terminal` 同样经过此 encoder/FIFO/逐帧 flush，
-不进入公开事件表或 replay ring。binding 按 output 的总 pending bytes 检查原 64 KiB
-压力界；撤销通过 output.abort 丢弃未写队列并关闭原连接，不得旁路 `res.write/end`。
+不进入公开事件表或 replay ring。#50 初始公共 bootstrap 有 pending 时先等原 encoder/FIFO 与
+下游可写通知（一次性、绝对2s、timer unref），不 mint/send 私有能力；超时仅放弃 binding，
+原连接收到完整 HubInfo 的 optional negative `terminal.reason="sse-admission-timeout"`，公共流与
+clientId 保留，刷新新 SSE 才重试。close/error/fence/privacy/dispose 封等待；准入重核原 proof。
+成功建立敏感 binding 后，仍按 output 总 pending bytes 检查原64KiB压力界，撤销通过 output.abort
+同步丢弃未写队列并关闭原连接，不得旁路 `res.write/end`。初始公共 burst 不再触发这条私有撤权门，
+公共24MiB准入帽及净进展期限保持独立。细节、固定限频诊断与风险见 terminal README。
 初始 terminal local/privacy 不可用且尚无私有 binding 时保留公共 SSE/clientId，拒绝终端写操作；
 browser HubInfo 的 optional `terminal:{state:"unavailable",reason}` 只作负面提示，不是执行权。
 这是 #49 P0 对 early `finish()` 的声明式修正，避免 hello 后 subscribe 404/重连循环；已绑定后的撤权仍同步 abort。

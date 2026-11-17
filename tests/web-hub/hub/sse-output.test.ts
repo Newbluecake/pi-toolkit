@@ -297,3 +297,40 @@ describe("ordered SSE output and lifecycle", () => {
     expect(output.send("late")).toBe(false);
   });
 });
+
+describe.each([false, true])("one-shot drained encoder observation (gzip=%s)", (compressed) => {
+  it("notifies only after queued/in-flight frames and downstream pressure drain; observes cancellation", async () => {
+    const { res, output } = setup(compressed, 2 ** 21, 5000);
+    res.stalled = true;
+    output.send("public bootstrap".repeat(8192));
+    const ready = vi.fn();
+    const cancelled = vi.fn();
+    output.onIdle(ready);
+    const cancel = output.onIdle(cancelled);
+    cancel();
+    await vi.waitFor(() => expect(res.release).toBeDefined(), { interval: 5 });
+    expect(ready).not.toHaveBeenCalled();
+    res.stalled = false;
+    res.release!();
+    await vi.waitFor(() => expect(ready).toHaveBeenCalledTimes(1), { interval: 5 });
+    expect(cancelled).not.toHaveBeenCalled();
+    output.send("later public frame");
+    await vi.waitFor(() => expect(output.pendingBytes()).toBe(0), { interval: 5 });
+    expect(ready).toHaveBeenCalledTimes(1);
+    output.abort();
+  });
+
+  it("abort clears pending observation without minting a late capability", async () => {
+    const { res, output } = setup(compressed, 2 ** 21, 5000);
+    res.stalled = true;
+    output.send("public bootstrap".repeat(8192));
+    const ready = vi.fn();
+    output.onIdle(ready);
+    output.abort();
+    res.stalled = false;
+    res.release?.();
+    await Promise.resolve();
+    expect(ready).not.toHaveBeenCalled();
+    expect(res.destroyed).toBe(true);
+  });
+});

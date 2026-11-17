@@ -967,8 +967,14 @@ export const TERMINAL_AUDIT_KEYS = [
   "n",
   "exitCode",
   "reap",
+  "phase",
+  "encoding",
+  "pending",
 ] as const;
 export interface TerminalAuditRecord {
+  phase?: "admission" | "bound";
+  encoding?: "identity" | "gzip";
+  pending?: number;
   op: string;
   listener?: "loopback" | "lan";
   ok: boolean;
@@ -1011,15 +1017,18 @@ export function auditTerminal(log: Pick<HubLog, "info">, record: TerminalAuditRe
           "reap-incomplete",
           "aggregate",
           "authority-recovery",
+          "sse",
         ].includes(v))
     )
       continue;
     if (k === "code" && (typeof v !== "string" || !/^E_[A-Z_]{1,40}$/.test(v))) continue;
     if (k === "ok" && typeof v !== "boolean") continue;
     if (k === "listener" && v !== "loopback" && v !== "lan") continue;
+    if (k === "phase" && v !== "admission" && v !== "bound") continue;
+    if (k === "encoding" && v !== "identity" && v !== "gzip") continue;
     if (k === "reap" && v !== "reaped" && v !== "reap_incomplete") continue;
     if (
-      ["ms", "bytesIn", "bytesOut", "droppedBytes", "n", "exitCode"].includes(k) &&
+      ["ms", "bytesIn", "bytesOut", "droppedBytes", "n", "exitCode", "pending"].includes(k) &&
       (typeof v !== "number" || !Number.isSafeInteger(v) || v < 0)
     )
       continue;

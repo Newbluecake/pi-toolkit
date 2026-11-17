@@ -48,13 +48,14 @@ class Response extends Writable {
 const cleanups: Array<() => void | Promise<void>> = [];
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
+  vi.useRealTimers();
 });
 
-function setup(encoding: "identity" | "gzip") {
+function setup(encoding: "identity" | "gzip", audit = vi.fn()) {
   let now = 0;
   const hub = createSseHub({ now: () => now });
   const fence = new TerminalRevocationFence(() => now);
-  const bindings = new TerminalSseBindings(fence, () => now);
+  const bindings = new TerminalSseBindings(fence, () => now, audit);
   const identity: AuthIdentity = {
     listener: "loopback",
     principal: "test",
@@ -73,6 +74,7 @@ function setup(encoding: "identity" | "gzip") {
     const client = hub.attach(req, res as unknown as ServerResponse, lastEventId);
     function text(complete = false) {
       const bytes = Buffer.concat(res.chunks);
+      if (bytes.length === 0) return "";
       return (
         encoding === "gzip" ? gunzipSync(bytes, complete ? {} : { finishFlush: constants.Z_SYNC_FLUSH }) : bytes
       ).toString("utf8");
@@ -95,15 +97,18 @@ function setup(encoding: "identity" | "gzip") {
     return { req, res, client, text, frames, compressor: () => compressor };
   }
   const conn = attach();
-  function connect() {
-    const binding = bindings.connect(
+  async function connect() {
+    bindings.connect(
       conn.req,
       conn.res as unknown as ServerResponse,
       identity,
       conn.client.id,
       "http://localhost",
       conn.client.output,
-    )!;
+    );
+    await until(() => expect(conn.frames().some((f) => f.event === "terminal_connection")).toBe(true));
+    const connection = conn.frames().find((f) => f.event === "terminal_connection")!.data;
+    const binding = bindings.resolve(identity, { clientId: conn.client.id, ...connection });
     expect(binding.metadata.live).toBe(true);
     expect(
       bindings.resolve(identity, {
@@ -119,7 +124,17 @@ function setup(encoding: "identity" | "gzip") {
     hub.closeAll();
     fence.dispose();
   });
-  return { ...conn, hub, bindings, fence, identity, connect, attach, expire: () => (now = 60_000) };
+  return {
+    ...conn,
+    hub,
+    bindings,
+    fence,
+    identity,
+    connect,
+    attach,
+    advance: (ms: number) => (now += ms),
+    expire: () => (now = 60_000),
+  };
 }
 
 async function until(assertion: () => void) {
@@ -195,10 +210,162 @@ describe.each(["identity", "gzip"] as const)("private terminal SSE through %s ou
     },
   );
 
+  it("defers the first private capability until a large public bootstrap actually drains", async () => {
+    const audit = vi.fn();
+    const f = setup(encoding, audit);
+    f.res.stalled = true;
+    f.client.send("fleet", { text: "x".repeat(96 * 1024) });
+    expect(f.client.output.pendingBytes()).toBeGreaterThan(65_536);
+    const abort = vi.spyOn(f.client.output, "abort");
+    const unavailable = vi.fn();
+    expect(
+      f.bindings.connect(
+        f.req,
+        f.res as unknown as ServerResponse,
+        f.identity,
+        f.client.id,
+        "http://localhost",
+        f.client.output,
+        unavailable,
+      ),
+    ).toBeUndefined();
+    expect(abort).not.toHaveBeenCalled();
+    expect(f.text()).not.toContain("terminal_connection");
+    f.res.stalled = false;
+    // gzip may still be processing hello; releasing an identity write is synchronous.
+    f.res.release?.();
+    await until(() => expect(f.frames().at(-1)?.event).toBe("terminal_connection"));
+    expect(f.frames().map((frame) => frame.event)).toEqual(["hello", "fleet", "terminal_connection"]);
+    const connection = f.frames().at(-1)!.data;
+    const binding = f.bindings.resolve(f.identity, { clientId: f.client.id, ...connection });
+    expect(binding.active).toBe(true);
+    expect(unavailable).not.toHaveBeenCalled();
+    expect(abort).not.toHaveBeenCalled();
+    expect(audit.mock.calls[0]![0]).toEqual({
+      op: "sse",
+      listener: "loopback",
+      ok: false,
+      code: "E_SSE_BOOTSTRAP",
+      phase: "admission",
+      encoding,
+      pending: expect.any(Number),
+    });
+    expect(binding.send("terminal", { text: "after admission" })).toBe(true);
+    await until(() => expect(f.frames().at(-1)?.data).toEqual({ text: "after admission" }));
+    // Once private capability exists the original synchronous pressure abort is unchanged.
+    f.res.stalled = true;
+    for (let i = 0; i < 5; i++) expect(binding.send("terminal", { text: "p".repeat(20_000) })).toBe(i < 4);
+    expect(binding.metadata.live).toBe(false);
+    expect(f.res.destroyed).toBe(true);
+    expect(abort).toHaveBeenCalledTimes(1);
+  });
+
+  it("abandons admission after 2s without aborting public SSE, minting a token or admitting after late drain", async () => {
+    const f = setup(encoding);
+    // Do not let native gzip run before the deterministic admission deadline assertion.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    f.res.stalled = true;
+    f.client.send("fleet", { text: "x".repeat(96 * 1024) });
+    const abort = vi.spyOn(f.client.output, "abort");
+    const unavailable = vi.fn();
+    const timeouts = vi.spyOn(globalThis, "setTimeout");
+    expect(
+      f.bindings.connect(
+        f.req,
+        f.res as unknown as ServerResponse,
+        f.identity,
+        f.client.id,
+        "http://localhost",
+        f.client.output,
+        unavailable,
+      ),
+    ).toBeUndefined();
+    expect((timeouts.mock.results.at(-1)!.value as NodeJS.Timeout).hasRef()).toBe(false);
+    f.advance(2000);
+    vi.advanceTimersByTime(2000);
+    expect(unavailable).toHaveBeenCalledTimes(1);
+    expect(abort).not.toHaveBeenCalled();
+    expect(f.res.destroyed).toBe(false);
+    expect(f.hub.get(f.client.id)).toBe(f.client);
+    vi.useRealTimers();
+    timeouts.mockRestore();
+    f.res.stalled = false;
+    f.res.release?.();
+    f.client.send("ping", { afterDeadline: true });
+    await until(() => expect(f.frames().at(-1)?.event).toBe("ping"));
+    expect(f.text()).not.toMatch(/connectionToken|terminal_connection/);
+    expect(unavailable).toHaveBeenCalledTimes(1);
+    expect(f.res.destroyed).toBe(false);
+  });
+
+  it.each(["fence", "close", "dispose"])(
+    "cancels pending admission on %s without a late capability",
+    async (reason) => {
+      const f = setup(encoding);
+      f.res.stalled = true;
+      f.client.send("fleet", { text: "x".repeat(96 * 1024) });
+      const unavailable = vi.fn();
+      expect(
+        f.bindings.connect(
+          f.req,
+          f.res as unknown as ServerResponse,
+          f.identity,
+          f.client.id,
+          "http://localhost",
+          f.client.output,
+          unavailable,
+        ),
+      ).toBeUndefined();
+      if (reason === "fence") f.fence.revoke("all");
+      else if (reason === "close") f.res.destroy();
+      else f.bindings.dispose();
+      f.res.stalled = false;
+      f.res.release?.();
+      if (reason !== "close") {
+        expect(f.client.send("ping", { afterCancel: true })).toBe(true);
+        await until(() => expect(f.frames().at(-1)?.event).toBe("ping"));
+        expect(f.res.destroyed).toBe(false);
+      }
+      expect(f.text()).not.toMatch(/connectionToken|terminal_connection/);
+      expect(unavailable).not.toHaveBeenCalled();
+    },
+  );
+
+  it("bounds body-free diagnostics to eight per second across bindings", async () => {
+    const audit = vi.fn();
+    const f = setup(encoding, audit);
+    for (let i = 0; i < 12; i++) {
+      const conn = f.attach();
+      f.bindings.connect(
+        conn.req,
+        conn.res as unknown as ServerResponse,
+        f.identity,
+        conn.client.id,
+        "http://localhost",
+        conn.client.output,
+      );
+      await until(() => expect(conn.frames().at(-1)?.event).toBe("terminal_connection"));
+      const connection = conn.frames().at(-1)!.data;
+      f.bindings.resolve(f.identity, { clientId: conn.client.id, ...connection }).revoke();
+    }
+    expect(audit).toHaveBeenCalledTimes(8);
+    for (const [record] of audit.mock.calls) {
+      expect(record).toEqual({
+        op: "sse",
+        listener: "loopback",
+        ok: false,
+        code: "E_SSE_REVOKED",
+        phase: "bound",
+        encoding,
+        pending: expect.any(Number),
+      });
+    }
+  });
+
   it("interleaves public/private frames in one encoder FIFO, flushes private frames while open, never replays them", async () => {
     const f = setup(encoding);
     f.client.send("hub", { phase: "before" });
-    const binding = f.connect(); // terminal_connection must follow hello + hub, even during async gzip
+    const binding = await f.connect(); // terminal_connection must follow hello + hub, even during async gzip
     f.client.send("agents", { agents: [] });
     expect(binding.send("terminal", { bytesB64: "5Lit5paHCg==" })).toBe(true);
     f.hub.publish("status", { phase: "after" });
@@ -250,7 +417,7 @@ describe.each(["identity", "gzip"] as const)("private terminal SSE through %s ou
 
   it("queues private frames behind socket backpressure and resumes in order on drain", async () => {
     const f = setup(encoding);
-    const binding = f.connect();
+    const binding = await f.connect();
     await until(() => expect(f.frames()).toHaveLength(2));
     const prefix = f.text();
     const chunks = f.res.chunks.length;
@@ -275,7 +442,7 @@ describe.each(["identity", "gzip"] as const)("private terminal SSE through %s ou
 
   it("counts queued/compressor input as pressure, revokes and discards frames not yet written", async () => {
     const f = setup(encoding);
-    const binding = f.connect();
+    const binding = await f.connect();
     await until(() => expect(f.frames()).toHaveLength(2));
     f.res.stalled = true;
     f.client.send("history", { text: "x".repeat(96 * 1024) });
@@ -293,7 +460,7 @@ describe.each(["identity", "gzip"] as const)("private terminal SSE through %s ou
 
   it("revocation drops accepted private frames waiting behind another frame", async () => {
     const f = setup(encoding);
-    const binding = f.connect();
+    const binding = await f.connect();
     await until(() => expect(f.frames()).toHaveLength(2));
     f.res.stalled = true;
     f.client.send("hub", { phase: "blocked" });
@@ -318,7 +485,7 @@ describe.each(["identity", "gzip"] as const)("private terminal SSE through %s ou
   const stops = ["revoke", "close", "disconnect", "error", "expiry", ...(encoding === "gzip" ? ["encoder-error"] : [])];
   it.each(stops)("rejects writes and releases binding after %s", async (stop) => {
     const f = setup(encoding);
-    const binding = f.connect();
+    const binding = await f.connect();
     const onRevoke = vi.fn();
     binding.onRevoke(onRevoke);
     await until(() => expect(f.frames()).toHaveLength(2));

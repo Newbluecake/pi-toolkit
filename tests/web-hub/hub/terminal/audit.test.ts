@@ -70,3 +70,37 @@ it("authority retirement emits only fixed outcome/count, never evidence material
     { audit: "terminal", op: "authority-recovery", ok: true, code: "E_AUTHORITY_RECOVERED", n: 2, ms: 10 },
   ]);
 });
+
+it("SSE diagnostics retain only fixed phase/encoding and numeric pending, never transport material", () => {
+  const out: object[] = [];
+  const log = {
+    info: (_m: string, data?: object) => {
+      out.push(data!);
+    },
+  };
+  auditTerminal(log, {
+    op: "sse",
+    ok: false,
+    code: "E_SSE_PRESSURE",
+    phase: "bound",
+    encoding: "gzip",
+    pending: 70000,
+    cookie: "secret",
+    token: "secret",
+    body: "secret",
+    path: "secret",
+  } as never);
+  auditTerminal(log, { op: "sse", ok: false, phase: "secret", encoding: "secret", pending: "secret" } as never);
+  expect(out).toEqual([
+    {
+      audit: "terminal",
+      op: "sse",
+      ok: false,
+      code: "E_SSE_PRESSURE",
+      phase: "bound",
+      encoding: "gzip",
+      pending: 70000,
+    },
+    { audit: "terminal", op: "sse", ok: false },
+  ]);
+});

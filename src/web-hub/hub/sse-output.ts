@@ -6,6 +6,8 @@ export interface SseOutput {
   send(frame: string): boolean;
   /** Conservative queued input + encoder + socket bytes, including the in-flight frame. */
   pendingBytes(): number;
+  /** One-shot local encoder/socket drain observation; cancellation never closes the stream. */
+  onIdle(fn: () => void): () => void;
   /** Stop admission, finish accepted frames (or replace queued frames with a terminal auth frame). */
   finish(terminal?: string): void;
   abort(): void;
@@ -40,6 +42,23 @@ export function createSseOutput(
   let ended = false;
   let closed = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  const idle = new Set<() => void>();
+  function notifyIdle(): void {
+    if (
+      closed ||
+      ending ||
+      flushing ||
+      blocked ||
+      res.writableNeedDrain ||
+      head < queue.length ||
+      inputBytes !== 0 ||
+      (gzip?.readableLength ?? 0) !== 0
+    )
+      return;
+    const callbacks = [...idle];
+    idle.clear();
+    for (const fn of callbacks) if (!closed && !ending) fn();
+  }
 
   function clearStall(): void {
     if (timer === undefined) return;
@@ -90,6 +109,7 @@ export function createSseOutput(
     if (closed) return;
     closed = true;
     clearStall();
+    idle.clear();
     queue = [];
     head = 0;
     queuedBytes = inputBytes = 0;
@@ -141,7 +161,7 @@ export function createSseOutput(
           head = 0;
         }
         if (gzip === undefined) {
-          blocked = !res.write(item.frame);
+          blocked = !res.write(item.frame, () => notifyIdle());
         } else {
           flushing = true;
           inputBytes = item.bytes;
@@ -163,6 +183,7 @@ export function createSseOutput(
         else gzip.end(); // pipe emits the gzip trailer before ending the response
       }
       checkStall();
+      notifyIdle();
     } catch {
       abort();
     }
@@ -185,6 +206,22 @@ export function createSseOutput(
 
   return {
     pendingBytes,
+    onIdle(fn) {
+      if (closed || ending) return () => {};
+      let live = true;
+      const run = () => {
+        if (live) {
+          live = false;
+          fn();
+        }
+      };
+      idle.add(run);
+      queueMicrotask(notifyIdle); // caller installs cancellation/deadline before notification
+      return () => {
+        live = false;
+        idle.delete(run);
+      };
+    },
     send(frame) {
       if (closed || ending) return false;
       const bytes = Buffer.byteLength(frame, "utf8");

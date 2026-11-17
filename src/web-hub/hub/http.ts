@@ -567,6 +567,7 @@ export interface RouteSet {
   subscribe(body: unknown, res: ServerResponse): void;
   unsubscribe(body: unknown, res: ServerResponse): void;
   openEvents(req: IncomingMessage, res: ServerResponse, auth?: SseClient["auth"]): SseClient;
+  terminalUnavailable?(client: SseClient, reason?: string): void;
   historyPage(query: URLSearchParams, res: ServerResponse): Promise<void>;
   /** fleet-drawer plan §5.4 (F4): the run-transcript routes — 404-shaped stubs when no service
    * was wired (`deps.runTx` absent), byte-identical to a hub without the channel. */
@@ -777,6 +778,7 @@ function createRouteSet(
           // the frontend's `case "hub"` reducer (already written for repeated frames) needs no
           // changes.
           sse.publish("hub", { ...routeDeps.info(), port: routeDeps.port() });
+          for (const [client, reason] of terminalDenied) terminalUnavailable(client, reason);
           break;
         case "load":
           // Host load is direct-send: no id and no replay-ring entry.
@@ -839,6 +841,16 @@ function createRouteSet(
     client.subscribed.add(agentKey);
   }
 
+  const terminalDenied = new Map<SseClient, string>();
+  function terminalUnavailable(client: SseClient, reason = "sse-admission-unavailable"): void {
+    if (sse.get(client.id) !== client) return;
+    terminalDenied.set(client, reason);
+    client.send("hub", {
+      ...routeDeps.info(),
+      port: routeDeps.port(),
+      terminal: { state: "unavailable", reason },
+    });
+  }
   function openEvents(req: IncomingMessage, res: ServerResponse, auth?: SseClient["auth"]): SseClient {
     const raw = req.headers["last-event-id"];
     const lastEventId = typeof raw === "string" && /^\d{1,16}$/.test(raw.trim()) ? Number(raw.trim()) : undefined;
@@ -868,6 +880,7 @@ function createRouteSet(
     if (schedulesWire !== undefined) client.send("schedules", schedulesWire);
     for (const [agentKey, cached] of fleetCache) client.send("fleet", fleetPayload(agentKey, cached));
     res.once("close", () => {
+      terminalDenied.delete(client);
       pending.delete(client.id);
       runRoutes?.onClientClose(client.id); // F4: run subs + watch refs die with the SSE conn
     });
@@ -926,6 +939,7 @@ function createRouteSet(
     subscribe,
     unsubscribe,
     openEvents,
+    terminalUnavailable,
     historyPage,
     runSubscribe: (body, res) => {
       if (runRoutes === undefined) throw new HttpError(404, "E_NOT_FOUND");
@@ -1715,6 +1729,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       client.id,
       canonicalOrigin("http", canonicalHostKey(req.headers.host, "http") ?? ""),
       client.output,
+      (reason) => routes.terminalUnavailable?.(client, reason),
     );
   }
 

@@ -116,7 +116,7 @@ export function createTerminalService(deps: TerminalServiceDeps) {
     }
   };
   const auth = new TerminalRevocationFence(now);
-  const bindings = new TerminalSseBindings(auth, now);
+  const bindings = new TerminalSseBindings(auth, now, note);
   const tickets = new TerminalCreationTickets(now);
   const limits = new TerminalLimits(deps.config, now);
   const records = new Map<string, RecordRow>();

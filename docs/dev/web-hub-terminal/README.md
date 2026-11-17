@@ -114,8 +114,16 @@ unknown-health/查询异常/mark 写失败都不允许无锁 fork。公开 priva
 loopback 与 LAN 都把 `openEvents` 返回的原 `SseClient.output` 经 terminal routes/assembly
 显式传给 binding；`terminal_connection` / `terminal` 只绕过 publish/ring，**不得直接
 `res.write` 或另建 compressor**。私有帧与公开帧共享原 FIFO、gzip `Z_SYNC_FLUSH` 和
-identity drain 处理，无新公开事件/id/cap。binding 的 64 KiB 压力检查使用该 output 的
-保守 pending bytes（队列 + 在途输入 + encoder + socket），不能仅看 `res.writableLength`。
+identity drain 处理，无新公开事件/id/cap。#50 将初始准入与敏感 binding 撤权分开：
+尚有公共 bootstrap pending 时，先注册原 output 的一次性 encoder/FIFO 消化及 downstream drain 通知，
+**不创建 binding、不 mint token**；唯一绝对 2s deadline（clamp + segmented clock、timer unref）内成功
+才重核原 proof、expiry/response 与容量后发送首张私有帧。socket 已可写但尚未完成的小额 bytes 仍受
+64 KiB 门约束；不等待浏览器消费 ACK。没有 sleep/polling，也不直写 response。
+等待及已建 binding 合计最多2048；close/error/fence/privacy revoke/dispose 取消等待，迟到通知不准入。
+超时或初始准入失败只放弃本次终端，保留公共 clientId/流；共享公共输出原有24MiB硬帽/无净进展
+期限仍独立生效，不承诺保留一个已被公共管线本身判死的流。成功后 binding 的64KiB撤权门不变，
+仍按 output 保守 pending bytes（队列 + 在途输入 + encoder + socket）fail-closed；不能仅看
+`res.writableLength`，也不能固定减去 connect 时的公共 pending（那会永久掩盖后来的私有积压）。
 每次 enqueue 前的身份、原 proof、expiry/active/fence 与 24 KiB 单帧检查不变；send=true
 表示接收入队，而不是浏览器已消费。撤权先同步清 live/active 与 listeners，再 abort 原 output，
 丢弃尚未写出的队列并销毁 compressor/socket，不用 `res.end()` 绕过 encoder 的生命周期；
@@ -128,6 +136,12 @@ identity drain 处理，无新公开事件/id/cap。binding 的 64 KiB 压力检
 不新增事件/cap、不 bump PROTO、不进 agent hello_ack；健康/真正 off 省略该字段。privacy 健康变化重投影此负面提示，
 旧 UI 忽略未知字段仍可使用公共流，新 UI 显示不可用原因并隐藏终端执行入口，不加载私有面板/API。
 缺字段只代表 legacy/未否决，绝非 ready 或授权。混版/回滚不依赖此提示授予权限。
+#50 准入失败对原连接追加完整 HubInfo 的 `terminal:{state:"unavailable",reason:"sse-admission-timeout"}`
+负面投影，不进 ring；后续 hub publish 后重投同一连接的负面提示。它不是机器全局不可用，不影响
+其他客户端，也不要求重新登录或重启 hub。当前连接不自动重试/开 shell，刷新页面（新 SSE）才重新
+尝试；UI 显示暂不可用、聊天/历史可用及刷新重试提示，隐藏终端入口，不加载私有面板/API。
+固定 body-free `audit:"terminal",op:"sse"` 只记 E_SSE_* 原因、admission/bound 阶段、identity/gzip 编码、
+pending 数字与 listener；每 service 1s 窗最多8条，失败 fail-soft；不记 cookie/token、帧正文或路径。
 已建立敏感 binding 的撤销仍同步 abort 原 SSE，不排空私有队列；source/Origin 例外不扩权。
 terminal off 不调用该端口、不新增字节；私有材料仍不进入 replay。
 

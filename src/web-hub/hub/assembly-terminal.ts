@@ -137,13 +137,13 @@ export async function assembleTerminal(ctx: HubAssembly) {
       }
       return baseRoutes.handle(req, res, context, identity, signal);
     },
-    openSse(req, res, id, clientId, origin, output) {
+    openSse(req, res, id, clientId, origin, output, unavailable) {
       // No binding or private material exists yet: terminal prerequisites must not
       // retire the PUBLIC clientId and break ordinary chat/history subscriptions.
       // HubInfo carries the negative availability hint. Established bindings still
       // synchronously abort this original output on revocation (sse-binding.ts).
       if (unavailableReason() !== undefined) return;
-      baseRoutes.openSse(req, res, id, clientId, origin, output);
+      baseRoutes.openSse(req, res, id, clientId, origin, output, unavailable);
     },
   };
   const dispose = async () => {

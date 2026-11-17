@@ -23,6 +23,7 @@ export interface TerminalFrontendPort extends TerminalRoutesPort {
     clientId: string,
     origin: string,
     output: SseClient["output"],
+    unavailable?: (reason?: string) => void,
   ): void;
 }
 export const terminalFrontend = (port: TerminalRoutesPort | undefined): TerminalFrontendPort | undefined =>
@@ -180,8 +181,8 @@ export function createTerminalRoutes(deps: {
     auditHealth: () => ({
       failures: Math.min(Number.MAX_SAFE_INTEGER, auditFailures + deps.service.auditHealth().failures),
     }),
-    openSse(req, res, id, clientId, origin, output) {
-      deps.service.bindings.connect(req, res, id, clientId, origin, output);
+    openSse(req, res, id, clientId, origin, output, unavailable) {
+      deps.service.bindings.connect(req, res, id, clientId, origin, output, unavailable);
     },
     async handle(req, res, ctx, id, signal) {
       const path = (req.url ?? "").split("?")[0],
