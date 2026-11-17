@@ -67,12 +67,16 @@ function fixture() {
   };
 }
 type Fixture = ReturnType<typeof fixture>;
-function seed(f: Pick<Fixture, "paths" | "root" | "auth">, previous = true) {
+function seed(f: Pick<Fixture, "paths" | "root" | "auth">, previous = true, count = 2) {
   const ids: string[] = JSON.parse(
-    execFileSync(process.execPath, ["--import", "tsx", worker, "seed", f.paths.stateDir], {
-      encoding: "utf8",
-      timeout: 10000,
-    }),
+    execFileSync(
+      process.execPath,
+      ["--import", "tsx", worker, "seed", f.paths.stateDir, ...(count === 1 ? ["single"] : [])],
+      {
+        encoding: "utf8",
+        timeout: 10000,
+      },
+    ),
   );
   for (const id of ids) {
     const path = join(f.auth, `${id}.json`),
@@ -615,7 +619,8 @@ describe("real guarded producer and PTY after retirement", () => {
         root: join(paths.stateDir, "terminal-v1"),
         auth: join(paths.stateDir, "terminal-v1/authority"),
       };
-      seed(f);
+      seed(f, true, 1);
+      expect(files(f.auth)).toHaveLength(1);
       const before = immutable(f as Fixture),
         old = snapshotFiles(f as Fixture);
       const pendingAgent = agentFirst ? m.agent(undefined, { sessionId: "agent-first" }) : undefined;

@@ -8,7 +8,7 @@ const [mode, path, stage] = process.argv.slice(2);
 if (!path || !path.startsWith(process.env.TMPDIR! + "/")) throw new Error("private-path-required");
 if (mode === "seed") {
   const names: string[] = [];
-  for (let i = 0; i < 2; i++) {
+  for (let i = 0; i < (stage === "single" ? 1 : 2); i++) {
     const a = await createLocalAuthority(
       path,
       {
