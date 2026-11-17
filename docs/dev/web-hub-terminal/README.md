@@ -170,13 +170,70 @@ publication 2s logical deadline、late-write seal；同步文件系统调用不�
 ### 首次初始化与重启
 
 仅从未存在 `terminal-v1/` 时自动初始化：parent 的 O_EXCL durable witness `.terminal-initialized-v1`、0700 root、O_EXCL/O_NOFOLLOW0600 journal + initialized marker、文件/root/parent fsync。
-已有 partial/corrupt/unsafe/unknown-version、旧 flat journal、无效残留 authority/receipt、删 root 后 witness 仍在，全部 **Unavailable**；不把 ENOENT/revision0 当全新，不自动 reset/repair。并发首次 loser fail-closed，winner 完成后可 reload/restart 重新核验。`/webhub status` 只有固定 prerequisite 原因，不公开能力/路径。
+已有 partial/corrupt/unsafe/unknown-version、旧 flat journal、无效 receipt、删 root 后 witness 仍在，全部 **Unavailable**；不把 ENOENT/revision0 当全新，不自动 reset/repair。残留 authority 仅有下述 #49 P1 保守隔离例外，其他情况仍封锁。并发首次 loser fail-closed，winner 完成后可 reload/restart 重新核验。`/webhub status` 只有固定 prerequisite 原因，不公开能力/路径。
 
 - 正常 resolved+pruned 不留 consumed row，最后一个终端关闭后冷重启可用。
 - resolved-before-prune 崩溃留下行：冷加载重新 unresolved/quarantine，旧 resolved 不直接放行。
 - pruned-before-ACK 崩溃留下合法孤立 receipt：bounded plain handoff 与 journal 做 union，重新 quarantine；**缺行不是 ACK**。
 - fresh inventory + 当前 challenge + 实际 receipt/OS 证明后再 resolve/prune/ACK。缺席 agent 变 `lost`，5/30/60s 乃至 TTL 到期均不释放、不开新 shell。
 - 同 boot release tombstone 保证重证/丢 ACK 不 double-release；只有同 producer 后续完整库存真正省略该 identity 才 GC，不靠 TTL。纯数据 handoff≤32，无活 closure/fd/owner 引用。
+
+### #49 P1：仅前 boot、已确认 PID 不存在、空物理态的 authority 隔离
+
+这是 terminal-on/plain 的声明式行为变化，不是 store reset，也不是资源回收。唯一生产入口是
+`assembleTerminal → prepareTerminalStore`，在现有 singleton 已持有之后；每个破坏性步骤前核
+startup/closing、原 bound socket **及 directory** identity、held O_DIRECTORY/no-follow fd 与路径 identity。
+不加 abstract socket 内锁（它按 netns 隔离，不是 stateDir 锁），不新增设置、wire、命令或修复 API。
+`StartHubDeps.terminalAuthorityRecoveryTestDeps` 仅测试进程传入，main/config/env/wire 不可达。
+
+所有 authority 和 receipt 先做完整闭合 schema/owner/mode/no-follow/名字/storeId 校验；只有合法
+旧 boot UUID + `/proc` 证实该数字 PID 确实 absent 才是候选。探测前后 self/proc 必须健康，stat 子文件
+ENOENT 还须目录确实 ENOENT，退出竞争最多重新采样一次。旧 namespace 要合法 readlink 形状但不要求
+等于当前 boot；current authority 仍须 exact process/uid/starttime 与 peer/self namespace 全一致。
+current+stale 混合集只移动 exact stale，保留 current 的名字/inode/原字节。
+
+- 同 boot 死进程/PID reuse：`stale-authority-same-boot`；旧 boot 但数字 PID 当前存在：
+  `stale-authority-prev-boot-pid-present`。不 signal，不按 TTL 猜测死亡。
+- proc 不可核、namespace mismatch、坏 authority 分别为 `authority-proc-unavailable`、
+  `authority-namespace-mismatch`、`authority-corrupt`。原 journal/witness/unsafe 原因保留。
+- **journal 任意 resource 行（含 resolved/pending）或 receipts 非空均禁止隔离**，分别诊断
+  `stale-authority-prev-boot-journal-not-empty` / `stale-authority-prev-boot-receipts-not-empty`；
+  合法非零 revision 的空表允许。无候选的健康启动照旧加载非空物理态进入 F2 quarantine。
+- 不改 storeId/witness/initialized/journal/receipts，不建新 epoch、不 mint reaped、不发 ACK、不释放配额。
+  前 boot 非空资源仍须原 receipt/fresh inventory/两次 durable CAS/ACK 链，不是本例外。
+
+留证在 sibling `.terminal-authority-archive-v1/<random transaction>/`（owned0700）内：
+先 O_EXCL0600 snapshots 原字节及私有 `authority-retirement-only` manifest，全部 file/parent fsync，
+再紧邻同步 exact inode/bytes/proc 重验→rename 到该全新事务的 `retired/`，目标身份验真与两父目录 fsync。
+source/target 使用内部 held-dir `/proc/self/fd/<fd>/<validated basename>` anchor，**不放宽**通用 symlink 拒绝。
+completion 只作证据，不是授权。故障留证不删，不 replay manifest，不自动回滚覆盖 live 路径。
+下一次只重验当前 live+OS；剩余候选进新 transaction；最后 rename 后缺 completion 也不重建 store。
+
+容量只有内部 `TERMINAL_AUTHORITY_ARCHIVE_MAX_BYTES = 256 * 1024 * 1024` 一个总字节帽；另有
+64 transactions / 256 candidates / 单次2MiB snapshots 限制。扫描包括所有已知 partial snapshot、
+retired、manifest/temp、completion 的实际逻辑 stat bytes；snapshot+retired 各计一份，创建前预留
+所有计划 bytes，执行按已写/剩余预留记账。未知布局/unsafe 拒绝；无 GC/TTL，满则 `authority-archive-capacity`。
+archive 不进入公共消息；仅固定审计 `authority-recovery` + E_* code/n/ms，不输出 nonce/hash/path/正文。
+
+初查、留证、全部 rename、最终校验共用唯一绝对2s logical IO budget 与 startup abort，任何 await 后及
+mutation 前都复核；没有逐文件重置。fsync 内核 IO 不可取消，超时先 unavailable，实际 settle 后才关 held fd，
+迟到工作不能继续 mutation/adopt local。仅 **最后 stale rename 后首次观察到**的合法 publisher pending 或
+pending+同 inode linked final 可在原 deadline 内用 5/10/20/40/80/160/320/640ms unref/abort-aware
+退避做最多8次额外**整体验证**。预检/末次 rename 前 pending、unsafe pending、坏 final、journal/receipt/
+原 current 变化都不获豁免。pending bytes 从不作为 authority，linked final 仍须完整 schema/current OS 验证。
+只有默认严格 inspector（无 pending/nlink1）真正通过才能 ready；否则 `authority-publication-unsettled`。
+默认 initialize 对 pending/nlink2 的拒绝永远不放宽；不会永久忽略 pending。
+
+agent 初次 owner factory 仅 `TerminalLocalError("stale-authority-prev-boot")` 记为可补偿；真实新 link 的
+hello_ack（不依赖 browser-only cap）后只试一次完整 guarded factory，成功再 guarded publishStatus。
+已有/revoked owner 不重建；无 polling、无自动 open/restart；ordinary unresolved 不被泛化成重试权。
+换 session/reload/shutdown/guard withdrawal 封 generation，迟到 owner 只能 dispose，不 adoption。
+这不替 hub 最后-rename race 兜底，也不承诺补偿时另一 publisher 普通 unresolved 的同 link 重试。
+
+威胁边界仍是同 uid 可信本地 producer、同机器单 kernel，不承诺共享网络 HOME/跨机器/恶意同 uid/root。
+Node pathname 最后检查与 rename 不是 openat2/renameat2 conditional-rename；不修改 singleton 算法或
+宣称跨 netns abstract 锁互斥。真实四阶段 SIGKILL 只证明同 kernel 可见集合/进程重启/调用顺序，
+**不是 power-cut 证据**。固定状态诊断只追加，off/D8/source denied/unknown/P0公共SSE合同保持。
 
 ## PTY、后台、流控与 UI
 

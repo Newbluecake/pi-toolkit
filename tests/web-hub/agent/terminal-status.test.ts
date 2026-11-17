@@ -82,3 +82,24 @@ describe("terminal status source contract (§7)", () => {
     },
   );
 });
+
+it.each([
+  "stale-authority-prev-boot",
+  "stale-authority-same-boot",
+  "stale-authority-prev-boot-pid-present",
+  "stale-authority-prev-boot-journal-not-empty",
+  "stale-authority-prev-boot-receipts-not-empty",
+  "authority-proc-unavailable",
+  "authority-namespace-mismatch",
+  "authority-corrupt",
+  "authority-recovery-not-owner",
+  "authority-publication-unsettled",
+  "authority-recovery-state-changed",
+  "authority-archive-unsafe",
+  "authority-archive-capacity",
+  "authority-archive-io",
+])("fixed appended cold-recovery reason is readable: %s", (reason) => {
+  const t = text({ hubSnapshot: { state: "unavailable", reason } });
+  expect(t).toContain(`终端不可用：${reason}`);
+  expect(t).toContain("不自动重置");
+});

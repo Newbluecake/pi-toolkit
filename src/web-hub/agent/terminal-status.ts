@@ -47,6 +47,20 @@ const REASONS = new Set([
   "local-capacity",
   "secure-domain",
   "file-changed",
+  "stale-authority-prev-boot",
+  "stale-authority-same-boot",
+  "stale-authority-prev-boot-pid-present",
+  "stale-authority-prev-boot-journal-not-empty",
+  "stale-authority-prev-boot-receipts-not-empty",
+  "authority-proc-unavailable",
+  "authority-namespace-mismatch",
+  "authority-corrupt",
+  "authority-recovery-not-owner",
+  "authority-publication-unsettled",
+  "authority-recovery-state-changed",
+  "authority-archive-unsafe",
+  "authority-archive-capacity",
+  "authority-archive-io",
 ]);
 const record = (v: unknown): Record<string, unknown> | undefined =>
   v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined;
@@ -83,7 +97,9 @@ export function formatTerminalStatusLines(input: TerminalStatusInput): string[] 
   }
   if (hub?.state === "unavailable") {
     const reason = typeof hub.reason === "string" && REASONS.has(hub.reason) ? hub.reason : "unknown";
-    lines.push(`终端不可用：${reason}。保留已有状态，不会自动重置；修复本地状态后 /webhub restart。`);
+    lines.push(
+      `终端不可用：${reason}。保留已有物理状态，不自动重置；仅可信前boot空资源authority可自动隔离，其他状态保持封锁。修复后 /webhub restart。`,
+    );
   }
   lines.push("浏览器需本boot真实登录；本地状态不证明当前登录或SSE可用。");
   return lines;

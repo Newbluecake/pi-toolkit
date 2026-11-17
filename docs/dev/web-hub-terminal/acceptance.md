@@ -134,3 +134,17 @@ timeout 240s npm run probe:terminal-e2e
 - 全量 npm test、全tier2/secure挂载、发布/推送：仅在独立授权且遵守正式secure预检后执行；没有跑必须注明，外部-only skip写 mount coverage NOT RUN。
 
 证据包建议：`environment.json`、`commands.tsv`、`e2e-report.json`、`report-r3.json`、PNG、各门原始log、explicit-files清单、fixtures/diff-check输出、git log/status。不得保存 token/grant/lease/nonce/正文hash或真实用户秘密；本probe的受控echo/PID样本可以保存。
+
+## #49 P1 authority retirement evidence
+
+代码与自动断言入口：`tests/web-hub/protocol/terminal-local.test.ts`（纯事实分类）、
+`tests/web-hub/hub/terminal/authority-recovery.test.ts`（唯一容量计算边界）、
+`tests/integration/web-hub-terminal-authority-recovery.test.ts`（real fs/proc/startHub、mixed current、
+最后rename pending/link两窗、四阶段 process-SIGKILL exact sets、sync fs故障、双owner、scene-shaped
+私有store与真实login→PTY→reap/prune/ACK、agent-first），以及 agent wiring/status 和原 local/SSE 回归。
+
+运行证据、命令/退出码、mutation kill、范围偏离及 NOT RUN 统一记在仓库外
+`/home/bluecake/pi-evidence-t49/p1-report.md`；该路径不是测试自动 PASS 的凭据。
+SIGKILL 与 injected-sync-fs-fault 分列，真实 power-cut NOT RUN；不将历史 boot UUID fixture 说成真实重启 kernel。
+P1 失败依 P0 保持公共 SSE/clientId，终端仍拒绝且无私有材料。现场服务/terminal-v1 未接触，部署/真人浏览器
+仍由用户独立验证。clean/drained rollback 必须真实 O 组件读取相同 store，dirty/poison 不获得回滚重开许可。
