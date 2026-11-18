@@ -7,8 +7,11 @@
  * (the hub's spawn-history precedent): each level is opened `O_DIRECTORY|O_NOFOLLOW` (files
  * `O_NOFOLLOW|O_NONBLOCK`), then `fstat`-checked — right type, owned by the expected uid, not
  * group/other-writable, size within the cap. A swapped-in symlink at any level fails with ELOOP
- * instead of being followed, and the parent can no longer be swapped underneath us. Without
- * `/proc/self/fd` (non-Linux) every operation fails closed (`platform`).
+ * instead of being followed, and the parent can no longer be swapped underneath us. That is the
+ * default Linux backend; macOS (Darwin) is supported through a snapshot backend (realpath +
+ * per-level pre/post `lstat`/`fstat` comparison, dev/ino(+birthtime) chains) with WEAKER guarantees
+ * — see docs/dev/scheduled-reports/README.md「macOS（Darwin）支持」 and darwin-report.md. Every other
+ * platform fails closed (`platform`).
  *
  * This module contains NO write primitive (pinned by tests/schedule/core/reader.test.ts) — it is
  * shared by the hub's pure reader and the agent writer; writes live in writer.ts / lock.ts.

@@ -44,3 +44,20 @@
 ## 记录
 
 每条记录：日期 / pi 版本 / commit / 通过与否 / 偏差。偏差先查 `/schedule log`、`/agent status`、`~/.pi/agent/schedules/<sid>/state.json`、hub.log，再决定是否开 bug。
+
+## macOS（Darwin）真机验收清单（darwin-plan P5，2026-11）
+
+mac 专属项（设计 `darwin-arch.md`，实施证据 `darwin-report.md`）。前置：真机 mac（darwin arm64）、`/usr/bin/perl` + `Fcntl` 可用、系统无 `flock(1)`（保持缺失——锁必须走 perl 后端）。每条记录：日期 / macOS 与 Node 版本 / commit / 通过与否 / 偏差。
+
+| #   | 操作                                                                                                                                                         | 期望                                                                                                                                                                                                                      |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| M1  | `/schedule add` 一个 `*/2 * * * *` 的 background 任务，等两个触发点；期间 `/agent status` 观察                                                               | 状态栏倒计时正常；每个触发点恰一条 quiet 结果、不新开模型回合；`/schedule log <id>` completed；hub 面板投影含该任务。Identity 为 Darwin epoch-ms：`state.json` 的 `holder.start` ≈ `1e12` 量级（非 Linux ticks 的小数值） |
+| M2  | 用 `run_now` 手动触发 background 与 message 各一个                                                                                                           | background 出报告文件；message 在本轮 settled 后派发一次；`/schedule list`/`history` 正常                                                                                                                                 |
+| M3  | 任务运行期间对另一终端手验锁互斥：两个进程同时操作同一会话 store（`/schedule` 或 e2e harness）；再对持锁进程 `kill -9` 后立刻重试操作                        | 并发操作恰一个成功、另一个 E_BUSY（不双写）；SIGKILL 后锁立即释放（open file description 随 fd 关闭），下一个事务立即可用；锁文件内容仅诊断，无 stale 回收、无强拆                                                        |
+| M4  | 临时从 PATH 移除 perl（或注入 `perlBin` 指向不存在路径）后 `/reload`，再执行任何写操作                                                                       | 启动 probe 失败 ⇒ 写事务一律 E_BUSY + 明确 warning（Perl/Fcntl flock 不可用）；不出现无锁写入、不凭超时判死；移回 perl 后 `/reload` 恢复                                                                                  |
+| M5  | 启动 hub（`webHub.enabled`），观察 schedule 面板与未知运行预测；任务执行前后对比账本目录快照（`ls -lR` / 内容 hash）                                         | hub pin root、投影任务、receipt 清理 pendingReports、未知运行预测正常；hub 对账本目录**零写入**（快照一致，hub 仍只读）                                                                                                   |
+| M6  | secure 域会话（`pi-secure`）与 child 会话各试一次 `schedule` create                                                                                          | 分别 E_SECURE / E_CHILD 拒绝；D8 强制关闭不因 Darwin 后端放宽                                                                                                                                                             |
+| M7  | identity 真机探针手验：`node --import tsx -e 'import("./src/web-hub/protocol/sched-identity.ts").then(m=>console.log(m.createDarwinIdentity().readSelf()))'` | `start` ≈ 1.79e12 量级（UTC epoch ms，`% 1000 === 0`）、`boot` 为 bootsessionuuid、`host`/`pid` 正确；与 `ps -o lstart= -p <pid>`、`sysctl -n kern.bootsessionuuid` 人工比对一致                                          |
+| M8  | 路径边界手验：把 `~/.pi/agent/schedules/<sid>` 的祖先目录换成符号链接（同 uid）再触发一次操作；把 `reports/` 换成符号链接再读                                | 两处均拒绝（`moved`/`symlink`），不写入符号链接目标、不返回外部内容；这是快照后端的可检出替换（TOCTOU 窗口 U1-U6 为已接受残余，见 README Darwin 小节）                                                                    |
+
+自动化门禁（mac 本机须全绿）：`npx vitest run 'tests/integration/schedule-*.test.ts'`（darwin 专有项非 skipped 实跑）+ `tests/schedule/core/paths-backend.test.ts` / `identity-domain.test.ts` / `seam-contract.test.ts` / `tests/web-hub/protocol/sched-identity.test.ts` / `tests/web-hub/boundary.test.ts`。Linux 侧回归由 CI（E-CI）提供，mac 本机不构成 Linux 证据。
