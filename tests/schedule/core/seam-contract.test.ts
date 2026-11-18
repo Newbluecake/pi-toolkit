@@ -85,11 +85,13 @@ describe("schedule P0 seams", () => {
     const actualTotal = [...counts.values()].reduce((a, b) => a + b, 0);
     const expectedTotal = [...expected.values()].reduce((a, b) => a + b, 0);
     expect(actualTotal).toBe(expectedTotal);
-    for (const file of ["lock.ts", "reader.ts", "writer.ts"]) {
+    // Per-key comparison for every file, including paths.ts: the declaration line
+    // `export function fdPath(` counts as its own "paths.ts:fdPath" bucket (fn is set
+    // before the same-line match), so a moved/renamed call site is caught exactly.
+    for (const file of ["lock.ts", "paths.ts", "reader.ts", "writer.ts"]) {
       const actual = [...counts].filter(([key]) => key.startsWith(`${file}:`)).map(([key, n]) => [key, n]);
       const declared = [...expected].filter(([key]) => key.startsWith(`${file}:`)).map(([key, n]) => [key, n]);
       expect(Object.fromEntries(actual)).toEqual(Object.fromEntries(declared));
     }
-    expect([...counts].filter(([key]) => key.startsWith("paths.ts:")).reduce((n, [, x]) => n + x, 0)).toBe(4);
   });
 });

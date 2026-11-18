@@ -2,7 +2,7 @@
 export const FDPATH_MANIFEST = [
   ["lock.ts", "readLockHolder", 1],
   ["lock.ts", "tryLock", 1],
-  ["paths.ts", "fdRealPath", 1],
+  ["paths.ts", "fdPath", 1],
   ["paths.ts", "openDirAt", 1],
   ["paths.ts", "readFileAt", 1],
   ["paths.ts", "linuxLstatAt", 1],

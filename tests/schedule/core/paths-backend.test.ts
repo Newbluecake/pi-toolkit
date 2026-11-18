@@ -4,6 +4,7 @@ import {
   constants,
   existsSync,
   fstatSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   openSync,
@@ -172,6 +173,40 @@ describe.each([linuxPathBackend, darwinPathBackend])("$platform path backend", (
       ok: true,
       value: { recycled: true },
     });
+  });
+  test("D3 write path: reports symlink swap refuses with nothing written outside; atomicWriteAt never follows a symlinked target", async () => {
+    const d = temp();
+    const outside = temp();
+    const root = ensureStoreRoot(join(d, "store"), { backend });
+    const store = openSessionStore({
+      root,
+      sessionId: "paths-test",
+      self: { pid: process.pid, start: 1, host: "fixture", boot: "fixture" },
+      epoch: "test",
+      acquire: () => "held",
+    });
+    expect(await store.transact(() => ({ value: 1, write: true }))).toMatchObject({ ok: true });
+    const sessDir = join(d, "store", "paths-test");
+    // reports -> symlink(outside): the write path must refuse and never land content outside.
+    // (darwin: lstatAt refuses the intermediate segment; linux: openDirAt's O_NOFOLLOW refuses.)
+    symlinkSync(outside, join(sessDir, "reports"));
+    const refused = await writeReportLocked(store, {
+      reportFile: "reports/" + "a".repeat(64) + ".md",
+      allocateUnique: true,
+      data: Buffer.from("report"),
+      now: Date.now(),
+    });
+    expect(refused.ok).toBe(false);
+    expect(readdirSync(outside)).toEqual([]);
+    // state.json -> symlink(outside file): the atomic rename swaps the link itself, never the target.
+    rmSync(join(sessDir, "reports"));
+    writeFileSync(join(outside, "state.json"), "outside-content");
+    rmSync(join(sessDir, "state.json"));
+    symlinkSync(join(outside, "state.json"), join(sessDir, "state.json"));
+    store.withDir((fd) => atomicWriteAt(fd, "state.json", Buffer.from("{}")));
+    expect(readFileSync(join(outside, "state.json"), "utf8")).toBe("outside-content");
+    expect(lstatSync(join(sessDir, "state.json")).isSymbolicLink()).toBe(false);
+    expect(readFileSync(join(sessDir, "state.json"), "utf8")).toBe("{}");
   });
 });
 
