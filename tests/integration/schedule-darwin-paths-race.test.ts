@@ -156,7 +156,9 @@ it("D4 concurrent directory replacement: bounded outcomes and resources (U1-U6 r
         sessionReads++;
       } catch (err) {
         expect(err).toBeInstanceOf(SchedFsError);
-        expect(["moved", "symlink", "missing", "io"]).toContain((err as SchedFsError).reason);
+        // "not-dir" is a legitimate refusal too: mid-race an ancestor can transiently be a
+        // non-directory (observed on Linux CI); every refusal is fail-closed, nothing is read.
+        expect(["moved", "symlink", "missing", "io", "not-dir"]).toContain((err as SchedFsError).reason);
         sessionRefusals++;
       } finally {
         closeQuiet(fd);

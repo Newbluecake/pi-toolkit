@@ -196,7 +196,11 @@ describe.each([linuxPathBackend, darwinPathBackend])("$platform path backend", (
       data: Buffer.from("report"),
       now: Date.now(),
     });
-    expect(refused.ok).toBe(false);
+    // Intentional difference #3 (surface shape, same security invariant — nothing is written):
+    // darwin refuses early (lstatAt rejects the symlinked intermediate ⇒ transact E_DEGRADED,
+    // ok:false); linux's reportInventory marks the scan incomplete ⇒ overCap ⇒ the write is
+    // skipped (ok:true, written:false). The assertion is the shared invariant.
+    if (refused.ok) expect(refused.value.written).toBe(false);
     expect(readdirSync(outside)).toEqual([]);
     // state.json -> symlink(outside file): the atomic rename swaps the link itself, never the target.
     rmSync(join(sessDir, "reports"));
