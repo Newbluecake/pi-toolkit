@@ -2,6 +2,9 @@
  * real HTTP auth/context RPC/PTY + durable prune. No LLM call or site paths. */
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { request, type IncomingMessage } from "node:http";
+import { NdjsonDecoder } from "../../src/web-hub/protocol/ndjson.js";
+import type { TerminalViewFrameV2 } from "../../src/web-hub/protocol/terminal-v2.js";
 import { afterEach, expect, it, vi } from "vitest";
 import { createTerminalSdkAgent } from "./helpers/terminal-v2-sdk.js";
 import { makeTerminalFixture } from "./terminal-v2-backend-fixture.js";
@@ -16,7 +19,7 @@ afterEach(async () => {
   for (const close of closers.splice(0).reverse()) await close();
   vi.unstubAllEnvs();
 });
-it("captures actual current pi ExtensionContext cwd at create time and never routes it through command/public status", async () => {
+it("captures actual SDK cwd, fences held native resize across HTTP views, and durably prunes", async () => {
   const fixture = makeTerminalFixture();
   closers.push(fixture.cleanup);
   const home = fixture.fixture.home,
@@ -35,6 +38,14 @@ it("captures actual current pi ExtensionContext cwd at create time and never rou
   vi.stubEnv("PI_CODING_AGENT_DIR", join(home, ".pi/agent"));
   vi.stubEnv("PI_WEBHUB_TERMINAL_SOURCE", "plain");
   let deps!: FrontendDeps, initialized: Promise<void> | undefined, status!: () => void;
+  let resizeCalls = 0,
+    physicalSettled = false,
+    releaseResize!: () => void;
+  const resizeBarrier = new Promise<void>((resolve) => {
+    releaseResize = resolve;
+  });
+  // Explicit injected method-result barrier, NOT a claim that the kernel ioctl hung.
+  // Every released resize executes the original native backend; no fake resize/proof.
   const declared = new Promise<void>((resolve) => {
     status = resolve;
   });
@@ -52,7 +63,22 @@ it("captures actual current pi ExtensionContext cwd at create time and never rou
     {
       xdgRuntimeDir: socketDir,
       terminalV2Test: {
-        backend: (options) => createTerminalTestBackend(options, fixture.fixture),
+        backend: (options) => {
+          const backend = createTerminalTestBackend(options, fixture.fixture);
+          return new Proxy(backend, {
+            get(target, key) {
+              if (key === "resize")
+                return async (...args: Parameters<typeof backend.resize>) => {
+                  resizeCalls++;
+                  if (resizeCalls === 1) await resizeBarrier;
+                  await target.resize(...args);
+                  physicalSettled = true;
+                };
+              const value = Reflect.get(target, key, target) as unknown;
+              return typeof value === "function" ? value.bind(target) : value;
+            },
+          });
+        },
         ready: (work) => {
           initialized = work;
         },
@@ -62,6 +88,7 @@ it("captures actual current pi ExtensionContext cwd at create time and never rou
   if (!("httpPort" in result)) throw new Error("private SDK hub startup failed");
   const hub: RunningHub = result;
   closers.push(() => hub.close("sdk-test"));
+  closers.push(() => releaseResize());
   await initialized;
   const sdk = await createTerminalSdkAgent({ home, cwd: fixture.fixture.cwd, socketDir, version: "1.2.3" });
   closers.push(sdk.close);
@@ -104,6 +131,68 @@ it("captures actual current pi ExtensionContext cwd at create time and never rou
   });
   expect(created.status).toBe(200);
   expect(created.body.ok).toBe(true);
+  const term = { scope, hubInstance: list.body.hubInstance, termId: created.body.termId };
+  const attach = async () => {
+    const stream = await openView(hub.httpPort, cookie, term);
+    const attached = await stream.next((frame) => frame.t === "attached");
+    const replay = await stream.next((frame) => frame.t === "replay-end");
+    if (attached.t !== "attached" || replay.t !== "replay-end") throw new Error("missing original view frames");
+    const writer = { ...term, viewId: attached.viewId };
+    expect((await call("ack", { ...writer, offset: replay.offset, replayComplete: true })).body.ok).toBe(true);
+    await stream.next((frame) => frame.t === "ready");
+    return { ...stream, writer };
+  };
+  const old = await attach();
+  const startedAt = Date.now();
+  const first = await call("resize", { ...old.writer, seq: 1, cols: 81, rows: 25 });
+  expect(first.body).toMatchObject({ ok: false, effect: "unknown" });
+  expect(Date.now() - startedAt).toBeLessThan(5000); // original 2s budget plus HTTP scheduling; no production widening.
+  expect(resizeCalls).toBe(1);
+  expect(physicalSettled).toBe(false);
+  const next = await attach();
+  const busyAt = Date.now();
+  expect((await call("resize", { ...next.writer, seq: 1, cols: 101, rows: 33 })).body).toMatchObject({
+    ok: false,
+    code: "E_NOT_READY",
+    effect: "none",
+  });
+  expect(Date.now() - busyAt).toBeLessThan(2000);
+  expect(resizeCalls).toBe(1);
+  let seq = 0;
+  const size = async (rows: number, cols: number) => {
+    const token = `SIZE${++seq}`;
+    expect(
+      (
+        await call("input", {
+          ...next.writer,
+          seq,
+          kind: "user",
+          bytesB64: Buffer.from(`printf '${token}='; stty size\n`).toString("base64"),
+        })
+      ).body.ok,
+    ).toBe(true);
+    await next.until(() =>
+      next.frames
+        .filter((frame) => frame.t === "output")
+        .map((frame) => Buffer.from(frame.bytesB64, "base64").toString())
+        .join("")
+        .includes(`${token}=${rows} ${cols}`),
+    );
+    const frame = next.frames.filter((frame) => frame.t === "output").at(-1)!;
+    const offset = frame.offset + Buffer.from(frame.bytesB64, "base64").length;
+    expect((await call("ack", { ...next.writer, offset })).body.ok).toBe(true);
+  };
+  console.info("native resize barrier", { first: first.body, calls: resizeCalls, physicalSettled });
+  expect(physicalSettled).toBe(false);
+  await size(24, 80); // actual old native dimensions, input is independent of held resize.
+  releaseResize();
+  await next.until(() => physicalSettled);
+  expect((await call("resize", { ...next.writer, seq: 2, cols: 101, rows: 33 })).body).toEqual({
+    ok: true,
+    acceptedThrough: 2,
+  });
+  expect(resizeCalls).toBe(2);
+  await size(33, 101); // original native backend really applied the accepted successor.
   const closed = await call("close", { scope, hubInstance: list.body.hubInstance, termId: created.body.termId });
   expect(closed.body).toMatchObject({ ok: true, state: "closed" });
   const disk = JSON.parse(readFileSync(join(state, "terminal-v2/ledger.json"), "utf8"));
@@ -118,3 +207,57 @@ it("captures actual current pi ExtensionContext cwd at create time and never rou
     ),
   ).toBe(false);
 }, 30000);
+
+/** Real HTTP NDJSON; only the resize method barrier above is injected. */
+async function openView(port: number, cookie: string, body: unknown) {
+  const response = await new Promise<IncomingMessage>((resolve, reject) => {
+    const req = request(
+      {
+        host: "127.0.0.1",
+        port,
+        path: "/api/terminal/v2/view",
+        method: "POST",
+        agent: false,
+        headers: {
+          Cookie: cookie,
+          Origin: `http://127.0.0.1:${port}`,
+          "x-pwh": "1",
+          "content-type": "application/json",
+        },
+      },
+      resolve,
+    );
+    req.once("error", reject);
+    req.end(JSON.stringify(body));
+  });
+  closers.push(() => {
+    response.destroy();
+  });
+  expect(response.statusCode).toBe(200);
+  const frames: TerminalViewFrameV2[] = [];
+  const decoder = new NdjsonDecoder({
+    onFrame: (raw) => frames.push(raw as TerminalViewFrameV2),
+    onError: () => {
+      throw new Error("invalid native view");
+    },
+  });
+  response.on("data", (chunk: Buffer) => decoder.push(chunk));
+  const until = async (check: () => boolean) => {
+    const at = Date.now() + 5000;
+    while (!check()) {
+      if (Date.now() >= at) throw new Error("native resize/view barrier deadline");
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, 10);
+        timer.unref();
+      });
+    }
+  };
+  return {
+    frames,
+    until,
+    next: async (predicate: (frame: TerminalViewFrameV2) => boolean) => {
+      await until(() => frames.some(predicate));
+      return frames.find(predicate)!;
+    },
+  };
+}
