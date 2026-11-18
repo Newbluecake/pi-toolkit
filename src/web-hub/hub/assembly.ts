@@ -184,6 +184,12 @@ export interface HubAssembly extends HubAssemblyBase {
   httpPort: number;
   spawnPlatform?: ReturnType<typeof probePlatform> | undefined;
   htmlEnabled: boolean;
+  /** darwin-plan §2.6 (修订 #5): the ONE hub-lifetime load probe result, assigned by
+   *  `prepareHubChannels` (exactly once per hub start) and read by BOTH consumers — the cap
+   * declaration (`assembleHubCaps`) and the frontend handoff (`FrontendDeps.loadProbed` →
+   *  `createHubLoad({probed})`), so the cap, the service, the route and the SSE frames can
+   *  never disagree. Default `false` until the assembly sets it (feature off ⇒ never set). */
+  loadProbeOk: boolean;
   xsAlias?: XsAliasBinding;
   xsAliasDegraded?: { reason: string; path: string };
 }
@@ -197,6 +203,7 @@ export function createHubAssembly(base: HubAssemblyBase): HubAssembly {
     lastSpawnStatus: undefined,
     lastProxyPortsStore: undefined,
     htmlEnabled: false,
+    loadProbeOk: false,
     avatarRoutes: undefined,
     bot: undefined,
     botSpawn: undefined,

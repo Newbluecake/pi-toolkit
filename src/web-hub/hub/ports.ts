@@ -851,6 +851,13 @@ export interface FrontendDeps {
    * and pre-F4 assemblies keep compiling — when absent there is no `/api/run/*` wiring (F4
    * builds `createRunRoutes` off this) and everything else is byte-identical. */
   runTx?: RunTranscriptService;
+  /** darwin-plan §2.6 (修订 #5)/§3.1-S2: the ONE hub-lifetime load probe result, written by
+   *  hub.ts from `ctx.loadProbeOk`. http.ts forwards it to `createHubLoad({probed})` so the
+   *  load service never re-probes (a darwin probe is a subprocess — two independent probes
+   *  could disagree between the cap and the service). Absent (feature off, or a test double
+   *  that ignores it) ⇒ `createHubLoad` falls back to probing itself — byte-identical to the
+   *  pre-S2 behavior. */
+  loadProbed?: boolean;
   /** web-hub-delete-session plan v2 §2.9: the agent/managed-session removal route frontend
    * (`hub/agent-remove.ts`'s `createAgentRemoveService`). Optional so test doubles and
    * pre-feature assemblies keep compiling — when absent, `POST /api/agents/remove` answers 404

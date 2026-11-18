@@ -186,6 +186,12 @@ export interface StartHubDeps {
     historyProcSyncFs?: Partial<ProcSyncFs>;
     wrapHistory?: (svc: SpawnHistoryService) => SpawnHistoryService;
   };
+  /** darwin-plan §2.6 (修订 #5)/§3.1-S2: test seam for the ONE hub-lifetime load startup probe.
+   *  Production leaves this undefined and gets the real `hubLoadProbe` (/proc/stat on Linux,
+   *  `probeDarwinHost` on darwin). The injected result feeds `ctx.loadProbeOk`, which both the
+   *  cap declaration and the frontend's `loadProbed` handoff read — a test can pin the
+   *  single-probe contract without any subprocess. `main.ts` never supplies this. */
+  loadSeams?: { probe?: () => boolean };
   /** dir-plan v3.1 §2.9 (P1a): the uid the preview root-warning checks — `0` ⇒ the one-shot
    * `preview.root_uid` WARN after the preview routes are built. Default: `process.getuid?.()`;
    * tests inject `() => 0` / `() => 1000` / leave it undefined (no getuid on the platform). */
@@ -794,6 +800,11 @@ export async function startHub(
       // fleet-drawer plan §5.3 (F3b): the run-transcript service — F4's `createRunRoutes`
       // reads it through this dep (absent ⇒ no `/api/run/*` wiring, byte-identical today).
       runTx,
+      // darwin-plan §2.6 (修订 #5)/§3.1-S2: the ONE hub-lifetime load probe result from
+      // `ctx.loadProbeOk` (prepareHubChannels). http.ts forwards it to `createHubLoad({probed})`
+      // so the service never re-probes; set only when `config.load` exists — a feature-off hub
+      // stays byte-identical and an old frontend double that ignores the field changes nothing.
+      ...(config.load === undefined ? {} : { loadProbed: ctx.loadProbeOk }),
     };
     // scheduled-reports H1: the coordinator rides FrontendDeps as a duck-typed extra (ports.ts
     // frozen for this package — http.ts reads it through the same widening; the GET route + SSE

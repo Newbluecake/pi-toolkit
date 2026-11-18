@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { createHubLoad, LOAD_TOP_WAITERS_MAX, normalizeHubLoadConfig } from "../../../src/web-hub/hub/load.js";
+import {
+  createHubLoad,
+  hubLoadProbe,
+  LOAD_TOP_WAITERS_MAX,
+  normalizeHubLoadConfig,
+} from "../../../src/web-hub/hub/load.js";
 import type { HubLoadConfig } from "../../../src/web-hub/hub/ports.js";
 import type { TopSnapshot } from "../../../src/sysload/types.js";
 
@@ -159,7 +164,11 @@ describe("hub sysload", () => {
   });
 
   it("shares one top scan, bounds waiters, and caches for two seconds", async () => {
-    if (process.platform !== "linux") return;
+    // darwin-plan §4.5-1: the pre-S2 `process.platform !== "linux"` early exit is gone — the
+    // service is now platform-neutral in tests: `probe` replaces the startup probe and the
+    // injected `io` (authoritative, no `host`) keeps every platform on the sampler's Linux
+    // default path (on a mac dev machine the /proc reads simply fail ⇒ invalid sample, no
+    // subprocess is ever started).
     let now = 0;
     let calls = 0;
     let release!: () => void;
@@ -170,6 +179,8 @@ describe("hub sysload", () => {
       home: "/",
       mono: () => now,
       now: () => now,
+      probe: () => true,
+      io: {},
       scanTop: async () => {
         calls++;
         return pending;
@@ -189,5 +200,20 @@ describe("hub sysload", () => {
     await second;
     expect(calls).toBe(2);
     await service!.dispose();
+  });
+
+  it("stays service-less when the injected probe fails (any platform)", () => {
+    // darwin-plan §3.1-S2: probe failure ⇒ no service, no cap, no route — the existing
+    // fail-closed contract, now observable without a real /proc (and without a darwin sysctl).
+    expect(createHubLoad(config, { home: "/", probe: () => false, io: {} })).toBeUndefined();
+  });
+
+  it("dispatches the startup probe per platform (linux original, others false)", () => {
+    // darwin-plan §2.6: only the linux branch keeps the original /proc/stat logic; every other
+    // non-darwin platform stays false. The darwin branch (and its probeDarwin seam) is pinned
+    // in load-probe-once.test.ts — calling it here with the real default would spawn sysctl.
+    expect(hubLoadProbe({ platform: "win32" })).toBe(false);
+    expect(hubLoadProbe({ platform: "sunos" })).toBe(false);
+    expect(hubLoadProbe({ platform: "linux" })).toBe(process.platform === "linux");
   });
 });
