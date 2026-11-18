@@ -2,8 +2,10 @@
 
 Status: **P6 scoped development/validation complete; P7 independent acceptance pending.
 NOT deployment approval and NOT all-stack PASS**.
-Accepted implementation design is T51 r2. D1 hub owner, D2 shared tabs/creator attribution and D3 drain
-then breaking replacement are fixed user decisions. This page replaces obsolete v1/#45 test claims;
+D1 hub owner and D2 shared tabs/creator attribution remain fixed. The approved retained-unknown
+contract supersedes physical-all-gone/live-ACK reconstruction as the only existing-installation path:
+seal old publishers/writers, retain cold debt, and permit only honest remaining quota. Strict fresh/
+real-clean-ACK initialization remains separate; retained rollback is O terminal-OFF only. This page replaces obsolete v1/#45 test claims;
 former complete O=4e15 evidence does not prove T51 O=7239→N migration.
 
 ## Executed evidence
@@ -26,7 +28,8 @@ former complete O=4e15 evidence does not prove T51 O=7239→N migration.
 
 - Root-approved shared v1 resource/offer/grant/receipt/frame/HTTP/schema/ports/dead-UI exports removed.
   Only machine policy/refusal classifiers and an inert export-free frozen I8 anchor remain. Frozen V2
-  P0/PROTO/fixtures/trace/I8 whitelist unchanged.
+  PROTO/fixtures/trace/I8 whitelist unchanged. The later root-approved retained extension adds ONLY
+  its initialization branch and independent optional legacy obligations; original empty branches remain byte-identical.
 - Fixed executable `terminal-v2-maintenance.ts fresh|cycle --private-parent <owned0700>` constructs a
   new private scope, holds filesystem deployment lock + original singleton/socket/dir, measures actual
   fixed O7239/tool observation patch/N clean source/compiled artifacts/toolchain. No arbitrary JSON,
@@ -53,7 +56,7 @@ former complete O=4e15 evidence does not prove T51 O=7239→N migration.
   selection is required; no injected UI state. Closed-tab cache resurrection was found/fixed with
   private memory metadata only after exact proof+prune; unknown remains visible/charged. WebGL2
   renderer is SwiftShader SOFTWARE, not hardware GPU. No install/download/site action.
-- Current full tier1 has a fresh exact membership1845 files/37819 passed/3 existing root-only skips,
+- Historical P6 full tier1 had exact membership1845 files/37819 passed/3 existing root-only skips,
   with one retained pre-existing Dashboard/useTicker teardown error followed by standalone AND same
   entire100-file shard green; no unrelated runtime fix/waiver. Earlier source-scan/drawer CSS failures
   were actually fixed without weakening the gate, then the ENTIRE fresh membership reran. Reports
@@ -92,4 +95,36 @@ use explicit TMPDIR=/tmp and only isolated generated fixtures. Never read/connec
 `npm run typecheck`, `npm run build`, `npm run build:web`, `npm run check:web`, v2 schema/notices checks,
 full tier1 serial shards and <=3 integration files per call are independent evidence. Real browser
 commands explicitly fail/NOT RUN without provided assets; they do not auto-install or silently skip.
-The browser probe is executable source, but has not been executed successfully here.
+The provided-browser probes HAVE executed successfully: P6's real UI/SDK/PTY/CSP cases and the
+retained O1/O2 readonly/remainder/E_LIMIT cases. These are Chromium/SwiftShader software evidence,
+not hardware GPU/Firefox/device coverage.
+
+## Retained existing-installation increment
+
+Implementation source is committed at `6f503997` (core/source/init predecessors `c2f67fa8`,
+`eaf42419`, `ae5e1180`, `1f1560cb`). The fixed closed-profile CLI is described in
+[README](README.md) and the [shipped runbook](retained-runbook.md). No site operation is authorized.
+
+- Actual independent ordinary UNPATCHED O7239 creates0/1/2 resources (two distinct actual SDK
+  sessions/processes for2) BEFORE a separate CLI opens the existing S. No ControlledScope, observation
+  patch, fake dirty row, owner-facts snapshot, live bridge or constructor capability substitutes for it.
+- Actual N SDK/native PTY/input/proof-prune preserves L, restart/new session/new login cannot shed
+  principal/total debt; L2 is honest E_LIMIT/backend0 while auth/public SSE work. Independent CLI
+  resume, actual O-off SDK/service/auth/public SSE/terminal404 and return-to-N retain the SAME L.
+- Real owned CLI self-exit75 (no injected signal) after prepared/config fsync leaves publication
+  incomplete/launcher blocked; a new process resumes only a consistent phase. Original sockets,
+  changed source, bad journal, unknown source, FIFO, links/partials/caps have explicit refusal tests.
+  Component old-boot/fault cases remain labelled simulated, not powercut/kernel evidence.
+- Actual npm pack/bin symlink and offline release ZIP unpacked consumers run the ordinary existing O1
+  path with Node22 and NO consumer node_modules/tsx/esbuild; original installed pi is explicit in I.
+- Current fresh tier1 manifest is1849 files:37875 passed,3 existing skips,0 final failures, exact
+  membership checked across serial150-file shards. Initial shard09 hit an existing long-TMPDIR socket
+  fallback; sandbox blocked the shared listen. Standalone hub-lan AND the SAME entire150-file shard
+  passed with explicit TMPDIR=/tmp; original red is retained, no runtime/fixture/gate relaxation.
+  The other three strict-TMP fixtures also ran explicitly under/tmp. Do not reuse historical counts.
+
+External retained migration/P7 reports index exact commands, private measurement/results/screenshots,
+initial reds, final selections and evidence limits. No auth DB/token/TOTP is restored. Existing full
+Tier1 includes its own owned-process signal/probe lifecycle tests; the new retained fault path uses
+self-exit, not a SIGKILL crash/powercut claim. No manual kill/user-shell/site action or deployment
+approval is implied. Independent P7 migration/accounting/UI acceptance remains required.

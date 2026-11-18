@@ -23,7 +23,9 @@ export async function probeRetainedBrowser(options: {
     errors: string[] = [];
   let page: any;
   try {
-    const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+    // The shared loader intentionally exposes only a minimal PwContext surface;
+    // this pinned real-browser probe also uses Playwright's routing/function-script APIs.
+    const context: any = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
     await context.route("**/*", (route: any) =>
       new URL(route.request().url()).origin === origin ? route.continue() : route.abort(),
     );
