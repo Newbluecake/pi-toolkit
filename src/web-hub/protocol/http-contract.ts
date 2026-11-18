@@ -315,20 +315,6 @@ export interface CommandCompleteResult {
   source: "own" | "tui";
 }
 
-// Feature-local, direct-send only. Do not add these to legacy SSE_EVENTS/ring dispatch.
-export const TERMINAL_SSE_EVENTS = ["terminal_connection", "terminal"] as const;
-export { TERMINAL_HTTP_PATHS } from "./terminal-paths.js";
-export type {
-  TerminalHttpRequests,
-  TerminalHttpResults,
-  TerminalHttpResponse,
-  TerminalSseEvent,
-  TerminalFailure,
-} from "./terminal.js";
-
-/** Terminal display metadata: optional response-only fields; see terminal.ts for ownership/privacy. */
-export type { TerminalDisplayMetadata, TerminalAgentDisplayMetadata, TerminalHubDisplayMetadata } from "./terminal.js";
-
 /** T51 P0 optional declarations; not registered routes or public SSE events. */
 export { TERMINAL_V2_CAP, TERMINAL_V2_HTTP_PATHS } from "./terminal-v2-paths.js";
 export type {

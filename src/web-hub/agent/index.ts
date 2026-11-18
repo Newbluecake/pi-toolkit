@@ -1234,7 +1234,7 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
     const reloadView = reloadTracker.projection();
     if (reloadView !== undefined) s.reload = reloadView;
     if (terminal !== undefined) {
-      delete s.terminalSession;
+      delete (s as typeof s & { terminalSession?: unknown }).terminalSession;
       delete s.terminalSessionV2;
     }
     c.setSlot("status", { t: "status", ...s }, terminal === undefined ? xsBridge?.slotFlush : terminalStatusFlush);

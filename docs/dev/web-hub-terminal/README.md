@@ -5,8 +5,7 @@
 >
 > **Integration checkpoint, NOT release/deployment approval.** V2 execution is wired. The real trusted
 > O/N/fresh maintenance adapter, complete mixed-version/rollback rehearsals and browser/device gates
-> remain incomplete. Frozen inherited v1 shared declarations still need the coordinator's deletion
-> decision; see the final section. Component/test greens do not imply full T51 acceptance.
+> remain incomplete. Root approved obsolete v1 shared declaration deletion on 2026-11-18; the shared execution schemas/exports are now removed. Component/test greens do not imply full T51 acceptance.
 
 ## Ownership and off
 
@@ -213,11 +212,14 @@ restart, user-shell termination, push or deployment is authorized by this work.
 
 ## Remaining integration blockers
 
-1. Frozen shared v1 declarations in `protocol/terminal.ts`, `messages.ts`, `http-contract.ts`,
-   `hub/ports.ts` still require coordinator approval to delete legacy resource/capability/frame schemas while
-   preserving only refusal utility/machine policy and keeping frozen v2 signatures unchanged. Runtime
-   legacy local reader/files/owner/service/bindings are deleted, but the **full schema deletion gate
-   is NOT PASS**. An attempted report was blocked by the run's3/3 report quota; no workaround used.
+1. Root-approved shared cleanup removed obsolete v1 resource/offer/grant/receipt/frame/HTTP types,
+   ordinary decoders/maps, ports and dead UI projection/generator. Machine policy defaults/schema and
+   namespace/reserved command/result **refusal classifiers only** remain. These historical labels are
+   necessary to discard old/malformed traffic without command-history/public-SSE leakage, never to
+   negotiate or execute. `terminal-session.ts` is an inert, export-free boundary anchor: the frozen
+   I8 closure pins that file and its three existing edges, so they are retained without changing the
+   whitelist. No production consumer imports it. Generic status stays open to opaque old keys; no v1
+   positive type/parser/capability is emitted. V2 P0 files/fields, PROTO, fixtures/trace/I8 unchanged.
 2. Actual executable trusted in-process O/N/fresh maintenance adapter/deployment publisher fence and
    fixed-version live O causal audit bridge remain incomplete. CLI78 is deliberately NOT a final
    delivery claim. No arbitrary module/JSON/boolean drain loader may be added to fake this gate.

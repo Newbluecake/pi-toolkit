@@ -7,15 +7,6 @@
  * literal plus total serialized size (≤ MAX_FRAME_BYTES). Unknown frame types —
  * including RESERVED_FRAME_TYPES — decode to `undefined` and are ignored.
  */
-import {
-  TERMINAL_AGENT_FRAME_SCHEMAS,
-  TERMINAL_HUB_FRAME_SCHEMAS,
-  terminalFrameOk,
-  type TermReq,
-  type TermRes,
-  type TermEvent,
-  type TerminalOffer,
-} from "./terminal.js";
 import { Type, type TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { MAX_FRAME_BYTES } from "./ndjson.js";
@@ -34,7 +25,6 @@ import {
   RunWatchSchema,
 } from "./run-transcript.js";
 import type { LanStatus } from "./lan.js";
-import type { TerminalSession } from "./terminal-session.js";
 import type { TerminalSessionV2, TerminalContextRequest, TerminalContextReply } from "./terminal-v2.js";
 // T51 P0: types only. P6 must consume private context frames before ordinary decoding.
 export type { TerminalContextRequest, TerminalContextReply } from "./terminal-v2.js";
@@ -797,10 +787,6 @@ export interface StatusInfo {
    *  facts). The open StatusInfoSchema forwards it through old hubs untouched; old UIs ignore it.
    *  No PROTO bump, no cap, no new frame (D6). */
   reload?: ReloadStatusWire;
-  /** Positive target declaration only; no execution authority. Deliberately NOT added to the
-   * open StatusInfoSchema: malformed future/old declarations must not discard ordinary status.
-   * Terminal consumers independently call parseTerminalSession and bind live session/epoch. */
-  terminalSession?: TerminalSession;
   /** T51 v2 candidate only; never emitted by P0 or proof of cwd/auth/link readiness. */
   terminalSessionV2?: TerminalSessionV2;
 }
@@ -1150,8 +1136,6 @@ export type CmdData =
   | {
       op: "command";
       kind: "extension" | "template" | "builtin";
-      /** Terminal r4: public offer only. Grant/inventory/proofs NEVER enter CmdData. */
-      terminal?: TerminalOffer;
       completion: "sync" | "async" | "unknown" | "timeout";
       captured?: boolean;
       output?: CommandOutputWire;
@@ -1298,8 +1282,6 @@ export interface SupersededFrame {
 // agent→hub
 export type AgentFrame =
   | TerminalContextReply // Type-only P0 addition; private decoder/consumer installed together in P6.
-  | TermRes
-  | TermEvent
   | {
       t: "hello";
       proto: { major: number; minor: number };
@@ -1408,7 +1390,6 @@ export type LanResFrame =
 // hub→agent
 export type HubFrame =
   | TerminalContextRequest // Type-only P0 addition; no v2 probe/output in current runtime.
-  | TermReq
   | {
       t: "hello_ack";
       hubVersion: string;
@@ -2598,7 +2579,6 @@ const agentFrameSchemas: Readonly<Record<string, TSchema>> = {
   ...SCHED_AGENT_FRAME_SCHEMAS,
   // fabric-thread P0 (arch §7.3): schemas from protocol/thread.ts
   ...THREAD_AGENT_FRAME_SCHEMAS,
-  ...TERMINAL_AGENT_FRAME_SCHEMAS,
 };
 
 const hubFrameSchemas: Readonly<Record<string, TSchema>> = {
@@ -2629,7 +2609,6 @@ const hubFrameSchemas: Readonly<Record<string, TSchema>> = {
   ...SCHED_HUB_FRAME_SCHEMAS,
   // fabric-thread P0 (arch §7.2): schemas from protocol/thread.ts
   ...THREAD_HUB_FRAME_SCHEMAS,
-  ...TERMINAL_HUB_FRAME_SCHEMAS,
 };
 
 // ---------------------------------------------------------------------------
@@ -2658,7 +2637,8 @@ function decodeWith(schemas: Readonly<Record<string, TSchema>>, raw: unknown): o
   // STRICTER 12 KiB serialized-JSON budget, and thr_req{op:"post"} the byte-precise 8 KiB text
   // cap — same posture as xs_*; inert until P2/P3 route the frames.
   if (t.startsWith("thr_") && !thrFrameOk(raw)) return undefined;
-  if (t.startsWith("term_") && !terminalFrameOk(raw)) return undefined;
+  // Historical terminal frames have no ordinary decoder, including unknown future variants.
+  if (t.startsWith("term_") || t.startsWith("terminal_context_")) return undefined;
   const schema = schemas[t];
   if (schema === undefined) return undefined; // unknown t + RESERVED_FRAME_TYPES
   return Value.Check(schema, raw) ? (raw as object) : undefined;

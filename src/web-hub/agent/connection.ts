@@ -766,8 +766,6 @@ class Connection implements HubConnection {
         }
         return;
       }
-      case "term_req": // Approved breaking change: never execute v1 terminal negotiation.
-        return;
       case "cmd":
         if (this.link !== "live") return;
         if (this.binding?.onCmd !== undefined) this.callBinding((b) => b.onCmd?.(frame));
