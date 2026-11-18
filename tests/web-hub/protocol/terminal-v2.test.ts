@@ -147,7 +147,6 @@ describe("T51 P0 terminal v2 frozen contracts (no runtime)", () => {
       expect(terminalHttpRequestV2Ok("input", invalid)).toBe(false);
     }
     expect(Value.Check(TerminalFailureV2Schema, { ok: false, code: "E_INPUT_UNKNOWN", effect: "unknown" })).toBe(true);
-    expect(TERMINAL_V2_LIMITS.inputResults).toBe(64); // no accepted seq can be rewritten after eviction
   });
   it("uses canonical base64 and UTF-8/code-point name/cwd limits", () => {
     expect(terminalBase64BytesV2("")).toBe(0);

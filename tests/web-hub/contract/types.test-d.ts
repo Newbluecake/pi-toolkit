@@ -807,3 +807,43 @@ describe("LAN security P0 types", () => {
     expectTypeOf<TfaResFrame>().toMatchTypeOf<HubFrame>();
   });
 });
+
+// T51 P0: these assertions are actually included by tsconfig.typecheck.json.
+import type {
+  TerminalHttpRequestsV2,
+  TerminalHttpResponseV2,
+  LedgerV2,
+} from "../../../src/web-hub/protocol/terminal-v2.js";
+import type {
+  TerminalAuthFenceV2,
+  TerminalContextPort,
+  TerminalContextSnapshotV2,
+  TerminalServiceV2,
+  TerminalViewPortV2,
+  TerminalRuntimeV2,
+} from "../../../src/web-hub/hub/ports.js";
+import type { TerminalHttpRequestsV2 as BrowserRequestsV2 } from "../../../src/web-hub/ui/src/components/terminal/protocol-v2.js";
+
+describe("T51 v2 compile-time cross-package ownership", () => {
+  it("pins synchronous/no-Promise auth notifications and immutable context snapshots", () => {
+    expectTypeOf<ReturnType<TerminalAuthFenceV2["invalidate"]>>().toEqualTypeOf<number>();
+    expectTypeOf<ReturnType<TerminalAuthFenceV2["settle"]>>().toEqualTypeOf<void>();
+    expectTypeOf<Awaited<ReturnType<TerminalContextPort["resolve"]>>>().toEqualTypeOf<TerminalContextSnapshotV2>();
+    expectTypeOf<Parameters<TerminalContextPort["current"]>[0]>().toEqualTypeOf<TerminalContextSnapshotV2>();
+    expectTypeOf<Awaited<ReturnType<TerminalServiceV2["create"]>>>().toEqualTypeOf<TerminalHttpResponseV2<"create">>();
+    expectTypeOf<Parameters<TerminalViewPortV2["input"]>[1]>().toEqualTypeOf<TerminalHttpRequestsV2["input"]>();
+    expectTypeOf<ReturnType<TerminalRuntimeV2["snapshot"]>["end"]>().toEqualTypeOf<number>();
+  });
+  it("uses protocol aliases in the browser and keeps ledger resource-only", () => {
+    expectTypeOf<BrowserRequestsV2>().toEqualTypeOf<TerminalHttpRequestsV2>();
+    expectTypeOf<TerminalHttpRequestsV2["create"]["mode"]>().toEqualTypeOf<"ensure-empty" | "new">();
+    expectTypeOf<keyof Extract<TerminalHttpRequestsV2["input"], { queryOnly: true }>>().toEqualTypeOf<
+      "scope" | "hubInstance" | "termId" | "viewId" | "seq" | "queryOnly"
+    >();
+    expectTypeOf<Extract<TerminalHttpRequestsV2["input"], { bytesB64: string }>["kind"]>().toEqualTypeOf<
+      "user" | "terminal_response"
+    >();
+    expectTypeOf<keyof LedgerV2>().toEqualTypeOf<"v" | "storeId" | "revision" | "allocations">();
+    expectTypeOf<keyof TerminalHttpRequestsV2["view"]>().toEqualTypeOf<"scope" | "hubInstance" | "termId" | "offset">();
+  });
+});

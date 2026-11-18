@@ -4,6 +4,64 @@
 > 总体边界见 [WebHub 索引](../web-hub/README.md)；安全域见 [data-encryption](../data-encryption/README.md)。
 > [验收清单](acceptance.md) 区分自动化证据与 NOT RUN；不要把方案矩阵或单包报告当作跨层 PASS。
 
+## T51 P0：v2 契约已冻结，生产仍为 v1
+
+T51 r2 的 D1–D3 已批准：终态为 hub-owned PTY、独立 NDJSON view、所有当前登录用户共享 tabs；
+取消 agent owner/authority/receipt/公共 SSE 绑定。**本包只交付可编译契约，不切换生产，不实现多 tab**。
+下文 v1 owner/F2/私有 SSE 描述仍准确描述本包的实际运行行为；只能在 P6 完整替换装配时一并移除。
+维护 drain、部署、现场重启及发版仍须另行授权。
+
+盘点起点 `7239dd115ac66039e2c4f80308ea5d08520aa6af`：现有协议是
+`protocol/terminal.ts`、`terminal-paths.ts`、`terminal-session.ts`，没有 `protocol/session.ts`；
+UI 没有独立 terminal types 目录，v1 类型直接来自协议，JSON projection 在
+`ui/src/components/terminal/protocol-schema.ts`，生成器为 `scripts/web-hub/gen-terminal-ui-schema.ts`。
+因此 v2 不复用/改名这些 v1 导出，而集中于以下唯一合同：
+
+- `protocol/terminal-v2.ts`：闭合 TypeBox schema/Static 类型、可选 session 声明、context RPC、
+  HTTP 输入/JSON 输出、独立 view 帧、纯 allocation ledger/marker、固定错误及纯验证。
+- `protocol/terminal-v2-paths.ts`：零 import 的 cap/路由/布局声明（`paths.ts` 重导出布局，
+  `http-contract.ts` 只值重导出轻量路由与 type-only 类型，不 eager 拉 schema）。
+- `protocol/terminal-v2-values.ts`：零 import 的有界常量与共享 UTF-8/name/base64 规则；
+  schema 检查之后还须执行语义检查，不能把安全整数、schema 布尔值当物理事实。
+- `hub/terminal-v2-ports.ts`（`hub/ports.ts` type-only 重导出）：P1 service/runtime/ledger、
+  P2 view/routes/auth fence、P3 context 的交接面。`TerminalRuntimeV2` 是原 term 的只读 ring/
+  backend handle，不是第二个 owner；P2 负责单 writer、seq/ACK、流和独立有界队列。
+- `ui/src/components/terminal/protocol-v2.ts`：只做协议 type alias 和轻量规则出口；
+  `protocol-v2-schema.ts` 是新生成物。生成器 `scripts/web-hub/gen-terminal-v2-ui-schema.ts`
+  默认/`--check` 拒绝漂移，只有显式 `--write` 写这个新文件，绝不重录 v1 或 fixtures。
+
+`messages.ts` 仅追加可选 `StatusInfo.terminalSessionV2`、type-only context union/export；
+普通 PROTO 仍 1.2，当前 decoder 不接受 context 帧，cap/status/路由不加入运行输出。
+P6 必须先在 registry/bus/history 之前安装私有消费/拒绝入口，再接 context decoder；
+否则可能把 cwd 泄漏进普通消息。旧 agent 无 matching v2 声明时零主动探测。
+
+合同要点：list 只带 scope，回当前 hubInstance；其它操作精确匹配 hubInstance；create 的
+requestId 捕获一次上下文、ensure-empty 单飞，creation unknown 只查原意图，不换 id 重开。
+view 成功是独立 `application/x-ndjson`/identity，不是 JSON success、不使用 SSE clientId。
+input/resize 用各自 seq；ACK 是 raw-byte offset，renderer callback 后才提交，replayComplete 后
+ready 才写，单 writer 不 steal。raw offset/seq 均安全整数；gap 显式，只有获准 view 带 metadata。
+rename trim 后 1–24 code points/≤96 UTF-8 bytes，禁止控制符；不采 OSC。
+
+P0 用户明确澄清：input 的另一个闭合互斥分支是 `{scope,hubInstance,termId,viewId,seq,queryOnly:true}`，
+严格拒绝 bytesB64/kind；不新增路由。P2 先核原认证/scope/原 view，禁止查他人或已撤 view 历史，
+再只查已记录原 seq 的结果；最近最多64结果+最大接受 seq，淘汰不表示从未执行。
+从未接受/已裁掉/不可证明结果统一 `E_INPUT_UNKNOWN effect:unknown`；旧 view 先按安全合同拒绝。
+查询零 PTY/创建/续期/writer acquisition。P4 unknown 后只查原 id/seq，不重发写分支或自动补写。
+结构测试只能证明分支互斥；查询零副作用/认证隔离/淘汰不重写须由 P2/P7 行为测试证明。
+
+合法 cold allocation 逐项 cleanup-unknown，按原 quotaSessionKey/principalKey/total 各占一次，
+不是全局封禁；余额可建，close 不释放未知槽。ledger 仅资源归因，拒绝 auth intent/epoch/repair/
+cwd/env/title/token，初始化不读 v1；缺 marker 为 setup-required，不生产扫描猜 fresh。
+释放必须完整物理 proof + exact durable prune；commit unknown 才资源全局拒新，绝不 finally 减槽。
+`TerminalAuthFenceV2.invalidate/settle` 同步无 IO、无 Promise、不把异常传回 auth；
+auth 仍按自己的 DB/token/rotate-intent 提交与诚实返回，terminal 磁盘失败不得成为前置条件。
+
+P0 定向门：`tests/web-hub/protocol/terminal-v2.test.ts`、`terminal-paths.test.ts`、
+`tests/web-hub/ui/terminal-v2-browser-schema.test.ts` 及纳入 typecheck 的
+`tests/web-hub/contract/types.test-d.ts`。新测试为纯合同 Tier1，无 proc/network/sleep marker，
+按 `tests/tiers.ts` 默认分区，无额外 tier2/secure 注册。真实 PTY/HTTP/auth 故障/多 tab browser/
+迁移/回滚/混版全栈属于 P1–P7，不以这些合同测试冒充通过。
+
 ## 产品边界与设置
 
 这是 **agent-owned Linux + Python 3 PTY**，不是 pi 原 TUI、不是模型工具、不是 `bash_job`，不使用 BashJobManager、bash job 持久化或 bash timeout/grace。
