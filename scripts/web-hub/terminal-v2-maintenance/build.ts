@@ -14,7 +14,12 @@ import { OLD_SOURCE } from "./legacy-reader.js";
 import { OLD_PATCH_FILES, patchOldMaintenanceSource } from "./old-build-patch.js";
 const repository = () => packageRoot(import.meta.url);
 const git = (args: string[]) =>
-  execFileSync("/usr/bin/git", args, { cwd: repository(), timeout: 30000, maxBuffer: 64 * 1024 * 1024 });
+  execFileSync("/usr/bin/git", ["--no-pager", "-c", "core.fsmonitor=false", ...args], {
+    cwd: repository(),
+    env: { ...process.env, GIT_NO_REPLACE_OBJECTS: "1", GIT_OPTIONAL_LOCKS: "0" },
+    timeout: 30000,
+    maxBuffer: 64 * 1024 * 1024,
+  });
 export interface MeasuredBuild {
   readonly kind: "old" | "new";
   readonly directory: string;
@@ -68,7 +73,7 @@ export async function buildMeasuredRuntime(parent: HeldDirectory, kind: "old" | 
       writeFileSync(file, after);
     }
   } else {
-    git(["diff", "--exit-code", "HEAD", "--", "src"]);
+    git(["diff", "--no-ext-diff", "--exit-code", "HEAD", "--", "src"]);
     // Content anchor for the generated artifact; not a copied or installed dependency tree.
     writeFileSync(join(output.path, "package.json"), readFileSync(join(repo, "package.json")), { mode: 0o600 });
   }
@@ -80,10 +85,12 @@ export {startHub} from ${JSON.stringify(join(sourceRoot, "src/web-hub/hub/hub.js
 export {createHttpFrontend} from ${JSON.stringify(join(sourceRoot, "src/web-hub/hub/http.js"))};
 export {wireWebHub} from ${JSON.stringify(join(sourceRoot, "src/web-hub/agent/index.js"))};
 export {resolveHubPaths} from ${JSON.stringify(join(sourceRoot, "src/web-hub/protocol/paths.js"))};
+export {terminalSessionUiEnabled as uiEnabled, terminalUiEnabled as uiHubEnabled} from ${JSON.stringify(join(sourceRoot, "src/web-hub/ui/src/logic/terminalCapability.js"))};
 import {wireWebHub} from ${JSON.stringify(join(sourceRoot, "src/web-hub/agent/index.js"))};
 import {runSdkWorker} from ${JSON.stringify(worker)};
 import {resolveHubPaths} from ${JSON.stringify(join(sourceRoot, "src/web-hub/protocol/paths.js"))};
 import {DEFAULT_SETTINGS} from ${JSON.stringify(join(sourceRoot, "src/config/settings.js"))};
+import {parseTerminalPolicy} from ${JSON.stringify(join(sourceRoot, "src/web-hub/protocol/terminal-policy.js"))};
 ${
   kind === "old"
     ? `
@@ -92,13 +99,13 @@ export {terminalIdentitiesGone} from ${JSON.stringify(join(sourceRoot, "src/web-
 import {createTerminalOwner} from ${JSON.stringify(join(sourceRoot, "src/web-hub/agent/terminal/owner.js"))};
 export {createTerminalTestBackend} from ${JSON.stringify(join(sourceRoot, "src/web-hub/agent/terminal/backend.js"))};
 import {createTerminalTestBackend} from ${JSON.stringify(join(sourceRoot, "src/web-hub/agent/terminal/backend.js"))};
-const workerRuntime = {kind: "old", wireWebHub, resolveHubPaths, defaults: DEFAULT_SETTINGS.webHub, createTerminalOwner, createTerminalTestBackend};
+const workerRuntime = {kind: "old", wireWebHub, resolveHubPaths, parseTerminalPolicy, defaults: DEFAULT_SETTINGS.webHub, createTerminalOwner, createTerminalTestBackend};
 `
     : `
 export {createTerminalTestBackend} from ${JSON.stringify(join(sourceRoot, "src/web-hub/hub/terminal/v2/backend.js"))};
 export {createTerminalAllocationLedgerV2} from ${JSON.stringify(join(sourceRoot, "src/web-hub/hub/terminal/v2/ledger.js"))};
 export {terminalIdentitiesGone} from ${JSON.stringify(join(sourceRoot, "src/web-hub/hub/terminal/v2/reaper.js"))};
-const workerRuntime = {kind: "new", wireWebHub, resolveHubPaths, defaults: DEFAULT_SETTINGS.webHub};
+const workerRuntime = {kind: "new", wireWebHub, resolveHubPaths, parseTerminalPolicy, defaults: DEFAULT_SETTINGS.webHub};
 `
 }
 if (process.argv[2] === "__owned_sdk_worker" && process.send) runSdkWorker(workerRuntime).catch(() => process.exit(70));
@@ -111,6 +118,13 @@ if (process.argv[2] === "__owned_sdk_worker" && process.send) runSdkWorker(worke
       {
         name: "measured-inputs",
         setup(builder) {
+          builder.onResolve({ filter: /^@protocol\// }, (args) => ({
+            path: join(
+              sourceRoot,
+              "src/web-hub/protocol",
+              args.path.slice("@protocol/".length).replace(/\.js$/, ".ts"),
+            ),
+          }));
           builder.onLoad({ filter: /\.[cm]?[jt]s$/ }, ({ path }) => {
             const contents = readFileSync(path);
             consumed.set(path, contents);
@@ -136,7 +150,7 @@ if (process.argv[2] === "__owned_sdk_worker" && process.send) runSdkWorker(worke
   const inputs = [...consumed]
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([path, bytes]) => ({ path, sha256: digest(bytes), bytes: bytes.length }));
-  if (kind === "new") git(["diff", "--exit-code", "HEAD", "--", "src"]);
+  if (kind === "new") git(["diff", "--no-ext-diff", "--exit-code", "HEAD", "--", "src"]);
   const controlDir = join(repo, "scripts/web-hub/terminal-v2-maintenance");
   const controlInputs = [
     join(repo, "scripts/web-hub/terminal-v2-maintenance.ts"),

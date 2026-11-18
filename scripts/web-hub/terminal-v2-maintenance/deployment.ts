@@ -32,6 +32,7 @@ export class ControlledDeployment {
   private newRuntime: LiveRuntime | undefined;
   private oldPin: CapturedFile | undefined;
   private newPin: CapturedFile | undefined;
+  private fixture: ReturnType<typeof createOwnedFixture> | undefined;
   private readonly runtimes: LiveRuntime[] = [];
   private closing: Promise<void> | undefined;
   private constructor(scope: ControlledScope, next: MeasuredBuild) {
@@ -233,9 +234,10 @@ export class ControlledDeployment {
     this.scope.checkpointCommitted();
     return { result, ...this.summary() };
   }
-  async cycle() {
+  async prepareCheckpoint() {
+    if (this.oldRuntime || this.oldBuild) fail("controlled-stage-already-entered");
     this.oldBuild = await buildMeasuredRuntime(this.scope.directory, "old");
-    const fixture = createOwnedFixture(this.scope);
+    const fixture = (this.fixture = createOwnedFixture(this.scope));
     const old = (this.oldRuntime = await LiveRuntime.start(this.oldBuild, this.scope, fixture));
     this.runtimes.push(old);
     const o = await old.exerciseOld();
@@ -245,6 +247,11 @@ export class ControlledDeployment {
     this.scope.directory.sync();
     const checkpoint = await this.transact("checkpoint");
     this.scope.checkpointCommitted();
+    return { checkpoint, o, oldDrain };
+  }
+  async useAndDrainNew() {
+    const fixture = this.fixture;
+    if (!fixture || this.newRuntime || !this.oldRuntime || !this.oldPin) fail("controlled-stage-unavailable");
     const next = (this.newRuntime = await LiveRuntime.start(this.newBuild, this.scope, fixture));
     this.runtimes.push(next);
     const n = await next.exerciseNew();
@@ -252,9 +259,17 @@ export class ControlledDeployment {
     const newDrain = await actualNewDrain(next);
     this.newPin = this.scope.directory.create("new-drain.json", json(newDrain.facts));
     this.scope.directory.sync();
-    const rollback = await this.transact("rollback");
+    return { n, newDrain };
+  }
+  async inspectRollback() {
+    return this.transact("rollback");
+  }
+  async cycle() {
+    const { checkpoint, o, oldDrain } = await this.prepareCheckpoint();
+    const { n, newDrain } = await this.useAndDrainNew();
+    const rollback = await this.inspectRollback();
     this.scope.rollbackEligible();
-    const returned = await LiveRuntime.start(this.oldBuild, this.scope, fixture);
+    const returned = await LiveRuntime.start(this.oldBuild!, this.scope, this.fixture!);
     this.runtimes.push(returned);
     const o2 = await returned.exerciseOld();
     await returned.stop();

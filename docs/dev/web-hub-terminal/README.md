@@ -162,8 +162,16 @@ controlled O login/open/reap. V2 witness/root and old evidence are retained. Too
 claims O understands v2 markers, lowers a site floor or deploys anything. Real reboot is separately
 reported false; simulated old-kernel archive tests are not actual kernel reboot evidence.
 
-Full mixed/refusal/auth/browser/device gates remain separately tracked in P6/P7 reports. P5's older
-ControlledAudit tests are component doubles, not substituted for these real executable integrations.
+The real mixed/refusal integration now additionally executes N-hub/O-SDK and O-hub/N-SDK with actual
+hello/session/status/auth/public SSE/subscribe, both fixed versions' measured **pure UI eligibility**
+code false and direct terminal refusal/zero PTY; same-version full cycles are positive controls.
+This is not a browser/visual/GPU claim. Actual true-off preserves prepared resource bytes with no
+service/positive declaration. An actual checkpoint followed by unreadable v1 still permits real N
+context/input/proof/prune, but rollback refuses. A real prior reservation deliberately reintroduced
+as an external ledger fault and a partial v2 layout refuse without repair/evidence deletion. Those
+corruptions are explicit owned fault fixtures, NOT invented physical drain or real powercut evidence.
+Full auth/browser/device gates remain separately tracked in P6/P7 reports. P5's older ControlledAudit
+tests are component doubles, not substituted for these real executable integrations.
 
 ## Auth: no terminal IO in commit path
 
@@ -275,6 +283,6 @@ restart, user-shell termination, push or deployment is authorized by this work.
    positive type/parser/capability is emitted. V2 P0 files/fields, PROTO, fixtures/trace/I8 unchanged.
 2. Fixed controlled-scope executable/adapters and actual measured O7239→N→O are implemented/tested.
    No general existing-site adapter, deployment or floor lowering is authorized/provided; CLI refusals
-   of arbitrary facts/paths remain intentional. Full mixed/refusal/fault matrix is still in progress.
+   of arbitrary facts/paths remain intentional. The actual SDK/wire/pure-UI mixed/refusal subset is now covered; hardware/kernel/browser/fault limitations above still apply.
 3. Complete real maintenance/mixed/browser/device/failure-window matrix and independent P7 acceptance
    still pending. Do not deploy this integration checkpoint or label it all-stack PASS.

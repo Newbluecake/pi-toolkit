@@ -40,8 +40,7 @@ former complete O=4e15 evidence does not prove T51 O=7239→N migration.
 
 ## Mandatory remaining gates (do not collapse into component greens)
 
-- Extend the completed real O7239→N→O/fresh rehearsal to the full mixed/refusal matrix: valid old-kernel archive rollback, dirty/current unknown/corrupt
-  ledger refusal, mixed O/O/O–N/O/O–O/N/N–N/N/O and true-off.
+- Extend real mixed/refusal coverage to any remaining browser/device/kernel failure windows. Actual O/O/O→N/N/N→O/O/O, fresh, N/O and O/N SDK/wire plus both exact pure-UI version gates, true-off, unreadable-v1 isolation, owned external-ledger/partial refusals are now executed. Old-kernel archive UUID tests remain simulated, not real reboot.
   No active shell migration/adoption/restart preservation claim. No version-floor lowering/old launch
   based merely on marker/empty ledger.
 - Full A1–A12 auth matrices with reserve/prune IO barriers and each mutation type, external DB55s/hard
@@ -71,7 +70,7 @@ production path to keep old tests green. Important shared tests were retained or
 - P5's one old production-initializer component case now explicitly says **synthetic** known-empty v1
   layout. It no longer imports the deleted src legacy reader. The separate real executable integration now covers fixed O7239 original initializer/live owner/futures/proof/prune/ACK/authority; that does not retroactively turn this synthetic case into real evidence.
 - Former #45 compat/rollback suites against O=4e15 were obsolete, not T51 compatibility evidence.
-  Their T51 O7239 replacement now has actual O→N→O/fresh executable evidence; full mixed/refusal cases remain in progress. Removal itself is not evidence of parity.
+  Their T51 O7239 replacement now has actual O→N→O/fresh/mixed-SDK/wire/pure-UI/refusal evidence. Browser/device/kernel limits remain explicit; removal itself is not evidence of parity.
 
 ## Running locally
 

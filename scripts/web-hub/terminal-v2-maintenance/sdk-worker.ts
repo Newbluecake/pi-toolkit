@@ -3,7 +3,7 @@
  * inherited private IPC parent can request the fixed start/observe/stop/exit lifecycle.
  * No prompt/LLM, discovered extension, arbitrary command, repair or receipt deletion.
  */
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { getModel } from "@earendil-works/pi-ai/compat";
 import {
@@ -89,6 +89,10 @@ export async function runSdkWorker(runtime: any): Promise<void> {
         if (fixture.home !== home || fixture.cwd !== cwd) throw new Error("owned fixture mismatch");
         const agentDir = join(home, ".pi/agent");
         mkdirSync(agentDir, { recursive: true, mode: 0o700 });
+        const policy = runtime.parseTerminalPolicy(JSON.parse(readFileSync(join(agentDir, "pi-toolkit.json"), "utf8")));
+        if (policy.state === "unavailable") throw new Error("owned boot policy invalid");
+        const terminalSettings =
+          policy.state === "enabled" ? { enabled: true, ...policy.policy } : { enabled: false, ...config };
         const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } });
         const loader = new DefaultResourceLoader({
           cwd,
@@ -108,7 +112,7 @@ export async function runSdkWorker(runtime: any): Promise<void> {
                   autoStart: false,
                   control: true,
                   webCommands: true,
-                  terminal: { enabled: true, ...config },
+                  terminal: terminalSettings,
                 },
                 terminalTrust: { domain: "plain", isChild: false },
                 terminalGuard: (ctx: any) => !closing && ctx.mode === "rpc",

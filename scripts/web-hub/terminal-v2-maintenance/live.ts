@@ -47,7 +47,13 @@ export class LiveRuntime {
     this.worker = worker;
     this.service = service;
   }
-  static async start(build: MeasuredBuild, scope: ControlledScope, fixture: TerminalTestFixture): Promise<LiveRuntime> {
+  static async start(
+    build: MeasuredBuild,
+    scope: ControlledScope,
+    fixture: TerminalTestFixture,
+    agent: MeasuredBuild = build,
+    eligibility: "candidate" | "ordinary" = agent.kind === build.kind ? "candidate" : "ordinary",
+  ): Promise<LiveRuntime> {
     const publisher = scope.beginPublisher(build.kind);
     let worker: OwnedSdkWorker | undefined;
     let hub: any;
@@ -109,13 +115,15 @@ export class LiveRuntime {
           else process.env[name] = original[i];
         });
       }
-      worker = await OwnedSdkWorker.start(build, scope, fixture);
+      worker = await OwnedSdkWorker.start(agent, scope, fixture);
       const live = new LiveRuntime(build, scope, publisher, module, hub, deps, worker, service, backends);
       await observeUntil(
         async () => ({ worker: await worker!.observe(), agents: deps.registry.list() }),
         (value) => {
           const target = value.agents.find((agent: any) => agent.session?.sessionId === value.worker.sessionId);
-          return !!target?.status?.[build.kind === "old" ? "terminalSession" : "terminalSessionV2"];
+          return eligibility === "ordinary"
+            ? !!target?.session && !!target?.status
+            : !!target?.status?.[agent.kind === "old" ? "terminalSession" : "terminalSessionV2"];
         },
       );
       return live;
@@ -159,7 +167,7 @@ export class LiveRuntime {
   current(): boolean {
     return this.worker.current() && (!this.stopped ? this.publisher.current() : true);
   }
-  private async target(): Promise<any> {
+  async target(): Promise<any> {
     const worker = await this.worker.observe();
     const target = this.deps.registry.list().find((agent: any) => agent.session?.sessionId === worker.sessionId);
     if (!target) throw new Error("actual SDK target missing");
@@ -167,8 +175,16 @@ export class LiveRuntime {
   }
   async exerciseOld(): Promise<any> {
     if (this.build.kind !== "old" || this.stopped) throw new Error("not a live O runtime");
-    const target = await this.target(),
-      cookie = await privateLogin(this.hub.httpPort, this.hub.paths.tokenFile);
+    const target = await this.target();
+    if (
+      !(await this.module.uiEnabled(this.hub.info, {
+        session: target.session,
+        card: { epoch: target.epoch },
+        status: target.status,
+      }))
+    )
+      throw new Error("actual same-version UI candidate missing");
+    const cookie = await privateLogin(this.hub.httpPort, this.hub.paths.tokenFile);
     const stream = (this.stream = await privateSse(this.hub.httpPort, cookie));
     const connection = await stream.wait((e) => e.event === "terminal_connection"),
       hello = await stream.wait((e) => e.event === "hello");
@@ -240,8 +256,16 @@ export class LiveRuntime {
   }
   async exerciseNew(): Promise<any> {
     if (this.build.kind !== "new" || this.stopped) throw new Error("not a live N runtime");
-    const target = await this.target(),
-      cookie = await privateLogin(this.hub.httpPort, this.hub.paths.tokenFile);
+    const target = await this.target();
+    if (
+      !(await this.module.uiEnabled(this.hub.info, {
+        session: target.session,
+        card: { epoch: target.epoch },
+        status: target.status,
+      }))
+    )
+      throw new Error("actual same-version UI candidate missing");
+    const cookie = await privateLogin(this.hub.httpPort, this.hub.paths.tokenFile);
     const scope = { agentKey: target.agentKey, sessionId: target.session.sessionId, epoch: target.epoch };
     const post = async (op: string, body: object) => {
       const response = await privatePost(this.hub.httpPort, `/api/terminal/v2/${op}`, body, cookie);
@@ -252,6 +276,7 @@ export class LiveRuntime {
     const list = await post("list", { scope }),
       envelope = { scope, hubInstance: list.hubInstance };
     const opened = await post("create", { ...envelope, requestId: id(), mode: "ensure-empty", cols: 80, rows: 24 });
+    const reservedLedger = this.service.maintenanceSnapshot().ledger;
     const term = { ...envelope, termId: opened.termId };
     const view = await privateTerminalView(this.hub.httpPort, cookie, term);
     let pid: number;
@@ -285,7 +310,7 @@ export class LiveRuntime {
         facts.service?.allocationCount === 0 &&
         facts.service?.runtimes.length === 0,
     );
-    return { termId: opened.termId, pid, renamed: renamed.ok, facts };
+    return { termId: opened.termId, pid, renamed: renamed.ok, facts, reservedLedger };
   }
   stop(): Promise<any> {
     return (this.stopWork ??= this.stopActual());
@@ -299,7 +324,7 @@ export class LiveRuntime {
     } catch (error) {
       failure = error;
     }
-    if (this.build.kind === "new") {
+    if (this.build.kind === "new" && this.service) {
       try {
         this.disposeResult = await this.service.dispose();
       } catch (error) {
