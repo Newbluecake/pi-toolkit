@@ -11,7 +11,15 @@ import type { AllocationV2, LedgerV2 } from "../../../../../src/web-hub/protocol
 const hooks = vi.hoisted(() => ({
   afterWitnessRead: undefined as undefined | (() => void | Promise<void>),
   afterDirectoryClose: undefined as undefined | ((path: string) => void),
-  failSyscall: undefined as undefined | "file-sync" | "rename" | "parent-sync",
+  failSyscall: undefined as
+    | undefined
+    | "file-sync"
+    | "rename"
+    | "parent-sync"
+    | "completion-file-sync"
+    | "completion-rename"
+    | "completion-dir-sync",
+  completionPublished: false,
   failedSyscallCalls: 0,
 }));
 vi.mock("node:fs/promises", async (original) => {
@@ -27,7 +35,9 @@ vi.mock("node:fs/promises", async (original) => {
         value: async () => {
           if (
             (hooks.failSyscall === "file-sync" && path.includes("/.ledger-")) ||
-            (hooks.failSyscall === "parent-sync" && path.endsWith("/terminal-v2"))
+            (hooks.failSyscall === "parent-sync" && path.endsWith("/terminal-v2")) ||
+            (hooks.failSyscall === "completion-file-sync" && path.endsWith("/.completion-prepared")) ||
+            (hooks.failSyscall === "completion-dir-sync" && hooks.completionPublished && /\/[a-f0-9]{32}$/.test(path))
           ) {
             hooks.failedSyscallCalls++;
             throw new Error("injected actual sync rejection");
@@ -60,6 +70,15 @@ vi.mock("node:fs/promises", async (original) => {
       if (hooks.failSyscall === "rename") {
         hooks.failedSyscallCalls++;
         throw new Error("injected actual rename rejection");
+      }
+      if (String(args[1]).endsWith("/completion.json")) {
+        if (hooks.failSyscall === "completion-rename") {
+          hooks.failedSyscallCalls++;
+          throw new Error("injected actual completion rename rejection");
+        }
+        await fs.rename(...args);
+        hooks.completionPublished = true;
+        return;
       }
       return fs.rename(...args);
     },
@@ -109,6 +128,7 @@ afterEach(async () => {
   hooks.afterDirectoryClose = undefined;
   hooks.failSyscall = undefined;
   hooks.failedSyscallCalls = 0;
+  hooks.completionPublished = false;
   vi.restoreAllMocks();
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
 });
@@ -398,5 +418,44 @@ describe("P1 verifier B1/B2 await-boundary regressions", () => {
       kind: "unavailable",
       effect: "none",
     });
+  });
+});
+
+describe("P6 completion publication is downstream of real committed prune", () => {
+  it.each(["completion-file-sync", "completion-rename", "completion-dir-sync"] as const)(
+    "%s failure preserves partials and cannot report retired",
+    async (fault) => {
+      const f = await fixture([row]);
+      const ledger = createTerminalAllocationLedgerV2({ stateDir: f.root, current: () => true });
+      hooks.failSyscall = fault;
+      expect(
+        await retireOldKernelAllocationsV2({ stateDir: f.root, ledger, current: () => true, kernelEvidence }, signal()),
+      ).toEqual({ kind: "unavailable" });
+      expect(hooks.failedSyscallCalls).toBe(1);
+      expect(JSON.parse(await readFile(f.path, "utf8")).allocations).toEqual([]);
+      const evidence = await evidencePath(f.root);
+      expect((await readdir(evidence.slice(0, evidence.lastIndexOf("/")))).sort()).toEqual(
+        fault === "completion-dir-sync"
+          ? ["completion.json", "evidence.json"]
+          : [".completion-prepared", "evidence.json"],
+      );
+      // A publication fault does not invent a failed prune or resurrect physical rows.
+      expect(await ledger.load(signal())).toMatchObject({ kind: "loaded", ledger: { revision: 1, allocations: [] } });
+    },
+  );
+  it("unknown prune never begins completion publication", async () => {
+    const f = await fixture([row]);
+    const ledger = createTerminalAllocationLedgerV2({
+      stateDir: f.root,
+      current: () => true,
+      stage: async (stage) => {
+        if (stage === "parent-sync") throw new Error("actual ledger barrier failure");
+      },
+    });
+    expect(
+      await retireOldKernelAllocationsV2({ stateDir: f.root, ledger, current: () => true, kernelEvidence }, signal()),
+    ).toEqual({ kind: "unavailable" });
+    const evidence = await evidencePath(f.root);
+    expect(await readdir(evidence.slice(0, evidence.lastIndexOf("/")))).toEqual(["evidence.json"]);
   });
 });

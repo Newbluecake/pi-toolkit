@@ -478,3 +478,26 @@ receipt ACK 删除及实际 PID gone，不能因 close200 就写 PASS。私帧 g
 同 uid 文件/凭据访问、LAN明文劫持、rc 副作用与 shell 自行 history 不在隔离保证内；无完整历史/VT像素恢复；恶意 uid/namespace/组脱逃、内核D-state、agent/helper同时被杀可能残留。大 managed identity 集合超过16KiB页/64KiB库存预算时保守拒绝，不裁证明或伪造空库存。未知磁盘/authority状态刻意 fail-closed，无自动 reset。逻辑 IO 截止不等于可抢占 fsync。reload/重启是清理边界，不是后台保活承诺。门禁日志里的已有 skip/环境限制都要在证据包单列。
 
 2026-11-14 曾有一次旧 probe「刷新后列表为空、整 cookie 对象 JSON 不同」；当时缺 SID/journal，无法回溯为真正 SID 轮换或独立 shell 退出，不宣称已证明那次具体原因。root 接受以强化可证伪回归+明确残留交付：新 probe 对同一 Page/Context 的真实 SID 做仅内存非秘密序号对比并断言，记录 context-wide login/Set-Cookie/SSE/list 序号及失败 journal/固定 backend 诊断；已有45次同 SID 刷新反证与真实 hub/PTY 三次 SSE 替换同 cookie/同 PID 回归。若再出现必须用这些新证据归因，不能只以「重跑绿」结案，也不把整 cookie 属性/数组比较误报成 SID 轮换。
+
+## T51 v2 集成中：旧 kernel 退休完成证据
+
+v2 resource retirement 的 `evidence.json` 只表示 prepared，不能证明 prune 已提交。
+唯一持有人在同一个 guarded ledger 的 CAS **实际返回 committed** 后，才创建固定闭合
+`completion.json`：transactionId/storeId、原 evidence bytes 的 SHA256、beforeRevision、
+严格 before+1 的 afterRevision 与 exact eligible allocation IDs。准备/完成/partial 都计入
+64 事务/16MiB 容量；不删除残留、不从 archive 重放删除或释放 current-kernel unknown。
+completion 的 O_EXCL 临时写入、file fsync、rename、tx/archive fsync 后，仍要在全部 fd
+cleanup await 结束后重核 original evidence/completion inode+bytes、目录和原 current/deadline。
+prune unknown 绝不写 completion；已提交后的 completion 故障保留证据并返回 unavailable，
+不能把“磁盘空了”冒充完成。
+
+工具域 `scripts/web-hub/terminal-v2-maintenance/archive-reader.ts` 替代原 blanket
+`v2-archive-review-required`：只认 exact evidence+completion 双文件，闭合键、store/tx/hash、
+revision、eligible/removed 集合与当前合法空 ledger 的关系全部校验。当前维护 lease 下
+pin 所有原字节/inode/目录，重新真实 fsync exact files/tx/archive/state，并在最终所有 await 后
+重验；这证明的是**本次维护窗口的 durability normalization**，不是“parse 得到文件名所以
+历史 writer 必定 fsync 成功”。缺 completion、partial/未知布局、同 bytes 换 inode 或 kernel
+关系变化都拒绝且不 heal。archive 原字节纳入 rollback 私有 snapshots，不修改 v1/v2。
+
+此部分 real-fs/guarded-prune 测试使用模拟 old boot UUID + 受控 drain adapter，**不是**真实
+kernel reboot / powercut / 可信 O/N adapter / 完整 O→N→O 通过；这些仍是 P6/P7 剩余门。

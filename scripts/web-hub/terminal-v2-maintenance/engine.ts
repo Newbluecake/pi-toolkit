@@ -27,6 +27,7 @@ import {
   type MaintenanceTestHooks,
 } from "./audit.js";
 import { HeldDirectory, digest, exactKeys, json, parse } from "./files.js";
+import { readRetirementArchive, type RetirementArchive } from "./archive-reader.js";
 import { PinnedEvidence, PREPARED_COMPLETION } from "./evidence.js";
 import { OLD_SOURCE, readLegacy, type LegacySnapshot, type SnapshotFile } from "./legacy-reader.js";
 export interface MaintenanceResult {
@@ -96,18 +97,18 @@ interface V2Snapshot {
   ledger: LedgerV2;
   files: SnapshotFile[];
   verify(): void;
+  proveArchiveDurable(guard: () => void): void;
   close(): void;
 }
 function readV2(state: HeldDirectory): V2Snapshot | undefined {
   const layout = terminalV2Files(state.path);
-  // P1's old-kernel retirement archive is not a reset/rollback permission. Until
-  // its full audit reader is integrated, conservatively require independent review.
-  if (!state.absent(".terminal-allocation-archive-v2")) fail("v2-archive-review-required");
   if (state.absent("terminal-v2")) {
     if (!state.absent(".terminal-initialized-v2")) fail("partial-v2-checkpoint");
+    if (!state.absent(".terminal-allocation-archive-v2")) fail("archive-without-v2-ledger");
     return undefined;
   }
   const root = new HeldDirectory(layout.root);
+  let archive: RetirementArchive | undefined;
   try {
     if (root.names().join(",") !== ["ledger.json", "marker.json"].join(",")) fail("unknown-v2-layout");
     const markerFile = root.read("marker.json", 2048),
@@ -123,10 +124,12 @@ function readV2(state: HeldDirectory): V2Snapshot | undefined {
     )
       fail("invalid-v2-checkpoint");
     if (ledger.allocations.length) fail("v2-allocations-not-empty");
+    archive = readRetirementArchive(state, ledger);
     const files = [
       { path: "terminal-v2/marker.json", directory: root, file: markerFile },
       { path: "terminal-v2/ledger.json", directory: root, file: ledgerFile },
       { path: ".terminal-initialized-v2", directory: state, file: witnessFile },
+      ...archive.files,
     ];
     return {
       marker,
@@ -135,12 +138,18 @@ function readV2(state: HeldDirectory): V2Snapshot | undefined {
       verify() {
         if (root.names().join(",") !== "ledger.json,marker.json") fail("v2-state-changed");
         for (const f of files) f.directory.verify(f.file);
+        archive!.verify();
+      },
+      proveArchiveDurable(guard) {
+        archive!.proveDurable(guard);
       },
       close() {
+        archive!.close();
         root.close();
       },
     };
   } catch (e) {
+    archive?.close();
     root.close();
     throw e;
   }
@@ -292,6 +301,7 @@ export async function runMaintenance(
       // a failed file/parent sync must never be reported as durable completion.
       attemptedPublication = true;
       for (const pin of pins) pin.proveDurable(guard);
+      next?.proveArchiveDurable(guard);
       const directories = new Set<HeldDirectory>();
       for (const f of next?.files ?? []) {
         guard();

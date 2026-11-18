@@ -2,9 +2,9 @@
  * Same-kernel unknown never released; archive failure keeps rows and does not poison ledger.
  * P6 runs under existing singleton BEFORE service.initialize (no hot backend at this point). */
 import { constants, openSync, closeSync, fstatSync, lstatSync, realpathSync, readSync } from "node:fs";
-import { open, lstat, realpath, mkdir, readdir, readFile, readlink } from "node:fs/promises";
+import { open, lstat, realpath, mkdir, readdir, readFile, readlink, rename } from "node:fs/promises";
 import { resolve } from "node:path";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import type { GuardedTerminalAllocationLedgerV2, TerminalLedgerCommitGuardV2 } from "./ledger.js";
 import { terminalLedgerV2Ok, type LedgerV2 } from "../../../protocol/terminal-v2.js";
 import { terminalV2Files } from "../../../protocol/terminal-v2-paths.js";
@@ -191,7 +191,12 @@ export async function retireOldKernelAllocationsV2(
           const tx = await directory(`${paths.archive}/${name}`);
           try {
             const files = await readdir(`${paths.archive}/${name}`);
-            if (files.length > 1 || files.some((f) => f !== "evidence.json")) throw new Error("E_ARCHIVE");
+            // Count prepared/committed/partial publication bytes without replaying them.
+            if (
+              files.length > 3 ||
+              files.some((f) => !["evidence.json", ".completion-prepared", "completion.json"].includes(f))
+            )
+              throw new Error("E_ARCHIVE");
             for (const f of files) {
               const s = await lstat(`${paths.archive}/${name}/${f}`);
               if (!s.isFile() || s.uid !== uid || (s.mode & 0o777) !== 0o600 || s.nlink !== 1)
@@ -206,7 +211,7 @@ export async function retireOldKernelAllocationsV2(
         const evidence = Buffer.from(
           JSON.stringify({ v: 2, kind: "old-kernel-allocation-retirement", kernel: before, ledger, eligible }) + "\n",
         );
-        if (bytes + evidence.length > L.archiveBytes) throw new Error("E_CAPACITY");
+        if (bytes + evidence.length + 8192 > L.archiveBytes) throw new Error("E_CAPACITY");
         check();
         const transactionTag = randomBytes(16).toString("hex");
         const transaction = `${paths.archive}/${transactionTag}`;
@@ -302,7 +307,87 @@ export async function retireOldKernelAllocationsV2(
           check();
           pruneEntered = true;
           const result = await deps.ledger.commitGuarded(ledger.revision, next, controller.signal, finalGuard);
-          if (result.kind === "committed") return { kind: "retired" as const, count: eligible.length };
+          if (result.kind === "committed") {
+            // Prepared evidence never proves a prune. Only this actual committed result
+            // may start completion publication. Surviving names still need a maintenance
+            // reader's current-window durability normalization before rollback approval.
+            check();
+            finalGuard();
+            const completion = Buffer.from(
+              JSON.stringify({
+                v: 2,
+                kind: "old-kernel-allocation-retirement-committed",
+                transactionId: transactionTag,
+                storeId: ledger.storeId,
+                evidenceSha256: createHash("sha256").update(evidence).digest("hex"),
+                beforeRevision: ledger.revision,
+                afterRevision: next.revision,
+                removedAllocationIds: eligible.map((a) => a.allocationId),
+              }) + "\n",
+            );
+            if (completion.length > 8192) throw new Error("E_ARCHIVE");
+            const temp = await open(
+              `/proc/self/fd/${tx.fd}/.completion-prepared`,
+              constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+              0o600,
+            );
+            let completionIdentity: { dev: number; ino: number };
+            try {
+              check();
+              finalGuard();
+              await temp.writeFile(completion);
+              check();
+              await temp.sync();
+              const st = await temp.stat();
+              completionIdentity = { dev: st.dev, ino: st.ino };
+            } finally {
+              await temp.close();
+            }
+            check();
+            finalGuard();
+            const preparedGuard = evidenceGuardV2({
+              directories: [
+                { path: resolve(deps.stateDir), dev: held.dev, ino: held.ino },
+                { path: paths.archive, dev: rootStat.dev, ino: rootStat.ino },
+                { path: transaction, dev: txHeld.dev, ino: txHeld.ino },
+              ],
+              filePath: `${transaction}/.completion-prepared`,
+              identity: completionIdentity,
+              bytes: completion,
+              uid,
+              signal: controller.signal,
+              at,
+            });
+            preparedGuard();
+            check();
+            await rename(`/proc/self/fd/${tx.fd}/.completion-prepared`, `/proc/self/fd/${tx.fd}/completion.json`);
+            check();
+            await tx.sync();
+            check();
+            await archive.sync();
+            check();
+            const evidenceGuard = finalGuard;
+            const completionGuard = evidenceGuardV2({
+              directories: [
+                { path: resolve(deps.stateDir), dev: held.dev, ino: held.ino },
+                { path: paths.archive, dev: rootStat.dev, ino: rootStat.ino },
+                { path: transaction, dev: txHeld.dev, ino: txHeld.ino },
+              ],
+              filePath: `${transaction}/completion.json`,
+              identity: completionIdentity,
+              bytes: completion,
+              uid,
+              signal: controller.signal,
+              at,
+            });
+            finalGuard = () => {
+              evidenceGuard();
+              completionGuard();
+              return undefined;
+            };
+            finalGuard();
+            return { kind: "retired" as const, count: eligible.length };
+          }
           if (result.kind === "unavailable" && result.effect === "none") {
             pruneEntered = false;
             return { kind: "retained" as const, count: eligible.length };
