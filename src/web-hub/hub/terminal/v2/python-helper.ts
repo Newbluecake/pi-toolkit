@@ -1,5 +1,5 @@
 /** T51 P1 relocation source: src/web-hub/agent/terminal/python-helper.ts @ 1820a8dd.
- * Transitional copy only: P6 must delete that source and all v1 consumers. */
+ * Hub-owned implementation; original agent execution source has been removed. */
 /** Versioned fixed source; no disk script/pycache, dependencies or interpolated user text.
  * Linux Python stdlib only. All shell bytes travel through the PTY, never stderr/logs. */
 export const TERMINAL_PYTHON_HELPER = String.raw`

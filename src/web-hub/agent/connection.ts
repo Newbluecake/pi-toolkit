@@ -429,6 +429,7 @@ class Connection implements HubConnection {
 
   send(frame: AgentFrame, opts?: { droppable?: boolean }): void {
     try {
+      if (frame.t.startsWith("term_")) return;
       if (
         frame.t === "terminal_context_res" &&
         (!terminalContextFrameV2Ok(frame) ||
@@ -453,6 +454,7 @@ class Connection implements HubConnection {
 
   trySend(frame: AgentFrame, opts?: { droppable?: boolean }): SendResult {
     try {
+      if (frame.t.startsWith("term_")) return "dropped";
       if (
         frame.t === "terminal_context_res" &&
         (!terminalContextFrameV2Ok(frame) ||

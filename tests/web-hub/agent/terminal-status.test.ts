@@ -40,10 +40,10 @@ describe("terminal status source contract (§7)", () => {
         text({ hubIdentityVerified: false, hubSnapshot: { mode: "per-session", state, reason: "settings-unsafe" } }),
       ).not.toMatch(/settings-unsafe|per-session/);
   });
-  it("old ready knows legacy only; old fixed unavailable reasons retained", () => {
+  it("old ready knows legacy only; v2 fixed unavailable reasons are bounded", () => {
     expect(text({ hubSnapshot: { state: "ready" } })).toContain("legacy-ready；per-session 能力 unknown");
-    expect(text({ hubSnapshot: { state: "unavailable", reason: "journal-missing" } })).toContain(
-      "终端不可用：journal-missing",
+    expect(text({ hubSnapshot: { state: "unavailable", reason: "resource-unavailable" } })).toContain(
+      "终端不可用：resource-unavailable",
     );
     expect(
       text({
@@ -74,7 +74,7 @@ describe("terminal status source contract (§7)", () => {
     expect(text({ hubSnapshot: { state: "unavailable", reason: "secret-token" } })).toContain("终端不可用：unknown");
     expect(text({ hubSnapshot: { state: "unavailable", reason: "/secret/cwd" } })).not.toContain("/secret");
   });
-  it.each(["not-connected", "guard-denied", "owner-unavailable"] as const)(
+  it.each(["not-connected", "guard-denied", "context-unavailable"] as const)(
     "current projection %s never says declaration emitted",
     (eligibility) => {
       expect(text({ eligibility })).toContain(`资格 ${eligibility}；声明 absent`);
@@ -83,23 +83,11 @@ describe("terminal status source contract (§7)", () => {
   );
 });
 
-it.each([
-  "stale-authority-prev-boot",
-  "stale-authority-same-boot",
-  "stale-authority-prev-boot-pid-present",
-  "stale-authority-prev-boot-journal-not-empty",
-  "stale-authority-prev-boot-receipts-not-empty",
-  "authority-proc-unavailable",
-  "authority-namespace-mismatch",
-  "authority-corrupt",
-  "authority-recovery-not-owner",
-  "authority-publication-unsettled",
-  "authority-recovery-state-changed",
-  "authority-archive-unsafe",
-  "authority-archive-capacity",
-  "authority-archive-io",
-])("fixed appended cold-recovery reason is readable: %s", (reason) => {
-  const t = text({ hubSnapshot: { state: "unavailable", reason } });
-  expect(t).toContain(`终端不可用：${reason}`);
-  expect(t).toContain("不自动重置");
-});
+it.each(["initializing", "resource-unavailable", "privacy-unavailable", "setup-required"])(
+  "fixed v2 reason is readable: %s",
+  (reason) => {
+    const t = text({ hubSnapshot: { state: "unavailable", reason } });
+    expect(t).toContain(`终端不可用：${reason}`);
+    expect(t).toContain("不自动重置");
+  },
+);

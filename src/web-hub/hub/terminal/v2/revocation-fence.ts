@@ -195,6 +195,15 @@ export class TerminalRevocationFenceV2 implements TerminalAuthFenceV2, TerminalA
         ((selector !== "all" && selector.listener === "loopback") || fact.lanComplete);
     if (!proven) return;
     this.denies.delete(key(selector));
+    // Only a current original-auth receipt covering the ENTIRE LAN listener can
+    // discharge older unknown user-transaction blocks. A new valid SID/user fact
+    // cannot clear them. Global revision CAS above rejects a stale rotate receipt.
+    if (
+      fact.kind === "listeners-invalidated" &&
+      fact.lanComplete &&
+      (selector === "all" || ("listener" in selector && selector.listener === "lan"))
+    )
+      this.userMutations.clear();
     if (selector === "all") this.overflow = false;
     this.bump();
   }

@@ -157,7 +157,7 @@ describe("§8.4 caps coexistence — hub cap surfaces (upload ∪ spawn ∪ runt
     expect(browserCaps).not.toContain(PRIVACY_HUB_CAP); // privacy P1: key absent ⇒ no cap
   });
 
-  it("machine-on eagerly advertises both browser-only caps with no eligible agent; legacy ack stays unchanged", async () => {
+  it("machine-on eagerly advertises only v2 browser-only cap with no eligible agent; legacy ack stays unchanged", async () => {
     const home = tmp.make("wh-term-caps-");
     mkdirSync(`${home}/.pi/agent`, { recursive: true });
     writeFileSync(`${home}/.pi/agent/pi-toolkit.json`, JSON.stringify({ webHub: { terminal: { enabled: true } } }));
@@ -178,8 +178,8 @@ describe("§8.4 caps coexistence — hub cap surfaces (upload ∪ spawn ∪ runt
     const ack = await c.waitFrame((f) => f.t === "hello_ack");
     c.sock.destroy();
     const agentCaps = ack.caps as string[];
-    expect(result.info.caps).toEqual([...agentCaps, "terminal.ui.v1", "terminal.session.v1"]);
-    expect(result.info.caps.filter((c) => c === "terminal.ui.v1")).toHaveLength(1);
+    expect(result.info.caps).toEqual([...agentCaps, "terminal.tabs.v2"]);
+    expect(result.info.caps.filter((c) => c === "terminal.tabs.v2")).toHaveLength(1);
     expect(agentCaps).not.toContain("terminal.ui.v1");
     expect(agentCaps).not.toContain("terminal.session.v1");
   });

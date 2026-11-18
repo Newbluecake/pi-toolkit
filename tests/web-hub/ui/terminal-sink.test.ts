@@ -1,8 +1,8 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { useHub } from "../../../src/web-hub/ui/src/composables/useHub.js";
 import type { HubTransport } from "../../../src/web-hub/ui/src/transport/types.js";
-describe("private terminal SSE sink (§4.4 / §7.3)", () => {
-  it("bypasses the transcript reducer, caches only the connection for a later explicit panel, and forgets it on dispose", () => {
+describe("removed public terminal SSE execution path", () => {
+  it("refuses legacy private events with byte-identical reducer state and exposes no cached private sink", () => {
     const hub = useHub({
       createTransport: () =>
         ({
@@ -19,25 +19,17 @@ describe("private terminal SSE sink (§4.4 / §7.3)", () => {
       clearTimeout() {},
     });
     const before = hub.state.value;
-    const connection = { connectionInstance: "instance", connectionToken: "private-token", expiresAt: 60000 };
+    const bytes = JSON.stringify(before);
+    const connection = { connectionInstance: "old-instance", connectionToken: "private-token", expiresAt: 60000 };
+    hub.dispatch({ event: "terminal_connection", data: connection });
+    hub.dispatch({ event: "terminal", data: { output: "private-output-marker" } });
+    expect(hub.state.value).toBe(before);
+    expect(JSON.stringify(hub.state.value)).toBe(bytes);
+    expect(Object.hasOwn(hub, "terminalEvents")).toBe(false);
+    expect(Object.hasOwn(hub, "terminal")).toBe(false);
+    expect(JSON.stringify(hub.state.value)).not.toContain("private-output-marker");
+    hub.dispose();
     hub.dispatch({ event: "terminal_connection", data: connection });
     expect(hub.state.value).toBe(before);
-    const sink = vi.fn();
-    const stop = hub.terminalEvents!(sink);
-    expect(sink).toHaveBeenCalledWith("terminal_connection", connection);
-    const output = { output: "bytes are not a transcript item" };
-    hub.dispatch({ event: "terminal", data: output });
-    expect(sink).toHaveBeenLastCalledWith("terminal", output);
-    expect(hub.state.value).toBe(before);
-    stop();
-    hub.dispatch({ event: "terminal", data: output });
-    expect(sink).toHaveBeenCalledTimes(2);
-    const disposeSink = vi.fn();
-    hub.terminalEvents!(disposeSink);
-    hub.dispose();
-    expect(disposeSink).toHaveBeenLastCalledWith("disconnected", null);
-    const late = vi.fn();
-    hub.terminalEvents!(late);
-    expect(late).not.toHaveBeenCalled();
   });
 });

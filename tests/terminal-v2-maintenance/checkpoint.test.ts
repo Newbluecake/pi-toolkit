@@ -85,12 +85,12 @@ describe("P5 checkpoint: private real-fs + explicitly controlled audit (not real
     expect((await checkpointTerminalV2("checkpoint", h.options)).outcome).toBe("already-complete");
   });
 
-  it("reads an actual v1 initializer's private empty store, not a real shell drain", async () => {
+  it("reads a synthetic known-empty v1 layout, not a real O initialization or shell drain", async () => {
     const h = setup();
-    const { initializeTerminalStore, checkTerminalStore } =
-      await import("../../src/web-hub/protocol/terminal-local.js");
-    const store = await initializeTerminalStore(h.stateDir);
-    expect(checkTerminalStore(h.stateDir).storeId).toBe(store.storeId);
+    // Synthetic disk layout only: the removed production v1 initializer is NOT
+    // retained/imported to make this component test pass. Real locked-O bridge
+    // initialization is a separate integration/maintenance gate, not claimed here.
+    legacyLayout(h.stateDir, 0);
     h.audit.revision = 0;
     const before = tree(join(h.stateDir, "terminal-v1"));
     expect((await checkpointTerminalV2("checkpoint", h.options)).outcome).toBe("committed");

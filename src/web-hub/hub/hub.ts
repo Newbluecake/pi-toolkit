@@ -155,9 +155,6 @@ export interface StartHubDeps {
       ledger: import("./terminal/v2/ledger.js").GuardedTerminalAllocationLedgerV2,
     ): void;
   };
-  /** Programmatic test-only stage/syscall barriers; main.ts never supplies this.
-   * No config/env/wire path. Ignored entirely when terminal policy is off/denied. */
-  terminalAuthorityRecoveryTestDeps?: import("./terminal/authority-recovery.js").AuthorityRecoveryTestDeps;
   now?: () => number;
   uid?: number;
   xdgRuntimeDir?: string;

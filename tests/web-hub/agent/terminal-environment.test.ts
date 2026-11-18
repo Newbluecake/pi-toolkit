@@ -1,7 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { cleanTerminalEnvironment, validTerminalPath } from "../../../src/web-hub/agent/terminal/environment.js";
-import { TerminalTail } from "../../../src/web-hub/agent/terminal/owner.js";
-import { TERMINAL_LIMITS as L } from "../../../src/web-hub/protocol/terminal.js";
+import { cleanTerminalEnvironment, validTerminalPath } from "../../../src/web-hub/hub/terminal/v2/environment.js";
 import { resolveCommandPolicy } from "../../../src/web-hub/agent/command-policy.js";
 import { createBuiltinBridge } from "../../../src/web-hub/agent/builtin-bridge.js";
 
@@ -94,33 +92,6 @@ describe("terminal inheritance §5.3", () => {
     expect(cleanTerminalEnvironment(inherited)).not.toHaveProperty("LANG");
   });
 });
-describe("terminal bounded byte tail §6.2", () => {
-  it("wraps at 1MiB, exact offsets/gap, copies only ≤16KiB, and wipes on revoke", () => {
-    const tail = new TerminalTail();
-    const all = Buffer.alloc(L.ringBytes + 4097);
-    for (let i = 0; i < all.length; i++) all[i] = i % 251;
-    for (let i = 0; i < all.length; i += 8192) expect(tail.append(all.subarray(i, i + 8192))).toBe(i);
-    expect(tail.base).toBe(4097);
-    expect(tail.next).toBe(all.length);
-    expect(tail.droppedBytes).toBe(4097);
-    const replay = tail.suffix();
-    expect(replay.S).toBe(all.length - L.replayBytes);
-    expect(replay.N0).toBe(all.length);
-    expect(replay.bytes.equals(all.subarray(-L.replayBytes))).toBe(true);
-    replay.bytes.fill(0);
-    expect(tail.suffix().bytes.equals(all.subarray(-L.replayBytes))).toBe(true);
-    tail.clear();
-    expect(tail.suffix().bytes.length).toBe(0);
-    expect(tail.base).toBe(all.length);
-  });
-  it("handles a single oversized chunk without growing capacity", () => {
-    const t = new TerminalTail();
-    const data = Buffer.alloc(L.ringBytes * 3 + 5, 9);
-    t.append(data);
-    expect(t.base).toBe(data.length - L.ringBytes);
-    expect(t.suffix().bytes).toEqual(data.subarray(-L.replayBytes));
-  });
-});
 it("reserved terminal bridge/policy cannot be enabled by a user allow override or capture", () => {
   expect(
     resolveCommandPolicy({
@@ -144,7 +115,7 @@ it("reserved terminal bridge/policy cannot be enabled by a user allow override o
 });
 
 it("optional panel metadata rejects unsafe/overlong labels without truncating paths or leaking them into facts", async () => {
-  const { terminalDisplayMetadata } = await import("../../../src/web-hub/agent/terminal/environment.js");
+  const { terminalDisplayMetadata } = await import("../../../src/web-hub/hub/terminal/v2/environment.js");
   expect(
     terminalDisplayMetadata({ shellName: "bash", userLabel: "正常用户", hostLabel: "node-1.local" }, "/work"),
   ).toEqual({

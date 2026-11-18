@@ -8,7 +8,8 @@ import { performance } from "node:perf_hooks";
 import { isDeepStrictEqual } from "node:util";
 import { resolveAgentDir } from "../../protocol/agent-dir.js";
 import { resolveSettingsLocation } from "../../protocol/settings-location.js";
-import { clampSpanMs } from "./limits.js";
+// Bounded policy-read mirror; no v1 service/resource dependency.
+const clampSpanMs = (ms: number) => Math.max(0, Math.min(Number.MAX_SAFE_INTEGER, Math.trunc(ms)));
 import { parseTerminalPolicy } from "../../protocol/terminal-policy.js";
 import type { HubConfig, TerminalStartupDiagnostic, TerminalStartupReason } from "../ports.js";
 

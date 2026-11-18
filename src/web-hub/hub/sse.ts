@@ -29,7 +29,7 @@ export interface SseClient {
   id: string;
   subscribed: Set<string>;
   /** Connection-local frames only: same encoder/FIFO, no event id or replay-ring entry. */
-  readonly output: Pick<SseOutput, "send" | "pendingBytes" | "finish" | "abort"> & Partial<Pick<SseOutput, "onIdle">>;
+  readonly output: Pick<SseOutput, "send" | "pendingBytes" | "finish" | "abort">;
   send(event: SseEventName, data: unknown): boolean;
   close(): void;
   /** Set when the LAN listener attaches an authenticated client (§4.2); loopback clients never set it. */
@@ -122,9 +122,9 @@ export function createSseHub(opts: {
     }
   }
 
-  function write(state: ClientState, frame: string, source?: object): boolean {
+  function write(state: ClientState, frame: string): boolean {
     if (state.closed || state.client.revoked === true) return false;
-    return state.output.send(frame, source);
+    return state.output.send(frame);
   }
 
   function drop(state: ClientState, terminal?: string): void {
@@ -188,9 +188,8 @@ export function createSseHub(opts: {
       id,
       subscribed,
       output: {
-        send: (frame, source) => write(state, frame, source),
-        pendingBytes: (source) => output.pendingBytes(source),
-        onIdle: (fn) => output.onIdle(fn),
+        send: (frame) => write(state, frame),
+        pendingBytes: () => output.pendingBytes(),
         finish: () => drop(state),
         abort: () => output.abort(),
       },

@@ -1,5 +1,5 @@
 /** T51 P1 relocation source: src/web-hub/agent/terminal/reaper.ts @ 1820a8dd.
- * Transitional copy only: P6 must delete that source and all v1 consumers. */
+ * Hub-owned implementation; original agent execution source has been removed. */
 /** Linux identity checks and bounded Node fallback. A timeout is never a reap proof. */
 import { readFile, readdir, stat } from "node:fs/promises";
 import { performance } from "node:perf_hooks";

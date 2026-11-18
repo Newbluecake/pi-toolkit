@@ -1,7 +1,8 @@
 /** T51 P1 relocation source: src/web-hub/agent/terminal/environment.ts @ 1820a8dd.
- * Transitional copy only: P6 must delete that source and all v1 consumers. */
+ * Hub-owned implementation; original agent execution source has been removed. */
 /** pi→helper inheritance, r4 §5.3. This reduces accidental inheritance; it is NOT isolation. */
 import { Value } from "@sinclair/typebox/value";
+import { terminalCwdV2Ok } from "../../../protocol/terminal-v2-values.js";
 import { TerminalMetadataV2Schema, type TerminalMetadataV2 } from "../../../protocol/terminal-v2.js";
 type TerminalAgentDisplayMetadata = Partial<TerminalMetadataV2>;
 import { lstatSync, realpathSync, statSync } from "node:fs";
@@ -130,8 +131,15 @@ export function terminalDisplayMetadata(raw: unknown, cwd: string): TerminalAgen
   const result: TerminalAgentDisplayMetadata = {};
   for (const key of ["shellName", "userLabel", "hostLabel", "cwd"] as const) {
     const value = key === "cwd" ? cwd : source[key];
-    if (value !== undefined && Value.Check(TerminalMetadataV2Schema.properties[key], value))
-      Object.assign(result, { [key]: value });
+    if (typeof value !== "string" || !Value.Check(TerminalMetadataV2Schema.properties[key], value)) continue;
+    if (
+      key === "cwd"
+        ? !terminalCwdV2Ok(value) || /[\u0000-\u001f\u007f-\u009f]/u.test(value)
+        : /[<>\u202a-\u202e\u2066-\u2069]/u.test(value)
+    )
+      continue;
+    if (key === "shellName" && (value.includes("/") || value.length > 64)) continue;
+    Object.assign(result, { [key]: value });
   }
   return result;
 }

@@ -1,5 +1,5 @@
 /** T51 P1 relocation source: src/web-hub/agent/terminal/backend.ts @ 1820a8dd.
- * Transitional copy only: P6 must delete that source and all v1 consumers. */
+ * Hub-owned implementation; original agent execution source has been removed. */
 /** Hub-owned PTY transport. Production factory has no shell/env/cwd override wire surface.
  * A reservation must already exist before constructing a backend. */
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";

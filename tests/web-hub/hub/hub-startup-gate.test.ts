@@ -65,7 +65,7 @@ vi.mock("../../../src/web-hub/hub/assembly-terminal.js", async (original) => {
   const mod = await original<typeof import("../../../src/web-hub/hub/assembly-terminal.js")>();
   return {
     ...mod,
-    assembleTerminal: async (...args: Parameters<typeof mod.assembleTerminal>) => {
+    assembleTerminal: (...args: Parameters<typeof mod.assembleTerminal>) => {
       seams.order.push("terminal");
       expect(args[0].privacyStore?.degraded).toBe(false);
       return mod.assembleTerminal(...args);
@@ -363,8 +363,9 @@ describe("terminal machine boot policy startup ordering", () => {
     expect(text.indexOf("config = normalizedTerminal.config")).toBeLessThan(
       text.indexOf("const ctx = createHubAssembly"),
     );
-    expect(text.indexOf("await loadPrivacyStore(ctx)")).toBeLessThan(text.indexOf("await assembleTerminal(ctx)"));
-    expect(text.indexOf("await assembleTerminal(ctx)")).toBeLessThan(text.indexOf("await assembleSpawn(ctx)"));
+    expect(text.indexOf("await loadPrivacyStore(ctx)")).toBeLessThan(text.indexOf("terminal = assembleTerminal(ctx)"));
+    expect(text.indexOf("terminal = assembleTerminal(ctx)")).toBeLessThan(text.indexOf("await assembleSpawn(ctx)"));
+    expect(text).not.toContain("await assembleTerminal(ctx)"); // Auth startup never waits for terminal resource IO.
   });
   it.each([false, true])(
     "privacy=false with machine on: load failure=%s cannot bypass internal store",
@@ -390,7 +391,10 @@ describe("terminal machine boot policy startup ordering", () => {
       if (!cfg.ok) throw new Error(cfg.detail);
       const frontend: FrontendFactory = (args) => {
         expect(args.privacy).toBeUndefined(); // public privacy remains OFF
-        expect(args.terminal).toBeDefined();
+        expect(
+          (args as typeof args & import("../../../src/web-hub/hub/terminal/v2/frontend.js").TerminalFrontendDepsV2)
+            .terminalV2,
+        ).toBeDefined();
         return {
           listen: async () => ({ port: 43210 }),
           close: async () => {},
@@ -425,7 +429,9 @@ describe("terminal machine boot policy startup ordering", () => {
         hubs.push(result);
         expect(seams.order).toEqual(["privacy", "terminal", "spawn"]);
         const record = JSON.parse(readFileSync(result.paths.hubJson, "utf8"));
-        expect(record.terminal).toMatchObject({ mode: "per-session", source: "default", state: "ready" });
+        expect(record.terminal).toMatchObject({ mode: "per-session", source: "default", state: "unavailable" });
+        expect(["initializing", "resource-unavailable"]).toContain(record.terminal.reason);
+        expect(existsSync(join(result.paths.stateDir, "terminal-v2"))).toBe(false); // No production initialization/heal.
         expect(record).not.toHaveProperty("privacy");
       }
     },

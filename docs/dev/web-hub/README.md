@@ -61,28 +61,30 @@ queue/held 镜像与空缓冲清扫）+ 路由层 `ctlCache`（`fleetCache` 同�
 终态不补 —— UI 侧已有自愈）。定向 send 不入 ring、无新 timer/模块态；同 tick 同步读保证补发不会
 旧于已收帧、也不会乱于后续实时帧。
 
-## 会话终端启动与兼容（#45）
+## 会话终端 T51 v2 集成
 
 详见 [terminal README](../web-hub-terminal/README.md) 与 [验收矩阵](../web-hub-terminal/acceptance.md)。
-机器终端策略在 startHub assembly 前只读选定 agentDir 的 settings，启动冻结；不再由 launcher 自身终端设置/
-guard 或旧 config.terminal 的存在性启用。只有合法机器 enabled + 私有 source plain 才装配；secure/locked
-launcher 发 denied，旧 launcher 缺 marker/坏值为 unknown，固定 unavailable，需从正确 agentDir 的 plain 会话
-`/webhub restart`。不根据 PI_SECURE 缺席猜 plain，不动态启用。机器坏 enabled block 整块拒绝，不回落大默认。
+机器策略仍在 startHub assembly 前只读选定 agentDir settings，启动冻结；plain/secure/locked/unknown
+来源、D8/HOST_KEY/private namespace/control/privacy 门不变。只有 `terminal.tabs.v2` 与当前 matching
+`status.terminalSessionV2` 才出现候选入口；agent 仅提供当前真实 pi ctx 的私有 metadata RPC，不再持
+PTY/authority/grant/receipt。hub 是唯一 shell/ring/allocation owner，同一服务/views/routes/fence/resize
+门供两 HTTP listener；terminal-only 资源初始化不被 HTTP/auth 启动等待，坏账本不阻健康 auth 提交。
 
-两个 browser-only cap 固定服务生命周期；逐目标 matching status.terminalSession 只是候选，本地 authority/
-/proc/真实登录/SSE/privacy/physical quota 仍是权威。raw slot 无正声明，write-time 重算；A→零→B 不重建 fence。
-本地 `/webhub status` 只读已核身份的启动 snapshot；缺 terminal 字段既可能 off 也可能旧版，诚实 unknown，
-不猜 browser cap/当前用户 proof/实时 quota。每次 hub restart 必须真实重新登录。
-首次 open 从当前会话 context 捕获 cwd，既有 shell 不迁移；无效 cwd fail-closed，不回退 HOME/hub/process；原 login rc 语义保留。
+终端读取是独立 POST NDJSON，不进入公共 registry/bus/SSE ring/encoder/clientId；公共 SSE 已删终端
+private source/admission/binding 执行。UI 显式点击才 lazy mount/open，恢复只 restore/list/query/attach，
+收起只 detach，不杀 shell。cold unknown 精确占原三维 quota，不 adopt/TTL 释放；坏账本才终端全局拒新。
+真实 proof+durable prune 才释放；旧 kernel 退休需先留 prepared 与 committed completion，工具读者在
+可信 drained 窗重新验真/fsync，parse != 历史durable。详情见终端 README。
 
-privacy=false + terminal=true 仍先加载内部 store 并供 spawn fork 继承 mark，失败不许无锁 fork。
-**public privacy routes 必须 privacy===true**：修正旧版因内部 store 而误开启公开 routes 的 bug，此 terminal-on 路径
-不是 byte parity；只有真正 machine-off+agent-off 的公共 bytes 合同保持不变（新 policy 读取是 I/O 例外）。
-严格混版：N hub 拒无声明 O agent，N UI 缺 new cap 隐藏；N agent 保留对 O hub 的旧 launch config。
-精确 O=4e15fac1 有既有 terminal 私帧 gzip 缺陷，O-hub enabled 的 gzip 浏览器失败要记录为旧版已知缺陷，
-identity 编码只作明确补充，不能当默认混版 PASS。N hub 的 encoder 修复见本文 SSE 一节；另外修复了多 agent
-inventory end 同写全局 fence busy 导致 reaped receipt 不 drain，现用原 deadline 内的 exact-publication FIFO，不改物理 proof/CAS。
-回滚前须真实 reaped+prune+ACK 后 clean 状态并再次批准；dirty/poison 不删 journal/receipt/witness、不自动重开。
+privacy=false + terminal=true 仍先加载内部 healthy store 并供 spawn fork 继承 mark；公开 routes 只在
+privacy===true，不能因内部 store 而意外公开。真实当前 auth/2FA/cookie/origin/CSRF 与原 deadline 保留；
+无 terminal auth journal/login proof/repair查询，原具体 store 同事务 password commit-fact 桥不改冻结
+LanStorePort/wire。logout 删除失败已声明式纠正为 HTTP503 E_DB+unknown+localSignedOut，on/off一致，
+成功 bytes 不变。不是“等 shell 死才 auth 成功”。
+
+**仍为集成 checkpoint**：旧 shared v1 resource/capability/frame schema 的冻结删除许可、真实可信 O/N/fresh
+维护 adapter/部署 publisher fence、完整 O=7239→N→O/混版和浏览器/设备矩阵未完成。CLI78/组件绿不能
+充当维护入口/全栈 PASS，未授权部署或现场操作。普通 true-off/golden/PROTO 合同继续保持。
 
 ## Web resume (resume.v1)
 

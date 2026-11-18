@@ -157,3 +157,21 @@ describe("P6 original-auth same-operation user transaction facts", () => {
     denied(fence);
   });
 });
+
+it("only exact full-LAN auth facts discharge older unknown user operations; stale rotate cannot clear a later operation", () => {
+  const fence = new TerminalRevocationFenceV2(() => 0);
+  fence.beginUserMutation(); // original DB outcome unknown, no receipt to finish it
+  const oldRotate = fence.invalidate("all");
+  const later = fence.beginUserMutation();
+  fence.settle("all", oldRotate, { kind: "listeners-invalidated", loopAuthGen: 8, lanComplete: true });
+  denied(fence);
+  const currentRotate = fence.invalidate("all");
+  fence.settle("all", currentRotate, { kind: "listeners-invalidated", loopAuthGen: 9, lanComplete: true });
+  fence.check(identity, fence.revision);
+  // The old op token is gone, not an authority that can mutate a new transaction.
+  const next = fence.beginUserMutation();
+  fence.finishUserMutation(later, { kind: "no-change-confirmed" });
+  denied(fence);
+  fence.finishUserMutation(next, { kind: "no-change-confirmed" });
+  fence.check(identity, fence.revision);
+});

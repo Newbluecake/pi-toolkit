@@ -1,618 +1,229 @@
 #!/usr/bin/env -S tsx
-/** Tier3 only: real hub/Unix agent/HTTP/SSE/PTY + the manifest-verified production UI.
- * No real pi account, user rc, existing daemon, dependency install or network fallback.
- * The only injected production seam is the audited isolated UID/rc backend fixture.
- */
+/** Tier3: manifest-verified UI + real SDK 1.5 event context + real startHub/UDS,
+ * real isolated Python PTY and independent NDJSON. No site, install or network fallback.
+ * Explicit contract-fixture v2 initialization is NOT trusted fresh maintenance evidence. */
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { once } from "node:events";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { startHub } from "../../src/web-hub/hub/hub.js";
+import { startHub, type RunningHub } from "../../src/web-hub/hub/hub.js";
 import { createHttpFrontend } from "../../src/web-hub/hub/http.js";
-import { resolveHubPaths } from "../../src/web-hub/protocol/paths.js";
-import { TERMINAL_JOURNAL_FILE } from "../../src/web-hub/protocol/terminal.js";
-import { TERMINAL_LOCAL_DIR } from "../../src/web-hub/protocol/terminal-local.js";
-import { makeTerminalFixture, writeTerminalMachinePolicy } from "../../tests/integration/web-hub-terminal-fixture.js";
-import { waitUntil } from "../../tests/web-hub/agent/helpers.js";
+import { createTerminalTestBackend } from "../../src/web-hub/hub/terminal/v2/backend.js";
+import { webHubStateDir } from "../../src/web-hub/protocol/paths.js";
+import { makeTerminalFixture } from "../../tests/integration/terminal-v2-backend-fixture.js";
+import { createTerminalSdkAgent } from "../../tests/integration/helpers/terminal-v2-sdk.js";
+import { openSse } from "../../tests/web-hub/http/helpers.js";
 import { terminalFontMetrics } from "./lib/terminal-font-metrics.js";
-import { terminalBrowser } from "../../tests/integration/web-hub-terminal-compat-baseline.js";
-import { login, openSse } from "../../tests/web-hub/http/helpers.js";
-
 assert.equal(process.env.npm_config_offline, "true", "explicit offline-only cache required");
-assert(!process.env.XDG_RUNTIME_DIR && !process.env.NODE_OPTIONS, "unset XDG_RUNTIME_DIR/NODE_OPTIONS");
-assert(!process.env.PI_CODING_AGENT_DIR, "unset PI_CODING_AGENT_DIR");
-const out = resolve(process.env.PWH_TERMINAL_EVIDENCE_DIR ?? join(tmpdir(), "pwh-terminal-e2e-evidence"));
+assert(
+  !process.env.XDG_RUNTIME_DIR && !process.env.NODE_OPTIONS && !process.env.PI_CODING_AGENT_DIR,
+  "unset runtime/agent-dir/NODE_OPTIONS",
+);
+const entry = process.env.TPS_PLAYWRIGHT_MODULE,
+  binary = process.env.TPS_CHROMIUM;
+assert(
+  entry && binary && existsSync(entry) && existsSync(binary),
+  "NOT RUN: explicit already-installed Playwright/Chromium assets required; never installs",
+);
+assert.equal(JSON.parse(readFileSync(join(dirname(entry), "package.json"), "utf8")).version, "1.63.0");
+const playwright = await import(pathToFileURL(entry).href);
+const fixture = makeTerminalFixture();
+const home = fixture.fixture.home,
+  state = webHubStateDir(home),
+  socketDir = join(fixture.fixture.root, "s");
+const out = resolve(process.env.PWH_TERMINAL_EVIDENCE_DIR ?? join(fixture.fixture.root, "evidence"));
 mkdirSync(out, { recursive: true, mode: 0o700 });
-const root = mkdtempSync(join(tmpdir(), "te-"));
-chmodSync(root, 0o700);
-const home = join(root, "h");
-mkdirSync(home, { mode: 0o700 });
-// Freeze all future library HOME lookups before hub/fixture startup. Never use ~/.pi.
+chmodSync(out, 0o700);
+mkdirSync(state, { recursive: true, mode: 0o700 });
+mkdirSync(socketDir, { mode: 0o700 });
+const put = (path: string, value: unknown) => writeFileSync(path, JSON.stringify(value), { mode: 0o600 });
+put(join(home, ".pi/agent/pi-toolkit.json"), { webHub: { terminal: { enabled: true } } });
+const marker = { v: 2, storeId: "s".repeat(24), initialization: "fresh", checkpointId: "c".repeat(24) };
+mkdirSync(join(state, "terminal-v2"), { mode: 0o700 });
+put(join(state, ".terminal-initialized-v2"), marker);
+put(join(state, "terminal-v2/marker.json"), marker);
+put(join(state, "terminal-v2/ledger.json"), { v: 2, storeId: marker.storeId, revision: 0, allocations: [] });
 process.env.HOME = home;
-process.umask(0o022);
-const fixture = makeTerminalFixture(),
-  fixtureB = makeTerminalFixture();
-writeTerminalMachinePolicy(home);
 process.env.PI_WEBHUB_TERMINAL_SOURCE = "plain";
-const limits = { maxPerSession: 2, maxPerPrincipal: 2, maxTotal: 8, inputIdleMs: 3600000, maxLifetimeMs: 28800000 };
 const version = JSON.parse(readFileSync(resolve("package.json"), "utf8")).version;
-const result: Record<string, unknown> = { firefox: "NOT RUN — accepted GTK3/NSS limitation", steps: [] };
-const steps = result.steps as string[];
-let hub: Awaited<ReturnType<typeof startHub>> | undefined;
-let child: ReturnType<typeof spawn> | undefined;
-let childB: ReturnType<typeof spawn> | undefined;
-let browser: any;
-let page: any;
-let stage = "offline loader";
-const ops: Array<{ op: string; status: number }> = [];
-const listResponses: unknown[] = [];
-const authTrace: unknown[] = [];
-const cookieIds = new Map<string, number>();
-const cookieId = (raw: string | undefined) => {
-  const value = /(?:^|;\s*)pwh_sid=([^;]+)/.exec(raw ?? "")?.[1];
-  if (!value) return 0;
-  if (!cookieIds.has(value)) cookieIds.set(value, cookieIds.size + 1);
-  return cookieIds.get(value)!;
+const result: Record<string, unknown> = {
+  status: "IN PROGRESS",
+  firefox: "NOT RUN",
+  deviceIme: "NOT RUN",
+  maintenance: "NOT RUN",
+  steps: [],
 };
-let errors = "";
-const warnings: string[] = [];
-let droppedWarnings = 0;
+const steps = result.steps as string[],
+  ops: string[] = [],
+  errors: string[] = [];
+let hub: RunningHub | undefined,
+  sdk: Awaited<ReturnType<typeof createTerminalSdkAgent>> | undefined,
+  browser: any,
+  ordinary: Awaited<ReturnType<typeof openSse>> | undefined;
 try {
-  const entry = process.env.TPS_PLAYWRIGHT_MODULE,
-    binary = process.env.TPS_CHROMIUM;
-  assert(entry && binary, "explicit already-installed offline browser module/binary required; no npx/install fallback");
-  const pkg = JSON.parse(readFileSync(join(dirname(entry), "package.json"), "utf8"));
-  assert.equal(pkg.version, "1.63.0");
-  const loaded = await import(pathToFileURL(entry).href);
-  const pw = { chromium: loaded.chromium, version: pkg.version, executablePath: binary, source: "offline" };
-  result.playwright = pw.version;
-  stage = "real hub and agent";
-  let deps: any;
-  assert(
-    resolveHubPaths({ home, uid: process.getuid!() }).socketPath.startsWith(home + "/"),
-    "scratch path too long: refuse shared socket fallback before starting a hub",
-  );
-  hub = await startHub(
+  let initialized: Promise<void> | undefined;
+  const started = await startHub(
+    { v: 1, home, port: 0, idleExitMinutes: 10, pluginVersion: version, buildId: "terminal-v2-browser-probe" },
+    createHttpFrontend,
     {
-      v: 1,
-      home,
-      port: 0,
-      idleExitMinutes: 10,
-      pluginVersion: version,
-      buildId: "terminal-tier3",
-      privacy: true,
-      terminal: limits,
-    },
-    (d) => {
-      deps = d;
-      return createHttpFrontend(d);
-    },
-  );
-  assert(!("exists" in hub), "must own a fresh private daemon");
-  const running = hub;
-  const cfg = join(root, "agent.json");
-  writeFileSync(cfg, JSON.stringify({ home, fixture: fixture.fixture, pluginVersion: version }), { mode: 0o600 });
-  child = spawn(process.execPath, ["--import", "tsx", resolve("tests/integration/fixtures/terminal-agent.ts"), cfg], {
-    stdio: ["pipe", "pipe", "pipe", "ipc"],
-    env: { ...process.env, HOME: home },
-  });
-  child.stderr!.on("data", (b: Buffer) => {
-    errors = (errors + b.toString()).slice(-8192);
-  });
-  await waitUntil(
-    () => deps.registry.list().some((v: any) => v.session?.sessionId === "child-terminal-session"),
-    10000,
-  );
-  const card = deps.registry.list().find((v: any) => v.session?.sessionId === "child-terminal-session");
-  assert.equal(card.agentId.pid, child.pid);
-  const cfgB = join(root, "agent-B.json");
-  writeFileSync(cfgB, JSON.stringify({ home, fixture: fixtureB.fixture, sessionId: "cwd-B", pluginVersion: version }), {
-    mode: 0o600,
-  });
-  childB = spawn(process.execPath, ["--import", "tsx", resolve("tests/integration/fixtures/terminal-agent.ts"), cfgB], {
-    stdio: ["pipe", "pipe", "pipe", "ipc"],
-    env: { ...process.env, HOME: home },
-  });
-  childB.stderr!.on("data", (b: Buffer) => {
-    errors = (errors + b.toString()).slice(-8192);
-  });
-  await waitUntil(
-    () => deps.registry.list().some((v: any) => v.session?.sessionId === "cwd-B" && v.status?.terminalSession),
-    10000,
-    "second independent agent declaration",
-  );
-  const cardB = deps.registry.list().find((v: any) => v.session?.sessionId === "cwd-B");
-  assert.equal(cardB.agentId.pid, childB.pid);
-  assert.notEqual(childB.pid, child.pid);
-  const ipc = async (data: object) => {
-    const id = Date.now();
-    const reply = new Promise<any>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("owned agent IPC deadline")), 5000);
-      timer.unref();
-      const onMessage = (m: any) => {
-        if (m.id === id) {
-          child!.off("message", onMessage);
-          clearTimeout(timer);
-          resolve(m);
-        }
-      };
-      child!.on("message", onMessage);
-    });
-    child!.send({ id, ...data });
-    return reply;
-  };
-  const cookie = await login(running.httpPort, running.paths.tokenFile),
-    stream = await openSse(running.httpPort, { cookie });
-  try {
-    const hello = await stream.waitFor((e) => e.event === "hello"),
-      connection = await stream.waitFor((e) => e.event === "terminal_connection"),
-      api = terminalBrowser(running.httpPort, cookie, stream, hello, connection);
-    const waitDrained = () =>
-      waitUntil(
-        () => {
-          const d = join(running.paths.stateDir, TERMINAL_LOCAL_DIR);
-          return (
-            JSON.parse(readFileSync(join(d, TERMINAL_JOURNAL_FILE), "utf8")).resources.length === 0 &&
-            readdirSync(join(d, "receipts")).length === 0
-          );
+      xdgRuntimeDir: socketDir,
+      terminalV2Test: {
+        backend: (options) => createTerminalTestBackend(options, fixture.fixture),
+        ready: (work) => {
+          initialized = work;
         },
-        60000,
-        "two-agent exact receipt drain",
-      );
-    const observe = async (c: any, t: any, expected: string, tag: string) => {
-      await api.input(c, t, `printf '${tag}=%s:%s\\n' "$$" "$(pwd -P)"\n`);
-      await waitUntil(
-        () =>
-          new RegExp(`${tag}=\\d+:${expected.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\r?\\n`).test(
-            api.output(t.termId),
-          ),
-        5000,
-        "actual canonical PTY cwd",
-      );
-      const match = new RegExp(`${tag}=(\\d+):`).exec(api.output(t.termId));
-      assert(match);
-      return Number(match[1]);
-    };
-    const a = await api.open(card),
-      b = await api.open(cardB),
-      pidA = await observe(card, a, fixture.fixture.cwd, "CWD_A"),
-      pidB = await observe(cardB, b, fixtureB.fixture.cwd, "CWD_B");
-    assert.notEqual(pidA, pidB);
-    assert.notEqual(fixture.fixture.cwd, process.cwd());
-    await api.close(cardB, b);
-    await waitUntil(
-      () =>
-        JSON.parse(readFileSync(join(running.paths.stateDir, TERMINAL_LOCAL_DIR, TERMINAL_JOURNAL_FILE), "utf8"))
-          .resources.length === 1,
-      60000,
-      "B physical release",
-    );
-    const next = join(fixture.fixture.root, "next");
-    mkdirSync(next, { mode: 0o700 });
-    await ipc({ op: "cwd", cwd: next });
-    const newer = await api.open(card);
-    await observe(card, newer, next, "CWD_CURRENT");
-    assert.equal(await observe(card, a, fixture.fixture.cwd, "CWD_PINNED"), pidA);
-    await api.close(card, a);
-    await api.close(card, newer);
-    await waitDrained();
-    await ipc({ op: "cwd", cwd: fixture.fixture.cwd });
-    result.perSessionCwd = {
-      agents: 2,
-      pidA,
-      pidB,
-      processCwd: process.cwd(),
-      cwdA: fixture.fixture.cwd,
-      cwdB: fixtureB.fixture.cwd,
-      currentCwd: next,
-      existingShellPinned: true,
-    };
-    steps.push(
-      "two independent agents: actual canonical pwd per ctx; current cwd affects new open only; old PID/cwd pinned; real receipts drained",
-    );
-  } finally {
-    stream.close();
-  }
-  const url = `http://127.0.0.1:${running.httpPort}`;
-  const token = readFileSync(running.paths.tokenFile, "utf8").trim();
-  browser = await pw.chromium.launch({ headless: true, executablePath: pw.executablePath });
-  result.browser = browser.version();
-  const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, locale: "zh-CN" });
-  context.on("response", (response: any) => {
-    const path = new URL(response.url()).pathname;
-    if (!["/api/login", "/api/events", "/api/terminal/list"].includes(path)) return;
-    void Promise.all([response.allHeaders(), response.request().allHeaders()]).then(([headers, sent]) => {
-      authTrace.push({
-        path,
-        status: response.status(),
-        requestSid: cookieId(sent.cookie),
-        setSid: cookieId(headers["set-cookie"]),
-      });
-    });
-  });
-  // No external requests, even if an accidental UI path tries them.
+      },
+    },
+  );
+  assert("httpPort" in started, "private hub startup failed");
+  hub = started;
+  await initialized;
+  sdk = await createTerminalSdkAgent({ home, cwd: fixture.fixture.cwd, socketDir, version });
+  const origin = `http://127.0.0.1:${hub.httpPort}`,
+    token = readFileSync(hub.paths.tokenFile, "utf8").trim();
+  browser = await playwright.chromium.launch({ headless: true, executablePath: binary });
+  const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
   await context.route("**/*", (route: any) =>
-    route
-      .request()
-      .url()
-      .startsWith(url + "/")
-      ? route.continue()
-      : route.abort(),
+    new URL(route.request().url()).origin === origin ? route.continue() : route.abort(),
   );
   await context.addInitScript(() => {
-    (window as any).__terminalEvidence = { violations: [], output: "", exits: [] };
-    document.addEventListener("securitypolicyviolation", (e) => {
-      (window as any).__terminalEvidence.violations.push({ directive: e.violatedDirective, uri: e.blockedURI });
-    });
-    const Original = window.EventSource;
-    window.EventSource = class extends Original {
-      constructor(...args: ConstructorParameters<typeof EventSource>) {
-        super(...args);
-        this.addEventListener("terminal", (event) => {
-          const e = JSON.parse((event as MessageEvent).data).event;
-          const evidence = (window as any).__terminalEvidence;
-          if (e.kind === "output") evidence.output = (evidence.output + atob(e.bytesB64)).slice(-65536);
-          if (e.kind === "exit") evidence.exits.push({ reap: e.reap, reason: e.reason });
-        });
+    localStorage.setItem("pwh_lang", "en");
+    const facts = { output: "", violations: [] as unknown[], privatePublicEvents: 0 };
+    (window as any).__terminalV2Probe = facts;
+    document.addEventListener("securitypolicyviolation", (event) =>
+      facts.violations.push({ directive: event.violatedDirective }),
+    );
+    const original = window.fetch.bind(window);
+    window.fetch = async (...args) => {
+      const response = await original(...args);
+      if (String(args[0]).endsWith("/api/terminal/v2/view") && response.ok) {
+        // Probe-only bounded observer, never substitutes ACK or changes the real response.
+        const clone = response.clone(),
+          reader = clone.body?.getReader(),
+          decoder = new TextDecoder();
+        if (reader)
+          void (async () => {
+            let partial = "";
+            try {
+              for (;;) {
+                const read = await reader.read();
+                if (read.done) break;
+                partial += decoder.decode(read.value, { stream: true });
+                if (partial.length > 65536) throw new Error("probe frame cap");
+                for (let newline; (newline = partial.indexOf("\n")) >= 0;) {
+                  const frame = JSON.parse(partial.slice(0, newline));
+                  partial = partial.slice(newline + 1);
+                  if (frame.t === "output") facts.output = (facts.output + atob(frame.bytesB64)).slice(-65536);
+                }
+              }
+            } catch {
+              /* Original view cancellation is expected on collapse/reload. */
+            } finally {
+              await reader.cancel().catch(() => {});
+            }
+          })();
       }
+      return response;
     };
   });
-  page = await context.newPage();
-  const consoleErrors: string[] = [];
-  const pageErrors: string[] = [];
-  const expectedRevocationErrors: string[] = [];
-  let invalidating = false;
-  const documentCsp: unknown[][] = [];
-  const captureDocumentCsp = async () => {
-    const violations = await page.evaluate(() => (window as any).__terminalEvidence.violations);
-    documentCsp.push(violations);
-    assert.deepEqual(violations, []);
-  };
-  page.on("pageerror", (e: Error) => pageErrors.push(e.message));
-  page.on("console", (m: any) => {
-    if (m.type() === "warning") {
-      if (warnings.length < 64) warnings.push(m.text().slice(0, 2048));
-      else droppedWarnings++;
-    }
-    if (m.type() === "error") {
-      const text = m.text();
-      const path = new URL(m.location().url || url).pathname;
-      if (
-        invalidating &&
-        ((/^\/api\/terminal\/(ack|input|renew|resize)$/.test(path) && /status of (401|409)/.test(text)) ||
-          // Explicit privacy/logout synchronously destroys the original streaming
-          // gzip socket. Chromium reports its missing HTTP chunk trailer; this is
-          // NOT the corrupt private-frame ERR_CONTENT_DECODING_FAILED regression.
-          (path === "/api/events" && text === "Failed to load resource: net::ERR_INCOMPLETE_CHUNKED_ENCODING"))
-      )
-        expectedRevocationErrors.push(`${path}: ${text}`);
-      else consoleErrors.push(text);
-    }
+  const page = await context.newPage();
+  page.on("pageerror", (error: Error) => errors.push(error.message.slice(0, 1024)));
+  page.on("request", (req: any) => {
+    const path = new URL(req.url()).pathname;
+    if (path.startsWith("/api/terminal/")) ops.push(path.split("/").pop()!);
   });
-  page.on("response", (r: any) => {
-    const path = new URL(r.url()).pathname;
-    if (path === "/api/login") ops.push({ op: "login", status: r.status() });
-    if (path === "/api/terminal/list")
-      void r
-        .json()
-        .then((v: any) => listResponses.push(v))
-        .catch(() => {});
-    if (path.startsWith("/api/terminal/")) ops.push({ op: path.split("/").pop()!, status: r.status() });
-  });
-  const shot = (name: string) => page.screenshot({ path: join(out, name + "-r2.png"), fullPage: true });
-  const button = (name: string) => page.locator(".terminal-chrome").getByRole("button", { name, exact: true });
-  const writable = () => page.waitForSelector('.terminal-panel[data-writable="true"]', { timeout: 15000 });
-  const send = async (command: string, marker: string) => {
-    await page.locator(".xterm-helper-textarea").focus();
-    await page.keyboard.press("Control+c"); // cancel readline state left by the deliberate raw Esc
-    await page.keyboard.type(command, { delay: 5 });
-    await page.keyboard.press("Enter");
-    await page.waitForFunction((m: string) => (window as any).__terminalEvidence.output.includes(m), marker, {
-      timeout: 10000,
-    });
-  };
-  const waitRelease = () =>
-    waitUntil(
-      () => {
-        const dir = join(running.paths.stateDir, TERMINAL_LOCAL_DIR);
-        const j = JSON.parse(readFileSync(join(dir, TERMINAL_JOURNAL_FILE), "utf8"));
-        return j.resources.length === 0 && readdirSync(join(dir, "receipts")).length === 0;
-      },
-      60000,
-      "physical receipt + durable prune + exact ACK",
-    );
-  stage = "login and detail terminal entry";
-  await page.goto(`${url}/#t=${encodeURIComponent(token)}`);
-  await page.waitForSelector(".agent-card", { timeout: 15000 });
-  await page.locator(`.agent-card[href="#/agent/${encodeURIComponent(card.agentKey)}"]`).click();
-  await page.locator('[data-fold="terminal"]').click();
-  await page.waitForSelector(".terminal-list");
-  steps.push("real token login → terminal button → drawer list");
-  await page.locator("[data-terminal-create]").click();
-  await writable();
-  const initialFont = await terminalFontMetrics(page);
-  await page.locator(".terminal-chrome").getByRole("button", { name: "放大终端字号", exact: true }).click();
-  const largerFont = await terminalFontMetrics(page);
-  assert.equal(largerFont.fontSize, initialFont.fontSize + 1);
-  await page.locator(".terminal-chrome").getByRole("button", { name: "缩小终端字号", exact: true }).click();
-  const smallerFont = await terminalFontMetrics(page);
-  assert.equal(smallerFont.fontSize, initialFont.fontSize);
-  // Retain a non-default size across GPU recovery AND a real document reload.
-  await page.locator(".terminal-chrome").getByRole("button", { name: "放大终端字号", exact: true }).click();
-  const chosenFont = await terminalFontMetrics(page);
-  stage = "real shell echo";
-  await send("echo P3_ECHO_OK", "\rP3_ECHO_OK\r\n");
-  await send("printf '\\nP3_BEFORE=%s\\n' \"$$\"", "P3_BEFORE=");
-  await page.waitForFunction(() => /P3_BEFORE=\d+/.test((window as any).__terminalEvidence.output));
-  const pid = Number(await page.evaluate(() => /P3_BEFORE=(\d+)/.exec((window as any).__terminalEvidence.output)![1]));
-  result.shellPid = pid;
-  assert(pid > 0);
-  await shot("01-echo");
-  steps.push("echo and real shell PID rendered through PTY/SSE/WebGL");
-  stage = "drawer modes and shell continuity";
-  for (const [width, mode] of [
-    [1440, "docked"],
-    [1000, "overlay"],
-    [390, "fullscreen"],
-  ] as const) {
-    await page.setViewportSize({ width, height: 1000 });
-    await page.waitForSelector(`.detail[data-drawer="${mode}"]`);
-    if (!(await page.locator(".terminal-panel").isVisible())) {
-      await page.locator('.fleet-summary-bar[data-panel="terminal"]').click();
-      await page.locator(".terminal-list").getByRole("button", { name: "接回", exact: true }).click();
-    }
-    await writable();
-    assert.equal(await page.locator(".detail-main .terminal-panel").count(), 0);
-    assert.equal(await page.locator('#fleet-drawer[data-panel="terminal"] .terminal-panel').count(), 1);
-    await send(`printf '\\nP46_${mode}=%s\\n' "$$"`, `P46_${mode}=${pid}\r\n`);
-    assert.equal(ops.filter((o) => o.op === "open").length, 1);
-    assert.equal(ops.filter((o) => o.op === "close").length, 0);
-    await shot(`drawer-${width}-${mode}`);
-    steps.push(`${width}px ${mode}: drawer terminal, attach original PID, zero new shell/close`);
-  }
-  await page.setViewportSize({ width: 1440, height: 1000 });
-  await page.waitForSelector('.detail[data-drawer="docked"]');
-  // Dashboard's existing 1025px branch remounts AgentDetail. Terminal selection is
-  // intentionally ephemeral: explicitly reopen the list instead of assuming restored input.
-  if (!(await page.locator(".terminal-panel").isVisible())) {
-    await page.locator('.fleet-summary-bar[data-panel="terminal"]').click();
-    await page.locator(".terminal-list").getByRole("button", { name: "接回", exact: true }).click();
-  }
-  await writable();
-  stage = "maximize and Escape";
-  await button("最大化").click();
+  await page.goto(`${origin}/#t=${encodeURIComponent(token)}`, { waitUntil: "load" });
+  await page.waitForSelector('[data-fold="terminal"]', { timeout: 15000 });
+  assert.deepEqual(ops, [], "terminal API before explicit click");
+  const cookie = (await context.cookies(origin)).find((value: any) => value.name === "pwh_sid");
+  assert(cookie, "real token login cookie missing");
+  ordinary = await openSse(hub.httpPort, { cookie: `pwh_sid=${cookie.value}` });
+  await ordinary.waitFor((event) => event.event === "hello");
+  await page.click('[data-fold="terminal"]');
+  await page.waitForSelector('.terminal-v2-panel[data-writable="true"]', { timeout: 15000 });
+  assert.equal(ops.filter((op) => op === "create").length, 1);
+  steps.push("real SDK → matching status → explicit lazy open → real PTY ready");
+  const font = await terminalFontMetrics(page);
+  result.font = font;
   await page.locator(".xterm-helper-textarea").focus();
-  await page.keyboard.press("Escape");
-  assert(await page.locator(".terminal-panel.is-maximized").isVisible());
-  assert.equal(ops.filter((o) => o.op === "close").length, 0);
-  await shot("02-maximized-escape");
-  await button("还原").click();
-  steps.push("maximize → Esc preserves panel, maximization and shell");
-  stage = "renderer loss same physical shell";
-  const beforeLoss = ops.filter((o) => ["prepare", "open", "close"].includes(o.op)).length;
-  const attachesBeforeLoss = ops.filter((o) => o.op === "attach").length;
+  await page.keyboard.type("printf 'T51_BROWSER_PID=%s\\n' \"$$\"");
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() => /T51_BROWSER_PID=\d+/.test((window as any).__terminalV2Probe.output), undefined, {
+    timeout: 8000,
+  });
+  const pid = await page.evaluate(() =>
+    Number(/T51_BROWSER_PID=(\d+)/.exec((window as any).__terminalV2Probe.output)![1]),
+  );
+  assert(existsSync(`/proc/${pid}/stat`));
+  await page.screenshot({ path: join(out, "terminal-v2-initial.png") });
   await page.evaluate(() => {
-    const canvas = [...document.querySelectorAll<HTMLCanvasElement>(".xterm canvas")].find((c) =>
-      c.getContext("webgl2"),
-    );
-    const lose = canvas?.getContext("webgl2")?.getExtension("WEBGL_lose_context");
-    if (!lose) throw new Error("real WEBGL_lose_context required");
+    const canvas = document.querySelector<HTMLCanvasElement>("canvas[data-terminal-webgl-canvas]")!;
+    (window as any).__terminalV2PreviousCanvas = canvas;
+    const gl = canvas.getContext("webgl2")!;
+    const lose = gl.getExtension("WEBGL_lose_context");
+    if (!lose) throw new Error("real loss extension unavailable");
     lose.loseContext();
   });
-  // Writable disappears during recovery; wait for a new renderer/attach cutover via HTTP ops.
-  await waitUntil(() => ops.filter((o) => o.op === "attach").length > attachesBeforeLoss, 10000, "recovery attach");
-  await writable();
-  await send("printf '\\nP3_RECOVERED=%s\\n' \"$$\"", `P3_RECOVERED=${pid}\r\n`);
-  assert.equal(ops.filter((o) => ["prepare", "open", "close"].includes(o.op)).length, beforeLoss);
-  const recoveredFont = await terminalFontMetrics(page);
-  assert.equal(recoveredFont.fontSize, chosenFont.fontSize);
-  assert.equal(recoveredFont.fontFamily, chosenFont.fontFamily);
-  await shot("03-renderer-recovered");
-  steps.push("real context loss → renderer rebuild → attach same PID; zero prepare/open/close");
-  stage = "background refresh same PID";
-  const cookiesBefore = await context.cookies();
-  result.cookieBefore = cookieId(cookiesBefore.map((c: any) => `${c.name}=${c.value}`).join("; "));
-  await button("放到后台").click();
-  await page.waitForSelector(".terminal-panel", { state: "detached" });
-  await captureDocumentCsp();
-  await page.reload();
-  const cookiesAfter = await context.cookies();
-  result.cookieAfter = cookieId(cookiesAfter.map((c: any) => `${c.name}=${c.value}`).join("; "));
-  result.sameCookies = result.cookieBefore === result.cookieAfter;
-  assert.equal(result.cookieAfter, result.cookieBefore, "same Page reload must retain the original login SID");
-  assert.equal(browser.contexts().length, 1, "reload must not create a new BrowserContext");
-  await page.waitForSelector('[data-fold="terminal"]');
-  await page.locator('[data-fold="terminal"]').click();
-  await page.locator(".terminal-list").getByRole("button", { name: "接回", exact: true }).click();
-  await writable();
-  await send("printf '\\nP3_AFTER=%s\\n' \"$$\"", `P3_AFTER=${pid}\r\n`);
-  assert.equal(ops.filter((o) => o.op === "open").length, 1);
-  const reloadedFont = await terminalFontMetrics(page);
-  assert.equal(reloadedFont.fontSize, chosenFont.fontSize);
-  assert.equal(reloadedFont.fontFamily, chosenFont.fontFamily);
-  result.fonts = { initialFont, largerFont, smallerFont, chosenFont, recoveredFont, reloadedFont };
-  await shot("04-refresh-same-pid");
-  steps.push("background → real page reload → list attach preserves same PID (one open)");
-  stage = "confirmed close and quota reuse";
-  await button("终止").click();
-  assert(await page.locator('[aria-modal="true"]').isVisible());
-  assert.equal(ops.filter((o) => o.op === "close").length, 0);
-  await shot("05-close-confirm");
-  await page.locator(".terminal-confirm").getByRole("button", { name: "确认", exact: true }).click();
-  await waitRelease();
-  assert.throws(() => process.kill(pid, 0));
-  await page.locator("[data-terminal-create]").click();
-  await writable();
-  steps.push("explicit close confirmation → process gone → durable quota/receipt release → reopen");
-  stage = "privacy lock immediate invalidation";
-  invalidating = true;
-  const lockAt = Date.now();
-  const locked = await page.evaluate(async (agentKey: string) => {
-    const response = await fetch("/api/privacy/lock", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-PWH": "1" },
-      body: JSON.stringify({ agentKey, sessionId: "child-terminal-session", locked: true }),
-    });
-    return response.status;
-  }, card.agentKey);
-  assert.equal(locked, 200);
-  await page.waitForFunction(() => !document.querySelector(".terminal-panel[data-writable]"), undefined, {
-    timeout: 2000,
-  });
-  result.privacyInvalidationMs = Date.now() - lockAt;
-  await shot("06-privacy-invalidated");
-  await waitRelease();
-  steps.push("authoritative privacy lock immediately freezes/clears panel and reaps shell");
-  invalidating = false;
-  await page.evaluate(async (agentKey: string) => {
-    const r = await fetch("/api/privacy/lock", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-PWH": "1" },
-      body: JSON.stringify({ agentKey, sessionId: "child-terminal-session", locked: false }),
-    });
-    if (!r.ok) throw new Error("unlock fixture failed");
-  }, card.agentKey);
-  await captureDocumentCsp();
-  await page.reload();
-  await page.locator('[data-fold="terminal"]').click();
-  await page.locator("[data-terminal-create]").click();
-  await writable();
-  stage = "auth revoke immediate invalidation";
-  invalidating = true;
-  const revokeAt = Date.now();
-  await page.evaluate(async () => {
-    localStorage.removeItem("pwh_token"); // prevent the ordinary token client's automatic fresh login
-    const r = await fetch("/api/logout", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-PWH": "1" },
-      body: "{}",
-    });
-    if (!r.ok) throw new Error("fixture logout failed");
-  });
-  await page.waitForFunction(() => !document.querySelector(".terminal-panel[data-writable]"), undefined, {
-    timeout: 2000,
-  });
-  result.revokeInvalidationMs = Date.now() - revokeAt;
-  await shot("07-revoke-invalidated");
-  await waitRelease();
-  steps.push("real logout/revoke immediately invalidates panel and reaps shell");
-  const evidence = await page.evaluate(() => (window as any).__terminalEvidence);
-  assert.deepEqual(evidence.violations, []);
-  documentCsp.push(evidence.violations);
-  result.cspByDocument = documentCsp;
-  result.cspViolations = documentCsp.flat();
-  assert.deepEqual(result.cspViolations, []);
-  result.warnings = warnings;
-  result.droppedWarnings = droppedWarnings;
-  result.consoleErrors = consoleErrors;
-  result.expectedRevocationErrors = expectedRevocationErrors;
-  result.pageErrors = pageErrors;
-  assert.deepEqual(pageErrors, []);
-  assert.deepEqual(consoleErrors, []);
-  // Expected auth HTTP errors are preserved; CSP and uncaught exceptions are separately asserted.
-  stage = "WebGL unavailable Chinese refusal, zero shell open";
-  const disabled = await pw.chromium.launch({
-    headless: true,
-    executablePath: pw.executablePath,
-    args: ["--disable-webgl"],
-  });
-  try {
-    const dc = await disabled.newContext({ viewport: { width: 1440, height: 1000 }, locale: "zh-CN" });
-    await dc.route("**/*", (route: any) =>
-      route
-        .request()
-        .url()
-        .startsWith(url + "/")
-        ? route.continue()
-        : route.abort(),
-    );
-    await dc.addInitScript(() => {
-      (window as any).__disabledCsp = [];
-      document.addEventListener("securitypolicyviolation", (e) =>
-        (window as any).__disabledCsp.push(e.violatedDirective),
+  await page.waitForFunction(
+    () => {
+      const canvas = document.querySelector("canvas[data-terminal-webgl-canvas]");
+      return (
+        canvas &&
+        canvas !== (window as any).__terminalV2PreviousCanvas &&
+        document.querySelector('.terminal-v2-panel[data-writable="true"]')
       );
-    });
-    const dp = await dc.newPage();
-    dp.on("console", (m: any) => {
-      if (m.type() !== "warning") return;
-      if (warnings.length < 64) warnings.push(m.text().slice(0, 2048));
-      else droppedWarnings++;
-    });
-    const attempted: string[] = [];
-    dp.on("request", (r: any) => {
-      if (/\/api\/terminal\/(prepare|open)$/.test(r.url())) attempted.push(r.url());
-    });
-    await dp.goto(`${url}/#t=${encodeURIComponent(token)}`);
-    await dp.waitForSelector(".agent-card");
-    await dp.locator(`.agent-card[href="#/agent/${encodeURIComponent(card.agentKey)}"]`).click();
-    await dp.locator('[data-fold="terminal"]').click();
-    await dp.locator("[data-terminal-create]").click();
-    await dp.waitForFunction(
-      () =>
-        /WebGL/.test(document.querySelector(".terminal-panel")?.textContent ?? "") &&
-        /终端未启动/.test(document.querySelector(".terminal-panel")?.textContent ?? ""),
-    );
-    assert.deepEqual(attempted, []);
-    result.disabledCspViolations = await dp.evaluate(() => (window as any).__disabledCsp);
-    assert.deepEqual(result.disabledCspViolations, []);
-    assert.equal(await dp.locator(".xterm").count(), 0);
-    await dp.screenshot({ path: join(out, "08-webgl-unavailable-r2.png"), fullPage: true });
-    steps.push("--disable-webgl: Chinese refusal before prepare/open, no xterm or shell");
-  } finally {
-    await disabled.close();
-  }
+    },
+    undefined,
+    { timeout: 15000 },
+  );
+  assert.equal(ops.filter((op) => op === "create").length, 1);
+  assert(existsSync(`/proc/${pid}/stat`));
+  steps.push("real WebGL loss → bounded renderer recovery, no new create, same PID remains");
+  await page.getByRole("button", { name: "Collapse terminal (keep shells)", exact: true }).click();
+  await page.waitForSelector(".terminal-v2-panel", { state: "detached" });
+  assert(existsSync(`/proc/${pid}/stat`));
+  assert.equal(ordinary.ended, false);
+  await page.reload({ waitUntil: "load" });
+  await page.waitForSelector('[data-fold="terminal"]');
+  assert.equal(ops.filter((op) => op === "create").length, 1);
+  await page.click('[data-fold="terminal"]');
+  await page.waitForSelector('.terminal-v2-panel[data-writable="true"]', { timeout: 15000 });
+  assert.equal(ops.filter((op) => op === "create").length, 1);
+  assert(existsSync(`/proc/${pid}/stat`));
+  steps.push("collapse/reload requires explicit click, reattaches original term without create");
+  await page
+    .locator(".terminal-v2-tabs")
+    .getByRole("button", { name: /^Close / })
+    .click();
+  await page.getByRole("dialog").getByRole("button", { name: "Confirm", exact: true }).click();
+  await page.waitForFunction(() => !document.querySelector('.terminal-v2-tabs [role="tab"]'), undefined, {
+    timeout: 15000,
+  });
+  const disk = JSON.parse(readFileSync(join(state, "terminal-v2/ledger.json"), "utf8"));
+  assert.deepEqual(disk.allocations, []);
+  assert(disk.revision >= 2);
+  assert(!existsSync(`/proc/${pid}/stat`));
+  assert.equal(ordinary.ended, false);
+  assert(!JSON.stringify(ordinary.events).includes("T51_BROWSER_PID"));
+  const violations = await page.evaluate(() => (window as any).__terminalV2Probe.violations);
+  assert.deepEqual(violations, []);
+  assert.deepEqual(errors, []);
+  await page.screenshot({ path: join(out, "terminal-v2-clean.png") });
+  steps.push("confirmed close → real physical proof + durable prune + PID gone, ordinary SSE intact");
+  result.status = "PASS — scoped browser scenario only";
   result.ops = ops;
-  result.listResponses = listResponses;
-  result.status = "PASS";
+  result.revision = disk.revision;
 } catch (error) {
   result.status = "FAIL";
-  // Keep bounded warning evidence on failed runs too, independently of assertions.
-  result.stage = stage;
-  result.error = String(error);
-  result.agentDiagnostics = errors;
-  if (hub && !("exists" in hub)) {
-    result.hubDiagnostics = readFileSync(hub.paths.logFile, "utf8").slice(-12000);
-    result.journal = JSON.parse(
-      readFileSync(join(hub.paths.stateDir, TERMINAL_LOCAL_DIR, TERMINAL_JOURNAL_FILE), "utf8"),
-    );
-  }
-  result.ops = ops;
-  result.listResponses = listResponses;
-  if (page) {
-    result.observed = await page.evaluate(() => (window as any).__terminalEvidence).catch(() => null);
-    result.body = (
-      await page
-        .locator("body")
-        .innerText()
-        .catch(() => "")
-    ).slice(-6000);
-    await page.screenshot({ path: join(out, "failure-r2.png"), fullPage: true }).catch(() => {});
-  }
+  result.reason = error instanceof Error ? error.message : "probe failed";
   process.exitCode = 1;
 } finally {
-  // Keep the browser connection alive through the unref'd production teardown clocks.
-  // Publish PASS only after owned child + hub + browser cleanup actually finishes.
-  for (const owned of [childB, child])
-    if (owned && owned.exitCode === null && owned.signalCode === null) {
-      const exited = once(owned, "exit");
-      owned.stdin!.end("STOP\n");
-      const timer = setTimeout(() => owned.kill("SIGKILL"), 6000);
-      timer.unref();
-      await exited;
-      clearTimeout(timer);
-    }
-  if (hub && !("exists" in hub)) await hub.close("test");
+  ordinary?.close();
   await browser?.close();
-  fixture.cleanup();
-  fixtureB.cleanup();
-  rmSync(root, { recursive: true, force: true });
-  result.warnings = warnings;
-  result.droppedWarnings = droppedWarnings;
-  result.authTrace = authTrace;
-  result.cleanup = "owned agent/hub/browser stopped; scratch removed";
-  writeFileSync(join(out, "e2e-report.json"), JSON.stringify(result, null, 2) + "\n");
-  console.log(JSON.stringify(result, null, 2));
+  await sdk?.close();
+  await hub?.close("private-browser-probe");
+  put(join(out, "terminal-v2-e2e.json"), result);
+  // Evidence is retained. Exact fixture cleanup is intentionally omitted when the
+  // evidence directory lives inside it; no broad /tmp/site cleanup is permitted.
+  if (!out.startsWith(fixture.fixture.root + "/")) fixture.cleanup();
 }

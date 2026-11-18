@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Terminal } from "@xterm/xterm";
-import { mountTerminalSpike } from "../../../src/web-hub/ui/src/components/terminal/terminal-impl.js";
+import { mountTerminal } from "../../../src/web-hub/ui/src/components/terminal/v2/terminal-v2-impl.js";
 import type { WebglUiState } from "../../../src/web-hub/ui/src/components/terminal/webgl-lifecycle.js";
 
 vi.mock("@xterm/xterm", () => ({ Terminal: vi.fn() }));
@@ -24,9 +24,7 @@ describe("WebGL unavailable never starts an xterm or DOM fallback", () => {
       const root = document.createElement("div");
       document.body.appendChild(root);
       const states: WebglUiState[] = [];
-      await expect(mountTerminalSpike(root, { onStateChange: (state) => states.push(state) })).rejects.toThrow(
-        "终端未启动",
-      );
+      await expect(mountTerminal(root, { onStateChange: (state) => states.push(state) })).rejects.toThrow("终端未启动");
       expect(Terminal).not.toHaveBeenCalled();
       expect(root.childNodes).toHaveLength(0);
       expect(document.querySelectorAll('link[rel="stylesheet"], .xterm')).toHaveLength(0);

@@ -1,10 +1,11 @@
 /** Local-only, pure terminal diagnostics. hub.json describes STARTUP policy, not
  * hello_ack/browser capabilities, login proof, SSE readiness or realtime usage.
  * All untrusted input is projected onto fixed tokens/numbers; never print paths. */
-import { parseTerminalSession } from "../protocol/terminal-session.js";
+import { Value } from "@sinclair/typebox/value";
+import { TerminalMachineLimitsV2Schema } from "../protocol/terminal-v2.js";
 import type { TerminalHubConfig } from "../protocol/terminal.js";
 
-export type TerminalEligibility = "eligible" | "not-connected" | "guard-denied" | "owner-unavailable";
+export type TerminalEligibility = "eligible" | "not-connected" | "guard-denied" | "context-unavailable";
 export interface TerminalStatusInput {
   /** Activation settings after D8 overrides. No disk reread of session settings. */
   settings: (TerminalHubConfig & { enabled: boolean }) | undefined;
@@ -29,43 +30,15 @@ const REASONS = new Set([
   "settings-timeout",
   "startup-domain-denied",
   "startup-domain-unknown",
-  "local-store-unavailable",
-  "journal-missing",
-  "journal-unreadable-or-corrupt",
-  "journal-invalid-identities",
-  "journal-unknown-version-or-shape",
-  "legacy-journal-state",
-  "unknown-store-version",
-  "unresolved-local-state",
-  "unsafe-directory",
-  "unsafe-file",
-  "initialization-already-claimed",
-  "initialization-witness-mismatch",
-  "residual-authority-state",
-  "residual-receipt-state",
-  "io-deadline",
-  "local-capacity",
-  "secure-domain",
-  "file-changed",
-  "stale-authority-prev-boot",
-  "stale-authority-same-boot",
-  "stale-authority-prev-boot-pid-present",
-  "stale-authority-prev-boot-journal-not-empty",
-  "stale-authority-prev-boot-receipts-not-empty",
-  "authority-proc-unavailable",
-  "authority-namespace-mismatch",
-  "authority-corrupt",
-  "authority-recovery-not-owner",
-  "authority-publication-unsettled",
-  "authority-recovery-state-changed",
-  "authority-archive-unsafe",
-  "authority-archive-capacity",
-  "authority-archive-io",
+  "initializing",
+  "resource-unavailable",
+  "privacy-unavailable",
+  "setup-required",
 ]);
 const record = (v: unknown): Record<string, unknown> | undefined =>
   v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined;
 function limits(v: unknown): TerminalHubConfig | undefined {
-  return parseTerminalSession({ v: 1, enabled: true, sessionId: "status", epoch: "status", limits: v })?.limits;
+  return Value.Check(TerminalMachineLimitsV2Schema, v) ? v : undefined;
 }
 export function formatTerminalStatusLines(input: TerminalStatusInput): string[] {
   const local = input.settings;
@@ -98,9 +71,9 @@ export function formatTerminalStatusLines(input: TerminalStatusInput): string[] 
   if (hub?.state === "unavailable") {
     const reason = typeof hub.reason === "string" && REASONS.has(hub.reason) ? hub.reason : "unknown";
     lines.push(
-      `终端不可用：${reason}。保留已有物理状态，不自动重置；仅可信前boot空资源authority可自动隔离，其他状态保持封锁。修复后 /webhub restart。`,
+      `终端不可用：${reason}。保留已有 allocation，不自动重置或接管；同 kernel unknown 逐条占额，坏账本仅封终端新建。修复后 /webhub restart。`,
     );
   }
-  lines.push("浏览器需本boot真实登录；本地状态不证明当前登录或SSE可用。");
+  lines.push("浏览器需本boot真实登录；本地状态不证明当前登录或独立终端流可用。");
   return lines;
 }
