@@ -123,9 +123,20 @@ class DevFullLedger extends IoLedger {
 
 /** performance.now fake: the deadline computation (first call) sees 0; every later call sees
  * `later` — so left() is exactly 1000 − later for the whole tick (darwin-plan §4.2-D(2)). */
-const freezeLeft = (later: number): (() => number) => {
+const freezeLeft = (later: number): (() => void) => {
   let calls = 0;
   const spy = vi.spyOn(performance, "now").mockImplementation(() => (calls++ === 0 ? 0 : later));
+  return () => {
+    spy.mockRestore();
+  };
+};
+
+/** performance.now fake with an explicit per-call queue (exhausted ⇒ repeats the last value):
+ * lets a test place the budget-check snapshot and the SUBSEQUENT clock reads on opposite sides
+ * of the 50ms boundary (S1 review Major 1). */
+const queueClock = (values: readonly number[]): (() => void) => {
+  let index = 0;
+  const spy = vi.spyOn(performance, "now").mockImplementation(() => values[Math.min(index++, values.length - 1)]!);
   return () => {
     spy.mockRestore();
   };
@@ -236,6 +247,60 @@ describe("sysload darwin sampler (host seam, §4.2-D)", () => {
       } finally {
         restore();
       }
+    }
+  });
+
+  it("D2: the budget is ONE snapshot — a clock crossing the 50ms boundary mid-check never leaks a sub-50 call (Major 1)", async () => {
+    // Snapshot exactly 49 ⇒ no lease, no host call at all (queue: deadline calc, then 49 forever).
+    const at49 = emptyLog();
+    const ledger49 = new RecordingLedger({ active: new Map(), capacity: 2 });
+    const restore49 = queueClock([0, 951]);
+    try {
+      await sampleOnce(hostIo(makeHost({}, at49), at49), { home: "/", mono: () => 0, at: () => 1 }, ledger49);
+      expect(at49.readHost).toEqual([]);
+      expect(ledger49.acquired).toEqual([]);
+      expect(ledger49.size).toBe(0);
+    } finally {
+      restore49();
+    }
+
+    // Snapshot exactly 50, but the NEXT clock read is already 49: the call proceeds with
+    // timeoutMs 50 taken from the snapshot — never 49 (the pre-fix double-read computed 49).
+    const crossing = emptyLog();
+    const ledgerCross = new RecordingLedger({ active: new Map(), capacity: 2 });
+    const restoreCross = queueClock([0, 950, 951]);
+    try {
+      await sampleOnce(
+        hostIo(makeHost({}, crossing), crossing),
+        { home: "/", mono: () => 0, at: () => 1 },
+        ledgerCross,
+      );
+      expect(crossing.readHost).toEqual([50]);
+      expect(ledgerCross.acquired).toContain("host:sysctl");
+    } finally {
+      restoreCross();
+    }
+
+    // Snapshot 51 ⇒ proceeds with 51.
+    const at51 = emptyLog();
+    const restore51 = queueClock([0, 949, 949]);
+    try {
+      await sampleOnce(hostIo(makeHost({}, at51), at51), { home: "/", mono: () => 0, at: () => 1 }, freshLedger());
+      expect(at51.readHost).toEqual([51]);
+    } finally {
+      restore51();
+    }
+
+    // A non-finite snapshot ⇒ no lease, no call (the Number.isFinite guard).
+    const nanLog = emptyLog();
+    const nanLedger = new RecordingLedger({ active: new Map(), capacity: 2 });
+    const restoreNan = queueClock([0, Number.NaN]);
+    try {
+      await sampleOnce(hostIo(makeHost({}, nanLog), nanLog), { home: "/", mono: () => 0, at: () => 1 }, nanLedger);
+      expect(nanLog.readHost).toEqual([]);
+      expect(nanLedger.acquired).toEqual([]);
+    } finally {
+      restoreNan();
     }
   });
 
@@ -417,7 +482,7 @@ describe("sysload darwin sampler (host seam, §4.2-D)", () => {
     expect(stale.sample.disks.every((disk) => disk.reading.kind === "invalid")).toBe(true);
   });
 
-  it("D4: a stale flip settled INSIDE deviceOf ⇒ the dev is dropped (unresolved/invalid), statfs never called", async () => {
+  it("D4: a generation flip settled INSIDE deviceOf ⇒ invalid (not unresolved), statfs never called (Minor)", async () => {
     let generation = 0;
     const log = emptyLog();
     const host = makeHost(
@@ -442,11 +507,9 @@ describe("sysload darwin sampler (host seam, §4.2-D)", () => {
     );
     expect(log.deviceOf).toEqual(["/Users/blue"]);
     expect(log.statfs).toEqual([]);
-    for (const disk of result.sample.disks) {
-      expect(["unresolved", "invalid"]).toContain(disk.reading.kind);
-    }
-    // never added to seenMounts with an unproven identity: nothing was statfs'd
-    expect(result.sample.disks.every((disk) => disk.reading.kind !== "ok")).toBe(true);
+    // Minor 修复：dev 缺席 + 代际失效 ⇒ invalid（区别于 deviceOf 真失败 ⇒ unresolved）；
+    // "~" 在 deviceOf 内部翻代际，"/" 在进入 deviceOf 步骤时即非当前代。
+    expect(result.sample.disks.map((disk) => disk.reading.kind)).toEqual(["invalid", "invalid"]);
   });
 
   it("D5: readHost undefined ⇒ mem invalid but disks still sampled; mountinfoText cache skips readMounts", async () => {

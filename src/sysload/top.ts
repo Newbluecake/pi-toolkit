@@ -382,11 +382,15 @@ export function createHostTopScanner(
     });
     const scanLease = ledger.tryAcquire("top");
     if (scanLease === undefined) return emptyPartial();
-    if (remaining() < TOP_HOST_MIN_BUDGET_MS) {
+    // Single budget snapshot (S1 review Major 1): two consecutive remaining() reads can straddle
+    // the 50ms boundary — the second may fall below 50 (even ≤0) while we still start `ps`.
+    // The snapshot must be finite and ≥ TOP_HOST_MIN_BUDGET_MS; timeoutMs comes from THAT value.
+    const budget = remaining();
+    if (!Number.isFinite(budget) || budget < TOP_HOST_MIN_BUDGET_MS) {
       scanLease.release();
       return emptyPartial();
     }
-    const timeoutMs = Math.floor(Math.min(1000, remaining()));
+    const timeoutMs = Math.floor(Math.min(1000, budget));
     const listing = host.listProcesses({ timeoutMs, maxPids });
     // Keep the global `top` slot reserved until the listing really settles (§2.4 lease rule).
     void listing.catch(() => undefined).then(() => scanLease.release());

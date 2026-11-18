@@ -230,11 +230,18 @@ function settingsToThresholds(settings: LoadSettings): LoadThresholds {
 
 /** darwin-plan §2.9（Q3 拍板）：advisory mem 只记显示值（value/lastValid ⇒ verdict 可显示
  * availPct），不走 advanceMetric —— mem.level 恒 unknown，不进 overall、不触发升级/恢复/gate/hint。
- * 不可信读数（与 memRaw 同一可信度闸）落回 invalid 路径而不是照屏；去掉样本标记（模拟 D1
- * 启用）后同序列走正常 advanceMetric 路径，可逆性由 darwin-tracker 测试钉住。 */
+ * S1 评审 Major 2：若同一 tracker 先由非 advisory 样本把 mem 推到 warn/crit，advisory 生效时必须把
+ * 该存量等级与挂起窗口一并清除——否则旧 crit 会继续参与 overall/gate，违背「恒 unknown」。清除后去掉
+ * 样本标记（模拟 D1 启用）从 unknown 重新走正常 advanceMetric 路径，对称性由 darwin-tracker 测试钉住。
+ * 不可信读数（与 memRaw 同一可信度闸）落回 invalid 路径而不是照屏。 */
 function recordAdvisoryMem(metric: InternalMetric, sample: LoadSample, settings: LoadSettings): { recovered: boolean } {
   if (sample.mem.kind !== "ok" || memRaw(sample, settingsToThresholds(settings)) === undefined)
     return advanceMetric(metric, undefined, undefined, sample.mono, settings, "mem");
+  metric.level = "unknown";
+  metric.levelSince = undefined;
+  metric.windowStart = undefined;
+  metric.direction = undefined;
+  metric.windowTarget = undefined;
   metric.value = sample.mem.value;
   metric.lastValid = sample.mono;
   return { recovered: false };
