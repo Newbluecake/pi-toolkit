@@ -122,6 +122,15 @@ function setup(mode: "docked" | "overlay" | "fullscreen", activity = false, enab
     setFontSize: vi.fn(),
   };
   const factory = vi.fn(async () => renderer);
+  // This happy-dom fixture supplies explicit stylesheet success, just as the
+  // injected renderer supplies geometry. Actual network/CSP cases are browser probes.
+  const css = new MutationObserver((records) => {
+    for (const record of records)
+      for (const node of record.addedNodes)
+        if (node instanceof HTMLLinkElement && node.rel === "stylesheet") node.dispatchEvent(new Event("load"));
+  });
+  css.observe(document.head, { childList: true });
+  cleanups.push(() => css.disconnect());
   const selectRun = vi.fn();
   const w = mount(AgentDetail, {
     props: { agent: agent(activity), now: 10000, narrow: mode === "fullscreen" },

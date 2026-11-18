@@ -179,7 +179,8 @@ function ensurePanelStyle(): Promise<void> {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      link.onload = link.onerror = null;
+      link.removeEventListener("load", onLoad);
+      link.removeEventListener("error", onError);
       if (error || disposed || panelStyle !== link || link.parentNode !== document.head) {
         panelStyleReady.value = false;
         link.remove();
@@ -190,8 +191,10 @@ function ensurePanelStyle(): Promise<void> {
       }
     };
     const timer = setTimeout(() => finish(new Error("E_PANEL_CSS_DEADLINE")), 5000);
-    link.onload = () => finish();
-    link.onerror = () => finish(new Error("E_PANEL_CSS_LOAD"));
+    const onLoad = () => finish();
+    const onError = () => finish(new Error("E_PANEL_CSS_LOAD"));
+    link.addEventListener("load", onLoad);
+    link.addEventListener("error", onError);
     abortPanelStyle = () => finish(new Error("E_PANEL_CSS_ABORTED"));
     document.head.appendChild(link);
   });

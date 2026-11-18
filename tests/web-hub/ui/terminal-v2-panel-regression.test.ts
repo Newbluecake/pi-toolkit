@@ -209,13 +209,12 @@ describe("P4 bounded panel stylesheet lifecycle", () => {
   it("CSS error is terminal-only and sticky; a late original load cannot enable create/input", async () => {
     const context = setup(undefined, false),
       link = style(),
-      late = link.onload,
       pending = context.vm.open();
     link.dispatchEvent(new Event("error"));
     expect(await pending).toBe(false);
     await flushPromises();
     expect(context.wrapper.get('[role="alert"]').text()).toContain("E_PANEL_CSS_LOAD");
-    late?.call(link, new Event("load"));
+    link.dispatchEvent(new Event("load"));
     expect(await context.vm.open()).toBe(false);
     expect(context.factory).not.toHaveBeenCalled();
     expect(context.request).not.toHaveBeenCalled();
@@ -225,7 +224,6 @@ describe("P4 bounded panel stylesheet lifecycle", () => {
     vi.useFakeTimers();
     const context = setup(undefined, false),
       link = style(),
-      late = link.onload,
       pending = context.vm.open();
     await vi.advanceTimersByTimeAsync(4999);
     expect(context.factory).not.toHaveBeenCalled();
@@ -233,7 +231,7 @@ describe("P4 bounded panel stylesheet lifecycle", () => {
     expect(await pending).toBe(false);
     await flushPromises();
     expect(context.wrapper.get('[role="alert"]').text()).toContain("E_PANEL_CSS_DEADLINE");
-    late?.call(link, new Event("load"));
+    link.dispatchEvent(new Event("load"));
     expect(await context.vm.open()).toBe(false);
     expect(context.factory).not.toHaveBeenCalled();
     expect(context.request).not.toHaveBeenCalled();
@@ -242,14 +240,13 @@ describe("P4 bounded panel stylesheet lifecycle", () => {
   it("unmount aborts pending CSS and late old-lifecycle load cannot unlock a replacement panel", async () => {
     const old = setup(undefined, false),
       oldLink = style(),
-      late = oldLink.onload,
       pending = old.vm.open();
     old.wrapper.unmount();
     expect(await pending).toBe(false);
     const current = setup(undefined, false),
       newLink = style(),
       opening = current.vm.open();
-    late?.call(oldLink, new Event("load"));
+    oldLink.dispatchEvent(new Event("load"));
     await flushPromises();
     expect(old.factory).not.toHaveBeenCalled();
     expect(current.factory).not.toHaveBeenCalled();
