@@ -61,18 +61,11 @@ export interface MaintenanceAuditPort {
     deadline: number;
   }): Promise<MaintenanceLease>;
 }
-/** Persistent witness bytes remain owned by the P0 contract holder. Required injection
- * until that contract is frozen; test codecs do NOT establish interoperability. */
-export interface WitnessCodec {
-  encode(marker: import("../../../src/web-hub/protocol/terminal-v2.js").TerminalMarkerV2): Buffer;
-  matches(bytes: Buffer, marker: import("../../../src/web-hub/protocol/terminal-v2.js").TerminalMarkerV2): boolean;
-}
 export interface MaintenanceOptions {
   /** Explicit existing owned0700 physical directories; never inferred from HOME/env. */
   stateDir: string;
   evidenceDir: string;
   audit: MaintenanceAuditPort;
-  witness: WitnessCodec;
   signal?: AbortSignal;
   /** Logical bound, <= 30s. Kernel fsync is not interruptible. */
   timeoutMs?: number;
