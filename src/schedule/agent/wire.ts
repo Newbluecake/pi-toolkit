@@ -19,6 +19,8 @@
  */
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { closeSync, constants as fsConstants, mkdtempSync, openSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { systemClock, type Clock } from "../../core/clock.js";
@@ -28,7 +30,7 @@ import { canonicalPath, inVaultDir, type SecureDomain } from "../../secure/domai
 import { createDarwinIdentity } from "../../web-hub/protocol/sched-identity.js";
 import { SCHED_TOLERANCE_S, type HubScheduleConfig } from "../../web-hub/protocol/schedule.js";
 import { closeEpoch, manualClaim, type ClaimGate } from "../core/claim.js";
-import { SCHED_LOCK_SHUTDOWN_TIMEOUT_MS, type LockAcquire } from "../core/lock.js";
+import { perlFlockAcquire, SCHED_LOCK_SHUTDOWN_TIMEOUT_MS, type LockAcquire } from "../core/lock.js";
 import {
   resolveStoreRoot,
   SchedFsError,
@@ -261,7 +263,36 @@ function probeLock(opts: ScheduleWireOpts): boolean {
   return (opts.flockProbe ?? defaultFlockProbe)();
 }
 
-export function defaultFlockProbe(): boolean {
+/** Startup lock-capability probe (plan P3-b). Linux/others: `flock -V` (byte-identical to before).
+ * Darwin: smoke the PRODUCTION acquisition itself — a temp lock file acquired through the very same
+ * `perlFlockAcquire()` the store transactions will use (same script, args, env, stdio slot 3; no
+ * second command to drift). Any exception or non-`held` result ⇒ `false` (fail closed, E_BUSY). */
+export function defaultFlockProbe(
+  platform: NodeJS.Platform = process.platform,
+  deps: { acquire?: LockAcquire } = {},
+): boolean {
+  if (platform === "darwin") {
+    let dir: string | undefined;
+    try {
+      dir = mkdtempSync(join(tmpdir(), ".sched-lock-probe-"));
+      const fd = openSync(join(dir, "probe.lock"), fsConstants.O_RDWR | fsConstants.O_CREAT, 0o600);
+      try {
+        return (deps.acquire ?? perlFlockAcquire())(fd) === "held";
+      } finally {
+        closeSync(fd);
+      }
+    } catch {
+      return false;
+    } finally {
+      if (dir !== undefined) {
+        try {
+          rmSync(dir, { recursive: true, force: true });
+        } catch {
+          /* best-effort probe cleanup */
+        }
+      }
+    }
+  }
   try {
     const r = spawnSync("flock", ["-V"], { stdio: "ignore", timeout: 2_000 });
     return r.error === undefined && r.status === 0;
@@ -338,7 +369,12 @@ export function wireSchedule(pi: Pick<ExtensionAPI, "on">, opts: ScheduleWireOpt
       if (mode.arm && flockOk === undefined) {
         flockOk = probeLock(opts);
         if (!flockOk)
-          warnOnce("flock", "util-linux `flock` not found: every schedule transaction fails closed (E_BUSY)");
+          warnOnce(
+            "flock",
+            process.platform === "darwin"
+              ? "Perl/Fcntl flock 不可用，schedule 事务拒绝（E_BUSY）"
+              : "util-linux `flock` not found: every schedule transaction fails closed (E_BUSY)",
+          );
       }
       return createScheduleAgent({
         ctx,

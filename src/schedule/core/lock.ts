@@ -20,6 +20,14 @@
  * only pending work is this transaction exit mid-wait (Node exit 13, the claim silently never
  * happens); the wait is bounded by `timeoutMs`, so it can never wedge print mode. Holder identity is written into the lock file only as
  * a diagnostic for the E_BUSY message. Missing `flock` binary ⇒ fail closed (`E_BUSY` + reason).
+ *
+ * Darwin (P3): macOS has no `flock(1)`, so the same kernel lock is taken via a short-lived `perl`
+ * child running `flock(2)` through `Fcntl` — on OUR descriptor (stdio slot 3, `open("+<&=3")` dups
+ * fd 3 onto the same open file description). Lock ownership semantics are identical to the Linux
+ * backend, so the B1/M6 argument above transfers unchanged: no stale reclamation, no forced
+ * break, a crashed holder releases by dying. The perl child runs with a fixed minimal `PATH` (no
+ * `PERL5OPT`/`PERL5LIB` inheritance); missing/timeout/signal/unexpected-exit perl ⇒ fail closed
+ * with a fixed detail (never `busy`: an unknown lock state must not be guessed).
  */
 import { spawnSync } from "node:child_process";
 import {
@@ -52,6 +60,16 @@ export interface AcquireDeps {
   timeoutMs?: number;
 }
 
+/** Perl `flock(2)` script — the single source of truth shared by `perlFlockAcquire` and the darwin
+ * startup probe (plan P3-a). `open("+<&=3")` dups fd 3 onto the SAME open file description, so the
+ * kernel lock outlives the perl child and is released only when OUR fd closes. `-MFcntl=:flock`
+ * exports LOCK_EX/LOCK_NB; Errno is imported explicitly (`-MErrno=…`) and compared numerically
+ * (`$!==X` parses as `$! == X`) — no `%!`/`$!{…}` hash-key lookups (plan revision #8). */
+export const PERL_FLOCK_SCRIPT =
+  'open(my $fh, "+<&=3") or exit 2; flock($fh, LOCK_EX|LOCK_NB) and exit 0; exit(($!==EWOULDBLOCK || $!==EAGAIN) ? 75 : 3)';
+export const PERL_FLOCK_ARGS = ["-MFcntl=:flock", "-MErrno=EWOULDBLOCK,EAGAIN", "-e", PERL_FLOCK_SCRIPT] as const;
+const PERL_ENV: Readonly<Record<string, string>> = Object.freeze({ PATH: "/usr/bin:/bin" });
+
 /** `flock -x -n -E 75 3` child on our descriptor (stdio slot 3). */
 export function linuxFlockAcquire(flockBin = "flock", deps: AcquireDeps = {}): LockAcquire {
   const spawn = deps.spawn ?? spawnSync;
@@ -71,6 +89,46 @@ export function linuxFlockAcquire(flockBin = "flock", deps: AcquireDeps = {}): L
     if (r.status !== 0) return { kind: "fail", detail: `flock exited ${String(r.status ?? r.signal)}` };
     return "held";
   };
+}
+
+/** `flock(2)` via a perl child on our descriptor (stdio slot 3) — the Darwin lock backend (plan
+ * P3-a). The result mapping is fail-closed with fixed details: ENOENT ⇒ "perl binary not found",
+ * `spawnSync` timeout (error ETIMEDOUT, status null, SIGTERM) and signal kills ⇒ fail (never
+ * `busy` — an unknown lock state must not be guessed), exit 75 ⇒ `busy`, exit 0 ⇒ `held`, any
+ * other exit ⇒ fail. */
+export function perlFlockAcquire(perlBin = "/usr/bin/perl", deps: AcquireDeps = {}): LockAcquire {
+  const spawn = deps.spawn ?? spawnSync;
+  const timeout = deps.timeoutMs ?? 5_000;
+  return (fd) => {
+    const r = spawn(perlBin, [...PERL_FLOCK_ARGS], {
+      stdio: ["ignore", "ignore", "ignore", fd],
+      timeout,
+      env: { ...PERL_ENV },
+    });
+    if (r.error !== undefined) {
+      const c = code(r.error);
+      if (c === "ENOENT") return { kind: "fail", detail: "perl binary not found (fail closed)" };
+      if (c === "ETIMEDOUT")
+        return { kind: "fail", detail: `perl flock timed out after ${String(timeout)}ms (fail closed)` };
+      return { kind: "fail", detail: `perl: ${String(r.error)}` };
+    }
+    if (r.status === null && r.signal !== null)
+      return { kind: "fail", detail: `perl flock killed by ${String(r.signal)} (fail closed)` };
+    if (r.status === FLOCK_CONFLICT_EXIT) return "busy";
+    if (r.status !== 0) return { kind: "fail", detail: `perl flock exited ${String(r.status)}` };
+    return "held";
+  };
+}
+
+/** Platform-default lock acquisition: darwin ⇒ perl `flock(2)`, everything else ⇒ `flock(1)`
+ * (plan P3-a). `deps` is forwarded to the chosen backend so tests can capture the spawn
+ * invocation (T-P8/T-P9); production callers pass none and get the real `spawnSync`. */
+export function defaultLockAcquire(
+  o: { platform?: string; flockBin?: string; perlBin?: string } = {},
+  deps: AcquireDeps = {},
+): LockAcquire {
+  const platform = o.platform ?? process.platform;
+  return platform === "darwin" ? perlFlockAcquire(o.perlBin, deps) : linuxFlockAcquire(o.flockBin, deps);
 }
 
 export interface LockOpts {
@@ -184,7 +242,12 @@ export async function withDirLock<T>(dirFd: number, body: () => T, opts: LockOpt
   const mono = opts.monotonic ?? (() => performance.now());
   const sleep = opts.sleep ?? lockRetrySleep;
   const name = opts.name ?? SCHED_LOCK_FILE;
-  const acquire = opts.acquire ?? linuxFlockAcquire(opts.flockBin);
+  const acquire =
+    opts.acquire ??
+    defaultLockAcquire({
+      platform: process.platform,
+      ...(opts.flockBin === undefined ? {} : { flockBin: opts.flockBin }),
+    });
   const deadline = mono() + (opts.timeoutMs ?? SCHED_LOCK_TIMEOUT_MS);
   for (let spins = 0; ; spins++) {
     const r = tryLock(dirFd, name, acquire);
