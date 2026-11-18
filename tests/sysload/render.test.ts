@@ -58,4 +58,42 @@ describe("sysload render", () => {
     expect(settings.gate).toBe(false);
     expect(buildLoadRecoveryText(verdict("ok", false), settings.gate)).toContain("仅提示");
   });
+
+  // darwin-plan §2.8（修订 #2）：render 链经 loadDetail 复用明细行，不含任何 ps 命令 —— 以下守卫把这一事实钉住，
+  // 防止日后有人在 render 里加命令忘了平台化。涵盖 top 有/无、nested 有/无、ownRuns、darwin 形态 verdict。
+  it("never renders a ps command or --sort, whatever the verdict shape (render chain is platform-free)", () => {
+    const darwinShaped: LoadVerdict = {
+      level: "crit",
+      gating: true,
+      metrics: {
+        cpu: { level: "unknown" },
+        mem: { level: "unknown", availPct: 3 },
+        disk: [{ label: "/", state: { level: "crit", freeBytes: 3.1 * 2 ** 30, mountPath: "/" } }],
+      },
+      mono: 120_000,
+      at: Date.UTC(2026, 0, 1, 14, 4),
+      gatingSinceMono: 0,
+      loadavg: [18.2, 15.1, 9.8],
+      cores: 12,
+    };
+    for (const nested of [true, false]) {
+      for (const withTop of [true, false]) {
+        for (const ownRuns of [undefined, ["r1", "r2"]] as const) {
+          const text = buildLoadEscalationText(darwinShaped, {
+            nested,
+            ...(withTop ? { top } : {}),
+            ...(ownRuns === undefined ? {} : { ownRuns }),
+          });
+          expect(text).not.toContain("ps ");
+          expect(text).not.toContain("--sort");
+          expect(text).not.toContain("ps -eo");
+        }
+      }
+    }
+    // darwin 形态的明细行：CPU 读数缺席 → `CPU —`；核数来自 verdict.cores（sample.cores 回退）
+    const detail = buildLoadEscalationText(darwinShaped, {});
+    expect(detail).toContain("CPU —");
+    expect(detail).toContain("loadavg 18.2 / 15.1 / 9.8 (12 cores)");
+    expect(detail).toContain("MEM 3% avail");
+  });
 });

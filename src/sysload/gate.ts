@@ -7,6 +7,10 @@ export interface LoadGateRequest {
   readonly nested?: boolean;
   readonly top?: TopSnapshot;
   readonly ownRuns?: readonly string[];
+  /** darwin-plan §2.8（修订 #2）：装配端（stack.ts）传入 process.platform；缺省（undefined）
+   * ⇒ 原 Linux 文本逐字不变（不依赖宿主 process.platform，旧测试/旧调用方在 mac 上也得到原串）；
+   * "darwin" ⇒ BSD 形态的 top 回退命令；其余值 ⇒ 原串。 */
+  readonly platform?: NodeJS.Platform;
 }
 
 export interface LoadGateDecision {
@@ -50,6 +54,14 @@ function formatSince(verdict: LoadVerdict): string {
   return `${clock} (${minutes > 0 ? `${minutes}m` : `${seconds}s`})`;
 }
 
+/** GNU/BSD top fallback command per platform (darwin-plan §2.8): the only platform-sensitive
+ * fragment in the gate chain — the render chain reuses `loadDetail` and carries no ps command
+ * (pinned by a render guard test). */
+const topFallbackCommand = (platform: NodeJS.Platform | undefined): string =>
+  platform === "darwin"
+    ? "top snapshot unavailable; run `ps -A -r -o pid,pcpu,rss,comm | head`"
+    : "top snapshot unavailable; run `ps -eo pid,comm,%cpu,rss --sort=-%cpu | head`";
+
 export function evaluateLoadGate(
   verdict: LoadVerdict,
   settings: LoadSettings,
@@ -60,7 +72,7 @@ export function evaluateLoadGate(
   const top = request.top;
   const topBlock =
     top === undefined
-      ? "top snapshot unavailable; run `ps -eo pid,comm,%cpu,rss --sort=-%cpu | head`"
+      ? topFallbackCommand(request.platform)
       : `top cpu: ${topText(top.byCpu, topUnitsAvailable(top))} ｜ top rss: ${topText(top.byRss, topUnitsAvailable(top))}`;
   const own =
     request.ownRuns !== undefined && request.ownRuns.length > 0
