@@ -45,7 +45,10 @@ const loadSettings: LoadSettings = {
   hud: false,
 };
 
-const IS_LINUX = process.platform === "linux";
+/** darwin-plan §3.1-S4: the load chain has a real host on linux AND darwin since S2 — the
+ * gate flips to both platforms (assertions unchanged; this is the S4 gate flip). Anything
+ * else (win32/…) still skips exactly as before. */
+const HAS_LOAD_HOST = process.platform === "linux" || process.platform === "darwin";
 const HUB_MAIN = resolve("src/web-hub/hub/main.ts");
 
 /** `webHub.nodeLoader` override resolving ok, so `shouldSpawnHub` passes `launcherOk`. */
@@ -64,7 +67,7 @@ function enoentConnect(): typeof import("node:net").connect {
 
 describe("web-hub P3 load wiring", () => {
   it("authenticates before top scans and serves one host-load SSE snapshot", async () => {
-    if (!IS_LINUX) return;
+    if (!HAS_LOAD_HOST) return;
     const tmp = makeTmp("pwh-load-");
     const deps = fakeDeps(tmp.dir);
     deps.config = { ...deps.config, load };
@@ -96,7 +99,7 @@ describe("web-hub P3 load wiring", () => {
   });
 
   it("Last-Event-ID reconnect does not replay stale load frames (single snapshot, no id)", async () => {
-    if (!IS_LINUX) return;
+    if (!HAS_LOAD_HOST) return;
     const tmp = makeTmp("pwh-load-replay-");
     const deps = fakeDeps(tmp.dir);
     deps.config = { ...deps.config, load };
@@ -130,7 +133,7 @@ describe("web-hub P3 load wiring", () => {
   });
 
   it("rate limit ⇒ 429 + Retry-After on the 4th rapid /api/load/top request", async () => {
-    if (!IS_LINUX) return;
+    if (!HAS_LOAD_HOST) return;
     const tmp = makeTmp("pwh-load-rate-");
     const deps = fakeDeps(tmp.dir);
     deps.config = { ...deps.config, load };
@@ -154,7 +157,7 @@ describe("web-hub P3 load wiring", () => {
   });
 });
 
-describe.skipIf(!IS_LINUX)("web-hub P3 load cap matrix (HubInfo.caps ≡ hello_ack.caps)", () => {
+describe.skipIf(!HAS_LOAD_HOST)("web-hub P3 load cap matrix (HubInfo.caps ≡ hello_ack.caps)", () => {
   const tmp = tmpDirs();
   const hubs: RunningHub[] = [];
 
@@ -221,7 +224,7 @@ describe.skipIf(!IS_LINUX)("web-hub P3 load cap matrix (HubInfo.caps ≡ hello_a
   });
 });
 
-describe.skipIf(!IS_LINUX)("web-hub P3 load enable/disable matrix (real buildHubConfig)", () => {
+describe.skipIf(!HAS_LOAD_HOST)("web-hub P3 load enable/disable matrix (real buildHubConfig)", () => {
   const tmp = tmpDirs();
   const hubs: RunningHub[] = [];
 
@@ -298,7 +301,7 @@ describe.skipIf(!IS_LINUX)("web-hub P3 load enable/disable matrix (real buildHub
   );
 });
 
-describe.skipIf(!IS_LINUX)("web-hub P3 load timer lifecycle", () => {
+describe.skipIf(!HAS_LOAD_HOST)("web-hub P3 load timer lifecycle", () => {
   it("stop clears the sampler tick timer and never re-arms it", async () => {
     const clock = new FakeClock(0);
     let resolveWire!: () => void;
@@ -338,7 +341,7 @@ describe.skipIf(!IS_LINUX)("web-hub P3 load timer lifecycle", () => {
   });
 });
 
-describe.skipIf(!IS_LINUX)("web-hub P3 load config drop (real hub main process)", () => {
+describe.skipIf(!HAS_LOAD_HOST)("web-hub P3 load config drop (real hub main process)", () => {
   it("invalid config.load is dropped with a stderr note before the hub starts", async () => {
     const tmp = makeTmp("pwh-load-drop-");
     const child = spawn(process.execPath, ["--import", "tsx", HUB_MAIN], {
