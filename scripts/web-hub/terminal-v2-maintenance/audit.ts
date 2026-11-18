@@ -44,13 +44,17 @@ export type MaintenanceEvidence = CommonEvidence &
   );
 export interface MaintenanceLease {
   /** Observe real components/OS/version/deployment state, not externally supplied JSON.
-   * Snapshot must be immutable and registered to this lease by object identity. */
+   * Snapshot must be recursively immutable and registered to this lease by object
+   * identity. Neither matching proofId nor matching generation substitutes for it. */
   observe(): Promise<MaintenanceEvidence>;
   /** Bounded actual fs/proc/component revalidation. Reject on any changed/unknown fact.
    * Must reject snapshots not originally produced by THIS lease. No drain or repair. */
   revalidate(snapshot: MaintenanceEvidence): Promise<void>;
-  /** Synchronous, NO IO. Private snapshot identity + lease/generation/invalidated check. */
+  /** Synchronous, NO IO. Exact live owner identity + per-lease released flag,
+   * private snapshot identity, generation, invalidation/abort and absolute deadline.
+   * Released leases never revive when a successor has the same generation. */
   current(snapshot: MaintenanceEvidence): boolean;
+  /** Idempotent per lease. A stale release must never unlock a successor owner. */
   release(): Promise<void>;
 }
 export interface MaintenanceAuditPort {

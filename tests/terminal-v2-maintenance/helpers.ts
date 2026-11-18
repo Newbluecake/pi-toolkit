@@ -1,6 +1,27 @@
 /** Controlled component double + private real files. NOT real O/N shell drain. */
-import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { afterEach } from "vitest";
+const ownedRoots = new Map<string, { dev: number; ino: number }>();
+afterEach(() => {
+  for (const [path, identity] of ownedRoots) {
+    const current = lstatSync(path);
+    if (
+      !current.isDirectory() ||
+      current.isSymbolicLink() ||
+      current.dev !== identity.dev ||
+      current.ino !== identity.ino
+    )
+      throw new Error("test scratch directory replaced; refusing cleanup");
+    rmSync(path, { recursive: true });
+    ownedRoots.delete(path);
+  }
+});
+function deepFreeze<T extends object>(value: T): T {
+  for (const child of Object.values(value)) if (child !== null && typeof child === "object") deepFreeze(child);
+  return Object.freeze(value);
+}
 import {
   MaintenanceError,
   type MaintenanceAuditPort,
@@ -14,8 +35,11 @@ export function put(path: string, value: unknown) {
   writeFileSync(path, typeof value === "string" ? value : JSON.stringify(value), { mode: 0o600 });
 }
 export function setup() {
-  // Intentionally retained: fault evidence is not auto-GCed by the test or tool.
-  const base = mkdtempSync("/home/bluecake/pi-t51p5r-");
+  // Respect the caller's private TMPDIR. Cleanup only exact roots created here;
+  // production tools still never garbage-collect maintenance evidence.
+  const base = mkdtempSync(join(tmpdir(), "pi-t51p5r-"));
+  const identity = lstatSync(base);
+  ownedRoots.set(base, { dev: identity.dev, ino: identity.ino });
   const stateDir = join(base, "state"),
     evidenceDir = join(base, "evidence");
   mkdirSync(stateDir, { mode: 0o700 });
@@ -52,7 +76,10 @@ export function tree(path: string): Record<string, string> {
 /** Stateful trusted-port double. Identity, invalidation and singleton tests are real
  * component behavior; all physical-drain observations here are explicitly simulated. */
 export class ControlledAudit implements MaintenanceAuditPort {
-  locked = false;
+  private owner: object | undefined;
+  get locked() {
+    return this.owner !== undefined;
+  }
   generation = 1;
   publisher = false;
   active = 0;
@@ -69,17 +96,32 @@ export class ControlledAudit implements MaintenanceAuditPort {
   constructor(readonly stateDir: string) {}
   async acquire(input: { stateDir: string; operation: MaintenanceOperation; signal: AbortSignal; deadline: number }) {
     if (this.locked || input.stateDir !== this.stateDir) throw new MaintenanceError("singleton-busy");
-    this.locked = true;
+    const owner = {};
+    this.owner = owner;
+    let released = false;
     const generation = this.generation,
       snapshots = new WeakSet<object>();
     const current = (snapshot: MaintenanceEvidence) =>
-      this.locked && this.generation === generation && snapshots.has(snapshot) && !input.signal.aborted;
+      !released &&
+      this.owner === owner &&
+      this.generation === generation &&
+      snapshots.has(snapshot) &&
+      !input.signal.aborted &&
+      Date.now() < input.deadline;
     const check = () => {
       if (this.publisher) throw new MaintenanceError("old-publisher-active");
       if (this.active || this.pending) throw new MaintenanceError("component-not-drained");
     };
     return {
       observe: async (): Promise<MaintenanceEvidence> => {
+        if (
+          released ||
+          this.owner !== owner ||
+          this.generation !== generation ||
+          input.signal.aborted ||
+          Date.now() >= input.deadline
+        )
+          throw new MaintenanceError("snapshot-not-current");
         check();
         this.onObserve?.();
         this.observations++;
@@ -122,7 +164,7 @@ export class ControlledAudit implements MaintenanceAuditPort {
                   },
                 };
         snapshots.add(snapshot);
-        return Object.freeze(snapshot);
+        return deepFreeze(snapshot);
       },
       current,
       revalidate: async (snapshot: MaintenanceEvidence) => {
@@ -133,7 +175,9 @@ export class ControlledAudit implements MaintenanceAuditPort {
         if (!current(snapshot)) throw new MaintenanceError("snapshot-not-current");
       },
       release: async () => {
-        this.locked = false;
+        if (released) return;
+        released = true;
+        if (this.owner === owner) this.owner = undefined;
         this.releaseCount++;
       },
     };
