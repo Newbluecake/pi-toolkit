@@ -134,3 +134,22 @@ describe("P5 independent rollback: controlled components, real private disk (not
     expect(rollbackCli([]).message).toContain("no rollback performed");
   });
 });
+
+it("strict ACK rollback never treats retained initialization as clean O terminal-on, even with zero L", async () => {
+  const h = setup();
+  legacyLayout(h.stateDir);
+  await checkpointTerminalV2("checkpoint", h.options);
+  const path = join(h.stateDir, "terminal-v2/marker.json"),
+    marker = JSON.parse(readFileSync(path, "utf8"));
+  marker.initialization = "offline-retained-unknown";
+  put(path, marker);
+  put(join(h.stateDir, ".terminal-initialized-v2"), marker);
+  const ledgerPath = join(h.stateDir, "terminal-v2/ledger.json"),
+    ledger = JSON.parse(readFileSync(ledgerPath, "utf8"));
+  put(ledgerPath, { ...ledger, legacyObligations: [] });
+  const before = tree(h.base);
+  await expect(rollbackTerminalV2(h.options)).rejects.toMatchObject({
+    code: "retained-initialization-requires-off-rollback",
+  });
+  expect(tree(h.base)).toEqual(before);
+});

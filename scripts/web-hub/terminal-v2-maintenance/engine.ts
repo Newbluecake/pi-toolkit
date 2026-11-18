@@ -123,6 +123,10 @@ function readV2(state: HeldDirectory): V2Snapshot | undefined {
       !terminalMarkersV2Match(marker, parse(witnessFile.bytes))
     )
       fail("invalid-v2-checkpoint");
+    // Strict ACK-cycle rollback is not retained migration rollback-off. Never
+    // accidentally authorize O terminal-on from an empty normal allocation array.
+    if (marker.initialization === "offline-retained-unknown") fail("retained-initialization-requires-off-rollback");
+    if (ledger.legacyObligations !== undefined) fail("legacy-obligations-require-retained-initialization");
     if (ledger.allocations.length) fail("v2-allocations-not-empty");
     archive = readRetirementArchive(state, ledger);
     const files = [
@@ -339,6 +343,7 @@ export async function runMaintenance(
       terminalLedgerV2Ok(target.ledger) &&
       target.ledger.storeId === marker.storeId &&
       target.ledger.allocations.length === 0 &&
+      target.ledger.legacyObligations === undefined &&
       sha(target.witnessSha256);
     const verifyCompleted = (pin: PinnedEvidence, rollback: boolean) => {
       const count = rollback ? files.length : legacy!.files.length;

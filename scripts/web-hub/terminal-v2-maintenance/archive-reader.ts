@@ -9,6 +9,8 @@ import { fail } from "./audit.js";
 import { HeldDirectory, digest, exactKeys, parse } from "./files.js";
 import type { SnapshotFile } from "./legacy-reader.js";
 const NAME = ".terminal-allocation-archive-v2";
+const hasField = (value: unknown, key: string): boolean =>
+  typeof value === "object" && value !== null && Object.prototype.hasOwnProperty.call(value, key);
 function kernel() {
   const bootId = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
   const pidNamespace = readlinkSync("/proc/self/ns/pid"),
@@ -71,7 +73,7 @@ export function readRetirementArchive(state: HeldDirectory, ledger?: LedgerV2): 
           "kernel",
           "ledger",
           "eligible",
-          ...("eligibleLegacy" in evidence ? ["eligibleLegacy"] : []),
+          ...(hasField(evidence, "eligibleLegacy") ? ["eligibleLegacy"] : []),
         ]) ||
         evidence.v !== 2 ||
         evidence.kind !== "old-kernel-allocation-retirement" ||
@@ -108,7 +110,7 @@ export function readRetirementArchive(state: HeldDirectory, ledger?: LedgerV2): 
       if (
         (eligibleLegacy.length
           ? JSON.stringify(eligibleLegacy) !== JSON.stringify(evidence.eligibleLegacy)
-          : "eligibleLegacy" in evidence) ||
+          : hasField(evidence, "eligibleLegacy")) ||
         (!eligible.length && !eligibleLegacy.length) ||
         JSON.stringify(eligible) !== JSON.stringify(evidence.eligible)
       )
@@ -123,7 +125,7 @@ export function readRetirementArchive(state: HeldDirectory, ledger?: LedgerV2): 
           "beforeRevision",
           "afterRevision",
           "removedAllocationIds",
-          ...("removedLegacyObligationIds" in completion ? ["removedLegacyObligationIds"] : []),
+          ...(hasField(completion, "removedLegacyObligationIds") ? ["removedLegacyObligationIds"] : []),
         ]) ||
         completion.v !== 2 ||
         completion.kind !== "old-kernel-allocation-retirement-committed" ||
@@ -138,7 +140,7 @@ export function readRetirementArchive(state: HeldDirectory, ledger?: LedgerV2): 
         (eligibleLegacy.length
           ? JSON.stringify(completion.removedLegacyObligationIds) !==
             JSON.stringify(eligibleLegacy.map((row) => row.obligationId))
-          : "removedLegacyObligationIds" in completion) ||
+          : hasField(completion, "removedLegacyObligationIds")) ||
         revisions.has(evidence.ledger.revision)
       )
         fail("invalid-retirement-completion");
