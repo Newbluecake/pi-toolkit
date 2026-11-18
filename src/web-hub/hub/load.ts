@@ -9,11 +9,12 @@ import { closeSync, openSync, readSync } from "node:fs";
 import { createSegmentedClock, type Clock } from "../../core/clock.js";
 import type { LoadSettings } from "../../config/settings.js";
 import { IoLedger } from "../../sysload/io-ledger.js";
-import { sampleOnce } from "../../sysload/sampler.js";
-import { scanTop } from "../../sysload/top.js";
+import { sampleOnce, type SamplerHost, type SamplerIo } from "../../sysload/sampler.js";
+import { createHostTopScanner, scanTop } from "../../sysload/top.js";
 import { createLoadTracker, type LoadTracker } from "../../sysload/tracker.js";
 import { loadFingerprint, projectLoadWire, projectTop } from "../../sysload/wire.js";
 import type { LoadVerdict } from "../../sysload/types.js";
+import { probeDarwinHost, resolveSysloadHost } from "../protocol/sysload-darwin.js";
 import type { LoadTopWire, LoadWire } from "../protocol/messages.js";
 import type { HubLoadConfig, HubLog } from "./ports.js";
 
@@ -49,6 +50,16 @@ export interface HubLoadDeps {
   clock?: Clock;
   /** Test seam; production uses the bounded sysload scanner. */
   scanTop?: typeof scanTop;
+  /** darwin-plan §2.6 (修订 #5): the ONE hub-lifetime probe result, computed once by the hub
+   *  assembly (`ctx.loadProbeOk`) and handed down through `FrontendDeps.loadProbed` ⇒ this
+   *  service never re-probes. Absent (old test doubles / a frontend that ignores the field) ⇒
+   *  this service probes itself exactly as before — byte-identical to the pre-S2 behavior. */
+  probed?: boolean;
+  /** Test seam replacing the startup probe; production leaves this undefined. */
+  probe?: () => boolean;
+  /** Test seam for the sampler IO; production leaves this undefined (the host is resolved
+   *  per platform below — an injected io is authoritative for its own `host` field). */
+  io?: SamplerIo;
   /** Called only for fingerprint changes or the 3×interval heartbeat. */
   onWire?: (wire: LoadWire) => void;
 }
@@ -81,9 +92,16 @@ function asErrorCode(error: unknown): LoadRequestError["code"] {
   return "E_INTERNAL";
 }
 
-/** A synchronous, bounded startup probe.  A failed probe means no cap and no route. */
-export function hubLoadProbe(): boolean {
-  if (process.platform !== "linux") return false;
+/** A synchronous, bounded startup probe.  A failed probe means no cap and no route.
+ *  darwin-plan §2.6: platform-sensitive since S2 — `darwin` runs the one-shot `probeDarwinHost`
+ *  (sysctl subprocess; injectable for tests), `linux` keeps the original /proc/stat check
+ *  verbatim, anything else stays `false`. With no deps the behavior on Linux is byte-identical
+ *  to the pre-S2 probe; on darwin the probe is the only thing standing between the hub and a
+ *  sampling subprocess, so a sandbox without sysctl degrades to "no cap, no route" as today. */
+export function hubLoadProbe(deps?: { platform?: NodeJS.Platform; probeDarwin?: () => boolean }): boolean {
+  const platform = deps?.platform ?? process.platform;
+  if (platform === "darwin") return (deps?.probeDarwin ?? probeDarwinHost)();
+  if (platform !== "linux") return false;
   try {
     const fd = openSync("/proc/stat", "r");
     const buffer = Buffer.alloc(64 * 1024 + 1);
@@ -195,7 +213,13 @@ function numberField(record: Record<string, unknown>, name: string): number | un
 
 export function createHubLoad(config: HubLoadConfig, deps: HubLoadDeps): HubLoadService | undefined {
   const normalized = normalizeHubLoadConfig(config);
-  if (normalized === undefined || !hubLoadProbe()) return undefined;
+  if (normalized === undefined) return undefined;
+  const probed = deps.probed ?? (deps.probe ?? hubLoadProbe)();
+  if (!probed) return undefined;
+  // darwin-plan §2.1/§3.1-S2: the platform-resolved host — an injected `io` is authoritative
+  // for its own `host` field (Linux-fixture tests keep the Linux path on any dev machine).
+  const host: SamplerHost | undefined = deps.io !== undefined ? deps.io.host : resolveSysloadHost();
+  const io: SamplerIo = host === undefined ? (deps.io ?? {}) : { ...(deps.io ?? {}), host };
   const mono = deps.mono ?? (() => performance.now());
   const wall = deps.now ?? (() => Date.now());
   const settings = loadSettings(normalized);
@@ -262,7 +286,7 @@ export function createHubLoad(config: HubLoadConfig, deps: HubLoadDeps): HubLoad
       mono,
       at: wall,
     };
-    void sampleOnce({}, plan, ledger, mine, settings)
+    void sampleOnce(io, plan, ledger, mine, settings)
       .then((result) => {
         if (disposed || mine !== generation) return;
         previousCpu = result.nextCpu;
@@ -294,7 +318,7 @@ export function createHubLoad(config: HubLoadConfig, deps: HubLoadDeps): HubLoad
     }
     const mine = generation;
     topWaiters = 0;
-    const scan = (deps.scanTop ?? scanTop)(ledger, {
+    const scan = (deps.scanTop ?? (host === undefined ? scanTop : createHostTopScanner(host)))(ledger, {
       now: mono,
       deadlineMs: 1_000,
       isCurrent: () => !disposed && mine === generation,
