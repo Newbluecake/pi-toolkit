@@ -18,18 +18,18 @@
 
 ## 2. 现状摘要
 
-| 路径 | 现状职责与相关约束 |
-|---|---|
-| `src/schedule/core/paths.ts` | 只读 fd-anchored 路径原语、vault 谓词注入、root pin、owner/mode/size 校验；只 import `node:crypto/fs/path`。`SchedFsError.reason` 含 `platform`；无 `/proc/self/fd` 时拒绝。属于 hub 精确 value-import 闭包。 |
-| `src/schedule/core/reader.ts` | 零写入账本/报告 reader，唯一 schema 校验器；`vHolder` 要求 `start` 为非负安全整数、`boot` 为字符串。 |
-| `src/schedule/core/recovery.ts` | `ProcessIdentity`、`LivenessProbe`、`readSelfIdentity`、`judgeHolder`、run recovery。holder 判定规则平台无关；仅 identity 的采集依赖 Linux `/proc`。仅 import `node:fs/os/spec`，闭包不可扩张。 |
-| `src/schedule/core/lock.ts` | 同步事务体外的有界异步抢锁：打开 `.lock` / `.store.lock`，启动 `flock -x -n -E 75 3` 子进程绑定 fd 3；内核锁在我方 fd 上保持到关闭。不同 inode 检查避免锁文件回收竞态。 |
-| `src/schedule/core/writer.ts` | root/session store 与原子写事务；`SessionStoreOpts.flockBin` 下传锁后端；目前原子写、GC、目录创建等依赖 `fdPath`。 |
-| `src/schedule/agent/wire.ts` | 创建 agent、`readSelf` 注入点、启动身份/锁探测、secure gating、HubConfig schedule root 生成。当前 `defaultFlockProbe()` 仅检查 `flock -V`。 |
-| `src/web-hub/hub/schedule/service.ts` | hub 直接调用 `resolveStoreRoot()` 与 `readSelfIdentity()`；root 不可用时投影为空，`self` 缺失时未知运行预测返回空。需注入平台 paths/identity。 |
-| `src/web-hub/protocol/schedule.ts` | 五类 `sched_*` wire 帧不携 Holder/identity；strict schema。`HubConfig.schedule` 也不携身份。无需扩 wire。 |
-| `docs/dev/scheduled-reports/README.md`、`S1-report.md` §偏差 #9 / §7.6 | schedule 当前边界、不变量、门禁；Linux-only 原决策明确记录 `/proc/self/fd` 依赖。本设计以本文件取代该平台限制，不放宽其他安全约束。 |
-| `tests/web-hub/boundary.test.ts` | paths/recovery 精确 value-import 闭包：paths 仅 `node:crypto/fs/path`，recovery 仅 `node:fs/os/spec.js`。不得在这两个文件新增 import。 |
+| 路径                                                                   | 现状职责与相关约束                                                                                                                                                                                            |
+| ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/schedule/core/paths.ts`                                           | 只读 fd-anchored 路径原语、vault 谓词注入、root pin、owner/mode/size 校验；只 import `node:crypto/fs/path`。`SchedFsError.reason` 含 `platform`；无 `/proc/self/fd` 时拒绝。属于 hub 精确 value-import 闭包。 |
+| `src/schedule/core/reader.ts`                                          | 零写入账本/报告 reader，唯一 schema 校验器；`vHolder` 要求 `start` 为非负安全整数、`boot` 为字符串。                                                                                                          |
+| `src/schedule/core/recovery.ts`                                        | `ProcessIdentity`、`LivenessProbe`、`readSelfIdentity`、`judgeHolder`、run recovery。holder 判定规则平台无关；仅 identity 的采集依赖 Linux `/proc`。仅 import `node:fs/os/spec`，闭包不可扩张。               |
+| `src/schedule/core/lock.ts`                                            | 同步事务体外的有界异步抢锁：打开 `.lock` / `.store.lock`，启动 `flock -x -n -E 75 3` 子进程绑定 fd 3；内核锁在我方 fd 上保持到关闭。不同 inode 检查避免锁文件回收竞态。                                       |
+| `src/schedule/core/writer.ts`                                          | root/session store 与原子写事务；`SessionStoreOpts.flockBin` 下传锁后端；目前原子写、GC、目录创建等依赖 `fdPath`。                                                                                            |
+| `src/schedule/agent/wire.ts`                                           | 创建 agent、`readSelf` 注入点、启动身份/锁探测、secure gating、HubConfig schedule root 生成。当前 `defaultFlockProbe()` 仅检查 `flock -V`。                                                                   |
+| `src/web-hub/hub/schedule/service.ts`                                  | hub 直接调用 `resolveStoreRoot()` 与 `readSelfIdentity()`；root 不可用时投影为空，`self` 缺失时未知运行预测返回空。需注入平台 paths/identity。                                                                |
+| `src/web-hub/protocol/schedule.ts`                                     | 五类 `sched_*` wire 帧不携 Holder/identity；strict schema。`HubConfig.schedule` 也不携身份。无需扩 wire。                                                                                                     |
+| `docs/dev/scheduled-reports/README.md`、`S1-report.md` §偏差 #9 / §7.6 | schedule 当前边界、不变量、门禁；Linux-only 原决策明确记录 `/proc/self/fd` 依赖。本设计以本文件取代该平台限制，不放宽其他安全约束。                                                                           |
+| `tests/web-hub/boundary.test.ts`                                       | paths/recovery 精确 value-import 闭包：paths 仅 `node:crypto/fs/path`，recovery 仅 `node:fs/os/spec.js`。不得在这两个文件新增 import。                                                                        |
 
 ## 3. 总体设计
 
@@ -196,13 +196,13 @@ Agent 侧 `wire.ts` 使用平台 identity resolver 与 paths backend；agent mod
 
 ### 7.3 建议新增覆盖
 
-| 领域 | 覆盖重点 | Tier 建议 |
-|---|---|---|
-| Identity parser | 固定 locale/timezone 的 ps lstart parsing、非法/缺失、UTC epoch ms 与 safe integer；boot UUID；start 域交叉 ⇒ unprovable；同秒 PID 复用 ⇒ 不误判 dead；kill 0 的 ESRCH/EPERM | 纯注入 Tier 1；真实 `ps/sysctl` Darwin smoke 可 Tier 1 自门控（无子进程 marker 时），若 spawn 则登记 `kind:"proc"`/Tier 2 |
-| Paths | symlink/祖先 symlink、fifo、owner/mode、realpath/vault、dev/ino pin、替换竞态检测、Darwin 不再产生伪 missing/platform；按平台注入文件系统快照 | 普通临时目录测试 Tier 1；真实并发换目录子进程 Tier 2 |
-| Lock | Perl Fcntl 可用/缺失 fail-closed、holder diagnostic、同 fd 锁覆盖子进程退出、多个进程互斥、SIGKILL 自动释放、无 break/stale reclaim | Tier 2 / integration，真实 Darwin 子进程专属 suite 自门控 |
-| End-to-end | create → run_now → timer fire → list/history → hub scan/projection/receipt；secure/locked 仍无 schedule；D8 off | integration Tier 2；沿用当前 schedule integration 栈 |
-| Linux compatibility | 现有 suites 保持 Linux backend，golden、错误码、flock wait 与事务结果 byte-for-byte 相同 | 现有 Tier 原位，不因 Darwin 增加而降级 |
+| 领域                | 覆盖重点                                                                                                                                                                     | Tier 建议                                                                                                                 |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| Identity parser     | 固定 locale/timezone 的 ps lstart parsing、非法/缺失、UTC epoch ms 与 safe integer；boot UUID；start 域交叉 ⇒ unprovable；同秒 PID 复用 ⇒ 不误判 dead；kill 0 的 ESRCH/EPERM | 纯注入 Tier 1；真实 `ps/sysctl` Darwin smoke 可 Tier 1 自门控（无子进程 marker 时），若 spawn 则登记 `kind:"proc"`/Tier 2 |
+| Paths               | symlink/祖先 symlink、fifo、owner/mode、realpath/vault、dev/ino pin、替换竞态检测、Darwin 不再产生伪 missing/platform；按平台注入文件系统快照                                | 普通临时目录测试 Tier 1；真实并发换目录子进程 Tier 2                                                                      |
+| Lock                | Perl Fcntl 可用/缺失 fail-closed、holder diagnostic、同 fd 锁覆盖子进程退出、多个进程互斥、SIGKILL 自动释放、无 break/stale reclaim                                          | Tier 2 / integration，真实 Darwin 子进程专属 suite 自门控                                                                 |
+| End-to-end          | create → run_now → timer fire → list/history → hub scan/projection/receipt；secure/locked 仍无 schedule；D8 off                                                              | integration Tier 2；沿用当前 schedule integration 栈                                                                      |
+| Linux compatibility | 现有 suites 保持 Linux backend，golden、错误码、flock wait 与事务结果 byte-for-byte 相同                                                                                     | 现有 Tier 原位，不因 Darwin 增加而降级                                                                                    |
 
 `tests/tiers.ts` 对 Tier 1 词法命中 `child_process` 的新增测试必须登记 `TIER1_DECLARED`（通常 kind `proc`），或移动至 Tier 2。现有 `tests/schedule/core/recovery.test.ts`、`writer.test.ts`、`fault-injection.test.ts` 等已有登记应复核新文件，不要假设目录名自动决定 Tier。
 
