@@ -30,6 +30,7 @@ import {
   viewClock,
 } from "./local.js";
 import { matchesTerminalAuthV2, type TerminalAuthNotificationsV2 } from "./revocation-fence.js";
+import type { TerminalResizeGateV2, TerminalResizeFlightV2 } from "./resize-gate.js";
 
 /** Auth authority supplies an already-resolved current identity or honest failure. No cookie
  * parsing here. E_DB/timeout detaches only this view; failures never alter resource health. */
@@ -50,6 +51,8 @@ export interface TerminalViewDepsV2 {
   auth: TerminalAuthFenceV2;
   notifications: Pick<TerminalAuthNotificationsV2, "subscribe">;
   revalidate: TerminalRevalidateV2;
+  /** ONE per service/runtime lifetime, including replacement view factories. */
+  resizeGate: TerminalResizeGateV2;
   now?: () => number;
 }
 type InputResult = TerminalHttpResponseV2<"input">;
@@ -98,6 +101,8 @@ export function createTerminalViewsV2(deps: TerminalViewDepsV2): TerminalViewsV2
     scheduler = undefined;
     replenish();
     let next = Infinity;
+    // Persistent round robin: successful service moves that view to the tail. Views
+    // blocked on shared credit stay ahead of spenders across refills, not just this pass.
     // One frame per view per pass; zero-delay clock yields between bounded passes.
     for (const view of [...views.values()]) {
       const item = view.queue[0];
@@ -119,6 +124,10 @@ export function createTerminalViewsV2(deps: TerminalViewDepsV2): TerminalViewsV2
       view.queue.shift();
       view.queuedRaw -= item.raw;
       view.queuedSize -= item.size;
+      if (views.get(view.viewId) === view) {
+        views.delete(view.viewId);
+        views.set(view.viewId, view);
+      }
       view.deliver(item.frame);
       if (view.queue.length) next = 0;
     }
@@ -228,7 +237,6 @@ export function createTerminalViewsV2(deps: TerminalViewDepsV2): TerminalViewsV2
         this.detach();
         return;
       }
-      if (raw > 0 && this.queuedRaw === 0 && unacked === 0) this.lastProgress = now();
       this.queue.push({ frame, raw, size, replay });
       this.queuedRaw += raw;
       this.queuedSize += size;
@@ -280,7 +288,10 @@ export function createTerminalViewsV2(deps: TerminalViewDepsV2): TerminalViewsV2
         }
         if (frame.t === "output") {
           const end = frame.offset + terminalBase64BytesV2(frame.bytesB64)!;
-          if (end > frame.offset) this.sentRaw.push({ start: frame.offset, end });
+          if (end > frame.offset) {
+            if (this.sentRaw.length === 0) this.lastProgress = now();
+            this.sentRaw.push({ start: frame.offset, end });
+          }
           if (this.sentRaw.length > L.viewPendingItems) {
             this.detach();
             return;
@@ -294,6 +305,7 @@ export function createTerminalViewsV2(deps: TerminalViewDepsV2): TerminalViewsV2
         const size = Buffer.byteLength(JSON.stringify(frame)) + 1;
         this.sentFrames.push({ offset: this.sent, size });
         this.sentSize += size;
+        if (frame.t === "output") this.arm();
       } catch {
         this.detach();
       }
@@ -361,7 +373,9 @@ export function createTerminalViewsV2(deps: TerminalViewDepsV2): TerminalViewsV2
         this.lastAck + L.writerIdleMs,
         this.lastPing + L.pingMs,
         this.lastAuth + L.authRecheckMs,
-        this.sentRaw.length || this.queue.some((item) => item.raw > 0) ? this.lastProgress + L.viewerMs : Infinity,
+        // Credit-waiting bytes have not reached this client. Only sent bytes can stall
+        // its ACK deadline; parent expiry / 15s writer liveness still bound every view.
+        this.sentRaw.length ? this.lastProgress + L.viewerMs : Infinity,
       );
       this.timer = clock.setTimer(clampSpanMs(due - now()), () => this.tick());
     }
@@ -371,7 +385,7 @@ export function createTerminalViewsV2(deps: TerminalViewDepsV2): TerminalViewsV2
       if (
         now() >= this.hardExpiry ||
         now() - this.lastAck >= L.writerIdleMs ||
-        ((this.sentRaw.length || this.queue.some((item) => item.raw > 0)) && now() - this.lastProgress >= L.viewerMs)
+        (this.sentRaw.length > 0 && now() - this.lastProgress >= L.viewerMs)
       ) {
         this.detach();
         return;
@@ -522,13 +536,24 @@ export function createTerminalViewsV2(deps: TerminalViewDepsV2): TerminalViewsV2
       const old = this.resizes.get(input.seq);
       if (old) return Promise.resolve(old.payload === payload ? old.result : fail("E_IDEMPOTENCY_CONFLICT"));
       if (input.seq <= this.resizeMax) return Promise.resolve(fail("E_IDEMPOTENCY_CONFLICT"));
-      if (!this.ready) return Promise.resolve(fail("E_NOT_READY"));
+      if (!this.ready || (!this.resizeActive && deps.resizeGate.busy(this.runtime)))
+        return Promise.resolve(fail("E_NOT_READY"));
       requireLive(signal);
       this.resizeMax = input.seq;
       let complete!: (value: InputResult) => void;
-      const result = new Promise<InputResult>((resolve) => {
+      const completed = new Promise<InputResult>((resolve) => {
         complete = resolve;
       });
+      // Each accepted/coalesced request keeps its ORIGINAL 2s budget. Queueing behind
+      // another resize cannot restart that budget, and cancellation is not physical proof.
+      const request = deadline(now, L.contextMs, [signal, this.controller.signal, flights.signal]);
+      const result = request
+        .wait(completed)
+        .catch((error: unknown) => {
+          this.detach();
+          return asFailure(error);
+        })
+        .finally(() => request.dispose());
       if (this.resizePending) {
         this.resizePending.cols = input.cols;
         this.resizePending.rows = input.rows;
@@ -549,10 +574,12 @@ export function createTerminalViewsV2(deps: TerminalViewDepsV2): TerminalViewsV2
       const revision = deps.auth.revision;
       const wait = deadline(now, L.contextMs, [this.controller.signal, flights.signal]);
       let result: InputResult;
+      let physical: TerminalResizeFlightV2 | undefined;
       try {
         requireLive(wait.signal);
         deps.auth.check(this.identity, revision);
-        const resized = await wait.wait(this.runtime.resize(pending.cols, pending.rows, wait.signal));
+        physical = deps.resizeGate.start(this.runtime, pending.cols, pending.rows, wait.signal);
+        const resized = await wait.wait(physical.result);
         deps.auth.check(this.identity, revision);
         if (this.closed || !this.runtime.current()) throw new TerminalV2Fault(fail("E_VIEW_CHANGED", "unknown"));
         result = resized.ok ? { ok: true, acceptedThrough: pending.seq } : resized;
@@ -560,6 +587,9 @@ export function createTerminalViewsV2(deps: TerminalViewDepsV2): TerminalViewsV2
         result = asFailure(error);
       } finally {
         wait.dispose();
+        // Seal the old logical writer if cancellation/timeout did not prove physical
+        // settlement. Neither this detach nor factory disposal may clear the shared gate.
+        if (physical && !physical.settled) this.detach();
       }
       for (const complete of pending.complete) complete(result);
       this.resizeActive = false;
@@ -662,16 +692,22 @@ export function createTerminalViewsV2(deps: TerminalViewDepsV2): TerminalViewsV2
       }
     },
     async resize(id, input, signal) {
+      let uncertain = false;
       try {
         if (!terminalHttpRequestV2Ok("resize", input)) return fail("E_BAD_REQUEST");
         const view = resolve(id, input);
         const revision = deps.auth.revision;
         const result = await view.resize(id, input, signal);
+        uncertain = result.ok || result.effect === "unknown";
         deps.auth.check(id, revision);
+        // An admitted call may have sealed its old view on timeout. Preserve its honest
+        // unknown result; never downgrade a possibly executed resize to effect:none.
+        if (!result.ok && result.effect === "unknown") return result;
         view.current(id, input);
         return result;
       } catch (error) {
-        return asFailure(error);
+        const failure = asFailure(error);
+        return uncertain && failure.code !== "E_INPUT_UNKNOWN" ? fail(failure.code, "unknown") : failure;
       }
     },
     async ack(id, input, signal) {

@@ -8,6 +8,7 @@ import type {
 import type { TerminalHttpRequestsV2, TerminalViewFrameV2 } from "../../../../../src/web-hub/protocol/terminal-v2.js";
 import { TerminalRevocationFenceV2 } from "../../../../../src/web-hub/hub/terminal/v2/revocation-fence.js";
 import { createTerminalViewsV2, type TerminalRevalidateV2 } from "../../../../../src/web-hub/hub/terminal/v2/view.js";
+import { createTerminalResizeGateV2 } from "../../../../../src/web-hub/hub/terminal/v2/resize-gate.js";
 export const hubInstance = "h".repeat(24),
   termId = "t".repeat(24);
 export const scope = { agentKey: "a".repeat(24), sessionId: "session", epoch: "epoch" };
@@ -69,7 +70,15 @@ export function fixture(initial = Buffer.alloc(0)) {
   };
   const fence = new TerminalRevocationFenceV2();
   const revalidate = vi.fn<TerminalRevalidateV2>(async (id) => ({ ok: true, identity: { ...id } }));
-  const views = createTerminalViewsV2({ service, auth: fence, notifications: fence, hubInstance, revalidate });
+  const resizeGate = createTerminalResizeGateV2();
+  const views = createTerminalViewsV2({
+    service,
+    auth: fence,
+    notifications: fence,
+    hubInstance,
+    revalidate,
+    resizeGate,
+  });
   const id = identity();
   const frames: TerminalViewFrameV2[] = [];
   const sink: TerminalViewSinkV2 = {
@@ -93,6 +102,7 @@ export function fixture(initial = Buffer.alloc(0)) {
     fence,
     views,
     revalidate,
+    resizeGate,
     id,
     frames,
     sink,
