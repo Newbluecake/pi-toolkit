@@ -4,7 +4,16 @@
  * acquires — no real child process here (the real-perl coverage lives in
  * `tests/integration/schedule-darwin-lock.test.ts`, tier2).
  */
-import { closeSync, constants as fsConstants, mkdtempSync, openSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  constants as fsConstants,
+  mkdtempSync,
+  realpathSync,
+  openSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -132,7 +141,7 @@ describe("lock acquisition seam (darwin plan P3)", () => {
   it("probe and production acquire issue the same perl spawn (T-P8)", () => {
     // Production path: the resolver `withDirLock` will use on darwin, called directly.
     const prod = fakeSpawn({ status: 0 });
-    const dir = mkdtempSync(join(tmpdir(), "lock-acquire-pin-"));
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "lock-acquire-pin-")));
     const fd = openSync(join(dir, "probe.lock"), fsConstants.O_RDWR | fsConstants.O_CREAT, 0o600);
     try {
       expect(defaultLockAcquire({ platform: "darwin" }, prod.deps)(fd)).toBe("held");
@@ -202,7 +211,7 @@ describe("lock acquisition seam (darwin plan P3)", () => {
   // darwin once P2's snapshot backend lands (hence the capability gate, not a platform check).
   describe.skipIf(!FD_ANCHORING)("with a real fd-anchored directory", () => {
     it("a replaced lock file ⇒ retry, then held once replacement stops (T-P7)", async () => {
-      const dir = mkdtempSync(join(tmpdir(), "lock-acquire-"));
+      const dir = realpathSync(mkdtempSync(join(tmpdir(), "lock-acquire-")));
       const dirFd = openDirPath(dir).fd;
       try {
         const lockPath = join(dir, ".lock");
@@ -225,7 +234,7 @@ describe("lock acquisition seam (darwin plan P3)", () => {
     });
 
     it("a constantly replaced lock file ⇒ E_BUSY, the body never runs (T-P7)", async () => {
-      const dir = mkdtempSync(join(tmpdir(), "lock-acquire-"));
+      const dir = realpathSync(mkdtempSync(join(tmpdir(), "lock-acquire-")));
       const dirFd = openDirPath(dir).fd;
       try {
         const lockPath = join(dir, ".lock");

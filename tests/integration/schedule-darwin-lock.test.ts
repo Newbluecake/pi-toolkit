@@ -16,6 +16,7 @@ import {
   utimesSync,
   mkdirSync,
   mkdtempSync,
+  realpathSync,
   openSync,
   rmSync,
   writeFileSync,
@@ -59,7 +60,7 @@ afterAll(() => {
 });
 
 function tmpLock(): { dir: string; path: string } {
-  const dir = mkdtempSync(join(tmpdir(), "sched-darwin-lock-"));
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "sched-darwin-lock-")));
   const path = join(dir, "t.lock");
   writeFileSync(path, "");
   return { dir, path };
@@ -67,7 +68,7 @@ function tmpLock(): { dir: string; path: string } {
 
 /** An executable stub standing in for the perl binary (exits / kills / sleeps on cue). */
 function stubScript(body: string): string {
-  const dir = mkdtempSync(join(tmpdir(), "sched-darwin-stub-"));
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "sched-darwin-stub-")));
   const p = join(dir, "stub.sh");
   writeFileSync(p, `#!/bin/sh\n${body}\n`);
   chmodSync(p, 0o755);
@@ -310,7 +311,7 @@ describe.skipIf(PERL === undefined)("perl flock lock backend (darwin plan P3, re
 
 describe.skipIf(PERL === undefined || !FD_ANCHORING)("through the fd-anchored store paths", () => {
   it("a missing perl binary maps through withSessionLock to E_BUSY with the fixed detail", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "sched-darwin-ebusy-"));
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "sched-darwin-ebusy-")));
     const dirFd = openDirPath(dir).fd;
     try {
       const r = await withSessionLock(dirFd, () => 42, {
@@ -325,7 +326,7 @@ describe.skipIf(PERL === undefined || !FD_ANCHORING)("through the fd-anchored st
   });
 
   it("repair() against a live perl holder ⇒ E_BUSY (no forced break); death releases it", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "sched-darwin-store-"));
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "sched-darwin-store-")));
     const storeDir = join(dir, "schedules");
     const sid = "019a0000-aaaa-7bbb-8ccc-dddddddddddd";
     try {
@@ -339,7 +340,9 @@ describe.skipIf(PERL === undefined || !FD_ANCHORING)("through the fd-anchored st
         lockTimeoutMs: 200,
         acquire: perlFlockAcquire(),
       });
-      const h = perlHolder(join(storeDir, sessionDirName(sid), ".lock"));
+      const lockPath = join(storeDir, sessionDirName(sid), ".lock");
+      writeFileSync(lockPath, ""); // the holder opens "+<" (no O_CREAT); tryLock would create it
+      const h = perlHolder(lockPath);
       await holderReady(h);
       const r = await store.repair();
       expect(r).toMatchObject({ ok: false, code: "E_BUSY" });
