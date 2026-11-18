@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { resolveJitiCli, shouldSpawnHub, spawnHub } from "../../../src/web-hub/agent/launcher.js";
+import { resolveJitiCli, resolveLauncherPlan, shouldSpawnHub, spawnHub } from "../../../src/web-hub/agent/launcher.js";
 import type { HubConfig } from "../../../src/web-hub/hub/ports.js";
 import { TIMING } from "../../../src/web-hub/protocol/messages.js";
 import * as domain from "../../../src/secure/domain.js";
@@ -88,6 +88,54 @@ describe("resolveJitiCli", () => {
   });
 });
 
+describe("resolveLauncherPlan host aliases", () => {
+  function typebox(piPkg: string, hoisted: boolean): Record<string, string> {
+    const dir = hoisted ? join(piPkg, "..", "..", "typebox") : join(piPkg, "node_modules", "typebox");
+    mkdirSync(dir, { recursive: true });
+    const exports = { ".": "./root.mjs", "./value": "./value.mjs", "./compile": "./compile.mjs" };
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "typebox", exports }));
+    for (const file of Object.values(exports)) writeFileSync(join(dir, file), "export const marker = 1");
+    return Object.fromEntries(
+      Object.entries(exports).flatMap(([sub, file]) => {
+        const tail = sub === "." ? "" : sub.slice(1);
+        return [
+          [`typebox${tail}`, join(dir, file)],
+          [`@sinclair/typebox${tail}`, join(dir, file)],
+        ];
+      }),
+    );
+  }
+  it.each([false, true])("symlink/global host, hoisted=%s: six exact targets", (hoisted) => {
+    const { piPkg, bin, jitiCli } = piLayout();
+    const expected = typebox(piPkg, hoisted);
+    const r = resolveLauncherPlan({ argv1: bin, override: "" });
+    expect(r).toEqual({ ok: true, plan: { execPath: process.execPath, argv1: bin, jitiCli, hostAliases: expected } });
+  });
+  it("override never bypasses missing host or a missing host subpath; no consumer fallback", () => {
+    const { bin, piPkg, jitiCli } = piLayout();
+    expect(resolveLauncherPlan({ argv1: bin, override: jitiCli })).toEqual({
+      ok: false,
+      reason: expect.stringContaining("TypeBox resolution failed"),
+    });
+    typebox(piPkg, false);
+    rmSync(join(piPkg, "node_modules/typebox/compile.mjs"));
+    expect(resolveLauncherPlan({ argv1: bin, override: jitiCli }).ok).toBe(false);
+    expect(
+      resolveLauncherPlan({
+        argv1: jitiCli,
+        override: jitiCli,
+        realpath: () => "/foreign/cli.js",
+        exists: () => false,
+      }),
+    ).toEqual({ ok: false, reason: expect.stringContaining("pi package not found") });
+  });
+  it.each(["relative.mjs", "/missing-host-file.mjs", "/tmp"])("rejects invalid target %s", (target) => {
+    const { bin, jitiCli } = piLayout();
+    const r = resolveLauncherPlan({ argv1: bin, override: jitiCli, resolve: () => target });
+    expect(r).toEqual({ ok: false, reason: expect.stringContaining("TypeBox resolution failed") });
+  });
+});
+
 describe("spawnHub", () => {
   const config: HubConfig = {
     v: 1,
@@ -97,7 +145,19 @@ describe("spawnHub", () => {
     pluginVersion: "1.0.0",
     buildId: "1.0.0@abc",
   };
-  const plan = { execPath: "/usr/bin/node", jitiCli: "/j/jiti-cli.mjs", argv1: "/p/cli.js" };
+  const plan = {
+    execPath: "/usr/bin/node",
+    jitiCli: "/j/jiti-cli.mjs",
+    argv1: "/p/cli.js",
+    hostAliases: {
+      "@sinclair/typebox": "/host/index.mjs",
+      typebox: "/host/index.mjs",
+      "@sinclair/typebox/value": "/host/value.mjs",
+      "typebox/value": "/host/value.mjs",
+      "@sinclair/typebox/compile": "/host/compile.mjs",
+      "typebox/compile": "/host/compile.mjs",
+    },
+  };
 
   it.each([
     ["plain", "plain"],
@@ -179,6 +239,28 @@ describe("spawnHub", () => {
         if (saved[k] === undefined) delete process.env[k];
         else process.env[k] = saved[k];
       }
+    }
+  });
+
+  it("replaces hostile inherited aliases and paths without mutating parent env or argv", () => {
+    vi.stubEnv("JITI_ALIAS", '{"typebox":"/evil.mjs","unrelated":"/evil.mjs"}');
+    vi.stubEnv("JITI_TSCONFIG_PATHS", "/evil-tsconfig.json");
+    try {
+      const spawnImpl = vi.fn(() => ({ on: vi.fn(), unref: vi.fn() }));
+      spawnHub(plan, "/pkg/src/web-hub/hub/main.ts", config, spawnImpl as never, () => undefined);
+      const [exec, argv, options] = spawnImpl.mock.calls[0] as unknown as [
+        string,
+        string[],
+        { env: NodeJS.ProcessEnv },
+      ];
+      expect([exec, ...argv]).toEqual([plan.execPath, plan.jitiCli, "/pkg/src/web-hub/hub/main.ts"]);
+      expect(JSON.parse(options.env.JITI_ALIAS!)).toEqual(plan.hostAliases);
+      expect(Object.keys(JSON.parse(options.env.JITI_ALIAS!))).toHaveLength(6);
+      expect(options.env.JITI_TSCONFIG_PATHS).toBe("false");
+      expect(process.env.JITI_ALIAS).toContain("unrelated");
+      expect(process.env.JITI_TSCONFIG_PATHS).toBe("/evil-tsconfig.json");
+    } finally {
+      vi.unstubAllEnvs();
     }
   });
 

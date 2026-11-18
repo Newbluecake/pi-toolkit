@@ -14,9 +14,9 @@
 import { hubSafeEnv } from "../../secure/env.js";
 import { getSecureDomain, hubSpawnBlockedReason } from "../../secure/domain.js";
 import { spawn as nodeSpawn } from "node:child_process";
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, realpathSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { findPiPackageJson } from "../../core/host-modules.js";
 import type { HubConfig } from "../hub/ports.js";
 import { TIMING } from "../protocol/messages.js";
@@ -26,7 +26,21 @@ export interface LauncherPlan {
   execPath: string;
   jitiCli: string;
   argv1: string;
+  /** Closed, host-owned bootstrap map; never inherited from the consumer environment. */
+  hostAliases: HostTypeBoxAliases;
 }
+
+export type HostTypeBoxAliases = Readonly<
+  Record<
+    | "@sinclair/typebox"
+    | "@sinclair/typebox/value"
+    | "@sinclair/typebox/compile"
+    | "typebox"
+    | "typebox/value"
+    | "typebox/compile",
+    string
+  >
+>;
 
 /**
  * Resolve pi's bundled `jiti/lib/jiti-cli.mjs`.
@@ -70,6 +84,53 @@ export function resolveJitiCli(opts: {
   }
   const cli = join(dirname(jitiPkg), "lib", "jiti-cli.mjs");
   return exists(cli) ? { ok: true, jitiCli: cli } : { ok: false, reason: `jiti-cli missing: ${cli}` };
+}
+
+/**
+ * Build the complete production plan. The override selects only the loader, never the
+ * module owner: even with an override, TypeBox must resolve from the real parent pi.
+ * Same resolution requests as pi 1.5's extension loader; no consumer/cwd fallback.
+ */
+export function resolveLauncherPlan(
+  opts: Parameters<typeof resolveJitiCli>[0] & { execPath?: string },
+): { ok: true; plan: LauncherPlan } | { ok: false; reason: string } {
+  const realpath = opts.realpath ?? realpathSync;
+  const exists = opts.exists ?? existsSync;
+  const resolve = opts.resolve ?? ((from: string, req: string) => createRequire(from).resolve(req));
+  if (!opts.argv1) return { ok: false, reason: "process.argv[1] is empty" };
+  try {
+    const real = realpath(opts.argv1);
+    const piPackageJson = findPiPackageJson(real, exists);
+    if (piPackageJson === undefined) return { ok: false, reason: `pi package not found above ${real}` };
+    const loader = resolveJitiCli(opts);
+    if (!loader.ok) return loader;
+    const targets = ["typebox", "typebox/value", "typebox/compile"].map((request) => {
+      const target = resolve(piPackageJson, request);
+      if (!isAbsolute(target) || !statSync(target).isFile()) {
+        throw new Error(`${request} target is not an absolute file: ${target}`);
+      }
+      return realpath(target);
+    });
+    const [root, value, compile] = targets as [string, string, string];
+    return {
+      ok: true,
+      plan: {
+        execPath: opts.execPath ?? process.execPath,
+        argv1: opts.argv1,
+        jitiCli: loader.jitiCli,
+        hostAliases: {
+          "@sinclair/typebox": root,
+          typebox: root,
+          "@sinclair/typebox/value": value,
+          "typebox/value": value,
+          "@sinclair/typebox/compile": compile,
+          "typebox/compile": compile,
+        },
+      },
+    };
+  } catch (err) {
+    return { ok: false, reason: `hub host TypeBox resolution failed: ${errText(err)}` };
+  }
 }
 
 /** private-plan §4.1-5 / security review N3 #1: `spawnHub`'s refusal verdict — the ONE place a
@@ -125,6 +186,9 @@ export function spawnHub(
       env: {
         // data-encryption §2.7: the hub only ever sees the pre-secure env (identity when no PI_SECURE_* key).
         ...env,
+        // jiti resolves tsconfig paths BEFORE aliases. Replace (do not merge) user input.
+        JITI_ALIAS: JSON.stringify(plan.hostAliases),
+        JITI_TSCONFIG_PATHS: "false",
         PI_WEBHUB_CONFIG: JSON.stringify(config),
         PI_WEBHUB_LAUNCHER: JSON.stringify([plan.execPath, plan.argv1]),
       },

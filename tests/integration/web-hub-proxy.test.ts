@@ -1,6 +1,6 @@
 /**
  * web-hub-proxy v2 + R1/R2, T-I1: REAL hub/main.ts children through pi's bundled jiti.
- * Reuses the spawnHub/resolveJitiCli path from web-hub-spawn and the HTTP/socket harnesses.
+ * Reuses the spawnHub/resolveLauncherPlan path from web-hub-spawn and the HTTP/socket harnesses.
  * Only the upstream is a fixture; no in-process startHub, service seams or fake auth.
  */
 import { spawn, type ChildProcess } from "node:child_process";
@@ -9,7 +9,7 @@ import { connect, createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { resolveJitiCli, spawnHub } from "../../src/web-hub/agent/launcher.js";
+import { resolveLauncherPlan, spawnHub } from "../../src/web-hub/agent/launcher.js";
 import type { HubConfig } from "../../src/web-hub/hub/ports.js";
 import { resolveHubPaths } from "../../src/web-hub/protocol/paths.js";
 import type { ProxyOpenResult } from "../../src/web-hub/protocol/proxy.js";
@@ -100,7 +100,7 @@ function newHome(): string {
 }
 
 async function boot(cfg: HubConfig) {
-  const launcher = resolveJitiCli({ argv1: PI_CLI, override: "" });
+  const launcher = resolveLauncherPlan({ argv1: PI_CLI, override: "" });
   // A hard integration gate must fail clearly, not silently return/pass if dev deps are absent.
   if (!launcher.ok) throw new Error(`pi bundled jiti unavailable: ${launcher.reason}`);
   let tracked: HubChild | undefined;
@@ -130,7 +130,7 @@ async function boot(cfg: HubConfig) {
     tracked = live;
     return child;
   }) as typeof spawn;
-  spawnHub({ execPath: process.execPath, jitiCli: launcher.jitiCli, argv1: PI_CLI }, HUB_MAIN, cfg, observeSpawn);
+  spawnHub(launcher.plan, HUB_MAIN, cfg, observeSpawn);
   if (tracked === undefined) throw new Error("spawnHub did not start a child");
   const live: HubChild = tracked;
   const paths = resolveHubPaths({ home: cfg.home, uid: process.getuid?.() ?? 0, xdgRuntimeDir: undefined });

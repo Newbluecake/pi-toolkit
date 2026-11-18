@@ -28,7 +28,7 @@ import { HUB_CTX } from "../../src/web-hub/ui/src/components/control/controlCont
 import { RETAINED_RELAUNCH, useRetainedRelaunch } from "../../src/web-hub/ui/src/composables/useRetainedRelaunch.js";
 import type { HubHandle, HubState, NewSessionFlow } from "../../src/web-hub/ui/src/types.js";
 import type { SpawnRelaunchOutcome } from "../../src/web-hub/ui/src/transport/types.js";
-import { resolveJitiCli, spawnHub } from "../../src/web-hub/agent/launcher.js";
+import { resolveLauncherPlan, spawnHub } from "../../src/web-hub/agent/launcher.js";
 import { writeRestoreVetoSync } from "../../src/web-hub/agent/admin-cmds.js";
 import { createHttpFrontend } from "../../src/web-hub/hub/http.js";
 import { startHub, type RunningHub, type StartHubDeps } from "../../src/web-hub/hub/hub.js";
@@ -45,7 +45,7 @@ import { sandboxHome } from "./helpers/home-sandbox.js";
 
 const FAKE = resolve("tests/integration/fixtures/fake-rpc-pi.mjs");
 const PI_CLI = resolve("node_modules/@earendil-works/pi-coding-agent/dist/cli.js");
-const JITI = resolveJitiCli({ argv1: PI_CLI, override: "" });
+const JITI = resolveLauncherPlan({ argv1: PI_CLI, override: "" });
 const hubs = new Set<RunningHub>();
 const hubPids = new Set<number>();
 const childPids = new Set<number>();
@@ -148,11 +148,7 @@ async function close(h: Hub, reason = "test-teardown"): Promise<void> {
 }
 async function bootChild(home: string, exclude?: number, over: Partial<HubSpawnConfig> = {}): Promise<Hub> {
   if (!JITI.ok) throw new Error(JITI.reason);
-  spawnHub(
-    { execPath: process.execPath, argv1: PI_CLI, jitiCli: JITI.jitiCli },
-    resolve("src/web-hub/hub/main.ts"),
-    cfg(home, over),
-  );
+  spawnHub(JITI.plan, resolve("src/web-hub/hub/main.ts"), cfg(home, over));
   let info: { pid?: number; port?: number } = {};
   await waitUntil(
     () => {

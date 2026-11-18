@@ -42,7 +42,7 @@ import { spawn as spawnChild } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { resolveJitiCli, spawnHub, type LauncherPlan } from "../../src/web-hub/agent/launcher.js";
+import { resolveLauncherPlan, spawnHub, type LauncherPlan } from "../../src/web-hub/agent/launcher.js";
 import { looksLikeHubArgv } from "../../src/web-hub/agent/proc-identity.js";
 import { parseCmdline } from "../../src/web-hub/protocol/proc-identity.js";
 
@@ -237,12 +237,12 @@ function jitiPlan(): LauncherPlan | undefined {
     console.log(`web-hub-headless: SKIP mode A — pi CLI not found at ${PI_CLI}`);
     return undefined;
   }
-  const r = resolveJitiCli({ argv1: PI_CLI, override: "" });
+  const r = resolveLauncherPlan({ argv1: PI_CLI, override: "" });
   if (!r.ok) {
     console.log(`web-hub-headless: SKIP mode A — ${r.reason}`);
     return undefined;
   }
-  return { execPath: process.execPath, jitiCli: r.jitiCli, argv1: PI_CLI };
+  return r.plan;
 }
 
 const PLAN = jitiPlan();

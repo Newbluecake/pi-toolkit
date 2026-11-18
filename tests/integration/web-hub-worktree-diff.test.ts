@@ -48,7 +48,7 @@ import { afterEach, beforeAll, afterAll, describe, expect, it } from "vitest";
 import { WTDIFF_GIT_PATH } from "../../src/git/diff.js";
 import type { GitRunner, GitRunResult } from "../../src/git/run.js";
 import { createGitRunner } from "../../src/git/run.js";
-import { spawnHub, resolveJitiCli, type LauncherPlan } from "../../src/web-hub/agent/launcher.js";
+import { spawnHub, resolveLauncherPlan, type LauncherPlan } from "../../src/web-hub/agent/launcher.js";
 import { startHub, type RunningHub } from "../../src/web-hub/hub/hub.js";
 import { createHttpFrontend } from "../../src/web-hub/hub/http.js";
 import { resolveHubPaths } from "../../src/web-hub/protocol/paths.js";
@@ -1048,12 +1048,12 @@ const PLAN: LauncherPlan | undefined = (() => {
     console.log(`web-hub-worktree-diff: SKIP child hub — pi CLI not found at ${PI_CLI}`);
     return undefined;
   }
-  const r = resolveJitiCli({ argv1: PI_CLI, override: "" });
+  const r = resolveLauncherPlan({ argv1: PI_CLI, override: "" });
   if (!r.ok) {
     console.log(`web-hub-worktree-diff: SKIP child hub — ${r.reason}`);
     return undefined;
   }
-  return { execPath: process.execPath, jitiCli: r.jitiCli, argv1: PI_CLI };
+  return r.plan;
 })();
 
 describe.skipIf(!hasGit || !gitInFixedPath || !hasProcFd || PLAN === undefined)(

@@ -117,7 +117,7 @@ import { cmdArgsStatusLevel, formatCmdArgsStatusLines } from "./cmd-args-status.
 import { packageUiDistDir } from "../protocol/paths.js";
 import type { UiStatus } from "../hub/ui-root.js";
 import type { PrivacyHubStatus } from "../protocol/privacy.js";
-import { resolveJitiCli, spawnHub, type LauncherPlan } from "./launcher.js";
+import { resolveLauncherPlan, spawnHub, type LauncherPlan } from "./launcher.js";
 import { judgePrivateNsGate, type PrivateNsGateVerdict } from "../../secure/domain.js";
 import { AGENT_NOSPAWN_CAP } from "../protocol/nospawn.js";
 import { MaskedInputComponent, runPasswdPrompt, type PasswdOutcome } from "./passwd-prompt.js";
@@ -1768,8 +1768,8 @@ export function wireWebHub(pi: ExtensionAPI, deps: WebHubDeps): WebHubControl {
 
   const resolveLauncher = (): LauncherPlan | { error: string } => {
     if (launcher !== undefined) return launcher;
-    const r = resolveJitiCli({ argv1, override: settings.nodeLoader });
-    launcher = r.ok ? { execPath: process.execPath, jitiCli: r.jitiCli, argv1: argv1 ?? "" } : { error: r.reason };
+    const r = resolveLauncherPlan({ argv1, override: settings.nodeLoader });
+    launcher = r.ok ? r.plan : { error: r.reason };
     return launcher;
   };
 

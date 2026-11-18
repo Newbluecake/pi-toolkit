@@ -47,6 +47,10 @@ function fail(message: string, code: number): never {
 }
 
 async function main(): Promise<void> {
+  // The stock jiti CLI has already snapshotted these options (nested jiti imports reuse
+  // them). They belong only to this hub bootstrap, not later managed pi/shell children.
+  delete process.env.JITI_ALIAS;
+  delete process.env.JITI_TSCONFIG_PATHS;
   // Kernel comm only (see hub/comm.ts): cmdline — which hub.json's identity argv and the
   // agent-side restart check depend on — is deliberately left untouched.
   setProcessComm(HUB_COMM);

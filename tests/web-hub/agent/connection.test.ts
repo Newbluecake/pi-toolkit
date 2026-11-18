@@ -302,7 +302,19 @@ describe("connection state machine (fake socket + fake timers)", () => {
         spawn,
         now: () => t,
         settings: { ...SETTINGS, autoStart: true },
-        launcher: { execPath: "/n", jitiCli: "/j", argv1: "/p" },
+        launcher: {
+          execPath: "/n",
+          jitiCli: "/j",
+          argv1: "/p",
+          hostAliases: {
+            "@sinclair/typebox": "/host/typebox/index.mjs",
+            typebox: "/host/typebox/index.mjs",
+            "@sinclair/typebox/value": "/host/typebox/value/index.mjs",
+            "typebox/value": "/host/typebox/value/index.mjs",
+            "@sinclair/typebox/compile": "/host/typebox/compile/index.mjs",
+            "typebox/compile": "/host/typebox/compile/index.mjs",
+          },
+        },
       }),
     );
     n.sockets[0]!.fail("ENOENT");
@@ -330,7 +342,19 @@ describe("connection state machine (fake socket + fake timers)", () => {
         spawn,
         headless: true,
         settings: { ...SETTINGS, autoStart: true },
-        launcher: { execPath: "/n", jitiCli: "/j", argv1: "/p" },
+        launcher: {
+          execPath: "/n",
+          jitiCli: "/j",
+          argv1: "/p",
+          hostAliases: {
+            "@sinclair/typebox": "/host/typebox/index.mjs",
+            typebox: "/host/typebox/index.mjs",
+            "@sinclair/typebox/value": "/host/typebox/value/index.mjs",
+            "typebox/value": "/host/typebox/value/index.mjs",
+            "@sinclair/typebox/compile": "/host/typebox/compile/index.mjs",
+            "typebox/compile": "/host/typebox/compile/index.mjs",
+          },
+        },
       }),
     );
     n.sockets[0]!.fail("ENOENT");
@@ -636,7 +660,19 @@ describe("cmd / superseded routing and D14 per-slot cap gating (fake socket)", (
         spawn,
         now: () => t.value,
         settings: { ...SETTINGS, autoStart: true },
-        launcher: { execPath: "/n", jitiCli: "/j", argv1: "/p" },
+        launcher: {
+          execPath: "/n",
+          jitiCli: "/j",
+          argv1: "/p",
+          hostAliases: {
+            "@sinclair/typebox": "/host/typebox/index.mjs",
+            typebox: "/host/typebox/index.mjs",
+            "@sinclair/typebox/value": "/host/typebox/value/index.mjs",
+            "typebox/value": "/host/typebox/value/index.mjs",
+            "@sinclair/typebox/compile": "/host/typebox/compile/index.mjs",
+            "typebox/compile": "/host/typebox/compile/index.mjs",
+          },
+        },
       }),
     );
     const first = n.sockets[0]!;
@@ -665,7 +701,19 @@ describe("cmd / superseded routing and D14 per-slot cap gating (fake socket)", (
         spawn,
         now: () => t.value,
         settings: { ...SETTINGS, autoStart: true },
-        launcher: { execPath: "/n", jitiCli: "/j", argv1: "/p" },
+        launcher: {
+          execPath: "/n",
+          jitiCli: "/j",
+          argv1: "/p",
+          hostAliases: {
+            "@sinclair/typebox": "/host/typebox/index.mjs",
+            typebox: "/host/typebox/index.mjs",
+            "@sinclair/typebox/value": "/host/typebox/value/index.mjs",
+            "typebox/value": "/host/typebox/value/index.mjs",
+            "@sinclair/typebox/compile": "/host/typebox/compile/index.mjs",
+            "typebox/compile": "/host/typebox/compile/index.mjs",
+          },
+        },
       }),
     );
     const first = n.sockets[0]!;
@@ -697,7 +745,19 @@ describe("cmd / superseded routing and D14 per-slot cap gating (fake socket)", (
       spawn,
       paths: { ...pathsIn(tmp.dir), stoppedFile: stopFile },
       settings: { ...SETTINGS, autoStart: true },
-      launcher: { execPath: "/n", jitiCli: "/j", argv1: "/p" },
+      launcher: {
+        execPath: "/n",
+        jitiCli: "/j",
+        argv1: "/p",
+        hostAliases: {
+          "@sinclair/typebox": "/host/typebox/index.mjs",
+          typebox: "/host/typebox/index.mjs",
+          "@sinclair/typebox/value": "/host/typebox/value/index.mjs",
+          "typebox/value": "/host/typebox/value/index.mjs",
+          "@sinclair/typebox/compile": "/host/typebox/compile/index.mjs",
+          "typebox/compile": "/host/typebox/compile/index.mjs",
+        },
+      },
     });
     vi.useFakeTimers();
     writeStopMarkerSync(stopFile);

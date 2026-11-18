@@ -38,7 +38,7 @@ import type { CommandInfoWire } from "../../src/web-hub/protocol/messages.js";
 import { AGENT_ID_KEY, resetGlobals, waitUntil } from "../web-hub/agent/helpers.js";
 import { config as hubConfig, connectClient, hello, type TestClient } from "../web-hub/hub/helpers.js";
 import { login, openSse, postJson, rawRequest, type SseConn } from "../web-hub/http/helpers.js";
-import { spawnHub, resolveJitiCli, type LauncherPlan } from "../../src/web-hub/agent/launcher.js";
+import { spawnHub, resolveLauncherPlan, type LauncherPlan } from "../../src/web-hub/agent/launcher.js";
 import { resolveHubPaths } from "../../src/web-hub/protocol/paths.js";
 import { sandboxHome } from "./helpers/home-sandbox.js";
 
@@ -624,9 +624,9 @@ const IS_LINUX = process.platform === "linux";
 const CHILD_PLAN: LauncherPlan | undefined = (() => {
   if (!IS_LINUX) return undefined;
   if (!existsSync(PI_CLI)) return undefined;
-  const r = resolveJitiCli({ argv1: PI_CLI, override: "" });
+  const r = resolveLauncherPlan({ argv1: PI_CLI, override: "" });
   if (!r.ok) return undefined;
-  return { execPath: process.execPath, jitiCli: r.jitiCli, argv1: PI_CLI };
+  return r.plan;
 })();
 
 interface ChildEnv {

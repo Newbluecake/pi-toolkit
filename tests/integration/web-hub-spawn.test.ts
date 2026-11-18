@@ -1,5 +1,5 @@
 // web-hub plan §包 I — spawn e2e: REAL hub child processes via pi's bundled
-// jiti-cli (resolveJitiCli from the real pi dist cli.js as argv1) + spawnHub.
+// jiti-cli (resolveLauncherPlan from the real pi dist cli.js as argv1) + spawnHub.
 //
 //  1. singleton race: 3 concurrent hub spawns ⇒ within one 30s boot budget exactly one pid
 //     survives and hub.json names it;
@@ -18,7 +18,7 @@ import { existsSync, readFileSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { wireWebHub } from "../../src/web-hub/agent/index.js";
-import { resolveJitiCli, spawnHub, type LauncherPlan } from "../../src/web-hub/agent/launcher.js";
+import { resolveLauncherPlan, spawnHub, type LauncherPlan } from "../../src/web-hub/agent/launcher.js";
 import type { HubConfig } from "../../src/web-hub/hub/ports.js";
 import { resolveHubPaths } from "../../src/web-hub/protocol/paths.js";
 import { fakeCtx, fakePi, resetGlobals, waitUntil } from "../web-hub/agent/helpers.js";
@@ -40,12 +40,12 @@ function launcherOrSkip(): LauncherPlan | undefined {
     console.log(`web-hub-spawn: SKIP — pi CLI not found at ${PI_CLI} (dev dependency not installed)`);
     return undefined;
   }
-  const r = resolveJitiCli({ argv1: PI_CLI, override: "" });
+  const r = resolveLauncherPlan({ argv1: PI_CLI, override: "" });
   if (!r.ok) {
     console.log(`web-hub-spawn: SKIP — ${r.reason}`);
     return undefined;
   }
-  return { execPath: process.execPath, jitiCli: r.jitiCli, argv1: PI_CLI };
+  return r.plan;
 }
 
 function hubPidOf(hubJson: string): number | undefined {
