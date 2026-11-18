@@ -21,34 +21,41 @@ export async function terminalV2AuthFixture(
   closers: Array<() => void | Promise<void>>,
   corrupt = false,
   terminalEnabled = true,
-  options: { awaitTerminal?: boolean; retain?: boolean; backendDoneBarrier?: Promise<void> } = {},
+  options: {
+    awaitTerminal?: boolean;
+    retain?: boolean;
+    backendDoneBarrier?: Promise<void>;
+    existing?: { privatePty: ReturnType<typeof makeTerminalFixture>; lanPort: number; password: string };
+  } = {},
 ) {
-  const privatePty = makeTerminalFixture();
-  if (!options.retain) closers.push(privatePty.cleanup);
+  const privatePty = options.existing?.privatePty ?? makeTerminalFixture();
+  if (!options.retain && !options.existing) closers.push(privatePty.cleanup);
   const home = privatePty.fixture.home,
     state = webHubStateDir(home),
     socketDir = join(privatePty.fixture.root, "s");
-  mkdirSync(state, { recursive: true, mode: 0o700 });
-  mkdirSync(socketDir, { mode: 0o700 });
-  writeFileSync(
-    join(home, ".pi/agent/pi-toolkit.json"),
-    JSON.stringify({ webHub: { terminal: { enabled: terminalEnabled } } }),
-    { mode: 0o600 },
-  );
-  // Contract fixture initialization, NOT a trusted fresh maintenance history claim.
-  const marker = { v: 2, storeId: "s".repeat(24), initialization: "fresh", checkpointId: "c".repeat(24) };
-  mkdirSync(join(state, "terminal-v2"), { mode: 0o700 });
-  const put = (path: string, value: unknown) => writeFileSync(path, JSON.stringify(value), { mode: 0o600 });
-  put(join(state, ".terminal-initialized-v2"), marker);
-  put(join(state, "terminal-v2/marker.json"), marker);
-  put(
-    join(state, "terminal-v2/ledger.json"),
-    corrupt ? { broken: true } : { v: 2, storeId: marker.storeId, revision: 0, allocations: [] },
-  );
+  if (!options.existing) {
+    mkdirSync(state, { recursive: true, mode: 0o700 });
+    mkdirSync(socketDir, { mode: 0o700 });
+    writeFileSync(
+      join(home, ".pi/agent/pi-toolkit.json"),
+      JSON.stringify({ webHub: { terminal: { enabled: terminalEnabled } } }),
+      { mode: 0o600 },
+    );
+    // Contract fixture initialization, NOT a trusted fresh maintenance history claim.
+    const marker = { v: 2, storeId: "s".repeat(24), initialization: "fresh", checkpointId: "c".repeat(24) };
+    mkdirSync(join(state, "terminal-v2"), { mode: 0o700 });
+    const put = (path: string, value: unknown) => writeFileSync(path, JSON.stringify(value), { mode: 0o600 });
+    put(join(state, ".terminal-initialized-v2"), marker);
+    put(join(state, "terminal-v2/marker.json"), marker);
+    put(
+      join(state, "terminal-v2/ledger.json"),
+      corrupt ? { broken: true } : { v: 2, storeId: marker.storeId, revision: 0, allocations: [] },
+    );
+  }
   vi.stubEnv("HOME", home);
   vi.stubEnv("PI_CODING_AGENT_DIR", join(home, ".pi/agent"));
   vi.stubEnv("PI_WEBHUB_TERMINAL_SOURCE", "plain");
-  const lanPort = await freePort();
+  const lanPort = options.existing?.lanPort ?? (await freePort());
   let initialized: Promise<void> | undefined, service: HubTerminalServiceV2 | undefined;
   let terminal: TerminalFrontendDepsV2["terminalV2"];
   let authStore: import("../../../src/web-hub/hub/ports.js").LanStorePort | undefined;
@@ -167,7 +174,7 @@ export async function terminalV2AuthFixture(
   const lanLogin = await lanPostJson(
     lanPort,
     "/api/login",
-    { username: info.info.username, password: info.info.initialPassword },
+    { username: info.info.username, password: options.existing?.password ?? info.info.initialPassword },
     lanHeaders,
   );
   expect(lanLogin.status).toBe(200);
@@ -201,10 +208,19 @@ export async function terminalV2AuthFixture(
     username: info.info.username,
     privatePty,
     initialized,
+    restart: async (password = options.existing?.password ?? info.info.initialPassword) => {
+      agent.sock.destroy();
+      await hub.close("auth-restart");
+      // Existing original state/DB/marker/ledger bytes are NEVER initialized/healed.
+      return terminalV2AuthFixture(closers, false, terminalEnabled, {
+        ...options,
+        existing: { privatePty, lanPort, password },
+      });
+    },
     get backendCalls() {
       return backendCalls;
     },
-    loginLan: (password = info.info.initialPassword, username = info.info.username) =>
+    loginLan: (password = options.existing?.password ?? info.info.initialPassword, username = info.info.username) =>
       lanPostJson(lanPort, "/api/login", { username, password }, lanHeaders),
   };
 }

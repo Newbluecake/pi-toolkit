@@ -227,8 +227,13 @@ Real original committed-delete reply loss retains terminal denial; a new valid S
 only actual full rotate completion can. Throwing terminal subscriber cannot replace passwd/rotate
 commit. Saturation2048 affects terminal only, not real auth. Same-SID real double logout/late older
 finally cannot clear a newer pending revoke; original DB still rejects old cookie independently of
-memory settlement. Fault fixtures retain their private state. Remaining timeout/restart/rotate-SIGKILL/
-55s authority/failure-audit windows are tracked explicitly, not implied by these partial A-subgates.
+memory settlement. Fault fixtures retain their private state. The additional timeout/restart suite drives the REAL
+resident SQLite child's unchanged8s deadline: either lose one actual successful delete reply (commit
+happened) or discard one outbound delete request (no commit). Eight on/off × healthy/bad ledger cases
+all return honest503 E_DB/unknown/localSignedOut, then a real hub restart/reopen of unchanged files
+rejects the old SID iff original DB committed, otherwise accepts it. No terminal-auth replay or state
+healing. This is real IPC/deadline/restart, not SIGKILL of the whole hub. Rotate-SIGKILL/55s authority/
+failure-audit windows remain tracked explicitly, not implied by partial A-subgates.
 
 ## Independent view / flow control
 
