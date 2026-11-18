@@ -118,5 +118,7 @@ it("tool system-rc mirror differs only by standalone TS7 definite-assignment ann
   const original = readFileSync("tests/integration/web-hub-terminal-system-rc.ts", "utf8");
   const tool = readFileSync("scripts/web-hub/terminal-v2-maintenance/system-rc.ts", "utf8");
   const body = tool.slice(tool.indexOf("/** Test-only pre-exec audit:"));
-  expect(body.replace(/let (physical|st|text)!:/g, "let $1:")).toBe(original);
+  expect(body.replace(/let (physical|st|text)!:/g, "let $1:")).toBe(
+    original.replace(/let (physical|st|text)!:/g, "let $1:"),
+  );
 });

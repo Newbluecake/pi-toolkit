@@ -23,7 +23,7 @@ import { createPrivacyRoutes } from "../../../src/web-hub/hub/privacy/routes.js"
 import { createPrivacyStore, type PrivacyStore } from "../../../src/web-hub/hub/privacy/store.js";
 import { createLoginLimiter, type LoginLimiter } from "../../../src/web-hub/hub/ratelimit.js";
 import type { HubEvent, HubLanConfig, HubLoadConfig, HttpFrontend, LanStatus } from "../../../src/web-hub/hub/ports.js";
-import type { CommandRouter } from "../../../src/web-hub/hub/ports.js";
+import type { FrontendDeps, CommandRouter } from "../../../src/web-hub/hub/ports.js";
 import type { SpawnFrontendPort } from "../../../src/web-hub/hub/spawn/ports.js";
 import type { AgentRemoveFrontendPort } from "../../../src/web-hub/hub/agent-remove.js";
 import type { RegistryView } from "../../../src/web-hub/hub/ports.js";
@@ -204,7 +204,16 @@ export async function startLan(
         onLeafChanged: () => {},
       },
       log,
-      info: () => ({ version: "9.9.9-test", buildId: "b1", pid: process.pid, startedAt: clock.now(), proto: PROTO }),
+      // Legacy fake deliberately omits caps; keep compatibility/golden bytes,
+      // not a model for the real SQLite/startHub auth integration producer.
+      info: () =>
+        ({
+          version: "9.9.9-test",
+          buildId: "b1",
+          pid: process.pid,
+          startedAt: clock.now(),
+          proto: PROTO,
+        }) as ReturnType<FrontendDeps["info"]>,
       now: clock.now,
       lan: {
         clientAllow: createClientAllowGuard({

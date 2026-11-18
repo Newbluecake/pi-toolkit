@@ -66,7 +66,7 @@ export function systemRcPreflight(options: SystemRcOptions = {}): string[] {
       if (osCode(error) === "ENOENT") continue;
       fail(file, `cannot inspect startup file (${osCode(error)})`);
     }
-    let physical: string;
+    let physical!: string;
     try {
       physical = realpathSync(file);
     } catch (error) {
@@ -74,7 +74,7 @@ export function systemRcPreflight(options: SystemRcOptions = {}): string[] {
     }
     if (![join(root, "etc"), join(root, "usr")].some((dir) => inside(dir, physical)))
       fail(file, `resolved target outside trusted /etc or /usr: ${physical}`);
-    let st: Stats;
+    let st!: Stats;
     try {
       st = statSync(physical);
     } catch (error) {
@@ -84,7 +84,7 @@ export function systemRcPreflight(options: SystemRcOptions = {}): string[] {
     if (st.uid !== ownerUid) fail(file, "resolved target is not owned by trusted root uid");
     if (st.mode & 0o002) fail(file, "resolved target is world-writable");
     if (st.mode & 0o020 && st.gid !== 0) fail(file, "resolved target is writable by non-root group");
-    let text: string;
+    let text!: string;
     try {
       text = readFileSync(physical, "utf8");
     } catch (error) {

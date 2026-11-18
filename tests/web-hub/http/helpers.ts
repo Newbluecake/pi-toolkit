@@ -95,7 +95,12 @@ export function fakeDeps(dir: string, opts: { port?: number } = {}): FakeDeps {
     },
     history,
     log,
-    info: () => ({ version: "9.9.9", buildId: "b1", pid: process.pid, startedAt: 1, proto: PROTO }),
+    // Legacy fake deliberately omits caps; preserve its existing wire bytes.
+    // Real-hub integrations never use this info producer.
+    info: () =>
+      ({ version: "9.9.9", buildId: "b1", pid: process.pid, startedAt: 1, proto: PROTO }) as ReturnType<
+        FrontendDeps["info"]
+      >,
     now: () => Date.now(),
     agents,
     emit: (e) => {

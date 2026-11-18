@@ -210,6 +210,26 @@ Bad resource ledger cannot prevent healthy auth success; bad auth cannot be acce
 is healthy. Both failures stay independent. Restart trusts original auth DB/token/rotate protocol,
 not reconstructed terminal denial memory. Rotate recovery still owns its original persistent intent.
 
+### Actual auth fault subgates
+
+`tests/integration/terminal-v2-auth-{matrix,io}.test.ts` shares the real dual-listener/SQLite/token/
+original-rotate/native-PTY fixture with the original hub suite; private context response remains
+explicitly simulated (not an SDK claim). A1 off/bad ledger/synchronous init throw/held init still run
+original logout/kick/passwd/delete/rotate and verify actual DB epochs/absence/token change. A2 holds
+real allocation-temp fds before sync or injects ENOSPC for reserve AND prune while each of the five
+original auth mutation kinds completes; no auth success is mocked. A3 holds ONLY the original real
+backend.done result future (all other methods delegate), proves logout replies while slot stays
+charged, then admits original proof and prunes once. A12 holds prune beyond the actual deadline and
+proves no late/double release. ENOSPC is a syscall injection, not a real full-device claim; lifting a
+known pre-rename failure may permit a fresh, actually committed proof/prune retry, never counted twice.
+
+Real original committed-delete reply loss retains terminal denial; a new valid SID cannot clear it,
+only actual full rotate completion can. Throwing terminal subscriber cannot replace passwd/rotate
+commit. Saturation2048 affects terminal only, not real auth. Same-SID real double logout/late older
+finally cannot clear a newer pending revoke; original DB still rejects old cookie independently of
+memory settlement. Fault fixtures retain their private state. Remaining timeout/restart/rotate-SIGKILL/
+55s authority/failure-audit windows are tracked explicitly, not implied by these partial A-subgates.
+
 ## Independent view / flow control
 
 Only POST `/api/terminal/v2/*`; independent fetch NDJSON, never public SSE registry/ring/encoder/clientId.
