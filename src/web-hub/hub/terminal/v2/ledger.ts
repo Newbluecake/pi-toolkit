@@ -6,6 +6,7 @@ import { resolve } from "node:path";
 import { randomBytes } from "node:crypto";
 import {
   terminalMarkersV2Match,
+  RETAINED_UNKNOWN_INITIALIZATION,
   terminalLedgerV2Ok,
   type LedgerV2,
   type TerminalMarkerV2,
@@ -43,6 +44,7 @@ export function createTerminalAllocationLedgerV2(
   let directories: Directory[] = [],
     images: { marker: Image; witness: Image; ledger: Image } | undefined;
   const directoryPins = new Map<string, { dev: number; ino: number }>();
+  let initialization: TerminalMarkerV2["initialization"] | undefined;
   let current: LedgerV2 | undefined,
     poisoned = false,
     busy = false;
@@ -151,6 +153,9 @@ export function createTerminalAllocationLedgerV2(
       typeof guard !== "function" ||
       !terminalLedgerV2Ok(next) ||
       next.storeId !== current.storeId ||
+      (initialization === RETAINED_UNKNOWN_INITIALIZATION
+        ? !Array.isArray(next.legacyObligations)
+        : next.legacyObligations !== undefined) ||
       next.revision !== expectedRevision + 1
     )
       return { kind: "unavailable", effect: "none" };
@@ -289,9 +294,15 @@ export function createTerminalAllocationLedgerV2(
             l: unknown = JSON.parse(ledgerImage.bytes.toString("utf8"));
           if (!terminalMarkersV2Match(m, w) || !terminalLedgerV2Ok(l) || l.storeId !== (m as TerminalMarkerV2).storeId)
             throw new Error("E_STORE");
+          if (
+            (m as TerminalMarkerV2).initialization === RETAINED_UNKNOWN_INITIALIZATION
+              ? !Array.isArray(l.legacyObligations)
+              : l.legacyObligations !== undefined
+          )
+            throw new Error("E_STORE");
           const candidateImages = { marker: markerImage, witness, ledger: ledgerImage };
           await unchanged(candidateImages);
-          return { ledger: clone(l), images: candidateImages };
+          return { ledger: clone(l), images: candidateImages, initialization: (m as TerminalMarkerV2).initialization };
         } finally {
           await releaseDirs();
         }
@@ -310,6 +321,7 @@ export function createTerminalAllocationLedgerV2(
         const candidate = await boundedV2(work, at, controller.signal);
         check(controller.signal, at);
         images = candidate.images;
+        if ("initialization" in candidate) initialization = candidate.initialization;
         current = clone(candidate.ledger);
         return { kind: "loaded", ledger: clone(candidate.ledger) };
       } catch {
@@ -323,6 +335,10 @@ export function createTerminalAllocationLedgerV2(
       }
     },
     commit(expectedRevision, next, signal) {
+      // Ordinary reserve/prune may NEVER alter retained obligations. Retirement is
+      // the separate trusted physical-evidence commitGuarded capability.
+      if (JSON.stringify(next.legacyObligations) !== JSON.stringify(current?.legacyObligations))
+        return Promise.resolve({ kind: "unavailable" as const, effect: "none" as const });
       return commitGuarded(expectedRevision, next, signal, () => undefined);
     },
     commitGuarded,

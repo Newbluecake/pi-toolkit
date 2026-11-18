@@ -12,6 +12,7 @@ import type {
 import type {
   AllocationV2,
   LedgerV2,
+  LegacyUnattributedObligationV1,
   TerminalScopeV2,
   TerminalTargetLimitsV2,
   TerminalMachineLimitsV2,
@@ -93,6 +94,7 @@ export interface TerminalServiceDependenciesV2 {
 }
 export class HubTerminalServiceV2 implements TerminalServiceV2 {
   private readonly allocationsById = new Map<string, AllocationV2>();
+  private readonly legacyById = new Map<string, LegacyUnattributedObligationV1>();
   private readonly hot = new Map<string, Hot>();
   private readonly intents = new Map<string, Intent>();
   private readonly pendingScopes = new Map<string, Intent>();
@@ -137,6 +139,7 @@ export class HubTerminalServiceV2 implements TerminalServiceV2 {
             throw new Error();
           this.ledger = structuredClone(loaded.ledger);
           for (const a of this.ledger.allocations) this.allocationsById.set(a.allocationId, a);
+          for (const row of this.ledger.legacyObligations ?? []) this.legacyById.set(row.obligationId, row);
           return true;
         })();
         return await boundedV2(work, Date.now() + L.contextMs, signal);
@@ -180,10 +183,26 @@ export class HubTerminalServiceV2 implements TerminalServiceV2 {
     return {
       revision: this.revision,
       rows: hotRows.concat(remaining ? completedRows.slice(-remaining) : []).sort((a, b) => a.ordinal - b.ordinal),
-      unknownResources: [...this.allocationsById.values()]
-        .filter((a) => a.quotaSessionKey === scope.sessionId && !this.hot.has(a.termId) && !pending.has(a.allocationId))
-        .map((a) => ({ allocationTag: a.allocationId, state: "cleanup-unknown" as const })),
-      quota: quotaV2(this.allocationsById.values(), this.hotIds(), scope.sessionId, principal(auth), limits),
+      unknownResources: [
+        ...[...this.allocationsById.values()]
+          .filter(
+            (a) => a.quotaSessionKey === scope.sessionId && !this.hot.has(a.termId) && !pending.has(a.allocationId),
+          )
+          .map((a) => ({ allocationTag: a.allocationId, state: "cleanup-unknown" as const })),
+        ...[...this.legacyById.values()]
+          .filter(
+            (row) => row.sessionBinding.kind === "unattributed" || row.sessionBinding.sessionId === scope.sessionId,
+          )
+          .map((row) => ({ allocationTag: row.obligationId, state: "cleanup-unknown" as const })),
+      ],
+      quota: quotaV2(
+        this.allocationsById.values(),
+        this.hotIds(),
+        scope.sessionId,
+        principal(auth),
+        limits,
+        this.legacyById.values(),
+      ),
     };
   }
   private notify(h: Hot) {
@@ -416,7 +435,14 @@ export class HubTerminalServiceV2 implements TerminalServiceV2 {
           if (signal.aborted || !this.deps.context.current(snapshot)) throw new TerminalFaultV2("E_SESSION_CHANGED");
           const ledger = this.resources();
           assertQuotaV2(
-            quotaV2(this.allocationsById.values(), this.hotIds(), scope.sessionId, principal(auth), effective),
+            quotaV2(
+              this.allocationsById.values(),
+              this.hotIds(),
+              scope.sessionId,
+              principal(auth),
+              effective,
+              this.legacyById.values(),
+            ),
           );
           this.allocationsById.set(allocation.allocationId, allocation);
           intent.allocationId = allocation.allocationId;
@@ -583,6 +609,11 @@ export class HubTerminalServiceV2 implements TerminalServiceV2 {
       },
     });
   }
+  private legacyCold(termId: string): boolean {
+    return (
+      this.legacyById.has(termId) || [...this.legacyById.values()].some((row) => row.legacyIdentity.termId === termId)
+    );
+  }
   async runtime(auth: AuthIdentity, input: TerminalHttpRequestsV2["view"], signal: AbortSignal) {
     try {
       this.hub(input.hubInstance);
@@ -591,6 +622,7 @@ export class HubTerminalServiceV2 implements TerminalServiceV2 {
       const h = this.hot.get(input.termId);
       if (!h || key(h.allocation.scope) !== key(input.scope)) {
         if (
+          this.legacyCold(input.termId) ||
           [...this.allocationsById.values()].some(
             (a) => a.termId === input.termId && a.quotaSessionKey === input.scope.sessionId,
           )
@@ -652,6 +684,7 @@ export class HubTerminalServiceV2 implements TerminalServiceV2 {
     try {
       this.hub(input.hubInstance);
       this.check(auth, input.scope, this.deps.revision());
+      if (!this.hot.has(input.termId) && this.legacyCold(input.termId)) throw new TerminalFaultV2("E_CLEANUP_UNKNOWN");
       const a = [...this.allocationsById.values()].find((a) => a.termId === input.termId);
       if (a && a.quotaSessionKey !== input.scope.sessionId) throw new TerminalFaultV2("E_NOT_FOUND");
       if (a && !this.hot.has(input.termId)) throw new TerminalFaultV2("E_CLEANUP_UNKNOWN");
@@ -821,9 +854,13 @@ export class HubTerminalServiceV2 implements TerminalServiceV2 {
         pruned: !this.allocationsById.has(h.allocation.allocationId),
       })),
       ledger: this.ledger ? structuredClone(this.ledger) : undefined,
-      allocationCount: this.allocationsById.size,
+      allocationCount: this.allocationsById.size + this.legacyById.size,
       consistent:
         !!this.ledger &&
+        (this.ledger.legacyObligations?.length ?? 0) === this.legacyById.size &&
+        (this.ledger.legacyObligations ?? []).every(
+          (row) => JSON.stringify(row) === JSON.stringify(this.legacyById.get(row.obligationId)),
+        ) &&
         this.ledger.allocations.length === this.allocationsById.size &&
         this.ledger.allocations.every(
           (a) => JSON.stringify(a) === JSON.stringify(this.allocationsById.get(a.allocationId)),
@@ -853,8 +890,14 @@ export class HubTerminalServiceV2 implements TerminalServiceV2 {
       const pending =
         [...this.intents.values()].filter((i) => !i.result).length + this.contextFlights + this.mutationFlights;
       return {
-        clean: !this.unavailable && this.initialized && !pending && !this.hot.size && !this.allocationsById.size,
-        unresolved: this.allocationsById.size + pending,
+        clean:
+          !this.unavailable &&
+          this.initialized &&
+          !pending &&
+          !this.hot.size &&
+          !this.allocationsById.size &&
+          !this.legacyById.size,
+        unresolved: this.allocationsById.size + this.legacyById.size + pending,
       };
     })();
     return this.disposeWork;

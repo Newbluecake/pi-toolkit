@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { HubTerminalServiceV2 } from "../../../../../src/web-hub/hub/terminal/v2/service.js";
+import { mapRetainedObligations } from "../../../../../scripts/web-hub/terminal-v2-retained/mapping.js";
 import { TerminalFaultV2 } from "../../../../../src/web-hub/hub/terminal/v2/timing.js";
 import type { TerminalBackend, TerminalPhysicalResult } from "../../../../../src/web-hub/hub/terminal/v2/backend.js";
 import type {
@@ -49,8 +50,14 @@ function allocation(n: string, session = "session", principal = "lan:u1"): Alloc
     creatorSidTag: "a".repeat(43),
   };
 }
-function harness(cold: AllocationV2[] = []) {
-  let disk: LedgerV2 = { v: 2, storeId: id("s"), revision: 0, allocations: cold };
+function harness(cold: AllocationV2[] = [], legacy?: LedgerV2["legacyObligations"]) {
+  let disk: LedgerV2 = {
+    v: 2,
+    storeId: id("s"),
+    revision: 0,
+    allocations: cold,
+    ...(legacy !== undefined ? { legacyObligations: legacy } : {}),
+  };
   let commitFailure: "none" | "unknown" | undefined, commitGate: Promise<void> | undefined;
   let current = true,
     rev = 0,
@@ -594,5 +601,86 @@ it("natural exit remains visible until explicit completed-tab close, whose idemp
   const hidden = await h.service.list(auth, scope, signal());
   expect(hidden.ok && hidden.rows).toEqual([]);
   expect(await h.service.close(auth, input, signal())).toMatchObject({ ok: true, state: "closed" });
+  await h.service.dispose();
+});
+
+function retained(count = 1, verified = true) {
+  return mapRetainedObligations(
+    "a".repeat(64),
+    "b".repeat(64),
+    Array.from({ length: count }, (_, n) => ({
+      identity: {
+        agentSessionId: scope.sessionId,
+        termId: `legacy-${n}`,
+        epoch: "old-epoch",
+        ownerInstance: "old-owner",
+        reservationId: `old-${n}`,
+      },
+      recordKey: `terminal-v1/terminal-resource-fence-v1.json#resources/${n}`,
+      sessionVerified: verified,
+      bootId: boot,
+    })),
+  );
+}
+it("retained unknown has no runtime/backend, charges every principal and persists after ordinary exact prune/restart", async () => {
+  const legacy = retained(),
+    h = harness([], legacy);
+  await h.service.initialize(signal());
+  const other = { ...auth, principal: "different", sidTag: "c".repeat(43), userId: 7 },
+    different = { ...scope, agentKey: "new-agent", epoch: "new-epoch" };
+  const listed = await h.service.list(other, different, signal());
+  expect(listed.ok && listed.quota.principal).toEqual({ used: 1, unknown: 1, limit: 2 });
+  expect(listed.ok && listed.unknownResources).toEqual([
+    { allocationTag: legacy[0]!.obligationId, state: "cleanup-unknown" },
+  ]);
+  expect(
+    await h.service.close(other, { scope: different, hubInstance: id("h"), termId: legacy[0]!.obligationId }, signal()),
+  ).toMatchObject({ ok: false, code: "E_CLEANUP_UNKNOWN" });
+  expect(
+    await h.service.runtime(
+      other,
+      { scope: different, hubInstance: id("h"), termId: legacy[0]!.obligationId },
+      signal(),
+    ),
+  ).toMatchObject({ ok: false, code: "E_CLEANUP_UNKNOWN" });
+  expect(h.counts.spawn).toBe(0);
+  const created = await h.create();
+  expect(created.ok).toBe(true);
+  if (!created.ok) throw new Error("expected remainder");
+  expect(await h.service.close(auth, { scope, hubInstance: id("h"), termId: created.termId }, signal())).toMatchObject({
+    ok: true,
+    state: "closed",
+  });
+  expect(h.disk.allocations).toEqual([]);
+  expect(h.disk.legacyObligations).toEqual(legacy);
+  expect(await h.service.dispose()).toEqual({ clean: false, unresolved: 1 });
+  const restarted = harness([], structuredClone(h.disk.legacyObligations));
+  await restarted.service.initialize(signal());
+  expect(restarted.service.maintenanceSnapshot().allocationCount).toBe(1);
+  expect(restarted.counts.spawn).toBe(0);
+  await restarted.service.dispose();
+});
+it("retained two obligations E_LIMIT for every principal; legacy never enters Hot and no fork", async () => {
+  const h = harness([], retained(2));
+  await h.service.initialize(signal());
+  for (const principal of ["u1", "u2", "brand-new"]) {
+    const target = { ...scope, agentKey: principal };
+    h.snapshot = { scope: target, cwd: "/tmp", contextGeneration: 1, linkInstance: {}, limits };
+    const result = await h.create(id(principal), "new", target, { ...auth, principal });
+    expect(result).toMatchObject({ ok: false, code: "E_LIMIT" });
+  }
+  expect(h.counts.spawn).toBe(0);
+  expect(h.service.maintenanceSnapshot().runtimes).toEqual([]);
+  expect(h.disk.legacyObligations).toHaveLength(2);
+  await h.service.dispose();
+});
+it("retained quota participates in the actual serialized reservation, not an HTTP precheck", async () => {
+  const h = harness([], retained());
+  await h.service.initialize(signal());
+  const results = await Promise.all([h.create(id("x")), h.create(id("y"))]);
+  expect(results.filter((r) => r.ok)).toHaveLength(1);
+  expect(results.filter((r) => !r.ok && r.code === "E_LIMIT")).toHaveLength(1);
+  expect(h.counts.spawn).toBe(1);
+  expect(h.disk.legacyObligations).toHaveLength(1);
   await h.service.dispose();
 });

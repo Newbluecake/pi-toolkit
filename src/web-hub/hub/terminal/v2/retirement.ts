@@ -148,7 +148,11 @@ export async function retireOldKernelAllocationsV2(
     if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(before.bootId))
       throw new Error("E_KERNEL");
     const eligible = ledger.allocations.filter((a) => a.kernelBootId !== before.bootId);
-    if (!eligible.length) return { kind: "unchanged" as const, count: 0 };
+    const eligibleLegacy = (ledger.legacyObligations ?? []).filter(
+      (row) => row.kernelBinding.kind === "known" && row.kernelBinding.bootId !== before.bootId,
+    );
+    const count = eligible.length + eligibleLegacy.length;
+    if (!count) return { kind: "unchanged" as const, count: 0 };
     const paths = terminalV2Files(resolve(deps.stateDir)),
       uid = process.getuid?.();
     const directory = async (path: string) => {
@@ -209,7 +213,14 @@ export async function retireOldKernelAllocationsV2(
           check();
         }
         const evidence = Buffer.from(
-          JSON.stringify({ v: 2, kind: "old-kernel-allocation-retirement", kernel: before, ledger, eligible }) + "\n",
+          JSON.stringify({
+            v: 2,
+            kind: "old-kernel-allocation-retirement",
+            kernel: before,
+            ledger,
+            eligible,
+            ...(eligibleLegacy.length ? { eligibleLegacy } : {}),
+          }) + "\n",
         );
         if (bytes + evidence.length + 8192 > L.archiveBytes) throw new Error("E_CAPACITY");
         check();
@@ -303,6 +314,13 @@ export async function retireOldKernelAllocationsV2(
             ...ledger,
             revision: ledger.revision + 1,
             allocations: ledger.allocations.filter((a) => !exact.has(a.allocationId)),
+            ...(ledger.legacyObligations !== undefined
+              ? {
+                  legacyObligations: ledger.legacyObligations.filter(
+                    (row) => !eligibleLegacy.some((removed) => removed.obligationId === row.obligationId),
+                  ),
+                }
+              : {}),
           };
           check();
           pruneEntered = true;
@@ -323,6 +341,9 @@ export async function retireOldKernelAllocationsV2(
                 beforeRevision: ledger.revision,
                 afterRevision: next.revision,
                 removedAllocationIds: eligible.map((a) => a.allocationId),
+                ...(eligibleLegacy.length
+                  ? { removedLegacyObligationIds: eligibleLegacy.map((row) => row.obligationId) }
+                  : {}),
               }) + "\n",
             );
             if (completion.length > 8192) throw new Error("E_ARCHIVE");
@@ -386,11 +407,11 @@ export async function retireOldKernelAllocationsV2(
               return undefined;
             };
             finalGuard();
-            return { kind: "retired" as const, count: eligible.length };
+            return { kind: "retired" as const, count };
           }
           if (result.kind === "unavailable" && result.effect === "none") {
             pruneEntered = false;
-            return { kind: "retained" as const, count: eligible.length };
+            return { kind: "retained" as const, count };
           }
           return { kind: "unavailable" as const };
         } finally {

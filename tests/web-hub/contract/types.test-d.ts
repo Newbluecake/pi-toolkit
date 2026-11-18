@@ -854,7 +854,7 @@ describe("T51 v2 compile-time cross-package ownership", () => {
     expectTypeOf<Extract<TerminalHttpRequestsV2["input"], { bytesB64: string }>["kind"]>().toEqualTypeOf<
       "user" | "terminal_response"
     >();
-    expectTypeOf<keyof LedgerV2>().toEqualTypeOf<"v" | "storeId" | "revision" | "allocations">();
+    expectTypeOf<keyof LedgerV2>().toEqualTypeOf<"v" | "storeId" | "revision" | "allocations" | "legacyObligations">();
     expectTypeOf<keyof TerminalHttpRequestsV2["view"]>().toEqualTypeOf<"scope" | "hubInstance" | "termId" | "offset">();
   });
 });

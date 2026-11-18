@@ -8,6 +8,25 @@
 > and provided Chromium UI/SDK/PTY/CSP/CSS gates are implemented and exercised. P7 is independent
 > acceptance, not adapter implementation. Device/Firefox/real kernel/powercut/mount limits remain explicit. Root approved obsolete v1 shared declaration deletion on 2026-11-18; the shared execution schemas/exports are now removed. Component/test greens do not imply full T51 acceptance.
 
+## Retained-unknown contract update (implementation in progress)
+
+User/root approval2026-11-18 replaces the existing-installation requirement to reconstruct live O
+ACK/drain or prove all resources gone: stop old resource publishers/writers, pin and back up ONLY
+terminal sources, then initialize `offline-retained-unknown`. Inspector/cgroup/reboot is NOT a
+precondition. Existing CLI/packaging integration is still being implemented; controlled cycle alone
+is NOT deployable existing-installation migration evidence. No site operation is authorized.
+
+The approved P0 extension is an independent optional `LedgerV2.legacyObligations` array with closed
+`legacy-unattributed` records, source manifest/installation binding and stable original identity.
+It has no fake agentKey/principal/sid and never enters Hot/backend/view. Original fresh/clean-checkpoint
+initialization stays empty with its original bytes. Every authenticated terminal principal pays ALL
+retained obligations; a proven old session pays its rows, unknown session attribution charges every
+session, and total counts all rows. The original serialized reserve checks those same facts. Quota
+exhaustion is honest E_LIMIT, not auth failure or a poisoned ledger. New scope/epoch/login/restart,
+PID absence/TTL/cold close cannot release retained debt. Plain reserve/prune cannot change it.
+Only known DIFFERENT kernel evidence plus actual guarded CAS and durable archive completion can
+retire exact obligation IDs; unknown boot stays charged. This is not proof of a real reboot test.
+
 ## Ownership and off
 
 - The hub alone owns PTY, ring, allocation ledger, cleanup/reaper and tabs. Agent sessions produce

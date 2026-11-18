@@ -274,17 +274,54 @@ export const AllocationV2Schema = closed({
   creatorSidTag: Type.String({ minLength: 43, maxLength: 43, pattern: "^[A-Za-z0-9_-]+$" }),
 });
 export type AllocationV2 = Static<typeof AllocationV2Schema>;
+/** Retained O obligations have NO invented v2 scope/principal/sid or attach capability.
+ * Root-approved offline-retained-unknown contract; normal AllocationV2 stays unchanged. */
+const sha256 = Type.String({ pattern: "^[a-f0-9]{64}$" });
+export const LegacyResourceIdentityV1Schema = closed({
+  agentSessionId: key,
+  termId: key,
+  epoch: key,
+  ownerInstance: key,
+  reservationId: key,
+});
+export type LegacyResourceIdentityV1 = Static<typeof LegacyResourceIdentityV1Schema>;
+export const LegacyUnattributedObligationV1Schema = closed({
+  kind: Type.Literal("legacy-unattributed"),
+  obligationId: sha256,
+  sourceInstallationId: sha256,
+  legacyIdentity: LegacyResourceIdentityV1Schema,
+  sourceManifestSha256: sha256,
+  sourceRecordKeys: Type.Array(Type.String({ minLength: 1, maxLength: 512, pattern: "^[^\\u0000-\\u001f\\u007f]+$" }), {
+    minItems: 1,
+    maxItems: 64,
+    uniqueItems: true,
+  }),
+  sessionBinding: Type.Union([
+    closed({ kind: Type.Literal("verified"), sessionId: key }),
+    closed({ kind: Type.Literal("unattributed") }),
+  ]),
+  kernelBinding: Type.Union([
+    closed({
+      kind: Type.Literal("known"),
+      bootId: Type.String({ pattern: "^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$" }),
+    }),
+    closed({ kind: Type.Literal("unknown") }),
+  ]),
+});
+export type LegacyUnattributedObligationV1 = Static<typeof LegacyUnattributedObligationV1Schema>;
+export const RETAINED_UNKNOWN_INITIALIZATION = "offline-retained-unknown" as const;
 export const LedgerV2Schema = closed({
   v: Type.Literal(2),
   storeId: id,
   revision: uint,
   allocations: Type.Array(AllocationV2Schema, { maxItems: 32 }),
+  legacyObligations: Type.Optional(Type.Array(LegacyUnattributedObligationV1Schema, { maxItems: 32 })),
 });
 export type LedgerV2 = Static<typeof LedgerV2Schema>;
 export const TerminalMarkerV2Schema = closed({
   v: Type.Literal(2),
   storeId: id,
-  initialization: literals(["fresh", "v1-clean-checkpoint"]),
+  initialization: literals(["fresh", "v1-clean-checkpoint", RETAINED_UNKNOWN_INITIALIZATION]),
   checkpointId: id,
 });
 export type TerminalMarkerV2 = Static<typeof TerminalMarkerV2Schema>;
@@ -304,9 +341,24 @@ export function terminalMarkersV2Match(marker: unknown, witness: unknown): boole
 }
 /** Pure maintenance-tool value construction ONLY. Production must never create missing
  * files from this value: absent initialization => setup-required, not automatic healing. */
-export function createInitialTerminalLedgerV2(marker: TerminalMarkerV2): LedgerV2 {
+export function createInitialTerminalLedgerV2(
+  marker: TerminalMarkerV2,
+  legacyObligations?: readonly LegacyUnattributedObligationV1[],
+): LedgerV2 {
   if (!Value.Check(TerminalMarkerV2Schema, marker)) throw new TypeError("invalid terminal v2 marker");
-  return { v: 2, storeId: marker.storeId, revision: 0, allocations: [] };
+  if (marker.initialization !== RETAINED_UNKNOWN_INITIALIZATION && legacyObligations !== undefined)
+    throw new TypeError("original initialization must remain empty");
+  const ledger: LedgerV2 = {
+    v: 2,
+    storeId: marker.storeId,
+    revision: 0,
+    allocations: [],
+    ...(marker.initialization === RETAINED_UNKNOWN_INITIALIZATION
+      ? { legacyObligations: structuredClone([...(legacyObligations ?? [])]) }
+      : {}),
+  };
+  if (!terminalInitialLedgerV2Ok(ledger, marker)) throw new TypeError("invalid initial terminal v2 ledger");
+  return ledger;
 }
 /** Tool initialization guard, NOT the production loader's revision requirement:
  * an initialized store may subsequently have nonzero revision/nonempty allocations. */
@@ -316,7 +368,10 @@ export function terminalInitialLedgerV2Ok(raw: unknown, marker: unknown): raw is
     terminalLedgerV2Ok(raw) &&
     raw.storeId === marker.storeId &&
     raw.revision === 0 &&
-    raw.allocations.length === 0
+    raw.allocations.length === 0 &&
+    (marker.initialization === RETAINED_UNKNOWN_INITIALIZATION
+      ? Array.isArray(raw.legacyObligations)
+      : raw.legacyObligations === undefined)
   );
 }
 /** Pure closed validation; no healing, accounting, disk IO, auth or physical-release inference. */
@@ -329,6 +384,34 @@ export function terminalLedgerV2Ok(raw: unknown): raw is LedgerV2 {
       return false;
     allocations.add(row.allocationId);
     terms.add(row.termId);
+  }
+  const legacyIds = new Set<string>(),
+    identities = new Set<string>();
+  let installation: string | undefined, manifest: string | undefined;
+  if (raw.allocations.length + (raw.legacyObligations?.length ?? 0) > 32) return false;
+  for (const row of raw.legacyObligations ?? []) {
+    const identity = JSON.stringify([
+      row.legacyIdentity.agentSessionId,
+      row.legacyIdentity.termId,
+      row.legacyIdentity.epoch,
+      row.legacyIdentity.ownerInstance,
+      row.legacyIdentity.reservationId,
+    ]);
+    if (
+      allocations.has(row.obligationId) ||
+      terms.has(row.obligationId) ||
+      legacyIds.has(row.obligationId) ||
+      identities.has(identity) ||
+      (row.sessionBinding.kind === "verified" && row.sessionBinding.sessionId !== row.legacyIdentity.agentSessionId) ||
+      (installation !== undefined && installation !== row.sourceInstallationId) ||
+      (manifest !== undefined && manifest !== row.sourceManifestSha256) ||
+      row.sourceRecordKeys.some((k) => k.startsWith("/") || k.split("/").includes("..") || k.includes("\\"))
+    )
+      return false;
+    installation = row.sourceInstallationId;
+    manifest = row.sourceManifestSha256;
+    legacyIds.add(row.obligationId);
+    identities.add(identity);
   }
   return true;
 }

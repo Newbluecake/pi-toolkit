@@ -65,7 +65,14 @@ export function readRetirementArchive(state: HeldDirectory, ledger?: LedgerV2): 
       bytes += evidenceFile.bytes.length + completionFile.bytes.length;
       if (bytes > L.archiveBytes) fail("archive-capacity");
       if (
-        !exactKeys(evidence, ["v", "kind", "kernel", "ledger", "eligible"]) ||
+        !exactKeys(evidence, [
+          "v",
+          "kind",
+          "kernel",
+          "ledger",
+          "eligible",
+          ...("eligibleLegacy" in evidence ? ["eligibleLegacy"] : []),
+        ]) ||
         evidence.v !== 2 ||
         evidence.kind !== "old-kernel-allocation-retirement" ||
         !exactKeys(evidence.kernel, ["bootId", "pidNamespace", "mountNamespace", "userNamespace"]) ||
@@ -91,7 +98,20 @@ export function readRetirementArchive(state: HeldDirectory, ledger?: LedgerV2): 
       // Archives survive subsequent boots, but can never release a row belonging
       // to the maintenance reader's actual current kernel.
       if (eligible.some((a) => a.kernelBootId === observed.bootId)) fail("archive-current-kernel-row");
-      if (!eligible.length || JSON.stringify(eligible) !== JSON.stringify(evidence.eligible))
+      const eligibleLegacy = (evidence.ledger.legacyObligations ?? []).filter(
+        (row) => row.kernelBinding.kind === "known" && row.kernelBinding.bootId !== archivedKernel,
+      );
+      if (
+        eligibleLegacy.some((row) => row.kernelBinding.kind !== "known" || row.kernelBinding.bootId === observed.bootId)
+      )
+        fail("archive-current-kernel-row");
+      if (
+        (eligibleLegacy.length
+          ? JSON.stringify(eligibleLegacy) !== JSON.stringify(evidence.eligibleLegacy)
+          : "eligibleLegacy" in evidence) ||
+        (!eligible.length && !eligibleLegacy.length) ||
+        JSON.stringify(eligible) !== JSON.stringify(evidence.eligible)
+      )
         fail("invalid-retirement-set");
       if (
         !exactKeys(completion, [
@@ -103,6 +123,7 @@ export function readRetirementArchive(state: HeldDirectory, ledger?: LedgerV2): 
           "beforeRevision",
           "afterRevision",
           "removedAllocationIds",
+          ...("removedLegacyObligationIds" in completion ? ["removedLegacyObligationIds"] : []),
         ]) ||
         completion.v !== 2 ||
         completion.kind !== "old-kernel-allocation-retirement-committed" ||
@@ -114,6 +135,10 @@ export function readRetirementArchive(state: HeldDirectory, ledger?: LedgerV2): 
         !Number.isSafeInteger(completion.afterRevision) ||
         ledger.revision < (completion.afterRevision as number) ||
         JSON.stringify(completion.removedAllocationIds) !== JSON.stringify(eligible.map((a) => a.allocationId)) ||
+        (eligibleLegacy.length
+          ? JSON.stringify(completion.removedLegacyObligationIds) !==
+            JSON.stringify(eligibleLegacy.map((row) => row.obligationId))
+          : "removedLegacyObligationIds" in completion) ||
         revisions.has(evidence.ledger.revision)
       )
         fail("invalid-retirement-completion");
@@ -122,6 +147,14 @@ export function readRetirementArchive(state: HeldDirectory, ledger?: LedgerV2): 
         if (removed.has(row.allocationId) || ledger.allocations.some((a) => a.allocationId === row.allocationId))
           fail("retirement-row-still-present-or-reused");
         removed.add(row.allocationId);
+      }
+      for (const row of eligibleLegacy) {
+        if (
+          removed.has(row.obligationId) ||
+          (ledger.legacyObligations ?? []).some((current) => current.obligationId === row.obligationId)
+        )
+          fail("retirement-row-still-present-or-reused");
+        removed.add(row.obligationId);
       }
       for (const file of [evidenceFile, completionFile])
         files.push({ path: `${NAME}/${name}/${file.name}`, directory: tx, file });

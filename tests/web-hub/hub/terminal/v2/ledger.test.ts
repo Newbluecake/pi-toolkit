@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { mkdtemp, mkdir, writeFile, readFile, chmod, rm, rename, symlink, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { mapRetainedObligations } from "../../../../../scripts/web-hub/terminal-v2-retained/mapping.js";
 import { createTerminalAllocationLedgerV2 } from "../../../../../src/web-hub/hub/terminal/v2/ledger.js";
 import { retireOldKernelAllocationsV2 } from "../../../../../src/web-hub/hub/terminal/v2/retirement.js";
 import type { AllocationV2, LedgerV2 } from "../../../../../src/web-hub/protocol/terminal-v2.js";
@@ -20,13 +21,24 @@ const a = (n: string, b = boot): AllocationV2 => ({
   principalKey: "lan:u1",
   creatorSidTag: "a".repeat(43),
 });
-async function fixture(allocations: AllocationV2[] = []) {
+async function fixture(allocations: AllocationV2[] = [], legacy?: LedgerV2["legacyObligations"]) {
   const root = await mkdtemp(join(tmpdir(), "v2-ledger-"));
   roots.push(root);
   await chmod(root, 0o700);
   await mkdir(join(root, "terminal-v2"), { mode: 0o700 });
-  const marker = { v: 2, storeId: id("s"), initialization: "fresh", checkpointId: id("c") };
-  const ledger: LedgerV2 = { v: 2, storeId: id("s"), revision: 0, allocations };
+  const marker = {
+    v: 2,
+    storeId: id("s"),
+    initialization: legacy === undefined ? "fresh" : "offline-retained-unknown",
+    checkpointId: id("c"),
+  };
+  const ledger: LedgerV2 = {
+    v: 2,
+    storeId: id("s"),
+    revision: 0,
+    allocations,
+    ...(legacy !== undefined ? { legacyObligations: legacy } : {}),
+  };
   const ledgerPath = join(root, "terminal-v2/ledger.json");
   await writeFile(join(root, "terminal-v2/marker.json"), JSON.stringify(marker), { mode: 0o600 });
   await writeFile(join(root, ".terminal-initialized-v2"), JSON.stringify(marker), { mode: 0o600 });
@@ -274,4 +286,72 @@ describe("old-kernel evidence retirement (simulated UUID, not real reboot)", () 
     ).toBe("retained");
     expect(JSON.parse(await readFile(f.ledgerPath, "utf8"))).toEqual(f.ledger);
   });
+});
+
+function legacyRows() {
+  return mapRetainedObligations("a".repeat(64), "b".repeat(64), [
+    {
+      identity: {
+        agentSessionId: "s",
+        termId: "legacy",
+        epoch: "e",
+        ownerInstance: "owner",
+        reservationId: "reservation",
+      },
+      recordKey: "terminal-v1/terminal-resource-fence-v1.json#resources/0",
+      sessionVerified: true,
+      bootId: boot,
+    },
+  ]);
+}
+it("plain ledger reserve/prune cannot drop or rewrite L, retained marker required and normal writer remains usable", async () => {
+  const rows = legacyRows(),
+    f = await fixture([], rows),
+    l = createTerminalAllocationLedgerV2(f.deps);
+  expect((await l.load(signal())).kind).toBe("loaded");
+  expect(await l.commit(0, { ...f.ledger, revision: 1, legacyObligations: [] }, signal())).toEqual({
+    kind: "unavailable",
+    effect: "none",
+  });
+  expect(await l.commit(0, { ...f.ledger, revision: 1, allocations: [a("a")] }, signal())).toEqual({
+    kind: "committed",
+    revision: 1,
+  });
+  expect(JSON.parse(await readFile(f.ledgerPath, "utf8")).legacyObligations).toEqual(rows);
+  const bad = await fixture([], rows);
+  const marker = JSON.parse(await readFile(join(bad.root, "terminal-v2/marker.json"), "utf8"));
+  marker.initialization = "fresh";
+  for (const file of [join(bad.root, "terminal-v2/marker.json"), join(bad.root, ".terminal-initialized-v2")])
+    await writeFile(file, JSON.stringify(marker));
+  expect(await createTerminalAllocationLedgerV2(bad.deps).load(signal())).toEqual({ kind: "unavailable" });
+});
+it("retained same boot and unknown boot never retire; simulated genuine boot change produces exact legacy CAS/completion", async () => {
+  const rows = legacyRows();
+  rows.push({
+    ...rows[0]!,
+    obligationId: "c".repeat(64),
+    legacyIdentity: { ...rows[0]!.legacyIdentity, reservationId: "unknown" },
+    kernelBinding: { kind: "unknown" },
+  });
+  const f = await fixture([], rows),
+    l = createTerminalAllocationLedgerV2(f.deps);
+  const { currentKernelEvidenceV2 } = await import("../../../../../src/web-hub/hub/terminal/v2/retirement.js");
+  const actual = await currentKernelEvidenceV2();
+  const first = await retireOldKernelAllocationsV2(
+    { ...f.deps, ledger: l, kernelEvidence: async () => ({ ...actual, bootId: boot }) },
+    signal(),
+  );
+  expect(first).toEqual({ kind: "unchanged", count: 0 });
+  const changed = await retireOldKernelAllocationsV2(
+    { ...f.deps, ledger: l, kernelEvidence: async () => ({ ...actual, bootId: old }) },
+    signal(),
+  );
+  expect(changed).toEqual({ kind: "retired", count: 1 });
+  const persisted = JSON.parse(await readFile(f.ledgerPath, "utf8"));
+  expect(persisted.legacyObligations).toEqual([rows[1]]);
+  const root = join(f.root, ".terminal-allocation-archive-v2"),
+    tx = (await readdir(root))[0]!;
+  const completion = JSON.parse(await readFile(join(root, tx, "completion.json"), "utf8"));
+  expect(completion.removedLegacyObligationIds).toEqual([rows[0]!.obligationId]);
+  expect(completion.removedAllocationIds).toEqual([]);
 });

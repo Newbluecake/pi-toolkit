@@ -1,6 +1,7 @@
 /** Single allocation set projections; no secondary slot counter and no auth authority. */
 import type {
   AllocationV2,
+  LegacyUnattributedObligationV1,
   TerminalMachineLimitsV2,
   TerminalTargetLimitsV2,
   TerminalQuotaV2,
@@ -31,22 +32,35 @@ export function quotaV2(
   session: string,
   principal: string,
   limits: TerminalMachineLimitsV2,
+  legacy: Iterable<LegacyUnattributedObligationV1> = [],
 ): TerminalQuotaV2 {
-  const all = [...allocations];
+  const all = [...allocations],
+    retained = [...legacy];
   const dimension = (rows: AllocationV2[], limit: number) => ({
     used: rows.length,
     unknown: rows.filter((a) => !hot.has(a.allocationId)).length,
     limit,
   });
+  const add = (d: ReturnType<typeof dimension>, count: number) => ({
+    ...d,
+    used: d.used + count,
+    unknown: d.unknown + count,
+  });
   return {
-    total: dimension(all, Math.min(L.hardTotal, limits.maxTotal)),
-    session: dimension(
-      all.filter((a) => a.quotaSessionKey === session),
-      limits.maxPerSession,
+    total: add(dimension(all, Math.min(L.hardTotal, limits.maxTotal)), retained.length),
+    session: add(
+      dimension(
+        all.filter((a) => a.quotaSessionKey === session),
+        limits.maxPerSession,
+      ),
+      retained.filter((r) => r.sessionBinding.kind === "unattributed" || r.sessionBinding.sessionId === session).length,
     ),
-    principal: dimension(
-      all.filter((a) => a.principalKey === principal),
-      limits.maxPerPrincipal,
+    principal: add(
+      dimension(
+        all.filter((a) => a.principalKey === principal),
+        limits.maxPerPrincipal,
+      ),
+      retained.length,
     ),
   };
 }
