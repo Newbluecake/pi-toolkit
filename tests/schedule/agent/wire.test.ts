@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, realpathSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -35,7 +35,10 @@ afterEach(() => {
 });
 
 function mkTmp(): string {
-  tmp = mkdtempSync(join(tmpdir(), "sched-a0-"));
+  // realpath (P4-B): on macOS os.tmpdir() sits behind the /var symlink and hubConfig returns the
+  // store dir's REALPATH — canonicalizing the base keeps the equality assertions identical on
+  // every platform (on Linux the realpath of a fresh /tmp dir is the same string).
+  tmp = realpathSync(mkdtempSync(join(tmpdir(), "sched-a0-")));
   return tmp;
 }
 
@@ -400,5 +403,31 @@ describe("ScheduleAgent.onChanged (#61)", () => {
     agent.changed();
     expect([a, b]).toEqual([1, 2]);
     expect(agent.onChanged(() => void a++)()).toBeUndefined(); // disposed: inert unsubscribe
+  });
+});
+
+// P4-B darwin wiring smoke (darwin plan §5.2 #6): the REAL default resolver — no identity
+// injected — must produce a usable agent on darwin: the ps/sysctl self identity and the
+// epoch-ms liveness probe reach the per-session agent exactly as wire.ts (P1) wires them.
+// Hidden spawn (darwin plan §5.1(2)): resolving the real darwin identity starts /bin/ps +
+// /usr/sbin/sysctl — this file is registered in TIER1_DECLARED (kind "proc") for that.
+describe.skipIf(process.platform !== "darwin")("darwin default identity wiring", () => {
+  it("wireSchedule with no injected identity resolves a real self and the epoch-ms probe", () => {
+    const base = mkTmp();
+    const wiring = wireSchedule({ on: vi.fn() } as never, {
+      settings: SETTINGS(join(base, "schedules")),
+      agentDir: base,
+      secure: PLAIN,
+      webHub: false,
+      current: () => undefined,
+      flockProbe: () => true,
+    });
+    const agent = wiring.createAgent({ ctx: ctxOf().ctx });
+    agents.push(agent);
+    expect(agent.self).toBeDefined();
+    expect(agent.self!.start).toBeGreaterThanOrEqual(1e11); // epoch-ms domain
+    expect(agent.probe?.startDomain).toBe("epoch-ms");
+    expect(agent.holder).toBeDefined();
+    agent.dispose();
   });
 });

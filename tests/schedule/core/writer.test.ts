@@ -17,6 +17,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { spawn } from "node:child_process";
+import { spawnLockHolder } from "../../helpers/sched-platform.js";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
@@ -438,7 +439,8 @@ describe("session-directory admission is atomic (review m1)", () => {
   it("creation happens under the store-level lock: a held .store.lock ⇒ E_BUSY, no directory created", async () => {
     E = env(T8);
     writeFileSync(join(E.storeDir, ".store.lock"), "", { mode: 0o600 });
-    const ext = spawn("flock", ["-o", "-x", join(E.storeDir, ".store.lock"), "sleep", "30"], { stdio: "ignore" });
+    // P4-B: flock(1) on Linux, perl flock(2) on darwin — the helper keeps the Linux argv byte-identical.
+    const ext = spawnLockHolder(join(E.storeDir, ".store.lock"));
     try {
       for (let i = 0; i < 200; i++) {
         const r = await E.store("sess-probe", { lockTimeoutMs: 0 }).transact(() => ({ value: 0, write: true }));
@@ -664,7 +666,7 @@ describe("report admission is single-writer (review round 2, m2)", () => {
       truncateSync(f, 65 * 1024 * 1024); // sparse: 2 × 65 MiB > the 128 MiB global byte cap
       utimesSync(f, (old + i) / 1000, (old + i) / 1000);
     }
-    const ext = spawn("flock", ["-o", "-x", join(E.storeDir, "sess-a", ".lock"), "sleep", "30"], { stdio: "ignore" });
+    const ext = spawnLockHolder(join(E.storeDir, "sess-a", ".lock"));
     try {
       for (let i = 0; i < 200; i++) {
         const probe = await E.store("sess-a", { lockTimeoutMs: 0 }).transact(() => ({ value: 0, write: false }));

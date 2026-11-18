@@ -5,7 +5,8 @@
  */
 import { createHash } from "node:crypto";
 import { manualClaim } from "../../../src/schedule/core/claim.js";
-import { holderOf, readSelfIdentity } from "../../../src/schedule/core/recovery.js";
+import { holderOf } from "../../../src/schedule/core/recovery.js";
+import { platformIdentity } from "../../helpers/sched-platform.js";
 import {
   addPendingReport,
   ensureStoreRoot,
@@ -20,7 +21,7 @@ import {
 const [storeDir, sessionId, taskId, mode] = process.argv.slice(2) as [string, string, string, string];
 const [targetPhase, targetPoint] = mode.split(":") as [string, WriterFaultPoint | undefined];
 let phase = "claim";
-const self = readSelfIdentity()!;
+const self = platformIdentity().readSelf()!;
 const holder = holderOf(self, "child");
 const store = openSessionStore({
   root: ensureStoreRoot(storeDir),

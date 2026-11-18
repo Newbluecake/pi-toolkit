@@ -11,6 +11,7 @@ import { sandboxHome } from "../../integration/helpers/home-sandbox.js";
 import { loadSettings } from "../../../src/config/settings.js";
 import type { AgentTypeRegistry } from "../../../src/config/agent-types.js";
 import { isEpochDisposed, wireSchedule } from "../../../src/schedule/agent/wire.js";
+import { fixtureSelf } from "../../helpers/sched-platform.js";
 import type { Stack } from "../../../src/stack.js";
 
 let home: ReturnType<typeof sandboxHome> | undefined;
@@ -82,9 +83,13 @@ describe("buildSessionStack × schedule", () => {
     const settings = loadSettings({});
     const agentDir = join(home!.home, ".pi", "agent");
     const { pi, ctx, types } = harness("tui", join(home!.home, "s.jsonl"));
+    // P4-B: inject the fixtures' identity (real /proc identity on Linux, the static epoch-ms
+    // stand-in on darwin) instead of the default resolver, so this suite stays free of the
+    // darwin ps/sysctl child processes.
     const wiring = wireSchedule(pi, {
       settings: { ...settings.schedule, enabled: true },
       agentDir,
+      identity: { readSelf: () => fixtureSelf() },
       secure: { kind: "plain", vaults: [], config: {} } as never,
       webHub: false,
       current: () => undefined,
@@ -112,6 +117,7 @@ describe("buildSessionStack × schedule", () => {
     const wiring = wireSchedule(pi, {
       settings: { ...settings.schedule, enabled: true },
       agentDir: join(home!.home, ".pi", "agent"),
+      identity: { readSelf: () => fixtureSelf() },
       secure: { kind: "plain", vaults: [], config: {} } as never,
       webHub: false,
       current: () => undefined,

@@ -232,6 +232,20 @@ export const TIER1_DECLARED: Readonly<Record<string, Tier1DeclaredEntry>> = {
   },
   "tests/release/web-ui-zip.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/schedule/core/fault-injection.test.ts": { kind: "proc", why: "proc:node:child_process" },
+  // P4-B (darwin plan §5.1(2) 隐藏 spawn): the darwin default-identity wiring smoke resolves
+  // the REAL ps/sysctl identity inside wireSchedule — no lexical child_process marker, registered
+  // by the human before/after marker comparison instead (store transactions' flock/perl spawns
+  // are the pre-existing hidden-spawn precedent and do not change tier ownership).
+  "tests/schedule/agent/wire.test.ts": {
+    kind: "proc",
+    why: "hidden-spawn: darwin wiring smoke resolves the real default identity (/bin/ps + /usr/sbin/sysctl)",
+  },
+  // P4-B (same rule): note.test.ts reads the live parent's start through platformProbe() — a real
+  // /bin/ps child on darwin (the judging probe is injected so the suite stays deterministic).
+  "tests/schedule/agent/note.test.ts": {
+    kind: "proc",
+    why: "hidden-spawn: platformProbe().startOf(process.ppid) starts /bin/ps on darwin",
+  },
   "tests/schedule/core/paths-backend.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/schedule/core/reader.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/schedule/core/recovery.test.ts": { kind: "proc", why: "proc:node:child_process" },

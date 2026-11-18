@@ -1,5 +1,5 @@
 /** Shared fixtures for the S1 core tests (scheduled-reports plan r3). */
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -8,7 +8,8 @@ import {
   type SessionStore,
   type SessionStoreOpts,
 } from "../../../src/schedule/core/writer.js";
-import { holderOf, readSelfIdentity, type ProcessIdentity } from "../../../src/schedule/core/recovery.js";
+import { holderOf, type ProcessIdentity } from "../../../src/schedule/core/recovery.js";
+import { fixtureSelf } from "../../helpers/sched-platform.js";
 import { initOcc } from "../../../src/schedule/core/occurrence.js";
 import {
   defHash,
@@ -22,9 +23,10 @@ import type { StoreRoot } from "../../../src/schedule/core/paths.js";
 export const SID = "019a0000-aaaa-7bbb-8ccc-dddddddddddd";
 
 export function self(): ProcessIdentity {
-  const s = readSelfIdentity();
-  if (s === undefined) throw new Error("needs /proc");
-  return s;
+  // P4-B: the /proc reader lives behind the platform helper — Linux behavior is unchanged
+  // (real identity, same "needs /proc" error); non-Linux gets a static epoch-ms identity
+  // without starting any child process.
+  return fixtureSelf();
 }
 
 export function holder(epoch = "ep-1"): Holder {
@@ -50,7 +52,11 @@ export interface Env {
 }
 
 export function env(start: number): Env {
-  const dir = mkdtempSync(join(tmpdir(), "sched-s1-"));
+  // realpath: on macOS os.tmpdir() lives behind the /var symlink, and the darwin path backend
+  // refuses symlinked ancestors; canonicalizing here keeps literal-path assertions (reader
+  // vault predicates, hubConfig realpath equality) identical on every platform. On Linux the
+  // realpath of a fresh /tmp dir is the same string.
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "sched-s1-")));
   const storeDir = join(dir, "schedules");
   const root = ensureStoreRoot(storeDir);
   const ck = clock(start);

@@ -6,7 +6,7 @@ import { absoluteReportPath } from "../../../src/schedule/agent/result-reference
 import { FakeClock } from "../../../src/core/clock.js";
 import { manualClaim } from "../../../src/schedule/core/claim.js";
 import { finishRun } from "../../../src/schedule/core/writer.js";
-import { procLivenessProbe } from "../../../src/schedule/core/recovery.js";
+import { platformProbe } from "../../helpers/sched-platform.js";
 import { SCHED_NOTE_PROOF_MAX_BYTES } from "../../../src/schedule/core/spec.js";
 import { addTask, approve, env, holder, makeTask, readOk, self, SID, type Env } from "../core/fixtures.js";
 const envs: Env[] = [];
@@ -37,6 +37,9 @@ async function fixture() {
     epoch: holder().epoch,
     self: self(),
     holder: holder(),
+    // P4-B: the production agent carries the platform probe (wire.ts P1) — /proc on Linux,
+    // ps/sysctl on darwin; without it the darwin notes could never judge a live foreign holder.
+    probe: platformProbe(),
     store: () => store,
     isDisposed: () => disposed,
     changed: vi.fn(),
@@ -223,7 +226,7 @@ describe("schedule result notes — file proof only", () => {
   it("a living different process is not even scanned, despite an oversized session file", async () => {
     const f = await fixture();
     f.idle();
-    const start = procLivenessProbe.startOf(process.ppid);
+    const start = platformProbe().startOf(process.ppid);
     if (typeof start !== "number") throw new Error("live parent identity unavailable");
     await f.store.transact((d) => {
       d.runs[0]!.noteHolder = { ...holder(), pid: process.ppid, start };

@@ -1,6 +1,6 @@
 import { closeSync, openSync } from "node:fs";
 import { join } from "node:path";
-import { spawnSync } from "node:child_process";
+import { acquireOnFd } from "../helpers/sched-platform.js";
 import { expect, it } from "vitest";
 import { FakeClock } from "../../src/core/clock.js";
 import { createSessionClock, SCHED_POLL_MS } from "../../src/schedule/agent/clock.js";
@@ -18,7 +18,8 @@ it("real kernel lock contention leaves rev unchanged; releasing only the lock le
   const task = everyTask(A);
   seedEvery(store, [task], A);
   let fd: number | undefined = openSync(join(store.root.real, store.dirName, ".lock"), "w", 0o600);
-  expect(spawnSync("flock", ["-x", "-n", "3"], { stdio: ["ignore", "ignore", "pipe", fd] }).status).toBe(0);
+  // P4-B: flock(1) on fd 3 on Linux, perl flock(2) on darwin — the helper routes by platform.
+  expect(acquireOnFd(fd)).toBe("held");
   const fired: string[] = [];
   const c = createSessionClock({
     store: { get: () => store },

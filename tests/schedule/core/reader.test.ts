@@ -162,8 +162,13 @@ describe("path safety", () => {
     // same filesystem ⇒ rename keeps every inode; the literal/real path strings still look harmless
     renameSync(join(E.dir, "a"), join(vault, "mnt", "a"));
     symlinkSync(join(vault, "mnt", "a"), join(E.dir, "a"));
-    expect(readSessionStateById(root, SID, { inVault })).toMatchObject({ kind: "degraded", reason: "vault" });
-    expect(listSessionDirs(root, { inVault })).toMatchObject({ kind: "degraded", reason: "vault" });
+    // Darwin backend (P2): an ancestor swapped for a symlink is refused at the chain snapshot
+    // check BEFORE the fd can be opened, so the observable reason is `moved` (fail closed; pinned
+    // in paths-backend.test.ts "ancestor replaced by symlink is moved"). Linux judges the OPENED
+    // fd's location against the vault predicate and reports `vault`.
+    const swappedAncestor = process.platform === "darwin" ? "moved" : "vault";
+    expect(readSessionStateById(root, SID, { inVault })).toMatchObject({ kind: "degraded", reason: swappedAncestor });
+    expect(listSessionDirs(root, { inVault })).toMatchObject({ kind: "degraded", reason: swappedAncestor });
     expect(await store.transact(() => ({ value: 0, write: true }))).toMatchObject({ ok: false, code: "E_DEGRADED" });
     // without a vault predicate the location change alone is still caught
     expect(readSessionStateById(root, SID)).toMatchObject({ kind: "degraded", reason: "moved" });
