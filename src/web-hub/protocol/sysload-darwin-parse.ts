@@ -112,6 +112,7 @@ export function parseDarwinSysctl(text: string): {
 export function parseDarwinMount(text: string): DarwinMount[] {
   if (Buffer.byteLength(text) > MAX_MOUNT_BYTES) return [];
   const lines = text.split(/\r?\n/);
+  if (lines[lines.length - 1] === "") lines.pop(); // trailing newline is not a line
   if (lines.length > MAX_MOUNT_LINES) return [];
   const mounts: DarwinMount[] = [];
   for (const line of lines) {

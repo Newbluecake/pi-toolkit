@@ -63,14 +63,15 @@ export interface SamplerIo {
   readonly realpath?: (path: string) => Promise<string>;
   readonly statfs?: (path: string, options?: { bigint?: boolean }) => Promise<StatFsLike>;
   readonly host?: SamplerHost; // 追加
-} // 追加
+}
 // ── C0:END ──
 `;
 
 describe("sysload darwin C0 contract copy (S0 side)", () => {
-  it("holds the C0:BEGIN/END-marked block verbatim (the C0-1 diff gate extracts exactly this)", () => {
-    expect(C0_SAMPLER_HOST_CONTRACT).toContain("// ── C0:BEGIN ──");
-    expect(C0_SAMPLER_HOST_CONTRACT).toContain("// ── C0:END ──");
+  it("holds the C0-marked block verbatim (the C0-1 diff gate extracts exactly this)", () => {
+    // Marker literals are split so the C0-1 sed range does not reopen on this assertion block.
+    expect(C0_SAMPLER_HOST_CONTRACT).toContain("// ── C0:" + "BEGIN ──");
+    expect(C0_SAMPLER_HOST_CONTRACT).toContain("// ── C0:" + "END ──");
     expect(C0_SAMPLER_HOST_CONTRACT).toContain('readonly kind: "darwin";');
     expect(C0_SAMPLER_HOST_CONTRACT).toContain("readHost(opts: { timeoutMs: number })");
     expect(C0_SAMPLER_HOST_CONTRACT).toContain("listProcesses(opts: {");
