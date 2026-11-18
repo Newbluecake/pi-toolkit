@@ -50,6 +50,10 @@ async function readJson(response: Response, signal: AbortSignal): Promise<unknow
   if (reader) {
     const chunks: Uint8Array[] = [];
     let size = 0;
+    const cancel = () => {
+      void reader.cancel().catch(() => {});
+    };
+    signal.addEventListener("abort", cancel, { once: true });
     try {
       while (true) {
         if (signal.aborted) throw new Error("cancelled");
@@ -67,6 +71,7 @@ async function readJson(response: Response, signal: AbortSignal): Promise<unknow
       }
       return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
     } finally {
+      signal.removeEventListener("abort", cancel);
       void reader.cancel().catch(() => {});
       reader.releaseLock();
     }
@@ -150,6 +155,12 @@ export function createTerminalTransportV2(deps: {
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     try {
       if (signal?.aborted) throw new TerminalViewErrorV2("E_DEADLINE", "unknown");
+      const deadline = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          abort.abort();
+          reject(new TerminalViewErrorV2("E_DEADLINE", "unknown"));
+        }, TERMINAL_V2_LIMITS.httpMs);
+      });
       const response = await Promise.race([
         deps.fetch(TERMINAL_V2_HTTP_PATHS.view, {
           method: "POST",
@@ -158,14 +169,8 @@ export function createTerminalTransportV2(deps: {
           body: JSON.stringify(body),
           signal: abort.signal,
         }),
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(() => {
-            abort.abort();
-            reject(new TerminalViewErrorV2("E_DEADLINE", "unknown"));
-          }, TERMINAL_V2_LIMITS.httpMs);
-        }),
+        deadline,
       ]);
-      clearTimeout(timer);
       if (response.status === 401) deps.onConn("auth");
       const contentType = response.headers.get("Content-Type")?.split(";", 1)[0]?.trim().toLowerCase();
       const encoding = response.headers.get("Content-Encoding")?.trim().toLowerCase();
@@ -173,16 +178,19 @@ export function createTerminalTransportV2(deps: {
         let code: TerminalFailureV2["code"] = response.status === 401 ? "E_AUTH" : "E_UNAVAILABLE";
         let effect: "none" | "unknown" = response.status === 401 ? "none" : "unknown";
         try {
-          const raw = await readJson(response, abort.signal);
+          const raw = await Promise.race([readJson(response, abort.signal), deadline]);
           if (terminalResponseV2Ok("ack", raw) && !raw.ok) {
             code = raw.code;
             effect = raw.effect;
           }
-        } catch {
+        } catch (error) {
+          if (error instanceof TerminalViewErrorV2 && error.code === "E_DEADLINE") throw error;
           // A pre-header JSON error is optional; never turn its failure into a retry.
         }
         throw new TerminalViewErrorV2(code, effect);
       }
+      // Only a valid NDJSON response becomes a long-lived stream; the header budget ends here.
+      clearTimeout(timer);
       reader = response.body?.getReader();
       if (!reader) throw new TerminalViewErrorV2("E_UNAVAILABLE", "unknown");
       const decoder = new TextDecoder("utf-8", { fatal: true });

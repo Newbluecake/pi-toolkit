@@ -55,6 +55,7 @@ interface ViewContextV2 {
   replayEnd: number;
   replayComplete: boolean;
   replayAcked: boolean;
+  readyReceived: boolean;
   ready: boolean;
   renderedOffset: number;
   output: Promise<void>;
@@ -67,6 +68,26 @@ interface ViewContextV2 {
   resizeFlight: Promise<void> | null;
   resizeAgain: boolean;
   attachTimer: ReturnType<typeof setTimeout>;
+}
+
+interface IntentTokenV2 {
+  readonly generation: number;
+}
+
+interface CallOptionsV2 {
+  intent?: IntentTokenV2;
+  view?: ViewContextV2;
+  /** An already-sent create remains queryable after collapse/dispose, without UI authority. */
+  creation?: { requestId: string; hubInstance: string };
+}
+
+interface CallAuthorityV2 {
+  readonly lifecycle: number;
+  readonly scope: TerminalScopeV2;
+  readonly hubInstance: string | undefined;
+  readonly intent?: IntentTokenV2;
+  readonly view?: ViewContextV2;
+  readonly creation?: { requestId: string; hubInstance: string };
 }
 
 const asFailure = (error: unknown): ControllerFailureV2 => {
@@ -112,8 +133,10 @@ export function createTerminalControllerV2(deps: {
     gap: null as { from: number; to: number } | null,
     exitCode: null as number | null,
     creating: false,
+    creationUnsettled: false,
   });
   let disposed = false;
+  let lifecycleGeneration = 0;
   let view: ViewContextV2 | undefined;
   let viewGeneration = 0;
   let opening: Promise<boolean> | undefined;
@@ -123,6 +146,8 @@ export function createTerminalControllerV2(deps: {
   let pendingRequestIds = new Set<string>();
 
   function persist(): void {
+    if (disposed) return;
+    state.creationUnsettled = pendingRequestIds.size > 0;
     saveTerminalV2Restore(
       deps.storage,
       scope,
@@ -149,7 +174,19 @@ export function createTerminalControllerV2(deps: {
     state.error = failure.effect === "unknown" ? `${failure.code} · effect unknown` : failure.code;
   }
 
+  function intentCurrent(token: IntentTokenV2): boolean {
+    return !disposed && state.open && token.generation === lifecycleGeneration;
+  }
+
+  function captureIntent(): IntentTokenV2 {
+    return { generation: lifecycleGeneration };
+  }
+
   function revoke(): void {
+    if (disposed) return;
+    lifecycleGeneration++;
+    opening = undefined;
+    state.open = false;
     clearTimeout(reconnectTimer);
     reconnectPending = false;
     invalidateView();
@@ -158,17 +195,46 @@ export function createTerminalControllerV2(deps: {
     state.activeTermId = null;
     state.metadata = null;
     state.gap = null;
-    pendingRequestIds.clear();
+    // Keep unresolved create IDs as resource facts; auth revocation is not proof of no fork.
+    persist();
     deps.revoked?.();
+  }
+
+  function authorityCurrent(authority: CallAuthorityV2): boolean {
+    if (authority.scope !== scope) return false;
+    if (authority.creation) {
+      return (
+        pendingRequestIds.has(authority.creation.requestId) && state.hubInstance === authority.creation.hubInstance
+      );
+    }
+    if (
+      disposed ||
+      authority.lifecycle !== lifecycleGeneration ||
+      state.hubInstance !== authority.hubInstance ||
+      (authority.intent !== undefined && !intentCurrent(authority.intent)) ||
+      (authority.view !== undefined && !owns(authority.view))
+    )
+      return false;
+    return true;
   }
 
   async function call<K extends TerminalJsonOpV2>(
     op: K,
     fields: Fields<K>,
-    hubInstance = state.hubInstance,
+    options: CallOptionsV2 = {},
   ): Promise<TerminalHttpResultsV2[K]> {
-    const body = {
+    const hubInstance = options.creation?.hubInstance ?? state.hubInstance;
+    const authority: CallAuthorityV2 = {
+      lifecycle: lifecycleGeneration,
       scope,
+      hubInstance,
+      ...(options.intent !== undefined ? { intent: options.intent } : {}),
+      ...(options.view !== undefined ? { view: options.view } : {}),
+      ...(options.creation !== undefined ? { creation: { ...options.creation } } : {}),
+    };
+    if (!authorityCurrent(authority)) throw new ControllerFailureV2("E_STALE", "none");
+    const body = {
+      scope: authority.scope,
       ...(op === "list" ? {} : { hubInstance }),
       ...fields,
     } as unknown as TerminalHttpRequestsV2[K];
@@ -178,12 +244,17 @@ export function createTerminalControllerV2(deps: {
     try {
       raw = await deps.transport.request(op, body);
     } catch (error) {
+      if (!authorityCurrent(authority)) throw new ControllerFailureV2("E_STALE", "unknown");
       throw asFailure(error);
     }
+    // Two connections have no global ordering. Current is checked before ANY error/revoke/state effect.
+    if (!authorityCurrent(authority)) throw new ControllerFailureV2("E_STALE", "unknown");
     if (!terminalResponseV2Ok(op, raw)) throw new ControllerFailureV2("E_UNAVAILABLE", "unknown");
     if (!raw.ok) {
-      if (["E_AUTH", "E_REVOKING", "E_SESSION_CHANGED", "E_PRIVACY"].includes(raw.code)) revoke();
-      if (raw.code === "E_HUB_CHANGED") invalidateView();
+      if (!authority.creation) {
+        if (["E_AUTH", "E_REVOKING", "E_SESSION_CHANGED", "E_PRIVACY"].includes(raw.code)) revoke();
+        if (raw.code === "E_HUB_CHANGED") invalidateView();
+      }
       throw new ControllerFailureV2(raw.code, raw.effect);
     }
     return raw;
@@ -197,8 +268,11 @@ export function createTerminalControllerV2(deps: {
       quota: TerminalQuotaV2;
     },
     hubInstance?: string,
-  ): void {
-    if (hubInstance !== undefined && state.hubInstance !== undefined && state.hubInstance !== hubInstance) {
+  ): boolean {
+    const hubChanged =
+      hubInstance !== undefined && state.hubInstance !== undefined && state.hubInstance !== hubInstance;
+    if (!hubChanged && tabs.revision < state.revision) return false;
+    if (hubChanged) {
       invalidateView();
       state.activeTermId = null;
       pendingRequestIds.clear();
@@ -218,10 +292,11 @@ export function createTerminalControllerV2(deps: {
       state.activeTermId = null;
     }
     persist();
+    return true;
   }
 
-  async function refreshList(): Promise<void> {
-    const result = await call("list", {});
+  async function refreshList(intent?: IntentTokenV2): Promise<void> {
+    const result = await call("list", {}, intent ? { intent } : {});
     applyTabs(result, result.hubInstance);
   }
 
@@ -258,9 +333,18 @@ export function createTerminalControllerV2(deps: {
       if (deps.hidden?.()) return;
       const delay = [1000, 2000, 4000, 8000, 16000][Math.min(reconnectAttempts, 4)] ?? 30_000;
       reconnectTimer = setTimeout(() => {
+        if (disposed || !state.open || state.activeTermId !== termId) {
+          reconnectPending = false;
+          return;
+        }
+        // The event may have been missed while the timer was queued; recheck at fire time.
+        if (deps.hidden?.()) {
+          reconnectPending = true;
+          return;
+        }
         reconnectPending = false;
         reconnectAttempts++;
-        if (state.open && state.activeTermId === termId) void attachActive(termId, true).catch(() => {});
+        void attachActive(termId, true).catch(() => {});
       }, delay);
     };
     schedule();
@@ -279,12 +363,16 @@ export function createTerminalControllerV2(deps: {
 
   async function acknowledge(context: ViewContextV2, offset: number, replayComplete = false): Promise<void> {
     if (!context.viewId) throw new ControllerFailureV2("E_VIEW_CHANGED", "unknown");
-    const result = await call("ack", {
-      termId: context.termId,
-      viewId: context.viewId,
-      offset,
-      ...(replayComplete ? { replayComplete: true as const } : {}),
-    });
+    const result = await call(
+      "ack",
+      {
+        termId: context.termId,
+        viewId: context.viewId,
+        offset,
+        ...(replayComplete ? { replayComplete: true as const } : {}),
+      },
+      { view: context },
+    );
     if (!owns(context) || result.offset !== offset) throw new ControllerFailureV2("E_VIEW_CHANGED", "unknown");
   }
 
@@ -294,9 +382,31 @@ export function createTerminalControllerV2(deps: {
       await acknowledge(context, context.replayEnd, true);
       if (!owns(context)) return;
       context.replayAcked = true;
+      maybeReady(context);
     });
-    context.output = work.catch(() => {});
+    // Do not park the renderer queue behind an independent ACK HTTP response.
     void work.catch((error) => failView(context, error));
+  }
+
+  function maybeReady(context: ViewContextV2): void {
+    if (!owns(context) || context.ready || !context.replayAcked || !context.readyReceived) return;
+    context.ready = true;
+    state.phase = "ready";
+    state.writable = currentRow(context.termId)?.state === "live";
+    state.notice = "";
+    state.error = "";
+    reconnectAttempts = 0;
+    reconnectPending = false;
+    clearTimeout(reconnectTimer);
+    // Live frames may have arrived behind early ready while the replay ACK response was in flight.
+    if (context.renderedOffset > context.replayEnd) {
+      const work = context.output.then(async () => {
+        if (owns(context)) await acknowledge(context, context.renderedOffset);
+      });
+      context.output = work.catch(() => {});
+      void work.catch((error) => failView(context, error));
+    }
+    void resize().catch((error) => failView(context, error));
   }
 
   function handleFrame(context: ViewContextV2, frame: TerminalViewFrameV2): void {
@@ -323,10 +433,10 @@ export function createTerminalControllerV2(deps: {
       const bytes = decodeOutput(frame);
       if (
         frame.offset !== context.offset ||
-        (context.replayComplete && !context.ready) ||
+        (context.replayComplete && !context.readyReceived) ||
         context.queuedBytes + bytes.byteLength > TERMINAL_V2_LIMITS.viewPendingBytes ||
         context.queuedItems >= 128 ||
-        (!context.ready && context.offset + bytes.byteLength > context.replayEnd)
+        (!context.readyReceived && context.offset + bytes.byteLength > context.replayEnd)
       )
         throw new ControllerFailureV2("E_UNAVAILABLE", "unknown");
       context.offset += bytes.byteLength;
@@ -373,18 +483,11 @@ export function createTerminalControllerV2(deps: {
       return;
     }
     if (frame.t === "ready") {
-      if (!context.replayComplete || !context.replayAcked || frame.offset !== context.replayEnd || context.ready)
+      if (!context.replayComplete || frame.offset !== context.replayEnd || context.readyReceived)
         throw new ControllerFailureV2("E_NOT_READY", "unknown");
-      context.ready = true;
-      context.renderedOffset = context.replayEnd;
-      state.phase = "ready";
-      state.writable = currentRow(context.termId)?.state === "live";
-      state.notice = "";
-      state.error = "";
-      reconnectAttempts = 0;
-      reconnectPending = false;
-      clearTimeout(reconnectTimer);
-      void resize().catch((error) => failView(context, error));
+      // NDJSON and ACK HTTP are independent; receiving ready first is valid and bounded.
+      context.readyReceived = true;
+      maybeReady(context);
       return;
     }
     if (frame.t === "tabs") {
@@ -454,6 +557,7 @@ export function createTerminalControllerV2(deps: {
       replayEnd: 0,
       replayComplete: false,
       replayAcked: false,
+      readyReceived: false,
       ready: false,
       renderedOffset: 0,
       output: Promise.resolve(),
@@ -513,57 +617,68 @@ export function createTerminalControllerV2(deps: {
     if (!owns(context)) throw new ControllerFailureV2("E_VIEW_CHANGED", "none");
   }
 
-  async function queryCreation(requestId: string): Promise<string | undefined> {
-    const result = await call("creation", { requestId });
+  async function queryCreation(requestId: string, intent: IntentTokenV2): Promise<string | undefined> {
+    const hubInstance = state.hubInstance;
+    if (!hubInstance) return undefined;
+    const result = await call("creation", { requestId }, { creation: { requestId, hubInstance } });
+    const recordCurrent = pendingRequestIds.has(requestId) && state.hubInstance === hubInstance;
     if (result.outcome === "created") {
-      pendingRequestIds.delete(requestId);
-      persist();
+      if (recordCurrent) {
+        pendingRequestIds.delete(requestId);
+        persist();
+      }
       return result.termId;
     }
     if (result.outcome === "failed") {
-      pendingRequestIds.delete(requestId);
-      state.error = result.code;
-      persist();
+      if (recordCurrent) {
+        pendingRequestIds.delete(requestId);
+        persist();
+      }
+      if (intentCurrent(intent)) state.error = result.code;
       return undefined;
     }
-    state.notice = result.outcome === "pending" ? "createPending" : "createUnknown";
-    persist();
+    if (intentCurrent(intent)) state.notice = result.outcome === "pending" ? "createPending" : "createUnknown";
+    if (recordCurrent) persist();
     return undefined;
   }
 
-  async function reconcilePending(): Promise<string | undefined> {
-    if (!state.hubInstance) return undefined;
+  async function reconcilePending(intent: IntentTokenV2): Promise<string | undefined> {
+    if (!intentCurrent(intent) || !state.hubInstance) return undefined;
     const restore = loadTerminalV2Restore(deps.storage, scope, now());
     if (restore?.hubInstance === state.hubInstance) {
       for (const id of restore.pendingRequestIds) pendingRequestIds.add(id);
     }
     for (const requestId of [...pendingRequestIds]) {
       try {
-        const termId = await queryCreation(requestId);
+        const termId = await queryCreation(requestId, intent);
+        if (!intentCurrent(intent)) return undefined;
         if (termId) {
-          await refreshList();
-          return termId;
+          await refreshList(intent);
+          return intentCurrent(intent) ? termId : undefined;
         }
         if (pendingRequestIds.has(requestId)) return undefined;
       } catch (error) {
-        setError(error);
-        state.notice = "createUnknown";
+        if (intentCurrent(intent)) {
+          setError(error);
+          state.notice = "createUnknown";
+        }
         return undefined;
       }
     }
     return undefined;
   }
 
-  async function create(mode: "ensure-empty" | "new"): Promise<boolean> {
-    if (state.creating || !state.hubInstance || disposed) return false;
+  async function create(mode: "ensure-empty" | "new", intent: IntentTokenV2): Promise<boolean> {
+    if (state.creating || !state.hubInstance || !intentCurrent(intent) || pendingRequestIds.size > 0) return false;
     state.creating = true;
     const requestId = makeId();
+    const hubInstance = state.hubInstance;
     pendingRequestIds.add(requestId);
     persist();
     try {
       let termId: string | undefined;
       try {
-        const result = await call("create", { requestId, mode, ...deps.renderer.dimensions() });
+        const result = await call("create", { requestId, mode, ...deps.renderer.dimensions() }, { intent });
         if (result.requestId !== requestId) throw new ControllerFailureV2("E_UNAVAILABLE", "unknown");
         termId = result.termId;
       } catch (error) {
@@ -573,19 +688,22 @@ export function createTerminalControllerV2(deps: {
           persist();
           throw failure;
         }
-        state.notice = "createUnknown";
-        termId = await queryCreation(requestId);
+        // The POST may have been accepted even if this panel collapsed or unmounted.
+        if (intentCurrent(intent)) state.notice = "createUnknown";
+        termId = await queryCreation(requestId, intent);
       }
+      if (!intentCurrent(intent)) return false;
       if (!termId) {
-        if (!pendingRequestIds.has(requestId)) pendingRequestIds.delete(requestId);
         persist();
         return false;
       }
       pendingRequestIds.delete(requestId);
-      await refreshList();
+      persist();
+      await refreshList(intent);
+      if (!intentCurrent(intent) || state.hubInstance !== hubInstance) return false;
       state.activeTermId = termId;
       persist();
-      if (state.open && currentRow(termId)) await attachActive(termId);
+      if (currentRow(termId)) await attachActive(termId);
       return true;
     } finally {
       state.creating = false;
@@ -595,10 +713,11 @@ export function createTerminalControllerV2(deps: {
 
   async function openOrRestore(allowCreate: boolean): Promise<boolean> {
     if (opening) return opening;
-    opening = (async () => {
-      if (disposed) return false;
+    if (disposed) return false;
+    state.open = true;
+    const intent = captureIntent();
+    const flight = (async () => {
       const restore = loadTerminalV2Restore(deps.storage, scope, now());
-      state.open = true;
       state.busy = true;
       state.error = "";
       state.notice = "";
@@ -612,14 +731,17 @@ export function createTerminalControllerV2(deps: {
         state.activeTermId = null;
       }
       try {
-        await refreshList();
+        await refreshList(intent);
+        if (!intentCurrent(intent)) return false;
         const restoredOtherHub = restore?.hubInstance != null && restore.hubInstance !== state.hubInstance;
         if (restoredOtherHub) {
           state.activeTermId = null;
           pendingRequestIds.clear();
           state.notice = "hubChanged";
         }
-        const restoredId = restoredOtherHub ? undefined : await reconcilePending();
+        const hadUnresolved = pendingRequestIds.size > 0;
+        const restoredId = restoredOtherHub ? undefined : await reconcilePending(intent);
+        if (!intentCurrent(intent)) return false;
         if (restoredId) state.activeTermId = restoredId;
         if (state.activeTermId && !currentRow()) state.activeTermId = null;
         if (
@@ -640,37 +762,52 @@ export function createTerminalControllerV2(deps: {
           await attachActive(state.activeTermId);
           return true;
         }
-        if (allowCreate && pendingRequestIds.size === 0) return create("ensure-empty");
+        // Querying/failing an old intent never becomes permission to mint a replacement in the same action.
+        if (allowCreate && !hadUnresolved && pendingRequestIds.size === 0) return await create("ensure-empty", intent);
         state.phase = "idle";
         persist();
         return true;
       } catch (error) {
-        if (!disposed) setError(error);
-        state.phase = state.open ? "disconnected" : "idle";
+        if (intentCurrent(intent)) {
+          setError(error);
+          state.phase = "disconnected";
+        }
         return false;
       } finally {
-        state.busy = false;
-        persist();
+        if (intentCurrent(intent)) {
+          state.busy = false;
+          persist();
+        }
       }
-    })().finally(() => {
-      opening = undefined;
+    })();
+    opening = flight;
+    return flight.finally(() => {
+      if (opening === flight) opening = undefined;
     });
-    return opening;
   }
 
   async function newTerminal(): Promise<boolean> {
-    if (state.busy || state.creating || disposed) return false;
+    if (state.busy || disposed || !state.open) return false;
+    const intent = captureIntent();
     state.busy = true;
     state.error = "";
     state.notice = "";
     try {
-      if (!state.hubInstance) await refreshList();
-      return await create("new");
+      if (!state.hubInstance) await refreshList(intent);
+      if (!intentCurrent(intent)) return false;
+      if (pendingRequestIds.size > 0 || state.creating) {
+        await reconcilePending(intent);
+        return false;
+      }
+      return await create("new", intent);
     } catch (error) {
-      setError(error);
+      if (intentCurrent(intent)) setError(error);
       return false;
     } finally {
-      state.busy = false;
+      if (intentCurrent(intent)) {
+        state.busy = false;
+        persist();
+      }
     }
   }
 
@@ -693,46 +830,54 @@ export function createTerminalControllerV2(deps: {
     const name = normalizeTerminalNameV2(rawName);
     const row = currentRow(termId);
     if (!name || !row || state.busy || disposed) return false;
+    const actionGeneration = lifecycleGeneration;
     state.busy = true;
     state.error = "";
     try {
       const result = await call("rename", { termId, name });
+      if (result.revision < state.revision) return false;
       const index = state.rows.findIndex((item) => item.termId === termId);
       if (index >= 0) state.rows[index] = result.row;
       state.revision = result.revision;
       return true;
     } catch (error) {
-      setError(error);
+      if (!disposed && actionGeneration === lifecycleGeneration) setError(error);
       return false;
     } finally {
-      state.busy = false;
+      if (!disposed && actionGeneration === lifecycleGeneration) state.busy = false;
     }
   }
 
   async function close(termId: string): Promise<boolean> {
     if (state.busy || disposed) return false;
+    const actionGeneration = lifecycleGeneration;
     state.busy = true;
     state.error = "";
     try {
       if (state.activeTermId === termId) invalidateView();
       await call("close", { termId });
       await refreshList();
+      if (disposed || !state.open) return false;
       if (state.activeTermId === termId) state.activeTermId = null;
       state.phase = "idle";
       persist();
       return true;
     } catch (error) {
-      setError(error);
+      if (!disposed && actionGeneration === lifecycleGeneration) setError(error);
       return false;
     } finally {
-      state.busy = false;
+      if (!disposed && actionGeneration === lifecycleGeneration) state.busy = false;
     }
   }
 
   async function queryInput(context: ViewContextV2, seq: number): Promise<boolean> {
     if (!context.viewId || !owns(context)) return false;
     // Closed query branch: deliberately no bytesB64/kind, no new seq/view and no PTY replay.
-    const result = await call("input", { termId: context.termId, viewId: context.viewId, seq, queryOnly: true });
+    const result = await call(
+      "input",
+      { termId: context.termId, viewId: context.viewId, seq, queryOnly: true },
+      { view: context },
+    );
     if (!owns(context) || result.acceptedThrough < seq) return false;
     context.nextInputSeq = result.acceptedThrough + 1;
     return true;
@@ -745,13 +890,17 @@ export function createTerminalControllerV2(deps: {
       if (!owns(context) || !context.ready || !state.writable || !context.viewId) return;
       const seq = context.nextInputSeq;
       try {
-        const result = await call("input", {
-          termId: context.termId,
-          viewId: context.viewId,
-          seq,
-          bytesB64: btoa(String.fromCharCode(...bytes)),
-          kind,
-        });
+        const result = await call(
+          "input",
+          {
+            termId: context.termId,
+            viewId: context.viewId,
+            seq,
+            bytesB64: btoa(String.fromCharCode(...bytes)),
+            kind,
+          },
+          { view: context },
+        );
         if (!owns(context) || result.acceptedThrough < seq) return;
         context.nextInputSeq = result.acceptedThrough + 1;
       } catch (error) {
@@ -801,12 +950,16 @@ export function createTerminalControllerV2(deps: {
         if (!owns(context) || !context.ready || !context.viewId) return;
         const seq = context.nextResizeSeq++;
         try {
-          const result = await call("resize", {
-            termId: context.termId,
-            viewId: context.viewId,
-            seq,
-            ...deps.renderer.dimensions(),
-          });
+          const result = await call(
+            "resize",
+            {
+              termId: context.termId,
+              viewId: context.viewId,
+              seq,
+              ...deps.renderer.dimensions(),
+            },
+            { view: context },
+          );
           if (result.acceptedThrough < seq) throw new ControllerFailureV2("E_UNAVAILABLE", "unknown");
         } catch (error) {
           failView(context, error);
@@ -824,6 +977,8 @@ export function createTerminalControllerV2(deps: {
 
   function collapse(): void {
     if (disposed) return;
+    lifecycleGeneration++;
+    opening = undefined;
     state.open = false;
     state.busy = false;
     clearTimeout(reconnectTimer);
@@ -867,9 +1022,23 @@ export function createTerminalControllerV2(deps: {
       reconnectAttempts = 0;
       return select(termId);
     },
+    cancelIntent() {
+      if (disposed) return;
+      lifecycleGeneration++;
+      opening = undefined;
+      state.open = false;
+      state.busy = false;
+      clearTimeout(reconnectTimer);
+      reconnectPending = false;
+      invalidateView();
+      state.phase = "idle";
+      persist();
+    },
     dispose() {
       if (disposed) return;
       persist();
+      lifecycleGeneration++;
+      opening = undefined;
       disposed = true;
       clearTimeout(reconnectTimer);
       invalidateView();

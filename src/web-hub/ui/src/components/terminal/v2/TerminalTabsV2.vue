@@ -100,7 +100,6 @@ defineExpose({ beginRename });
           v-model="draft"
           class="terminal-v2-rename-input"
           type="text"
-          maxlength="24"
           :aria-label="t('terminalV2.renameLabel', { name: row.name })"
           :aria-invalid="nameError"
           @keydown.enter.prevent.stop="commitRename"

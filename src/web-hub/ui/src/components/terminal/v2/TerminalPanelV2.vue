@@ -93,6 +93,7 @@ const controller = createTerminalControllerV2({
   transport: props.transport,
   scope: props.scope,
   ...(restoreStorage !== undefined ? { storage: restoreStorage } : {}),
+  hidden: () => document.hidden,
   revoked() {
     confirmRow.value = null;
     paste.value = null;
@@ -123,7 +124,7 @@ const controller = createTerminalControllerV2({
 });
 const state = controller.state;
 const activeRow = computed(() => state.rows.find((row) => row.termId === state.activeTermId));
-const canCreate = computed(() => terminalCanCreateV2(state.quota) && !state.creating);
+const canCreate = computed(() => terminalCanCreateV2(state.quota) && !state.creating && !state.creationUnsettled);
 const quotaFull = computed(() => !!state.quota && !terminalCanCreateV2(state.quota));
 const errorText = computed(() => (state.error.startsWith("E_LIMIT") ? t("terminalV2.limit") : state.error));
 const noticeText = computed(() => {
@@ -156,7 +157,7 @@ function rendererState(next: WebglUiState): void {
   }
   if (next.phase === "reopen-required" || next.phase === "unavailable") {
     removeInput();
-    controller.detach();
+    controller.cancelIntent();
     state.error = next.reason;
   }
 }
