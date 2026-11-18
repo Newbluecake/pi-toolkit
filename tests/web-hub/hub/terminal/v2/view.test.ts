@@ -261,6 +261,29 @@ describe("terminal v2 exact writer/rendered ACK/seq", () => {
       f.dispose();
     }
   });
+  it("fresh auth may shorten but never extend the original parent-expiry hard timer", async () => {
+    for (const change of ["shorter", "longer"] as const) {
+      vi.setSystemTime(0);
+      const f = setup();
+      if (change === "longer") f.id.parentExpiresAt = 55_100;
+      const { writer } = await f.open();
+      await ready(f, writer);
+      f.revalidate.mockImplementation(async (id) => ({
+        ok: true,
+        identity: { ...id, parentExpiresAt: change === "shorter" ? Date.now() + 100 : 1_000_000 },
+      }));
+      for (let i = 0; i < 11; i++) {
+        await vi.advanceTimersByTimeAsync(5000);
+        await f.views.ack(f.id, { ...writer, offset: 0 }, signal());
+      }
+      expect(f.revalidate).toHaveBeenCalledOnce();
+      expect(f.sink.close).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(120);
+      expect(f.sink.close).toHaveBeenCalledOnce();
+      expect(f.service.close).not.toHaveBeenCalled();
+      f.dispose();
+    }
+  });
   it("hard expiry is not extended by active ACK/query; unstarted handles expire and release only themselves", async () => {
     const f = setup();
     f.id.parentExpiresAt = 100;

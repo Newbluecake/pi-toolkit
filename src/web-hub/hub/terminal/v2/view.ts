@@ -154,6 +154,7 @@ export function createTerminalViewsV2(deps: TerminalViewDepsV2): TerminalViewsV2
     private sentRaw: Array<{ start: number; end: number }> = [];
     private sentFrames: Array<{ offset: number; size: number }> = [];
     private sentSize = 0;
+    private hardExpiry: number;
     private lastProgress = now();
     private lastAck = now();
     private lastPing = now();
@@ -168,6 +169,7 @@ export function createTerminalViewsV2(deps: TerminalViewDepsV2): TerminalViewsV2
       id: AuthIdentity,
     ) {
       this.identity = Object.freeze({ ...id, ...(id.lan ? { lan: Object.freeze({ ...id.lan }) } : {}) });
+      this.hardExpiry = id.parentExpiresAt;
       const snapshot = runtime.snapshot();
       const requested = request.offset ?? snapshot.start;
       if (requested > snapshot.end) throw new TerminalV2Fault(fail("E_BAD_REQUEST"));
@@ -207,7 +209,7 @@ export function createTerminalViewsV2(deps: TerminalViewDepsV2): TerminalViewsV2
         input.termId !== this.runtime.termId ||
         !sameScope(input.scope, this.request.scope) ||
         !sameIdentity(this.identity, id) ||
-        now() >= this.identity.parentExpiresAt
+        now() >= this.hardExpiry
       )
         throw new TerminalV2Fault(fail("E_VIEW_CHANGED"));
     }
@@ -267,7 +269,7 @@ export function createTerminalViewsV2(deps: TerminalViewDepsV2): TerminalViewsV2
     deliver(frame: TerminalViewFrameV2): void {
       try {
         deps.auth.check(this.identity, deps.auth.revision);
-        if (!this.runtime.current() || this.runtime.invalidated.aborted || now() >= this.identity.parentExpiresAt) {
+        if (!this.runtime.current() || this.runtime.invalidated.aborted || now() >= this.hardExpiry) {
           this.detach();
           return;
         }
@@ -355,7 +357,7 @@ export function createTerminalViewsV2(deps: TerminalViewDepsV2): TerminalViewsV2
       this.timer = undefined;
       if (this.closed) return;
       const due = Math.min(
-        this.identity.parentExpiresAt,
+        this.hardExpiry,
         this.lastAck + L.writerIdleMs,
         this.lastPing + L.pingMs,
         this.lastAuth + L.authRecheckMs,
@@ -367,7 +369,7 @@ export function createTerminalViewsV2(deps: TerminalViewDepsV2): TerminalViewsV2
       this.timer = undefined;
       if (this.closed) return;
       if (
-        now() >= this.identity.parentExpiresAt ||
+        now() >= this.hardExpiry ||
         now() - this.lastAck >= L.writerIdleMs ||
         ((this.sentRaw.length || this.queue.some((item) => item.raw > 0)) && now() - this.lastProgress >= L.viewerMs)
       ) {
@@ -424,6 +426,8 @@ export function createTerminalViewsV2(deps: TerminalViewDepsV2): TerminalViewsV2
             return;
           }
           deps.auth.check(result.identity, revision);
+          this.hardExpiry = Math.min(this.hardExpiry, result.identity.parentExpiresAt);
+          this.arm();
           return;
         }
         this.detach();
