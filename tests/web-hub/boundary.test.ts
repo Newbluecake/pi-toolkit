@@ -469,6 +469,24 @@ describe("web-hub boundary", () => {
     }
     expect(offenders, offenders.join("; ")).toEqual([]);
   });
+
+  /**
+   * scheduled-reports Darwin P1 (darwin-plan §3.P1 测试, review #3): the identity probe is a NEW
+   * protocol file carrying `node:child_process` — discovery (the arrayContaining case above) is not a
+   * per-file closure guarantee, so pin its COMPLETE import surface here, type-only included:
+   * exactly `node:child_process` + `node:os`, zero relative imports (it must not type-import
+   * schedule/core either — recovery consumes it structurally). This only tightens the boundary.
+   */
+  it("sched-identity.ts imports exactly node:child_process + node:os and no relative path (schedule Darwin P1)", () => {
+    const actual = scanImports(resolve(ROOT, "src/web-hub/protocol/sched-identity.ts")).map((ref) => ({
+      spec: ref.spec,
+      typeOnly: ref.typeOnly,
+    }));
+    expect(actual).toEqual([
+      { spec: "node:child_process", typeOnly: false },
+      { spec: "node:os", typeOnly: false },
+    ]);
+  });
 });
 
 describe("web-hub boundary import scanner (worktree-diff §5 D1 #12 fix 1a/1b/1c)", () => {

@@ -25,6 +25,7 @@ import { systemClock, type Clock } from "../../core/clock.js";
 import type { ScheduleSettings } from "../../config/settings.js";
 import { legacyConsultForkDir } from "../../runtime/legacy-consult-forks.js";
 import { canonicalPath, inVaultDir, type SecureDomain } from "../../secure/domain.js";
+import { createDarwinIdentity } from "../../web-hub/protocol/sched-identity.js";
 import { SCHED_TOLERANCE_S, type HubScheduleConfig } from "../../web-hub/protocol/schedule.js";
 import { closeEpoch, manualClaim, type ClaimGate } from "../core/claim.js";
 import { SCHED_LOCK_SHUTDOWN_TIMEOUT_MS, type LockAcquire } from "../core/lock.js";
@@ -249,7 +250,11 @@ export interface ScheduleWiring {
 }
 
 function resolveIdentity(opts: ScheduleWireOpts): IdentityDeps {
-  return opts.identity ?? (opts.readSelf ? { readSelf: opts.readSelf } : { readSelf: readSelfIdentity });
+  if (opts.identity !== undefined) return opts.identity;
+  if (opts.readSelf !== undefined) return { readSelf: opts.readSelf }; // old test seam
+  // Darwin has no /proc: ps/sysctl identity (darwin-plan §3.P1-b). Linux and everything else keep today's behavior.
+  if (process.platform === "darwin") return createDarwinIdentity();
+  return { readSelf: readSelfIdentity };
 }
 
 function probeLock(opts: ScheduleWireOpts): boolean {
@@ -323,7 +328,13 @@ export function wireSchedule(pi: Pick<ExtensionAPI, "on">, opts: ScheduleWireOpt
       });
       const identity = resolveIdentity(opts);
       const self = plain ? identity.readSelf() : undefined;
-      if (plain && self === undefined) warnOnce("proc", "no /proc identity: scheduled tasks cannot execute here");
+      if (plain && self === undefined)
+        warnOnce(
+          "proc",
+          process.platform === "darwin"
+            ? "no process identity (ps/sysctl unavailable): scheduled tasks cannot execute here"
+            : "no /proc identity: scheduled tasks cannot execute here",
+        );
       if (mode.arm && flockOk === undefined) {
         flockOk = probeLock(opts);
         if (!flockOk)
@@ -500,7 +511,11 @@ export function createScheduleAgent(deps: ScheduleAgentDeps): ScheduleAgent {
           ...(deps.monotonic !== undefined ? { monotonic: deps.monotonic } : {}),
           gate: claimGate,
           preflight: (task) => gate(task),
-          judge: { currentEpoch: epoch, epochDisposed: isEpochDisposed },
+          judge: {
+            currentEpoch: epoch,
+            epochDisposed: isEpochDisposed,
+            ...(deps.probe === undefined ? {} : { probe: deps.probe }),
+          },
           onFired: dispatchRun,
           onChanged: changed,
           warn: deps.warn,

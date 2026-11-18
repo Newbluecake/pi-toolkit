@@ -113,7 +113,7 @@ export function deriveCoversAt(state: ScheduleStateFile, at: number): DigestCove
 }
 
 export interface DigestDeps {
-  agent: Pick<ScheduleAgent, "store" | "mode" | "holder" | "self" | "epoch" | "changed" | "isDisposed">;
+  agent: Pick<ScheduleAgent, "store" | "mode" | "holder" | "self" | "probe" | "epoch" | "changed" | "isDisposed">;
   sessionFile(): string | undefined;
   sendMessage(
     message: { customType: string; content: string; display: boolean; details: unknown },
@@ -222,6 +222,7 @@ export function createScheduleDigest(deps: DigestDeps): ScheduleDigest {
       const verdict = judgeHolder(infl, self, {
         currentEpoch: deps.agent.epoch,
         epochDisposed: deps.isEpochDisposed,
+        ...(deps.agent.probe === undefined ? {} : { probe: deps.agent.probe }),
       });
       if (verdict.liveness !== "dead") return; // alive / unprovable ⇒ respect the claim
       const proof = proofOf(infl.id, undefined);
