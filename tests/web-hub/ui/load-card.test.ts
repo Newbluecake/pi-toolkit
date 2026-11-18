@@ -361,3 +361,59 @@ describe("LoadCard.vue — freshness label (2026-10-16 「一直显示 0s 前更
     ).toBe("updated 25s ago");
   });
 });
+
+// darwin-plan §4.3b (S3, user Q1): the loadavg bar's denominator. `cpu.cores` keeps priority
+// (Linux frames — byte-identical to before), the cpu-less platform's top-level `load.cores`
+// (darwin disclosure) takes over when `cpu` is absent, and a frame with neither stays on the
+// 1-core scale exactly as before. `cores` also feeds the "· N cores" annex so a cpu-less frame
+// still discloses its count.
+describe("LoadCard.vue — loadavg denominator via top-level cores (S3)", () => {
+  /** All `.ld-bar > i` inline widths rendered by the card, as "NN%" strings. */
+  function barWidths(l: LoadWire): string[] {
+    return mountCard(l)
+      .findAll(".ld-bar i")
+      .map((el) => el.attributes("style") ?? "");
+  }
+
+  it("cpu absent + cores 12 + loadavg 3 ⇒ 25% bar (real denominator, NOT a 1-core peg)", () => {
+    const l = load({
+      cpu: undefined,
+      cores: 12,
+      loadavg: [3, 2.5, 2],
+      mem: { usedPct: 54, availPct: 46, level: "ok" },
+    });
+    const widths = barWidths(l);
+    expect(widths.some((w) => /width:\s*25%/.test(w))).toBe(true);
+    expect(widths.some((w) => /width:\s*300%/.test(w))).toBe(false);
+    // mac shape: no CPU section, but the core count is still disclosed in the loadavg annex.
+    const text = mountCard(l).text();
+    expect(text).not.toContain("CPU busy");
+    expect(text).toContain("12 cores");
+  });
+
+  it("cpu present ⇒ cpu.cores keeps priority even when a (redundant) top-level cores differs", () => {
+    const l = load({
+      cpu: { busyPct: 72, level: "ok", cores: 8 },
+      cores: 12,
+      loadavg: [4, 3, 2],
+      io: { psiPct: 5 },
+    });
+    const widths = barWidths(l);
+    expect(widths.some((w) => /width:\s*50%/.test(w))).toBe(true); // 4/8, not 4/12≈33%
+    expect(widths.some((w) => /width:\s*33/.test(w))).toBe(false);
+  });
+
+  it("neither cpu nor cores ⇒ 1-core scale, exactly as before the S3 change", () => {
+    const l = load({ loadavg: [0.5, 0.4, 0.3] });
+    const widths = barWidths(l);
+    expect(widths.some((w) => /width:\s*50%/.test(w))).toBe(true);
+    expect(mountCard(l).text()).not.toContain("cores");
+  });
+
+  it("loadavg above the core count caps at 100%, never overflows the bar", () => {
+    const l = load({ cores: 4, loadavg: [9.6, 2, 2] });
+    const widths = barWidths(l);
+    expect(widths.some((w) => /width:\s*100%/.test(w))).toBe(true);
+    expect(widths.some((w) => /width:\s*240%/.test(w))).toBe(false);
+  });
+});

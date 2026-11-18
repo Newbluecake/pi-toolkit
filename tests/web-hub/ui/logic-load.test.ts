@@ -101,6 +101,26 @@ describe("isLoadWireLike — structural gate for the `load` SSE event", () => {
   });
 });
 
+// darwin-plan §4.3b (S3, user Q1): optional top-level `cores` — the cpu-less platform's core
+// count. Old hubs never send it (absent ⇒ legal); a valid count is accepted with or without
+// `cpu`; anything outside the 1..4096 integer domain rejects the whole frame.
+describe("isLoadWireLike — optional top-level cores (S3 core-count disclosure)", () => {
+  it("absent cores stays legal (old hub / Linux frames — new UI receives old frames unchanged)", () => {
+    expect(isLoadWireLike(wire())).toBe(true);
+  });
+  it("accepts a valid cores on a cpu-less frame, and a redundant one alongside cpu", () => {
+    expect(isLoadWireLike(wire({ cores: 12 }))).toBe(true);
+    expect(isLoadWireLike(wire({ cores: 1 }))).toBe(true);
+    expect(isLoadWireLike(wire({ cores: 4096 }))).toBe(true);
+    expect(isLoadWireLike(wire({ cpu: { busyPct: 50, level: "ok", cores: 8 }, cores: 8 }))).toBe(true);
+  });
+  it("rejects non-integer / non-finite / out-of-domain cores (same 1..4096 domain as isCpu)", () => {
+    for (const bad of [0, -1, 1.5, 4097, Number.NaN, Number.POSITIVE_INFINITY, "12", null, true]) {
+      expect(isLoadWireLike({ ...wire(), cores: bad as unknown as number }), `cores=${String(bad)}`).toBe(false);
+    }
+  });
+});
+
 describe("isLoadGateWireLike / loadGateFromStatus", () => {
   const g: LoadGateWire = { gating: true, level: "crit", sinceAgoMs: 1_000, at: 2_000 };
   it("accepts a well-formed gate", () => {
@@ -194,6 +214,20 @@ describe("pillView — §7.4/视觉稿 topbar segments", () => {
     expect(zh.segs.map((s) => s.text)).toEqual(["CPU 3%", "内存 10%", "磁盘 71%"]);
     const defaulted = pillView(l, 1_000, 1_000)!;
     expect(defaulted.segs.map((s) => s.text)).toEqual(["CPU 3%", "MEM 10%", "DISK 71%"]);
+  });
+  // darwin-plan §4.3b: a mac-shaped frame (no cpu, top-level cores) renders without a CPU
+  // segment and never throws — LoadPill itself is ZERO-change, the top-level cores key is
+  // simply not consumed here (only LoadCard's loadavg denominator reads it).
+  it("a cpu-less frame with top-level cores renders MEM/DISK only (no CPU segment, no throw)", () => {
+    const l = wire({
+      cores: 12,
+      mem: { usedPct: 54, availPct: 46, level: "ok" },
+      disks: [{ label: "/", path: "/", usedPct: 64, freeBytes: 1, totalBytes: 2, level: "ok" }],
+    });
+    const v = pillView(l, 1_000, 1_000)!;
+    expect(v.segs.map((s) => s.text)).toEqual(["MEM 54%", "DISK 64%"]);
+    expect(v.segs.some((s) => s.key === "cpu")).toBe(false);
+    expect(pillView(wire({ cores: 12 }), 1_000, 1_000)).toBeNull();
   });
 });
 
