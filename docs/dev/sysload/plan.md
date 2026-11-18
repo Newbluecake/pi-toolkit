@@ -9,7 +9,7 @@
 - 监控本机 CPU / 内存 / 磁盘，展示于 web hub（`LoadPill`+`LoadCard`，**主机全局视角**）与 TUI HUD（**会话视角**）。
 - 负载过高只拦**新派发**：`Agent`（主会话 + 嵌套）在 crit 立即拒绝、零副作用；workflow `agent()` 在 host FIFO 排队；turn_end 阶梯告知主 agent
   （升 warn / 升 crit / 一次恢复提示），由它选择排查或等待。
-- 非目标（v1）：cgroup v2、非 Linux、远程/未知文件系统、自动唤醒、已在跑 run 的限速、跨进程共享样本、计数聚合（rejected/queued 次数）、可配置 top 数与额外路径。
+- 非目标（v1）：cgroup v2、非 Linux、远程/未知文件系统、自动唤醒、已在跑 run 的限速、跨进程共享样本、计数聚合（rejected/queued 次数）、可配置 top 数与额外路径。其中「非 Linux」一项已由后续工作取代：darwin（macOS）自 2026-11 起支持，见 `darwin-plan.md`；Linux 行为/文本/wire 不变。
 
 ## 2. 用户裁决（不得偏离）
 
@@ -18,7 +18,7 @@
 | U1     | workflow `agent()` crit 时**排队**；`Agent` **立即拒绝**（同 quota L3 fast-fail），消息含负载明细 + top 进程 + 排查/等待两选项；系统内部 run 逐项豁免（§6.3）。                                                                       |
 | U2     | 默认阈值，持续 ≥60 s 升级、迟滞降级：CPU busy ≥85% 或 PSI cpu some avg10 ≥40% ⇒ warn，≥95% 或 ≥70% ⇒ crit；MEM available ≤15% ⇒ warn，≤8% ⇒ crit；DISK free ≤10% ⇒ warn，≤5% 或 ≤5 GiB ⇒ crit。`load.*` 可调，`load.enabled` 总开关。 |
 | U3     | TopBar `LoadPill` 紧挨 QuotaPill（`CPU 72% · MEM 81% · DISK 64%`，≤480px 只显示最差项）→ `LoadCard`；crit 时 fleet drawer 横幅「负载过高，已暂停派发新子 agent」；HUD 在 quota 行旁加 load 行。                                       |
-| U4     | pi-free 采样模块被 pi 侧（闸门/阶梯/HUD，hub 关闭也工作）与 hub 进程（自采样，新 SSE 事件）共用；非 Linux/不可读 ⇒ `unknown` ⇒ 永不拦。                                                                                               |
+| U4     | pi-free 采样模块被 pi 侧（闸门/阶梯/HUD，hub 关闭也工作）与 hub 进程（自采样，新 SSE 事件）共用；非 Linux/不可读 ⇒ `unknown` ⇒ 永不拦。（「非 Linux」已细化：darwin 自 2026-11 起支持，见 `darwin-plan.md`。）                        |
 | U5→Q1  | **v1 不做恢复唤醒**：恢复只在下一次 turn_end 注入提示（`triggerTurn:false`）；全程零新增定时器（仅采样节拍，unref）。                                                                                                                 |
 | Q2     | 嵌套 `Agent` crit 时也拒绝（文案：不委派，自己完成或交回上层）。                                                                                                                                                                      |
 | Q5     | LAN 与 loopback 同宽（top 进程、磁盘挂载路径均展示，同 bash-jobs 面板 U1 口径）；仍须正常鉴权与限流（§7.3）。                                                                                                                         |
@@ -224,7 +224,7 @@ totalBytes, level, skipped?}; loadavg?}`；`LoadTopWire{at; partial?; byCpu[≤5
 ## 8. 不变量
 
 - I1 fail-open：unknown / stale / 未解析或跳过的挂载 / 非 Linux / print·json / `load.gate=false` ⇒ 不拦、不排队；invalid 样本按 §5.2 只打断序列、
-  等级至多保持到 stale（3×interval），gate 与 hint 同一口径。
+  等级至多保持到 stale（3×interval），gate 与 hint 同一口径。「非 Linux ⇒ 永不拦」在 darwin 上的具体口径（CPU 恒 unknown 不 gate、mem 只展示不 gate、仅 DISK 参与 gate，整体仍 fail-open）见 `darwin-plan.md`（darwin 自 2026-11 起支持）。
 - I2 只拦新派发，回落不依赖派发；I3 拒绝零副作用（准入区，先于 runId/label/resumeLocks/nesting/worktree）。
 - I4 零新增定时器：pi、hub 各一个 unref 节拍；恢复提示只随 turn_end。I5 IO 有界：同步 procfs ≤64 KiB；statfs/per-pid 走账本（全局 ≤2）+ 响应期限。
 - I6 无新增模块级可变状态：LoadActivation 由 `activate()` 闭包持有（不学 `stack.ts:≈216` 的 `previousQuota`），stop/dispose 递增 generation 丢迟到结果；
