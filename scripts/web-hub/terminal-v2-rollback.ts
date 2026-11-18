@@ -14,7 +14,8 @@ export function rollbackCli(args: readonly string[]): { exitCode: number; messag
       message:
         "terminal-v2-rollback: tool-only rollbackTerminalV2({stateDir,evidenceDir,audit}). " +
         "Requires N real drain, zero allocations/backend/futures, unchanged clean O bytes and a trusted singleton/deployment adapter. " +
-        "Emits rollback eligibility evidence only; does NOT launch O or lower its version floor. Old O does not understand v2 markers.",
+        "Emits rollback eligibility evidence only; does NOT launch O or lower its version floor. Old O does not understand v2 markers. " +
+        "Executable private rehearsal: --controlled-cycle --private-parent <owned0700> constructs actual O/N states; never adopts an existing site.",
     };
   return {
     exitCode: 78,
@@ -23,7 +24,12 @@ export function rollbackCli(args: readonly string[]): { exitCode: number; messag
   };
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const result = rollbackCli(process.argv.slice(2));
-  console.error(result.message);
+  const args = process.argv.slice(2);
+  const result =
+    args[0] === "--controlled-cycle"
+      ? await (await import("./terminal-v2-maintenance.js")).controlledMaintenanceCli(["cycle", ...args.slice(1)])
+      : rollbackCli(args);
+  if (result.exitCode === 0 && args[0] === "--controlled-cycle") console.log(result.message);
+  else console.error(result.message);
   process.exitCode = result.exitCode;
 }

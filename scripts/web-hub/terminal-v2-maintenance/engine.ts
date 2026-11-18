@@ -266,6 +266,9 @@ export async function runMaintenance(
     const guard = () => {
       checkDeadline();
       if (!lease!.current(snapshot)) fail("lease-invalidated");
+      lease!.guardOwnership?.(snapshot);
+      checkDeadline();
+      if (!lease!.current(snapshot)) fail("lease-invalidated");
       state!.check();
       evidence!.check();
       if (evidence!.names().join(",") !== evidenceNames.join(",")) fail("evidence-members-changed");

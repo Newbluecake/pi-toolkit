@@ -1,6 +1,6 @@
 # T51 v2 acceptance checkpoint
 
-Status: **PARTIAL / BLOCKED, NOT deployment approval and NOT all-stack PASS**.
+Status: **P6 IN PROGRESS, NOT deployment approval and NOT all-stack PASS**.
 Accepted implementation design is T51 r2. D1 hub owner, D2 shared tabs/creator attribution and D3 drain
 then breaking replacement are fixed user decisions. This page replaces obsolete v1/#45 test claims;
 former complete O=4e15 evidence does not prove T51 O=7239→N migration.
@@ -21,26 +21,34 @@ former complete O=4e15 evidence does not prove T51 O=7239→N migration.
 | UI lifecycle/provenance                 | V2 controller/regression/panel/transport tests; migrated cap/session/drawer/old-event-refusal; actual build/check:web graph + source/artifact/license gates                                                              | Happy DOM is NOT a real browser, CSP/GPU/IME/device proof                                   |
 | Off/boundary/config/governance          | Full tier1 serial manifest shards; unchanged frozen artifacts; typecheck/build/build:web/check:web/schema/notices                                                                                                        | Exact final commands/counts/red/rerun details in P6 evidence report, not inferred here      |
 
+## Closed continuation gates
+
+- Root-approved shared v1 resource/offer/grant/receipt/frame/HTTP/schema/ports/dead-UI exports removed.
+  Only machine policy/refusal classifiers and an inert export-free frozen I8 anchor remain. Frozen V2
+  P0/PROTO/fixtures/trace/I8 whitelist unchanged.
+- Fixed executable `terminal-v2-maintenance.ts fresh|cycle --private-parent <owned0700>` constructs a
+  new private scope, holds filesystem deployment lock + original singleton/socket/dir, measures actual
+  fixed O7239/tool observation patch/N clean source/compiled artifacts/toolchain. No arbitrary JSON,
+  module loader, old stopped empty-disk inference, reset or existing-site adoption.
+- `tests/integration/terminal-v2-maintenance*.test.ts` actually executes real pi1.5 SDK child/UDS/hub/
+  native PTY/token login/input/physical proof/original prune/exact ACK/authority revoke → checkpoint →
+  real N input/prune/dispose/no-future/same guarded ledger readback → strict rollback inspection →
+  controlled O login/input/reap again. Fresh is realized without any fictitious O instance. Immutable
+  snapshot identity, publisher/floor guards, source/artifact/socket replacement refusals are real.
+  P5 ControlledAudit/old-UUID cases remain clearly simulated; no real reboot/powercut claim. This is
+  private development/validation, not site maintenance/deployment/floor lowering.
+
 ## Mandatory remaining gates (do not collapse into component greens)
 
-- **Frozen legacy shared declarations**: remove old v1 resource/offer/grant/receipt and old
-  frame/route exports from the previously frozen shared files only after coordinator authorization.
-  V2 P0 schema/ports/ordinary PROTO and frozen fixtures stay unchanged. Runtime legacy reader/PTY/
-  authority/SSE execution is deleted, but full production/schema deletion gate remains **BLOCKED**.
-- **Trusted executable maintenance**: actual fixed trusted fresh/O/N in-process audit adapter, genuine
-  deployment/publisher prevention facts, real singleton/directory identity, measured version/artifact,
-  original live O physical proof→durable resolve/prune→exact ACK/authority/futures closure, real N
-  dispose/no-future/same-ledger readback. Cannot accept CLI78, JSON/operator booleans or stopped empty
-  disk as these observations. User authorized private controlled rehearsal only, not site maintenance.
-- Real O=7239→N→O full login/open/reap, valid old-kernel archive rollback, dirty/current unknown/corrupt
-  ledger refusal, fresh realizable without an O instance, mixed O/O/O–N/O/O–O/N/N–N/N/O and true-off.
+- Extend the completed real O7239→N→O/fresh rehearsal to the full mixed/refusal matrix: valid old-kernel archive rollback, dirty/current unknown/corrupt
+  ledger refusal, mixed O/O/O–N/O/O–O/N/N–N/N/O and true-off.
   No active shell migration/adoption/restart preservation claim. No version-floor lowering/old launch
   based merely on marker/empty ledger.
 - Full A1–A12 auth matrices with reserve/prune IO barriers and each mutation type, external DB55s/hard
   expiry, concurrent old-finally, rotate original intent/token-written/revoke crash windows. No auth
   callback can await terminal fs/reaper or replace original transaction outcome.
 - Real Chromium seven-case CSP/WebGL gate plus manifest-verified full UI/SDK/PTY probe. Explicit offline
-  Playwright1.63.0/Chromium1243 assets are absent here; no install/download was attempted. Firefox,
+  root-provided Playwright1.65.1/Chromium1255 assets are now available; WebGL2 uses SwiftShader software, not hardware GPU. No install/download by this run. Firefox,
   true mobile/OS IME/system clipboard/drop,8-way sustained PTY+slow renderer, secure real mount,
   real kernel reboot/powercut/real ENOSPC device are **NOT RUN**.
 - Recheck P4 panel CSS resource-load failure/deadline/geometry in the real browser; renderer/xterm
@@ -61,10 +69,9 @@ production path to keep old tests green. Important shared tests were retained or
 - Shared real agent-server status/link tests, cap startup/privacy/off tests and UI drawer/session/
   transport tests were migrated to v2 matching scope/zero private SSE, not simply discarded.
 - P5's one old production-initializer component case now explicitly says **synthetic** known-empty v1
-  layout. It no longer imports the deleted src legacy reader; real fixed-O initializer/tool bridge is
-  a pending integration gate, not a silently preserved real-O PASS.
+  layout. It no longer imports the deleted src legacy reader. The separate real executable integration now covers fixed O7239 original initializer/live owner/futures/proof/prune/ACK/authority; that does not retroactively turn this synthetic case into real evidence.
 - Former #45 compat/rollback suites against O=4e15 were obsolete, not T51 compatibility evidence.
-  Their replacement T51 real O=7239 matrix is still **NOT RUN**. Removal is not evidence of parity.
+  Their T51 O7239 replacement now has actual O→N→O/fresh executable evidence; full mixed/refusal cases remain in progress. Removal itself is not evidence of parity.
 
 ## Running locally
 

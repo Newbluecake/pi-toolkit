@@ -3,9 +3,7 @@
 > Read before changing agent context metadata, hub terminal service/resource lifecycle, either HTTP
 > listener/auth bridge, UI terminal entry/renderer, maintenance tools or their tests.
 >
-> **Integration checkpoint, NOT release/deployment approval.** V2 execution is wired. The real trusted
-> O/N/fresh maintenance adapter, complete mixed-version/rollback rehearsals and browser/device gates
-> remain incomplete. Root approved obsolete v1 shared declaration deletion on 2026-11-18; the shared execution schemas/exports are now removed. Component/test greens do not imply full T51 acceptance.
+> **Integration checkpoint, NOT release/deployment approval.** V2 execution is wired. The fixed controlled-scope trusted O/N/fresh entry and real O→N→O rehearsal are implemented; complete mixed-version/refusal/auth/browser/device gates remain in progress. Root approved obsolete v1 shared declaration deletion on 2026-11-18; the shared execution schemas/exports are now removed. Component/test greens do not imply full T51 acceptance.
 
 ## Ownership and off
 
@@ -103,13 +101,69 @@ Missing completion/partials/unknown members/replaced inode/current-kernel rows d
 Earlier completed retirement boots remain auditable subject to the current-kernel safety check.
 Rollback evidence snapshots include original archive bytes and never mutate v1/v2/archive.
 
-Tools are never imported by production. P5's controlled audit double is not a trusted deployment
-adapter. Fresh requires actual never-initialized controlled history, not one ENOENT or CLI boolean.
-Checkpoint requires live trusted O owner/future/proof/prune/exact-ACK facts; stopped empty disk cannot
-reconstruct them. Rollback additionally requires N stopped, no hot/future/allocations, real clean dispose
-and same-ledger readback. A qualifying tool result does not launch O/lower version floor; O does not
-understand v2 markers. Real trusted adapters/entries and complete O→N→O remain **NOT IMPLEMENTED/NOT RUN**
-at this checkpoint; the existing CLI78 refusal is NOT a completed maintenance feature.
+### Fixed executable / controlled deployment adapter
+
+Tools are never imported by production. Run from this source checkout (Node22, existing pinned dev
+SDK1.5.0/esbuild/git/tar; no installation):
+
+```sh
+node node_modules/tsx/dist/cli.mjs scripts/web-hub/terminal-v2-maintenance.ts fresh --private-parent /absolute/owned0700
+node node_modules/tsx/dist/cli.mjs scripts/web-hub/terminal-v2-maintenance.ts cycle --private-parent /absolute/owned0700
+```
+
+`terminal-v2-checkpoint.ts fresh|cycle ...` forwards to the same fixed entry;
+`terminal-v2-rollback.ts --controlled-cycle ...` runs that same complete private rehearsal.
+The pure APIs still require a trusted in-process port; arbitrary JSON/booleans/module paths/default
+state/force/reset remain fixed refusals, not an alternate maintenance implementation.
+
+The entry **atomically creates a NEW private scope**, never adopts an existing state directory. Its
+original live constructor, held physical directories, immutable construction record and exclusive
+filesystem deployment-lock directory establish history. All publishers in this controlled scope go
+through the same retained object/generation/floor gate; the lock lasts through the entire operation.
+This is explicitly a controlled-scope/same-uid-trusted premise, **not an abstract socket as a global
+cross-netns deployment fence**, and does not cover arbitrary external/site publishers. An arbitrary
+empty directory is not fresh. No scope/lock adoption, stale repair, evidence GC or site action exists.
+
+Every transaction additionally acquires the real original hub singleton and pins original socket/dir
+identity. `current()` remains NO-IO private snapshot identity/generation/lifetime; the P5 tool-only
+optional `guardOwnership()` performs separate synchronous read-only physical/source/artifact checks
+at every engine publication guard. Async revalidation checks after all awaits; detected loss latches
+invalid and stale release cannot unlock a successor. Frozen V2 P0/wire contracts are unchanged.
+
+O is a tool build of exact7239dd115ac66039e2c4f80308ea5d08520aa6af from git archive, with a measured
+**observation-only patch**: original owner/futures/physical rows/receipt/ACK success and original hub
+commit/prune/service facts. No admission/proof/prune/ACK checks are replaced. Original sources, exact
+before/after patch, consumed/control source hashes, actual Node/git/tar/SDK/toolchain measurements and
+compiled artifact hash are retained in `build-o/measurement.json`; N clean-HEAD production source and
+artifact similarly in `build-n/`. There is no caller-controlled module loader or version string.
+
+Actual pi1.5 SDK hosts use private ResourceLoader/auth/model paths, no discovery/LLM/credentials and one
+owned OS child per version to avoid cross-version `Symbol.for` objects in one VM. Retained actual
+owner objects remain readable after real dispose; original accepted futures and no-new-start worker
+state are checked via a private inherited PID/starttime/namespace/artifact-pinned IPC channel, not
+operator JSON. Parent loss withdraws the trusted guard and runs original cleanup with an UNKNOWN hard
+bound. Native private UID/rc fixtures use the unchanged real backend/helper/reaper, never fake proof.
+
+O must really open/input/reap, durably resolve/prune and consume exact dedicated ACK before authority
+revocation/dispose. Tool correlates actual proof identities/challenge/inventory/revision with original
+commit chain and ACK, checks original receipts/resources/futures0 and independent `/proc` gone. Original
+O marks availability `lost` on intentional link retirement even with an empty healthy journal: require
+actual **live cleared before shutdown**, exact unchanged journal/physical rows/ACK afterward and actual
+revoked authority/no futures, not `lost` or empty disk as proof. Original authority/receipt directories
+are re-fsynced in the stopped maintenance window, not claimed historically durable from a filename.
+
+N uses the actual service.dispose result and maintenanceSnapshot counters/consistency/physical-prunes,
+original backend.done results and independent gone checks. Rollback reads the **same actual ledger**
+through the real guarded ledger implementation under the current maintenance singleton, and compares
+it to the original stopped service image. Unknown/dirty/partial/error refuses without repair/deletion.
+Strict existing archive completion/reader is reused. `cycle` executes real O login/open/reap/ACK →
+checkpoint → real N context/input/proof/prune/dispose/readback → rollback eligibility → one explicitly
+controlled O login/open/reap. V2 witness/root and old evidence are retained. Tool eligibility never
+claims O understands v2 markers, lowers a site floor or deploys anything. Real reboot is separately
+reported false; simulated old-kernel archive tests are not actual kernel reboot evidence.
+
+Full mixed/refusal/auth/browser/device gates remain separately tracked in P6/P7 reports. P5's older
+ControlledAudit tests are component doubles, not substituted for these real executable integrations.
 
 ## Auth: no terminal IO in commit path
 
@@ -188,8 +242,7 @@ classification. Ordinary first-screen CSS increment remains zero.
 
 Unlinked offline probe mounts real PanelV2 with an explicit contract fake (no backend/auth claim).
 `probe:terminal-e2e` now uses real SDK context, startHub, actual UI/login, isolated real PTY, independent
-view and physical prune; explicit existing Playwright1.63.0/Chromium1243 assets only, never installs.
-It has not been run here because those assets are absent. Source is not proof of browser success.
+view and physical prune; explicit external Playwright/Chromium assets only, never installs. Root has provided Playwright1.65.1/Chromium1255 (Chrome159); default headless WebGL2 is SwiftShader software, not hardware GPU. Private real-browser execution follows stable source; earlier missing-assets NOT RUN is historical. Source alone is not browser proof.
 
 ## Verification and evidence limits
 
@@ -201,7 +254,7 @@ restart, user-shell termination, push or deployment is authorized by this work.
 - Real integration: actual pi1.5 ExtensionContext→wireWebHub→UDS→startHub→HTTP/auth→isolated PTY→exact
   durable prune; plus dual listener SQLite/auth/share/PID/output/public-SSE-isolation tests.
 - Archive/retirement IO tests are real private fs/guarded CAS but old boot UUIDs and drain adapters
-  are simulated. Not a real reboot, powercut, trusted maintenance adapter or complete O→N→O.
+  are simulated, not a real reboot/powercut. The separate fixed controlled executable integrations above supply real O/N adapter and O→N→O evidence (without a kernel reboot).
 - Full tier1 was executed as serial manifest shards; P6 report/commands log records initial failures, invocation corrections and reruns; shard
   log files contain the final full run (some initial full logs were overwritten by same-name reruns). Browser, Firefox, device/OS IME, secure real mounts, real kernel
   reboot/powercut and complete mixed/version maintenance matrix remain NOT RUN.
@@ -210,7 +263,7 @@ restart, user-shell termination, push or deployment is authorized by this work.
   public-SSE/metadata/guards/drawer/provenance tests were migrated/retained. V1 compatibility/rollback
   successes against former O=4e15 are obsolete and cannot stand in for T51 O=7239 maintenance evidence.
 
-## Remaining integration blockers
+## Current integration closure / remaining gates
 
 1. Root-approved shared cleanup removed obsolete v1 resource/offer/grant/receipt/frame/HTTP types,
    ordinary decoders/maps, ports and dead UI projection/generator. Machine policy defaults/schema and
@@ -220,8 +273,8 @@ restart, user-shell termination, push or deployment is authorized by this work.
    I8 closure pins that file and its three existing edges, so they are retained without changing the
    whitelist. No production consumer imports it. Generic status stays open to opaque old keys; no v1
    positive type/parser/capability is emitted. V2 P0 files/fields, PROTO, fixtures/trace/I8 unchanged.
-2. Actual executable trusted in-process O/N/fresh maintenance adapter/deployment publisher fence and
-   fixed-version live O causal audit bridge remain incomplete. CLI78 is deliberately NOT a final
-   delivery claim. No arbitrary module/JSON/boolean drain loader may be added to fake this gate.
+2. Fixed controlled-scope executable/adapters and actual measured O7239→N→O are implemented/tested.
+   No general existing-site adapter, deployment or floor lowering is authorized/provided; CLI refusals
+   of arbitrary facts/paths remain intentional. Full mixed/refusal/fault matrix is still in progress.
 3. Complete real maintenance/mixed/browser/device/failure-window matrix and independent P7 acceptance
    still pending. Do not deploy this integration checkpoint or label it all-stack PASS.

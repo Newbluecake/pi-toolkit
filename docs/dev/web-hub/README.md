@@ -82,9 +82,8 @@ privacy===true，不能因内部 store 而意外公开。真实当前 auth/2FA/c
 LanStorePort/wire。logout 删除失败已声明式纠正为 HTTP503 E_DB+unknown+localSignedOut，on/off一致，
 成功 bytes 不变。不是“等 shell 死才 auth 成功”。
 
-**仍为集成 checkpoint**：root 已批准且已删旧 shared v1 resource/capability/frame schema，仅保留固定拒绝/机器policy与冻结 I8 惰性锚；真实可信 O/N/fresh
-维护 adapter/部署 publisher fence、完整 O=7239→N→O/混版和浏览器/设备矩阵未完成。CLI78/组件绿不能
-充当维护入口/全栈 PASS，未授权部署或现场操作。普通 true-off/golden/PROTO 合同继续保持。
+**仍为集成 checkpoint**：root 已批准且已删旧 shared v1 resource/capability/frame schema，仅保留固定拒绝/机器policy与冻结 I8 惰性锚；固定受控私有 scope 的可信 O/N/fresh
+维护入口、filesystem publisher锁/原singleton fence与实测O=7239→N→O已实现；完整混版/故障/auth/browser/device矩阵仍在推进。该入口不接管任意现场，组件绿不能充当全栈 PASS，未授权部署或现场操作。普通 true-off/golden/PROTO 合同继续保持。
 
 ## Web resume (resume.v1)
 

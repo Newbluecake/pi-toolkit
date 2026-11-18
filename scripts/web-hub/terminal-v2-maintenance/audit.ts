@@ -54,6 +54,11 @@ export interface MaintenanceLease {
    * private snapshot identity, generation, invalidation/abort and absolute deadline.
    * Released leases never revive when a successor has the same generation. */
   current(snapshot: MaintenanceEvidence): boolean;
+  /** Tool-only final synchronous READ-ONLY filesystem fence, separate from the
+   * NO-IO memory current() above. Real controlled adapter verifies original state,
+   * deployment lock, singleton socket/dir immediately at each publication guard.
+   * No await, mutation, drain, repair or capability minting. */
+  guardOwnership?(snapshot: MaintenanceEvidence): void;
   /** Idempotent per lease. A stale release must never unlock a successor owner. */
   release(): Promise<void>;
 }

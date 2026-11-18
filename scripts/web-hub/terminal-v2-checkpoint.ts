@@ -1,6 +1,6 @@
-/** Offline maintenance API, not a production initializer. Actual maintenance and
- * shell shutdown require separate authorization. P6 must wire a trusted adapter;
- * this CLI deliberately refuses JSON/boolean/module-path drain assertions. */
+/** Offline maintenance API, not a production initializer. The only executable
+ * adapter is the fixed controlled-scope entry below, never an existing-site JSON/
+ * boolean/module-path assertion. Site maintenance still needs separate authorization. */
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runMaintenance } from "./terminal-v2-maintenance/engine.js";
@@ -19,7 +19,7 @@ export function checkpointCli(args: readonly string[]): { exitCode: number; mess
       message:
         "terminal-v2-checkpoint: tool-only checkpointTerminalV2(mode, {stateDir,evidenceDir,audit}). " +
         "Requires an audited in-process deployment/singleton/drain adapter. No default state path, force/reset, module loader or JSON drain input. " +
-        "P6/P7 real adapter and O→N→O validation required before maintenance use.",
+        "Executable private entry: terminal-v2-maintenance.ts fresh|cycle --private-parent <owned0700>. No existing-site adoption/deployment.",
     };
   return {
     exitCode: 78,
@@ -28,7 +28,12 @@ export function checkpointCli(args: readonly string[]): { exitCode: number; mess
   };
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const result = checkpointCli(process.argv.slice(2));
-  console.error(result.message);
+  const args = process.argv.slice(2);
+  const result =
+    args[0] === "fresh" || args[0] === "cycle"
+      ? await (await import("./terminal-v2-maintenance.js")).controlledMaintenanceCli(args)
+      : checkpointCli(args);
+  if (result.exitCode === 0 && (args[0] === "fresh" || args[0] === "cycle")) console.log(result.message);
+  else console.error(result.message);
   process.exitCode = result.exitCode;
 }
