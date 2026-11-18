@@ -5,7 +5,16 @@ import ts from "typescript";
 import { describe, expect, it } from "vitest";
 import { TERMINAL_HTTP_PATHS as tinyPaths } from "../../../src/web-hub/protocol/terminal-paths.js";
 import { TERMINAL_HTTP_PATHS as privatePaths } from "../../../src/web-hub/protocol/terminal.js";
-import { TERMINAL_HTTP_PATHS as eagerPaths } from "../../../src/web-hub/protocol/http-contract.js";
+import {
+  TERMINAL_HTTP_PATHS as eagerPaths,
+  TERMINAL_V2_HTTP_PATHS as v2Eager,
+} from "../../../src/web-hub/protocol/http-contract.js";
+import {
+  TERMINAL_V2_CAP,
+  TERMINAL_V2_HTTP_PATHS as v2Tiny,
+  terminalV2Files,
+} from "../../../src/web-hub/protocol/terminal-v2-paths.js";
+import { TERMINAL_V2_HTTP_PATHS as v2Private } from "../../../src/web-hub/protocol/terminal-v2.js";
 
 const protocol = fileURLToPath(new URL("../../../src/web-hub/protocol/", import.meta.url));
 /** Follow static emitted imports/re-exports, not erased type-only edges or lazy import(). */
@@ -76,11 +85,39 @@ describe("terminal eager path boundary (P1-C A)", () => {
     expect(eagerPaths).toBe(tinyPaths);
     expect(Object.isFrozen(tinyPaths)).toBe(true);
   });
+  it("declares v2 paths separately without advertising or changing v1 paths", () => {
+    expect(v2Tiny).toBe(v2Eager);
+    expect(v2Tiny).toBe(v2Private);
+    expect(Object.isFrozen(v2Tiny)).toBe(true);
+    expect(TERMINAL_V2_CAP).toBe("terminal.tabs.v2");
+    expect(Object.keys(v2Tiny)).toEqual([
+      "list",
+      "create",
+      "creation",
+      "rename",
+      "close",
+      "view",
+      "input",
+      "resize",
+      "ack",
+    ]);
+    for (const [op, path] of Object.entries(v2Tiny)) expect(path).toBe(`/api/terminal/v2/${op}`);
+    expect(terminalV2Files("/isolated/state")).toEqual({
+      root: "/isolated/state/terminal-v2",
+      ledger: "/isolated/state/terminal-v2/ledger.json",
+      marker: "/isolated/state/terminal-v2/marker.json",
+      witness: "/isolated/state/.terminal-initialized-v2",
+      archive: "/isolated/state/.terminal-allocation-archive-v2",
+    });
+  });
   it("keeps the http-contract runtime import graph away from terminal schema construction", () => {
     const graph = runtimeGraph(resolve(protocol, "http-contract.ts"));
     expect(graph.has(resolve(protocol, "terminal-paths.ts"))).toBe(true);
     expect(graph.has(resolve(protocol, "terminal.ts"))).toBe(false);
     expect(runtimeImports(resolve(protocol, "terminal-paths.ts"))).toEqual([]);
+    expect(runtimeImports(resolve(protocol, "terminal-v2-paths.ts"))).toEqual([]);
+    expect(runtimeImports(resolve(protocol, "terminal-v2-values.ts"))).toEqual([]);
+    expect(graph.has(resolve(protocol, "terminal-v2.ts"))).toBe(false);
     expect([...graph].filter((id) => id.includes("typebox"))).toEqual([]);
   });
 });

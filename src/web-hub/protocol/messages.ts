@@ -35,6 +35,9 @@ import {
 } from "./run-transcript.js";
 import type { LanStatus } from "./lan.js";
 import type { TerminalSession } from "./terminal-session.js";
+import type { TerminalSessionV2, TerminalContextRequest, TerminalContextReply } from "./terminal-v2.js";
+// T51 P0: types only. P6 must consume private context frames before ordinary decoding.
+export type { TerminalContextRequest, TerminalContextReply } from "./terminal-v2.js";
 // tokens-speed (task58): `WireEntry.piToolkitGeneration` type lives in protocol/message-generation.ts
 // (its own module); only the type is folded in here — runtime stays in keys.ts condition-spread.
 import type { GenerationMetadata } from "./message-generation.js";
@@ -798,6 +801,8 @@ export interface StatusInfo {
    * open StatusInfoSchema: malformed future/old declarations must not discard ordinary status.
    * Terminal consumers independently call parseTerminalSession and bind live session/epoch. */
   terminalSession?: TerminalSession;
+  /** T51 v2 candidate only; never emitted by P0 or proof of cwd/auth/link readiness. */
+  terminalSessionV2?: TerminalSessionV2;
 }
 
 /** `StatusInfo.reload.state` — the most recent fact of the tracked lifecycle. */
@@ -1292,6 +1297,7 @@ export interface SupersededFrame {
 
 // agent→hub
 export type AgentFrame =
+  | TerminalContextReply // Type-only P0 addition; private decoder/consumer installed together in P6.
   | TermRes
   | TermEvent
   | {
@@ -1401,6 +1407,7 @@ export type LanResFrame =
 
 // hub→agent
 export type HubFrame =
+  | TerminalContextRequest // Type-only P0 addition; no v2 probe/output in current runtime.
   | TermReq
   | {
       t: "hello_ack";

@@ -581,3 +581,6 @@ export async function checkTrustedEntry(
  */
 export const TRUSTED_FILE_OPEN_FLAGS: number =
   fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | (fsConstants.O_NONBLOCK ?? 0);
+
+/** Pure v2 terminal layout; no extra HubPaths keys or runtime IO. */
+export { terminalV2Files } from "./terminal-v2-paths.js";

@@ -328,3 +328,13 @@ export type {
 
 /** Terminal display metadata: optional response-only fields; see terminal.ts for ownership/privacy. */
 export type { TerminalDisplayMetadata, TerminalAgentDisplayMetadata, TerminalHubDisplayMetadata } from "./terminal.js";
+
+/** T51 P0 optional declarations; not registered routes or public SSE events. */
+export { TERMINAL_V2_CAP, TERMINAL_V2_HTTP_PATHS } from "./terminal-v2-paths.js";
+export type {
+  TerminalHttpRequestsV2,
+  TerminalHttpResultsV2,
+  TerminalHttpResponseV2,
+  TerminalViewFrameV2,
+  TerminalFailureV2,
+} from "./terminal-v2.js";

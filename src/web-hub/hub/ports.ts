@@ -1531,3 +1531,20 @@ export interface TerminalRoutesPort {
 export function terminalUnavailable(): import("../protocol/terminal.js").TerminalFailure {
   return { ok: false, code: "E_UNAVAILABLE", effect: "none" };
 }
+
+// T51 P0: optional v2 contracts only. No FrontendDeps/config/HubInfo instance is wired here.
+export type {
+  TerminalContextSnapshotV2,
+  TerminalContextPort,
+  TerminalViewV2,
+  TerminalViewSinkV2,
+  TerminalOpenViewResultV2,
+  TerminalViewPortV2,
+  TerminalServiceV2,
+  TerminalRoutesPortV2,
+  TerminalAllocationLedgerPortV2,
+  TerminalAuthFact,
+  TerminalAuthFenceV2,
+  TerminalRuntimeV2,
+  TerminalRuntimeResultV2,
+} from "./terminal-v2-ports.js";
