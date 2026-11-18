@@ -105,6 +105,51 @@ describe("sysload darwin tracker (§4.2-T)", () => {
     expect(tracker.verdict(20_000).gating).toBe(true);
   });
 
+  it("an advisory INVALID mem sample after a REAL crit also drops the stale level (R2: unconditional)", () => {
+    const tracker = createLoadTracker(settings);
+    tracker.observe(darwinSample(0, { availPct: 3, memAdvisory: false }));
+    tracker.observe(darwinSample(5_000, { availPct: 3, memAdvisory: false }));
+    expect(tracker.verdict(5_000).metrics.mem.level).toBe("crit");
+    expect(tracker.verdict(5_000).gating).toBe(true);
+    const invalidAdvisory: LoadSample = {
+      mono: 10_000,
+      at: 10_000,
+      cpu: { kind: "invalid" },
+      mem: { kind: "invalid" },
+      disks: [disk(50)],
+      memAdvisory: true,
+    };
+    const transition = tracker.observe(invalidAdvisory);
+    expect(transition.gateCleared).toBe(true);
+    const verdict = tracker.verdict(10_000);
+    expect(verdict.metrics.mem.level).toBe("unknown");
+    expect(verdict.level).toBe("ok");
+    expect(verdict.gating).toBe(false);
+  });
+
+  it("an advisory UNTRUSTED mem sample after a REAL crit clears the level and does not refresh the display (R2)", () => {
+    const tracker = createLoadTracker(settings);
+    tracker.observe(darwinSample(0, { availPct: 3, memAdvisory: false }));
+    tracker.observe(darwinSample(5_000, { availPct: 3, memAdvisory: false }));
+    expect(tracker.verdict(5_000).metrics.mem.level).toBe("crit");
+    const untrustedAdvisory: LoadSample = {
+      mono: 10_000,
+      at: 10_000,
+      cpu: { kind: "invalid" },
+      mem: { kind: "ok", value: { availPct: 90, usedPct: 42 } }, // usedPct ≠ 100 − availPct ⇒ 不可信
+      disks: [disk(50)],
+      memAdvisory: true,
+    };
+    const transition = tracker.observe(untrustedAdvisory);
+    expect(transition.gateCleared).toBe(true);
+    const verdict = tracker.verdict(10_000);
+    expect(verdict.metrics.mem.level).toBe("unknown");
+    expect(verdict.level).toBe("ok");
+    expect(verdict.gating).toBe(false);
+    expect(verdict.metrics.mem.availPct).toBe(3); // 不可信读数不刷新显示值
+    expect(verdict.metrics.mem.lastValidMono).toBe(5_000);
+  });
+
   it("fail-open: all-invalid disks with advisory mem keep the overall level unknown and the gate closed", () => {
     const tracker = createLoadTracker(settings);
     tracker.observe(darwinSample(0, { availPct: 3, disks: [{ label: "/", reading: { kind: "invalid" } }] }));

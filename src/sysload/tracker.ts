@@ -230,20 +230,22 @@ function settingsToThresholds(settings: LoadSettings): LoadThresholds {
 
 /** darwin-plan §2.9（Q3 拍板）：advisory mem 只记显示值（value/lastValid ⇒ verdict 可显示
  * availPct），不走 advanceMetric —— mem.level 恒 unknown，不进 overall、不触发升级/恢复/gate/hint。
- * S1 评审 Major 2：若同一 tracker 先由非 advisory 样本把 mem 推到 warn/crit，advisory 生效时必须把
- * 该存量等级与挂起窗口一并清除——否则旧 crit 会继续参与 overall/gate，违背「恒 unknown」。清除后去掉
- * 样本标记（模拟 D1 启用）从 unknown 重新走正常 advanceMetric 路径，对称性由 darwin-tracker 测试钉住。
- * 不可信读数（与 memRaw 同一可信度闸）落回 invalid 路径而不是照屏。 */
+ * S1 评审 Major 2 + 复验 R2：advisory 一旦生效（`sample.memAdvisory === true`），无论本拍读数是否有效，
+ * 都**无条件**清除存量等级与挂起窗口（否则先由非 advisory 样本推到的 warn/crit 会继续参与
+ * overall/gate，违背「恒 unknown」）；随后仅当读数可信（与 memRaw 同一闸）才更新显示值，
+ * 无效/不可信读数不动 value/lastValid（显示值自然随 stale 规则老去）。清除后去掉样本标记
+ * （模拟 D1 启用）从 unknown 重新走正常 advanceMetric 路径，对称性由 darwin-tracker 测试钉住。 */
 function recordAdvisoryMem(metric: InternalMetric, sample: LoadSample, settings: LoadSettings): { recovered: boolean } {
-  if (sample.mem.kind !== "ok" || memRaw(sample, settingsToThresholds(settings)) === undefined)
-    return advanceMetric(metric, undefined, undefined, sample.mono, settings, "mem");
   metric.level = "unknown";
   metric.levelSince = undefined;
   metric.windowStart = undefined;
   metric.direction = undefined;
   metric.windowTarget = undefined;
-  metric.value = sample.mem.value;
-  metric.lastValid = sample.mono;
+  metric.broken = false;
+  if (sample.mem.kind === "ok" && memRaw(sample, settingsToThresholds(settings)) !== undefined) {
+    metric.value = sample.mem.value;
+    metric.lastValid = sample.mono;
+  }
   return { recovered: false };
 }
 
@@ -332,7 +334,7 @@ export function createLoadTracker(
             )
           : advanceMetric(cpu, undefined, undefined, sample.mono, settings, "cpu");
       const memResult =
-        sample.mem.kind === "ok" && sample.memAdvisory === true
+        sample.memAdvisory === true
           ? recordAdvisoryMem(mem, sample, settings)
           : sample.mem.kind === "ok"
             ? advanceMetric(
