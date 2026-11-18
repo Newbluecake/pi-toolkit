@@ -56,6 +56,14 @@ F1 增量修复把 failure 本身设为判别 union：`E_INPUT_UNKNOWN` 只能�
 合法 cold allocation 逐项 cleanup-unknown，按原 quotaSessionKey/principalKey/total 各占一次，
 不是全局封禁；余额可建，close 不释放未知槽。ledger 仅资源归因，拒绝 auth intent/epoch/repair/
 cwd/env/title/token，初始化不读 v1；缺 marker 为 setup-required，不生产扫描猜 fresh。
+共享初始化合同：`TerminalWitnessV2Schema` 是 `TerminalMarkerV2Schema` 的同对象别名，
+marker/witness 初读按闭合对象语义匹配 storeId/initialization/checkpointId，不要求 JSON 键序或尾换行。
+P5 可用 `createInitialTerminalLedgerV2` 构造同 storeId/revision0/空 allocations，
+用 `terminalMarkersV2Match`、`terminalInitialLedgerV2Ok` 纯验证；生产只读/验证，缺失 setup-required，
+不自动创建或 heal。P1 初读后须固定原字节与 inode/目录身份，运行中语义等价的文件交换也不能接受。
+ledger commit 次序固定为 tmp O_EXCL0600 → file fsync → exact 原字节/inodes/store dirs 重核 →
+rename → parent fsync；进入 rename 窗后失败/结果不可证为 effect:unknown（包括 rename 抛错），
+仅窗前确证未变更才能 none。这些 IO/替换检测/故障次序由 P1/P5 验证，P0 无文件 IO。
 释放必须完整物理 proof + exact durable prune；commit unknown 才资源全局拒新，绝不 finally 减槽。
 `TerminalAuthFenceV2.invalidate/settle` 同步无 IO、无 Promise、不把异常传回 auth；
 auth 仍按自己的 DB/token/rotate-intent 提交与诚实返回，terminal 磁盘失败不得成为前置条件。

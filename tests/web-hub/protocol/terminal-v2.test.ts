@@ -6,6 +6,10 @@ import {
   TerminalSessionV2Schema,
   TerminalFailureV2Schema,
   TerminalMarkerV2Schema,
+  TerminalWitnessV2Schema,
+  terminalMarkersV2Match,
+  createInitialTerminalLedgerV2,
+  terminalInitialLedgerV2Ok,
   TERMINAL_V2_HTTP_SCHEMAS,
   TERMINAL_V2_HTTP_SUCCESS_SCHEMAS,
   TERMINAL_V2_ERROR_STATUS,
@@ -215,6 +219,60 @@ describe("T51 P0 terminal v2 frozen contracts (no runtime)", () => {
       { t: "tabs", ...tabs, rows: [{ ...tabs.rows[0], cwd: "/secret" }] },
     ])
       expect(terminalViewFrameV2Ok(frame)).toBe(false);
+  });
+  it("shares one closed marker/witness object and compares semantic fields independent of JSON layout", () => {
+    const marker = { v: 2, storeId: id, initialization: "fresh", checkpointId: other };
+    const reordered: unknown = JSON.parse(
+      `{\"checkpointId\":\"${other}\",\"initialization\":\"fresh\",\"storeId\":\"${id}\",\"v\":2}\n`,
+    );
+    expect(TerminalWitnessV2Schema).toBe(TerminalMarkerV2Schema);
+    expect(terminalMarkersV2Match(marker, reordered)).toBe(true);
+    expect(terminalMarkersV2Match(reordered, marker)).toBe(true);
+    expect(
+      terminalMarkersV2Match(
+        { ...marker, initialization: "v1-clean-checkpoint" },
+        { ...marker, initialization: "v1-clean-checkpoint" },
+      ),
+    ).toBe(true);
+    for (const invalid of [
+      undefined,
+      null,
+      { ...marker, v: 1 },
+      { ...marker, storeId: other },
+      { ...marker, checkpointId: id },
+      { ...marker, initialization: "v1-clean-checkpoint" },
+      { ...marker, initialization: "auto" },
+      { ...marker, checkpointId: undefined },
+      { ...marker, extra: true },
+    ]) {
+      expect(terminalMarkersV2Match(marker, invalid)).toBe(false);
+      expect(terminalMarkersV2Match(invalid, marker)).toBe(false);
+    }
+    expect(Value.Check(TerminalWitnessV2Schema, { ...marker, extra: true })).toBe(false);
+    expect(terminalMarkersV2Match({ ...marker, extra: true }, { ...marker, extra: true })).toBe(false);
+  });
+  it("constructs only a linked revision-zero empty initial ledger, distinct from a running ledger", () => {
+    const marker = { v: 2 as const, storeId: id, initialization: "fresh" as const, checkpointId: other };
+    const initial = createInitialTerminalLedgerV2(marker);
+    expect(initial).toEqual({ v: 2, storeId: id, revision: 0, allocations: [] });
+    expect(() => createInitialTerminalLedgerV2({ ...marker, storeId: "short" })).toThrow("invalid terminal v2 marker");
+    expect(terminalInitialLedgerV2Ok(initial, marker)).toBe(true);
+    expect(terminalInitialLedgerV2Ok(initial, { ...marker, initialization: "v1-clean-checkpoint" })).toBe(true);
+    const next = createInitialTerminalLedgerV2(marker);
+    initial.allocations.push(allocation);
+    expect(next).toEqual({ v: 2, storeId: id, revision: 0, allocations: [] }); // no shared array
+    for (const invalid of [
+      { ...next, revision: 1 },
+      { ...next, allocations: [allocation] },
+      { ...next, storeId: other },
+      { ...next, extra: true },
+      { ...next, v: 1 },
+    ])
+      expect(terminalInitialLedgerV2Ok(invalid, marker)).toBe(false);
+    expect(terminalInitialLedgerV2Ok(next, { ...marker, storeId: other })).toBe(false);
+    expect(terminalInitialLedgerV2Ok(next, { ...marker, extra: true })).toBe(false);
+    expect(terminalInitialLedgerV2Ok(next, undefined)).toBe(false);
+    expect(terminalLedgerV2Ok({ ...ledger, revision: 7 })).toBe(true); // production must not force rev0/empty
   });
   it("ledger is resources only, preserves exact attribution, rejects duplicate/misattributed/oversized data without healing", () => {
     expect(terminalLedgerV2Ok(ledger)).toBe(true);

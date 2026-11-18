@@ -152,7 +152,15 @@ export interface TerminalRoutesPortV2 {
  * `unavailable` does not mean empty. A determined failed write is none; uncertain commit
  * poisons resource admission globally (not auth). Never infer prune from close/exit/PID/TTL. */
 export interface TerminalAllocationLedgerPortV2 {
+  /** Production reads/verifies only; marker/witness/initial ledger are tool-created.
+   * Missing => setup-required. Marker/witness initially match as closed semantic objects
+   * (JSON key order/trailing LF irrelevant). Then pin original bytes + file/dir identities;
+   * semantically equivalent replacements during operation are still external changes. */
   load(signal: AbortSignal): Promise<{ kind: "loaded"; ledger: LedgerV2 } | { kind: "unavailable" }>;
+  /** tmp O_EXCL0600 -> file fsync -> exact prior bytes/inodes/store dirs recheck ->
+   * rename -> parent fsync. Once rename is entered, failure/unprovable result is unknown,
+   * even if rename throws. none requires proven unchanged state before that window.
+   * This port documents the IO contract; P1 must test real operation/fault ordering. */
   commit(
     expectedRevision: number,
     next: LedgerV2,

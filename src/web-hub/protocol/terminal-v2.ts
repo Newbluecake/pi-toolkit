@@ -288,6 +288,37 @@ export const TerminalMarkerV2Schema = closed({
   checkpointId: id,
 });
 export type TerminalMarkerV2 = Static<typeof TerminalMarkerV2Schema>;
+/** Same closed object, not a second witness format. Initial read compares semantics;
+ * after loading, P1 must pin original bytes/inodes/directories against external changes. */
+export const TerminalWitnessV2Schema = TerminalMarkerV2Schema;
+export type TerminalWitnessV2 = TerminalMarkerV2;
+export function terminalMarkersV2Match(marker: unknown, witness: unknown): boolean {
+  return (
+    Value.Check(TerminalMarkerV2Schema, marker) &&
+    Value.Check(TerminalWitnessV2Schema, witness) &&
+    marker.v === witness.v &&
+    marker.storeId === witness.storeId &&
+    marker.initialization === witness.initialization &&
+    marker.checkpointId === witness.checkpointId
+  );
+}
+/** Pure maintenance-tool value construction ONLY. Production must never create missing
+ * files from this value: absent initialization => setup-required, not automatic healing. */
+export function createInitialTerminalLedgerV2(marker: TerminalMarkerV2): LedgerV2 {
+  if (!Value.Check(TerminalMarkerV2Schema, marker)) throw new TypeError("invalid terminal v2 marker");
+  return { v: 2, storeId: marker.storeId, revision: 0, allocations: [] };
+}
+/** Tool initialization guard, NOT the production loader's revision requirement:
+ * an initialized store may subsequently have nonzero revision/nonempty allocations. */
+export function terminalInitialLedgerV2Ok(raw: unknown, marker: unknown): raw is LedgerV2 {
+  return (
+    Value.Check(TerminalMarkerV2Schema, marker) &&
+    terminalLedgerV2Ok(raw) &&
+    raw.storeId === marker.storeId &&
+    raw.revision === 0 &&
+    raw.allocations.length === 0
+  );
+}
 /** Pure closed validation; no healing, accounting, disk IO, auth or physical-release inference. */
 export function terminalLedgerV2Ok(raw: unknown): raw is LedgerV2 {
   if (!jsonBytesOk(raw, TERMINAL_V2_LIMITS.ledgerBytes) || !Value.Check(LedgerV2Schema, raw)) return false;
