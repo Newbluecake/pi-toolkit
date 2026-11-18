@@ -36,6 +36,16 @@ export function projectLoadWire(
     };
   });
   const ioPsiPct = (sample as (LoadSample & { ioPsiPct?: number }) | undefined)?.ioPsiPct;
+  /** darwin-plan §3.1-S3 (user Q1): top-level `cores` is disclosed ONLY when the CPU reading is
+   *  absent — Linux samples (cpu always present) keep the exact frame key set / `loadFingerprint`
+   *  bytes (I10 append-only). Projection-side self-validation: a non-finite / non-integer / ≤0 /
+   *  >4096 count is dropped instead of forwarded (mirrors `isCpu`'s `finite(x.cores, 1, 4096)`). */
+  const disclosedCores =
+    sample?.cpu.kind === "ok" || sample?.cores === undefined
+      ? undefined
+      : Number.isInteger(sample.cores) && sample.cores >= 1 && sample.cores <= 4096
+        ? sample.cores
+        : undefined;
   return {
     v: 1,
     at,
@@ -79,6 +89,7 @@ export function projectLoadWire(
         }
       : {}),
     ...(sample?.loadavg === undefined ? {} : { loadavg: [...sample.loadavg] as [number, number, number] }),
+    ...(disclosedCores === undefined ? {} : { cores: disclosedCores }),
   };
 }
 

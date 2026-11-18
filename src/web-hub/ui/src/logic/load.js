@@ -149,6 +149,11 @@ export function isLoadWireLike(d) {
     return false;
   if (w.sinceAgoMs !== undefined && !finite(w.sinceAgoMs, 0)) return false;
   if (w.cpu !== undefined && !isCpu(w.cpu)) return false;
+  // darwin-plan §4.3b (S3, user Q1): optional top-level `cores` — the cpu-less platform's core
+  // count. Absent is always legal (old hubs / Linux frames); when present it must be a finite
+  // integer in 1..4096 (same domain as `isCpu`'s nested cores), anything else fails the whole
+  // frame. A redundant `cores` alongside `cpu` doesn't affect the verdict either way.
+  if (w.cores !== undefined && (!Number.isInteger(w.cores) || w.cores < 1 || w.cores > 4096)) return false;
   if (w.mem !== undefined && !isMem(w.mem)) return false;
   if (w.io !== undefined && !isIo(w.io)) return false;
   if (w.disks !== undefined && (!Array.isArray(w.disks) || w.disks.length > MAX_DISKS || !w.disks.every(isDisk)))

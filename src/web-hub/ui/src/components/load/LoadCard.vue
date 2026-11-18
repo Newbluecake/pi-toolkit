@@ -113,6 +113,11 @@ const cpu = computed(() => props.load.cpu);
 const mem = computed(() => props.load.mem);
 const io = computed(() => props.load.io);
 const loadavg = computed(() => props.load.loadavg);
+/** darwin-plan §3.1-S3 (user Q1): core count for the loadavg bar's denominator — `cpu.cores`
+ *  first (Linux frames, unchanged), then the cpu-less platform's top-level `load.cores`
+ *  (darwin disclosure), falling back to a 1-core scale exactly as before when neither is
+ *  present. Also feeds the "· N cores" annex so a cpu-less frame still discloses its count. */
+const cores = computed(() => props.load.cpu?.cores ?? props.load.cores);
 const disks = computed((): readonly LoadDiskWire[] => props.load.disks ?? []);
 
 function diskLabel(d: LoadDiskWire): string {
@@ -202,14 +207,14 @@ const byRssRows = computed(() => rows(topData.value?.byRss, "rss"));
       <div class="ld-row">
         <span class="ld-label">{{ t("load.loadavgLabel") }}</span>
         <span class="ld-bar" :data-lv="level">
-          <i :style="{ width: Math.min(100, (loadavg[0] / Math.max(1, cpu?.cores ?? 1)) * 100) + '%' }"></i>
+          <i :style="{ width: Math.min(100, (loadavg[0] / Math.max(1, cores ?? 1)) * 100) + '%' }"></i>
         </span>
         <span class="ld-val">{{ loadavg[0].toFixed(1) }}</span>
       </div>
       <div class="ld-subrow">
         <span>
           {{ loadavg[0].toFixed(1) }} / {{ loadavg[1].toFixed(1) }} / {{ loadavg[2].toFixed(1) }}
-          <template v-if="cpu">· {{ t("load.cores", { n: cpu.cores }) }}</template>
+          <template v-if="cores">· {{ t("load.cores", { n: cores }) }}</template>
         </span>
         <span></span>
       </div>
