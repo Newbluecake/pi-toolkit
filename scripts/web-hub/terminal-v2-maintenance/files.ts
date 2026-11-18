@@ -95,7 +95,7 @@ export class HeldDirectory {
       throw e;
     }
   }
-  read(name: string, max = 65536): CapturedFile {
+  read(name: string, max = 65536, links = 1): CapturedFile {
     this.check();
     const fd = openSync(this.at(name), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     try {
@@ -104,7 +104,7 @@ export class HeldDirectory {
         !st.isFile() ||
         st.uid !== process.getuid?.() ||
         (st.mode & 0o777) !== 0o600 ||
-        st.nlink !== 1 ||
+        st.nlink !== links ||
         !Number.isSafeInteger(st.size) ||
         st.size < 0 ||
         st.size > max
@@ -143,12 +143,12 @@ export class HeldDirectory {
       closeSync(fd);
     }
   }
-  verify(file: CapturedFile): void {
-    const now = this.read(file.name, file.bytes.length);
+  verify(file: CapturedFile, links = 1): void {
+    const now = this.read(file.name, file.bytes.length, links);
     if (JSON.stringify(file.fingerprint) !== JSON.stringify(now.fingerprint) || !file.bytes.equals(now.bytes))
       fail("file-changed");
   }
-  create(name: string, bytes: Buffer): void {
+  create(name: string, bytes: Buffer): CapturedFile {
     this.check();
     const fd = openSync(
       this.at(name),
@@ -163,10 +163,34 @@ export class HeldDirectory {
         written += n;
       }
       fsyncSync(fd);
+      const original = fstatSync(fd),
+        captured = this.read(name, bytes.length);
+      if (
+        original.dev !== captured.fingerprint.dev ||
+        original.ino !== captured.fingerprint.ino ||
+        !captured.bytes.equals(bytes)
+      )
+        fail("file-changed");
+      this.verify(captured);
+      return captured;
     } finally {
       closeSync(fd);
     }
-    this.check();
+  }
+  /** Re-establish durability on retry; parsing a surviving filename is insufficient.
+   * Pin read bytes/inodes before and after fsync of the exact reopened file. */
+  syncFile(file: CapturedFile, links = 1): void {
+    this.verify(file, links);
+    const fd = openSync(this.at(file.name), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    try {
+      const st = fstatSync(fd);
+      if (st.dev !== file.fingerprint.dev || st.ino !== file.fingerprint.ino || st.nlink !== links)
+        fail("file-changed");
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    this.verify(file, links);
   }
   mkdir(name: string): HeldDirectory {
     this.check();

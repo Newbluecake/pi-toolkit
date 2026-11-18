@@ -1,6 +1,7 @@
 /** Maintenance transaction engine. NO production imports this directory.
- * Refusal before any state mutation: effect none (evidence may remain).
- * Any attempted state mutation / incomplete checkpoint: effect unknown; no repair.
+ * Pre-mutation refusal: effect none (private preparation evidence may remain).
+ * Attempted state mutation, completion publication or durability reproof failure:
+ * effect unknown; no replay/repair. A surviving filename is never a durable ACK.
  */
 import { randomBytes } from "node:crypto";
 import { clampSpanMs } from "../../../src/core/deadline.js";
@@ -26,6 +27,7 @@ import {
   type MaintenanceTestHooks,
 } from "./audit.js";
 import { HeldDirectory, digest, exactKeys, json, parse } from "./files.js";
+import { PinnedEvidence, PREPARED_COMPLETION } from "./evidence.js";
 import { OLD_SOURCE, readLegacy, type LegacySnapshot, type SnapshotFile } from "./legacy-reader.js";
 export interface MaintenanceResult {
   operation: MaintenanceOperation;
@@ -214,7 +216,9 @@ export async function runMaintenance(
     next: V2Snapshot | undefined,
     tx: HeldDirectory | undefined,
     root: HeldDirectory | undefined;
+  const originalDirectories: HeldDirectory[] = [];
   let attemptedState = false,
+    attemptedPublication = false,
     workFailed = false;
   try {
     checkDeadline();
@@ -247,11 +251,16 @@ export async function runMaintenance(
       fail("initialization-kind-mismatch");
     validateEvidence(snapshot, operation, state, legacy, next?.ledger);
     const created: SnapshotFile[] = [];
+    const pins: PinnedEvidence[] = [];
+    let evidenceNames = evidence.names();
+    let transactionPins: PinnedEvidence | undefined;
     const guard = () => {
       checkDeadline();
       if (!lease!.current(snapshot)) fail("lease-invalidated");
       state!.check();
       evidence!.check();
+      if (evidence!.names().join(",") !== evidenceNames.join(",")) fail("evidence-members-changed");
+      for (const pin of pins) pin.check();
       legacy!.verify();
       next?.verify();
       tx?.check();
@@ -275,6 +284,32 @@ export async function runMaintenance(
       await bounded(lease!.revalidate(snapshot));
       guard();
     };
+    // A surviving completion filename is only a publication observation, not a
+    // durability guarantee. Reprove exact files and both directory levels on retry.
+    const proveDurability = () => {
+      guard();
+      // Re-confirming an earlier publication is also an uncertainty window:
+      // a failed file/parent sync must never be reported as durable completion.
+      attemptedPublication = true;
+      for (const pin of pins) pin.proveDurable(guard);
+      const directories = new Set<HeldDirectory>();
+      for (const f of next?.files ?? []) {
+        guard();
+        f.directory.syncFile(f.file);
+        guard();
+        directories.add(f.directory);
+      }
+      for (const directory of directories) {
+        guard();
+        directory.sync();
+        guard();
+      }
+      guard();
+      state!.sync();
+      guard();
+      evidence!.sync();
+      guard();
+    };
     await revalidate();
     const marker: TerminalMarkerV2 = next?.marker ?? {
       v: 2,
@@ -292,9 +327,16 @@ export async function runMaintenance(
       target.ledger.storeId === marker.storeId &&
       target.ledger.allocations.length === 0 &&
       sha(target.witnessSha256);
-    const verifyCompleted = (dir: HeldDirectory, rollback: boolean) => {
-      const prepared = parse(dir.read("prepared.json", 262144).bytes),
-        completed = parse(dir.read("complete.json", 2048).bytes);
+    const verifyCompleted = (pin: PinnedEvidence, rollback: boolean) => {
+      const count = rollback ? files.length : legacy!.files.length;
+      pin.expectNames([
+        "prepared.json",
+        PREPARED_COMPLETION,
+        "complete.json",
+        ...Array.from({ length: count }, (_, i) => `snapshot-${i}`),
+      ]);
+      const prepared = parse(pin.read("prepared.json", 262144).bytes),
+        completed = parse(pin.readCompletion().bytes);
       if (
         !exactKeys(prepared, ["v", "operation", "checkpointId", "audit", "files", "target"]) ||
         prepared.v !== 1 ||
@@ -314,7 +356,7 @@ export async function runMaintenance(
       if (JSON.stringify(prepared.files) !== JSON.stringify(expected)) fail("evidence-state-mismatch");
       for (let i = 0; i < (rollback ? files.length : legacy!.files.length); i++) {
         const source = (rollback ? files : legacy!.files)[i]!;
-        if (!dir.read(`snapshot-${i}`, source.file.bytes.length).bytes.equals(source.file.bytes))
+        if (!pin.read(`snapshot-${i}`, source.file.bytes.length).bytes.equals(source.file.bytes))
           fail("evidence-state-mismatch");
       }
       if (rollback) {
@@ -328,8 +370,11 @@ export async function runMaintenance(
     };
     if (!evidence.absent(transaction)) {
       tx = new HeldDirectory(join(evidence.path, transaction));
-      verifyCompleted(tx, operation === "rollback");
+      transactionPins = new PinnedEvidence(tx);
+      pins.push(transactionPins);
+      verifyCompleted(transactionPins, operation === "rollback");
       await revalidate();
+      proveDurability();
       return {
         operation,
         checkpointId: marker.checkpointId,
@@ -344,8 +389,17 @@ export async function runMaintenance(
     if (next && marker.initialization === "fresh" && operation === "rollback") fail("no-legacy-checkpoint-to-rollback");
     if (operation === "rollback") {
       const original = new HeldDirectory(join(evidence.path, marker.checkpointId));
-      try {
-        const completed = parse(original.read("complete.json", 2048).bytes);
+      originalDirectories.push(original);
+      const originalPins = new PinnedEvidence(original);
+      pins.push(originalPins);
+      originalPins.expectNames([
+        "prepared.json",
+        PREPARED_COMPLETION,
+        "complete.json",
+        ...legacy.files.map((_, i) => `snapshot-${i}`),
+      ]);
+      {
+        const completed = parse(originalPins.readCompletion().bytes);
         if (
           !exactKeys(completed, ["v", "checkpointId", "kind"]) ||
           completed.v !== 1 ||
@@ -353,7 +407,7 @@ export async function runMaintenance(
           completed.kind !== "checkpoint-durable"
         )
           fail("checkpoint-evidence-missing");
-        const prepared = parse(original.read("prepared.json", 262144).bytes);
+        const prepared = parse(originalPins.read("prepared.json", 262144).bytes);
         if (
           !exactKeys(prepared, ["v", "operation", "checkpointId", "audit", "files", "target"]) ||
           prepared.operation !== "checkpoint" ||
@@ -365,24 +419,28 @@ export async function runMaintenance(
         if (!targetMatches(prepared.target)) fail("evidence-target-mismatch");
         for (let i = 0; i < legacy.files.length; i++)
           if (
-            !original
+            !originalPins
               .read(`snapshot-${i}`, legacy.files[i]!.file.bytes.length)
               .bytes.equals(legacy.files[i]!.file.bytes)
           )
             fail("legacy-changed-since-checkpoint");
-      } finally {
-        original.close();
       }
+      await revalidate();
+      proveDurability();
     }
     // Keep accumulated evidence, including partial transactions. Never auto-GC.
     if (evidence.names().length >= 64) fail("maintenance-evidence-capacity");
     guard();
     tx = evidence.mkdir(transaction);
+    evidenceNames = [...evidenceNames, transaction].sort();
+    transactionPins = new PinnedEvidence(tx);
+    transactionPins.expectNames([]);
+    pins.push(transactionPins);
     const writeEvidence = (name: string, bytes: Buffer) => {
       guard();
       hooks.before?.("evidence-write");
       guard();
-      tx!.create(name, bytes);
+      transactionPins!.create(name, bytes);
       guard();
     };
     for (let i = 0; i < files.length; i++) writeEvidence(`snapshot-${i}`, files[i]!.file.bytes);
@@ -411,8 +469,8 @@ export async function runMaintenance(
         hooks.before?.("state-write");
         guard();
         attemptedState = true;
-        directory.create(name, bytes);
-        created.push({ path: name, directory, file: directory.read(name, bytes.length) });
+        const file = directory.create(name, bytes);
+        created.push({ path: name, directory, file });
       };
       // Witness first, so a crash never makes a missing root look fresh.
       stateWrite(state, ".terminal-initialized-v2", witnessBytes);
@@ -431,20 +489,26 @@ export async function runMaintenance(
       root.sync();
       state.sync();
     }
-    // Durable state before completion. Crash/ENOSPC here leaves evidence and must
-    // be reviewed independently, never automatically replayed into a success.
+    // Durable state before completion preparation. Exclusive temporary content is
+    // file-fsynced before no-clobber publication; parent durability is established
+    // afterwards. Partial preparations are never replayed into a completion.
     guard();
     hooks.before?.("complete-write");
     guard();
-    tx.create(
-      "complete.json",
+    transactionPins.create(
+      PREPARED_COMPLETION,
       json({
         v: 1,
         checkpointId: marker.checkpointId,
         kind: operation === "rollback" ? "rollback-eligible" : "checkpoint-durable",
       }),
     );
+    guard();
+    attemptedPublication = true;
+    transactionPins.publishCompletion(guard);
+    guard();
     tx.sync();
+    guard();
     evidence.sync();
     guard();
     return {
@@ -457,13 +521,14 @@ export async function runMaintenance(
   } catch (error) {
     workFailed = true;
     if (error instanceof MaintenanceError)
-      throw new MaintenanceError(error.code, attemptedState ? "unknown" : error.effect);
+      throw new MaintenanceError(error.code, attemptedState || attemptedPublication ? "unknown" : error.effect);
     const code = (error as NodeJS.ErrnoException).code;
     throw new MaintenanceError(
       code && /^[A-Z0-9_]+$/.test(code) ? `io-${code}` : "maintenance-failed",
-      attemptedState ? "unknown" : "none",
+      attemptedState || attemptedPublication ? "unknown" : "none",
     );
   } finally {
+    for (const dir of originalDirectories) dir.close();
     root?.close();
     tx?.close();
     next?.close();
@@ -475,7 +540,11 @@ export async function runMaintenance(
     try {
       if (lease) await bounded(lease.release());
     } catch {
-      if (!workFailed) throw new MaintenanceError("lease-release-unknown", attemptedState ? "unknown" : "none");
+      if (!workFailed)
+        throw new MaintenanceError(
+          "lease-release-unknown",
+          attemptedState || attemptedPublication ? "unknown" : "none",
+        );
     } finally {
       clearTimeout(timer);
       options.signal?.removeEventListener("abort", abort);
