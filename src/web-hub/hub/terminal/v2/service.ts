@@ -156,10 +156,14 @@ export class HubTerminalServiceV2 implements TerminalServiceV2 {
     if (!this.initialized || this.unavailable || !this.ledger) throw new TerminalFaultV2("E_RESOURCE_UNAVAILABLE");
     return this.ledger;
   }
+  private pendingAllocationIds() {
+    return new Set([...this.intents.values()].filter((i) => !i.result && i.allocationId).map((i) => i.allocationId!));
+  }
   private hotIds() {
-    return new Set(
-      [...this.hot.values()].filter((h) => h.row.state !== "cleanup-unknown").map((h) => h.allocation.allocationId),
-    );
+    return new Set([
+      ...this.pendingAllocationIds(),
+      ...[...this.hot.values()].filter((h) => h.row.state !== "cleanup-unknown").map((h) => h.allocation.allocationId),
+    ]);
   }
   private tabs(auth: AuthIdentity, scope: TerminalScopeV2, limits: TerminalMachineLimitsV2) {
     const hotRows = [...this.hot.values()]
@@ -167,24 +171,32 @@ export class HubTerminalServiceV2 implements TerminalServiceV2 {
       .map((h) => ({ ...h.row }));
     const completedRows = [...this.completed.values()].filter((c) => c.scope === key(scope)).map((c) => ({ ...c.row }));
     const remaining = Math.max(0, L.scopeRows - hotRows.length);
+    const pending = this.pendingAllocationIds();
     return {
       revision: this.revision,
       rows: hotRows.concat(remaining ? completedRows.slice(-remaining) : []).sort((a, b) => a.ordinal - b.ordinal),
       unknownResources: [...this.allocationsById.values()]
-        .filter((a) => a.quotaSessionKey === scope.sessionId && !this.hot.has(a.termId))
+        .filter((a) => a.quotaSessionKey === scope.sessionId && !this.hot.has(a.termId) && !pending.has(a.allocationId))
         .map((a) => ({ allocationTag: a.allocationId, state: "cleanup-unknown" as const })),
       quota: quotaV2(this.allocationsById.values(), this.hotIds(), scope.sessionId, principal(auth), limits),
     };
   }
   private notify(h: Hot) {
     this.revision++;
-    for (const fn of [...h.changed]) {
-      try {
-        fn();
-      } catch {
-        /* local observer only */
+    // The existing active term is also the card's sole tabs update channel. Wake every
+    // exact-scope runtime on create/rename/close, not only the mutated (possibly inactive) tab.
+    const handles = new Set([
+      h,
+      ...[...this.hot.values()].filter((other) => key(other.allocation.scope) === key(h.allocation.scope)),
+    ]);
+    for (const handle of handles)
+      for (const fn of [...handle.changed]) {
+        try {
+          fn();
+        } catch {
+          /* local observer only */
+        }
       }
-    }
   }
   private async mutate<T>(fn: () => Promise<T>, signal?: AbortSignal, at?: number): Promise<T> {
     const prior = this.mutations;
@@ -315,7 +327,7 @@ export class HubTerminalServiceV2 implements TerminalServiceV2 {
         this.check(auth, scope, rev);
       } catch (e) {
         const f = failureV2(e);
-        return result.ok ? { ...f, effect: "unknown" } : f;
+        return result.ok || result.effect === "unknown" ? { ...f, effect: "unknown" } : f;
       }
       return result;
     } catch (e) {
@@ -424,7 +436,7 @@ export class HubTerminalServiceV2 implements TerminalServiceV2 {
         at,
       );
       this.check(auth, scope, rev);
-      if (signal.aborted || Date.now() >= at || !this.deps.context.current(snapshot))
+      if (hot.sealed || signal.aborted || Date.now() >= at || !this.deps.context.current(snapshot))
         throw new TerminalFaultV2("E_SESSION_CHANGED");
       const lifetime = Math.min(effective.maxLifetimeMs, auth.parentExpiresAt - Date.now());
       if (lifetime <= 0) throw new TerminalFaultV2("E_AUTH");

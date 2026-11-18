@@ -435,6 +435,76 @@ describe("hub v2 sole resource owner", () => {
       vi.useRealTimers();
     }
   });
+  it("active runtime wakes for inactive-tab rename/create/close without a second stream", async () => {
+    const h = harness();
+    await h.service.initialize(signal());
+    const first = await h.create();
+    if (!first.ok) throw new Error("first");
+    const runtime = await h.service.runtime(
+      auth,
+      { scope, hubInstance: id("h"), termId: first.termId, viewId: id("v") },
+      signal(),
+    );
+    if (!runtime.ok) throw new Error("runtime");
+    let wakes = 0;
+    const stop = runtime.runtime.subscribe(() => {
+      wakes++;
+    });
+    const second = await h.create(id("b"));
+    if (!second.ok) throw new Error("second");
+    expect(wakes).toBeGreaterThan(0);
+    const before = wakes;
+    expect(
+      (await h.service.rename(auth, { scope, hubInstance: id("h"), termId: second.termId, name: "renamed" }, signal()))
+        .ok,
+    ).toBe(true);
+    expect(wakes).toBeGreaterThan(before);
+    stop();
+    await h.service.dispose();
+  });
+  it("pending durable reservation is starting quota, not a cold unknown projection", async () => {
+    const h = harness();
+    await h.service.initialize(signal());
+    const gate = deferred<void>();
+    h.commitGate = gate.promise;
+    const create = h.create();
+    await h.reserveReached.promise;
+    const list = await h.service.list(auth, scope, signal());
+    if (!list.ok) throw new Error("list");
+    expect(list.quota.session).toEqual({ used: 1, unknown: 0, limit: 2 });
+    expect(list.unknownResources).toEqual([]);
+    expect(h.counts.spawn).toBe(0);
+    gate.resolve();
+    await create;
+    await h.service.dispose();
+  });
+  it("closing a newly published starting tab seals its still-unstarted backend future", async () => {
+    const h = harness();
+    await h.service.initialize(signal());
+    const first = await h.create();
+    if (!first.ok) throw new Error("first");
+    const runtime = await h.service.runtime(
+      auth,
+      { scope, hubInstance: id("h"), termId: first.termId, viewId: id("v") },
+      signal(),
+    );
+    if (!runtime.ok) throw new Error("runtime");
+    let requested = false,
+      close: Promise<unknown> | undefined;
+    const stop = runtime.runtime.subscribe(() => {
+      const next = h.service.maintenanceSnapshot().runtimes.find((r) => r.termId !== first.termId);
+      if (next && !requested) {
+        requested = true;
+        close = h.service.close(auth, { scope, hubInstance: id("h"), termId: next.termId }, signal());
+      }
+    });
+    expect((await h.create(id("b"))).ok).toBe(false);
+    expect(requested).toBe(true);
+    await close;
+    expect(h.counts.spawn).toBe(1);
+    stop();
+    await h.service.dispose();
+  });
   it("auth revision/privacy changed during context has zero reserve and fork", async () => {
     for (const mutate of [
       (h: ReturnType<typeof harness>) => {
