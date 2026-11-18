@@ -1021,8 +1021,9 @@ describe("P4-A (darwin-plan §3): platform identity seam drives predictUnknowns 
     });
     svc.bindDelivery(f.delivery);
     await svc.rescanAll();
-    // Without the probe forwarding, the default /proc probe would judge 300 and 302 dead too
-    // (no such pids ⇒ ESRCH) — exactly one unknown notice proves the wiring.
+    // Without the probe forwarding, the default /proc probe would misjudge at least one of
+    // 300/301/302 (darwin: 302 vanishes via ESRCH ⇒ unknown set degenerates; linux: all three
+    // ESRCH ⇒ three unknowns) — exactly one unknown notice proves the wiring.
     const unknowns = f.notices.filter((n) => n.kind === "unknown");
     expect(unknowns).toHaveLength(1);
     expect(unknowns[0]!.key).toContain("s_abcd2345@301");
