@@ -19,7 +19,7 @@ export {
 export { TERMINAL_V2_CAP, TERMINAL_V2_HTTP_PATHS } from "./terminal-v2-paths.js";
 
 const closed = <P extends TProperties>(p: P) => Type.Object(p, { additionalProperties: false });
-const literals = <T extends string>(xs: readonly T[]) => Type.Union(xs.map((x) => Type.Literal(x)));
+const literals = <const T extends string>(xs: readonly T[]) => Type.Union(xs.map((x) => Type.Literal(x)));
 const uint = Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER });
 const positive = Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER });
 /** Random ids require >=128 bits of entropy at minting (length is necessary, not proof of entropy).
@@ -149,7 +149,12 @@ export const TERMINAL_V2_HTTP_SCHEMAS = {
   rename: closed({ ...term, name: Type.String({ minLength: 1, maxLength: 256 }) }),
   close: closed(term),
   view: closed({ ...term, offset: Type.Optional(uint) }),
-  input: closed({ ...writer, seq: uint, bytesB64: base64(4096), kind: literals(["user", "terminal_response"]) }),
+  input: Type.Union([
+    closed({ ...writer, seq: uint, bytesB64: base64(4096), kind: literals(["user", "terminal_response"]) }),
+    // Query only a recorded result in the original valid view. Never write/renew/acquire writer.
+    // Missing/evicted/unprovable => E_INPUT_UNKNOWN effect:unknown, not permission to resend.
+    closed({ ...writer, seq: uint, queryOnly: Type.Literal(true) }),
+  ]),
   resize: closed({ ...writer, seq: uint, ...dimensions }),
   ack: closed({ ...writer, offset: uint, replayComplete: Type.Optional(Type.Literal(true)) }),
 } satisfies Record<TerminalOpV2, TSchema>;
@@ -291,6 +296,7 @@ export function terminalHttpRequestV2Ok<K extends TerminalOpV2>(op: K, raw: unkn
   const r = raw as Record<string, unknown>;
   if (op === "rename") return typeof r.name === "string" && normalizeTerminalNameV2(r.name) !== undefined;
   if (op === "input") {
+    if (r.queryOnly === true) return true; // closed union already forbids bytesB64/kind here
     const n = terminalBase64BytesV2(String(r.bytesB64));
     return n !== undefined && n <= TERMINAL_V2_LIMITS.inputBytes;
   }

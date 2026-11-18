@@ -127,6 +127,28 @@ describe("T51 P0 terminal v2 frozen contracts (no runtime)", () => {
       terminalHttpRequestV2Ok("input", { ...samples.input, bytesB64: Buffer.alloc(4096).toString("base64") }),
     ).toBe(true);
   });
+  it("input queryOnly is a closed mutually exclusive lookup, never a write payload", () => {
+    const query = { ...writer, seq: 0, queryOnly: true };
+    expect(Value.Check(TERMINAL_V2_HTTP_SCHEMAS.input, query)).toBe(true);
+    expect(terminalHttpRequestV2Ok("input", query)).toBe(true);
+    for (const invalid of [
+      { ...query, bytesB64: "" },
+      { ...query, kind: "user" },
+      { ...query, bytesB64: "YQ==", kind: "user" },
+      { ...query, queryOnly: false },
+      { ...query, queryOnly: "true" },
+      { ...query, seq: -1 },
+      { ...query, seq: Number.MAX_SAFE_INTEGER + 1 },
+      { ...query, viewId: undefined },
+      { ...samples.input, queryOnly: true },
+      { ...samples.input, queryOnly: false },
+    ]) {
+      expect(Value.Check(TERMINAL_V2_HTTP_SCHEMAS.input, invalid)).toBe(false);
+      expect(terminalHttpRequestV2Ok("input", invalid)).toBe(false);
+    }
+    expect(Value.Check(TerminalFailureV2Schema, { ok: false, code: "E_INPUT_UNKNOWN", effect: "unknown" })).toBe(true);
+    expect(TERMINAL_V2_LIMITS.inputResults).toBe(64); // no accepted seq can be rewritten after eviction
+  });
   it("uses canonical base64 and UTF-8/code-point name/cwd limits", () => {
     expect(terminalBase64BytesV2("")).toBe(0);
     expect(terminalBase64BytesV2("YQ==")).toBe(1);

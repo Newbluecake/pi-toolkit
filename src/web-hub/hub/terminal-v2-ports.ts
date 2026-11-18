@@ -54,6 +54,10 @@ export interface TerminalViewPortV2 {
     input: TerminalHttpRequestsV2["view"],
     signal: AbortSignal,
   ): Promise<TerminalOpenViewResultV2>;
+  /** queryOnly:true only looks up recorded seq results AFTER original auth/scope/view checks.
+   * Never expose another/retired view's history; reject stale view as usual. No PTY call,
+   * create, writer acquisition or idle renewal. Keep <=64 results + maximum accepted seq;
+   * evicted/never accepted/unprovable result => E_INPUT_UNKNOWN effect:unknown, never rewrite. */
   input(
     auth: AuthIdentity,
     input: TerminalHttpRequestsV2["input"],
