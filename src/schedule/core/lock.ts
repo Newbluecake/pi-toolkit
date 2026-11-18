@@ -44,6 +44,35 @@ export const SCHED_STORE_LOCK_FILE = ".store.lock";
 const FLOCK_CONFLICT_EXIT = 75;
 const HOLDER_INFO_MAX = 1024;
 
+export type AcquireResult = "held" | "busy" | { kind: "fail"; detail: string };
+/** Synchronous lock attempt on `fd`; on `held` the lock belongs to that fd's open file description. */
+export type LockAcquire = (fd: number) => AcquireResult;
+export interface AcquireDeps {
+  spawn?: typeof spawnSync;
+  timeoutMs?: number;
+}
+
+/** `flock -x -n -E 75 3` child on our descriptor (stdio slot 3). */
+export function linuxFlockAcquire(flockBin = "flock", deps: AcquireDeps = {}): LockAcquire {
+  const spawn = deps.spawn ?? spawnSync;
+  const timeout = deps.timeoutMs ?? 5_000;
+  return (fd) => {
+    const r = spawn(flockBin, ["-x", "-n", "-E", String(FLOCK_CONFLICT_EXIT), "3"], {
+      stdio: ["ignore", "ignore", "ignore", fd],
+      timeout,
+    });
+    if (r.error !== undefined) {
+      return {
+        kind: "fail",
+        detail: code(r.error) === "ENOENT" ? "flock binary not found (fail closed)" : `flock: ${String(r.error)}`,
+      };
+    }
+    if (r.status === FLOCK_CONFLICT_EXIT) return "busy";
+    if (r.status !== 0) return { kind: "fail", detail: `flock exited ${String(r.status ?? r.signal)}` };
+    return "held";
+  };
+}
+
 export interface LockOpts {
   timeoutMs?: number;
   /** Monotonic clock for the deadline (default `performance.now`). */
@@ -53,6 +82,8 @@ export interface LockOpts {
   holderInfo?: Record<string, unknown>;
   /** `flock` binary (tests). */
   flockBin?: string;
+  /** Lock acquisition strategy; wins over `flockBin`. */
+  acquire?: LockAcquire;
   /** Lock file name inside the directory (default `.lock`). */
   name?: string;
 }
@@ -98,7 +129,7 @@ type TryResult =
   | { kind: "gone" }
   | { kind: "fail"; detail: string };
 
-function tryLock(dirFd: number, name: string, flockBin: string): TryResult {
+function tryLock(dirFd: number, name: string, acquire: LockAcquire): TryResult {
   const path = fdPath(dirFd, name);
   let fd: number;
   try {
@@ -115,18 +146,9 @@ function tryLock(dirFd: number, name: string, flockBin: string): TryResult {
     const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
     if (!st.isFile() || (uid !== undefined && st.uid !== uid))
       return { kind: "fail", detail: "lock file is not our regular file" };
-    const r = spawnSync(flockBin, ["-x", "-n", "-E", String(FLOCK_CONFLICT_EXIT), "3"], {
-      stdio: ["ignore", "ignore", "ignore", fd],
-      timeout: 5_000,
-    });
-    if (r.error !== undefined) {
-      return {
-        kind: "fail",
-        detail: code(r.error) === "ENOENT" ? "flock binary not found (fail closed)" : `flock: ${String(r.error)}`,
-      };
-    }
-    if (r.status === FLOCK_CONFLICT_EXIT) return { kind: "busy" };
-    if (r.status !== 0) return { kind: "fail", detail: `flock exited ${String(r.status ?? r.signal)}` };
+    const r = acquire(fd);
+    if (r === "busy") return { kind: "busy" };
+    if (r !== "held") return { kind: "fail", detail: r.detail };
     // Locked an inode that is no longer the linked lock file (recycled meanwhile)? Retry.
     let linked;
     try {
@@ -162,10 +184,10 @@ export async function withDirLock<T>(dirFd: number, body: () => T, opts: LockOpt
   const mono = opts.monotonic ?? (() => performance.now());
   const sleep = opts.sleep ?? lockRetrySleep;
   const name = opts.name ?? SCHED_LOCK_FILE;
-  const flockBin = opts.flockBin ?? "flock";
+  const acquire = opts.acquire ?? linuxFlockAcquire(opts.flockBin);
   const deadline = mono() + (opts.timeoutMs ?? SCHED_LOCK_TIMEOUT_MS);
   for (let spins = 0; ; spins++) {
-    const r = tryLock(dirFd, name, flockBin);
+    const r = tryLock(dirFd, name, acquire);
     if (r.kind === "held") {
       writeHolderInfo(r.fd, opts.holderInfo);
       try {

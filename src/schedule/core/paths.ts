@@ -63,17 +63,82 @@ export class SchedFsError extends Error {
   }
 }
 
+export interface PathBackend {
+  readonly platform: "linux" | "darwin";
+  available(): boolean;
+  path(fd: number, name?: string): string;
+  lstatAt(fd: number, rel: string, opts?: FsCheckOpts): Stats;
+  locate(fd: number): string;
+  prepare(path: string, kind: "dir" | "file"): unknown;
+  confirm(snap: unknown, args: { fd: number; path: string; st: Stats; kind: "dir" | "file"; parentFd?: number }): void;
+}
+
+interface FdRecord {
+  backend: "darwin";
+  path: string;
+  dev: number;
+  ino: number;
+  chain: unknown[];
+  lastUsed: number;
+}
+interface FdRegistry {
+  map: Map<number, FdRecord>;
+  lastSweepAt: number;
+}
+const FD_PATHS_KEY = Symbol.for("pi-subagent:sched-fd-paths:v1");
+
+function fdRegistry(): FdRegistry | undefined {
+  return (globalThis as Record<symbol, unknown>)[FD_PATHS_KEY] as FdRegistry | undefined;
+}
+
+function fdBackendOf(_fd: number): PathBackend {
+  const registry = fdRegistry();
+  if (registry === undefined || registry.map.size === 0) return linuxPathBackend;
+  return linuxPathBackend;
+}
+
 /** `/proc/self/fd/<fd>[/<name>]`. */
 export function fdPath(fd: number, name?: string): string {
+  return fdBackendOf(fd).path(fd, name);
+}
+
+function linuxFdPath(fd: number, name?: string): string {
   return name === undefined ? `${SCHED_FD_ROOT}/${fd}` : `${SCHED_FD_ROOT}/${fd}/${name}`;
 }
 
-export function fdAnchoringAvailable(): boolean {
+function linuxLstatAt(dirFd: number, rel: string, _opts?: FsCheckOpts): Stats {
+  return lstatSync(fdPath(dirFd, rel));
+}
+
+export const linuxPathBackend: PathBackend = Object.freeze({
+  platform: "linux",
+  available: () => linuxFdAnchoringAvailable(),
+  path: linuxFdPath,
+  lstatAt: linuxLstatAt,
+  locate: (fd: number) => readlinkSync(linuxFdPath(fd)),
+  prepare: () => undefined,
+  confirm: () => undefined,
+});
+
+/** P0 keeps the existing Linux behavior on every host; Darwin is introduced in P2. */
+export function defaultPathBackend(): PathBackend {
+  return linuxPathBackend;
+}
+
+export function lstatAt(fd: number, rel: string, opts?: FsCheckOpts): Stats {
+  return fdBackendOf(fd).lstatAt(fd, rel, opts);
+}
+
+function linuxFdAnchoringAvailable(): boolean {
   try {
     return statSync(SCHED_FD_ROOT).isDirectory();
   } catch {
     return false;
   }
+}
+
+export function fdAnchoringAvailable(): boolean {
+  return defaultPathBackend().available();
 }
 
 function errCode(err: unknown): string | undefined {
@@ -112,6 +177,8 @@ export function isSessionDirName(name: string): boolean {
 export interface FsCheckOpts {
   /** Expected owner (default: process uid). */
   uid?: number;
+  /** Explicit path backend; consumed only at root/open entry points. */
+  backend?: PathBackend;
 }
 
 function expectedUid(opts: FsCheckOpts): number | undefined {
@@ -154,7 +221,8 @@ function mapOpenError(err: unknown, what: string, path?: string): SchedFsError {
 
 /** Open an absolute, already-canonical directory path `O_DIRECTORY|O_NOFOLLOW` and check it. */
 export function openDirPath(path: string, opts: FsCheckOpts = {}): OpenedDir {
-  if (!fdAnchoringAvailable()) throw new SchedFsError("platform", "fd-anchored opens need /proc/self/fd");
+  if (!(opts.backend ?? defaultPathBackend()).available())
+    throw new SchedFsError("platform", "fd-anchored opens need /proc/self/fd");
   let fd: number;
   try {
     fd = openSync(path, fsConstants.O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
@@ -177,15 +245,16 @@ export function openDirPath(path: string, opts: FsCheckOpts = {}): OpenedDir {
  */
 export function fdRealPath(fd: number): string {
   try {
-    return readlinkSync(fdPath(fd));
+    return fdBackendOf(fd).locate(fd);
   } catch (err) {
     throw new SchedFsError("io", `cannot resolve fd location: ${errCode(err) ?? String(err)}`);
   }
 }
 
 /** Open an existing ancestor directory without owner/mode policy (only for anchored creation). */
-export function openDirPathUnchecked(path: string): OpenedDir {
-  if (!fdAnchoringAvailable()) throw new SchedFsError("platform", "fd-anchored opens need /proc/self/fd");
+export function openDirPathUnchecked(path: string, opts: FsCheckOpts = {}): OpenedDir {
+  if (!(opts.backend ?? defaultPathBackend()).available())
+    throw new SchedFsError("platform", "fd-anchored opens need /proc/self/fd");
   let fd: number;
   try {
     fd = openSync(path, fsConstants.O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
@@ -278,6 +347,7 @@ export interface StoreRoot {
   real: string;
   dev: number;
   ino: number;
+  backend?: PathBackend;
 }
 
 export interface StoreRootOpts extends FsCheckOpts {
@@ -309,12 +379,19 @@ export function resolveStoreRoot(storeDir: string, opts: StoreRootOpts = {}): St
     throw mapOpenError(err, "store dir");
   }
   vaultCheck(storeDir, real, opts);
-  const dir = openDirPath(real, opts);
+  const backend = opts.backend ?? defaultPathBackend();
+  const dir = openDirPath(real, { ...opts, backend });
   try {
     const actual = fdRealPath(dir.fd);
     vaultCheck(storeDir, actual, opts);
     if (actual !== real) throw new SchedFsError("moved", "store dir moved while being pinned");
-    return { literal: storeDir, real: actual, dev: dir.dev, ino: dir.ino };
+    return {
+      literal: storeDir,
+      real: actual,
+      dev: dir.dev,
+      ino: dir.ino,
+      ...(opts.backend === undefined ? {} : { backend: opts.backend }),
+    };
   } finally {
     closeQuiet(dir.fd);
   }
@@ -328,7 +405,8 @@ export function resolveStoreRoot(storeDir: string, opts: StoreRootOpts = {}): St
  */
 export function openStoreRoot(root: StoreRoot, opts: StoreRootOpts = {}): OpenedDir {
   vaultCheck(root.literal, root.real, opts);
-  const dir = openDirPath(root.real, opts);
+  const backend = opts.backend ?? root.backend ?? defaultPathBackend();
+  const dir = openDirPath(root.real, { ...opts, backend });
   try {
     if (dir.dev !== root.dev || dir.ino !== root.ino) {
       throw new SchedFsError("moved", "store dir identity changed since it was pinned");

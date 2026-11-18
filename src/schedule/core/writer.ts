@@ -46,6 +46,7 @@ import {
   SCHED_LOCK_TIMEOUT_MS,
   withDirLock,
   withSessionLock,
+  type LockAcquire,
   type LockOpts,
   type LockOutcome,
 } from "./lock.js";
@@ -54,6 +55,7 @@ import {
   fdPath,
   fdRealPath,
   isPlainName,
+  lstatAt,
   openDirAt,
   openDirPathUnchecked,
   openSessionDirAt,
@@ -62,6 +64,7 @@ import {
   SchedFsError,
   sessionDirName,
   type InVaultPredicate,
+  type PathBackend,
   type StoreRoot,
 } from "./paths.js";
 import { listSessionDirs, readSessionState, readStateAt, validateStateFile, type SessionStateRead } from "./reader.js";
@@ -145,6 +148,8 @@ export interface SessionStoreOpts {
   sleep?: (ms: number) => Promise<void>;
   /** `flock` binary (tests). */
   flockBin?: string;
+  /** Lock acquisition strategy (wins over `flockBin`). */
+  acquire?: LockAcquire;
   faults?: (point: WriterFaultPoint) => void;
 }
 
@@ -223,7 +228,10 @@ export function atomicWriteAt(dirFd: number, name: string, data: Buffer, faults?
  * location re-checked, and each missing component is created anchored on its parent fd and
  * re-opened O_NOFOLLOW (owner/mode checked). Finally the root is pinned (`resolveStoreRoot`).
  */
-export function ensureStoreRoot(storeDir: string, opts: { inVault?: InVaultPredicate; uid?: number } = {}): StoreRoot {
+export function ensureStoreRoot(
+  storeDir: string,
+  opts: { inVault?: InVaultPredicate; uid?: number; backend?: PathBackend } = {},
+): StoreRoot {
   if (typeof storeDir !== "string" || !isAbsolute(storeDir) || storeDir.includes("\0")) {
     throw new SchedFsError("relative", "store dir must be an absolute path");
   }
@@ -248,7 +256,7 @@ export function ensureStoreRoot(storeDir: string, opts: { inVault?: InVaultPredi
   if (inVault(canonical) || inVault(join(canonical, ...rest))) {
     throw new SchedFsError("vault", "store dir resolves inside an encrypted vault");
   }
-  let parent = openDirPathUnchecked(canonical);
+  let parent = openDirPathUnchecked(canonical, opts);
   try {
     const actual = fdRealPath(parent.fd);
     if (actual !== canonical || inVault(actual))
@@ -525,6 +533,7 @@ export function openSessionStore(opts: SessionStoreOpts): SessionStore {
           }),
       ...(opts.sleep === undefined ? {} : { sleep: opts.sleep }),
       ...(opts.flockBin === undefined ? {} : { flockBin: opts.flockBin }),
+      ...(opts.acquire === undefined ? {} : { acquire: opts.acquire }),
     };
   }
 
@@ -1103,7 +1112,7 @@ export async function writeReportLocked<T = undefined>(
         allocated = n === 1 ? name : `${name.slice(0, -3)}-${n}.md`;
         if (used.has(allocated)) continue;
         try {
-          lstatSync(fdPath(fd, `${SCHED_REPORTS_DIR}/${allocated}`));
+          lstatAt(fd, `${SCHED_REPORTS_DIR}/${allocated}`);
         } catch (err) {
           if (errCode(err) !== "ENOENT") throw err;
           available = true;
