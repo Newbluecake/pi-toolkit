@@ -12,24 +12,38 @@ import {
   privateSse,
   observeUntil,
 } from "../../scripts/web-hub/terminal-v2-maintenance/http-client.js";
-import { prepareStockRetained } from "./helpers/terminal-retained-stock-setup.js";
-import { descendants, probeStockMain, stockProcess } from "./helpers/terminal-retained-stock-process.js";
+import { prepareStockRetained, reopenStockRetained } from "./helpers/terminal-retained-stock-setup.js";
+import {
+  descendants,
+  probeBareStockMainCounterexample,
+  stockProcess,
+} from "./helpers/terminal-retained-stock-process.js";
 const root = process.env.PI_TOOLKIT_STOCK_CONSUMERS;
+const phase = process.env.PI_TOOLKIT_STOCK_PHASE ?? "restart";
+if (!["restart", "rollback"].includes(phase)) throw new Error("unknown stock phase");
 const id = () => randomBytes(24).toString("base64url");
 it.each([
   ["npm", 2],
   ["zip", 2],
 ] as const)(
-  "stock %s L%i: actual consumer N1 close/N2 new PID/new login/session preserves retained debt",
+  `stock %s L%i: sealed consumer ${phase} phase preserves retained debt`,
   async (format, count) => {
     if (!root)
       throw new Error("PI_TOOLKIT_STOCK_CONSUMERS must name private unpacked npm/zip consumers; no checkout fallback");
-    const f = await prepareStockRetained(join(root, format), count);
-    console.log(`stock retained evidence: ${f.base}`);
+    const checkpointPath = join(root, `${format}-stock-checkpoint.json`);
+    const saved = phase === "rollback" ? JSON.parse(readFileSync(checkpointPath, "utf8")) : undefined;
+    const f = saved ? reopenStockRetained(saved.base) : await prepareStockRetained(join(root, format), count);
+    expect(f.profile.newPackageRoot).toBe(join(root, format));
+    console.log(`stock retained ${phase} evidence: ${f.base}`);
     const ledger = () => JSON.parse(readFileSync(f.ledgerPath, "utf8"));
     const processes: Awaited<ReturnType<typeof stockProcess>>[] = [];
-    const lifecycle: unknown[] = [],
-      observations: any[] = [];
+    const lifecycle: unknown[] = saved?.lifecycle ?? [],
+      observations: any[] = saved?.observations ?? [];
+    const priorProcesses: any[] = saved?.stockProcesses ?? [];
+    const cleanups: Array<() => Promise<void>> = [];
+    const start = (label: string, sameSession = false) =>
+      stockProcess(f, label, sameSession, (stop) => cleanups.push(stop));
+    let bareCounterexample = saved?.bareCounterexample;
     const assertLegacy = () => {
       expect(ledger().legacyObligations).toEqual(f.retained);
       expect(ledger().allocations).toEqual([]);
@@ -117,7 +131,7 @@ it.each([
           scope,
           quota: list.body.quota,
           unknownResources: list.body.unknownResources,
-          cookieChangedOnly: true,
+          sameOriginalSession: sameSession,
           ...(denial ? { denial } : {}),
           backendObservation: {
             factoryInstrumented: false,
@@ -135,25 +149,48 @@ it.each([
     };
     try {
       assertLegacy();
-      probeStockMain(f); // Genuine red is a gate, not skipped/expected-failure green.
-      const n1 = await stockProcess(f, "N1", count === 2);
-      processes.push(n1);
-      const first = await inspect(n1, count === 2);
-      const closed1 = await n1.closeProof();
-      lifecycle.push({ label: "N1", ...closed1 });
-      expect(closed1).toEqual({ code: 0, signal: null, piGone: true, hubGone: true });
-      assertLegacy();
-      const n2 = await stockProcess(f, "N2");
-      processes.push(n2);
-      expect(n2.evidence.pi!.pid).not.toBe(n1.evidence.pi!.pid);
-      expect(n2.hub.pid).not.toBe(n1.hub.pid);
-      expect(n2.state.sessionId).not.toBe(n1.state.sessionId);
-      const second = await inspect(n2, false);
-      expect(second.cookie).not.toBe(first.cookie);
-      expect(second.scope.sessionId).not.toBe(first.scope.sessionId);
-      const closed2 = await n2.closeProof();
-      lifecycle.push({ label: "N2", ...closed2 });
-      expect(closed2).toEqual({ code: 0, signal: null, piGone: true, hubGone: true });
+      if (phase === "restart") {
+        bareCounterexample = probeBareStockMainCounterexample(f);
+        const n1 = await start("N1", count === 2);
+        processes.push(n1);
+        const first = await inspect(n1, count === 2);
+        const closed1 = await n1.closeProof();
+        lifecycle.push({ label: "N1", ...closed1 });
+        expect(closed1).toEqual({ code: 0, signal: null, piGone: true, hubGone: true });
+        assertLegacy();
+        const n2 = await start("N2");
+        processes.push(n2);
+        expect(n2.evidence.pi!.pid).not.toBe(n1.evidence.pi!.pid);
+        expect(n2.hub.pid).not.toBe(n1.hub.pid);
+        expect(n2.state.sessionId).not.toBe(n1.state.sessionId);
+        const second = await inspect(n2, false);
+        expect(second.cookie).not.toBe(first.cookie);
+        expect(second.scope.sessionId).not.toBe(first.scope.sessionId);
+        const closed2 = await n2.closeProof();
+        lifecycle.push({ label: "N2", ...closed2 });
+        expect(closed2).toEqual({ code: 0, signal: null, piGone: true, hubGone: true });
+        assertLegacy();
+        writeFileSync(
+          checkpointPath,
+          JSON.stringify(
+            {
+              v: 1,
+              phase: "stock-N2-complete",
+              base: f.base,
+              consumer: f.profile.newPackageRoot,
+              lifecycle,
+              observations,
+              stockProcesses: processes.map((p) => p.evidence),
+              bareCounterexample,
+            },
+            null,
+            2,
+          ),
+          { mode: 0o600 },
+        );
+        return;
+      }
+      expect(saved.phase).toBe("stock-N2-complete");
       expect(f.run("resume", ["--operation", f.init.operationId])).toMatchObject({
         phase: "publication-complete",
         mode: "new",
@@ -171,11 +208,14 @@ it.each([
         mode: "new",
         sequence: 3,
       });
-      const n3 = await stockProcess(f, "N-return");
+      const n3 = await start("N-return");
       processes.push(n3);
-      expect(n3.hub.pid).not.toBe(n2.hub.pid);
+      expect(n3.hub.pid).not.toBe(priorProcesses[1].hub.pid);
+      expect(n3.evidence.pi!.pid).not.toBe(priorProcesses[1].pi.pid);
       await inspect(n3, false);
-      lifecycle.push({ label: "N-return", ...(await n3.closeProof()) });
+      const closed3 = await n3.closeProof();
+      expect(closed3).toEqual({ code: 0, signal: null, piGone: true, hubGone: true });
+      lifecycle.push({ label: "N-return", ...closed3 });
       assertLegacy();
       writeFileSync(
         join(f.base, "stock-restart-result.json"),
@@ -193,13 +233,16 @@ it.each([
             beforeLegacy: f.retained,
             afterLegacy: ledger().legacyObligations,
             rollback,
-            stockProcesses: processes.map((p) => p.evidence),
+            stockProcesses: [...priorProcesses, ...processes.map((p) => p.evidence)],
+            bareCounterexample,
+            independentVitestPhases: true,
             realKernelReboot: false,
             oldOffBusinessService: "NOT RUN in this supplement; publication only (prior P7B covers service)",
             L1StockPtyCreateInputPrune:
               "NOT RUN: no authorized closed passwd UID/container; production ignores private HOME",
-            backendFactoryCounter:
-              "NOT instrumented; real E_LIMIT effect:none, no observed helper and zero ledger allocations",
+            backendFactoryCounter: processes.some((p) => p.evidence.passiveCoverage)
+              ? "Passive V8 coverage: original createTerminalBackend execution count 0 for observed processes; no test factory/wrapper"
+              : "No observer: real E_LIMIT effect:none, no observed helper and zero ledger allocations; no exact invocation counter",
           },
           null,
           2,
@@ -207,7 +250,7 @@ it.each([
         { mode: 0o600 },
       );
     } finally {
-      for (const app of processes.reverse()) await app.stop();
+      for (const stop of cleanups.reverse()) await stop();
     }
   },
   180000,

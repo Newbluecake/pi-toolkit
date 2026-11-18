@@ -4,7 +4,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { expect } from "vitest";
 import { observeUntil } from "../../../scripts/web-hub/terminal-v2-maintenance/http-client.js";
@@ -18,6 +18,9 @@ export function proc(pid: number) {
     return {
       pid,
       state: fields[0],
+      parentPid: Number(fields[1]),
+      uid: Number(readFileSync(`/proc/${pid}/status`, "utf8").match(/^Uid:\s+(\d+)/m)?.[1]),
+      bootId: readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim(),
       starttime: fields[19],
       argv: readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean),
     };
@@ -37,10 +40,10 @@ export function descendants(pid: number): ReturnType<typeof proc>[] {
     .flatMap((child) => [proc(child), ...descendants(child)])
     .filter(Boolean);
 }
-/** Fail-fast, genuine stock main module-load diagnostic. Missing config is
- * intentional: a loadable original main exits 2 before any service/PTY starts.
- * No plain provenance is supplied, and no resolver alias is added. */
-export function probeStockMain(f: Installation) {
+/** Historical bare-jiti negative control, NOT a product startup positive.
+ * No config/plain marker/host aliases: the repaired production spawn plan is
+ * intentionally absent. The positive below uses only the sealed pi launcher. */
+export function probeBareStockMainCounterexample(f: Installation) {
   const require = createRequire(f.profile.piCli);
   const jitiPackage = require.resolve("jiti/package.json");
   const jitiCli = join(dirname(jitiPackage), "lib/jiti-cli.mjs");
@@ -75,12 +78,24 @@ export function probeStockMain(f: Installation) {
     stdout: result.stdout,
     stderr: result.stderr,
   };
-  writeFileSync(join(f.base, "stock-main-load.json"), JSON.stringify(evidence, null, 2), { mode: 0o600 });
-  expect(result.status, `stock main must load before rejecting absent config: ${result.stderr}`).toBe(2);
-  expect(result.stderr).toContain("PI_WEBHUB_CONFIG is not set");
+  writeFileSync(join(f.base, "stock-main-bare-counterexample.json"), JSON.stringify(evidence, null, 2), {
+    mode: 0o600,
+  });
+  expect(result.status, `bare jiti has no product host aliases: ${result.stderr}`).toBe(1);
+  expect(result.stderr).toContain("Cannot find module '@sinclair/typebox'");
   return evidence;
 }
-export async function stockProcess(f: Installation, label: string, sameSession = false) {
+export async function stockProcess(
+  f: Installation,
+  label: string,
+  sameSession = false,
+  own?: (stop: () => Promise<void>) => void,
+) {
+  // Opt-in passive V8 coverage, as in the independently accepted loader gate.
+  // No hooks, test loader, source rewrite, backend wrapper or resolver mutation.
+  const passiveCoverage: { directory: string; files?: string[]; backendFactoryCalls?: number } | null =
+    process.env.PI_TOOLKIT_STOCK_OBSERVE === "1" ? { directory: join(f.base, `${label}-v8`) } : null;
+  if (passiveCoverage) mkdirSync(passiveCoverage.directory, { mode: 0o700 });
   const env: NodeJS.ProcessEnv = {
     HOME: f.f.home,
     PATH: "/usr/local/bin:/usr/bin:/bin",
@@ -92,6 +107,7 @@ export async function stockProcess(f: Installation, label: string, sameSession =
     JITI_FS_CACHE: "false",
     npm_config_offline: "true",
   };
+  if (passiveCoverage) env.NODE_V8_COVERAGE = passiveCoverage.directory;
   const args = [
     "--mode",
     "rpc",
@@ -223,6 +239,7 @@ export async function stockProcess(f: Installation, label: string, sameSession =
       }
     }
   };
+  own?.(stop);
   try {
     const state = await rpc("get_state"),
       commands = await rpc("get_commands");
@@ -231,7 +248,9 @@ export async function stockProcess(f: Installation, label: string, sameSession =
     // Source info comes from the ORIGINAL SDK resource loader, not our version
     // string. The source-forced sealed launcher must bind this exact consumer.
     expect(JSON.stringify(webhub.sourceInfo)).toContain(f.profile.newPackageRoot);
-    await rpc("prompt", { message: "/webhub start" });
+    // N1 auto-spawns. Later full pi processes retain the real stopped marker;
+    // explicit start clears it and the original connection backoff spawns anew.
+    if (existsSync(join(f.paths.stateDir, "stopped"))) await rpc("prompt", { message: "/webhub start" });
     hub = await observeUntil(
       async () => {
         try {
@@ -246,11 +265,54 @@ export async function stockProcess(f: Installation, label: string, sameSession =
       45000,
     );
     const expectedMain = join(f.profile.newPackageRoot, "src/web-hub/hub/main.ts");
-    expect(hub.identity.argv).toContain(expectedMain);
-    expect(hub.identity.argv.some((arg: string) => arg.endsWith("jiti-cli.mjs"))).toBe(true);
-    const pi = descendants(child.pid!).find((p) => p?.argv.includes(f.profile.piCli));
+    const hostRequire = createRequire(f.profile.piCli);
+    const jitiCli = join(dirname(hostRequire.resolve("jiti/package.json")), "lib/jiti-cli.mjs");
+    expect(hub.identity.argv).toEqual([process.execPath, jitiCli, expectedMain]);
+    expect(hub.socket).toBe(f.paths.socketPath);
+    expect(hub.procStartTicks).toBe(Number(hub.identity.starttime));
+    const initial = Object.fromEntries(
+      readFileSync(`/proc/${hub.pid}/environ`, "utf8")
+        .split("\0")
+        .filter(Boolean)
+        .map((line) => {
+          const at = line.indexOf("=");
+          return [line.slice(0, at), line.slice(at + 1)];
+        }),
+    );
+    const hostAliases = JSON.parse(initial.JITI_ALIAS!);
+    for (const request of ["typebox", "typebox/value", "typebox/compile"]) {
+      expect(hostAliases[request]).toBe(hostRequire.resolve(request));
+      expect(hostAliases[`@sinclair/${request}`]).toBe(hostRequire.resolve(request));
+    }
+    expect(Object.keys(hostAliases)).toHaveLength(6);
+    expect(initial.JITI_TSCONFIG_PATHS).toBe("false");
+    expect(initial.PI_WEBHUB_TERMINAL_SOURCE).toBe("plain");
+    expect(JSON.parse(initial.PI_WEBHUB_CONFIG!).home).toBe(f.f.home);
+    expect(JSON.parse(initial.PI_WEBHUB_LAUNCHER!)).toEqual([process.execPath, f.profile.piCli]);
+    // Stock pi setupCli intentionally rewrites kernel cmdline to `pi`.
+    // Bind the direct sealed-launcher child by real ppid/uid/starttime/boot,
+    // then corroborate its ORIGINAL SDK registration on authenticated SSE.
+    const pi = children(child.pid!)
+      .map(proc)
+      .find(
+        (p) =>
+          p !== undefined &&
+          p.parentPid === child.pid &&
+          p.uid === process.getuid!() &&
+          p.argv.length === 1 &&
+          p.argv[0] === "pi",
+      );
+    writeFileSync(
+      join(f.base, `${label}-startup-processes.json`),
+      JSON.stringify({ launcher: proc(child.pid!), descendants: descendants(child.pid!) }, null, 2),
+      { mode: 0o600 },
+    );
     expect(pi).toBeTruthy();
     expect(pi!.pid).not.toBe(child.pid);
+    const piEnv = readFileSync(`/proc/${pi!.pid}/environ`, "utf8").split("\0");
+    expect(piEnv).toContain(`PI_CODING_AGENT_DIR=${f.agentDir}`);
+    expect(piEnv).toContain(`HOME=${f.f.home}`);
+    expect(piEnv.some((entry) => entry.startsWith("JITI_ALIAS="))).toBe(false);
     expect(existsSync(join(f.profile.newPackageRoot, "node_modules"))).toBe(false);
     const evidence = {
       label,
@@ -258,6 +320,13 @@ export async function stockProcess(f: Installation, label: string, sameSession =
       pi,
       hub,
       extension: webhub.sourceInfo,
+      productSpawn: {
+        hostAliases,
+        tsconfigPaths: initial.JITI_TSCONFIG_PATHS,
+        terminalSource: initial.PI_WEBHUB_TERMINAL_SOURCE,
+        exactKernelArgv: hub.identity.argv,
+      },
+      sealedLauncher: { path: f.profile.launchers[0], sha256: digest(f.profile.launchers[0]!) },
       sdkCli: { path: f.profile.piCli, sha256: digest(f.profile.piCli) },
       loadedMain: { path: expectedMain, sha256: digest(expectedMain) },
       extensionEntry: {
@@ -272,6 +341,7 @@ export async function stockProcess(f: Installation, label: string, sameSession =
       sessionId: state.sessionId,
       noModelPrompt: true,
       productionBackendInjected: false,
+      passiveCoverage,
     };
     writeFileSync(join(f.base, `${label}-loaded.json`), JSON.stringify(evidence, null, 2), { mode: 0o600 });
     return {
@@ -283,6 +353,24 @@ export async function stockProcess(f: Installation, label: string, sameSession =
       evidence,
       async closeProof() {
         await stop();
+        if (passiveCoverage) {
+          const files = readdirSync(passiveCoverage.directory).filter((name) =>
+            name.startsWith(`coverage-${hub.pid}-`),
+          );
+          const scripts = files.flatMap(
+            (name) => JSON.parse(readFileSync(join(passiveCoverage.directory, name), "utf8")).result,
+          );
+          const backend = scripts.find((script: any) =>
+            script.url.endsWith(join(f.profile.newPackageRoot, "src/web-hub/hub/terminal/v2/backend.ts")),
+          );
+          expect(backend, "actual consumer backend module must be loaded, not just a plan string").toBeTruthy();
+          const factory = backend.functions.find((fn: any) => fn.functionName === "createTerminalBackend");
+          expect(factory, "real production backend factory coverage must exist").toBeTruthy();
+          expect(factory.ranges[0].count).toBe(0);
+          passiveCoverage.files = files.map((name) => join(passiveCoverage.directory, name));
+          passiveCoverage.backendFactoryCalls = factory.ranges[0].count;
+          writeFileSync(join(f.base, `${label}-loaded.json`), JSON.stringify(evidence, null, 2), { mode: 0o600 });
+        }
         return {
           ...(await closed),
           piGone: !proc(pi!.pid) || proc(pi!.pid)?.state === "Z",

@@ -300,6 +300,24 @@ runOrdinaryTerminalHost({startHub,createHttpFrontend,wireWebHub,resolveHubPaths,
     phase: "publication-complete",
     mode: "new",
   });
+  // Terminal-only test handoff for a SECOND independent Vitest process. No
+  // token/auth bytes are copied: only a hash checks the original token in place.
+  put(join(base, "stock-installation.json"), {
+    base,
+    f,
+    profile,
+    paths,
+    installation,
+    evidence,
+    agentDir,
+    init,
+    ledgerPath,
+    retained,
+    originalJournalPath,
+    oldInfo,
+    originalJournalSha256: sha(originalJournal),
+    tokenSha256: sha(token),
+  });
   return {
     base,
     f,
@@ -318,4 +336,41 @@ runOrdinaryTerminalHost({startHub,createHttpFrontend,wireWebHub,resolveHubPaths,
     token,
     oldInfo,
   };
+}
+/** Reopen genuine prior fixture state, not a new runtime/constructor history. */
+export function reopenStockRetained(base: string): Awaited<ReturnType<typeof prepareStockRetained>> {
+  const saved = JSON.parse(readFileSync(join(base, "stock-installation.json"), "utf8"));
+  expect(saved.base).toBe(base);
+  const originalJournal = readFileSync(saved.originalJournalPath),
+    token = readFileSync(saved.paths.tokenFile);
+  expect(sha(originalJournal)).toBe(saved.originalJournalSha256);
+  expect(sha(token)).toBe(saved.tokenSha256);
+  expect(JSON.parse(readFileSync(saved.ledgerPath, "utf8")).legacyObligations).toEqual(saved.retained);
+  const env = {
+    HOME: saved.f.home,
+    PATH: "/usr/local/bin:/usr/bin:/bin",
+    LANG: "C.UTF-8",
+    XDG_CACHE_HOME: process.env.XDG_CACHE_HOME!,
+    TMPDIR: process.env.TMPDIR!,
+    PI_CODING_AGENT_DIR: saved.agentDir,
+    JITI_FS_CACHE: "false",
+    NODE_OPTIONS: "",
+  };
+  const cli = join(saved.profile.newPackageRoot, "dist/maintenance/cli.mjs");
+  const run = (command: string, extra: string[] = [], stateFlag = true) =>
+    JSON.parse(
+      execFileSync(
+        process.execPath,
+        [
+          cli,
+          command,
+          "--installation",
+          saved.installation,
+          ...(stateFlag ? ["--state", saved.paths.stateDir] : []),
+          ...extra,
+        ],
+        { cwd: base, env, timeout: 30000, encoding: "utf8" },
+      ),
+    );
+  return { ...saved, originalJournal, token, env, run };
 }

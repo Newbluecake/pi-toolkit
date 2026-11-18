@@ -4,9 +4,10 @@
  * The hub runs as a detached plain-node process executing the package's own TS
  * source through pi's bundled jiti CLI (spike K1/K1-git): from `process.argv[1]`
  * (the pi CLI) we walk up to `@earendil-works/pi-coding-agent/package.json` and
- * resolve `jiti/package.json` from there. `webHub.nodeLoader` overrides the
- * lookup (escape hatch for the bun single-file distribution, where no jiti
- * exists on disk).
+ * resolve `jiti/package.json` from there. `webHub.nodeLoader` overrides only
+ * the loader executable; the same on-disk parent pi host must still provide
+ * TypeBox. A diskless Bun/SEA distribution is therefore unavailable, not an
+ * escape from host verification.
  *
  * Nothing here blocks: `spawnHub` is fire-and-forget (detached, stdio ignored,
  * unref'd, async spawn errors swallowed).
@@ -150,7 +151,8 @@ export function hubSpawnBlockedInPrivateNs(): "private-ns" | "private-ns-unknown
 
 /**
  * Fire-and-forget hub spawn: `execPath jiti-cli.mjs main.ts`, detached, stdio
- * ignored, config passed through env. Never throws, never awaits.
+ * ignored, config passed through env. Never awaits; invalid internal alias
+ * plans throw after the namespace veto, while actual spawn errors are swallowed.
  *
  * private-plan §4.1-1: the ONE hard gate covering every caller (auto-start, respawn, restart,
  * start) — inside a private mount ns (or when that cannot be ruled out) the spawn is refused
