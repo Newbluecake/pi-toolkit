@@ -3,7 +3,10 @@
 > Read before changing agent context metadata, hub terminal service/resource lifecycle, either HTTP
 > listener/auth bridge, UI terminal entry/renderer, maintenance tools or their tests.
 >
-> **Integration checkpoint, NOT release/deployment approval.** V2 execution is wired. The fixed controlled-scope trusted O/N/fresh entry and real O→N→O rehearsal are implemented; complete mixed-version/refusal/auth/browser/device gates remain in progress. Root approved obsolete v1 shared declaration deletion on 2026-11-18; the shared execution schemas/exports are now removed. Component/test greens do not imply full T51 acceptance.
+> **P6 scoped development/validation complete; NOT release/deployment approval or all-stack PASS.**
+> V2 execution, fixed controlled-scope trusted O/N/fresh entry, real O→N→O/mixed/refusal, scoped A1–A12
+> and provided Chromium UI/SDK/PTY/CSP/CSS gates are implemented and exercised. P7 is independent
+> acceptance, not adapter implementation. Device/Firefox/real kernel/powercut/mount limits remain explicit. Root approved obsolete v1 shared declaration deletion on 2026-11-18; the shared execution schemas/exports are now removed. Component/test greens do not imply full T51 acceptance.
 
 ## Ownership and off
 
