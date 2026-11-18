@@ -13,8 +13,9 @@
 User/root approval2026-11-18 replaces the existing-installation requirement to reconstruct live O
 ACK/drain or prove all resources gone: stop old resource publishers/writers, pin and back up ONLY
 terminal sources, then initialize `offline-retained-unknown`. Inspector/cgroup/reboot is NOT a
-precondition. Existing CLI/packaging integration is still being implemented; controlled cycle alone
-is NOT deployable existing-installation migration evidence. No site operation is authorized.
+precondition. The fixed existing-installation CLI and npm/git/release maintenance bundle are now
+implemented and privately exercised; controlled cycle alone is NOT existing-installation evidence.
+Final regression/P7 acceptance remains separate. No site operation is authorized.
 
 The approved P0 extension is an independent optional `LedgerV2.legacyObligations` array with closed
 `legacy-unattributed` records, source manifest/installation binding and stable original identity.
@@ -50,6 +51,41 @@ retirement evidence/completion; PID/TTL/array omission cannot reimport/reset deb
 partials remain and refuse rather than being overwritten or guessed clean. Component guard doubles
 are explicitly marked; actual installation sealing, original singleton and standalone CLI are separate
 caller responsibilities and need their own real integration evidence.
+
+The fixed `pi-terminal-maint` bin (`npm run build:maintenance` → `dist/maintenance/cli.mjs`) now provides
+`retained-preflight`, `retained-initialize`, `publish-new`, independent `resume`, `rollback-inspect`
+and `publish-old-off`. See [the shipped operator runbook](retained-runbook.md) for its closed I profile,
+exact path/permission/known-source limits, same-uid trusted inventory premise and required separate
+maintenance authorization. No default HOME, arbitrary adapter/module, stopped/drain JSON, force,
+reset, unknown-source adoption, daemon or credential restore exists. Original O source hashes are
+compiled from exact7239; actual current package/extension/loader bindings, producer identities,
+source files and the original singleton are independently checked, not inferred from I's strings.
+
+Installation kernel flock plus original singleton/socket/dir fencing cover each maintenance call.
+Only exact durably recorded TOOL-CREATED maintenance socket residue may be recovered after actual
+old maintenance-process loss; original O/N sockets/witnesses are never unlinked to make a test pass,
+and no PID observation releases debt. Initialization and publication have separate durable records.
+The immutable terminal-generation floor binds N source/maintenance bytes and pi runtime anchors,
+not semver. Package/terminal config CAS never rewinds auth. A load-only actual installed-SDK probe
+loads the selected package but binds NO agent session (no accidental auto-start if its parent dies).
+The fixed launcher checks source/floor/completion/bindings through actual fork; it forces measured
+source loading with filesystem cache off. O may run ordinary service ONLY with terminal disabled;
+returning to N retains the same v2 L/A. This is a trusted local operational boundary, not a ban on
+malicious same-uid direct old-code execution or out-of-protocol release/binding edits.
+
+Real `terminal-v2-retained-existing` cases now start UNPATCHED O in independent processes, let its
+actual SDK/HTTP/auth/native backend create0/1/2 resources (2 different SDK sessions), normally stop
+controls, and only THEN run an independent existing-S CLI. Actual N SDK/native PTY/proof-prune,
+restart/new session/new login/conservative E_LIMIT, independent CLI resume, actual O-off service
+login/public SSE/direct-terminal refusal and return-to-N preserve original v1/token bytes and L;
+CLI auth-domain sentinel cases separately prove no auth backup/restore.
+Provided Chromium proves L1 readonly/remainder/native input/prune and L2 E_LIMIT/backend0; WebGL is
+measured SwiftShader software, not hardware coverage. Tests also execute actual CLI self-exit75
+without a signal before publication completion and independent resume; unknown original socket,
+source mutation, bad journal, extra source, opaque regular and FIFO refusals are separate fault
+fixtures. Real npm and offline release ZIP consumers run these existing commands with Node22 and
+NO consumer node_modules/tsx/esbuild (original installed pi remains I's explicit runtime). These are
+scoped private gates, not deployment approval, real reboot/powercut or full device acceptance.
 
 ## Ownership and off
 
@@ -402,7 +438,9 @@ restart, user-shell termination, push or deployment is authorized by this work.
    whitelist. No production consumer imports it. Generic status stays open to opaque old keys; no v1
    positive type/parser/capability is emitted. V2 P0 files/fields, PROTO, fixtures/trace/I8 unchanged.
 2. Fixed controlled-scope executable/adapters and actual measured O7239→N→O are implemented/tested.
-   No general existing-site adapter, deployment or floor lowering is authorized/provided; CLI refusals
-   of arbitrary facts/paths remain intentional. The actual SDK/wire/pure-UI mixed/refusal subset is now covered; hardware/kernel/browser/fault limitations above still apply.
+   The separate fixed O7239 retained CLI now opens a real existing S under the explicit profile above;
+   unknown/general site layouts still refuse. No deployment or floor lowering is authorized. Arbitrary
+   facts/adapters remain forbidden. SDK/wire/UI and retained browser subsets are scoped evidence;
+   hardware/kernel/device/fault limitations above still apply.
 3. Complete real maintenance/mixed/browser/device/failure-window matrix and independent P7 acceptance
    still pending. Do not deploy this integration checkpoint or label it all-stack PASS.

@@ -28,7 +28,8 @@
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "pi-secure": "src/secure/bin/pi-secure"
+    "pi-secure": "src/secure/bin/pi-secure",
+    "pi-terminal-maint": "dist/maintenance/cli.mjs"
   },
   "pi": {
     "extensions": [
@@ -95,7 +96,8 @@
     "vue-tsc": "^3.3.0"
   },
   "scripts": {
-    "build": "node node_modules/typescript-7/bin/tsc -p tsconfig.build.json && npm run build:bundle",
+    "build": "node node_modules/typescript-7/bin/tsc -p tsconfig.build.json && npm run build:bundle && npm run build:maintenance",
+    "build:maintenance": "node scripts/build-maintenance.mjs",
     "build:bundle": "node scripts/build-bundle.mjs",
     "build:web": "vite build --config src/web-hub/ui/vite.config.ts",
     "dev:web": "vite build --watch --config src/web-hub/ui/vite.config.ts",
@@ -107,9 +109,9 @@
     "dev:hub": "tsx scripts/web-hub/dev-hub.ts",
     "visual:web": "tsx scripts/web-hub/visual.ts",
     "typecheck": "node node_modules/typescript-7/bin/tsc --noEmit -p tsconfig.json && node node_modules/typescript-7/bin/tsc --noEmit -p tsconfig.typecheck.json && vue-tsc --noEmit -p src/web-hub/ui/tsconfig.json",
-    "test": "vitest run",
+    "test": "npm run build:maintenance && vitest run",
     "test:tier1": "vitest run --project tier1",
-    "test:tier2": "vitest run --project tier2 --project secure",
+    "test:tier2": "npm run build:maintenance && vitest run --project tier2 --project secure",
     "test:secure": "vitest run --project secure",
     "test:watch": "vitest",
     "test:conformance": "vitest run tests/conformance",

@@ -19,6 +19,8 @@ export async function createTerminalSdkAgent(options: {
   cwd: string;
   socketDir: string;
   version: string;
+  /** Actual SDK-created prior session file for migration/restart fixtures. */
+  sessionFile?: string;
 }) {
   const agentDir = join(options.home, ".pi/agent");
   mkdirSync(agentDir, { recursive: true, mode: 0o700 });
@@ -73,7 +75,7 @@ export async function createTerminalSdkAgent(options: {
   });
   const model = getModel("anthropic", "claude-sonnet-4-5");
   if (!model) throw new Error("SDK built-in fixture model unavailable");
-  const manager = SessionManager.inMemory(options.cwd);
+  const manager = options.sessionFile ? SessionManager.open(options.sessionFile) : SessionManager.inMemory(options.cwd);
   const { session } = await createAgentSession({
     cwd: options.cwd,
     agentDir,
