@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { writeFileSync } from "node:fs";
+import { realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { wireWebHub, type WebHubDeps, type WebHubSettings } from "../../../src/web-hub/agent/index.js";
 import type { AgentFrame } from "../../../src/web-hub/protocol/messages.js";
@@ -16,6 +16,11 @@ import {
   waitUntil,
   type FakeHub,
 } from "./helpers.js";
+
+// A loader override still resolves TypeBox from the original on-disk pi host.
+const piCli = realpathSync(
+  new URL("../../../node_modules/@earendil-works/pi-coding-agent/dist/cli.js", import.meta.url),
+);
 
 let tmp: ReturnType<typeof tmpDir>;
 let hub: FakeHub | undefined;
@@ -44,7 +49,7 @@ function deps(over: Partial<WebHubDeps> = {}): WebHubDeps {
     env: { HOME: tmp.dir },
     paths: pathsIn(tmp.dir),
     buildInfo: async () => ({ pluginVersion: "1.2.3", buildId: "1.2.3@test" }),
-    argv1: "/nonexistent/pi",
+    argv1: piCli,
     ...over,
   };
 }

@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { wireWebHub, type WebHubDeps } from "../../../src/web-hub/agent/index.js";
@@ -8,6 +8,11 @@ import * as identity from "../../../src/web-hub/agent/proc-identity.js";
 import * as restart from "../../../src/web-hub/agent/restart.js";
 import * as markers from "../../../src/web-hub/protocol/stop-marker.js";
 import { ackFrame, fakeCtx, fakeNet, fakePi, pathsIn, resetGlobals, SETTINGS, tmpDir } from "./helpers.js";
+
+// A loader override still resolves TypeBox from the original on-disk pi host.
+const piCli = realpathSync(
+  new URL("../../../node_modules/@earendil-works/pi-coding-agent/dist/cli.js", import.meta.url),
+);
 
 let tmp: ReturnType<typeof tmpDir>;
 let stoppedFile: string;
@@ -51,7 +56,7 @@ async function live(over: Partial<WebHubDeps> = {}, caps = ["ctl.v1"], startupWa
     env: { HOME: tmp.dir },
     paths: { ...pathsIn(tmp.dir), stoppedFile },
     buildInfo: async () => ({ pluginVersion: "1.2.3", buildId: "restart-test" }),
-    argv1: "/nonexistent/pi",
+    argv1: piCli,
     netConnect: net.netConnect,
     spawnImpl,
     ...over,

@@ -10,12 +10,17 @@
  * not-ns parity (opts/caps byte-equal) is pinned by every pre-existing wiring test — anything
  * that changed there would fail the suite; here we only assert the cap's absence explicitly.
  */
-import { writeFileSync } from "node:fs";
+import { realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { wireWebHub, type WebHubDeps, type WebHubSettings } from "../../../src/web-hub/agent/index.js";
 import { AGENT_NOSPAWN_CAP } from "../../../src/web-hub/protocol/nospawn.js";
 import { ackFrame, fakeCtx, fakeNet, fakePi, pathsIn, resetGlobals, SETTINGS, tmpDir } from "./helpers.js";
+
+// A loader override still resolves TypeBox from the original on-disk pi host.
+const piCli = realpathSync(
+  new URL("../../../node_modules/@earendil-works/pi-coding-agent/dist/cli.js", import.meta.url),
+);
 
 let tmp: ReturnType<typeof tmpDir>;
 beforeEach(() => {
@@ -43,7 +48,7 @@ function deps(over: Partial<WebHubDeps> = {}): WebHubDeps {
     env: { HOME: tmp.dir },
     paths: pathsIn(tmp.dir),
     buildInfo: async () => ({ pluginVersion: "1.2.3", buildId: "1.2.3@pns" }),
-    argv1: "/nonexistent/pi",
+    argv1: piCli,
     ...over,
   };
 }

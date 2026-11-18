@@ -1,9 +1,14 @@
 /** D-B-launchHome: the hub launch home is an explicit seam, never inferred from HubPaths. */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { writeFileSync } from "node:fs";
+import { realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { wireWebHub, type WebHubDeps } from "../../../src/web-hub/agent/index.js";
 import { fakeCtx, fakePi, pathsIn, resetGlobals, SETTINGS, tmpDir } from "./helpers.js";
+
+// A loader override still resolves TypeBox from the original on-disk pi host.
+const piCli = realpathSync(
+  new URL("../../../node_modules/@earendil-works/pi-coding-agent/dist/cli.js", import.meta.url),
+);
 
 let tmp: ReturnType<typeof tmpDir>;
 beforeEach(() => {
@@ -35,7 +40,7 @@ async function launchedConfig(over: Partial<WebHubDeps> = {}): Promise<Record<st
     fleet: () => [],
     env: { HOME: tmp.dir },
     paths: pathsIn(tmp.dir),
-    argv1: "/nonexistent/pi",
+    argv1: piCli,
     buildInfo: async () => ({ pluginVersion: "1.0.0", buildId: "test" }),
     netConnect: connect(),
     spawnImpl,

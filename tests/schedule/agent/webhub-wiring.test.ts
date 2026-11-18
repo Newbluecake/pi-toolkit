@@ -3,7 +3,7 @@
  * (key absence = off), the link view the router sends through, and the sched frame hooks.
  * Without the port every surface stays byte-identical (no cap, no key, no hooks).
  */
-import { writeFileSync } from "node:fs";
+import { realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { wireWebHub, type WebHubDeps } from "../../../src/web-hub/agent/index.js";
@@ -91,6 +91,8 @@ async function launchedConfig(over: Partial<WebHubDeps>): Promise<Record<string,
   const settings = { ...SETTINGS, autoStart: true, nodeLoader: loader, ...(over.settings ?? {}) };
   wireWebHub(pi, {
     ...deps(),
+    // A loader override still requires the original on-disk pi host for TypeBox aliases.
+    argv1: realpathSync(new URL("../../../node_modules/@earendil-works/pi-coding-agent/dist/cli.js", import.meta.url)),
     netConnect: (() => {
       throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
     }) as never,
