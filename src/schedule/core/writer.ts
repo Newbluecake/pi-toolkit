@@ -252,6 +252,7 @@ export function ensureStoreRoot(
     existing = next;
   }
   const rest = parts.slice(i);
+  if (!rest.every(isPlainName)) throw new SchedFsError("bad-name", "bad path component");
   const canonical = realpathSync(existing);
   if (inVault(canonical) || inVault(join(canonical, ...rest))) {
     throw new SchedFsError("vault", "store dir resolves inside an encrypted vault");

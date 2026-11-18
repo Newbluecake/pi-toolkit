@@ -232,6 +232,7 @@ export const TIER1_DECLARED: Readonly<Record<string, Tier1DeclaredEntry>> = {
   },
   "tests/release/web-ui-zip.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/schedule/core/fault-injection.test.ts": { kind: "proc", why: "proc:node:child_process" },
+  "tests/schedule/core/paths-backend.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/schedule/core/reader.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/schedule/core/recovery.test.ts": { kind: "proc", why: "proc:node:child_process" },
   "tests/schedule/core/session-proof.test.ts": { kind: "proc", why: "proc:node:child_process" },
