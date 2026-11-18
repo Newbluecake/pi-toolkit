@@ -50,7 +50,10 @@ async function until(pred: () => boolean, budgetMs: number, what: string): Promi
   const deadline = performance.now() + budgetMs;
   while (!pred()) {
     if (performance.now() > deadline) throw new Error(`timeout waiting for: ${what}`);
-    await new Promise((resolve) => setTimeout(resolve, 25));
+    await new Promise((resolve) => {
+      const timer = setTimeout(resolve, 25);
+      timer.unref(); // I5: never wedge the process on a poll tick
+    });
   }
 }
 
