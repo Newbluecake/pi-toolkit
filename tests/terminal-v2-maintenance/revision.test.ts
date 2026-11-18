@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { checkpointTerminalV2 } from "../../scripts/web-hub/terminal-v2-checkpoint.js";
 import { setup, tree, legacyLayout } from "./helpers.js";
 import { rollbackTerminalV2 } from "../../scripts/web-hub/terminal-v2-rollback.js";
+import type { MaintenanceEvidence, MaintenanceLease } from "../../scripts/web-hub/terminal-v2-maintenance/audit.js";
 
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
@@ -308,25 +309,34 @@ describe("B2 evidence stays pinned through every asynchronous revalidation", () 
   }
 });
 describe("M2/M3 adapter and private scratch invariants", () => {
-  it("deadline really elapses with signal still live; same-generation wrong proof is rejected", async () => {
+  it("virtual deadline preserves pre-expiry validity and rejects expiry with signal still live", async () => {
+    vi.useFakeTimers({ now: 1000000 });
     const h = setup(),
-      signal = new AbortController().signal;
+      signal = new AbortController().signal,
+      before = tree(h.base);
     const input = { stateDir: h.stateDir, operation: "fresh" as const, signal, deadline: Date.now() + 25 };
     const lease = await h.audit.acquire(input),
       snapshot = await lease.observe();
-    expect(lease.current({ ...snapshot, proofId: "wrong-proof-same-generation" })).toBe(false);
-    await expect(lease.revalidate({ ...snapshot, proofId: "wrong-proof-same-generation" })).rejects.toMatchObject({
-      code: "snapshot-not-current",
-    });
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, Math.max(1, input.deadline - Date.now() + 5));
-      timer.unref();
-    });
-    expect(signal.aborted).toBe(false);
-    expect(Date.now()).toBeGreaterThanOrEqual(input.deadline);
-    expect(lease.current(snapshot)).toBe(false);
-    await expect(lease.revalidate(snapshot)).rejects.toMatchObject({ code: "snapshot-not-current" });
-    await lease.release();
+    try {
+      expect(lease.current(snapshot)).toBe(true);
+      await lease.revalidate(snapshot);
+      expect(lease.current({ ...snapshot, proofId: "wrong-proof-same-generation" })).toBe(false);
+      await expect(lease.revalidate({ ...snapshot, proofId: "wrong-proof-same-generation" })).rejects.toMatchObject({
+        code: "snapshot-not-current",
+      });
+      await vi.advanceTimersByTimeAsync(24);
+      expect(lease.current(snapshot)).toBe(true);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(Date.now()).toBe(input.deadline); // exact virtual clock fact, not an OS timing lower bound
+      expect(signal.aborted).toBe(false);
+      expect(lease.current(snapshot)).toBe(false);
+      await expect(lease.revalidate(snapshot)).rejects.toMatchObject({ code: "snapshot-not-current" });
+      expect(h.audit.validations).toBe(1);
+      expect(tree(h.base)).toEqual(before);
+    } finally {
+      await lease.release();
+      vi.useRealTimers();
+    }
   });
   it.each(["fresh", "checkpoint", "rollback"] as const)(
     "all nested %s evidence objects are recursively immutable",
@@ -348,33 +358,56 @@ describe("M2/M3 adapter and private scratch invariants", () => {
       await lease.release();
     },
   );
-  it("actual engine deadline seals a pending observation and its late resolution", async () => {
+  it("virtual engine deadline seals pending observation and prevents late mutation", async () => {
+    vi.useFakeTimers({ now: 1000000 });
     const h = setup(),
       before = tree(h.base),
-      start = Date.now();
+      controller = new AbortController();
     const acquire = h.audit.acquire.bind(h.audit);
-    let resolveLate!: () => void;
+    let resolveLate!: () => void, observationReady!: () => void;
+    let lease!: MaintenanceLease, snapshot!: MaintenanceEvidence;
+    const ready = new Promise<void>((resolve) => {
+      observationReady = resolve;
+    });
     const audit = {
       async acquire(input: Parameters<typeof acquire>[0]) {
-        const lease = await acquire(input),
-          snapshot = await lease.observe();
+        lease = await acquire(input);
+        snapshot = await lease.observe();
         lease.observe = () =>
           new Promise((resolve) => {
             resolveLate = () => resolve(snapshot);
+            observationReady();
           });
         return lease;
       },
     };
-    await expect(checkpointTerminalV2("fresh", { ...h.options, audit, timeoutMs: 25 })).rejects.toMatchObject({
-      code: "maintenance-deadline",
-    });
-    expect(Date.now()).toBeGreaterThanOrEqual(start + 25);
-    expect(h.audit.locked).toBe(false);
-    expect(h.audit.releaseCount).toBe(1);
-    expect(resolveLate).toBeTypeOf("function");
-    resolveLate();
-    await Promise.resolve();
-    expect(tree(h.base)).toEqual(before);
+    const pending = checkpointTerminalV2("fresh", { ...h.options, audit, signal: controller.signal, timeoutMs: 25 });
+    const rejected = expect(pending).rejects.toMatchObject({ code: "maintenance-deadline" });
+    try {
+      await ready; // deterministic barrier: no OS sleep or wall-clock assertion
+      expect(lease.current(snapshot)).toBe(true);
+      await lease.revalidate(snapshot);
+      await vi.advanceTimersByTimeAsync(24);
+      expect(lease.current(snapshot)).toBe(true);
+      expect(h.audit.locked).toBe(true);
+      expect(h.audit.releaseCount).toBe(0);
+      expect(tree(h.base)).toEqual(before);
+      await vi.advanceTimersByTimeAsync(1);
+      await rejected;
+      expect(lease.current(snapshot)).toBe(false);
+      await expect(lease.revalidate(snapshot)).rejects.toMatchObject({ code: "snapshot-not-current" });
+      expect(h.audit.validations).toBe(1);
+      expect(h.audit.locked).toBe(false);
+      expect(h.audit.releaseCount).toBe(1);
+      resolveLate();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(tree(h.base)).toEqual(before);
+      expect(h.audit.releaseCount).toBe(1);
+    } finally {
+      controller.abort();
+      resolveLate?.();
+      vi.useRealTimers();
+    }
   });
   it("scratch follows caller TMPDIR and registers only the exact newly created root for cleanup", () => {
     const h = setup();
