@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { aggregateTop, readTopUnits, scanTop } from "../../src/sysload/top.js";
+import { aggregateTop, rankTopRows, readTopUnits, scanTop } from "../../src/sysload/top.js";
 import { IoLedger } from "../../src/sysload/io-ledger.js";
 import { projectTop } from "../../src/sysload/wire.js";
 import { parseLoadTopWire } from "../../src/web-hub/ui/src/logic/load.js";
@@ -99,5 +99,27 @@ describe("sysload top", () => {
     view.setBigUint64(24, 4096n, true);
     expect(readTopUnits(bytes)).toEqual({ userHz: 100, pageSize: 4096 });
     expect(readTopUnits(new Uint8Array(16))).toBeUndefined();
+  });
+
+  it("rankTopRows caps rows at 5 and pids at 8, deterministic and pure (darwin-plan §2.7)", () => {
+    const inputs = Array.from({ length: 12 }, (_unused, index) => ({
+      pid: index,
+      comm: ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l"][index % 12]!,
+      cpuPct: 12 - index,
+      rssBytes: index,
+    }));
+    const first = rankTopRows(inputs);
+    expect(first.byCpu).toHaveLength(5);
+    expect(first.byRss).toHaveLength(5);
+    expect(first.byCpu.map((row) => row.comm)).toEqual(["a", "b", "c", "d", "e"]);
+    expect(first).toEqual(rankTopRows(inputs));
+    expect(rankTopRows([])).toEqual({ byCpu: [], byRss: [] });
+    // one comm over the 8-pid cap keeps only the top-8 pids by cpuPct
+    const many = rankTopRows(
+      Array.from({ length: 10 }, (_unused, index) => ({ pid: index, comm: "node", cpuPct: 10 - index, rssBytes: 0 })),
+    );
+    expect(many.byCpu[0]!.count).toBe(10);
+    expect(many.byCpu[0]!.pids).toHaveLength(8);
+    expect(many.byCpu[0]!.pids[0]).toEqual({ pid: 0, cpuPct: 10, rssBytes: 0 });
   });
 });

@@ -1,6 +1,7 @@
 import { promises as fsPromises, openSync, readSync, closeSync } from "node:fs";
 import { IoLedger } from "./io-ledger.js";
 import { parseAuxv, parsePidStat, parsePidStatm, type PidStat, type PidStatm } from "./procfs.js";
+import type { HostProcess, SamplerHost } from "./sampler.js";
 import type { LoadTopPid, LoadTopRow, TopSnapshot } from "./types.js";
 
 /** Local enrichment: the P0 numeric domain remains frozen; the wire drops n/a values. */
@@ -45,6 +46,62 @@ export interface TopScanOptions {
 }
 
 const cleanComm = (value: string): string => value.replace(/[\u0000-\u001f\u007f]/g, "?").slice(0, 128) || "?";
+
+/** Mirror of sampler.ts's HOST_MIN_BUDGET_MS (darwin-plan §2.3/§2.7). Duplicated locally on
+ * purpose: top.ts must not gain a value import (the hub-boundary `SYSLOAD_FILE_CLOSURE` pin on
+ * this file is frozen); host-contract/darwin-top tests keep the two constants in step. */
+const TOP_HOST_MIN_BUDGET_MS = 50;
+
+/** One process feeding `rankTopRows` (darwin-plan §2.7): the per-pid numbers `aggregateTop`
+ * computes plus the process's comm. The darwin scanner produces these straight from the host's
+ * `ps` listing; no `avg` flag there (Q4: macOS `pcpu` is a kernel-decayed average, deliberately
+ * not marked — see the darwin README section). */
+export interface RankInput {
+  readonly pid: number;
+  readonly comm: string;
+  readonly cpuPct: number;
+  readonly rssBytes: number;
+  readonly avg?: true;
+}
+
+/** The comm-grouping → row-shaping → top-5 tail of the former `aggregateTop`, extracted as a
+ * pure function (darwin-plan §2.7) so the host scanner can reuse the EXACT ranking rules.
+ * `aggregateTop` still calls it — layer A/B of linux-parity.test.ts pin that the move is pure. */
+export function rankTopRows(inputs: readonly RankInput[]): { byCpu: LoadTopRow[]; byRss: LoadTopRow[] } {
+  const groups = new Map<string, { pids: (LoadTopPid & { avg?: true })[] }>();
+  for (const process of inputs) {
+    const group = groups.get(cleanComm(process.comm)) ?? { pids: [] };
+    group.pids.push({
+      pid: process.pid,
+      cpuPct: process.cpuPct,
+      rssBytes: process.rssBytes,
+      ...(process.avg === true ? { avg: true } : {}),
+    });
+    groups.set(cleanComm(process.comm), group);
+  }
+  const rows: LoadTopRow[] = [...groups].map(([comm, group]) => {
+    const pids = group.pids;
+    const avg = pids.some((pid) => pid.avg === true);
+    return {
+      comm,
+      count: pids.length,
+      cpuPct: pids.reduce((sum, pid) => sum + pid.cpuPct, 0),
+      rssBytes: pids.reduce((sum, pid) => sum + pid.rssBytes, 0),
+      ...(avg ? { avg: true as const } : {}),
+      pids: [...pids]
+        .sort((a, b) => b.cpuPct - a.cpuPct || a.pid - b.pid)
+        .slice(0, 8)
+        .map(({ avg: _avg, ...pid }) => pid),
+    };
+  });
+  const byCpu = [...rows]
+    .sort((a, b) => b.cpuPct - a.cpuPct || b.rssBytes - a.rssBytes || a.comm.localeCompare(b.comm))
+    .slice(0, 5);
+  const byRss = [...rows]
+    .sort((a, b) => b.rssBytes - a.rssBytes || b.cpuPct - a.cpuPct || a.comm.localeCompare(b.comm))
+    .slice(0, 5);
+  return { byCpu, byRss };
+}
 
 export function readAuxvBounded(path = "/proc/self/auxv"): TopUnits | undefined {
   try {
@@ -102,34 +159,22 @@ export function aggregateTop(
       ...(avg ? { avg: true } : {}),
     });
   }
-  const groups = new Map<string, { pids: (LoadTopPid & { avg?: true })[] }>();
-  for (const process of processes) {
-    const group = groups.get(cleanComm(process.comm)) ?? { pids: [] };
-    const pid = byPid.get(process.pid);
-    if (pid !== undefined) group.pids.push(pid);
-    groups.set(cleanComm(process.comm), group);
-  }
-  const rows: LoadTopRow[] = [...groups].map(([comm, group]) => {
-    const pids = group.pids;
-    const avg = pids.some((pid) => pid.avg === true);
-    return {
-      comm,
-      count: pids.length,
-      cpuPct: pids.reduce((sum, pid) => sum + pid.cpuPct, 0),
-      rssBytes: pids.reduce((sum, pid) => sum + pid.rssBytes, 0),
-      ...(avg ? { avg: true as const } : {}),
-      pids: [...pids]
-        .sort((a, b) => b.cpuPct - a.cpuPct || a.pid - b.pid)
-        .slice(0, 8)
-        .map(({ avg: _avg, ...pid }) => pid),
-    };
-  });
-  const byCpu = [...rows]
-    .sort((a, b) => b.cpuPct - a.cpuPct || b.rssBytes - a.rssBytes || a.comm.localeCompare(b.comm))
-    .slice(0, 5);
-  const byRss = [...rows]
-    .sort((a, b) => b.rssBytes - a.rssBytes || b.cpuPct - a.cpuPct || a.comm.localeCompare(b.comm))
-    .slice(0, 5);
+  const { byCpu, byRss } = rankTopRows(
+    processes.flatMap((process) => {
+      const pid = byPid.get(process.pid);
+      return pid === undefined
+        ? []
+        : [
+            {
+              pid: process.pid,
+              comm: process.comm,
+              cpuPct: pid.cpuPct,
+              rssBytes: pid.rssBytes,
+              ...(pid.avg === true ? { avg: true } : {}),
+            },
+          ];
+    }),
+  );
   return { at: Date.now(), unitsAvailable: units !== undefined, byCpu, byRss };
 }
 
@@ -289,5 +334,77 @@ function toProcess(stat: PidStat, statm: PidStatm, uptimeSeconds?: number, units
     ...(uptimeSeconds === undefined || units === undefined
       ? {}
       : { lifetimeSeconds: uptimeSeconds - stat.starttime / units.userHz }),
+  };
+}
+
+/** Ends only the CALLER's wait on a host listing (darwin-plan §2.4): the listing itself is never
+ * cancelled — its lease stays held until it really settles. */
+async function waitHostListing<T>(operation: Promise<T>, left: number): Promise<T | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    if (left <= 0) {
+      void operation.catch(() => undefined);
+      return undefined;
+    }
+    return await Promise.race([
+      operation,
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), left);
+        timer.unref();
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+/** darwin-plan §2.7: a `scanTop`-signature closure over the host's `listProcesses` — the SAME
+ * injection seam the Linux scanner occupies, so the assembly points only swap the default
+ * (`deps.scanTop ?? (host === undefined ? scanTop : createHostTopScanner(host))`). Budget gate:
+ * under TOP_HOST_MIN_BUDGET_MS remaining it returns a partial empty snapshot WITHOUT starting
+ * `ps`; the passed timeoutMs is always a finite positive integer ≤1000. `onPrevious` is never
+ * called (host `pcpu` is a kernel-decayed average, not a two-scan delta — Q4). */
+export function createHostTopScanner(
+  host: Pick<SamplerHost, "listProcesses">,
+): (ledger?: IoLedger, options?: TopScanOptions) => Promise<TopScanSnapshot> {
+  return async (ledger: IoLedger = new IoLedger(), options: TopScanOptions = {}): Promise<TopScanSnapshot> => {
+    const now = options.now ?? (() => performance.now());
+    const started = now();
+    const deadlineMs = options.deadlineMs ?? 300;
+    const maxPids = Math.min(2048, options.maxPids ?? 2048);
+    const remaining = (): number => (options.isCurrent?.() === false ? 0 : Math.max(0, deadlineMs - (now() - started)));
+    const emptyPartial = (): TopScanSnapshot => ({
+      at: Date.now(),
+      unitsAvailable: true,
+      partial: true,
+      byCpu: [],
+      byRss: [],
+    });
+    const scanLease = ledger.tryAcquire("top");
+    if (scanLease === undefined) return emptyPartial();
+    if (remaining() < TOP_HOST_MIN_BUDGET_MS) {
+      scanLease.release();
+      return emptyPartial();
+    }
+    const timeoutMs = Math.floor(Math.min(1000, remaining()));
+    const listing = host.listProcesses({ timeoutMs, maxPids });
+    // Keep the global `top` slot reserved until the listing really settles (§2.4 lease rule).
+    void listing.catch(() => undefined).then(() => scanLease.release());
+    let result: Awaited<typeof listing> | undefined;
+    try {
+      result = await waitHostListing(listing, remaining());
+    } catch {
+      result = undefined;
+    }
+    const { byCpu, byRss } = rankTopRows(
+      (result?.procs ?? []).map((process: HostProcess) => ({
+        pid: process.pid,
+        comm: process.comm,
+        cpuPct: process.cpuPct,
+        rssBytes: process.rssBytes,
+      })),
+    );
+    const snapshot: TopScanSnapshot = { at: Date.now(), unitsAvailable: true, byCpu, byRss };
+    return result === undefined || result.truncated ? { ...snapshot, partial: true } : snapshot;
   };
 }

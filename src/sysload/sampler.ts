@@ -21,12 +21,53 @@ export interface StatFsLike {
   readonly dev?: bigint | number;
 }
 
+// ── C0:BEGIN ── sampler.ts（S1 声明；S0 结构满足；零运行时 import）
+export interface SamplerHostMount {
+  // = MountInfoRecord 的字段集（host 解析器须填满：root:"/"、optionalFields:[]、superOptions:[]、mountId:0、majorMinor:"0:0" 占位）
+  mountId: number;
+  parentId: number;
+  majorMinor: string;
+  root: string;
+  mountPoint: string;
+  mountOptions: readonly string[];
+  optionalFields: readonly string[];
+  fstype: string;
+  source: string;
+  superOptions: readonly string[];
+}
+export interface SamplerHostReading {
+  // 任一字段缺失 ⇔ 该项本拍不可用（互相独立）
+  loadavg?: readonly [number, number, number];
+  memAvailPct?: number; // kern.memorystatus_level，整数 0..100
+  cores?: number; // hw.ncpu，正整数
+}
+export interface HostProcess {
+  pid: number;
+  comm: string;
+  cpuPct: number;
+  rssBytes: number;
+}
+/** 所有带 timeoutMs 的方法：调用方保证 timeoutMs 为有限正数；host 收到非有限/≤0 的值**不得启动进程**，直接 resolve undefined。 */
+export interface SamplerHost {
+  readonly kind: "darwin";
+  readonly localFilesystems: ReadonlySet<string>; // 替代 mounts.ts 的 Linux LOCAL_FILESYSTEMS
+  readHost(opts: { timeoutMs: number }): Promise<SamplerHostReading | undefined>; // 永不 throw/reject
+  readMounts(opts: { timeoutMs: number }): Promise<string | undefined>; // 原始 mount(8) 文本 ≤1 MiB；永不 throw
+  parseMounts(text: string): readonly SamplerHostMount[]; // 同步纯函数
+  deviceOf(path: string): Promise<number | undefined>; // fs.stat().dev；失败 ⇒ undefined；永不 throw
+  listProcesses(opts: {
+    timeoutMs: number;
+    maxPids: number;
+  }): Promise<{ procs: readonly HostProcess[]; truncated: boolean } | undefined>;
+}
 export interface SamplerIo {
   readonly readFileSync?: (path: string, options?: { encoding?: "utf8"; flag?: string }) => string | Buffer;
   readonly readFile?: (path: string) => Promise<string | Buffer>;
   readonly realpath?: (path: string) => Promise<string>;
   readonly statfs?: (path: string, options?: { bigint?: boolean }) => Promise<StatFsLike>;
+  readonly host?: SamplerHost; // 追加
 }
+// ── C0:END ──
 
 export interface SamplerPlan {
   readonly home?: string;
@@ -49,6 +90,16 @@ export interface SampleResult {
 
 const MAX_PROC_BYTES = 64 * 1024;
 const MAX_MOUNTINFO_BYTES = 1024 * 1024;
+
+/** darwin-plan §2.9（Q3 拍板）：darwin 的 mem 读数（kern.memorystatus_level）只展示、不进 gate。
+ * 样本携带 `memAdvisory:true`、tracker 只记显示值。翻转启用 gate 是后续独立决策（D1），
+ * 决策记录出现前禁止改回 false。Linux 样本永不携带该标记。 */
+export const DARWIN_MEM_ADVISORY = true;
+/** darwin-plan §2.3 hostBounded 步骤 1：host 调用前的最小剩余预算（ms）——预算不足不取租约、不启动进程。 */
+export const HOST_MIN_BUDGET_MS = 50;
+/** darwin-plan §2.3 hostBounded 步骤 2：单次 host 调用的超时上限（ms）；内部常量，不属 C0 契约。 */
+const HOST_MAX_TIMEOUT_MS = 800;
+
 const finite = (n: number): boolean => Number.isFinite(n);
 const asNumber = (value: bigint | number): number => (typeof value === "bigint" ? Number(value) : value);
 
@@ -126,6 +177,30 @@ async function resolvePath(
   }
 }
 
+/** darwin-plan §2.3 `hostBounded`：所有 host 调用的共用闸门。
+ * 1. 预算/代际检查在取租约**之前**⇒ 预算耗尽不取租约、不启动进程；
+ * 2. timeoutMs 必为 ≥HOST_MIN_BUDGET_MS 的有限正整数（≤HOST_MAX_TIMEOUT_MS）；
+ * 3. 租约由 withIoLease 在底层 promise 真正 settle 后释放；
+ * 4. beforeDeadline 只结束等待（该拍记缺失），不取消进程；返回后 !isCurrent() ⇒ 丢弃。 */
+async function hostBounded<T>(
+  kind: string,
+  ledger: IoLedger,
+  left: () => number,
+  isCurrent: () => boolean,
+  op: (timeoutMs: number) => Promise<T>,
+): Promise<T | undefined> {
+  if (!isCurrent() || left() < HOST_MIN_BUDGET_MS) return undefined;
+  const timeoutMs = Math.floor(Math.min(HOST_MAX_TIMEOUT_MS, left()));
+  const operation = withIoLease(ledger, `host:${kind}`, () => op(timeoutMs));
+  if (operation === undefined) return undefined;
+  try {
+    const result = await beforeDeadline(operation, left());
+    return isCurrent() ? result : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 async function statMount(
   label: "~" | "/",
   path: string,
@@ -198,9 +273,14 @@ export async function sampleOnce(
   const left = (): number => Math.max(0, deadline - performance.now());
   const isCurrent = (): boolean => plan.expectedGeneration === undefined || plan.expectedGeneration() === generation;
   const read = (path: string): string | undefined => boundedRead(path, io);
-  const cpuText = read("/proc/stat");
+  const host = io.host;
+  const reading =
+    host === undefined
+      ? undefined
+      : await hostBounded("sysctl", ledger, left, isCurrent, (timeoutMs) => host.readHost({ timeoutMs }));
+  const cpuText = host === undefined ? read("/proc/stat") : undefined;
   const parsedCpu = cpuSample(cpuText, plan.previousCpu, plan.previousMono, mono);
-  const pressure = parsePressure(read("/proc/pressure/cpu") ?? "");
+  const pressure = host === undefined ? parsePressure(read("/proc/pressure/cpu") ?? "") : undefined;
   const cpu =
     parsedCpu.value === undefined
       ? { kind: "invalid" as const }
@@ -208,22 +288,34 @@ export async function sampleOnce(
           kind: "ok" as const,
           value: { ...parsedCpu.value, ...(pressure?.someAvg10 === undefined ? {} : { psiPct: pressure.someAvg10 }) },
         };
-  const mem = parseMeminfo(read("/proc/meminfo") ?? "");
+  const mem = host === undefined ? parseMeminfo(read("/proc/meminfo") ?? "") : undefined;
   const memory =
-    mem === undefined
-      ? { kind: "invalid" as const }
-      : {
-          kind: "ok" as const,
-          value: {
-            availPct: (100 * mem.memAvailableKiB!) / mem.memTotalKiB,
-            usedPct: 100 - (100 * mem.memAvailableKiB!) / mem.memTotalKiB,
-          },
-        };
-  const loadavg = parseLoadavg(read("/proc/loadavg") ?? "")?.values;
+    host === undefined
+      ? mem === undefined
+        ? { kind: "invalid" as const }
+        : {
+            kind: "ok" as const,
+            value: {
+              availPct: (100 * mem.memAvailableKiB!) / mem.memTotalKiB,
+              usedPct: 100 - (100 * mem.memAvailableKiB!) / mem.memTotalKiB,
+            },
+          }
+      : reading?.memAvailPct === undefined
+        ? { kind: "invalid" as const }
+        : {
+            kind: "ok" as const,
+            value: { availPct: reading.memAvailPct, usedPct: 100 - reading.memAvailPct },
+          };
+  const loadavg = host === undefined ? parseLoadavg(read("/proc/loadavg") ?? "")?.values : reading?.loadavg;
   const home = plan.home ?? homedir();
   // P0 freezes two display paths (HOME and root); cwd is intentionally not sampled.
-  const mountText = plan.mountinfoText ?? read("/proc/self/mountinfo");
-  const parsedMounts = mountText === undefined ? [] : parseMountinfo(mountText);
+  const mountText =
+    plan.mountinfoText ??
+    (host === undefined
+      ? read("/proc/self/mountinfo")
+      : await hostBounded("mount", ledger, left, isCurrent, (timeoutMs) => host.readMounts({ timeoutMs })));
+  const parsedMounts =
+    mountText === undefined ? [] : host === undefined ? parseMountinfo(mountText) : host.parseMounts(mountText);
   const diskPaths: readonly ["~" | "/", string][] = [
     ["~", home],
     ["/", "/"],
@@ -241,7 +333,28 @@ export async function sampleOnce(
       disks.push({ label, reading: { kind: "unresolved" } });
       continue;
     }
-    const resolved = resolveMount(resolvedPath, parsedMounts);
+    let resolved: ResolvedMount =
+      host === undefined
+        ? resolveMount(resolvedPath, parsedMounts)
+        : resolveMount(resolvedPath, parsedMounts, host.localFilesystems);
+    if (host !== undefined && resolved.mount !== undefined && resolved.skipped === undefined) {
+      // darwin-plan §2.3 deviceOf 步骤：命中本地挂载后，以 fs.stat().dev 覆盖 mountId/majorMinor。
+      if (!isCurrent() || left() < HOST_MIN_BUDGET_MS) {
+        disks.push({ label, reading: { kind: "invalid" } });
+        continue;
+      }
+      const dev = await hostBounded(`dev:${resolvedPath}`, ledger, left, isCurrent, () => host.deviceOf(resolvedPath));
+      if (dev === undefined) {
+        // 不能证明挂载身份就不冒充（与 resolvePath 未解析同口径）：unresolved，绝不调 statfs、不进 seenMounts。
+        disks.push({ label, reading: { kind: "unresolved" } });
+        continue;
+      }
+      if (!isCurrent() || left() <= 0) {
+        disks.push({ label, reading: { kind: "invalid" } });
+        continue;
+      }
+      resolved = { ...resolved, mount: { ...resolved.mount, mountId: dev, majorMinor: String(dev) } };
+    }
     if (resolved.mount !== undefined && resolved.skipped === undefined) {
       const mountKey = `${resolved.mount.mountId}:${resolved.mount.majorMinor}`;
       if (seenMounts.has(mountKey)) continue;
@@ -249,7 +362,7 @@ export async function sampleOnce(
     }
     disks.push(await statMount(label, resolvedPath, resolved, ledger, io, left, isCurrent));
   }
-  const ioPsiPct = parsePressure(read("/proc/pressure/io") ?? "")?.someAvg10;
+  const ioPsiPct = host === undefined ? parsePressure(read("/proc/pressure/io") ?? "")?.someAvg10 : undefined;
   const sample: SampleResult["sample"] = {
     mono,
     at,
@@ -258,6 +371,8 @@ export async function sampleOnce(
     disks: disks.slice(0, 2),
     ...(loadavg === undefined ? {} : { loadavg }),
     ...(ioPsiPct === undefined ? {} : { ioPsiPct }),
+    ...(host !== undefined && reading?.cores !== undefined ? { cores: reading.cores } : {}),
+    ...(host !== undefined && DARWIN_MEM_ADVISORY ? { memAdvisory: true } : {}),
   };
   void settings;
   return {
