@@ -24,7 +24,20 @@ export interface TerminalLedgerDependenciesV2 {
   /** Test-only barriers/fault injection; never settings/env/HTTP. */
   stage?(stage: "read" | "temp-sync" | "before-rename" | "after-rename" | "parent-sync"): Promise<void>;
 }
-export function createTerminalAllocationLedgerV2(deps: TerminalLedgerDependenciesV2): TerminalAllocationLedgerPortV2 {
+/** P1-local physical-evidence capability. NOT part of the frozen P0 port.
+ * Only trusted resource code may supply a bounded synchronous read-only guard. */
+export type TerminalLedgerCommitGuardV2 = () => undefined;
+export interface GuardedTerminalAllocationLedgerV2 extends TerminalAllocationLedgerPortV2 {
+  commitGuarded(
+    expectedRevision: number,
+    next: LedgerV2,
+    signal: AbortSignal,
+    guard: TerminalLedgerCommitGuardV2,
+  ): ReturnType<TerminalAllocationLedgerPortV2["commit"]>;
+}
+export function createTerminalAllocationLedgerV2(
+  deps: TerminalLedgerDependenciesV2,
+): GuardedTerminalAllocationLedgerV2 {
   const files = terminalV2Files(resolve(deps.stateDir));
   const uid = process.getuid?.();
   let directories: Directory[] = [],
@@ -34,8 +47,8 @@ export function createTerminalAllocationLedgerV2(deps: TerminalLedgerDependencie
     poisoned = false,
     busy = false;
   const clone = <T>(v: T): T => structuredClone(v);
-  function check(signal: AbortSignal) {
-    if (signal.aborted || !deps.current()) throw new Error("E_STORE");
+  function check(signal: AbortSignal, at: number) {
+    if (signal.aborted || Date.now() >= at || !deps.current()) throw new Error("E_STORE");
   }
   async function directory(path: string): Promise<Directory> {
     const h = await open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
@@ -109,13 +122,13 @@ export function createTerminalAllocationLedgerV2(deps: TerminalLedgerDependencie
   function equal(a: Image, b: Image) {
     return a.dev === b.dev && a.ino === b.ino && a.bytes.equals(b.bytes);
   }
-  async function unchanged() {
+  async function unchanged(expected = images) {
     await checkDirectories();
     if (
-      !images ||
-      !equal(images.marker, await image(files.marker, 4096)) ||
-      !equal(images.witness, await image(files.witness, 4096)) ||
-      !equal(images.ledger, await image(files.ledger))
+      !expected ||
+      !equal(expected.marker, await image(files.marker, 4096)) ||
+      !equal(expected.witness, await image(files.witness, 4096)) ||
+      !equal(expected.ledger, await image(files.ledger))
     )
       throw new Error("E_STORE");
   }
@@ -124,81 +137,38 @@ export function createTerminalAllocationLedgerV2(deps: TerminalLedgerDependencie
     directories = [];
     await Promise.all(ds.map((d) => d.handle.close()));
   }
-  return {
-    async load(signal) {
-      if (poisoned || busy) return { kind: "unavailable" };
-      busy = true;
-      const controller = new AbortController();
-      const abort = () => controller.abort();
-      signal.addEventListener("abort", abort, { once: true });
-      if (signal.aborted) controller.abort();
-      let loadSettled = false;
-      const work = (async () => {
-        check(controller.signal);
-        directories.push(await directory(resolve(deps.stateDir)));
-        directories.push(await directory(files.root));
-        if (current) {
-          await unchanged();
-          check(controller.signal);
-          return clone(current);
-        }
-        await deps.stage?.("read");
-        check(controller.signal);
-        const markerImage = await image(files.marker, 4096),
-          witness = await image(files.witness, 4096),
-          ledgerImage = await image(files.ledger);
-        const m: unknown = JSON.parse(markerImage.bytes.toString("utf8")),
-          w: unknown = JSON.parse(witness.bytes.toString("utf8"));
-        const l: unknown = JSON.parse(ledgerImage.bytes.toString("utf8"));
-        if (!terminalMarkersV2Match(m, w) || !terminalLedgerV2Ok(l) || l.storeId !== (m as TerminalMarkerV2).storeId)
-          throw new Error("E_STORE");
-        images = { marker: markerImage, witness, ledger: ledgerImage };
-        await unchanged();
-        check(controller.signal);
-        current = clone(l);
-        return clone(l);
-      })();
-      void work.then(
-        () => {
-          loadSettled = true;
-        },
-        () => {
-          loadSettled = true;
-        },
-      );
+  /** Cleanup is part of the bounded IO work. No candidate is ever adopted in that work:
+   * after a logical timeout it may settle/close fds, but can no longer change images/current. */
+  async function commitGuarded(
+    expectedRevision: number,
+    next: LedgerV2,
+    signal: AbortSignal,
+    guard: TerminalLedgerCommitGuardV2,
+  ): ReturnType<TerminalAllocationLedgerPortV2["commit"]> {
+    if (poisoned || busy || !current || !images) return { kind: "unavailable", effect: "none" };
+    if (current.revision !== expectedRevision) return { kind: "conflict" };
+    if (
+      typeof guard !== "function" ||
+      !terminalLedgerV2Ok(next) ||
+      next.storeId !== current.storeId ||
+      next.revision !== expectedRevision + 1
+    )
+      return { kind: "unavailable", effect: "none" };
+    next = clone(next);
+    busy = true;
+    const at = Date.now() + L.contextMs,
+      controller = new AbortController(),
+      abort = () => controller.abort();
+    signal.addEventListener("abort", abort, { once: true });
+    if (signal.aborted) controller.abort();
+    let renameEntered = false,
+      externalChange = false,
+      settled = false,
+      waiterFinished = false;
+    let tmp = `${files.root}/.ledger-${randomBytes(16).toString("hex")}.tmp`;
+    const work = (async () => {
       try {
-        return { kind: "loaded", ledger: await boundedV2(work, Date.now() + L.contextMs, controller.signal) };
-      } catch {
-        controller.abort();
-        poisoned = true;
-        return { kind: "unavailable" };
-      } finally {
-        signal.removeEventListener("abort", abort);
-        const cleanup = async () => {
-          await releaseDirs();
-          busy = false;
-        };
-        if (loadSettled) await cleanup();
-        else void work.catch(() => {}).then(cleanup);
-      }
-    },
-    async commit(expectedRevision, next, signal) {
-      if (poisoned || busy || !current || !images) return { kind: "unavailable", effect: "none" };
-      if (current.revision !== expectedRevision) return { kind: "conflict" };
-      if (!terminalLedgerV2Ok(next) || next.storeId !== current.storeId || next.revision !== expectedRevision + 1)
-        return { kind: "unavailable", effect: "none" };
-      next = clone(next); // Freeze caller-owned data before the first await.
-      busy = true;
-      const controller = new AbortController(),
-        abort = () => controller.abort();
-      signal.addEventListener("abort", abort, { once: true });
-      if (signal.aborted) controller.abort();
-      let renameEntered = false,
-        externalChange = false,
-        settled = false;
-      let tmp = `${files.root}/.ledger-${randomBytes(16).toString("hex")}.tmp`;
-      const work = (async () => {
-        check(controller.signal);
+        check(controller.signal, at);
         directories.push(await directory(resolve(deps.stateDir)));
         directories.push(await directory(files.root));
         try {
@@ -207,7 +177,7 @@ export function createTerminalAllocationLedgerV2(deps: TerminalLedgerDependencie
           externalChange = true;
           throw e;
         }
-        check(controller.signal);
+        check(controller.signal, at);
         tmp = `/proc/self/fd/${directories[1]!.handle.fd}/${tmp.slice(tmp.lastIndexOf("/") + 1)}`;
         const h = await open(
           tmp,
@@ -217,7 +187,7 @@ export function createTerminalAllocationLedgerV2(deps: TerminalLedgerDependencie
         try {
           await h.writeFile(JSON.stringify(next) + "\n");
           await deps.stage?.("temp-sync");
-          check(controller.signal);
+          check(controller.signal, at);
           await h.sync();
         } finally {
           await h.close();
@@ -229,14 +199,18 @@ export function createTerminalAllocationLedgerV2(deps: TerminalLedgerDependencie
           externalChange = true;
           throw e;
         }
-        check(controller.signal);
+        check(controller.signal, at);
+        // LAST await is above. Guard failure is strictly before the rename syscall => none.
+        // Guard must not await, invoke user callbacks, or mutate evidence.
+        if (guard() !== undefined) throw new Error("E_GUARD");
+        check(controller.signal, at);
         renameEntered = true;
         await rename(tmp, `/proc/self/fd/${directories[1]!.handle.fd}/ledger.json`);
         await deps.stage?.("after-rename");
-        check(controller.signal);
+        check(controller.signal, at);
         await deps.stage?.("parent-sync");
         await directories[1]!.handle.sync();
-        check(controller.signal);
+        check(controller.signal, at);
         await checkDirectories();
         const written = await image(files.ledger);
         if (!written.bytes.equals(Buffer.from(JSON.stringify(next) + "\n"))) throw new Error("E_STORE");
@@ -245,40 +219,112 @@ export function createTerminalAllocationLedgerV2(deps: TerminalLedgerDependencie
           !equal(images!.witness, await image(files.witness, 4096))
         )
           throw new Error("E_STORE");
-        images!.ledger = written;
-        current = clone(next);
-        return { kind: "committed" as const, revision: next.revision };
-      })();
-      const cleanup = async () => {
+        return written;
+      } finally {
         try {
           await unlink(tmp);
         } catch {
-          /* our random temporary file only */
+          /* only our own random staging name */
         }
         await releaseDirs();
-        busy = false;
-      };
+      }
+    })();
+    void work.then(
+      () => {
+        settled = true;
+        if (waiterFinished) busy = false;
+      },
+      () => {
+        settled = true;
+        if (waiterFinished) busy = false;
+      },
+    );
+    try {
+      const written = await boundedV2(work, at, controller.signal);
+      // ALL async IO (including final witness reads and fd cleanup) has ended. Neither
+      // old generations nor late IO may publish success/adopt a candidate after this point.
+      check(controller.signal, at);
+      if (guard() !== undefined) throw new Error("E_GUARD");
+      check(controller.signal, at);
+      images!.ledger = written;
+      current = clone(next);
+      return { kind: "committed", revision: next.revision };
+    } catch {
+      controller.abort();
+      if (renameEntered || externalChange) poisoned = true;
+      return { kind: "unavailable", effect: renameEntered ? "unknown" : "none" };
+    } finally {
+      signal.removeEventListener("abort", abort);
+      waiterFinished = true;
+      if (settled) busy = false;
+    }
+  }
+  return {
+    async load(signal) {
+      if (poisoned || busy) return { kind: "unavailable" };
+      busy = true;
+      const at = Date.now() + L.contextMs,
+        controller = new AbortController(),
+        abort = () => controller.abort();
+      signal.addEventListener("abort", abort, { once: true });
+      if (signal.aborted) controller.abort();
+      let settled = false,
+        waiterFinished = false;
+      const work = (async () => {
+        try {
+          check(controller.signal, at);
+          directories.push(await directory(resolve(deps.stateDir)));
+          directories.push(await directory(files.root));
+          if (current) {
+            await unchanged();
+            return { ledger: clone(current), images: images! };
+          }
+          await deps.stage?.("read");
+          check(controller.signal, at);
+          const markerImage = await image(files.marker, 4096),
+            witness = await image(files.witness, 4096),
+            ledgerImage = await image(files.ledger);
+          const m: unknown = JSON.parse(markerImage.bytes.toString("utf8")),
+            w: unknown = JSON.parse(witness.bytes.toString("utf8")),
+            l: unknown = JSON.parse(ledgerImage.bytes.toString("utf8"));
+          if (!terminalMarkersV2Match(m, w) || !terminalLedgerV2Ok(l) || l.storeId !== (m as TerminalMarkerV2).storeId)
+            throw new Error("E_STORE");
+          const candidateImages = { marker: markerImage, witness, ledger: ledgerImage };
+          await unchanged(candidateImages);
+          return { ledger: clone(l), images: candidateImages };
+        } finally {
+          await releaseDirs();
+        }
+      })();
       void work.then(
         () => {
           settled = true;
+          if (waiterFinished) busy = false;
         },
         () => {
           settled = true;
+          if (waiterFinished) busy = false;
         },
       );
       try {
-        return await boundedV2(work, Date.now() + L.contextMs, controller.signal);
+        const candidate = await boundedV2(work, at, controller.signal);
+        check(controller.signal, at);
+        images = candidate.images;
+        current = clone(candidate.ledger);
+        return { kind: "loaded", ledger: clone(candidate.ledger) };
       } catch {
         controller.abort();
-        if (renameEntered) poisoned = true;
-        // External-change failures also poison: subsequent load must not adopt them.
-        if (externalChange) poisoned = true;
-        return { kind: "unavailable", effect: renameEntered ? "unknown" : "none" };
+        poisoned = true;
+        return { kind: "unavailable" };
       } finally {
         signal.removeEventListener("abort", abort);
-        if (settled) await cleanup();
-        else void work.catch(() => {}).then(cleanup);
+        waiterFinished = true;
+        if (settled) busy = false;
       }
     },
+    commit(expectedRevision, next, signal) {
+      return commitGuarded(expectedRevision, next, signal, () => undefined);
+    },
+    commitGuarded,
   };
 }

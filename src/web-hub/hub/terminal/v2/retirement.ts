@@ -1,11 +1,11 @@
 /** Cold old-kernel retirement only: durable evidence BEFORE exact atomic prune.
  * Same-kernel unknown never released; archive failure keeps rows and does not poison ledger.
  * P6 runs under existing singleton BEFORE service.initialize (no hot backend at this point). */
-import { constants } from "node:fs";
+import { constants, openSync, closeSync, fstatSync, lstatSync, realpathSync, readSync } from "node:fs";
 import { open, lstat, realpath, mkdir, readdir, readFile, readlink } from "node:fs/promises";
 import { resolve } from "node:path";
 import { randomBytes } from "node:crypto";
-import type { TerminalAllocationLedgerPortV2 } from "../../terminal-v2-ports.js";
+import type { GuardedTerminalAllocationLedgerV2, TerminalLedgerCommitGuardV2 } from "./ledger.js";
 import { terminalLedgerV2Ok, type LedgerV2 } from "../../../protocol/terminal-v2.js";
 import { terminalV2Files } from "../../../protocol/terminal-v2-paths.js";
 import { TERMINAL_V2_LIMITS as L } from "../../../protocol/terminal-v2-values.js";
@@ -36,16 +36,96 @@ export async function currentKernelEvidenceV2(): Promise<KernelEvidenceV2> {
     throw new Error("E_KERNEL");
   return { bootId: boot.trim(), pidNamespace, mountNamespace, userNamespace };
 }
+/** Only bounded synchronous read-only syscalls; no async work, user callback or evidence
+ * mutation. Reopens original pinned paths so it also works after async fd cleanup ended. */
+function evidenceGuardV2(pins: {
+  directories: Array<{ path: string; dev: number; ino: number }>;
+  filePath: string;
+  identity: { dev: number; ino: number };
+  bytes: Buffer;
+  uid: number;
+  signal: AbortSignal;
+  at: number;
+}): TerminalLedgerCommitGuardV2 {
+  if (pins.bytes.length > 2 * L.ledgerBytes + 4096) throw new Error("E_ARCHIVE");
+  return () => {
+    if (pins.signal.aborted || Date.now() >= pins.at) throw new Error("E_STOP");
+    const opened: number[] = [];
+    try {
+      for (const pin of pins.directories) {
+        const fd = openSync(pin.path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+        opened.push(fd);
+        const held = fstatSync(fd),
+          path = lstatSync(pin.path);
+        if (
+          !held.isDirectory() ||
+          held.uid !== pins.uid ||
+          (held.mode & 0o777) !== 0o700 ||
+          held.dev !== pin.dev ||
+          held.ino !== pin.ino ||
+          path.dev !== pin.dev ||
+          path.ino !== pin.ino ||
+          realpathSync(pin.path) !== pin.path
+        )
+          throw new Error("E_ARCHIVE");
+      }
+      const fd = openSync(pins.filePath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      opened.push(fd);
+      const stat = fstatSync(fd),
+        path = lstatSync(pins.filePath);
+      if (
+        !stat.isFile() ||
+        stat.uid !== pins.uid ||
+        (stat.mode & 0o777) !== 0o600 ||
+        stat.nlink !== 1 ||
+        stat.size !== pins.bytes.length ||
+        stat.dev !== pins.identity.dev ||
+        stat.ino !== pins.identity.ino ||
+        path.dev !== stat.dev ||
+        path.ino !== stat.ino
+      )
+        throw new Error("E_ARCHIVE");
+      const bytes = Buffer.alloc(pins.bytes.length + 1);
+      let count = 0;
+      while (count < bytes.length) {
+        const n = readSync(fd, bytes, count, bytes.length - count, count);
+        if (!n) break;
+        count += n;
+      }
+      const after = fstatSync(fd);
+      if (
+        count !== pins.bytes.length ||
+        !bytes.subarray(0, count).equals(pins.bytes) ||
+        after.size !== stat.size ||
+        after.mtimeMs !== stat.mtimeMs
+      )
+        throw new Error("E_ARCHIVE");
+      if (pins.signal.aborted || Date.now() >= pins.at) throw new Error("E_STOP");
+    } finally {
+      let closeFailed = false;
+      for (const fd of opened.reverse()) {
+        try {
+          closeSync(fd);
+        } catch {
+          closeFailed = true;
+        }
+      }
+      if (closeFailed) throw new Error("E_ARCHIVE");
+    }
+    return undefined;
+  };
+}
 export async function retireOldKernelAllocationsV2(
   deps: {
     stateDir: string;
-    ledger: TerminalAllocationLedgerPortV2;
+    ledger: GuardedTerminalAllocationLedgerV2;
     current(): boolean;
     /** Test-only simulated boot/proc evidence; never env/config/wire. UUID fixtures are NOT real reboot evidence. */
     kernelEvidence?(): Promise<KernelEvidenceV2>;
   },
   signal: AbortSignal,
 ): Promise<{ kind: "unchanged" | "retired" | "retained"; count: number } | { kind: "unavailable" }> {
+  if (typeof deps.ledger.commitGuarded !== "function") return { kind: "unavailable" };
   const controller = new AbortController(),
     abort = () => controller.abort();
   signal.addEventListener("abort", abort, { once: true });
@@ -54,7 +134,9 @@ export async function retireOldKernelAllocationsV2(
   const check = () => {
     if (controller.signal.aborted || Date.now() >= at || !deps.current()) throw new Error("E_STOP");
   };
+  // A plain P0 ledger cannot provide the physical evidence fence. Never fall back.
   let pruneEntered = false;
+  let finalGuard: TerminalLedgerCommitGuardV2 | undefined;
   const work = (async () => {
     check();
     const loaded = await deps.ledger.load(controller.signal);
@@ -197,6 +279,20 @@ export async function retireOldKernelAllocationsV2(
           } finally {
             await verify.close();
           }
+          if (uid === undefined) throw new Error("E_ARCHIVE");
+          finalGuard = evidenceGuardV2({
+            directories: [
+              { path: resolve(deps.stateDir), dev: held.dev, ino: held.ino },
+              { path: paths.archive, dev: rootStat.dev, ino: rootStat.ino },
+              { path: transaction, dev: txHeld.dev, ino: txHeld.ino },
+            ],
+            filePath: `${transaction}/evidence.json`,
+            identity: writtenIdentity,
+            bytes: evidence,
+            uid,
+            signal: controller.signal,
+            at,
+          });
           const exact = new Set(eligible.map((a) => a.allocationId));
           const next: LedgerV2 = {
             ...ledger,
@@ -205,10 +301,12 @@ export async function retireOldKernelAllocationsV2(
           };
           check();
           pruneEntered = true;
-          const result = await deps.ledger.commit(ledger.revision, next, controller.signal);
+          const result = await deps.ledger.commitGuarded(ledger.revision, next, controller.signal, finalGuard);
           if (result.kind === "committed") return { kind: "retired" as const, count: eligible.length };
-          if (result.kind === "unavailable" && result.effect === "none")
+          if (result.kind === "unavailable" && result.effect === "none") {
+            pruneEntered = false;
             return { kind: "retained" as const, count: eligible.length };
+          }
           return { kind: "unavailable" as const };
         } finally {
           await tx.close();
@@ -221,7 +319,14 @@ export async function retireOldKernelAllocationsV2(
     }
   })();
   try {
-    return await boundedV2(work, at, controller.signal);
+    const result = await boundedV2(work, at, controller.signal);
+    // No await may follow this success fence: ledger and retirement fd cleanup are done.
+    if (result.kind === "retired") {
+      check();
+      finalGuard!();
+      check();
+    }
+    return result;
   } catch {
     controller.abort();
     return pruneEntered ? { kind: "unavailable" } : { kind: "retained", count: 0 };
