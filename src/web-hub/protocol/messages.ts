@@ -563,6 +563,12 @@ export interface LoadWire {
   /** ≤2, per §5.4/§7.1. */
   disks?: LoadDiskWire[];
   loadavg?: [number, number, number];
+  /** Logical core count disclosed by platforms whose CPU reading is unavailable (darwin-plan
+   *  §2.8/S3, user Q1 2026-11-18): the hub projects it ONLY when `cpu` is absent, so the loadavg
+   *  bar's denominator can be the real core count instead of a hard-wired 1. Append-only (I10):
+   *  optional top-level — Linux frames (which carry `cpu.cores`) never emit this key, old hub ×
+   *  new UI and new hub × old UI are both unaffected. `LoadCpuWire.busyPct` stays required. */
+  cores?: number;
 }
 
 /**

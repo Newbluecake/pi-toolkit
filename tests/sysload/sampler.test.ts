@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { IoLedger } from "../../src/sysload/io-ledger.js";
-import { sampleOnce } from "../../src/sysload/sampler.js";
+import { createDefaultSamplerIo, sampleOnce } from "../../src/sysload/sampler.js";
 
 const mountinfo = "1 0 8:1 / / rw - ext4 /dev/root rw\n";
 const files: Record<string, string> = {
@@ -111,5 +111,10 @@ describe("sysload sampler", () => {
       new IoLedger({ active: new Map(), capacity: 2 }),
     );
     expect(split.sample.disks.map((disk) => disk.label)).toEqual(["~", "/"]);
+  });
+
+  it("keeps the default sampler io host-free (the default path stays Linux, darwin-plan §2.1)", () => {
+    expect(createDefaultSamplerIo().host).toBeUndefined();
+    expect("host" in createDefaultSamplerIo()).toBe(false);
   });
 });

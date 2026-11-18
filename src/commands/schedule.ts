@@ -341,7 +341,11 @@ export function createScheduleCommand(deps: ScheduleCommandDeps): Omit<Registere
             "warning",
           );
         if (all && agent.self === undefined && !READ_SUBS.has(sub))
-          return void notify(ctx, "E_UNSUPPORTED: 无法取得进程身份（/proc），不能写入其他会话的账本。", "error");
+          return void notify(
+            ctx,
+            "E_UNSUPPORTED: 无法取得进程身份（/proc 或 ps/sysctl），不能写入其他会话的账本。",
+            "error",
+          );
 
         switch (sub) {
           case "list":

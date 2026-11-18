@@ -240,3 +240,32 @@ describe("LoadPill.vue — zh/en segment labels (2026-10 user ruling)", () => {
     expect(segs[0]!.text()).toBe("CPU 6%");
   });
 });
+
+// darwin-plan §4.3b (S3): LoadPill is ZERO-change — a mac-shaped frame (no `cpu`, top-level
+// `cores`) must render the pill without a CPU segment and without throwing; the top-level key
+// is simply not consumed here (only LoadCard's loadavg denominator reads it).
+describe("LoadPill.vue — mac-shaped frame (no cpu, top-level cores)", () => {
+  // Belt-and-braces (same as the zh/en describe above): an earlier ≤480px test stubs
+  // `matchMedia` without resetting, so pin a desktop viewport explicitly.
+  function stubDesktop(): void {
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      matches: false,
+      media: query,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }));
+  }
+
+  it("renders MEM/DISK segments only — no CPU segment, no crash", () => {
+    stubDesktop();
+    const l = load({
+      cores: 12,
+      mem: { usedPct: 54, availPct: 46, level: "ok" },
+      disks: [{ label: "/", path: "/", usedPct: 64, freeBytes: 1, totalBytes: 2, level: "ok" }],
+    });
+    const wrapper = m(mount(LoadPill, { props: { load: l, receivedAt: Date.now() } }));
+    expect(wrapper.get(".ld-pill").text().replace(/\s+/g, " ")).toContain("MEM 54%");
+    expect(wrapper.get(".ld-pill").text()).toContain("DISK 64%");
+    expect(wrapper.get(".ld-pill").text()).not.toContain("CPU");
+  });
+});

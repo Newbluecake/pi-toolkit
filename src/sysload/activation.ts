@@ -2,9 +2,10 @@ import type { Clock } from "../core/clock.js";
 import { createSegmentedClock } from "../core/clock.js";
 import type { LoadSettings } from "../config/settings.js";
 import { IoLedger } from "./io-ledger.js";
-import { sampleOnce, type SamplerIo } from "./sampler.js";
-import { scanTop, type TopPrevious } from "./top.js";
+import { sampleOnce, type SamplerHost, type SamplerIo } from "./sampler.js";
+import { createHostTopScanner, scanTop, type TopPrevious } from "./top.js";
 import type { TopScanOptions } from "./top.js";
+import { resolveSysloadHost } from "../web-hub/protocol/sysload-darwin.js";
 import { createLoadTracker, type LoadTracker } from "./tracker.js";
 import type { LoadLevel, LoadPort, TopSnapshot } from "./types.js";
 
@@ -24,6 +25,12 @@ export interface LoadActivationDeps {
   readonly wall?: () => number;
   readonly clock?: Clock;
   readonly io?: SamplerIo;
+  /** darwin-plan §2.1/§3.1-S2: the platform-resolved host (test seam; production leaves this
+   *  undefined and `resolveSysloadHost()` decides — `undefined` on every non-darwin platform, so
+   *  the Linux path stays byte-identical). An injected `io` is AUTHORITATIVE for its own `host`
+   *  field: no platform resolution ever happens behind a test's injected io (the Linux fixture
+   *  suites must keep taking the Linux path on a mac dev machine). */
+  readonly host?: SamplerHost;
   /** Test seam for the bounded top scanner; production uses scanTop. */
   readonly scanTop?: (ledger: IoLedger, options: TopScanOptions) => Promise<TopSnapshot>;
 }
@@ -38,6 +45,11 @@ export interface LoadActivation {
 export function createLoadActivation(deps: LoadActivationDeps): LoadActivation {
   const mono = deps.mono ?? (() => performance.now());
   const wall = deps.wall ?? (() => Date.now());
+  // darwin-plan §3.0: the FIRST compile-time compatibility checkpoint between S0's protocol
+  // host and S1's C0 seam — this assignment typechecks only while DarwinHost still satisfies
+  // SamplerHost structurally (protocol must never import sysload, not even type-only).
+  const host: SamplerHost | undefined = deps.host ?? (deps.io !== undefined ? deps.io.host : resolveSysloadHost());
+  const io: SamplerIo | undefined = host === undefined ? deps.io : { ...(deps.io ?? {}), host };
   const clock = deps.clock ?? createLoadClock(mono);
   const ledger = new IoLedger();
   const tracker: LoadTracker = createLoadTracker(deps.settings, mono, wall);
@@ -71,7 +83,7 @@ export function createLoadActivation(deps: LoadActivationDeps): LoadActivation {
       mono,
       at: wall,
     };
-    void sampleOnce(deps.io, plan, ledger, mine, deps.settings)
+    void sampleOnce(io, plan, ledger, mine, deps.settings)
       .then((result) => {
         if (!started || disposed || mine !== generation) return;
         previousCpu = result.nextCpu;
@@ -100,7 +112,7 @@ export function createLoadActivation(deps: LoadActivationDeps): LoadActivation {
       if (disposed || topInFlight || mono() - topLastAt < 30_000) return;
       topInFlight = true;
       const mine = generation;
-      void (deps.scanTop ?? scanTop)(ledger, {
+      void (deps.scanTop ?? (host === undefined ? scanTop : createHostTopScanner(host)))(ledger, {
         now: mono,
         isCurrent: () => !disposed && mine === generation,
         ...(topPrevious === undefined ? {} : { previous: topPrevious }),

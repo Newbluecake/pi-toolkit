@@ -84,6 +84,7 @@ import type {
   FleetOmitted,
   HubCtlFrame,
   HubFrame,
+  LoadCpuWire,
   LoadWire,
   StatusInfo,
   WireEntry,
@@ -119,6 +120,18 @@ describe("types.test-d.ts (plan §11 typecheck contract)", () => {
     expectTypeOf<LoadWire["sinceAgoMs"]>().toEqualTypeOf<number | undefined>();
     expectTypeOf<LoadWire>().not.toHaveProperty("since");
     expectTypeOf<LoadWire>().not.toHaveProperty("mono");
+  });
+
+  // darwin-plan §4.3b (S3, user Q1): the cpu-less platform's core count is an OPTIONAL top-level
+  // LoadWire key; `LoadCpuWire.busyPct` must stay required (an old UI's isCpu rejects the whole
+  // frame if it ever becomes optional — I10 append-only in both directions).
+  it("sysload S3 keeps LoadWire.cores optional and LoadCpuWire.busyPct required", () => {
+    expectTypeOf<LoadWire>().toHaveProperty("cores");
+    expectTypeOf<LoadWire["cores"]>().toEqualTypeOf<number | undefined>();
+    // Optionality, not just undefined-typed: a frame object without `cores` still satisfies LoadWire.
+    expectTypeOf<Omit<LoadWire, "cores">>().toMatchTypeOf<LoadWire>();
+    expectTypeOf<LoadCpuWire>().toHaveProperty("busyPct");
+    expectTypeOf<LoadCpuWire["busyPct"]>().toEqualTypeOf<number>();
   });
 
   it("P1-shaped FrontendDeps (no `lan`) is still assignable to FrontendDeps", () => {

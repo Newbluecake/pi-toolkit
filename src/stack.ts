@@ -654,6 +654,7 @@ export function buildSessionStack(
           .map((s) => s.diag.label ?? s.runId);
         const decision = evaluateLoadGate(verdict, settings.load, {
           nested,
+          platform: process.platform, // darwin-plan §2.8: assembly-side platform handoff (gate default keeps the Linux text verbatim)
           ...(top === undefined ? {} : { top }),
           ...(ownRuns === undefined ? {} : { ownRuns }),
         });

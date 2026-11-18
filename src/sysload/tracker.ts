@@ -228,6 +228,27 @@ function settingsToThresholds(settings: LoadSettings): LoadThresholds {
   return { cpu: settings.cpu, mem: settings.mem, disk: settings.disk };
 }
 
+/** darwin-plan §2.9（Q3 拍板）：advisory mem 只记显示值（value/lastValid ⇒ verdict 可显示
+ * availPct），不走 advanceMetric —— mem.level 恒 unknown，不进 overall、不触发升级/恢复/gate/hint。
+ * S1 评审 Major 2 + 复验 R2：advisory 一旦生效（`sample.memAdvisory === true`），无论本拍读数是否有效，
+ * 都**无条件**清除存量等级与挂起窗口（否则先由非 advisory 样本推到的 warn/crit 会继续参与
+ * overall/gate，违背「恒 unknown」）；随后仅当读数可信（与 memRaw 同一闸）才更新显示值，
+ * 无效/不可信读数不动 value/lastValid（显示值自然随 stale 规则老去）。清除后去掉样本标记
+ * （模拟 D1 启用）从 unknown 重新走正常 advanceMetric 路径，对称性由 darwin-tracker 测试钉住。 */
+function recordAdvisoryMem(metric: InternalMetric, sample: LoadSample, settings: LoadSettings): { recovered: boolean } {
+  metric.level = "unknown";
+  metric.levelSince = undefined;
+  metric.windowStart = undefined;
+  metric.direction = undefined;
+  metric.windowTarget = undefined;
+  metric.broken = false;
+  if (sample.mem.kind === "ok" && memRaw(sample, settingsToThresholds(settings)) !== undefined) {
+    metric.value = sample.mem.value;
+    metric.lastValid = sample.mono;
+  }
+  return { recovered: false };
+}
+
 function staleLevel(metric: InternalMetric, now: number, interval: number): LoadLevel {
   return metric.lastValid === undefined || !Number.isFinite(now) || now - metric.lastValid > interval * 3
     ? "unknown"
@@ -300,6 +321,7 @@ export function createLoadTracker(
       const before = verdict(sample.mono, sample.at);
       if (sample.loadavg !== undefined) latestLoadavg = sample.loadavg;
       if (sample.cpu.kind === "ok") latestCores = sample.cpu.value.cores;
+      else if (sample.cores !== undefined) latestCores = sample.cores;
       const cpuResult =
         sample.cpu.kind === "ok"
           ? advanceMetric(
@@ -312,16 +334,18 @@ export function createLoadTracker(
             )
           : advanceMetric(cpu, undefined, undefined, sample.mono, settings, "cpu");
       const memResult =
-        sample.mem.kind === "ok"
-          ? advanceMetric(
-              mem,
-              memRaw(sample, settingsToThresholds(settings)),
-              sample.mem.value,
-              sample.mono,
-              settings,
-              "mem",
-            )
-          : advanceMetric(mem, undefined, undefined, sample.mono, settings, "mem");
+        sample.memAdvisory === true
+          ? recordAdvisoryMem(mem, sample, settings)
+          : sample.mem.kind === "ok"
+            ? advanceMetric(
+                mem,
+                memRaw(sample, settingsToThresholds(settings)),
+                sample.mem.value,
+                sample.mono,
+                settings,
+                "mem",
+              )
+            : advanceMetric(mem, undefined, undefined, sample.mono, settings, "mem");
       let diskRecovered = false;
       const seen = new Set<string>();
       for (const path of sample.disks.slice(0, LOAD_MOUNT_RING_MAX_SLOTS)) {

@@ -170,6 +170,16 @@ export interface LoadSample {
   readonly disks: readonly LoadDiskPathSample[];
   /** `/proc/loadavg`'s three load averages, display-only (§6.4 文案). */
   readonly loadavg?: readonly [number, number, number];
+  /** darwin host seam (darwin-plan §2.2/§2.8): logical core count disclosed by platforms whose
+   * CPU reading is unavailable (`cpu.kind === "invalid"`) — feeds `LoadVerdict.cores` so the
+   * loadavg display can use the real denominator. Append-only optional: Linux samples never
+   * carry this key. */
+  readonly cores?: number;
+  /** darwin host seam (darwin-plan §2.9, user Q3): the mem reading is display-only and never
+   * enters the gate/level machinery (`kern.memorystatus_level` semantics unproven — evidence
+   * gate P1–P5 in the darwin plan). The tracker consumes this flag and keeps `mem.level` at
+   * `"unknown"`. Append-only optional: Linux samples never carry this key. */
+  readonly memAdvisory?: true;
 }
 
 // ---------------------------------------------------------------------------

@@ -7,8 +7,11 @@
  * (the hub's spawn-history precedent): each level is opened `O_DIRECTORY|O_NOFOLLOW` (files
  * `O_NOFOLLOW|O_NONBLOCK`), then `fstat`-checked — right type, owned by the expected uid, not
  * group/other-writable, size within the cap. A swapped-in symlink at any level fails with ELOOP
- * instead of being followed, and the parent can no longer be swapped underneath us. Without
- * `/proc/self/fd` (non-Linux) every operation fails closed (`platform`).
+ * instead of being followed, and the parent can no longer be swapped underneath us. That is the
+ * default Linux backend; macOS (Darwin) is supported through a snapshot backend (realpath +
+ * per-level pre/post `lstat`/`fstat` comparison, dev/ino(+birthtime) chains) with WEAKER guarantees
+ * — see docs/dev/scheduled-reports/README.md「macOS（Darwin）支持」 and darwin-report.md. Every other
+ * platform fails closed (`platform`).
  *
  * This module contains NO write primitive (pinned by tests/schedule/core/reader.test.ts) — it is
  * shared by the hub's pure reader and the agent writer; writes live in writer.ts / lock.ts.
@@ -63,17 +66,255 @@ export class SchedFsError extends Error {
   }
 }
 
+export interface PathBackend {
+  readonly platform: "linux" | "darwin";
+  available(): boolean;
+  path(fd: number, name?: string): string;
+  lstatAt(fd: number, rel: string, opts?: FsCheckOpts): Stats;
+  locate(fd: number): string;
+  prepare(path: string, kind: "dir" | "file"): unknown;
+  confirm(snap: unknown, args: { fd: number; path: string; st: Stats; kind: "dir" | "file"; parentFd?: number }): void;
+}
+
+interface FdRecord {
+  backend: "darwin";
+  path: string;
+  dev: number;
+  ino: number;
+  chain: DarwinSnapshot[];
+  lastUsed: number;
+}
+interface FdRegistry {
+  map: Map<number, FdRecord>;
+  lastSweepAt: number;
+}
+const FD_PATHS_KEY = Symbol.for("pi-subagent:sched-fd-paths:v1");
+
+function fdRegistry(): FdRegistry | undefined {
+  return (globalThis as Record<symbol, unknown>)[FD_PATHS_KEY] as FdRegistry | undefined;
+}
+
+function fdBackendOf(fd: number): PathBackend {
+  const registry = fdRegistry();
+  if (registry === undefined) return linuxPathBackend;
+  if (!registry.map.has(fd)) return defaultPathBackend();
+  return darwinPathBackend;
+}
+
 /** `/proc/self/fd/<fd>[/<name>]`. */
 export function fdPath(fd: number, name?: string): string {
+  return fdBackendOf(fd).path(fd, name);
+}
+
+function linuxFdPath(fd: number, name?: string): string {
   return name === undefined ? `${SCHED_FD_ROOT}/${fd}` : `${SCHED_FD_ROOT}/${fd}/${name}`;
 }
 
-export function fdAnchoringAvailable(): boolean {
+function linuxLstatAt(dirFd: number, rel: string, _opts?: FsCheckOpts): Stats {
+  return lstatSync(fdPath(dirFd, rel));
+}
+
+export const linuxPathBackend: PathBackend = Object.freeze({
+  platform: "linux",
+  available: () => linuxFdAnchoringAvailable(),
+  path: linuxFdPath,
+  lstatAt: linuxLstatAt,
+  locate: (fd: number) => readlinkSync(linuxFdPath(fd)),
+  prepare: () => undefined,
+  confirm: () => undefined,
+});
+
+export interface DarwinSnapshot {
+  dev: number;
+  ino: number;
+  bt: number | null;
+}
+
+export function birthOf(st: Pick<Stats, "birthtimeMs" | "ctimeMs">): number | null {
+  return Number.isFinite(st.birthtimeMs) && st.birthtimeMs > 0 && st.birthtimeMs < st.ctimeMs ? st.birthtimeMs : null;
+}
+
+export function darwinSnapshotEqual(snap: DarwinSnapshot, cur: DarwinSnapshot): boolean {
+  return snap.dev === cur.dev && snap.ino === cur.ino && (snap.bt === null || snap.bt === cur.bt);
+}
+
+export interface DarwinBackendOpts {
+  now?: () => number;
+  capacity?: number;
+  ttlMs?: number;
+  birthtime?: "auto" | "off";
+  hooks?: { beforeVerify?(point: string): void; afterVerify?(point: string): void };
+}
+
+/** Snapshot checks detect completed replacements; the following pathname syscall retains U1-U6. */
+export function createDarwinPathBackend(o: DarwinBackendOpts = {}): PathBackend {
+  const now = o.now ?? Date.now;
+  const capacity = o.capacity ?? 1024;
+  const ttl = o.ttlMs ?? 600_000;
+  const snapshot = (st: Stats): DarwinSnapshot => ({
+    dev: st.dev,
+    ino: st.ino,
+    bt: o.birthtime === "off" ? null : birthOf(st),
+  });
+  const prefixes = (path: string): string[] => {
+    if (!isAbsolute(path) || path.includes("\0") || path.split("/").some((p) => p === "." || p === ".."))
+      throw new SchedFsError("bad-name", "non-canonical directory path");
+    const out = ["/"];
+    for (const part of path.split("/").filter(Boolean)) out.push(join(out[out.length - 1]!, part));
+    return out;
+  };
+  const chainAt = (path: string): DarwinSnapshot[] =>
+    prefixes(path).map((p) => {
+      const st = lstatSync(p);
+      if (!st.isDirectory() || st.isSymbolicLink()) throw new SchedFsError("moved", "directory chain changed");
+      return snapshot(st);
+    });
+  const verify = (fd: number, point: string): FdRecord => {
+    const reg = fdRegistry();
+    const rec = reg?.map.get(fd);
+    if (!rec) throw new SchedFsError("io", "fd has no verified path");
+    try {
+      o.hooks?.beforeVerify?.(point);
+      const st = fstatSync(fd);
+      if (!st.isDirectory() || st.dev !== rec.dev || st.ino !== rec.ino) {
+        // The fd identity is dev/ino; birth belongs to each directory chain entry.
+        throw new SchedFsError("moved", "directory fd changed");
+      }
+      const cur = chainAt(rec.path);
+      if (cur.length !== rec.chain.length || rec.chain.some((s, i) => !darwinSnapshotEqual(s, cur[i]!)))
+        throw new SchedFsError("moved", "directory chain changed");
+      rec.lastUsed = now();
+    } catch {
+      reg!.map.delete(fd);
+      throw new SchedFsError("moved", "directory snapshot changed");
+    }
+    o.hooks?.afterVerify?.(point);
+    return rec;
+  };
+  const backend: PathBackend = {
+    platform: "darwin",
+    available: () => true,
+    prepare(path, kind) {
+      let st: Stats;
+      try {
+        st = lstatSync(path);
+      } catch (err) {
+        throw mapOpenError(err, kind, path);
+      }
+      if (st.isSymbolicLink()) throw new SchedFsError("symlink", "symlink refused");
+      if (kind === "dir" ? !st.isDirectory() : !st.isFile())
+        throw new SchedFsError(kind === "dir" ? "not-dir" : "not-file", "unexpected entry type");
+      return snapshot(st);
+    },
+    confirm(snap, a) {
+      o.hooks?.beforeVerify?.("confirm-post");
+      try {
+        const post = lstatSync(a.path);
+        const pre = snap as DarwinSnapshot;
+        if (
+          post.isSymbolicLink() ||
+          !darwinSnapshotEqual(pre, snapshot(a.st)) ||
+          !darwinSnapshotEqual(pre, snapshot(post))
+        )
+          throw new SchedFsError("moved", "entry changed during open");
+        if (a.kind === "dir") {
+          let chain: DarwinSnapshot[];
+          if (a.parentFd !== undefined) {
+            const parent = fdRegistry()?.map.get(a.parentFd);
+            if (
+              !parent ||
+              !isPlainName(a.path.slice(parent.path === "/" ? 1 : parent.path.length + 1)) ||
+              !a.path.startsWith(parent.path === "/" ? "/" : parent.path + "/")
+            )
+              throw new SchedFsError("moved", "parent record unavailable");
+            chain = [...parent.chain, snapshot(a.st)];
+          } else {
+            chain = chainAt(a.path);
+            if (!darwinSnapshotEqual(chain[chain.length - 1]!, snapshot(a.st)))
+              throw new SchedFsError("moved", "directory changed during open");
+          }
+          let reg = fdRegistry();
+          if (!reg) {
+            reg = { map: new Map(), lastSweepAt: now() };
+            (globalThis as Record<symbol, unknown>)[FD_PATHS_KEY] = reg;
+          }
+          const t = now();
+          if (reg.map.size >= Math.min(256, capacity) || t - reg.lastSweepAt >= 60_000) {
+            for (const [fd, rec] of reg.map) {
+              try {
+                const st = fstatSync(fd);
+                if (st.dev !== rec.dev || st.ino !== rec.ino || t - rec.lastUsed > ttl) reg.map.delete(fd);
+              } catch {
+                reg.map.delete(fd);
+              }
+            }
+            reg.lastSweepAt = t;
+          }
+          if (reg.map.size >= capacity && !reg.map.has(a.fd)) throw new SchedFsError("io", "fd registry full");
+          reg.map.set(a.fd, { backend: "darwin", path: a.path, dev: a.st.dev, ino: a.st.ino, chain, lastUsed: t });
+        }
+      } catch (err) {
+        fdRegistry()?.map.delete(a.fd);
+        if (err instanceof SchedFsError) throw err;
+        throw new SchedFsError("moved", "entry changed during open");
+      }
+      o.hooks?.afterVerify?.("confirm-post");
+    },
+    path(fd, name) {
+      if (name !== undefined && !isPlainName(name)) throw new SchedFsError("bad-name", "bad entry name");
+      const rec = verify(fd, "path");
+      return name === undefined ? rec.path : join(rec.path, name);
+    },
+    locate(fd) {
+      return verify(fd, "locate").path;
+    },
+    lstatAt(fd, rel, opts) {
+      const parts = rel.split("/");
+      if (parts.length > 8 || !parts.every(isPlainName)) throw new SchedFsError("bad-name", "bad relative path");
+      const opened: number[] = [];
+      try {
+        verify(fd, "lstatAt");
+        let cur = fd;
+        for (const part of parts.slice(0, -1)) {
+          try {
+            const d = openDirAt(cur, part, opts);
+            opened.push(d.fd);
+            cur = d.fd;
+          } catch (err) {
+            if (err instanceof SchedFsError && err.reason === "missing")
+              throw Object.assign(new Error("missing intermediate directory"), { code: "ENOENT" });
+            throw err;
+          }
+        }
+        return lstatSync(backend.path(cur, parts[parts.length - 1]!));
+      } finally {
+        for (const fd of opened.reverse()) closeQuiet(fd);
+      }
+    },
+  };
+  return backend;
+}
+
+export const darwinPathBackend: PathBackend = createDarwinPathBackend();
+
+export function defaultPathBackend(): PathBackend {
+  return process.platform === "darwin" ? darwinPathBackend : linuxPathBackend;
+}
+
+export function lstatAt(fd: number, rel: string, opts?: FsCheckOpts): Stats {
+  return fdBackendOf(fd).lstatAt(fd, rel, opts);
+}
+
+function linuxFdAnchoringAvailable(): boolean {
   try {
     return statSync(SCHED_FD_ROOT).isDirectory();
   } catch {
     return false;
   }
+}
+
+export function fdAnchoringAvailable(): boolean {
+  return defaultPathBackend().available();
 }
 
 function errCode(err: unknown): string | undefined {
@@ -112,6 +353,8 @@ export function isSessionDirName(name: string): boolean {
 export interface FsCheckOpts {
   /** Expected owner (default: process uid). */
   uid?: number;
+  /** Explicit path backend; consumed only at root/open entry points. */
+  backend?: PathBackend;
 }
 
 function expectedUid(opts: FsCheckOpts): number | undefined {
@@ -154,7 +397,10 @@ function mapOpenError(err: unknown, what: string, path?: string): SchedFsError {
 
 /** Open an absolute, already-canonical directory path `O_DIRECTORY|O_NOFOLLOW` and check it. */
 export function openDirPath(path: string, opts: FsCheckOpts = {}): OpenedDir {
-  if (!fdAnchoringAvailable()) throw new SchedFsError("platform", "fd-anchored opens need /proc/self/fd");
+  if (!(opts.backend ?? defaultPathBackend()).available())
+    throw new SchedFsError("platform", "fd-anchored opens need /proc/self/fd");
+  const backend = opts.backend ?? defaultPathBackend();
+  const snap = backend.prepare(path, "dir");
   let fd: number;
   try {
     fd = openSync(path, fsConstants.O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
@@ -164,6 +410,7 @@ export function openDirPath(path: string, opts: FsCheckOpts = {}): OpenedDir {
   try {
     const st = fstatSync(fd);
     checkStat(st, "dir", "store dir", opts);
+    backend.confirm(snap, { fd, path, st, kind: "dir" });
     return { fd, dev: st.dev, ino: st.ino };
   } catch (err) {
     closeQuiet(fd);
@@ -177,30 +424,42 @@ export function openDirPath(path: string, opts: FsCheckOpts = {}): OpenedDir {
  */
 export function fdRealPath(fd: number): string {
   try {
-    return readlinkSync(fdPath(fd));
+    return fdBackendOf(fd).locate(fd);
   } catch (err) {
+    if (err instanceof SchedFsError) throw err;
     throw new SchedFsError("io", `cannot resolve fd location: ${errCode(err) ?? String(err)}`);
   }
 }
 
 /** Open an existing ancestor directory without owner/mode policy (only for anchored creation). */
-export function openDirPathUnchecked(path: string): OpenedDir {
-  if (!fdAnchoringAvailable()) throw new SchedFsError("platform", "fd-anchored opens need /proc/self/fd");
+export function openDirPathUnchecked(path: string, opts: FsCheckOpts = {}): OpenedDir {
+  if (!(opts.backend ?? defaultPathBackend()).available())
+    throw new SchedFsError("platform", "fd-anchored opens need /proc/self/fd");
+  const backend = opts.backend ?? defaultPathBackend();
+  const snap = backend.prepare(path, "dir");
   let fd: number;
   try {
     fd = openSync(path, fsConstants.O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
   } catch (err) {
     throw mapOpenError(err, "ancestor dir", path);
   }
-  const st = fstatSync(fd);
-  return { fd, dev: st.dev, ino: st.ino };
+  try {
+    const st = fstatSync(fd);
+    backend.confirm(snap, { fd, path, st, kind: "dir" });
+    return { fd, dev: st.dev, ino: st.ino };
+  } catch (err) {
+    closeQuiet(fd);
+    throw err;
+  }
 }
 
 /** Open child directory `name` of `parentFd` (`O_DIRECTORY|O_NOFOLLOW`, checked). */
 export function openDirAt(parentFd: number, name: string, opts: FsCheckOpts = {}): OpenedDir {
   if (!isPlainName(name)) throw new SchedFsError("bad-name", "bad directory name");
   let fd: number;
+  const backend = fdBackendOf(parentFd);
   const path = fdPath(parentFd, name);
+  const snap = backend.prepare(path, "dir");
   try {
     fd = openSync(path, fsConstants.O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
   } catch (err) {
@@ -209,6 +468,7 @@ export function openDirAt(parentFd: number, name: string, opts: FsCheckOpts = {}
   try {
     const st = fstatSync(fd);
     checkStat(st, "dir", `dir ${name}`, opts);
+    backend.confirm(snap, { fd, path, st, kind: "dir", parentFd });
     return { fd, dev: st.dev, ino: st.ino };
   } catch (err) {
     closeQuiet(fd);
@@ -230,9 +490,12 @@ export interface BoundedRead {
  */
 export function readFileAt(dirFd: number, name: string, maxBytes: number, opts: FsCheckOpts = {}): BoundedRead {
   if (!isPlainName(name)) throw new SchedFsError("bad-name", "bad file name");
+  const backend = fdBackendOf(dirFd);
+  const path = fdPath(dirFd, name);
+  const snap = backend.prepare(path, "file");
   let fd: number;
   try {
-    fd = openSync(fdPath(dirFd, name), fsConstants.O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
+    fd = openSync(path, fsConstants.O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
   } catch (err) {
     throw mapOpenError(err, `file ${name}`);
   }
@@ -251,6 +514,8 @@ export function readFileAt(dirFd: number, name: string, maxBytes: number, opts: 
     }
     if (off > maxBytes) throw new SchedFsError("too-large", `file ${name}: grew past ${maxBytes} bytes`);
     if (off !== st.size) throw new SchedFsError("io", `file ${name}: changed while being read`);
+    backend.confirm(snap, { fd, path, st, kind: "file", parentFd: dirFd });
+    if (backend.platform === "darwin") backend.path(dirFd);
     return { bytes: buf.subarray(0, off), size: off, mtimeMs: st.mtimeMs, dev: st.dev, ino: st.ino };
   } finally {
     closeQuiet(fd);
@@ -259,6 +524,7 @@ export function readFileAt(dirFd: number, name: string, maxBytes: number, opts: 
 
 export function closeQuiet(fd: number | undefined): void {
   if (fd === undefined) return;
+  fdRegistry()?.map.delete(fd);
   try {
     closeSync(fd);
   } catch {
@@ -278,6 +544,7 @@ export interface StoreRoot {
   real: string;
   dev: number;
   ino: number;
+  backend?: PathBackend;
 }
 
 export interface StoreRootOpts extends FsCheckOpts {
@@ -309,12 +576,19 @@ export function resolveStoreRoot(storeDir: string, opts: StoreRootOpts = {}): St
     throw mapOpenError(err, "store dir");
   }
   vaultCheck(storeDir, real, opts);
-  const dir = openDirPath(real, opts);
+  const backend = opts.backend ?? defaultPathBackend();
+  const dir = openDirPath(real, { ...opts, backend });
   try {
     const actual = fdRealPath(dir.fd);
     vaultCheck(storeDir, actual, opts);
     if (actual !== real) throw new SchedFsError("moved", "store dir moved while being pinned");
-    return { literal: storeDir, real: actual, dev: dir.dev, ino: dir.ino };
+    return {
+      literal: storeDir,
+      real: actual,
+      dev: dir.dev,
+      ino: dir.ino,
+      ...(opts.backend === undefined ? {} : { backend: opts.backend }),
+    };
   } finally {
     closeQuiet(dir.fd);
   }
@@ -328,7 +602,8 @@ export function resolveStoreRoot(storeDir: string, opts: StoreRootOpts = {}): St
  */
 export function openStoreRoot(root: StoreRoot, opts: StoreRootOpts = {}): OpenedDir {
   vaultCheck(root.literal, root.real, opts);
-  const dir = openDirPath(root.real, opts);
+  const backend = opts.backend ?? root.backend ?? defaultPathBackend();
+  const dir = openDirPath(root.real, { ...opts, backend });
   try {
     if (dir.dev !== root.dev || dir.ino !== root.ino) {
       throw new SchedFsError("moved", "store dir identity changed since it was pinned");

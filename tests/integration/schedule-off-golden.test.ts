@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -46,7 +47,14 @@ const FIXTURE = join(here, "..", "fixtures", "schedule-off-golden.json");
 const FIXED_NOW = 1_769_000_000_000;
 
 function normalize(value: unknown): unknown {
-  const json = JSON.stringify(value)
+  let json = JSON.stringify(value);
+  // Map the real temp root on any platform (linux /tmp, darwin /var/folders behind a symlink)
+  // together with the mkdtemp leaf — same shape as the generic /tmp backstop below.
+  for (const root of new Set([realpathSync(tmpdir()), tmpdir()])) {
+    const escaped = root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    json = json.replace(new RegExp(escaped + "\\/[A-Za-z0-9._-]+", "g"), "<tmp>");
+  }
+  json = json
     .replace(/\/tmp\/[A-Za-z0-9._-]+/g, "<tmp>")
     .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, "<uuid>")
     .replace(/"agentId":\{"pid":[0-9]+,"nonce":"[^"]*"\}/g, '"agentId":"<agentId>"')

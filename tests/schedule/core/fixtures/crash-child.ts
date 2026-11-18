@@ -4,7 +4,8 @@
  *   tsx crash-child.ts <storeDir> <sessionId> <taskId> <T> <point>
  */
 import { autoClaim } from "../../../../src/schedule/core/claim.js";
-import { holderOf, readSelfIdentity } from "../../../../src/schedule/core/recovery.js";
+import { holderOf } from "../../../../src/schedule/core/recovery.js";
+import { platformIdentity } from "../../../helpers/sched-platform.js";
 import { ensureStoreRoot, openSessionStore, type WriterFaultPoint } from "../../../../src/schedule/core/writer.js";
 
 const [storeDir, sessionId, taskId, tText, point] = process.argv.slice(2) as [
@@ -14,7 +15,7 @@ const [storeDir, sessionId, taskId, tText, point] = process.argv.slice(2) as [
   string,
   WriterFaultPoint | "lock-hold-wait",
 ];
-const self = readSelfIdentity()!;
+const self = platformIdentity().readSelf()!;
 const store = openSessionStore({
   root: ensureStoreRoot(storeDir),
   sessionId,

@@ -1298,6 +1298,10 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       : createHubLoad(config.load, {
           home: config.home,
           now,
+          // darwin-plan §2.6 (修订 #5): the assembly-level probe result — the service accepts
+          // it verbatim and never re-probes (`probed === undefined` ⇒ the service probes
+          // itself, the exact pre-S2 behavior for any frontend double that ignores the field).
+          ...(deps.loadProbed === undefined ? {} : { probed: deps.loadProbed }),
           onWire: (wire) => {
             for (const route of loadRouteSets) route.onHubEvent({ type: "load", wire });
           },

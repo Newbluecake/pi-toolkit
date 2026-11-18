@@ -19,18 +19,33 @@
  */
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { closeSync, constants as fsConstants, mkdtempSync, openSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { systemClock, type Clock } from "../../core/clock.js";
 import type { ScheduleSettings } from "../../config/settings.js";
 import { legacyConsultForkDir } from "../../runtime/legacy-consult-forks.js";
 import { canonicalPath, inVaultDir, type SecureDomain } from "../../secure/domain.js";
+import { createDarwinIdentity } from "../../web-hub/protocol/sched-identity.js";
 import { SCHED_TOLERANCE_S, type HubScheduleConfig } from "../../web-hub/protocol/schedule.js";
 import { closeEpoch, manualClaim, type ClaimGate } from "../core/claim.js";
-import { SCHED_LOCK_SHUTDOWN_TIMEOUT_MS } from "../core/lock.js";
-import { resolveStoreRoot, SchedFsError, type InVaultPredicate, type StoreRoot } from "../core/paths.js";
+import { perlFlockAcquire, SCHED_LOCK_SHUTDOWN_TIMEOUT_MS, type LockAcquire } from "../core/lock.js";
+import {
+  resolveStoreRoot,
+  SchedFsError,
+  type InVaultPredicate,
+  type PathBackend,
+  type StoreRoot,
+} from "../core/paths.js";
 import { readSessionStateById, type SessionStateRead } from "../core/reader.js";
-import { holderOf, readSelfIdentity, type ProcessIdentity } from "../core/recovery.js";
+import {
+  holderOf,
+  readSelfIdentity,
+  type IdentityDeps,
+  type LivenessProbe,
+  type ProcessIdentity,
+} from "../core/recovery.js";
 import { defHash, type Holder, type RunRecord, type ScheduleForm, type ScheduleTask } from "../core/spec.js";
 import {
   ensureStoreRoot,
@@ -166,6 +181,7 @@ export interface ScheduleAgent {
   /** undefined ⇔ /proc unavailable (Linux-only identity) ⇒ no execution. */
   readonly holder: Holder | undefined;
   readonly self: ProcessIdentity | undefined;
+  readonly probe?: LivenessProbe;
   readonly dir: string;
   readonly coordinator: ScheduleCoordinator;
   readonly clock: SessionClock | undefined;
@@ -216,6 +232,9 @@ export interface ScheduleWireOpts {
   /** Tests: identity / flock probes. */
   readSelf?: () => ProcessIdentity | undefined;
   flockProbe?: () => boolean;
+  identity?: IdentityDeps;
+  pathBackend?: PathBackend;
+  acquire?: LockAcquire;
 }
 
 export interface CreateAgentInput {
@@ -232,7 +251,48 @@ export interface ScheduleWiring {
   createAgent(input: CreateAgentInput): ScheduleAgent;
 }
 
-export function defaultFlockProbe(): boolean {
+function resolveIdentity(opts: ScheduleWireOpts): IdentityDeps {
+  if (opts.identity !== undefined) return opts.identity;
+  if (opts.readSelf !== undefined) return { readSelf: opts.readSelf }; // old test seam
+  // Darwin has no /proc: ps/sysctl identity (darwin-plan §3.P1-b). Linux and everything else keep today's behavior.
+  if (process.platform === "darwin") return createDarwinIdentity();
+  return { readSelf: readSelfIdentity };
+}
+
+function probeLock(opts: ScheduleWireOpts): boolean {
+  return (opts.flockProbe ?? defaultFlockProbe)();
+}
+
+/** Startup lock-capability probe (plan P3-b). Linux/others: `flock -V` (byte-identical to before).
+ * Darwin: smoke the PRODUCTION acquisition itself — a temp lock file acquired through the very same
+ * `perlFlockAcquire()` the store transactions will use (same script, args, env, stdio slot 3; no
+ * second command to drift). Any exception or non-`held` result ⇒ `false` (fail closed, E_BUSY). */
+export function defaultFlockProbe(
+  platform: NodeJS.Platform = process.platform,
+  deps: { acquire?: LockAcquire } = {},
+): boolean {
+  if (platform === "darwin") {
+    let dir: string | undefined;
+    try {
+      dir = mkdtempSync(join(tmpdir(), ".sched-lock-probe-"));
+      const fd = openSync(join(dir, "probe.lock"), fsConstants.O_RDWR | fsConstants.O_CREAT, 0o600);
+      try {
+        return (deps.acquire ?? perlFlockAcquire())(fd) === "held";
+      } finally {
+        closeSync(fd);
+      }
+    } catch {
+      return false;
+    } finally {
+      if (dir !== undefined) {
+        try {
+          rmSync(dir, { recursive: true, force: true });
+        } catch {
+          /* best-effort probe cleanup */
+        }
+      }
+    }
+  }
   try {
     const r = spawnSync("flock", ["-V"], { stdio: "ignore", timeout: 2_000 });
     return r.error === undefined && r.status === 0;
@@ -257,7 +317,10 @@ export function wireSchedule(pi: Pick<ExtensionAPI, "on">, opts: ScheduleWireOpt
   const hubConfig = (): HubScheduleConfig | undefined => {
     try {
       // The hub pins the root at start (resolveStoreRoot): it must exist ⇒ create it here (0700).
-      const root = ensureStoreRoot(dir, { inVault });
+      const root = ensureStoreRoot(dir, {
+        inVault,
+        ...(opts.pathBackend === undefined ? {} : { backend: opts.pathBackend }),
+      });
       return { dir: root.real, toleranceS: SCHED_TOLERANCE_S };
     } catch (err) {
       warnOnce(
@@ -294,18 +357,32 @@ export function wireSchedule(pi: Pick<ExtensionAPI, "on">, opts: ScheduleWireOpt
         childFile,
         secure: opts.secure.kind,
       });
-      const self = plain ? (opts.readSelf ?? readSelfIdentity)() : undefined;
-      if (plain && self === undefined) warnOnce("proc", "no /proc identity: scheduled tasks cannot execute here");
+      const identity = resolveIdentity(opts);
+      const self = plain ? identity.readSelf() : undefined;
+      if (plain && self === undefined)
+        warnOnce(
+          "proc",
+          process.platform === "darwin"
+            ? "no process identity (ps/sysctl unavailable): scheduled tasks cannot execute here"
+            : "no /proc identity: scheduled tasks cannot execute here",
+        );
       if (mode.arm && flockOk === undefined) {
-        flockOk = (opts.flockProbe ?? defaultFlockProbe)();
+        flockOk = probeLock(opts);
         if (!flockOk)
-          warnOnce("flock", "util-linux `flock` not found: every schedule transaction fails closed (E_BUSY)");
+          warnOnce(
+            "flock",
+            process.platform === "darwin"
+              ? "Perl/Fcntl flock 不可用，schedule 事务拒绝（E_BUSY）"
+              : "util-linux `flock` not found: every schedule transaction fails closed (E_BUSY)",
+          );
       }
       return createScheduleAgent({
         ctx,
         mode,
         sessionId,
         self,
+        ...(identity.probe === undefined ? {} : { probe: identity.probe }),
+        ...(opts.pathBackend === undefined ? {} : { pathBackend: opts.pathBackend }),
         dir,
         plain,
         inVault,
@@ -325,6 +402,8 @@ export interface ScheduleAgentDeps {
   mode: ScheduleModeVerdict;
   sessionId: string | undefined;
   self: ProcessIdentity | undefined;
+  probe?: LivenessProbe;
+  pathBackend?: PathBackend;
   dir: string;
   plain: boolean;
   inVault: InVaultPredicate;
@@ -334,7 +413,7 @@ export interface ScheduleAgentDeps {
   router: ScheduleHubRouter | undefined;
   lockedReason?: () => string | undefined;
   /** Store test hooks (lock timeout / flock binary). */
-  storeOpts?: { flockBin?: string; lockTimeoutMs?: number };
+  storeOpts?: { flockBin?: string; lockTimeoutMs?: number; acquire?: LockAcquire };
 }
 
 export function createScheduleAgent(deps: ScheduleAgentDeps): ScheduleAgent {
@@ -357,6 +436,7 @@ export function createScheduleAgent(deps: ScheduleAgentDeps): ScheduleAgent {
       now: () => deps.clock.now(),
       ...(deps.monotonic !== undefined ? { monotonic: deps.monotonic } : {}),
       ...(deps.storeOpts?.flockBin !== undefined ? { flockBin: deps.storeOpts.flockBin } : {}),
+      ...(deps.storeOpts?.acquire !== undefined ? { acquire: deps.storeOpts.acquire } : {}),
       ...(lockTimeoutMs !== undefined
         ? { lockTimeoutMs }
         : deps.storeOpts?.lockTimeoutMs !== undefined
@@ -373,7 +453,10 @@ export function createScheduleAgent(deps: ScheduleAgentDeps): ScheduleAgent {
     if (now - rootTried < ROOT_RETRY_MS) return undefined;
     rootTried = now;
     try {
-      root = resolveStoreRoot(deps.dir, { inVault: deps.inVault });
+      root = resolveStoreRoot(deps.dir, {
+        inVault: deps.inVault,
+        ...(deps.pathBackend === undefined ? {} : { backend: deps.pathBackend }),
+      });
     } catch (err) {
       if (!(err instanceof SchedFsError && err.reason === "missing"))
         deps.warn(`store dir unusable: ${err instanceof Error ? err.message : String(err)}`);
@@ -464,7 +547,11 @@ export function createScheduleAgent(deps: ScheduleAgentDeps): ScheduleAgent {
           ...(deps.monotonic !== undefined ? { monotonic: deps.monotonic } : {}),
           gate: claimGate,
           preflight: (task) => gate(task),
-          judge: { currentEpoch: epoch, epochDisposed: isEpochDisposed },
+          judge: {
+            currentEpoch: epoch,
+            epochDisposed: isEpochDisposed,
+            ...(deps.probe === undefined ? {} : { probe: deps.probe }),
+          },
           onFired: dispatchRun,
           onChanged: changed,
           warn: deps.warn,
@@ -508,6 +595,7 @@ export function createScheduleAgent(deps: ScheduleAgentDeps): ScheduleAgent {
     epoch,
     holder,
     self: deps.self,
+    ...(deps.probe === undefined ? {} : { probe: deps.probe }),
     dir: deps.dir,
     get coordinator() {
       return coordinator;
@@ -518,14 +606,22 @@ export function createScheduleAgent(deps: ScheduleAgentDeps): ScheduleAgent {
     ensureStore() {
       if (store !== undefined) return store;
       if (!canStore()) throw new Error("schedule store unavailable in this session");
-      root = ensureStoreRoot(deps.dir, { inVault: deps.inVault });
+      root = ensureStoreRoot(deps.dir, {
+        inVault: deps.inVault,
+        ...(deps.pathBackend === undefined ? {} : { backend: deps.pathBackend }),
+      });
       store = buildStore(root);
       return store;
     },
     readState() {
       if (!deps.plain || deps.sessionId === undefined) return { kind: "absent" };
       try {
-        const r = root ?? resolveStoreRoot(deps.dir, { inVault: deps.inVault });
+        const r =
+          root ??
+          resolveStoreRoot(deps.dir, {
+            inVault: deps.inVault,
+            ...(deps.pathBackend === undefined ? {} : { backend: deps.pathBackend }),
+          });
         return readSessionStateById(r, deps.sessionId, { inVault: deps.inVault });
       } catch (err) {
         if (err instanceof SchedFsError && err.reason === "missing") return { kind: "absent" };

@@ -49,8 +49,14 @@ import {
   type PendingReport,
   type ScheduleStateFile,
 } from "../../../schedule/core/spec.js";
-import { judgeHolder, readSelfIdentity, type ProcessIdentity } from "../../../schedule/core/recovery.js";
-import { resolveStoreRoot, sessionDirName, type StoreRoot } from "../../../schedule/core/paths.js";
+import {
+  judgeHolder,
+  readSelfIdentity,
+  type IdentityDeps,
+  type ProcessIdentity,
+} from "../../../schedule/core/recovery.js";
+import { resolveStoreRoot, sessionDirName, type PathBackend, type StoreRoot } from "../../../schedule/core/paths.js";
+import { createDarwinIdentity } from "../../protocol/sched-identity.js";
 import { readReportFile } from "../../../schedule/core/reader.js";
 import { scanSessionOne, scanStore, type ScanResult } from "./scan.js";
 import {
@@ -127,6 +133,13 @@ export interface ScheduleServiceDeps {
   scanOne?: typeof scanSessionOne;
   /** Test seam for the timers (default: real unref'd setTimeout/setInterval). */
   timer?: SchedTimer;
+  /** Platform identity seam (darwin-plan §3 P4-A): default resolves per platform — darwin uses
+   *  the protocol's ps/sysctl identity (probe included, epoch-ms domain), everything else the
+   *  /proc one; `probe` reaches both judgeHolder sites in predictUnknowns (J6/J7). */
+  identity?: IdentityDeps;
+  /** Path-backend seam for the store root: the backend rides on the resolved root, so every
+   *  per-round openStoreRoot (scan/readReport) reuses it automatically. */
+  paths?: { backend?: PathBackend };
 }
 
 export interface ScheduleCounters {
@@ -201,16 +214,19 @@ export function createScheduleService(deps: ScheduleServiceDeps): ScheduleCoordi
     });
 
   let disposed = false;
+  // P4-A (darwin-plan §3): the hub resolves its identity/paths per platform unless injected.
+  const identity: IdentityDeps =
+    deps.identity ?? (process.platform === "darwin" ? createDarwinIdentity() : { readSelf: readSelfIdentity });
   let root: StoreRoot | undefined;
   let rootError: string | undefined;
   try {
-    root = resolveStoreRoot(deps.config.dir);
+    root = resolveStoreRoot(deps.config.dir, deps.paths?.backend ? { backend: deps.paths.backend } : {});
   } catch (err) {
     rootError = err instanceof Error ? err.message : String(err);
     log.warn("web-hub schedule: store root unusable — projection stays empty", { error: rootError });
   }
 
-  const self: ProcessIdentity | undefined = readSelfIdentity();
+  const self: ProcessIdentity | undefined = identity.readSelf();
   const states = new Map<string, ScheduleStateFile>();
   const degradedSessions = new Map<string, string>();
   const receiptStates = new Map<string, ReceiptView>();
@@ -373,13 +389,14 @@ export function createScheduleService(deps: ScheduleServiceDeps): ScheduleCoordi
         continue;
       }
       if (isTerminalRunState(run.state) || run.state === "queued") continue;
-      if (judgeHolder(run.holder, self).liveness !== "dead") continue;
+      if (judgeHolder(run.holder, self, identity.probe ? { probe: identity.probe } : {}).liveness !== "dead") continue;
       const fresh = await scanOneFn(root, sid, { isCurrent: () => !disposed });
       if (fresh.kind !== "ok") continue;
       const again = fresh.state.runs.find((r) => r.runKey === run.runKey);
       if (again === undefined) continue;
       if (isTerminalRunState(again.state) || again.state === "queued") continue;
-      if (judgeHolder(again.holder, self).liveness !== "dead") continue;
+      if (judgeHolder(again.holder, self, identity.probe ? { probe: identity.probe } : {}).liveness !== "dead")
+        continue;
       out.push(run.runKey);
     }
     return out;

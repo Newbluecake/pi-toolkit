@@ -112,4 +112,36 @@ describe("sysload stack wiring", () => {
     stack.rpc.close();
     home.restore();
   });
+
+  // darwin-plan §2.8（修订 #2）/§3.1-S2：装配端 platform 传入 —— stack.ts 的 evaluateLoadGate
+  // 选项新增 `platform: process.platform`，gate 的 top 回退命令是这条链上唯一平台敏感片段。
+  // `top: () => undefined` ⇒ 恰走 fallback；两侧都显式翻转，测试在 Linux/mac 上同样确定。
+  it("hands the assembly platform to the gate fallback command (darwin BSD vs linux GNU)", async () => {
+    const home = sandboxHome();
+    const h = host();
+    const hint = createLoadHintState();
+    const stack = buildSessionStack(h.pi, h.ctx, settings(), types, [], "reload", hint);
+    const original = process.platform;
+    const spawnRejected = async (): Promise<string> => {
+      const rejected = await stack.spawn.spawn({ type: "worker", prompt: "fallback", loadPolicy: "reject" });
+      if (!("error" in rejected)) throw new Error("expected the load gate to reject");
+      return rejected.error.message;
+    };
+    try {
+      Object.defineProperty(process, "platform", { value: "darwin" });
+      const darwin = await spawnRejected();
+      expect(darwin).toContain("ps -A -r -o pid,pcpu,rss,comm | head");
+      expect(darwin).not.toContain("--sort");
+      Object.defineProperty(process, "platform", { value: "linux" });
+      const linux = await spawnRejected();
+      expect(linux).toContain("--sort=-%cpu");
+      expect(linux).not.toContain("ps -A -r");
+    } finally {
+      Object.defineProperty(process, "platform", { value: original });
+    }
+    stack.load?.dispose();
+    stack.schedule?.dispose();
+    stack.rpc.close();
+    home.restore();
+  });
 });

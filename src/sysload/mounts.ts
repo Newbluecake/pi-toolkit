@@ -50,8 +50,16 @@ export function resolveMounts(paths: readonly string[], mountinfoText: string): 
   });
 }
 
-export function resolveMount(path: string, mounts: readonly MountInfoRecord[]): ResolvedMount {
+/** Resolves one path lexically against mountinfo; it deliberately does not call realpath.
+ * The optional third parameter (darwin host seam, darwin-plan §2.3) replaces the Linux
+ * `LOCAL_FILESYSTEMS` classification set — the default keeps the Linux behaviour byte-identical
+ * (deliberately NOT extended with apfs/hfs: no Linux semantic drift). */
+export function resolveMount(
+  path: string,
+  mounts: readonly MountInfoRecord[],
+  local: ReadonlySet<string> = LOCAL_FILESYSTEMS,
+): ResolvedMount {
   const mount = findMount(path, mounts);
   if (mount === undefined) return { path };
-  return LOCAL_FILESYSTEMS.has(mount.fstype) ? { path, mount } : { path, mount, skipped: "remote" };
+  return local.has(mount.fstype) ? { path, mount } : { path, mount, skipped: "remote" };
 }

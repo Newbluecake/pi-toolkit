@@ -79,6 +79,20 @@ export function prepareHubChannels(ctx: HubAssembly): Promise<void> | undefined 
   // web-hub-html-preview plan v2 §4: ONE value read by the cap declaration below AND the
   // `createPreviewRoutes({ html })` attachment further down, so they can never disagree.
   ctx.htmlEnabled = config.preview !== undefined && previewProcFdAvailable();
+  // darwin-plan §2.6 (修订 #5): ONE load-probe result for the whole hub lifetime, same
+  // spawnPlatform/htmlEnabled precedent. Before S2 the cap (`assembleHubCaps`) and the service
+  // (`createHubLoad`) each probed independently — on darwin the probe is a SUBPROCESS, so two
+  // probes could disagree (cap without service, or service without cap). Now the cap below
+  // reads `ctx.loadProbeOk` and hub.ts hands the same value to the frontend as
+  // `FrontendDeps.loadProbed`, which http.ts forwards as `createHubLoad({probed})` — the
+  // service then never re-probes. `deps.loadSeams?.probe` is the programmatic-only test seam
+  // (production leaves it undefined and gets the real `hubLoadProbe`: /proc/stat on Linux,
+  // `probeDarwinHost` on darwin). The short-circuit keeps a malformed `config.load` probing
+  // nothing, and a feature-off hub byte-identical.
+  ctx.loadProbeOk =
+    config.load !== undefined &&
+    normalizeHubLoadConfig(config.load) !== undefined &&
+    (deps.loadSeams?.probe ?? hubLoadProbe)();
   // Alias-plan AL2 (§3.3/§3.6, key-absent convention): the binding table exists iff
   // `config.crossSession.alias` exists (absent ⇒ no table, no file IO, no cap — byte-identical).
   // It is LOADED here, before the cap array (`xs.alias.v1` iff the load came back `ready`, fixed for
@@ -101,7 +115,7 @@ export function prepareHubChannels(ctx: HubAssembly): Promise<void> | undefined 
 }
 
 export function assembleHubCaps(ctx: HubAssembly): readonly string[] {
-  const { config, spawnPlatform, htmlEnabled, xsAlias } = ctx;
+  const { config, spawnPlatform, htmlEnabled, loadProbeOk, xsAlias } = ctx;
   const extraHubCaps: readonly string[] = [
     ...(config.cmdArgs === "all" || config.cmdArgs === "toolkit" ? CMD_ARGS_HUB_CAPS : []),
     // cmd-history plan §4.6 (F4, H1): `cmd.history.v1` is UNCONDITIONAL on the hub — the P0
@@ -169,12 +183,11 @@ export function assembleHubCaps(ctx: HubAssembly): readonly string[] {
     // one array (评审 #10: HubInfo.caps 与 hello_ack.caps 两面同源) whenever
     // `config.privacy` exists. STATIC — it never follows whether the LAN listener came up.
     ...(config.privacy === true ? [PRIVACY_HUB_CAP] : []),
-    // sysload P3: the hub-side sampler is available only after the bounded Linux
-    // startup probe.  Feature-off (absent config.load) keeps every cap surface
-    // byte-identical.
-    ...(config.load !== undefined && normalizeHubLoadConfig(config.load) !== undefined && hubLoadProbe()
-      ? [LOAD_HUB_CAP]
-      : []),
+    // sysload P3: the hub-side sampler is available only after the bounded startup
+    // probe.  darwin-plan §2.6 (修订 #5): the probe result is the ONE `ctx.loadProbeOk`
+    // computed in `prepareHubChannels` (config gate + probe, short-circuited) — never probed
+    // again here.  Feature-off (absent config.load) keeps every cap surface byte-identical.
+    ...(loadProbeOk ? [LOAD_HUB_CAP] : []),
     // web-hub-proxy plan v2 §5 (X1c): `proxy.v1` iff `config.proxy`; `proxy.lan.v1` iff
     // `config.proxy && config.lan` (Q2 — LAN reach follows the LAN config, STATIC like
     // `privacy.v1`: it never follows whether the LAN listener actually came up). Both cap

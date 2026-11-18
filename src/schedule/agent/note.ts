@@ -23,7 +23,7 @@ import { absoluteReportPath } from "./result-reference.js";
 
 export type ScheduleNoteOwner = Pick<
   ScheduleAgent,
-  "mode" | "sessionId" | "epoch" | "self" | "holder" | "store" | "isDisposed" | "changed"
+  "mode" | "sessionId" | "epoch" | "self" | "holder" | "probe" | "store" | "isDisposed" | "changed"
 >;
 export interface ScheduleResultMessage {
   customType: typeof SCHED_CUSTOM_TYPE;
@@ -169,8 +169,11 @@ export function createScheduleNotes(schedule: ScheduleNoteOwner, deps: ScheduleN
           run.noteHolder === undefined ||
           sameProcess(run.noteHolder, holder) ||
           schedule.self === undefined ||
-          judgeHolder(run.noteHolder, schedule.self, { currentEpoch: epoch, epochDisposed: isEpochDisposed })
-            .liveness !== "dead"
+          judgeHolder(run.noteHolder, schedule.self, {
+            currentEpoch: epoch,
+            epochDisposed: isEpochDisposed,
+            ...(schedule.probe === undefined ? {} : { probe: schedule.probe }),
+          }).liveness !== "dead"
         )
           return { value: undefined, write: false };
         // User ruling: without a frozen-schema counter, narrow §6.3's two resends to ONE.
@@ -214,8 +217,11 @@ export function createScheduleNotes(schedule: ScheduleNoteOwner, deps: ScheduleN
     if (previous !== undefined && !ours) {
       if (
         schedule.self === undefined ||
-        judgeHolder(previous, schedule.self, { currentEpoch: epoch, epochDisposed: isEpochDisposed }).liveness !==
-          "dead"
+        judgeHolder(previous, schedule.self, {
+          currentEpoch: epoch,
+          epochDisposed: isEpochDisposed,
+          ...(schedule.probe === undefined ? {} : { probe: schedule.probe }),
+        }).liveness !== "dead"
       )
         return;
     }

@@ -173,7 +173,7 @@ export type ScheduleErrorCode = (typeof SCHEDULE_ERROR_CODES)[number];
 /** Process identity of a run / note / digest holder. `epoch` is random per stack build. */
 export interface Holder {
   pid: number;
-  /** /proc starttime (clock ticks since boot). */
+  /** Process start: Linux /proc starttime (clock ticks since boot); Darwin: epoch-ms via the identity seam. */
   start: number;
   host: string;
   /** Kernel boot id. */

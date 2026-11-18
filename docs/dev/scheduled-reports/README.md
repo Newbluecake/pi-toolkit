@@ -348,3 +348,54 @@ P2 supersedes P1's **no producer / no migration** restriction, not its arbitrati
   transport root cause. `tests/tools/schedule-schema-shape.test.ts` and
   `tests/integration/schedule-schema-diagnostic.test.ts` exercise the pure and CLI boundaries.
   Offline evidence and source changes do not establish deployment or live-provider behavior.
+
+## macOS（Darwin）支持（2026-11，darwin-arch/darwin-plan P0-P5）
+
+> 设计：`darwin-arch.md`；实施与实测证据：`darwin-report.md`。S1 报告中「只支持 Linux」的平台限制（§偏差 #9、遗留问题 Linux-only 条目）已被本节取代；Linux 后端行为、错误码、等待参数与冻结件不变（差分对 `tests/schedule/compat/paths-v0.ts` 钉住）。
+
+### 后端选择机制
+
+- **paths**：`defaultPathBackend()`（`src/schedule/core/paths.ts`）按 `process.platform` 解析 —— `darwin` ⇒ 快照后端（realpath + 逐级 pre/`fstat`/post-lstat 快照比对，`Symbol.for("pi-subagent:sched-fd-paths:v1")` 全局 fd 注册表，容量 1024、空闲 TTL 10 min，纯数据 + `:v1` 键保证 `/reload` 共享）；其余平台 ⇒ Linux fd 锚定后端（无 `/proc/self/fd` ⇒ `available()` 假 ⇒ fail closed `platform`）。测试可注入 `createDarwinPathBackend()` 在 Linux 上强制 darwin 后端（仅算法辅助证据，见下「CI 覆盖」）。
+- **lock**：`defaultLockAcquire()`（`src/schedule/core/lock.ts`）按 `process.platform` 解析 —— `darwin` ⇒ `perlFlockAcquire()`（`/usr/bin/perl -MFcntl=:flock` 对 fd 3 执行 `flock(2)`，锁属于我方 open file description，无 stale 回收）；其余 ⇒ 原 `flock(1)` argv 逐字不变。启动探测 `defaultFlockProbe()`（`src/schedule/agent/wire.ts`）：Linux `flock -V`；Darwin 直接用生产同一 `perlFlockAcquire()` 冒烟（同脚本同参数同 env，无第二条会漂移的命令）。
+- **identity**：agent 侧 `resolveIdentity()`（`src/schedule/agent/wire.ts`）与 hub 侧 `ScheduleServiceDeps` 注入 —— `darwin` ⇒ `createDarwinIdentity()`（`src/web-hub/protocol/sched-identity.ts`，ps/sysctl probe）；其余 ⇒ 既有 `/proc` probe。`judgeHolder`/`recoverDeadRuns`/`unknownRunKeys` 的纯判定矩阵不分平台；`JUDGE_MANIFEST`（`seam-contract.test.ts`）强制每条 `judgeHolder` 链都有 probe 到达证据。
+
+### 运行时依赖（缺失一律 fail closed）
+
+| 依赖                                       | 用途                                                            | 缺失时                                                                                                  |
+| ------------------------------------------ | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `/bin/ps -o lstart=`                       | 进程启动时间（固定 `LC_ALL=C TZ=UTC0` 严格解析为 UTC epoch ms） | identity 不可得 ⇒ **禁止执行**（不猜测、不回退）                                                        |
+| `/usr/sbin/sysctl -n kern.bootsessionuuid` | boot id（UUID 字符串）                                          | 同上                                                                                                    |
+| `/usr/bin/perl` + `Fcntl`/`Errno`          | `flock(2)` 锁后端                                               | **E_BUSY + 明确 warning**（`Perl/Fcntl flock 不可用，schedule 事务拒绝`）；不回退无锁写入，不凭超时判死 |
+
+### identity 编码域（`start` 字段跨平台语义）
+
+Linux holder 写 `/proc` starttime **clock ticks**；Darwin holder 写 **epoch 毫秒**。`Holder` 字段/`sched_*` wire/schema 零改动（I10，无 PROTO bump）。identity seam 按数量级识别已知域（阈值 1e11：低于为 ticks、高于为 epoch-ms）；**跨域不可证明 ⇒ `unprovable`**，不回收、不判死——共享 store 的混合环境里旧 holder 可能持续占用恢复状态直到其自身终止，这是兼容安全优先的已接受残余。域外/不确定值 fail closed。
+
+### 已接受残余（逐项，darwin-arch §9 + darwin-plan §3.P2-d 已拍板）
+
+- **路径 TOCTOU（U1-U6），弱于 Linux fd 锚定**：校验点之前已完成的祖先替换必被检出并拒绝（记录删除、之后不再用旧记录）；但校验点与 pathname syscall 之间的窗口（U1）、A→B→A 恢复原状（U2）、基于路径的枚举（U3）无法在 Node 层关闭。威胁前提是攻击者与进程同 uid 且可写 store 某个祖先目录（U4，异 uid 受 owner/mode 阻断）。不得把 Darwin 快照校验表述为「与 Linux 等价的原子锚定」。
+- **`ps lstart` 秒精度**：同一 boot 内 pid 同秒复用可能被当成同一进程（start 完全相等 ⇒ alive）——后果是 **dead run 恢复延迟或 E_BUSY（可用性损失），绝不误杀存活 run**；不因时间过期推断 dead。
+- **macOS `fsync(2)` 非 `F_FULLFSYNC`**：沿用现有 `fsyncSync` 语义（目录 fsync 的 EINVAL/ENOTSUP 类 errno 已容忍），掉电持久性弱于 Linux，已披露不改。
+- **birthtime 不可信目录退化 dev/ino-only 并入 U5**：`birthtimeMs` 0/NaN/负值/≥ctime（libuv 伪值）⇒ 快照 `bt=null`，只比 dev/ino——inode 复用窗口在这些目录（NFS/SMB/exFAT/FUSE、旧卷、tmpfs）无额外缓解；「原可信现不可信」fail closed 判不等。不 fail closed 整个后端的原因：birthtime 只是 U5 的补充缓解，主身份是 dev/ino。
+- **perl 为 Apple 弃用运行时**：未来 macOS 可能移除 `/usr/bin/perl`；届时 schedule 事务在 mac 回到 E_BUSY fail closed（与今天无 flock(1) 时同态），不回退无锁写入。`perlBin` 可注入。
+
+### 本地运行命令（mac 真机）
+
+```bash
+npm run typecheck && npm run format:check && npm run test:tier1   # mac 日常门
+# Darwin 专属（integration 前缀 ⇒ tier2，describe.skipIf 非 darwin）：
+npx vitest run tests/integration/schedule-darwin-identity.test.ts \
+  tests/integration/schedule-darwin-lock.test.ts \
+  tests/integration/schedule-darwin-paths-race.test.ts \
+  tests/integration/schedule-darwin-e2e.test.ts
+# 平台无关的算法面（mac 上同跑，Linux CI 也实跑）：
+npx vitest run tests/schedule/core/paths-backend.test.ts \
+  tests/schedule/core/identity-domain.test.ts tests/schedule/core/lock-acquire.test.ts \
+  tests/web-hub/protocol/sched-identity.test.ts tests/schedule/core/seam-contract.test.ts
+# mac 上全套 schedule 集成（含真实 hub 段）：
+npx vitest run 'tests/integration/schedule-*.test.ts'
+```
+
+### CI 覆盖说明（证据类别，darwin-plan §5.4）
+
+CI 仅 ubuntu（无 macOS runner）：darwin 真实进程测试在 CI 显示 **skipped**，不得把 CI 绿记作 Darwin 验证。「Darwin 可用」的唯一证据是 **mac 真机运行（E-MAC）**；「Linux 不变」由 Linux CI（**E-CI**，含 `paths-backend`/perl 锁在 Linux 上的实跑）提供；Linux 上强制 darwin 后端的结果只是**算法辅助证据（E-AUX）**，互不替代。分支 push 后核对 CI 全绿即完成 E-CI 取证。

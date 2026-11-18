@@ -23,10 +23,26 @@ import { isTerminalRunState, type Holder, type RunRecord, type ScheduleStateFile
 
 export interface ProcessIdentity {
   pid: number;
-  /** /proc/<pid>/stat field 22 (starttime, clock ticks since boot). */
+  /** Linux: /proc/<pid>/stat field 22 (starttime, clock ticks since boot); Darwin: epoch-ms (supplied by the identity seam). */
   start: number;
   host: string;
   boot: string;
+}
+
+/** Which clock a `ProcessIdentity.start` value is measured on. */
+export type StartDomain = "ticks" | "epoch-ms";
+
+/** ≥1e11 ⇒ epoch-ms (1973-03 onwards); Linux ticks (USER_HZ=100) would need ~31 years of uptime to get there. */
+export const SCHED_EPOCH_MS_FLOOR = 1e11;
+
+export function startDomainOf(start: number): StartDomain {
+  return start >= SCHED_EPOCH_MS_FLOOR ? "epoch-ms" : "ticks";
+}
+
+/** Self-identity source (injectable): `probe` is the matching liveness probe when it is not the /proc one. */
+export interface IdentityDeps {
+  readSelf(): ProcessIdentity | undefined;
+  probe?: LivenessProbe;
 }
 
 /** Read-only process probes (injectable for tests). */
@@ -35,6 +51,8 @@ export interface LivenessProbe {
   startOf(pid: number): number | undefined | "error";
   /** `false` only on proven ESRCH. */
   pidMayExist(pid: number): boolean;
+  /** When set: a holder whose `start` is on another clock domain is `unprovable`. `procLivenessProbe` leaves it unset. */
+  readonly startDomain?: StartDomain;
 }
 
 function readStartTicks(pid: number): number | undefined | "error" {
@@ -116,6 +134,8 @@ export function judgeHolder(
     return { liveness: "alive" };
   }
   const probe = opts.probe ?? procLivenessProbe;
+  if (probe.startDomain !== undefined && startDomainOf(holder.start) !== probe.startDomain)
+    return { liveness: "unprovable" };
   const start = probe.startOf(holder.pid);
   if (start === "error") return { liveness: "unprovable" };
   if (start === undefined)
