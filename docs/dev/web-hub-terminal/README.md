@@ -27,6 +27,20 @@ PID absence/TTL/cold close cannot release retained debt. Plain reserve/prune can
 Only known DIFFERENT kernel evidence plus actual guarded CAS and durable archive completion can
 retire exact obligation IDs; unknown boot stays charged. This is not proof of a real reboot test.
 
+Tool-only `terminal-v2-retained/{old-schema,source-reader,snapshot,backup}.ts` now captures the fixed
+O7239 terminal domain with held directory FDs, exact file metadata/bytes and directory membership,
+including empty directories. It does not inspect/copy auth DB/WAL/token/TOTP or claim whole-state
+consistency. Journal rows (including resolved rows) and receipts always incur retained debt; only
+compatible identical original resource facts merge. Complete authority-retirement archives are
+validated as authority-only history, never physical release or additional resource rows. Ambiguous
+partials, missing authoritative sources, conflicting flat journals, unsafe links/special files and
+capacity overflow refuse the terminal migration without repair. Opaque regular files outside fixed
+authoritative record locations are backed up, including owned non-group-writable0644 files. Bounds:
+512 files/16MiB, depth8,128 directories,512 members/directory; original stricter ordinary maintenance
+file/name helpers are unchanged. Backup uses exclusive0600 temps, fsync/rename/parent fsync and final
+source/backup verification; failed partials remain. These primitives require a caller's live guard;
+they do NOT themselves establish installation publisher sealing or a real existing CLI migration.
+
 ## Ownership and off
 
 - The hub alone owns PTY, ring, allocation ledger, cleanup/reaper and tabs. Agent sessions produce

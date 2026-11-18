@@ -14,7 +14,7 @@ describe("tool-only trust and production boundary", () => {
     const matches: string[] = [];
     for (const path of globSync("src/**/*.{ts,js,vue}")) {
       const text = readFileSync(path, "utf8");
-      if (/terminal-v2-(?:maintenance|checkpoint|rollback)/.test(text)) matches.push(path);
+      if (/terminal-v2-(?:maintenance|checkpoint|rollback|retained)/.test(text)) matches.push(path);
     }
     expect(matches).toEqual([]);
   });
