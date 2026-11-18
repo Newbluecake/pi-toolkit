@@ -41,6 +41,16 @@ file/name helpers are unchanged. Backup uses exclusive0600 temps, fsync/rename/p
 source/backup verification; failed partials remain. These primitives require a caller's live guard;
 they do NOT themselves establish installation publisher sealing or a real existing CLI migration.
 
+`terminal-v2-retained/engine.ts` is separate from strict fresh/ACK-cycle initialization. It persists
+one original-S/store/root-bound installation anchor and operation/source-prepared binding before
+backup, then exact mapping/intent and `initialization-complete`. Existing completed retries validate
+original source/backup/marker/witness/ledger links and normalize durability, never replace later normal
+allocations with the initial empty A array. Missing legacy IDs require exact validated committed
+retirement evidence/completion; PID/TTL/array omission cannot reimport/reset debt. Failed/inconsistent
+partials remain and refuse rather than being overwritten or guessed clean. Component guard doubles
+are explicitly marked; actual installation sealing, original singleton and standalone CLI are separate
+caller responsibilities and need their own real integration evidence.
+
 ## Ownership and off
 
 - The hub alone owns PTY, ring, allocation ledger, cleanup/reaper and tabs. Agent sessions produce
