@@ -487,6 +487,41 @@ describe("web-hub boundary", () => {
       { spec: "node:os", typeOnly: false },
     ]);
   });
+
+  /**
+   * sysload darwin S0 (darwin-plan §3.1-S0 边界验收， 修订 #8): two NEW protocol files carry the
+   * macOS host primitives. Discovery (the arrayContaining case above) is not a per-file closure
+   * guarantee, so pin their COMPLETE import surface here, type-only included (scanImports output
+   * is NOT filtered):
+   * - sysload-darwin-parse.ts is the pure parser half: ZERO imports of any form.
+   * - sysload-darwin.ts is the host half: exactly node:child_process + node:fs + the parser
+   *   sibling — and it must never reach ../../sysload/**, not even type-only (the C0 shapes
+   *   are consumed structurally, exactly like sched-identity's IdentityDeps).
+   * This only tightens the boundary: SYSLOAD_FILE_ALLOWLIST / SYSLOAD_FILE_CLOSURE untouched.
+   */
+  it("sysload-darwin-parse.ts imports exactly nothing at all (pure parsers, sysload darwin S0)", () => {
+    const actual = scanImports(resolve(ROOT, "src/web-hub/protocol/sysload-darwin-parse.ts")).map((ref) => ({
+      spec: ref.spec,
+      typeOnly: ref.typeOnly,
+    }));
+    expect(actual).toEqual([]);
+  });
+
+  it("sysload-darwin.ts imports exactly node:child_process + node:fs + ./sysload-darwin-parse.js, never sysload (sysload darwin S0)", () => {
+    const file = resolve(ROOT, "src/web-hub/protocol/sysload-darwin.ts");
+    const actual = scanImports(file).map((ref) => ({ spec: ref.spec, typeOnly: ref.typeOnly }));
+    expect(actual).toEqual([
+      { spec: "node:child_process", typeOnly: false },
+      { spec: "node:fs", typeOnly: false },
+      { spec: "./sysload-darwin-parse.js", typeOnly: false },
+    ]);
+    for (const ref of scanImports(file)) {
+      expect(
+        resolveImport(file, ref.spec).startsWith(resolve(ROOT, "src/sysload")),
+        `sysload-darwin.ts must not reach src/sysload/**, not even type-only: ${ref.spec}`,
+      ).toBe(false);
+    }
+  });
 });
 
 describe("web-hub boundary import scanner (worktree-diff §5 D1 #12 fix 1a/1b/1c)", () => {
