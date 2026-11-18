@@ -232,8 +232,15 @@ resident SQLite child's unchanged8s deadline: either lose one actual successful 
 happened) or discard one outbound delete request (no commit). Eight on/off × healthy/bad ledger cases
 all return honest503 E_DB/unknown/localSignedOut, then a real hub restart/reopen of unchanged files
 rejects the old SID iff original DB committed, otherwise accepts it. No terminal-auth replay or state
-healing. This is real IPC/deadline/restart, not SIGKILL of the whole hub. Rotate-SIGKILL/55s authority/
-failure-audit windows remain tracked explicitly, not implied by partial A-subgates.
+healing. The separate A8 suite compiles a measured private current-source hub snapshot with ONLY
+an observation pause after the original durable intent, token-written advance or completed LAN revoke.
+Six healthy/bad resource-ledger cases SIGKILL ONLY that owned hub child, then UNPATCHED original
+startHub/SQLite recovery rejects the old LAN SID, permits a new actual login, removes only the original
+rotate intent and preserves resource bytes. Two additional real DB-permission fault cases retain the
+original intent and LAN rotate-pending block despite successful loopback auth; lifting that explicit
+owned fault permits original recovery. Source/patch/artifact hashes and private state are retained.
+No PTY was started and no kernel reboot/resource-drain inference is made. 55s authority/failure-audit
+windows remain tracked explicitly, not implied by partial A-subgates.
 
 ## Independent view / flow control
 
