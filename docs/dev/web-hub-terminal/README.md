@@ -298,7 +298,12 @@ fonts500ms budgets are not authorization. Font fallback chain and feature-local1
 Renderer geometry was extracted to `renderer.css?url` before deleting v1 CSS. Three lazy CSS assets are
 v2 panel + renderer + xterm, total<=16KiB; terminalJS<=256KiB gzip, unlinked probe host<=4KiB. Actual
 Rollup E=M\A+SHA256/provenance/licenses gate escaped/mixed/eager xterm; no budget borrowing/name-only
-classification. Ordinary first-screen CSS increment remains zero.
+classification. Ordinary first-screen CSS increment remains zero. The panel stylesheet itself now
+has an original-link, one-shot load/error/5s gate: renderer/list/create and backend-affecting controls
+wait for load; error/deadline is sticky for that mounted lifetime. Unmount aborts/removes the original
+link and late callbacks cannot enable this or a replacement panel. Collapse does not auto-open when
+CSS later loads. Happy-dom behavior tests explicitly deliver load/error/deadline/old-lifecycle events;
+these are not substituted for the separate real browser/CSP/geometry gate.
 
 Unlinked offline probe mounts real PanelV2 with an explicit contract fake (no backend/auth claim).
 `probe:terminal-e2e` now uses real SDK context, startHub, actual UI/login, isolated real PTY, independent

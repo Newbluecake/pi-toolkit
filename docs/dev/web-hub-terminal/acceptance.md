@@ -51,8 +51,9 @@ former complete O=4e15 evidence does not prove T51 O=7239→N migration.
   true mobile/OS IME/system clipboard/drop,8-way sustained PTY+slow renderer, secure real mount,
   real kernel reboot/powercut/real ENOSPC device are **NOT RUN**.
 - Recheck P4 panel CSS resource-load failure/deadline/geometry in the real browser; renderer/xterm
-  CSS paths are bounded but the PanelV2 onMounted link itself is inherited accepted component code,
-  not independently proven by happy-dom. Do not claim full CSS-failure gate from source-only migration.
+  CSS paths AND the PanelV2 link now have bounded loading; happy-dom tests prove success/error/5s/
+  unmount/late-old-lifecycle behavior and no pre-ready requests. Actual browser CSS-failure/geometry
+  still requires its separate run, not a source-only claim.
 
 ## Test removal/migration accounting
 

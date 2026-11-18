@@ -51,6 +51,9 @@ let rendererAbort: AbortController | undefined;
 let rendererGeneration = 0;
 let disposed = false;
 let panelStyle: HTMLLinkElement | undefined;
+let panelStylePending: Promise<void> | undefined;
+let abortPanelStyle = () => {};
+const panelStyleReady = ref(false);
 let observer: ResizeObserver | undefined;
 let resizeTimer: ReturnType<typeof setTimeout> | undefined;
 let removeInput = () => {};
@@ -124,7 +127,9 @@ const controller = createTerminalControllerV2({
 });
 const state = controller.state;
 const activeRow = computed(() => state.rows.find((row) => row.termId === state.activeTermId));
-const canCreate = computed(() => terminalCanCreateV2(state.quota) && !state.creating && !state.creationUnsettled);
+const canCreate = computed(
+  () => panelStyleReady.value && terminalCanCreateV2(state.quota) && !state.creating && !state.creationUnsettled,
+);
 const quotaFull = computed(() => !!state.quota && !terminalCanCreateV2(state.quota));
 const errorText = computed(() => (state.error.startsWith("E_LIMIT") ? t("terminalV2.limit") : state.error));
 const noticeText = computed(() => {
@@ -162,7 +167,42 @@ function rendererState(next: WebglUiState): void {
   }
 }
 
+function ensurePanelStyle(): Promise<void> {
+  if (panelStylePending) return panelStylePending;
+  const link = document.createElement("link");
+  panelStyle = link;
+  link.rel = "stylesheet";
+  link.href = terminalCss;
+  panelStylePending = new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      link.onload = link.onerror = null;
+      if (error || disposed || panelStyle !== link || link.parentNode !== document.head) {
+        panelStyleReady.value = false;
+        link.remove();
+        reject(error ?? new Error("E_PANEL_CSS_ABORTED"));
+      } else {
+        panelStyleReady.value = true;
+        resolve();
+      }
+    };
+    const timer = setTimeout(() => finish(new Error("E_PANEL_CSS_DEADLINE")), 5000);
+    link.onload = () => finish();
+    link.onerror = () => finish(new Error("E_PANEL_CSS_LOAD"));
+    abortPanelStyle = () => finish(new Error("E_PANEL_CSS_ABORTED"));
+    document.head.appendChild(link);
+  });
+  // A lazy mount may never receive open(); still consume a failed stylesheet load.
+  void panelStylePending.catch(() => {});
+  return panelStylePending;
+}
+
 async function ensureRenderer(): Promise<void> {
+  await ensurePanelStyle();
+  if (disposed || !open.value || !panelStyleReady.value) throw new Error("E_PANEL_CSS_ABORTED");
   if (renderer?.terminal) return;
   if (rendererPending) return rendererPending;
   await nextTick();
@@ -210,7 +250,7 @@ function openPanel(): Promise<boolean> {
       if (result && activeRow.value) renderer?.focus();
       return result;
     } catch (error) {
-      if (open.value) state.error = error instanceof Error ? error.message : "E_UNAVAILABLE";
+      if (open.value && !disposed) state.error = error instanceof Error ? error.message : "E_UNAVAILABLE";
       return false;
     }
   })().finally(() => {
@@ -229,7 +269,7 @@ function restorePanel(): Promise<boolean> {
       if (!open.value || disposed) return false;
       return await controller.restore();
     } catch (error) {
-      if (open.value) state.error = error instanceof Error ? error.message : "E_UNAVAILABLE";
+      if (open.value && !disposed) state.error = error instanceof Error ? error.message : "E_UNAVAILABLE";
       return false;
     }
   })().finally(() => {
@@ -260,10 +300,17 @@ function collapse(): void {
 }
 
 async function selectTab(termId: string): Promise<void> {
+  if (disposed || !panelStyleReady.value) return;
   await controller.select(termId);
 }
 
+async function renameTab(termId: string, name: string): Promise<void> {
+  if (disposed || !panelStyleReady.value) return;
+  await controller.rename(termId, name);
+}
+
 async function closeTab(row: TerminalTabRowV2): Promise<void> {
+  if (disposed || !panelStyleReady.value) return;
   const wasActive = row.termId === state.activeTermId;
   const completed = await controller.close(row.termId);
   if (completed && wasActive) {
@@ -318,6 +365,7 @@ function modalKeys(event: KeyboardEvent): void {
 function inputAllowed(): boolean {
   return (
     open.value &&
+    panelStyleReady.value &&
     state.writable &&
     !confirmRow.value &&
     paste.value === null &&
@@ -403,6 +451,7 @@ function focus(): void {
 }
 
 async function maximize(): Promise<void> {
+  if (disposed || !panelStyleReady.value) return;
   maximized.value = !maximized.value;
   await nextTick();
   renderer?.fit();
@@ -410,6 +459,7 @@ async function maximize(): Promise<void> {
 }
 
 function font(step: number): void {
+  if (disposed || !panelStyleReady.value) return;
   fontSize.value = Math.max(10, Math.min(24, fontSize.value + step));
   saveTerminalFontSize(fontSize.value);
   renderer?.setFontSize(fontSize.value);
@@ -429,10 +479,7 @@ function visibilityChanged(): void {
 }
 
 onMounted(() => {
-  panelStyle = document.createElement("link");
-  panelStyle.rel = "stylesheet";
-  panelStyle.href = terminalCss;
-  document.head.appendChild(panelStyle);
+  void ensurePanelStyle();
   document.addEventListener("visibilitychange", visibilityChanged);
   // No list/view/create here. P6 calls open() only from an explicit session-button intent.
 });
@@ -445,6 +492,8 @@ onBeforeUnmount(() => {
   clearTimeout(imeTimer);
   clearTimeout(resizeTimer);
   document.removeEventListener("visibilitychange", visibilityChanged);
+  abortPanelStyle();
+  panelStyleReady.value = false;
   panelStyle?.remove();
   disposeRenderer();
   controller.dispose();
@@ -483,7 +532,7 @@ defineExpose({ open: openPanel, restore: restorePanel, collapse, focus });
       :can-create="canCreate"
       @select="selectTab"
       @close="requestClose"
-      @rename="controller.rename"
+      @rename="renameTab"
       @create="createTab"
     />
     <div

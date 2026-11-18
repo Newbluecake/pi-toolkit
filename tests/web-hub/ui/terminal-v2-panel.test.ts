@@ -61,6 +61,7 @@ function setup(options: { empty?: boolean; rendererFailure?: boolean } = {}) {
     attachTo: document.body,
   });
   wrappers.push(wrapper);
+  document.head.querySelector<HTMLLinkElement>('link[rel="stylesheet"]')?.dispatchEvent(new Event("load"));
   const vm = wrapper.vm as unknown as {
     open(): Promise<boolean>;
     restore(): Promise<boolean>;

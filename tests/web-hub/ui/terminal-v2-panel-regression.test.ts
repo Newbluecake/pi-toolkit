@@ -19,7 +19,7 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-function setup(rendererGate?: Promise<unknown>) {
+function setup(rendererGate?: Promise<unknown>, styleLoad = true) {
   setLangOverride("zh");
   const mock = createTerminalMockV2();
   const terminal = {
@@ -54,6 +54,8 @@ function setup(rendererGate?: Promise<unknown>) {
     attachTo: document.body,
   });
   wrappers.push(wrapper);
+  if (styleLoad)
+    document.head.querySelector<HTMLLinkElement>('link[rel="stylesheet"]')?.dispatchEvent(new Event("load"));
   const vm = wrapper.vm as unknown as { open(): Promise<boolean>; collapse(): void };
   return { ...mock, wrapper, vm, factory, renderer, state: (state: WebglUiState) => onState?.(state) };
 }
@@ -183,5 +185,80 @@ describe("P4 F7 rename uses code points rather than UTF-16 maxlength", () => {
     await turnV2();
     const body = context.request.mock.calls.find(([op]) => op === "rename")?.[1];
     expect(body && "name" in body ? body.name : "").toBe("工".repeat(24));
+  });
+});
+
+describe("P4 bounded panel stylesheet lifecycle", () => {
+  const style = () => document.head.querySelector<HTMLLinkElement>('link[rel="stylesheet"]')!;
+  it("no renderer/list/create/input until original panel CSS load; load then permits explicit open", async () => {
+    const context = setup(undefined, false),
+      pending = context.vm.open();
+    await flushPromises();
+    expect(context.factory).not.toHaveBeenCalled();
+    expect(context.request).not.toHaveBeenCalled();
+    expect(context.wrapper.get(".terminal-v2-new-tab").attributes("disabled")).toBeDefined();
+    style().dispatchEvent(new Event("load"));
+    await flushPromises();
+    await turnV2();
+    expect(context.factory).toHaveBeenCalledOnce();
+    expect(context.views).toHaveLength(1);
+    context.views[0]!.emit(attachedFrameV2(context.views[0]!.body.termId));
+    expect(await pending).toBe(true);
+    expect(context.request.mock.calls.some(([op]) => op === "input")).toBe(false);
+  });
+  it("CSS error is terminal-only and sticky; a late original load cannot enable create/input", async () => {
+    const context = setup(undefined, false),
+      link = style(),
+      late = link.onload,
+      pending = context.vm.open();
+    link.dispatchEvent(new Event("error"));
+    expect(await pending).toBe(false);
+    await flushPromises();
+    expect(context.wrapper.get('[role="alert"]').text()).toContain("E_PANEL_CSS_LOAD");
+    late?.call(link, new Event("load"));
+    expect(await context.vm.open()).toBe(false);
+    expect(context.factory).not.toHaveBeenCalled();
+    expect(context.request).not.toHaveBeenCalled();
+    expect(link.isConnected).toBe(false);
+  });
+  it("CSS load has a real5s logical bound, removes original link, and ignores late success", async () => {
+    vi.useFakeTimers();
+    const context = setup(undefined, false),
+      link = style(),
+      late = link.onload,
+      pending = context.vm.open();
+    await vi.advanceTimersByTimeAsync(4999);
+    expect(context.factory).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await pending).toBe(false);
+    await flushPromises();
+    expect(context.wrapper.get('[role="alert"]').text()).toContain("E_PANEL_CSS_DEADLINE");
+    late?.call(link, new Event("load"));
+    expect(await context.vm.open()).toBe(false);
+    expect(context.factory).not.toHaveBeenCalled();
+    expect(context.request).not.toHaveBeenCalled();
+    expect(link.isConnected).toBe(false);
+  });
+  it("unmount aborts pending CSS and late old-lifecycle load cannot unlock a replacement panel", async () => {
+    const old = setup(undefined, false),
+      oldLink = style(),
+      late = oldLink.onload,
+      pending = old.vm.open();
+    old.wrapper.unmount();
+    expect(await pending).toBe(false);
+    const current = setup(undefined, false),
+      newLink = style(),
+      opening = current.vm.open();
+    late?.call(oldLink, new Event("load"));
+    await flushPromises();
+    expect(old.factory).not.toHaveBeenCalled();
+    expect(current.factory).not.toHaveBeenCalled();
+    expect(current.request).not.toHaveBeenCalled();
+    newLink.dispatchEvent(new Event("load"));
+    await flushPromises();
+    await turnV2();
+    current.views[0]!.emit(attachedFrameV2(current.views[0]!.body.termId));
+    expect(await opening).toBe(true);
+    expect(old.request).not.toHaveBeenCalled();
   });
 });
