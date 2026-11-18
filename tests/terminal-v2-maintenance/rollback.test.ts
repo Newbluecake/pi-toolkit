@@ -80,7 +80,19 @@ describe("P5 independent rollback: controlled components, real private disk (not
     if (fault === "publisher") h.audit.publisher = true;
     if (fault === "revision") h.audit.nextRevision = 99;
     const before = tree(h.base);
-    await expect(rollbackTerminalV2(h.options)).rejects.toBeInstanceOf(MaintenanceError);
+    const expected: Record<string, string> = {
+      allocation: "v2-allocations-not-empty",
+      "invalid-ledger": "invalid-json",
+      "unknown-version": "invalid-v2-checkpoint",
+      "unknown-file": "unknown-v2-layout",
+      "v1-dirty": "v1-receipts-not-empty",
+      "v1-changed": "legacy-changed-since-checkpoint",
+      active: "component-not-drained",
+      future: "component-not-drained",
+      publisher: "old-publisher-active",
+      revision: "v2-drain-unproven",
+    };
+    await expect(rollbackTerminalV2(h.options)).rejects.toMatchObject({ code: expected[fault], effect: "none" });
     expect(tree(h.base)).toEqual(before);
   });
 

@@ -125,8 +125,8 @@ describe("P5 checkpoint: private real-fs + explicitly controlled audit (not real
       if (kind === "version") put(join(root, "initialized"), { v: 99, storeId: "L".repeat(32) });
       if (kind === "permissions") chmodSync(root, 0o755);
       if (kind === "symlink") {
-        renameSync(join(root, "initialized"), join(root, "original"));
-        symlinkSync("original", join(root, "initialized"));
+        renameSync(join(root, "initialized"), join(h.base, "original-initialized"));
+        symlinkSync(join(h.base, "original-initialized"), join(root, "initialized"));
       }
       if (kind === "flat")
         put(join(h.stateDir, "terminal-resource-fence-v1.json"), { v: 1, revision: 0, resources: [] });
@@ -241,6 +241,24 @@ describe("P5 checkpoint: private real-fs + explicitly controlled audit (not real
       }
     },
   );
+
+  it("crash model after durable ledger but before marker leaves partials, retry never heals", async () => {
+    const h = setup();
+    legacyLayout(h.stateDir);
+    let writes = 0;
+    await expect(
+      checkpointTerminalV2("checkpoint", h.options, {
+        before(stage) {
+          if (stage === "state-write" && ++writes === 3) throw new MaintenanceError("simulated-crash-before-marker");
+        },
+      }),
+    ).rejects.toMatchObject({ code: "simulated-crash-before-marker", effect: "unknown" });
+    expect(existsSync(join(h.stateDir, "terminal-v2/ledger.json"))).toBe(true);
+    expect(existsSync(join(h.stateDir, "terminal-v2/marker.json"))).toBe(false);
+    const before = tree(h.base);
+    await expect(checkpointTerminalV2("checkpoint", h.options)).rejects.toMatchObject({ effect: "none" });
+    expect(tree(h.base)).toEqual(before);
+  });
 
   it("singleton covers async validation and commit, no second writer", async () => {
     const h = setup();
