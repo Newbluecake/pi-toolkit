@@ -76,6 +76,8 @@ interface IntentTokenV2 {
 
 interface CallOptionsV2 {
   intent?: IntentTokenV2;
+  /** Explicit rename/close may run while collapsed, but never across a newer lifecycle. */
+  action?: IntentTokenV2;
   view?: ViewContextV2;
   /** An already-sent create remains queryable after collapse/dispose, without UI authority. */
   creation?: { requestId: string; hubInstance: string };
@@ -86,6 +88,7 @@ interface CallAuthorityV2 {
   readonly scope: TerminalScopeV2;
   readonly hubInstance: string | undefined;
   readonly intent?: IntentTokenV2;
+  readonly action?: IntentTokenV2;
   readonly view?: ViewContextV2;
   readonly creation?: { requestId: string; hubInstance: string };
 }
@@ -182,6 +185,10 @@ export function createTerminalControllerV2(deps: {
     return { generation: lifecycleGeneration };
   }
 
+  function actionCurrent(token: IntentTokenV2): boolean {
+    return !disposed && token.generation === lifecycleGeneration;
+  }
+
   function revoke(): void {
     if (disposed) return;
     lifecycleGeneration++;
@@ -212,6 +219,7 @@ export function createTerminalControllerV2(deps: {
       authority.lifecycle !== lifecycleGeneration ||
       state.hubInstance !== authority.hubInstance ||
       (authority.intent !== undefined && !intentCurrent(authority.intent)) ||
+      (authority.action !== undefined && !actionCurrent(authority.action)) ||
       (authority.view !== undefined && !owns(authority.view))
     )
       return false;
@@ -222,6 +230,7 @@ export function createTerminalControllerV2(deps: {
     op: K,
     fields: Fields<K>,
     options: CallOptionsV2 = {},
+    commit?: (result: TerminalHttpResultsV2[K]) => void,
   ): Promise<TerminalHttpResultsV2[K]> {
     const hubInstance = options.creation?.hubInstance ?? state.hubInstance;
     const authority: CallAuthorityV2 = {
@@ -229,6 +238,7 @@ export function createTerminalControllerV2(deps: {
       scope,
       hubInstance,
       ...(options.intent !== undefined ? { intent: options.intent } : {}),
+      ...(options.action !== undefined ? { action: options.action } : {}),
       ...(options.view !== undefined ? { view: options.view } : {}),
       ...(options.creation !== undefined ? { creation: { ...options.creation } } : {}),
     };
@@ -256,6 +266,11 @@ export function createTerminalControllerV2(deps: {
         if (raw.code === "E_HUB_CHANGED") invalidateView();
       }
       throw new ControllerFailureV2(raw.code, raw.effect);
+    }
+    if (commit) {
+      // Commit in the SAME synchronous authority segment; no outer await/microtask window.
+      if (!authorityCurrent(authority)) throw new ControllerFailureV2("E_STALE", "unknown");
+      commit(raw);
     }
     return raw;
   }
@@ -295,9 +310,10 @@ export function createTerminalControllerV2(deps: {
     return true;
   }
 
-  async function refreshList(intent?: IntentTokenV2): Promise<void> {
-    const result = await call("list", {}, intent ? { intent } : {});
-    applyTabs(result, result.hubInstance);
+  async function refreshList(intent?: IntentTokenV2, action = false): Promise<void> {
+    await call("list", {}, intent ? (action ? { action: intent } : { intent }) : {}, (result) => {
+      applyTabs(result, result.hubInstance);
+    });
   }
 
   function invalidateView(): void {
@@ -830,43 +846,47 @@ export function createTerminalControllerV2(deps: {
     const name = normalizeTerminalNameV2(rawName);
     const row = currentRow(termId);
     if (!name || !row || state.busy || disposed) return false;
-    const actionGeneration = lifecycleGeneration;
+    const intent = captureIntent();
     state.busy = true;
     state.error = "";
+    let committed = false;
     try {
-      const result = await call("rename", { termId, name });
-      if (result.revision < state.revision) return false;
-      const index = state.rows.findIndex((item) => item.termId === termId);
-      if (index >= 0) state.rows[index] = result.row;
-      state.revision = result.revision;
-      return true;
+      await call("rename", { termId, name }, { action: intent }, (result) => {
+        if (result.revision < state.revision) return;
+        const index = state.rows.findIndex((item) => item.termId === termId);
+        if (index >= 0) state.rows[index] = result.row;
+        state.revision = result.revision;
+        committed = true;
+      });
+      return committed;
     } catch (error) {
-      if (!disposed && actionGeneration === lifecycleGeneration) setError(error);
+      if (actionCurrent(intent)) setError(error);
       return false;
     } finally {
-      if (!disposed && actionGeneration === lifecycleGeneration) state.busy = false;
+      if (actionCurrent(intent)) state.busy = false;
     }
   }
 
   async function close(termId: string): Promise<boolean> {
     if (state.busy || disposed) return false;
-    const actionGeneration = lifecycleGeneration;
+    const intent = captureIntent();
     state.busy = true;
     state.error = "";
     try {
       if (state.activeTermId === termId) invalidateView();
-      await call("close", { termId });
-      await refreshList();
-      if (disposed || !state.open) return false;
+      await call("close", { termId }, { action: intent });
+      // The follow-up list belongs to the original close action, not a later lifecycle.
+      await refreshList(intent, true);
+      if (!actionCurrent(intent)) return false;
       if (state.activeTermId === termId) state.activeTermId = null;
       state.phase = "idle";
       persist();
       return true;
     } catch (error) {
-      if (!disposed && actionGeneration === lifecycleGeneration) setError(error);
+      if (actionCurrent(intent)) setError(error);
       return false;
     } finally {
-      if (!disposed && actionGeneration === lifecycleGeneration) state.busy = false;
+      if (actionCurrent(intent)) state.busy = false;
     }
   }
 

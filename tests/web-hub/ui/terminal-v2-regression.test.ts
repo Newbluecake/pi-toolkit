@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { watch } from "vue";
 import { createTerminalControllerV2 } from "../../../src/web-hub/ui/src/components/terminal/v2/controller.js";
 import type { TerminalQuotaV2 } from "../../../src/web-hub/ui/src/components/terminal/protocol-v2.js";
 import type { TerminalRestoreStorageV2 } from "../../../src/web-hub/ui/src/logic/terminal-v2.js";
+import type { TerminalTransportV2 } from "../../../src/web-hub/ui/src/transport/terminal-v2.js";
 import {
   attachedFrameV2,
   createTerminalMockV2,
@@ -25,10 +27,12 @@ function deferred<T>() {
 
 class Storage implements TerminalRestoreStorageV2 {
   value: string | null = null;
+  setCalls = 0;
   getItem(): string | null {
     return this.value;
   }
   setItem(_key: string, value: string): void {
+    this.setCalls++;
     this.value = value;
   }
 }
@@ -69,6 +73,11 @@ function setup(handler?: RequestHandlerV2, hidden: () => boolean = () => false) 
   });
   controllers.push(controller);
   return { ...mock, renderer, controller, storage };
+}
+
+function directRequest(context: ReturnType<typeof setup>, handler: RequestHandlerV2): void {
+  // No async wrapper/assimilation: resolving the deferred queues call()'s own continuation directly.
+  context.transport.request = ((op, body) => handler(op, body)) as TerminalTransportV2["request"];
 }
 
 async function openExisting(context: ReturnType<typeof setup>) {
@@ -511,5 +520,136 @@ describe("P4 additional late-response and bounded-merge fences", () => {
     expect(() => context.views[0]!.emit({ t: "output", offset: 65_536, bytesB64 })).toThrow("E_UNAVAILABLE");
     expect(context.views[0]!.signal.aborted).toBe(true);
     expect(context.renderer.write).toHaveBeenCalledOnce();
+  });
+});
+
+describe("P4 F2 inner-call settled / outer-commit barrier", () => {
+  it("collapse+restore between inner settle and outer commit commits no old projection and accepts rev2", async () => {
+    const first = deferred<unknown>();
+    const second = deferred<unknown>();
+    let lists = 0;
+    const context = setup();
+    directRequest(context, (op) => {
+      if (op === "list") return (++lists === 1 ? first.promise : second.promise) as never;
+      return undefined;
+    });
+    const oldRestore = context.controller.restore();
+    await turnV2();
+    let writesAtCollapse = 0;
+    let newRestore!: Promise<boolean>;
+    first.resolve({ ...listEmpty, rows: [rowV2()] });
+    queueMicrotask(() => {
+      context.controller.collapse();
+      newRestore = context.controller.restore();
+      writesAtCollapse = context.storage.setCalls;
+    });
+    await turnV2();
+    expect(context.storage.setCalls).toBe(writesAtCollapse);
+    second.resolve({ ...listEmpty, revision: 2 });
+    expect(await newRestore).toBe(true);
+    expect(await oldRestore).toBe(false);
+    expect(context.controller.state.rows).toEqual([]);
+    expect(context.controller.state.revision).toBe(2);
+    expect(context.controller.state.error).toBe("");
+    expect(context.storage.setCalls - writesAtCollapse).toBeGreaterThan(0);
+    expect(JSON.parse(context.storage.value ?? "[]")[0]?.activeTermId ?? null).toBeNull();
+  });
+
+  it("dispose in the same barrier leaves rows/hub unchanged after disposal", async () => {
+    const first = deferred<unknown>();
+    const context = setup();
+    directRequest(context, (op) => (op === "list" ? (first.promise as never) : undefined));
+    const restoring = context.controller.restore();
+    await turnV2();
+    let rowsAtDispose: unknown;
+    let hubAtDispose: unknown;
+    first.resolve({ ...listEmpty, rows: [rowV2()] });
+    queueMicrotask(() => {
+      context.controller.dispose();
+      rowsAtDispose = context.controller.state.rows.map((row) => ({ ...row }));
+      hubAtDispose = context.controller.state.hubInstance;
+    });
+    await turnV2();
+    await restoring;
+    expect(context.controller.state.rows.map((row) => ({ ...row }))).toEqual(rowsAtDispose);
+    expect(context.controller.state.hubInstance).toBe(hubAtDispose);
+  });
+
+  it("rename commits in the inner current segment, never after a collapse+restore has started", async () => {
+    const rename = deferred<unknown>();
+    const secondList = deferred<unknown>();
+    let lists = 0;
+    const context = setup((op) => {
+      if (op === "rename") return rename.promise as never;
+      if (op === "list" && ++lists > 1) return secondList.promise as never;
+      return undefined;
+    });
+    await openExisting(context);
+    directRequest(context, (op) => {
+      if (op === "rename") return rename.promise as never;
+      if (op === "list" && ++lists > 1) return secondList.promise as never;
+      return undefined;
+    });
+    const events: string[] = [];
+    let phase = "before-collapse";
+    const stop = watch(
+      () => context.controller.state.rows[0]?.name,
+      (name) => {
+        if (name === "renamed") events.push(phase);
+      },
+      { flush: "sync" },
+    );
+    const pending = context.controller.rename(termV2, "renamed");
+    await turnV2();
+    let restoring!: Promise<boolean>;
+    rename.resolve({ ok: true, row: { ...rowV2(), name: "renamed" }, revision: 2 });
+    queueMicrotask(() => {
+      phase = "after-restore-started";
+      context.controller.collapse();
+      restoring = context.controller.restore();
+    });
+    await turnV2();
+    expect(events).toEqual(["before-collapse"]);
+    secondList.resolve({ ...listEmpty, rows: [{ ...rowV2(), name: "fresh" }], revision: 2 });
+    await turnV2();
+    const current = context.views.at(-1)!;
+    current.emit(attachedFrameV2(current.body.termId));
+    await restoring;
+    await pending;
+    stop();
+  });
+
+  it("close uses its original action authority and sends no follow-up list after collapse+restore", async () => {
+    const close = deferred<unknown>();
+    let lists = 0;
+    const context = setup((op) => {
+      if (op === "close") return close.promise as never;
+      if (op === "list") {
+        lists++;
+        return lists === 1 ? { ...listEmpty, rows: [rowV2()] } : listEmpty;
+      }
+      return undefined;
+    });
+    await openExisting(context);
+    directRequest(context, (op) => {
+      if (op === "close") return close.promise as never;
+      if (op === "list") {
+        lists++;
+        return listEmpty;
+      }
+      return undefined;
+    });
+    const closing = context.controller.close(termV2);
+    await turnV2();
+    let restoring!: Promise<boolean>;
+    close.resolve({ ok: true, state: "closed", revision: 2 });
+    queueMicrotask(() => {
+      context.controller.collapse();
+      restoring = context.controller.restore();
+    });
+    await turnV2();
+    expect(lists).toBe(2); // initial open + new restore; no old close follow-up
+    expect(await closing).toBe(false);
+    expect(await restoring).toBe(true);
   });
 });
