@@ -39,7 +39,12 @@ describe("P5 verifier counterexamples", () => {
     await expect(checkpointTerminalV2("fresh", h.options)).rejects.toMatchObject({ code: "io-EIO", effect: "unknown" });
     expect(injected).toBe(true);
     vi.mocked(fs.fsyncSync).mockImplementation(real.fsyncSync);
-    await expect(checkpointTerminalV2("fresh", h.options)).rejects.toBeDefined();
+    const retained = tree(h.base);
+    await expect(checkpointTerminalV2("fresh", h.options)).rejects.toMatchObject({
+      code: "unknown-maintenance-evidence",
+      effect: "none",
+    });
+    expect(tree(h.base)).toEqual(retained);
   });
 
   it("B2: prepared evidence changed during revalidation prevents state commit", async () => {
