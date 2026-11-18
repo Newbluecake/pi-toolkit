@@ -167,6 +167,18 @@ export function spawnHub(
 ): SpawnHubResult {
   const reason = privateNsBlocked();
   if (reason !== undefined) return { blocked: true, reason };
+  // Required at the runtime boundary too: malformed internal/fake plans must never
+  // silently launch an unaliased jiti. Keep this outside the spawn-error swallow.
+  const aliases: unknown = plan.hostAliases;
+  if (typeof aliases !== "object" || aliases === null || Object.keys(aliases).length !== 6) {
+    throw new Error("Invalid hub host TypeBox alias map");
+  }
+  for (const request of ["typebox", "typebox/value", "typebox/compile"] as const) {
+    const target = Reflect.get(aliases, request);
+    if (typeof target !== "string" || !isAbsolute(target) || Reflect.get(aliases, `@sinclair/${request}`) !== target) {
+      throw new Error(`Invalid hub host TypeBox alias map: ${request}`);
+    }
+  }
   try {
     // Never trust an inherited marker (hubSafeEnv may return process.env itself).
     // This bootstrap veto uses the frozen domain, NOT the session runtime guard.

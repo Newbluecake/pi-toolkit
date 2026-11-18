@@ -5,7 +5,16 @@
  */
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -157,7 +166,7 @@ console.log('PASS native TypeBox identities and lazy import after env scrub');
           stderr: result.stderr,
         });
         return { on() {}, unref() {} };
-      }) as typeof spawn;
+      }) as unknown as typeof spawn;
       expect(
         spawnHub(
           plan,
@@ -170,6 +179,14 @@ console.log('PASS native TypeBox identities and lazy import after env scrub');
       expect(result?.stdout).toContain("PASS native TypeBox identities");
       expect(process.env.JITI_ALIAS).toContain("unrelated");
       expect(process.env.JITI_TSCONFIG_PATHS).toBe(tsconfig);
+      // A resolvable local peer cannot become a fallback when the selected host is missing.
+      expect(createRequire(script).resolve("typebox")).toBe(join(shadow, "node_modules/typebox/index.mjs"));
+      const fakePi = join(f.base, "host/node_modules/@earendil-works/pi-coding-agent");
+      mkdirSync(join(fakePi, "dist"), { recursive: true });
+      writeFileSync(join(fakePi, "package.json"), '{"name":"@earendil-works/pi-coding-agent"}');
+      writeFileSync(join(fakePi, "dist/cli.js"), "");
+      const missingHost = resolveLauncherPlan({ argv1: join(fakePi, "dist/cli.js"), override: plan.jitiCli });
+      expect(missingHost).toEqual({ ok: false, reason: expect.stringContaining("hub host TypeBox resolution failed") });
       expect(existsSync(marker)).toBe(false);
     } finally {
       for (const key of ["JITI_ALIAS", "JITI_TSCONFIG_PATHS"]) {
@@ -204,7 +221,7 @@ console.log('PASS native TypeBox identities and lazy import after env scrub');
         };
         diagnostic = spawnSync(exec, argv, { cwd: f.home, env, timeout: 30_000, encoding: "utf8" });
         return { on() {}, unref() {} };
-      }) as typeof spawn);
+      }) as unknown as typeof spawn);
       expect(diagnostic?.status, String(diagnostic?.stderr)).toBe(2);
       expect(diagnostic?.stderr).toContain("PI_WEBHUB_CONFIG is not set");
       const bare = spawnSync(plan.execPath, [plan.jitiCli, main], {
@@ -249,6 +266,11 @@ console.log('PASS native TypeBox identities and lazy import after env scrub');
         "--no-prompt-templates",
         "--no-context-files",
       ];
+      // Passive built-in V8 observation: no hooks/loader/argv changes or resolver overrides.
+      // The preceding consumer runs also exercise the same path without this observer.
+      const coverageDir = join(f.base, "v8");
+      mkdirSync(coverageDir, { mode: 0o700 });
+      f.env.NODE_V8_COVERAGE = coverageDir;
       const child = spawn(process.execPath, argv, { cwd: join(f.base, "cwd"), env: f.env, stdio: "pipe" });
       const exit = new Promise((r) => child.once("close", (code, signal) => r({ code, signal })));
       let stderr = "",
@@ -296,6 +318,10 @@ console.log('PASS native TypeBox identities and lazy import after env scrub');
         }
       };
       let sse: Awaited<ReturnType<typeof privateSse>> | undefined;
+      const closeSse = () => {
+        sse?.close();
+        sse = undefined;
+      };
       try {
         const commands = (await rpc("get_commands")).commands;
         expect(commands.find((c: any) => c.name === "webhub")?.sourceInfo).toBeTruthy();
@@ -381,19 +407,40 @@ console.log('PASS native TypeBox identities and lazy import after env scrub');
         expect(managedEnv.PI_WEBHUB_HEADLESS).toBe("1");
         expect(envOf(child.pid!).JITI_ALIAS).toBeUndefined();
         records.push({ managedPid, loaderKeysAbsent: true, parentLoaderKeysAbsent: true });
-        sse?.close();
-        sse = undefined;
+        closeSse();
         await rpc("prompt", { message: "/webhub restart" });
         await until(() => (!proc(hub.pid) ? true : undefined), "old own hub PID gone");
         const next = await ready(hub.pid);
         expect(next.hub.nonce).not.toBe(hub.nonce);
-        sse?.close();
-        sse = undefined;
+        closeSse();
         await rpc("prompt", { message: "/webhub stop" });
         await until(() => (!proc(next.hub.pid) ? true : undefined), "second own hub PID gone");
         expect(existsSync(f.paths.socketPath)).toBe(false);
         child.stdin!.end();
         expect(await exit).toEqual({ code: 0, signal: null });
+        for (const record of records.filter((r) => r.pid !== undefined)) {
+          const files = readdirSync(coverageDir).filter((name) => name.startsWith(`coverage-${record.pid}-`));
+          const modules = files.flatMap((name) => JSON.parse(readFileSync(join(coverageDir, name), "utf8")).result);
+          const actualTargets = [plan.hostAliases.typebox, plan.hostAliases["typebox/value"]];
+          for (const target of actualTargets) {
+            const loaded = modules.find((entry: any) => entry.url === pathToFileURL(target).href);
+            expect(loaded, `real hub ${record.pid} loaded host ${target}`).toBeTruthy();
+            expect(loaded.functions.some((fn: any) => fn.ranges.some((r: any) => r.count > 0))).toBe(true);
+          }
+          record.passivelyObservedHostModules = actualTargets;
+          record.passiveCoverageFiles = files.map((name) => join(coverageDir, name));
+        }
+        const coverage = readdirSync(coverageDir).filter((name) => name.startsWith(`coverage-${child.pid}-`));
+        const scripts = coverage.flatMap((name) => JSON.parse(readFileSync(join(coverageDir, name), "utf8")).result);
+        const bundle = join(consumer, "dist/bundle/index.js");
+        const actualBundle = scripts.find((entry: any) => entry.url.startsWith(pathToFileURL(bundle).href + "?v="));
+        if (existsSync(bundle)) {
+          expect(actualBundle, "actual consumer bundle must execute, not just exist on disk").toBeTruthy();
+          expect(actualBundle.functions.some((fn: any) => fn.ranges.some((r: any) => r.count > 0))).toBe(true);
+        } else {
+          expect(actualBundle).toBeUndefined();
+          expect(scripts.some((entry: any) => entry.url.includes(join(consumer, "src/index.ts")))).toBe(true);
+        }
         put(join(f.base, "result.json"), {
           consumer,
           piCli,
@@ -411,6 +458,8 @@ console.log('PASS native TypeBox identities and lazy import after env scrub');
             ].map((p) => [p, sha(join(consumer, p))]),
           ),
           agentArgv: [process.execPath, ...argv],
+          loadedEntry: actualBundle?.url ?? join(consumer, "src/index.ts"),
+          passiveCoverageFiles: coverage.map((name) => join(coverageDir, name)),
           records,
           diagnosticExit: diagnostic?.status,
           bareCounterexampleExit: bare.status,
@@ -419,7 +468,7 @@ console.log('PASS native TypeBox identities and lazy import after env scrub');
         });
         console.log(`HUB_LOADER_EVIDENCE ${join(f.base, "result.json")}`);
       } finally {
-        sse?.close();
+        closeSse();
         // Only owned private PIDs, pinned by starttime; never a global census or reused PID.
         if (existsSync(f.paths.hubJson)) {
           try {

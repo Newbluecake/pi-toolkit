@@ -264,6 +264,26 @@ describe("spawnHub", () => {
     }
   });
 
+  it("missing/partial/mismatched runtime plans never spawn bare jiti; namespace veto still comes first", () => {
+    const spawnImpl = vi.fn(() => ({ on: vi.fn(), unref: vi.fn() }));
+    for (const hostAliases of [
+      undefined,
+      {},
+      { ...plan.hostAliases, typebox: "relative.mjs" },
+      { ...plan.hostAliases, "typebox/value": "/different/value.mjs" },
+    ]) {
+      const bad = { ...plan, hostAliases } as never;
+      expect(() => spawnHub(bad, "/m.ts", config, spawnImpl as never, () => undefined)).toThrow(
+        "Invalid hub host TypeBox alias map",
+      );
+      expect(spawnHub(bad, "/m.ts", config, spawnImpl as never, () => "private-ns")).toEqual({
+        blocked: true,
+        reason: "private-ns",
+      });
+    }
+    expect(spawnImpl).not.toHaveBeenCalled();
+  });
+
   it("a throwing spawn never propagates", () => {
     const spawnImpl = vi.fn(() => {
       throw new Error("EAGAIN");
