@@ -1359,8 +1359,10 @@ async function handleLanRequestInner(
           rt.authRevoke.emit({ sel: { sidTag: sidHash }, reason: "logout" });
           settleTerminalAuthV2(rt.terminalV2?.auth, selector, revision, { kind: "sid-absent", sidTag: sidHash });
           rt.lanSse.revoke((c) => c.auth?.sidHash === sidHash, "revoked");
-        } catch (err) {
-          rt.log.error("web-hub lan http: logout deleteSession failed", { error: String(err) });
+        } catch {
+          // DB/transport exception text is not audit data: it can contain credentials,
+          // cookie values or private paths. Keep this declared on/off failure fixed-code.
+          rt.log.error("web-hub lan http: logout deleteSession failed", { code: "E_DB" });
           // Clearing the browser cookie is not proof of server-side logout. This
           // honest failure contract applies identically with terminal on AND off.
           sendJson(

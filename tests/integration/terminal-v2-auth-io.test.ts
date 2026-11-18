@@ -200,3 +200,73 @@ it("A12 real prune sync past its deadline cannot publish late release or alter e
   expect(JSON.parse(readFileSync(`${h.state}/terminal-v2/ledger.json`, "utf8")).allocations).toHaveLength(1);
   expect(response.body).toBe('{"ok":true}');
 }, 30000);
+it("A12 failed auth response/cookie/DB-state match terminal-off while real prune IO arrives late; logs contain no secret payload", async () => {
+  const h = await terminalV2AuthFixture(closers, false, true, { retain: true }),
+    pending = await create(h),
+    created = await pending.work;
+  expect(created.body.ok).toBe(true);
+  const gate = arm(h.state),
+    closing = h.loop("close", { ...pending.envelope, termId: created.body.termId });
+  await observeUntil(
+    async () => gate.entered,
+    (value) => value,
+  );
+  async function failedLogout(target: Awaited<ReturnType<typeof terminalV2AuthFixture>>) {
+    const { lanPostJson } = await import("../web-hub/http/lan-helpers.js");
+    const before = (await target.authStore.getUser(target.username))!,
+      token = readFileSync(target.hub.paths.tokenFile, "utf8").trim();
+    const secret = `${token} ${target.lanCookie} ${target.privatePty.fixture.cwd}`;
+    const fault = vi
+      .spyOn(target.authStore, "deleteSession")
+      .mockRejectedValueOnce(Object.assign(new Error(secret), { code: "E_DB" }));
+    const result = await lanPostJson(
+      target.lanPort,
+      "/api/logout",
+      {},
+      { ...target.lanHeaders, Cookie: target.lanCookie },
+    );
+    expect(result.status).toBe(503);
+    expect(fault).toHaveBeenCalledOnce();
+    fault.mockRestore();
+    expect((await target.authStore.getUser(target.username))!.epoch).toBe(before.epoch);
+    const { hashSid } = await import("../../src/web-hub/hub/sid-hash.js");
+    expect(
+      await target.authStore.touchSession(
+        hashSid(target.lanCookie.slice(target.lanCookie.indexOf("=") + 1)),
+        Date.now(),
+      ),
+    ).toBeDefined();
+    const log = readFileSync(target.hub.paths.logFile, "utf8")
+      .split("\n")
+      .filter((line) => {
+        if (!line) return false;
+        const row = JSON.parse(line);
+        return row.audit !== undefined || row.msg === "web-hub lan http: logout deleteSession failed";
+      })
+      .join("\n");
+    expect(log).toContain("logout deleteSession failed");
+    for (const value of [token, target.lanCookie, target.privatePty.fixture.cwd]) expect(log).not.toContain(value);
+    return result;
+  }
+  const response = await failedLogout(h); // must finish while the original resource barrier is still held
+  expect(h.service.maintenanceSnapshot().allocationCount).toBe(1);
+  const off = await terminalV2AuthFixture(closers, false, false, { retain: true }),
+    control = await failedLogout(off);
+  expect(response.status).toBe(control.status);
+  expect(response.body).toBe(control.body);
+  expect(response.headers["set-cookie"]).toEqual(control.headers["set-cookie"]);
+  await new Promise<void>((r) => {
+    const timer = setTimeout(r, 2300);
+    timer.unref();
+  });
+  gate.release();
+  injection.gate = undefined;
+  expect((await closing).body.ok).toBe(false);
+  await observeUntil(
+    async () => h.service.maintenanceSnapshot(),
+    (state) => state.mutationFlights === 0,
+  );
+  expect(h.service.maintenanceSnapshot().allocationCount).toBe(1);
+  expect(h.service.maintenanceSnapshot().physicalPrunes).toBe(0);
+  expect(response.body).toBe('{"error":"E_DB","effect":"unknown","localSignedOut":true}');
+}, 30000);

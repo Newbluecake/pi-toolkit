@@ -239,8 +239,28 @@ startHub/SQLite recovery rejects the old LAN SID, permits a new actual login, re
 rotate intent and preserves resource bytes. Two additional real DB-permission fault cases retain the
 original intent and LAN rotate-pending block despite successful loopback auth; lifting that explicit
 owned fault permits original recovery. Source/patch/artifact hashes and private state are retained.
-No PTY was started and no kernel reboot/resource-drain inference is made. 55s authority/failure-audit
-windows remain tracked explicitly, not implied by partial A-subgates.
+No PTY was started and no kernel reboot/resource-drain inference is made.
+
+`terminal-v2-auth-failures` additionally checks real failed kick, before/after-original-commit password
+and delete result loss, exact business no-change without clearing an older unknown mutation, and
+true post-commit HTTP DELETE/admin password-epoch transport loss followed by real same-state restart.
+The defensive bulk partial path uses an explicitly oversized owned SQLite fixture beyond normal32
+admission, then the ORIGINAL transaction really deletes64/reports more; no success result is mocked.
+
+`terminal-v2-auth-authority` runs actual55s wallclock expiry checks on both resource healths. Normal
+ACK auth remains real/healthy while only original reserved SQLite lookup replies are lost: this makes
+55s revalidation causal, rather than a15s missing-ACK or30s metadata-peer silence detach. Actual UDS
+protocol pings keep the explicitly simulated metadata responder alive. Private NDJSON detaches,
+public LAN SSE keeps its original weaker failure behavior, the other listener authenticates, and
+resource bytes/charged live slot remain unchanged. A separate explicit original-DB absolute-expiry
+timestamp fixture demonstrates the real local hard-expiry timer, without fake time or a55s wait.
+This is controlled lookup-result failure, NOT a claim the entire SQLite process stayed dead55s.
+
+A12 pairs failed original logout on/off while real prune fsync stays held past its own deadline:
+response/cookie/DB state match and late IO cannot free/double-free a slot. A regression exposed raw
+logout exception text in the diagnostic log; that single declared auth-failure branch now logs ONLY
+fixed E_DB, on/off identically. Auth/terminal audit and that failure diagnostic exclude token/cookie/
+private-cwd exception payloads; unrelated ordinary registry diagnostics are not rewritten.
 
 ## Independent view / flow control
 
