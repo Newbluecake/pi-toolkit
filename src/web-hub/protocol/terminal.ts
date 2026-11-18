@@ -796,7 +796,8 @@ export function isTerminalNamespace(raw: unknown): boolean {
     !!raw &&
     typeof raw === "object" &&
     typeof (raw as Record<string, unknown>).t === "string" &&
-    ((raw as Record<string, unknown>).t as string).startsWith("term_")
+    (((raw as Record<string, unknown>).t as string).startsWith("term_") ||
+      ((raw as Record<string, unknown>).t as string).startsWith("terminal_context_"))
   );
 }
 /** Only reserved structures; never scan user output/text for the word terminal. */

@@ -1,3 +1,5 @@
+import { parseTerminalSessionV2, type TerminalSessionV2, type TerminalScopeV2 } from "../protocol/terminal-v2.js";
+import type { TerminalContextLinkV2 } from "./terminal/v2/context.js";
 /**
  * hub side of the agent socket (plan §包 B): per connection NdjsonDecoder →
  * `hello` within TIMING.helloAckMs → validate → `hello_ack` / `hello_reject`;
@@ -63,6 +65,7 @@ export interface TerminalAgentLink {
   send(frame: HubFrame): boolean;
 }
 export interface AgentServer {
+  terminalContextLink?(agentKey: string): TerminalContextLinkV2 | undefined;
   terminalLink?(agentKey: string): TerminalAgentLink | undefined;
   connectionCount(): number;
   close(): Promise<void>;
@@ -77,6 +80,10 @@ export function createAgentServer(
   deps: {
     registry: Registry;
     terminal?: TerminalIngressPort;
+    terminalContext?: {
+      consume(instance: object, raw: unknown): void;
+      retire(instance: object, scope: TerminalScopeV2): void;
+    };
     config: HubConfig;
     log: HubLog;
     now: () => number;
@@ -126,6 +133,7 @@ export function createAgentServer(
     sock: net.Socket;
     teardown: () => void;
     terminalLink?: () => TerminalAgentLink | undefined;
+    terminalContextLink?: () => TerminalContextLinkV2 | undefined;
   }>();
   let closed = false;
 
@@ -137,6 +145,17 @@ export function createAgentServer(
     sock.unref();
     let agentKey: string | undefined;
     let agentPid: number | undefined;
+    const contextInstance = Object.freeze({});
+    let contextDeclaration: TerminalSessionV2 | undefined;
+    const retireContext = () => {
+      if (contextDeclaration && agentKey)
+        deps.terminalContext?.retire(contextInstance, {
+          agentKey,
+          sessionId: contextDeclaration.sessionId,
+          epoch: contextDeclaration.epoch,
+        });
+      contextDeclaration = undefined;
+    };
     let terminalMeta: TerminalIngressMeta | undefined;
     let terminalHello: Extract<AgentFrame, { t: "hello" }> | undefined;
     let terminalDetached = false;
@@ -144,6 +163,7 @@ export function createAgentServer(
     let authorizationVersion = 0;
     let terminalSessionId = "";
     const withdraw = () => {
+      retireContext();
       terminalSession = undefined;
       authorizationVersion++;
       if (terminalMeta) {
@@ -277,6 +297,16 @@ export function createAgentServer(
       // F1: isolate BEFORE decoder fallback/registry and synchronously. No service or a
       // throwing service never licenses terminal traffic to enter ordinary pending/bus/ring.
       if (superseded) return;
+      // Always consume the reserved context namespace, including malformed/disabled frames.
+      // Install this private path before ever allowing a context reply to be decoded.
+      if (typeof rawType(raw) === "string" && String(rawType(raw)).startsWith("terminal_context_")) {
+        try {
+          deps.terminalContext?.consume(contextInstance, raw);
+        } catch {
+          retireContext();
+        }
+        return;
+      }
       if (terminalMeta !== undefined) {
         const meta = { ...terminalMeta, sessionId: registry.get(agentKey)?.session?.sessionId ?? "" };
         let privateCommand = false;
@@ -440,6 +470,19 @@ export function createAgentServer(
           }
         }
       }
+      if (config.terminal !== undefined && frame.t === "status") {
+        const next =
+          !terminalDetached && terminalSessionId && terminalMeta
+            ? parseTerminalSessionV2(frame.terminalSessionV2, {
+                sessionId: terminalSessionId,
+                epoch: terminalMeta.epoch,
+              })
+            : undefined;
+        if (JSON.stringify(next) !== JSON.stringify(contextDeclaration)) {
+          retireContext();
+          contextDeclaration = next;
+        }
+      }
       registry.onFrame(agentKey, frame);
       if (frame.t === "bye") {
         hadBye = true;
@@ -490,6 +533,51 @@ export function createAgentServer(
     const entry = {
       sock,
       teardown,
+      terminalContextLink: (): TerminalContextLinkV2 | undefined => {
+        const view = agentKey ? registry.get(agentKey) : undefined;
+        if (
+          !contextDeclaration ||
+          !terminalMeta ||
+          !terminalHello ||
+          (terminalHello.kind !== "tui" && terminalHello.kind !== "rpc") ||
+          finished ||
+          superseded ||
+          terminalDetached ||
+          hadBye ||
+          sock.destroyed ||
+          !sock.writable ||
+          registry.getLinkGen(terminalMeta.agentKey) !== terminalMeta.linkGen ||
+          view?.session?.sessionId !== contextDeclaration.sessionId
+        )
+          return undefined;
+        const scope = {
+          agentKey: terminalMeta.agentKey,
+          sessionId: contextDeclaration.sessionId,
+          epoch: contextDeclaration.epoch,
+        };
+        return {
+          instance: contextInstance,
+          scope,
+          declaration: contextDeclaration,
+          pendingBytes: sock.writableLength,
+          send(frame) {
+            if (
+              !contextDeclaration ||
+              frame.contextGeneration !== contextDeclaration.contextGeneration ||
+              frame.sessionId !== contextDeclaration.sessionId ||
+              frame.epoch !== contextDeclaration.epoch ||
+              finished ||
+              superseded ||
+              sock.destroyed ||
+              !sock.writable ||
+              sock.writableLength > 24576
+            )
+              return false;
+            write(frame);
+            return !sock.destroyed;
+          },
+        };
+      },
       ...(config.terminal === undefined
         ? {}
         : {
@@ -545,6 +633,13 @@ export function createAgentServer(
   server.on("connection", onConnection);
 
   return {
+    terminalContextLink: (key) => {
+      for (const entry of conns) {
+        const link = entry.terminalContextLink?.();
+        if (link?.scope.agentKey === key) return link;
+      }
+      return undefined;
+    },
     ...(config.terminal === undefined
       ? {}
       : {

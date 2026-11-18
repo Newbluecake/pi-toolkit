@@ -1048,6 +1048,7 @@ export default function activate(rawPi: ExtensionAPI): void {
     webHubRef.current = wireWebHub(pi, {
       ...(settings.webHub.terminal?.enabled === true
         ? {
+            terminalTrust: { domain: secureDomain.kind, isChild: isChildSession },
             terminalGuard: (c) =>
               secureDomain.kind === "plain" && !isChildSession && secureGuards?.recheckForWrite(c) === undefined,
           }
