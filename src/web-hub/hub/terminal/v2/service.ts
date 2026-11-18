@@ -736,17 +736,26 @@ export class HubTerminalServiceV2 implements TerminalServiceV2 {
     });
     return h.closeWork;
   }
+  /** Link/declaration/privacy loss seals existing handles and futures. A later
+   * trusted link/declaration for the SAME scope may create again; old handles never revive. */
+  invalidateScope(scope: TerminalScopeV2): void {
+    const k = key(scope);
+    for (const i of this.intents.values()) if (i.scope === k) i.controller.abort();
+    for (const h of this.hot.values()) if (key(h.allocation.scope) === k) void this.cleanup(h);
+  }
   retireScope(scope: TerminalScopeV2): void {
     const k = key(scope);
     if (this.retired.size < L.intentsTotal || this.retired.has(k)) this.retired.add(k);
     else this.scopeAdmissionBlocked = true;
-    for (const i of this.intents.values()) if (i.scope === k) i.controller.abort();
-    for (const h of this.hot.values()) if (key(h.allocation.scope) === k) void this.cleanup(h);
+    this.invalidateScope(scope);
   }
   /** P2 synchronous invalidate callback: abort all in-flight creates conservatively, close
    * only matching creators. Caller must isolate exceptions; no IO is awaited here. */
-  invalidateCreators(matches: (creator: Readonly<AuthIdentity>) => boolean): void {
+  abortCreates(): void {
     for (const i of this.intents.values()) if (!i.result) i.controller.abort();
+  }
+  invalidateCreators(matches: (creator: Readonly<AuthIdentity>) => boolean): void {
+    this.abortCreates();
     let fault = false;
     for (const h of this.hot.values()) {
       try {

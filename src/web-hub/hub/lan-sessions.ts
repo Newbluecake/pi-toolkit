@@ -29,8 +29,8 @@
  *  - Every outcome (including gate refusals) writes one `auditLanSession` line; the audit
  *    never carries a sidHash, public id or UA string (§8).
  */
-import type { TerminalRevocationFence } from "./terminal/revocation-fence.js";
-import { bounded } from "./terminal/limits.js";
+import type { TerminalAuthFenceV2 } from "./terminal-v2-ports.js";
+import { invalidateTerminalAuthV2, settleTerminalAuthV2 } from "./terminal/v2/frontend.js";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { Value } from "@sinclair/typebox/value";
 import {
@@ -80,7 +80,7 @@ function ipcSignal(ms: number): AbortSignal {
 }
 
 export function createLanSessionsRoutes(
-  deps: LanSessionsDeps & { terminalAuth?: TerminalRevocationFence },
+  deps: LanSessionsDeps & { terminalAuth?: TerminalAuthFenceV2 },
 ): LanSessionsRoutes {
   const now = deps.now;
   const limit: CmdLimit = createCmdLimit(now);
@@ -96,21 +96,6 @@ export function createLanSessionsRoutes(
 
   function emitRevoke(sidHash: string): void {
     deps.authRevoke.emit({ sel: { sidTag: sidHash }, reason: "logout" });
-  }
-
-  async function repairSid(sidTag: string, deadline: ReqDeadline): Promise<void> {
-    const fence = deps.terminalAuth,
-      selector = { sidTag };
-    const revision = fence?.selectorRevision(selector);
-    if (!fence || revision === undefined || deadline.expired()) return;
-    await fence.repair(selector, revision, 0, async () =>
-      bounded(
-        deps.store.touchSession(sidTag, now()),
-        now,
-        Math.min(deadline.at, now() + 1000),
-        new AbortController().signal,
-      ).then((rec) => rec === undefined),
-    );
   }
 
   /** `requireLanSession` answers failure responses itself (401 E_AUTH / 429 E_RATE / 503 E_DB);
@@ -254,6 +239,8 @@ export function createLanSessionsRoutes(
     const self = target.sidHash === auth.sidHash;
     const shared = target.createdIp === io.ip || target.lastIp === io.ip;
     // Logout order (plan §3.2): emit → delete → emit → SSE revoke.
+    const selector = { sidTag: target.sidHash };
+    const revision = invalidateTerminalAuthV2(deps.terminalAuth, selector);
     emitRevoke(target.sidHash);
     let sharedIpKept: boolean;
     try {
@@ -283,7 +270,7 @@ export function createLanSessionsRoutes(
     }
     emitRevoke(target.sidHash);
     deps.revokeSse(target.sidHash);
-    await repairSid(target.sidHash, deadline);
+    settleTerminalAuthV2(deps.terminalAuth, selector, revision, { kind: "sid-absent", sidTag: target.sidHash });
     if (self) io.clearCookie(res);
     audit({ op: "revoke", ip: io.ip, user: auth.user, ok: true, n: 1, complete: true, self, sharedIpKept });
     const body: LanSessionRevokeResponse = { ok: true, revoked: 1, complete: true };
@@ -308,7 +295,11 @@ export function createLanSessionsRoutes(
       return io.sendJson(res, 503, { error: code });
     }
     const preListed = rows.filter((r) => r.sidHash !== auth.sidHash).map((r) => r.sidHash);
-    for (const h of preListed) emitRevoke(h);
+    const revisions = new Map<string, number | undefined>();
+    for (const h of preListed) {
+      revisions.set(h, invalidateTerminalAuthV2(deps.terminalAuth, { sidTag: h }));
+      emitRevoke(h);
+    }
     let result: { deleted: string[]; more: boolean; sharedIpKept?: boolean };
     try {
       result = await call(
@@ -357,7 +348,12 @@ export function createLanSessionsRoutes(
       emitRevoke(h);
       deps.revokeSse(h);
     }
-    await Promise.all(result.deleted.map((hash) => repairSid(hash, deadline)));
+    for (const hash of result.deleted) {
+      // Unexpected concurrently-created deleted sessions are authoritative commit
+      // facts too. Capture a new exact deny before settle, never a repair query.
+      const revision = revisions.get(hash) ?? invalidateTerminalAuthV2(deps.terminalAuth, { sidTag: hash });
+      settleTerminalAuthV2(deps.terminalAuth, { sidTag: hash }, revision, { kind: "sid-absent", sidTag: hash });
+    }
     const complete = !result.more;
     audit({
       op: "others",

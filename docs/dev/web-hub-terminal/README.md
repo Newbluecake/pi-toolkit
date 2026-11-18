@@ -501,3 +501,38 @@ pin 所有原字节/inode/目录，重新真实 fsync exact files/tx/archive/sta
 
 此部分 real-fs/guarded-prune 测试使用模拟 old boot UUID + 受控 drain adapter，**不是**真实
 kernel reboot / powercut / 可信 O/N adapter / 完整 O→N→O 通过；这些仍是 P6/P7 剩余门。
+
+## T51 v2 集成中：hub / auth 接线
+
+`assembly-terminal.ts` 已切为唯一 `HubTerminalServiceV2`、同一个 guarded ledger、context port、
+views、resize gate 与 auth fence。只从工具预建的 v2 marker/witness/ledger 验真加载；旧 kernel
+退休在 service initialize 之前且无 hot，两个阶段用同一 singleton/current/socket/目录身份。
+同步装配返回后仅启动有界 terminal-only 初始化 Promise，HTTP/auth/原 rotate recovery 不等待它。
+初始化/账本失败只投影 terminal unavailable；普通 SSE 无 terminal binding、输出或 clientId 撤销。
+V2 读取独立 POST NDJSON；两 listener 共用 routes/views/fence，真实原认证之前 capture revision。
+55s 复核使用原已解析 identity（LAN 内部 symbol 保留 origin/IP，绝不 wire/storage），原 auth
+store/expiry/origin 规则；DB 失败只 detach terminal view，不照抄聊天失败保流语义。
+
+logout/kick/rotate 的 invalidation/settle 是同步无 IO 通知，不等待 terminal 持久化/PTY。
+LAN logout 删除失败现返回 `503 {error:"E_DB",effect:"unknown",localSignedOut:true}` 并清本地
+cookie，terminal on/off 一致，成功 bytes 不变。不再 loginComplete/额外 proof 表或 repair 查询。
+
+原 `LanStorePort.setPassword():Promise<void>` 不改。原具体 store 增加仅同进程
+`setPasswordWithFact`：同一个原 SQLite 事务的 original SELECT 与 UPDATE/INSERT 得到
+userId/beforeEpoch/afterEpoch，COMMIT 后经原 IPC 返回闭合内部回执（无额外 getUser/listSessions）。
+admin 在原事务 await **前**建立局部 opaque user-mutation token：临时 LAN admission deny、同步
+seal views/abort creates，但不知道 userId 时不误杀无关 creator。成功回执只清该 exact token，
+并按实际 userId 启动 creator cleanup；新登录恢复可用。并发 token/独立 sticky deny 不互相清除，
+旧 token 重放/foreign token 无效；P0 settle 的 global revision CAS 保持原样。business refusal 用
+原确定 no-change，只清自己临时 block。DB/回执 unknown 不造事实，保守保 block；没有 bridge 的
+非生产自定义 store 不能伪造 beforeEpoch。所有通知异常与 auth 结果隔离。原 admin wire 的异常
+仍是原 `E_INTERNAL`，不借此扩冻结 LanResFrame；HTTP logout 的声明式失败合同如上。
+
+link/declaration/privacy loss 使用 service-local `invalidateScope` 封原 handle/futures，并实际清理；
+后续同 epoch 的新可信 link 可由新明确请求创建。permanent `retireScope` 仍禁止原 scope，不能把
+普通 UDS reconnect 错当永久 tombstone。旧 namespace/保留 result 全拒绝，不执行 v1 端口。
+
+集成测试 `terminal-v2-hub.test.ts` 已覆盖 real startHub、两 HTTP listener、真实 SQLite 登录与
+passwd 回执、真实隔离 Python PTY/echo/PID、共享 rename/close、exact durable prune/PID gone、
+普通 SSE clientId/subscribe 不受 terminal 影响及坏账本/auth 独立、logout 故障 on/off。agent context
+响应器仍是显式模拟；不是 real pi SDK / browser / 可信维护 adapter / O→N→O 的通过证明。

@@ -106,3 +106,54 @@ describe("terminal v2 synchronous auth facts", () => {
     expect(() => fence.check({ ...identity, userId: 8 }, fence.revision)).toThrow();
   });
 });
+
+describe("P6 original-auth same-operation user transaction facts", () => {
+  it("temporarily seals LAN views before original await, then only cleans exact creator and permits new login", () => {
+    const fence = new TerminalRevocationFenceV2(() => 0);
+    const notifications: unknown[] = [],
+      creators: unknown[] = [];
+    fence.subscribe((s) => notifications.push(s));
+    fence.subscribeCreators((s) => creators.push(s));
+    const token = fence.beginUserMutation();
+    denied(fence);
+    expect(notifications).toEqual([{ listener: "lan" }]);
+    expect(creators).toEqual([]);
+    fence.check({ ...identity, listener: "loopback" }, fence.revision);
+    fence.finishUserMutation(token, { kind: "password-committed", userId: 7, beforeEpoch: 3, afterEpoch: 4 });
+    fence.check({ ...identity, sidTag: "new-login", lan: { ...identity.lan!, epoch: 4 } }, fence.revision);
+    expect(creators).toEqual([{ userId: 7 }]);
+    fence.finishUserMutation(token, { kind: "password-committed", userId: 8, beforeEpoch: 1, afterEpoch: 2 });
+    expect(creators).toEqual([{ userId: 7 }]);
+  });
+  it("concurrent operations/late receipts cannot release another operation or an independent sticky revoke", () => {
+    const fence = new TerminalRevocationFenceV2(() => 0);
+    const first = fence.beginUserMutation(),
+      second = fence.beginUserMutation();
+    fence.finishUserMutation(first, { kind: "user-absent", userId: 7 });
+    denied(fence);
+    const revoke = fence.invalidate({ userId: 7 });
+    fence.finishUserMutation(second, { kind: "no-change-confirmed" });
+    denied(fence);
+    fence.check({ ...identity, userId: 8 }, fence.revision);
+    // P0 global revision CAS remains intact after receipt completion.
+    fence.settle({ userId: 7 }, revoke, { kind: "user-absent", userId: 7 });
+    denied(fence);
+    fence.finishUserMutation(first, { kind: "no-change-confirmed" });
+    denied(fence);
+  });
+  it("missing/invalid facts retain their own block, foreign tokens and callbacks cannot mutate auth result", () => {
+    const fence = new TerminalRevocationFenceV2(() => 0);
+    const token = fence.beginUserMutation();
+    fence.finishUserMutation({}, { kind: "no-change-confirmed" });
+    fence.finishUserMutation(token, { kind: "password-committed", userId: 7, beforeEpoch: 3, afterEpoch: 3 });
+    denied(fence);
+    fence.finishUserMutation(token, { kind: "no-change-confirmed" });
+    fence.check(identity, fence.revision);
+    fence.subscribeCreators(() => {
+      throw new Error("terminal only");
+    });
+    const next = fence.beginUserMutation();
+    fence.finishUserMutation(next, { kind: "user-absent", userId: 7 });
+    denied(fence);
+  });
+});

@@ -1,7 +1,7 @@
 /** LAN security r2 §5.4–5.6: one checked completion, instance-local challenges and budgets.
  * HTTP/CSRF/cookie parsing and finish-hook registration belong to the integrator. */
-import type { TerminalRevocationFence } from "./terminal/revocation-fence.js";
-import { lanIdentity } from "./auth-identity.js";
+import type { TerminalAuthFenceV2 } from "./terminal-v2-ports.js";
+import { invalidateTerminalAuthV2, settleTerminalAuthV2 } from "./terminal/v2/frontend.js";
 import { createHash, randomBytes } from "node:crypto";
 import {
   LAN_2FA_COOKIE,
@@ -170,7 +170,7 @@ async function step<T>(
   }
 }
 
-export function createLanLoginCore(deps: LanLoginCoreDeps & { terminalAuth?: TerminalRevocationFence }): LanLoginCore {
+export function createLanLoginCore(deps: LanLoginCoreDeps & { terminalAuth?: TerminalAuthFenceV2 }): LanLoginCore {
   const challenges = new Map<string, Challenge>();
   // Never evict an unexpired attempt window: capacity refuses new users fail-closed.
   const windows = new Map<number, UserWindows>();
@@ -180,7 +180,10 @@ export function createLanLoginCore(deps: LanLoginCoreDeps & { terminalAuth?: Ter
   let completing = 0;
   let disposed = false;
 
-  function revokeHash(sidHash: string): void {
+  function revokeHash(sidHash: string, absent = false): void {
+    const selector = { sidTag: sidHash };
+    const revision = invalidateTerminalAuthV2(deps.terminalAuth, selector);
+    if (absent) settleTerminalAuthV2(deps.terminalAuth, selector, revision, { kind: "sid-absent", sidTag: sidHash });
     deps.authRevoke.emit({ sel: { sidTag: sidHash }, reason: "logout" });
     deps.revokeSse(sidHash);
   }
@@ -189,9 +192,13 @@ export function createLanLoginCore(deps: LanLoginCoreDeps & { terminalAuth?: Ter
     revokeHash(sidHash);
     // Best effort, bounded logical wait. The store owns physical IPC settlement.
     const io: LoginIo = { ua: "", signal: new AbortController().signal, responseOpen: () => true };
-    void step(io, 8_000, (opts) => deps.store.deleteSession(sidHash, opts))
-      .catch(() => deps.log.error("web-hub lan login: session cleanup failed"))
-      .finally(() => revokeHash(sidHash));
+    void step(io, 8_000, (opts) => deps.store.deleteSession(sidHash, opts)).then(
+      () => revokeHash(sidHash, true),
+      () => {
+        deps.log.error("web-hub lan login: session cleanup failed");
+        revokeHash(sidHash);
+      },
+    );
   }
   function closeApproval(ch: Challenge, why: LoginApprovalCloseReason): void {
     if (ch.approvalTimer !== undefined) {
@@ -358,7 +365,6 @@ export function createLanLoginCore(deps: LanLoginCoreDeps & { terminalAuth?: Ter
     recoveryLeft?: number,
   ): Promise<LoginReply> {
     let sid: string | undefined;
-    const terminalLoginRevision = deps.terminalAuth?.revision;
     let reserved = false;
     try {
       if (!live(io, run, ch)) throw new Error("E_ABORTED");
@@ -387,7 +393,7 @@ export function createLanLoginCore(deps: LanLoginCoreDeps & { terminalAuth?: Ter
         },
         (late) => {
           if (late.ok) {
-            for (const hash of late.evicted) revokeHash(hash);
+            for (const hash of late.evicted) revokeHash(hash, true);
             cleanupSession(late.sid);
           }
         },
@@ -397,7 +403,7 @@ export function createLanLoginCore(deps: LanLoginCoreDeps & { terminalAuth?: Ter
         return error(401, "E_AUTH");
       }
       sid = inserted.sid;
-      for (const hash of inserted.evicted) revokeHash(hash);
+      for (const hash of inserted.evicted) revokeHash(hash, true);
       if (!live(io, run, ch)) throw new Error("E_ABORTED");
       if (user.initialPassword !== undefined) await clearInitialPassword(io, user, ctx.clientIp, deadline);
       if (!live(io, run, ch)) throw new Error("E_ABORTED");
@@ -415,31 +421,6 @@ export function createLanLoginCore(deps: LanLoginCoreDeps & { terminalAuth?: Ter
         }
         closeApproval(ch, "success");
         ch.waiter?.wake("expired");
-      }
-      if (deps.terminalAuth !== undefined && terminalLoginRevision !== undefined) {
-        // Explicit successful INSERT provenance, never called by generic authorize/touch.
-        // Optional terminal failure must not change legacy WebHub login success.
-        try {
-          const rec = await step(io, deadline.remaining(), (opts) =>
-            deps.store.touchSession(hashSid(sid!), deps.now(), opts),
-          );
-          if (rec !== undefined && live(io, run))
-            deps.terminalAuth.loginComplete(
-              lanIdentity(
-                {
-                  userId: rec.userId,
-                  epoch: rec.epoch,
-                  sidHash: hashSid(sid),
-                  absoluteExpiresAt: rec.absoluteExpiresAt,
-                },
-                rec,
-              ),
-              rec.epoch,
-              terminalLoginRevision,
-            );
-        } catch {
-          /* no proof is fail-closed for terminal only */
-        }
       }
       auditLan2fa(deps.log, { phase: "complete", method, ip: ctx.clientIp, user: user.username, ok: true });
       // Keep the abort cleanup through the send/finish gap. It is independently bounded

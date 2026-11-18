@@ -4,7 +4,16 @@
 import { parseTerminalSession } from "../../protocol/terminal-session.js";
 import { randomBytes } from "node:crypto";
 import { createTerminalCommandIngress } from "../commands.js";
-import type { TerminalAgentLink } from "../agent-server.js";
+// Legacy test-only dependency during staged removal; no production assembly imports this module.
+type TerminalAgentLink = {
+  meta: import("../ports.js").TerminalIngressMeta;
+  agentId: Extract<import("../../protocol/messages.js").AgentFrame, { t: "hello" }>["agentId"];
+  kind: Extract<import("../../protocol/messages.js").AgentFrame, { t: "hello" }>["kind"];
+  pendingBytes: number;
+  terminalSession?: import("../../protocol/terminal-session.js").TerminalSession;
+  authorizationVersion?: number;
+  send(frame: import("../../protocol/messages.js").HubFrame): boolean;
+};
 import type { TerminalIngressMeta, TerminalIngressPort } from "../ports.js";
 import type { CmdFrame } from "../../protocol/messages.js";
 import { terminalFrameOk, type TerminalLocalReference, type TermReq, type TermRes } from "../../protocol/terminal.js";

@@ -34,7 +34,6 @@ async function setup(trusted: boolean, guard: () => boolean = () => true) {
     paths: pathsIn(tmp.dir),
     env: { HOME: tmp.dir },
     netConnect: n.netConnect,
-    random: () => 0.5,
     argv1: "/nonexistent/pi",
     buildInfo: async () => ({ pluginVersion: "1", buildId: "t51" }),
   });
@@ -59,7 +58,7 @@ describe("metadata-only production wireWebHub", () => {
       sessionId: "sess-1",
       epoch: MODULE_INSTANCE,
       contextGeneration: generation,
-    };
+    } as const;
     h.socket.hub(request);
     expect(h.socket.frames().at(-1)).toMatchObject({ t: "terminal_context_res", ok: true, cwd: tmp.dir });
     const original = currentConnection()!.terminalLinkInstance;
@@ -68,8 +67,12 @@ describe("metadata-only production wireWebHub", () => {
     const before = h.socket.frames().length;
     h.socket.hub(request);
     expect(h.socket.frames()).toHaveLength(before);
-    await vi.advanceTimersByTimeAsync(500);
+    // WireWebHub does not forward AcquireOptions.random. Cover the actual public
+    // retry's entire 400..600ms jitter window, then require a genuinely new socket.
+    await vi.advanceTimersByTimeAsync(601);
+    expect(h.n.sockets).toHaveLength(2);
     const next = h.n.sockets.at(-1)!;
+    expect(next).not.toBe(h.socket);
     next.emit("connect");
     next.hub(ackFrame());
     expect(currentConnection()!.terminalLinkInstance).not.toBe(original);

@@ -640,6 +640,7 @@ ${crashAfterCommit}
       return revoked;
     }
     case 'setPassword': {
+      let authFact;
       db.exec('BEGIN IMMEDIATE');
       try {
         const existing = stmtGetUser.get(args.username);
@@ -649,13 +650,15 @@ ${crashAfterCommit}
         } else {
           stmtInsertUser.run(args.username, args.kdf, args.n, args.r, args.p, unb64(args.salt), unb64(args.hash), args.now, args.now);
         }
+        const updated = stmtGetUser.get(args.username);
+        authFact = {kind:'password-committed',userId:updated.id,beforeEpoch:existing ? existing.epoch : null,afterEpoch:updated.epoch};
         db.exec('COMMIT');
       } catch (err) {
         try { db.exec('ROLLBACK'); } catch {}
         throw err;
       }
 ${crashAfterCommit}
-      return null;
+      return authFact;
     }
     case 'rehashPassword': {
       const old = args.old, next = args.next;

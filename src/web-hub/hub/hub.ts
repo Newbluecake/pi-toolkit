@@ -22,8 +22,9 @@ import type { RetainedSessionFs } from "./spawn/retained-session.js";
  * idle monitor fires); every timer here is unref'd.
  */
 import { assembleTerminal } from "./assembly-terminal.js";
-import type { TerminalRevocationFence } from "./terminal/revocation-fence.js";
-import { TERMINAL_UI_CAP, TERMINAL_SESSION_CAP } from "../protocol/version.js";
+import type { TerminalRevocationFenceV2 } from "./terminal/v2/revocation-fence.js";
+import type { TerminalFrontendDepsV2 } from "./terminal/v2/frontend.js";
+import { TERMINAL_V2_CAP } from "../protocol/terminal-v2-paths.js";
 import { randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { type GitRunner } from "../../git/run.js";
@@ -142,6 +143,18 @@ const HISTORY_SERVICE_DISPOSE_MS = 2_500;
  */
 export const RESTORE_REASONS: ReadonlySet<string> = new Set(["restart", "superseded", "crash"]);
 export interface StartHubDeps {
+  /** Programmatic-only isolated PTY/observation seam. No settings/env/wire path;
+   * main.ts never supplies it, machine-off never reads it. */
+  terminalV2Test?: {
+    backend?(
+      options: import("./terminal/v2/backend.js").TerminalBackendOptions,
+    ): import("./terminal/v2/backend.js").TerminalBackend;
+    ready?(
+      initialized: Promise<void>,
+      service: import("./terminal/v2/service.js").HubTerminalServiceV2,
+      ledger: import("./terminal/v2/ledger.js").GuardedTerminalAllocationLedgerV2,
+    ): void;
+  };
   /** Programmatic test-only stage/syscall barriers; main.ts never supplies this.
    * No config/env/wire path. Ignored entirely when terminal policy is off/denied. */
   terminalAuthorityRecoveryTestDeps?: import("./terminal/authority-recovery.js").AuthorityRecoveryTestDeps;
@@ -382,7 +395,7 @@ export async function startHub(
       ...(config.terminal === undefined
         ? {}
         : {
-            terminalAuth: () => (ctx.fe as HttpFrontendExt & { terminalAuth?: TerminalRevocationFence }).terminalAuth,
+            terminalAuth: () => (ctx.fe as HttpFrontendExt & { terminalAuth?: TerminalRevocationFenceV2 }).terminalAuth,
           }),
       hasLan: () => config.lan !== undefined,
       // D/E/F/G gates passed together: expose local setup only with configured LAN.
@@ -447,7 +460,7 @@ export async function startHub(
         // agent-server.ts's hello_ack.caps fold (caps-coexist pins the set equality).
         ...TODO_ARCHIVE_HUB_CAPS,
         ...extraHubCaps,
-        ...(config.terminal === undefined ? [] : [TERMINAL_UI_CAP, TERMINAL_SESSION_CAP]),
+        ...(config.terminal === undefined ? [] : [TERMINAL_V2_CAP]),
       ],
     };
     ctx.info = info;
@@ -488,11 +501,9 @@ export async function startHub(
       ...(config.terminal === undefined
         ? {}
         : {
-            terminal: {
-              ownsCommand: (meta, raw) => terminal?.ingress.ownsCommand(meta, raw) ?? false,
-              consumeAgentFrame: (meta, raw) => terminal?.ingress.consumeAgentFrame(meta, raw),
-              retireLink: (meta) => terminal?.ingress.retireLink(meta),
-              onIngressFailure: (meta) => terminal?.ingress.onIngressFailure?.(meta),
+            terminalContext: {
+              consume: (instance, raw) => terminal?.context.consume(instance, raw),
+              retire: (instance, scope) => terminal?.context.retire(instance, scope),
             },
           }),
       config,
@@ -668,7 +679,7 @@ export async function startHub(
     ctx.lanClosedByRotateScan = false;
 
     if (config.privacy === true || config.terminal !== undefined) await loadPrivacyStore(ctx);
-    if (config.terminal !== undefined) terminal = await assembleTerminal(ctx);
+    if (config.terminal !== undefined) terminal = assembleTerminal(ctx);
     const commandRouter = createCommandRouter({ registry, log, now });
     ctx.commandRouter = commandRouter;
     const cmdLimit = createCmdLimit(now);
@@ -752,7 +763,7 @@ export async function startHub(
     cleanup.push(async () => versionSvc.dispose());
     const sameUi = (a: HubUiBuildWire | undefined, b: HubUiBuildWire | undefined): boolean =>
       a === b || (a !== undefined && b !== undefined && JSON.stringify(a) === JSON.stringify(b));
-    const frontendDeps: FrontendDeps = {
+    const frontendDeps: FrontendDeps & TerminalFrontendDepsV2 = {
       config,
       paths,
       registry,
@@ -781,7 +792,7 @@ export async function startHub(
         : {}),
       uploadMetrics,
       agentRemove: agentRemoveService,
-      ...(terminal === undefined ? {} : { terminal: terminal.routes }),
+      ...(terminal === undefined ? {} : { terminalV2: terminal.frontend }),
       ...(ctx.avatarRoutes === undefined ? {} : { avatar: ctx.avatarRoutes }),
       ...(privacyRoutes === undefined ? {} : { privacy: privacyRoutes }),
       ...(ctx.uploads === undefined ? {} : { uploads: ctx.uploads }),

@@ -63,7 +63,7 @@ function harness(cold: AllocationV2[] = []) {
   const reserveReached = deferred<void>();
   let snapshot: TerminalContextSnapshotV2 = { scope, cwd: "/tmp", contextGeneration: 1, linkInstance: {}, limits };
   let resolveGate: Promise<void> | undefined;
-  const physical = deferred<TerminalPhysicalResult>();
+  let physical = deferred<TerminalPhysicalResult>();
   let autoProof = true;
   const ledger: TerminalAllocationLedgerPortV2 = {
     load: async () => ({ kind: "loaded", ledger: structuredClone(disk) }),
@@ -125,7 +125,12 @@ function harness(cold: AllocationV2[] = []) {
     service,
     create,
     reserveReached,
-    physical,
+    get physical() {
+      return physical;
+    },
+    resetPhysical() {
+      physical = deferred<TerminalPhysicalResult>();
+    },
     get disk() {
       return disk;
     },
@@ -526,5 +531,30 @@ describe("hub v2 sole resource owner", () => {
       expect(h.counts.spawn).toBe(0);
       await h.service.dispose();
     }
+  });
+});
+
+describe("P6 scope invalidation versus permanent retirement", () => {
+  it("original link handles are sealed but a fresh trusted declaration in the same epoch may create", async () => {
+    const h = harness();
+    await h.service.initialize(signal());
+    const created = await h.create();
+    expect(created.ok).toBe(true);
+    if (!created.ok) throw new Error("expected original term");
+    const original = await h.service.runtime(auth, { scope, hubInstance: id("h"), termId: created.termId }, signal());
+    expect(original.ok).toBe(true);
+    h.service.invalidateScope(scope);
+    if (original.ok) expect(original.runtime.invalidated.aborted).toBe(true);
+    expect((await h.service.close(auth, { scope, hubInstance: id("h"), termId: created.termId }, signal())).ok).toBe(
+      true,
+    );
+    expect((await h.service.list(auth, scope, signal())).ok).toBe(true);
+    h.resetPhysical();
+    const next = await h.create(id("z"));
+    expect(next.ok).toBe(true);
+    expect(h.counts.spawn).toBe(2);
+    h.service.retireScope(scope);
+    expect(await h.create(id("y"))).toMatchObject({ ok: false, code: "E_SESSION_CHANGED" });
+    await h.service.dispose();
   });
 });

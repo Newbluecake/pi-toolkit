@@ -34,6 +34,7 @@
  * choice made without a §16-style user sign-off; flagged in the delivery
  * report for review.
  */
+import { passwordCommitFact, type PasswordFactStore } from "./auth-store-facts.js";
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { userInfo } from "node:os";
@@ -65,7 +66,7 @@ const FALLBACK_INITIAL_USERNAME = "admin";
 /** `LanStatus.warnings` token raised when the WAL TRUNCATE after wiping the initial password failed. */
 const INITIAL_RESIDUE_WARNING = "initial-password-residue";
 
-export interface LanStore extends LanStorePort {
+export interface LanStore extends LanStorePort, PasswordFactStore {
   /** §6.7.1 step ④ (rotate token, C8): single-transaction revoke of every LAN session — bumps
    * every user's epoch and deletes every session row. Deliberately NOT on the frozen
    * `LanStorePort` (same widening rule as `touchSessionReserved` above): the rotate-token flow
@@ -406,19 +407,24 @@ export async function createLanStore(deps: CreateLanStoreDeps): Promise<CreateLa
     },
 
     async setPassword(input, opts) {
-      await dbClient.call(
-        "setPassword",
-        {
-          username: input.username,
-          kdf: input.kdf,
-          n: input.n,
-          r: input.r,
-          p: input.p,
-          salt: base64(input.salt),
-          hash: base64(input.hash),
-          now: now(),
-        },
-        opts,
+      await store.setPasswordWithFact(input, opts);
+    },
+    async setPasswordWithFact(input, opts) {
+      return passwordCommitFact(
+        await dbClient.call(
+          "setPassword",
+          {
+            username: input.username,
+            kdf: input.kdf,
+            n: input.n,
+            r: input.r,
+            p: input.p,
+            salt: base64(input.salt),
+            hash: base64(input.hash),
+            now: now(),
+          },
+          opts,
+        ),
       );
     },
 

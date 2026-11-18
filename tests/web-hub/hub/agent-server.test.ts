@@ -37,7 +37,7 @@ const clients: TestClient[] = [];
 
 async function setup(
   terminal = false,
-  port?: import("../../../src/web-hub/hub/ports.js").TerminalIngressPort,
+  port?: NonNullable<Parameters<typeof createAgentServer>[1]["terminalContext"]>,
   overrides: Partial<import("../../../src/web-hub/hub/ports.js").HubConfig> = {},
 ): Promise<void> {
   sockPath = join(tmp.make("wh-as-"), "hub.sock");
@@ -46,7 +46,7 @@ async function setup(
   await new Promise<void>((r) => server.listen(sockPath, () => r()));
   agentServer = createAgentServer(server, {
     registry,
-    ...(port === undefined ? {} : { terminal: port }),
+    ...(port === undefined ? {} : { terminalContext: port }),
     config: config({
       pluginVersion: "9.9.9",
       buildId: "9.9.9@hub",
@@ -348,112 +348,109 @@ describe("agent-server: run-transcript frames (fleet-drawer §5.3, F3b)", () => 
   });
 });
 
-describe("private terminal current-socket transport", () => {
-  it("off allocates/exposes no terminal transport port", () => {
+const sessionV2 = (sessionId: string) => ({
+  t: "session",
+  sessionId,
+  cwd: "/fixture",
+  reason: "new",
+  leafId: null,
+  mode: "tui",
+});
+const claimV2 = (sessionId = "one", contextGeneration = 1) => ({
+  v: 2,
+  enabled: true,
+  sessionId,
+  epoch: "epoch-1",
+  contextGeneration,
+  limits: { maxPerSession: 2, inputIdleMs: 3600000, maxLifetimeMs: 28800000 },
+});
+const statusV2 = (terminalSessionV2?: unknown) => ({
+  t: "status",
+  leafId: null,
+  busy: true,
+  pending: false,
+  ...(terminalSessionV2 === undefined ? {} : { terminalSessionV2 }),
+});
+describe("v2 private terminal current-socket metadata transport", () => {
+  it("off exposes no legacy execution port", () => {
     expect(Object.hasOwn(agentServer, "terminalLink")).toBe(false);
   });
-  it("uses the actual current link, retires old closures on reclaim and refuses detached scope", async () => {
+  it("requires exact declaration, retires old closures on reclaim and refuses detached scope", async () => {
     await agentServer.close();
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await setup(true);
     const c = await client();
     c.send(hello());
-    const ack = await c.waitFrame((f) => f["t"] === "hello_ack"),
-      key = ack["agentKey"] as string;
-    expect(agentServer.terminalLink!(key)).toBeUndefined();
-    c.send({ t: "session", sessionId: "one", cwd: "/fixture", reason: "startup", leafId: null, mode: "tui" });
-    await waitFor(() => registry.get(key)?.session?.sessionId === "one");
-    const link = agentServer.terminalLink!(key)!;
-    expect(link.meta).toEqual({ agentKey: key, linkGen: 1, sessionId: "one", epoch: "epoch-1" });
-    expect(link.agentId).toEqual(hello().agentId);
-    expect(link.kind).toBe("tui");
-    expect(link.pendingBytes).toBe(0);
-    expect(link.send({ t: "ping", ts: 1937 })).toBe(true);
-    await c.waitFrame((f) => f["t"] === "ping" && f["ts"] === 1937);
-    c.send({ t: "session_detached", reason: "new" });
-    await waitFor(() => agentServer.terminalLink!(key) === undefined);
-    expect(link.send({ t: "ping", ts: 1938 })).toBe(false);
-    const d = await client();
-    d.send(hello());
-    await d.waitFrame((f) => f["t"] === "hello_ack");
-    d.send({ t: "session", sessionId: "two", cwd: "/fixture", reason: "new", leafId: null, mode: "tui" });
-    await waitFor(() => agentServer.terminalLink!(key)?.meta.sessionId === "two");
-    expect(link.send({ t: "ping", ts: 1938 })).toBe(false);
-    expect(agentServer.terminalLink!(key)!.meta.linkGen).toBe(2);
-  });
-});
-
-describe("per-session declaration is current-socket state before ordinary publication", () => {
-  it("rejects absent/malformed/stale claims, withdraws before broadcast, restores only a fresh scope", async () => {
-    await agentServer.close();
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-    const failures = vi.fn();
-    await setup(true, {
-      ownsCommand: () => false,
-      consumeAgentFrame() {},
-      retireLink() {},
-      onIngressFailure: failures,
-    });
-    const c = await client();
-    c.send(hello());
-    const ack = await c.waitFrame((f) => f.t === "hello_ack");
-    const key = ack.agentKey as string;
-    const session = (sessionId: string) => ({
-      t: "session",
-      sessionId,
-      cwd: "/fixture",
-      reason: "new",
-      leafId: null,
-      mode: "tui",
-    });
-    c.send(session("one"));
-    await waitFor(() => agentServer.terminalLink!(key)?.meta.sessionId === "one");
-    expect(agentServer.terminalLink!(key)?.terminalSession).toBeUndefined();
-    const claim = {
-      v: 1,
-      enabled: true,
+    const ack = await c.waitFrame((f) => f.t === "hello_ack"),
+      key = ack.agentKey as string;
+    expect(agentServer.terminalContextLink!(key)).toBeUndefined();
+    c.send(sessionV2("one"));
+    c.send(statusV2(claimV2()));
+    await waitFor(() => agentServer.terminalContextLink!(key) !== undefined);
+    const link = agentServer.terminalContextLink!(key)!;
+    expect(link.scope).toEqual({ agentKey: key, sessionId: "one", epoch: "epoch-1" });
+    const request = {
+      t: "terminal_context_req" as const,
+      v: 2 as const,
+      rid: "r".repeat(24),
       sessionId: "one",
       epoch: "epoch-1",
-      limits: { maxPerSession: 2, maxPerPrincipal: 2, maxTotal: 8, inputIdleMs: 3600000, maxLifetimeMs: 28800000 },
+      contextGeneration: 1,
     };
-    const status = (terminalSession?: unknown) => ({
-      t: "status",
-      leafId: null,
-      busy: true,
-      pending: false,
-      ...(terminalSession === undefined ? {} : { terminalSession }),
-    });
+    expect(link.send(request)).toBe(true);
+    await c.waitFrame((f) => f.t === "terminal_context_req");
+    c.send({ t: "session_detached", reason: "new" });
+    await waitFor(() => agentServer.terminalContextLink!(key) === undefined);
+    expect(link.send(request)).toBe(false);
+    const d = await client();
+    d.send(hello());
+    await d.waitFrame((f) => f.t === "hello_ack");
+    d.send(sessionV2("two"));
+    d.send(statusV2(claimV2("two", 2)));
+    await waitFor(() => agentServer.terminalContextLink!(key)?.scope.sessionId === "two");
+    expect(agentServer.terminalContextLink!(key)!.instance).not.toBe(link.instance);
+    expect(link.send(request)).toBe(false);
+  });
+  it("rejects malformed/stale declarations and withdraws before ordinary publication", async () => {
+    await agentServer.close();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    const retired = vi.fn();
+    await setup(true, { consume() {}, retire: retired });
+    const c = await client();
+    c.send(hello());
+    const ack = await c.waitFrame((f) => f.t === "hello_ack"),
+      key = ack.agentKey as string;
+    c.send(sessionV2("one"));
+    await waitFor(() => registry.get(key)?.session?.sessionId === "one");
+    expect(agentServer.terminalContextLink!(key)).toBeUndefined();
+    const claim = claimV2();
     const observations: unknown[] = [];
     registry.bus.subscribe((e) => {
-      if (e.type === "status") observations.push(agentServer.terminalLink!(key)?.terminalSession);
+      if (e.type === "status") observations.push(agentServer.terminalContextLink!(key)?.declaration);
     });
-    c.send(status(claim));
+    c.send(statusV2(claim));
     await waitFor(() => observations.length === 1);
     expect(observations[0]).toEqual(claim);
-    const version = agentServer.terminalLink!(key)!.authorizationVersion!;
     for (const bad of [
       undefined,
       { ...claim, epoch: "old" },
       { ...claim, sessionId: "stale" },
       { ...claim, enabled: false },
-      { ...claim, limits: { ...claim.limits, maxTotal: 0 } },
+      { ...claim, limits: { ...claim.limits, maxPerSession: 0 } },
     ]) {
       const n = observations.length;
-      c.send(status(bad));
+      c.send(statusV2(bad));
       await waitFor(() => observations.length === n + 1);
       expect(observations.at(-1)).toBeUndefined();
-      expect(registry.get(key)?.status?.busy).toBe(true); // ordinary malformed nested status survives
+      expect(registry.get(key)?.status?.busy).toBe(true);
     }
-    expect(failures).toHaveBeenCalled();
-    c.send(status(claim));
-    await waitFor(() => agentServer.terminalLink!(key)?.terminalSession !== undefined);
-    expect(agentServer.terminalLink!(key)!.authorizationVersion!).toBeGreaterThan(version);
-    c.send(session("two"));
-    c.send(status(claim)); // delayed old-session projection must NOT revive eligibility
-    await waitFor(() => agentServer.terminalLink!(key)?.meta.sessionId === "two");
-    expect(agentServer.terminalLink!(key)?.terminalSession).toBeUndefined();
-    c.send({ t: "session_detached", reason: "new" });
-    await waitFor(() => agentServer.terminalLink!(key) === undefined);
+    expect(retired).toHaveBeenCalled();
+    c.send(statusV2(claimV2("one", 2)));
+    await waitFor(() => agentServer.terminalContextLink!(key)?.declaration.contextGeneration === 2);
+    c.send(sessionV2("two"));
+    c.send(statusV2(claim));
+    await waitFor(() => registry.get(key)?.session?.sessionId === "two");
+    expect(agentServer.terminalContextLink!(key)).toBeUndefined();
   });
 });
 

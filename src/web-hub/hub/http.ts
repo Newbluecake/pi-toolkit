@@ -59,7 +59,14 @@
  * §6.2/§6.3/§3.3) likewise lives in `http-cmd.ts` (same ⑨-H2 split); both
  * listeners' call sites below import `dispatchCmdOrDialog` from there.
  */
-import { dispatchTerminal, isTerminalPath, terminalFrontend } from "./terminal/routes.js";
+import { dispatchTerminalV2 } from "./terminal/v2/routes.js";
+import {
+  isTerminalPathV2,
+  invalidateTerminalAuthV2,
+  settleTerminalAuthV2,
+  type TerminalFrontendDepsV2,
+} from "./terminal/v2/frontend.js";
+import type { TerminalRevalidateV2 } from "./terminal/v2/view.js";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import {
   API_ERRORS,
@@ -104,7 +111,13 @@ import type { SpawnsPayload } from "../protocol/spawn.js";
 import { handleUploadRequest } from "./upload-http.js";
 import { sendJsonNegotiated } from "./gzip.js";
 import { dispatchCmdOrDialog } from "./http-cmd.js";
-import { createLanTransport, handleLanRequest, recheckLanSseExpiry, type LanRuntime } from "./http-lan.js";
+import {
+  createLanTransport,
+  handleLanRequest,
+  recheckLanSseExpiry,
+  revalidateTerminalLanV2,
+  type LanRuntime,
+} from "./http-lan.js";
 import { errCode, isPvLogUrl, redactLogUrl } from "./preview/pv-path.js";
 import { WTDIFF_FILES_PATH, WTDIFF_FILE_PATH } from "../protocol/worktree-diff.js";
 import { SCHED_API_PATH, SCHED_SESSION_ID_RE, type SchedulesPayloadWire } from "../protocol/schedule.js";
@@ -567,7 +580,6 @@ export interface RouteSet {
   subscribe(body: unknown, res: ServerResponse): void;
   unsubscribe(body: unknown, res: ServerResponse): void;
   openEvents(req: IncomingMessage, res: ServerResponse, auth?: SseClient["auth"]): SseClient;
-  terminalUnavailable?(client: SseClient, reason?: string): void;
   historyPage(query: URLSearchParams, res: ServerResponse): Promise<void>;
   /** fleet-drawer plan §5.4 (F4): the run-transcript routes — 404-shaped stubs when no service
    * was wired (`deps.runTx` absent), byte-identical to a hub without the channel. */
@@ -778,7 +790,6 @@ function createRouteSet(
           // the frontend's `case "hub"` reducer (already written for repeated frames) needs no
           // changes.
           sse.publish("hub", { ...routeDeps.info(), port: routeDeps.port() });
-          for (const [client, reason] of terminalDenied) terminalUnavailable(client, reason);
           break;
         case "load":
           // Host load is direct-send: no id and no replay-ring entry.
@@ -841,16 +852,6 @@ function createRouteSet(
     client.subscribed.add(agentKey);
   }
 
-  const terminalDenied = new Map<SseClient, string>();
-  function terminalUnavailable(client: SseClient, reason = "sse-admission-unavailable"): void {
-    if (sse.get(client.id) !== client) return;
-    terminalDenied.set(client, reason);
-    client.send("hub", {
-      ...routeDeps.info(),
-      port: routeDeps.port(),
-      terminal: { state: "unavailable", reason },
-    });
-  }
   function openEvents(req: IncomingMessage, res: ServerResponse, auth?: SseClient["auth"]): SseClient {
     const raw = req.headers["last-event-id"];
     const lastEventId = typeof raw === "string" && /^\d{1,16}$/.test(raw.trim()) ? Number(raw.trim()) : undefined;
@@ -880,7 +881,6 @@ function createRouteSet(
     if (schedulesWire !== undefined) client.send("schedules", schedulesWire);
     for (const [agentKey, cached] of fleetCache) client.send("fleet", fleetPayload(agentKey, cached));
     res.once("close", () => {
-      terminalDenied.delete(client);
       pending.delete(client.id);
       runRoutes?.onClientClose(client.id); // F4: run subs + watch refs die with the SSE conn
     });
@@ -939,7 +939,6 @@ function createRouteSet(
     subscribe,
     unsubscribe,
     openEvents,
-    terminalUnavailable,
     historyPage,
     runSubscribe: (body, res) => {
       if (runRoutes === undefined) throw new HttpError(404, "E_NOT_FOUND");
@@ -1211,8 +1210,15 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
   // direct `revokeHtmlCaps` call is a 1:1, in-place, same-order `authRevoke.emit`. The proxy
   // package attaches its own subscriber through the `subscribeAuthRevoke` extra at the bottom.
   const authRevoke = createAuthRevokeBus(log);
-  const terminal = terminalFrontend(deps.terminal);
-  terminal?.terminalAuth.connect(authRevoke);
+  const terminal = (deps as FrontendDeps & TerminalFrontendDepsV2).terminalV2;
+  let lanTerminalRevalidate: TerminalRevalidateV2 = async () => ({ ok: false, code: "E_AUTH", effect: "none" });
+  terminal?.attachAuthority(async (id, signal) => {
+    if (signal.aborted) return { ok: false, code: "E_DEADLINE", effect: "none" };
+    if (id.listener === "lan") return lanTerminalRevalidate(id, signal);
+    if (!id.sid || hashSid(id.sid) !== id.sidTag) return { ok: false, code: "E_AUTH", effect: "none" };
+    const result = auth.resolve(`${SESSION_COOKIE}=${id.sid}`, now());
+    return result.ok ? { ok: true, identity: loopbackIdentity(result) } : { ok: false, code: "E_AUTH", effect: "none" };
+  });
   // X1c: wiring the proxy routes (`deps.proxy`, present only when `config.proxy` exists) is what
   // arms BOTH the multi-candidate cookie path (§4.1) and the `/api` cross-site gate (§4.3 P4);
   // the explicit flags exist for tests that arm one without the routes. Neither armed ⇒ the
@@ -1403,7 +1409,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       spawn: deps.spawn,
       preview: deps.preview,
       authRevoke,
-      ...(deps.terminal === undefined ? {} : { terminal: deps.terminal }),
+      ...(terminal === undefined ? {} : { terminalV2: terminal }),
       lanCookieMax: multiCandidateAuth ? LAN_COOKIE_MAX : 1,
       ...(proxyRoutes === undefined ? {} : { proxy: proxyRoutes }),
       ...(crossSiteGate ? { crossSiteGate: true } : {}),
@@ -1440,8 +1446,9 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
         ? createKdfUpgrader({ kdf: lan.kdf, store: lan.store, log, now, target: effectiveWriteTarget(true) })
         : undefined;
     lan.scope.defer(() => kdfUpgrader?.dispose());
+    lanTerminalRevalidate = (id, signal) => revalidateTerminalLanV2(rt, id, signal);
     const loginCore = createLanLoginCore({
-      ...(terminal === undefined ? {} : { terminalAuth: terminal.terminalAuth }),
+      ...(terminal === undefined ? {} : { terminalAuth: terminal.auth }),
       ...(kdfUpgrader === undefined ? {} : { kdfUpgrader }),
       store: lan.store,
       kdf: lan.kdf,
@@ -1463,7 +1470,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       },
     });
     rt.sessions = createLanSessionsRoutes({
-      ...(terminal === undefined ? {} : { terminalAuth: terminal.terminalAuth }),
+      ...(terminal === undefined ? {} : { terminalAuth: terminal.auth }),
       store: lan.store,
       idleMs: lan.cfg.sessionIdleMs ?? 720 * 60_000,
       now,
@@ -1720,17 +1727,8 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
     return true;
   }
 
-  function openEvents(req: IncomingMessage, res: ServerResponse, identity: AuthIdentity): void {
-    const client = routes.openEvents(req, res);
-    terminal?.openSse(
-      req,
-      res,
-      identity,
-      client.id,
-      canonicalOrigin("http", canonicalHostKey(req.headers.host, "http") ?? ""),
-      client.output,
-      (reason) => routes.terminalUnavailable?.(client, reason),
-    );
+  function openEvents(req: IncomingMessage, res: ServerResponse, _identity: AuthIdentity): void {
+    routes.openEvents(req, res);
   }
 
   // web-hub-proxy §4.1 (XA): the single loopback identity resolution. Every executing
@@ -1769,19 +1767,30 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
     ) {
       throw new HttpError(403, "E_CSRF");
     }
-    if (deps.terminal !== undefined && isTerminalPath(path)) {
+    if (terminal !== undefined && isTerminalPathV2(path)) {
       const ctx = buildContext(req, "loopback");
       if ("reject" in ctx) throw new HttpError(ctx.reject, ctx.code);
-      await dispatchTerminal(deps.terminal, req, res, ctx, now, async () => {
-        const result = resolveLoopbackIdentity(req);
-        if (result.ok) return result.id;
-        if (result.conflict === true)
-          res.setHeader(
-            "Set-Cookie",
-            clearingSetCookies(SESSION_COOKIE, req.url ?? "/", req.headers.host, { secure: false }),
-          );
-        return undefined;
-      });
+      await dispatchTerminalV2(
+        {
+          routes: terminal.routes,
+          auth: terminal.auth,
+          now,
+          authenticate: async () => {
+            const result = resolveLoopbackIdentity(req);
+            if (result.ok) return { ok: true, identity: result.id };
+            if (result.conflict === true)
+              res.setHeader(
+                "Set-Cookie",
+                clearingSetCookies(SESSION_COOKIE, req.url ?? "/", req.headers.host, { secure: false }),
+              );
+            return { ok: false, code: result.code, effect: "none" };
+          },
+        },
+        req,
+        res,
+        ctx,
+        new AbortController().signal,
+      );
       return;
     }
     // web-hub-spawn plan §SP9 (arch §8.2): `/api/headless*` routes own their whole pipeline
@@ -2086,15 +2095,6 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
       if (path === "/api/login") {
         const r = auth.login(field(body, "token"), now());
         if (r.ok) {
-          if (terminal !== undefined) {
-            const resolved = auth.resolve(`${SESSION_COOKIE}=${r.sid}`, now());
-            if (resolved.ok)
-              terminal.terminalAuth.loginComplete(
-                loopbackIdentity(resolved),
-                auth.authGen(),
-                terminal.terminalAuth.revision,
-              );
-          }
           sendJson(
             res,
             200,
@@ -2113,7 +2113,10 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
         // `pwh_sid` value (valid or not, exactly as before); multi-candidate mode logs out every
         // distinct candidate (a logout is never refused by a conflict).
         for (const sid of cookieCandidates(req.headers.cookie, SESSION_COOKIE, loopbackCookieMax).values) {
+          const selector = { sidTag: hashSid(sid) };
+          const revision = invalidateTerminalAuthV2(terminal?.auth, selector);
           auth.logout(sid);
+          settleTerminalAuthV2(terminal?.auth, selector, revision, { kind: "sid-absent", sidTag: selector.sidTag });
           // web-hub-html-preview plan v2 §2.4: this session's HTML capabilities die with it.
           authRevoke.emit({ sel: { sidTag: hashSid(sid) }, reason: "logout" });
         }
@@ -2263,7 +2266,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
   async function close(): Promise<void> {
     if (closed) return;
     closed = true;
-    await deps.terminal?.dispose();
+    await terminal?.routes.dispose();
     await load?.dispose();
     await lanFacade?.close();
     unsubscribeBus?.();
@@ -2296,7 +2299,7 @@ export const createHttpFrontend: FrontendFactory = (deps: FrontendDeps): HttpFro
   // the object literal itself) so that literal still gets full excess-property checking against
   // the frozen `HttpFrontend` shape — every other caller of this factory stays byte-identical.
   return Object.assign(frontend, {
-    ...(terminal === undefined ? {} : { terminalAuth: terminal.terminalAuth }),
+    ...(terminal === undefined ? {} : { terminalAuth: terminal.auth }),
     auth,
     revokeAllSse: () => {
       // web-hub-html-preview plan v2 §2.4: token rotate (`revokeLoopbackSse`) also ends every

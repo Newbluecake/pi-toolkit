@@ -1,4 +1,5 @@
 /** In-memory auth notification ONLY. Auth's DB/token/rotate protocol is the fact source. */
+import type { PasswordCommitFact } from "../../auth-store-facts.js";
 import type { AuthIdentity } from "../../auth-identity.js";
 import type { AuthRevokeSelector } from "../../auth-revoke.js";
 import type { TerminalAuthFact, TerminalAuthFenceV2 } from "../../terminal-v2-ports.js";
@@ -41,6 +42,8 @@ export class TerminalRevocationFenceV2 implements TerminalAuthFenceV2, TerminalA
   private disposed = false;
   private readonly denies = new Map<string, { selector: AuthRevokeSelector; revision: number }>();
   private readonly listeners = new Set<TerminalAuthSubscriberV2>();
+  private readonly creatorListeners = new Set<TerminalAuthSubscriberV2>();
+  private readonly userMutations = new Map<object, number>();
   constructor(private readonly now: () => number = Date.now) {}
   get revision(): number {
     return this.rev;
@@ -50,6 +53,7 @@ export class TerminalRevocationFenceV2 implements TerminalAuthFenceV2, TerminalA
       this.disposed ||
       this.poisoned ||
       capturedRevision !== this.rev ||
+      (id.listener === "lan" && this.userMutations.size > 0) ||
       [...this.denies.values()].some((deny) => matchesTerminalAuthV2(deny.selector, id))
     )
       throw new TerminalV2Fault(fail("E_REVOKING"));
@@ -65,6 +69,65 @@ export class TerminalRevocationFenceV2 implements TerminalAuthFenceV2, TerminalA
         active = false;
         this.listeners.delete(listener);
       }
+    };
+  }
+  /** Local auth transaction bridge, not P0 settle or a persistent intent. Before
+   * the ORIGINAL transaction await, temporarily block LAN admission and seal views/
+   * flights. Do not kill unrelated creators just because the userId is not yet known.
+   * Each opaque token owns exactly its own block; other revocations are never removed. */
+  beginUserMutation(): object {
+    const token = Object.freeze({});
+    const revision = this.bump();
+    if (this.userMutations.size >= L.authSelectors) {
+      this.invalidate({ listener: "lan" });
+      return token;
+    }
+    this.userMutations.set(token, revision);
+    for (const listener of [...this.listeners]) {
+      try {
+        listener({ listener: "lan" }, revision);
+      } catch {
+        this.poisoned = true;
+      }
+    }
+    return token;
+  }
+  finishUserMutation(
+    token: object,
+    fact: PasswordCommitFact | { kind: "user-absent"; userId: number } | { kind: "no-change-confirmed" },
+  ): void {
+    const revision = this.userMutations.get(token);
+    if (this.disposed || this.poisoned || revision === undefined) return;
+    // The token/revision capability belongs only to this original same-operation
+    // receipt. Later completions cannot clear a different operation, sticky deny,
+    // or overflow. P0 settle still retains its stricter global revision CAS.
+    if (fact.kind !== "no-change-confirmed" && (!Number.isSafeInteger(fact.userId) || fact.userId < 1)) return;
+    if (
+      fact.kind === "password-committed" &&
+      (!Number.isSafeInteger(fact.afterEpoch) ||
+        fact.afterEpoch < 0 ||
+        (fact.beforeEpoch !== null &&
+          (!Number.isSafeInteger(fact.beforeEpoch) || fact.beforeEpoch < 0 || fact.afterEpoch <= fact.beforeEpoch)))
+    )
+      return;
+    if (fact.kind !== "no-change-confirmed") {
+      for (const listener of [...this.creatorListeners]) {
+        try {
+          listener({ userId: fact.userId }, revision);
+        } catch {
+          this.poisoned = true;
+        }
+      }
+    }
+    if (!this.poisoned) {
+      this.userMutations.delete(token);
+      this.bump();
+    }
+  }
+  subscribeCreators(listener: TerminalAuthSubscriberV2): () => void {
+    this.creatorListeners.add(listener);
+    return () => {
+      this.creatorListeners.delete(listener);
     };
   }
   private bump(): number {
@@ -85,7 +148,7 @@ export class TerminalRevocationFenceV2 implements TerminalAuthFenceV2, TerminalA
       const captured = selector === "all" ? selector : { ...selector };
       this.denies.set(key(captured), { selector: captured, revision });
       let threw = false;
-      for (const listener of [...this.listeners]) {
+      for (const listener of [...this.listeners, ...this.creatorListeners]) {
         try {
           listener(captured, revision);
         } catch {
@@ -94,7 +157,7 @@ export class TerminalRevocationFenceV2 implements TerminalAuthFenceV2, TerminalA
       }
       if (threw) {
         this.poisoned = true;
-        for (const listener of [...this.listeners]) {
+        for (const listener of [...this.listeners, ...this.creatorListeners]) {
           try {
             listener("all", revision);
           } catch {
@@ -140,6 +203,8 @@ export class TerminalRevocationFenceV2 implements TerminalAuthFenceV2, TerminalA
     this.invalidate("all");
     this.disposed = true;
     this.listeners.clear();
+    this.creatorListeners.clear();
+    this.userMutations.clear();
     this.denies.clear();
   }
 }

@@ -8,8 +8,16 @@
  * `http.ts` and are imported back; nothing in this file is edited relative
  * to its previous `http.ts` incarnation except the added `export` keywords.
  */
-import { dispatchTerminal, isTerminalPath, terminalFrontend } from "./terminal/routes.js";
-import type { TerminalRoutesPort } from "./ports.js";
+import { dispatchTerminalV2 } from "./terminal/v2/routes.js";
+import {
+  isTerminalPathV2,
+  invalidateTerminalAuthV2,
+  settleTerminalAuthV2,
+  terminalAuthSourceV2,
+  type TerminalFrontendV2,
+  type TerminalSourcedIdentityV2,
+} from "./terminal/v2/frontend.js";
+import type { TerminalRevalidateV2 } from "./terminal/v2/view.js";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
 import { Value } from "@sinclair/typebox/value";
@@ -310,7 +318,7 @@ const ABS_EXPIRY_MAX_DELAY_MS = 2_147_483_647;
 // ---------------------------------------------------------------------------
 
 export interface LanRuntime {
-  terminal?: TerminalRoutesPort;
+  terminalV2?: TerminalFrontendV2;
   loginCore?: LanLoginCore;
   sessions?: LanSessionsRoutes;
   csp: string;
@@ -577,10 +585,7 @@ async function requireLanSession(
 ): Promise<LanAuthed | undefined> {
   const fail = (status: number, code: string): undefined => {
     if (authFailure !== undefined) authFailure.code = code;
-    if (terminalErrors) {
-      if (!res.writableEnded && !res.destroyed)
-        sendJson(res, status, { ok: false, code: code === "E_DB" ? "E_UNAVAILABLE" : code, effect: "none" });
-    } else sendError(res, status, code);
+    if (!terminalErrors) sendError(res, status, code);
     return undefined;
   };
   const ip = ctx.clientIp;
@@ -673,7 +678,10 @@ async function requireLanSession(
     sidHash,
     absoluteExpiresAt: rec.absoluteExpiresAt,
   };
-  return { ...lan, identity: lanIdentity(lan, rec) };
+  const identity: TerminalSourcedIdentityV2 = lanIdentity(lan, rec);
+  if (terminalErrors)
+    identity[terminalAuthSourceV2] = Object.freeze({ origin: ctx.externalOrigin, clientIp: ctx.clientIp });
+  return { ...lan, identity };
 }
 
 function csrfOkLan(req: IncomingMessage, ctx: RequestContext): boolean {
@@ -1237,11 +1245,30 @@ async function handleLanRequestInner(
     return path === PRIVACY_VERIFY_PATH ? rt.privacy.handleVerify(req, res, io) : rt.privacy.handleLock(req, res, io);
   }
 
-  if (rt.terminal !== undefined && isTerminalPath(path)) {
-    await dispatchTerminal(rt.terminal, req, res, ctx, rt.now, async (remaining) => {
-      const session = await requireLanSession(rt, req, res, ctx, false, lease, remaining, undefined, true);
-      return session?.identity;
-    });
+  if (rt.terminalV2 !== undefined && isTerminalPathV2(path)) {
+    await dispatchTerminalV2(
+      {
+        routes: rt.terminalV2.routes,
+        auth: rt.terminalV2.auth,
+        now: rt.now,
+        authenticate: async (signal) => {
+          const failure: { code?: string } = {};
+          const session = await requireLanSession(rt, req, res, ctx, false, lease, 2000, failure, true);
+          if (signal.aborted) return { ok: false, code: "E_DEADLINE", effect: "none" };
+          return session
+            ? { ok: true, identity: session.identity }
+            : {
+                ok: false,
+                code: failure.code === "E_DB" ? "E_DB" : failure.code === "E_RATE" ? "E_RATE" : "E_AUTH",
+                effect: "none",
+              };
+        },
+      },
+      req,
+      res,
+      ctx,
+      new AbortController().signal,
+    );
     return;
   }
 
@@ -1324,23 +1351,25 @@ async function handleLanRequestInner(
         // outlive the intent) and again after it (a mint whose authorize ran inside that window
         // still carries `sidHash`; the second bump catches it). Bus emits (XA §4.2), same
         // positions/order as the former direct hook calls.
-        rt.authRevoke.emit({ sel: { sidTag: sidHash }, reason: "logout" });
+        const selector = { sidTag: sidHash };
+        const revision = invalidateTerminalAuthV2(rt.terminalV2?.auth, selector);
+        rt.authRevoke.emit({ sel: selector, reason: "logout" });
         try {
           await rt.lan.store.deleteSession(sidHash);
           rt.authRevoke.emit({ sel: { sidTag: sidHash }, reason: "logout" });
-          const fence = terminalFrontend(rt.terminal)?.terminalAuth;
-          if (fence !== undefined) {
-            const revision = fence.revision;
-            await fence.repair(
-              { sidTag: sidHash },
-              revision,
-              0,
-              async () => (await raceDeadline(rt.lan.store.touchSession(sidHash, rt.now()), 1000)) === undefined,
-            );
-          }
+          settleTerminalAuthV2(rt.terminalV2?.auth, selector, revision, { kind: "sid-absent", sidTag: sidHash });
           rt.lanSse.revoke((c) => c.auth?.sidHash === sidHash, "revoked");
         } catch (err) {
           rt.log.error("web-hub lan http: logout deleteSession failed", { error: String(err) });
+          // Clearing the browser cookie is not proof of server-side logout. This
+          // honest failure contract applies identically with terminal on AND off.
+          sendJson(
+            res,
+            503,
+            { error: "E_DB", effect: "unknown", localSignedOut: true },
+            { "Set-Cookie": formatLanCookie("", { secure: ctx.scheme === "https", clear: true }) },
+          );
+          return;
         }
       }
       sendJson(
@@ -1391,15 +1420,6 @@ async function handleLanRequestInner(
         boundOrigin: ctx.externalOrigin,
         verifiedAt: rt.now(),
       });
-      terminalFrontend(rt.terminal)?.openSse(
-        req,
-        res,
-        session.identity,
-        client.id,
-        ctx.externalOrigin,
-        client.output,
-        (reason) => rt.routes.terminalUnavailable?.(client, reason),
-      );
       // §4.2 review fix (LC #1): a db-independent hard ceiling — cleared on the connection's own
       // `close` (natural disconnect, logout/passwd revoke, or the 55s tick's own "expired" revoke).
       rt.sseClientIps?.set(client, ctx.clientIp);
@@ -1445,3 +1465,41 @@ export function handleLanRequest(
     else res.destroy();
   });
 }
+
+/** Same original LAN store authority and identity/expiry/origin rules. Unlike chat
+ * SSE, a DB failure MUST detach the terminal view. No second cookie parsing. */
+export const revalidateTerminalLanV2: (
+  rt: LanRuntime,
+  ...args: Parameters<TerminalRevalidateV2>
+) => ReturnType<TerminalRevalidateV2> = async (rt, identity, signal) => {
+  const source = (identity as TerminalSourcedIdentityV2)[terminalAuthSourceV2];
+  if (signal.aborted) return { ok: false, code: "E_DEADLINE", effect: "none" };
+  if (!source || identity.listener !== "lan" || !identity.lan) return { ok: false, code: "E_AUTH", effect: "none" };
+  try {
+    const record = await raceDeadline(
+      touchForExpiryRecheck(rt.lan.store, identity.sidTag, rt.now(), source.clientIp),
+      2000,
+    );
+    if (signal.aborted) return { ok: false, code: "E_DEADLINE", effect: "none" };
+    if (
+      !record ||
+      record.userId !== identity.userId ||
+      record.epoch !== identity.lan.epoch ||
+      !lanRecordValid(record, rt.now(), source.origin)
+    )
+      return { ok: false, code: "E_AUTH", effect: "none" };
+    const next: TerminalSourcedIdentityV2 = lanIdentity(
+      {
+        userId: record.userId,
+        epoch: record.epoch,
+        sidHash: identity.sidTag,
+        absoluteExpiresAt: record.absoluteExpiresAt,
+      },
+      record,
+    );
+    next[terminalAuthSourceV2] = source;
+    return { ok: true, identity: next };
+  } catch {
+    return { ok: false, code: "E_DB", effect: "none" };
+  }
+};

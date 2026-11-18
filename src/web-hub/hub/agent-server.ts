@@ -23,10 +23,8 @@ import type { TerminalContextLinkV2 } from "./terminal/v2/context.js";
  * whether to ever send the `dialogs`/`ctl`/`commands` slots at all — omitting
  * `caps` here makes every hub look like a pre-P2 hub to every agent.
  */
-import { parseTerminalSession, type TerminalSession } from "../protocol/terminal-session.js";
 import type net from "node:net";
-import { isTerminalNamespace, hasReservedTerminalResult, terminalFrameOk } from "../protocol/terminal.js";
-import type { TerminalIngressPort, TerminalIngressMeta } from "./ports.js";
+import { isTerminalNamespace, hasReservedTerminalResult } from "../protocol/terminal.js";
 import { decodeAgentFrame, LIMITS, TIMING, type AgentFrame, type HubFrame } from "../protocol/messages.js";
 import { encodeFrame, NdjsonDecoder } from "../protocol/ndjson.js";
 import {
@@ -52,21 +50,8 @@ import type { AdminHandler } from "./admin.js";
 import type { HubConfig, HubLog } from "./ports.js";
 import type { AgentConn, Registry } from "./registry.js";
 
-/** Private current-socket binding, never card/status projections. Hello identity/kind
- * are CLAIMS: the local authority must independently validate OS incarnation/domain. */
-export interface TerminalAgentLink {
-  meta: TerminalIngressMeta;
-  agentId: Extract<AgentFrame, { t: "hello" }>["agentId"];
-  kind: Extract<AgentFrame, { t: "hello" }>["kind"];
-  pendingBytes: number;
-  /** Current positive declaration; never grants physical authority by itself. */
-  terminalSession?: TerminalSession;
-  authorizationVersion?: number;
-  send(frame: HubFrame): boolean;
-}
 export interface AgentServer {
   terminalContextLink?(agentKey: string): TerminalContextLinkV2 | undefined;
-  terminalLink?(agentKey: string): TerminalAgentLink | undefined;
   connectionCount(): number;
   close(): Promise<void>;
 }
@@ -79,7 +64,6 @@ export function createAgentServer(
   server: import("node:net").Server,
   deps: {
     registry: Registry;
-    terminal?: TerminalIngressPort;
     terminalContext?: {
       consume(instance: object, raw: unknown): void;
       retire(instance: object, scope: TerminalScopeV2): void;
@@ -132,7 +116,6 @@ export function createAgentServer(
   const conns = new Set<{
     sock: net.Socket;
     teardown: () => void;
-    terminalLink?: () => TerminalAgentLink | undefined;
     terminalContextLink?: () => TerminalContextLinkV2 | undefined;
   }>();
   let closed = false;
@@ -148,32 +131,25 @@ export function createAgentServer(
     const contextInstance = Object.freeze({});
     let contextDeclaration: TerminalSessionV2 | undefined;
     const retireContext = () => {
-      if (contextDeclaration && agentKey)
-        deps.terminalContext?.retire(contextInstance, {
-          agentKey,
-          sessionId: contextDeclaration.sessionId,
-          epoch: contextDeclaration.epoch,
-        });
+      const previous = contextDeclaration;
       contextDeclaration = undefined;
-    };
-    let terminalMeta: TerminalIngressMeta | undefined;
-    let terminalHello: Extract<AgentFrame, { t: "hello" }> | undefined;
-    let terminalDetached = false;
-    let terminalSession: TerminalSession | undefined;
-    let authorizationVersion = 0;
-    let terminalSessionId = "";
-    const withdraw = () => {
-      retireContext();
-      terminalSession = undefined;
-      authorizationVersion++;
-      if (terminalMeta) {
+      if (previous && agentKey) {
         try {
-          deps.terminal?.onIngressFailure?.({ ...terminalMeta, sessionId: terminalSessionId });
+          deps.terminalContext?.retire(contextInstance, {
+            agentKey,
+            sessionId: previous.sessionId,
+            epoch: previous.epoch,
+          });
         } catch {
-          /* synchronous deny */
+          /* private failure stays isolated */
         }
       }
     };
+    let terminalMeta: { agentKey: string; linkGen: number; sessionId: string; epoch: string } | undefined;
+    let terminalHello: Extract<AgentFrame, { t: "hello" }> | undefined;
+    let terminalDetached = false;
+    let terminalSessionId = "";
+    const withdraw = retireContext;
     let hadBye = false;
     let superseded = false;
     let finished = false;
@@ -217,16 +193,7 @@ export function createAgentServer(
       send: write,
       close(reason) {
         superseded = true;
-        if (config.terminal !== undefined) {
-          withdraw();
-          if (terminalMeta) {
-            try {
-              deps.terminal?.retireLink(terminalMeta);
-            } catch {
-              /* isolated */
-            }
-          }
-        }
+        if (config.terminal !== undefined) withdraw();
         destroy(reason);
       },
     };
@@ -307,34 +274,9 @@ export function createAgentServer(
         }
         return;
       }
-      if (terminalMeta !== undefined) {
-        const meta = { ...terminalMeta, sessionId: registry.get(agentKey)?.session?.sessionId ?? "" };
-        let privateCommand = false;
-        try {
-          privateCommand = deps.terminal?.ownsCommand(meta, raw) === true;
-        } catch {
-          try {
-            deps.terminal?.onIngressFailure?.(meta);
-          } catch {
-            /* fixed fail-closed */
-          }
-          return;
-        } // no raw/error body logging
-        if (isTerminalNamespace(raw) || hasReservedTerminalResult(raw) || privateCommand) {
-          if (!isTerminalNamespace(raw) || (terminalFrameOk(raw) && rawType(raw) !== "term_req")) {
-            try {
-              deps.terminal?.consumeAgentFrame(meta, raw);
-            } catch {
-              try {
-                deps.terminal?.onIngressFailure?.(meta);
-              } catch {
-                /* consumed, no fallback */
-              }
-            }
-          }
-          return;
-        }
-      }
+      // v1 execution is removed. Every reserved namespace/result is refused even
+      // when terminal is off; no fallback decoder/registry/public SSE path exists.
+      if (isTerminalNamespace(raw) || hasReservedTerminalResult(raw)) return;
       const frame: AgentFrame | undefined = decodeAgentFrame(raw);
       if (frame === undefined) {
         if (config.terminal !== undefined && rawType(raw) === "status") withdraw();
@@ -459,15 +401,6 @@ export function createAgentServer(
           if (terminalDetached || terminalSessionId !== frame.sessionId) withdraw();
           terminalSessionId = frame.sessionId;
           terminalDetached = false;
-        } else if (frame.t === "status") {
-          const next =
-            !terminalDetached && terminalSessionId && terminalMeta
-              ? parseTerminalSession(frame.terminalSession, { sessionId: terminalSessionId, epoch: terminalMeta.epoch })
-              : undefined;
-          if (JSON.stringify(next) !== JSON.stringify(terminalSession)) {
-            withdraw(); // clear old authorization BEFORE registry/broadcast/reentrant observers
-            terminalSession = next === undefined ? undefined : structuredClone(next);
-          }
         }
       }
       if (config.terminal !== undefined && frame.t === "status") {
@@ -519,13 +452,6 @@ export function createAgentServer(
       if (finished) return;
       finished = true;
       if (config.terminal !== undefined) withdraw();
-      if (terminalMeta !== undefined) {
-        try {
-          deps.terminal?.retireLink(terminalMeta);
-        } catch {
-          /* isolated cleanup */
-        }
-      }
       clearTimeout(helloTimer);
       clearTimeout(silenceTimer);
       clearInterval(pingTimer);
@@ -578,49 +504,6 @@ export function createAgentServer(
           },
         };
       },
-      ...(config.terminal === undefined
-        ? {}
-        : {
-            terminalLink: (): TerminalAgentLink | undefined => {
-              const view = agentKey === undefined ? undefined : registry.get(agentKey);
-              if (
-                finished ||
-                superseded ||
-                sock.destroyed ||
-                !sock.writable ||
-                !terminalMeta ||
-                !terminalHello ||
-                registry.getLinkGen(terminalMeta.agentKey) !== terminalMeta.linkGen ||
-                !view?.session ||
-                terminalDetached ||
-                hadBye
-              )
-                return undefined;
-              return {
-                meta: { ...terminalMeta, sessionId: view.session.sessionId },
-                agentId: { ...terminalHello.agentId },
-                kind: terminalHello.kind,
-                pendingBytes: sock.writableLength,
-                ...(terminalSession === undefined ? {} : { terminalSession: structuredClone(terminalSession) }),
-                authorizationVersion,
-                send: (frame) => {
-                  if (
-                    finished ||
-                    superseded ||
-                    terminalDetached ||
-                    sock.destroyed ||
-                    !sock.writable ||
-                    registry.get(terminalMeta!.agentKey)?.session?.sessionId !== view.session!.sessionId ||
-                    registry.getLinkGen(terminalMeta!.agentKey) !== terminalMeta!.linkGen ||
-                    sock.writableLength > LIMITS.hardQueueBytes
-                  )
-                    return false;
-                  write(frame);
-                  return !sock.destroyed;
-                },
-              };
-            },
-          }),
     };
     conns.add(entry);
     sock.on("close", () => {
@@ -640,17 +523,6 @@ export function createAgentServer(
       }
       return undefined;
     },
-    ...(config.terminal === undefined
-      ? {}
-      : {
-          terminalLink: (key: string) => {
-            for (const entry of conns) {
-              const link = entry.terminalLink?.();
-              if (link?.meta.agentKey === key) return link;
-            }
-            return undefined;
-          },
-        }),
     connectionCount: () => conns.size,
     close: async () => {
       if (closed) return;
