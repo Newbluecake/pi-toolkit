@@ -85,6 +85,8 @@ pi 子进程环境验证 bootstrap 键已清除（不执行 shell/PTY）。另�
 TypeBox 根/value/compile 成员身份、六 spelling、影子 consumer peer 与恶意 alias/paths，
 以及 scrub 后 lazy import。设置 `PI_TOOLKIT_HUB_LOADER_CONSUMER=<独立解包目录>` 可分片测
 无 node_modules 的 git/no-dist、正常 prepack npm 与 release ZIP；不在 consumer 安装/build。
+默认正例无 observer；另设 `PI_TOOLKIT_HUB_LOADER_OBSERVE=1` 用 Node 自带 V8 coverage 被动验证
+真实 hub 的宿主 root/value ESM 及父 consumer bundle/source 确实执行，不改解析/argv，不替代默认正例。
 诊断正例是产品 spawn env 下缺配置精确 exit 2；**裸 stock jiti 缺 alias 的 exit 1 仍是反例**，
 不能给裸诊断塞测试 alias 后称生产通过。retained sealed launcher 的迁移/债务/restart 完整链
 由独立 stockrestart 验收，不被本 loader 门替代；这里 terminal 始终关闭。

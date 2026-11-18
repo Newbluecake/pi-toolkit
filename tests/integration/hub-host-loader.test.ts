@@ -267,10 +267,13 @@ console.log('PASS native TypeBox identities and lazy import after env scrub');
         "--no-context-files",
       ];
       // Passive built-in V8 observation: no hooks/loader/argv changes or resolver overrides.
-      // The preceding consumer runs also exercise the same path without this observer.
+      // Opt-in only: the ordinary regression is a no-observer production launch.
+      const observe = process.env.PI_TOOLKIT_HUB_LOADER_OBSERVE === "1";
       const coverageDir = join(f.base, "v8");
-      mkdirSync(coverageDir, { mode: 0o700 });
-      f.env.NODE_V8_COVERAGE = coverageDir;
+      if (observe) {
+        mkdirSync(coverageDir, { mode: 0o700 });
+        f.env.NODE_V8_COVERAGE = coverageDir;
+      }
       const child = spawn(process.execPath, argv, { cwd: join(f.base, "cwd"), env: f.env, stdio: "pipe" });
       const exit = new Promise((r) => child.once("close", (code, signal) => r({ code, signal })));
       let stderr = "",
@@ -418,28 +421,33 @@ console.log('PASS native TypeBox identities and lazy import after env scrub');
         expect(existsSync(f.paths.socketPath)).toBe(false);
         child.stdin!.end();
         expect(await exit).toEqual({ code: 0, signal: null });
-        for (const record of records.filter((r) => r.pid !== undefined)) {
-          const files = readdirSync(coverageDir).filter((name) => name.startsWith(`coverage-${record.pid}-`));
-          const modules = files.flatMap((name) => JSON.parse(readFileSync(join(coverageDir, name), "utf8")).result);
-          const actualTargets = [plan.hostAliases.typebox, plan.hostAliases["typebox/value"]];
-          for (const target of actualTargets) {
-            const loaded = modules.find((entry: any) => entry.url === pathToFileURL(target).href);
-            expect(loaded, `real hub ${record.pid} loaded host ${target}`).toBeTruthy();
-            expect(loaded.functions.some((fn: any) => fn.ranges.some((r: any) => r.count > 0))).toBe(true);
+        let loadedEntry: string | undefined;
+        let coverage: string[] = [];
+        if (observe) {
+          for (const record of records.filter((r) => r.pid !== undefined)) {
+            const files = readdirSync(coverageDir).filter((name) => name.startsWith(`coverage-${record.pid}-`));
+            const modules = files.flatMap((name) => JSON.parse(readFileSync(join(coverageDir, name), "utf8")).result);
+            const actualTargets = [plan.hostAliases.typebox, plan.hostAliases["typebox/value"]];
+            for (const target of actualTargets) {
+              const loaded = modules.find((entry: any) => entry.url === pathToFileURL(target).href);
+              expect(loaded, `real hub ${record.pid} loaded host ${target}`).toBeTruthy();
+              expect(loaded.functions.some((fn: any) => fn.ranges.some((r: any) => r.count > 0))).toBe(true);
+            }
+            record.passivelyObservedHostModules = actualTargets;
+            record.passiveCoverageFiles = files.map((name) => join(coverageDir, name));
           }
-          record.passivelyObservedHostModules = actualTargets;
-          record.passiveCoverageFiles = files.map((name) => join(coverageDir, name));
-        }
-        const coverage = readdirSync(coverageDir).filter((name) => name.startsWith(`coverage-${child.pid}-`));
-        const scripts = coverage.flatMap((name) => JSON.parse(readFileSync(join(coverageDir, name), "utf8")).result);
-        const bundle = join(consumer, "dist/bundle/index.js");
-        const actualBundle = scripts.find((entry: any) => entry.url.startsWith(pathToFileURL(bundle).href + "?v="));
-        if (existsSync(bundle)) {
-          expect(actualBundle, "actual consumer bundle must execute, not just exist on disk").toBeTruthy();
-          expect(actualBundle.functions.some((fn: any) => fn.ranges.some((r: any) => r.count > 0))).toBe(true);
-        } else {
-          expect(actualBundle).toBeUndefined();
-          expect(scripts.some((entry: any) => entry.url.includes(join(consumer, "src/index.ts")))).toBe(true);
+          coverage = readdirSync(coverageDir).filter((name) => name.startsWith(`coverage-${child.pid}-`));
+          const scripts = coverage.flatMap((name) => JSON.parse(readFileSync(join(coverageDir, name), "utf8")).result);
+          const bundle = join(consumer, "dist/bundle/index.js");
+          const actualBundle = scripts.find((entry: any) => entry.url.startsWith(pathToFileURL(bundle).href + "?v="));
+          loadedEntry = actualBundle?.url ?? join(consumer, "src/index.ts");
+          if (existsSync(bundle)) {
+            expect(actualBundle, "actual consumer bundle must execute, not just exist on disk").toBeTruthy();
+            expect(actualBundle.functions.some((fn: any) => fn.ranges.some((r: any) => r.count > 0))).toBe(true);
+          } else {
+            expect(actualBundle).toBeUndefined();
+            expect(scripts.some((entry: any) => entry.url.includes(join(consumer, "src/index.ts")))).toBe(true);
+          }
         }
         put(join(f.base, "result.json"), {
           consumer,
@@ -458,7 +466,8 @@ console.log('PASS native TypeBox identities and lazy import after env scrub');
             ].map((p) => [p, sha(join(consumer, p))]),
           ),
           agentArgv: [process.execPath, ...argv],
-          loadedEntry: actualBundle?.url ?? join(consumer, "src/index.ts"),
+          observerEnabled: observe,
+          loadedEntry,
           passiveCoverageFiles: coverage.map((name) => join(coverageDir, name)),
           records,
           diagnosticExit: diagnostic?.status,
