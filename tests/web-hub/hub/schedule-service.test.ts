@@ -6,7 +6,7 @@
  * schedule-f1.test.ts.
  */
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -20,16 +20,19 @@ import type { ScheduleDelivery } from "../../../src/web-hub/hub/schedule/feishu-
 import type { SchedHubStore } from "../../../src/web-hub/hub/schedule/hub-state.js";
 import type { ScanResult } from "../../../src/web-hub/hub/schedule/scan.js";
 import { defHash, emptyStateFile, type ScheduleStateFile, type ScheduleTask } from "../../../src/schedule/core/spec.js";
-import { holderOf, readSelfIdentity } from "../../../src/schedule/core/recovery.js";
+import { holderOf, type LivenessProbe, type ProcessIdentity } from "../../../src/schedule/core/recovery.js";
 import { spawnSync } from "node:child_process";
 import { SCHED_HUB_CAP } from "../../../src/web-hub/protocol/schedule.js";
 import type { HubFrame } from "../../../src/web-hub/protocol/messages.js";
 
-/** A holder whose pid is provably dead on THIS host (same host/boot as the hub process). */
+/** Deterministic stand-in self (P4-A): the services in the identity-sensitive tests inject
+ *  `identity: { readSelf: () => fixtureSelf }` so no /proc (or ps/sysctl) dependency remains. */
+const fixtureSelf: ProcessIdentity = { pid: process.pid, start: 1, host: hostname(), boot: "test-boot" };
+
+/** A holder whose pid is provably dead on THIS host (same host/boot as the injected hub self). */
 function deadHolder(): ReturnType<typeof holderOf> {
   const finished = spawnSync("true", { shell: false });
-  const self = readSelfIdentity()!;
-  return { pid: finished.pid ?? 999_999, start: 1, host: self.host, boot: self.boot, epoch: "dead" };
+  return { pid: finished.pid ?? 999_999, start: 1, host: fixtureSelf.host, boot: fixtureSelf.boot, epoch: "dead" };
 }
 
 const BASE = Date.UTC(2026, 9, 25, 0, 0, 0);
@@ -198,6 +201,7 @@ interface Ctx {
   mt: ReturnType<typeof manualTimer>;
   scanAll?: ScheduleServiceDeps["scanAll"];
   scanOne?: ScheduleServiceDeps["scanOne"];
+  identity?: ScheduleServiceDeps["identity"];
   store?: SchedHubStore;
   storeFs?: ScheduleServiceDeps["storeFs"];
 }
@@ -219,6 +223,7 @@ function service(
     timer: mt.timer,
     ...(extra.scanAll === undefined ? {} : { scanAll: extra.scanAll }),
     ...(extra.scanOne === undefined ? {} : { scanOne: extra.scanOne }),
+    ...(extra.identity === undefined ? {} : { identity: extra.identity }),
     ...(extra.store === undefined ? {} : { store: extra.store }),
     ...(extra.storeFs === undefined ? {} : { storeFs: extra.storeFs }),
   });
@@ -761,6 +766,7 @@ describe("M11 (r1 #11): unknown prediction re-reads the ledger fresh", () => {
     const reg = fakeRegistry();
     const f = fakeDelivery();
     const svc = service(root, reg, T(13), {
+      identity: { readSelf: () => fixtureSelf },
       scanOne: async () => ({ kind: "ok", state: snapshot("completed"), bytes: 1, mtimeMs: 0 }),
     });
     writeStore(root, "sid-a", (s) => {
@@ -804,6 +810,7 @@ describe("M11 (r1 #11): unknown prediction re-reads the ledger fresh", () => {
     const reg = fakeRegistry();
     const f = fakeDelivery();
     const svc = service(root, reg, T(13), {
+      identity: { readSelf: () => fixtureSelf },
       scanOne: async () => ({ kind: "ok", state: snapshot(), bytes: 1, mtimeMs: 0 }),
     });
     writeStore(root, "sid-a", (s) => {
@@ -829,7 +836,7 @@ describe("M12/#15 (r1): deleted-task unknowns still notify; queued+dead never do
         scheduledAt: T(12),
         defHash: "d".repeat(64),
         state: "unknown",
-        holder: holderOf(readSelfIdentity()!, "e"),
+        holder: holderOf(fixtureSelf, "e"),
         startedAt: T(12),
         note: "none",
       });
@@ -873,7 +880,7 @@ describe("M12/#15 (r1): deleted-task unknowns still notify; queued+dead never do
     });
     const reg = fakeRegistry();
     const f = fakeDelivery();
-    const svc = service(root, reg, T(13));
+    const svc = service(root, reg, T(13), { identity: { readSelf: () => fixtureSelf } });
     svc.bindDelivery(f.delivery);
     await svc.rescanAll();
     expect(f.notices.filter((n) => n.kind === "unknown")).toHaveLength(0);
@@ -903,7 +910,7 @@ describe("M13 (r1 #13): pending unknowns are never silently dropped", () => {
           scheduledAt: T(12),
           defHash: defHash(t),
           state: "unknown",
-          holder: holderOf(readSelfIdentity()!, "e"),
+          holder: holderOf(fixtureSelf, "e"),
           startedAt: T(12),
           note: "none",
         });
@@ -922,6 +929,142 @@ describe("M13 (r1 #13): pending unknowns are never silently dropped", () => {
     await svc.rescanAll();
     const unknowns = f.notices.filter((n) => n.kind === "unknown");
     expect(unknowns).toHaveLength(3);
+  });
+});
+
+describe("P4-A (darwin-plan §3): platform identity seam drives predictUnknowns (J6/J7)", () => {
+  it("darwin start-domain probe: dead / alive / same-second-reused holders (fresh read agrees)", async () => {
+    const root = tmp();
+    const t = task();
+    const DARWIN_START = Date.UTC(2026, 10, 17, 5, 40, 6); // epoch-ms domain (≥1e11)
+    const hubSelf: ProcessIdentity = { pid: 4242, start: DARWIN_START, host: "hub-host", boot: "boot-x" };
+    const probed = new Set<number>();
+    const probe: LivenessProbe = {
+      startDomain: "epoch-ms",
+      startOf: (pid) => {
+        probed.add(pid);
+        // pid 301 was recycled and now runs with a LATER start ⇒ dead(crash); pid 300 was reused
+        // within the SAME second ⇒ the probe reports the holder's own start ⇒ alive (accepted
+        // residual: same-second reuse only delays recovery, never kills); pid 302 never reaches
+        // the probe — its ticks-domain start judges unprovable before any subprocess.
+        return pid === 301 ? DARWIN_START + 60_000 : DARWIN_START;
+      },
+      pidMayExist: () => true,
+    };
+    const holder = (pid: number, start: number): ReturnType<typeof holderOf> => ({
+      pid,
+      start,
+      host: hubSelf.host,
+      boot: hubSelf.boot,
+      epoch: "e",
+    });
+    const snapshot = (): ScheduleStateFile => {
+      const s = emptyStateFile("sid-a");
+      s.rev = 1;
+      s.tasks.push(t);
+      s.occ[t.id] = {
+        defHash: defHash(t),
+        decidedThrough: T(12),
+        firedTotal: 1,
+        missedTotal: 0,
+        skippedTotal: 0,
+        missedLog: [],
+      };
+      s.runs.push(
+        {
+          runKey: "s_abcd2345@300",
+          taskId: t.id,
+          kind: "auto",
+          form: "background",
+          scheduledAt: T(12),
+          defHash: defHash(t),
+          state: "running",
+          holder: holder(300, DARWIN_START),
+          startedAt: T(12),
+          note: "none",
+        },
+        {
+          runKey: "s_abcd2345@301",
+          taskId: t.id,
+          kind: "auto",
+          form: "background",
+          scheduledAt: T(12),
+          defHash: defHash(t),
+          state: "running",
+          holder: holder(301, DARWIN_START),
+          startedAt: T(12),
+          note: "none",
+        },
+        {
+          runKey: "s_abcd2345@302",
+          taskId: t.id,
+          kind: "auto",
+          form: "background",
+          scheduledAt: T(12),
+          defHash: defHash(t),
+          state: "running",
+          holder: holder(302, 999), // ticks domain ⇒ cross-domain ⇒ unprovable
+          startedAt: T(12),
+          note: "none",
+        },
+      );
+      return s;
+    };
+    const reg = fakeRegistry();
+    const f = fakeDelivery();
+    const svc = service(root, reg, T(13), {
+      identity: { readSelf: () => hubSelf, probe },
+      scanOne: async () => ({ kind: "ok", state: snapshot(), bytes: 1, mtimeMs: 0 }),
+    });
+    writeStore(root, "sid-a", (s) => {
+      Object.assign(s, snapshot());
+    });
+    svc.bindDelivery(f.delivery);
+    await svc.rescanAll();
+    // Without the probe forwarding, the default /proc probe would judge 300 and 302 dead too
+    // (no such pids ⇒ ESRCH) — exactly one unknown notice proves the wiring.
+    const unknowns = f.notices.filter((n) => n.kind === "unknown");
+    expect(unknowns).toHaveLength(1);
+    expect(unknowns[0]!.key).toContain("s_abcd2345@301");
+    expect(probed.has(300)).toBe(true);
+    expect(probed.has(301)).toBe(true);
+    expect(probed.has(302)).toBe(false); // cross-domain ⇒ unprovable before any probe call
+  });
+
+  it("self unavailable (readSelf → undefined) ⇒ predictUnknowns fail-closes to [] — no unknown notices", async () => {
+    const root = tmp();
+    const t = task();
+    writeStore(root, "sid-a", (s) => {
+      s.tasks.push(t);
+      s.occ[t.id] = {
+        defHash: defHash(t),
+        decidedThrough: T(12),
+        firedTotal: 1,
+        missedTotal: 0,
+        skippedTotal: 0,
+        missedLog: [],
+      };
+      // Even a TERMINAL unknown run (normally passed through unconditionally) stays silent:
+      // `self === undefined` short-circuits the whole prediction.
+      s.runs.push({
+        runKey: "s_abcd2345@1",
+        taskId: t.id,
+        kind: "auto",
+        form: "background",
+        scheduledAt: T(12),
+        defHash: defHash(t),
+        state: "unknown",
+        holder: holderOf(fixtureSelf, "e"),
+        startedAt: T(12),
+        note: "none",
+      });
+    });
+    const reg = fakeRegistry();
+    const f = fakeDelivery();
+    const svc = service(root, reg, T(13), { identity: { readSelf: () => undefined } });
+    svc.bindDelivery(f.delivery);
+    await svc.rescanAll();
+    expect(f.notices.filter((n) => n.kind === "unknown")).toHaveLength(0);
   });
 });
 

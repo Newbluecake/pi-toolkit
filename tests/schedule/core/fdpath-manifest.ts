@@ -32,8 +32,8 @@ export const JUDGE_MANIFEST = [
   "note.ts:217",
   "digest.ts:222",
   "wire.ts:clock-judge",
-  "service.ts:376",
-  "service.ts:382",
+  "service.ts:397",
+  "service.ts:404",
 ] as const;
 
 export const ABS_SYSCALL_MANIFEST = [

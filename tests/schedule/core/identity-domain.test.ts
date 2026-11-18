@@ -253,8 +253,9 @@ interface Site {
  * `arg` pins HOW each site stays probe-reachable:
  *  - internal recovery/claim/clock sites forward the caller's judge opts (probe rides in them);
  *  - note/digest sites pass `probe` explicitly;
- *  - the two hub sites are the read-only projection (J6/J7): probe injection lands in P4-A —
- *    they are registered in JUDGE_MANIFEST and pinned here so new hub wiring cannot regress silently.
+ *  - the two hub sites are the read-only projection (J6/J7): probe injection landed in P4-A
+ *    (deps.identity ?? platform default) — both sites forward `identity.probe`, pinned here so
+ *    new hub wiring cannot regress silently.
  */
 const EXPECTED_SITES: Site[] = [
   { file: "src/schedule/core/recovery.ts", fn: "recoverDeadRuns", callee: "judgeHolder", arg: "opts" },
@@ -264,8 +265,8 @@ const EXPECTED_SITES: Site[] = [
   { file: "src/schedule/agent/note.ts", fn: "claimAndSend", callee: "judgeHolder", arg: "probe" },
   { file: "src/schedule/agent/note.ts", fn: "verify", callee: "judgeHolder", arg: "probe" },
   { file: "src/schedule/agent/digest.ts", fn: "resolveInflight", callee: "judgeHolder", arg: "probe" },
-  { file: "src/web-hub/hub/schedule/service.ts", fn: "predictUnknowns", callee: "judgeHolder", arg: "self" },
-  { file: "src/web-hub/hub/schedule/service.ts", fn: "predictUnknowns", callee: "judgeHolder", arg: "self" },
+  { file: "src/web-hub/hub/schedule/service.ts", fn: "predictUnknowns", callee: "judgeHolder", arg: "identity.probe" },
+  { file: "src/web-hub/hub/schedule/service.ts", fn: "predictUnknowns", callee: "judgeHolder", arg: "identity.probe" },
 ];
 
 const JUDGE_CALLEES = ["judgeHolder", "recoverDeadRuns", "recoverRuns", "unknownRunKeys"] as const;
