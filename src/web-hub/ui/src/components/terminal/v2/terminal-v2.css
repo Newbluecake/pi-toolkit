@@ -53,10 +53,6 @@
   min-height: 36px;
   padding: 0 8px;
 }
-.terminal-v2-close-glyph {
-  font-size: 20px;
-  line-height: 1;
-}
 .terminal-v2-tabs-row {
   display: flex;
   flex: none;

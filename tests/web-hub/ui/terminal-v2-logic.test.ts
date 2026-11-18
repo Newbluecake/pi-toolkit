@@ -49,6 +49,10 @@ describe("terminal v2 pure UI logic", () => {
     expect(storage.value).not.toContain("token");
     expect(loadTerminalV2Restore(storage, scopeV2, 100_000 + TERMINAL_V2_RESTORE_MS + 1)).toBeUndefined();
     expect(loadTerminalV2Restore(storage, { ...scopeV2, sessionId: "other" }, 100_000)).toBeUndefined();
+    const parsed = JSON.parse(storage.value ?? "[]") as Record<string, unknown>[];
+    parsed[0]!.cwd = "/must-not-persist";
+    storage.value = JSON.stringify(parsed);
+    expect(loadTerminalV2Restore(storage, scopeV2, 100_000)).toBeUndefined();
   });
 
   it("keeps at most 32 recently saved scopes", () => {

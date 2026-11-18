@@ -41,6 +41,7 @@ function setup(
     reset: vi.fn(),
     dimensions: vi.fn(() => ({ cols: 80, rows: 24 })),
   };
+  let requestOrdinal = 0;
   const controller = createTerminalControllerV2({
     transport: mock.transport,
     scope: scopeV2,
@@ -48,7 +49,7 @@ function setup(
     ...(options.storage ? { storage: options.storage } : {}),
     ...(options.hidden ? { hidden: options.hidden } : {}),
     now: () => 100_000,
-    id: () => requestV2,
+    id: () => (requestOrdinal++ === 0 ? requestV2 : `R${String(requestOrdinal).padStart(21, "0")}`),
   });
   return { ...mock, renderer, controller };
 }

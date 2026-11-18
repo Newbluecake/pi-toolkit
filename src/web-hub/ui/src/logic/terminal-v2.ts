@@ -115,18 +115,32 @@ export const TERMINAL_V2_RESTORE_MS = 600_000;
 const idOk = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9_-]{22,128}$/.test(value);
 const nullableIdOk = (value: unknown): value is string | null => value === null || idOk(value);
 
+const storedKeys = new Set([
+  "agentKey",
+  "sessionId",
+  "epoch",
+  "open",
+  "hubInstance",
+  "activeTermId",
+  "pendingRequestIds",
+  "savedAt",
+]);
+const scopeKeyOk = (value: unknown): value is string =>
+  typeof value === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(value);
+
 function parseStored(raw: string | null, now: number): StoredScopeV2[] {
   if (raw === null || raw.length > 65_536) return [];
   try {
     const value: unknown = JSON.parse(raw);
     if (!Array.isArray(value)) return [];
-    return value.filter((entry): entry is StoredScopeV2 => {
-      if (!entry || typeof entry !== "object") return false;
+    return value.slice(0, 32).filter((entry): entry is StoredScopeV2 => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
       const row = entry as Record<string, unknown>;
       return (
-        typeof row.agentKey === "string" &&
-        typeof row.sessionId === "string" &&
-        typeof row.epoch === "string" &&
+        Object.keys(row).every((key) => storedKeys.has(key)) &&
+        scopeKeyOk(row.agentKey) &&
+        scopeKeyOk(row.sessionId) &&
+        scopeKeyOk(row.epoch) &&
         typeof row.open === "boolean" &&
         nullableIdOk(row.hubInstance) &&
         nullableIdOk(row.activeTermId) &&

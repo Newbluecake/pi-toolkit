@@ -81,10 +81,18 @@ function userEvent(event?: KeyboardEvent | InputEvent | CompositionEvent | Clipb
   }
 }
 
+function defaultRestoreStorage(): TerminalRestoreStorageV2 | undefined {
+  try {
+    return sessionStorage;
+  } catch {
+    return undefined;
+  }
+}
+const restoreStorage = props.storage ?? defaultRestoreStorage();
 const controller = createTerminalControllerV2({
   transport: props.transport,
   scope: props.scope,
-  ...(props.storage !== undefined ? { storage: props.storage } : {}),
+  ...(restoreStorage !== undefined ? { storage: restoreStorage } : {}),
   revoked() {
     confirmRow.value = null;
     paste.value = null;

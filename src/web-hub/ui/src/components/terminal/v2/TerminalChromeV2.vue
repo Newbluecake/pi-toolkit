@@ -17,8 +17,14 @@ const emit = defineEmits<{
   <header class="terminal-v2-chrome">
     <strong id="terminal-v2-title"><AppIcon name="terminal" class="icon" /> {{ t("terminalV2.title") }}</strong>
     <div class="terminal-v2-chrome-actions">
-      <button class="btn btn-ghost" type="button" data-terminal-focus @click="emit('focus')">
-        {{ t("terminalV2.focus") }}
+      <button
+        class="btn btn-ghost"
+        type="button"
+        data-terminal-focus
+        :aria-label="t('terminalV2.focus')"
+        @click="emit('focus')"
+      >
+        <AppIcon name="terminal" class="icon" /><span>{{ t("terminalV2.focus") }}</span>
       </button>
       <button
         class="btn btn-ghost"
@@ -28,7 +34,7 @@ const emit = defineEmits<{
         :title="t('terminalV2.rename')"
         @click="emit('rename')"
       >
-        {{ t("terminalV2.rename") }}
+        <AppIcon name="edit" class="icon" /><span>{{ t("terminalV2.rename") }}</span>
       </button>
       <button
         class="btn btn-ghost terminal-v2-font"
@@ -63,7 +69,7 @@ const emit = defineEmits<{
         :title="t('terminalV2.collapse')"
         @click="emit('background')"
       >
-        <span class="terminal-v2-close-glyph" aria-hidden="true">×</span>
+        <AppIcon name="x" class="icon" />
       </button>
     </div>
   </header>
