@@ -3,6 +3,7 @@
  * real isolated Python PTY and independent NDJSON. No site, install or network fallback.
  * Explicit contract-fixture v2 initialization is NOT trusted fresh maintenance evidence. */
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -25,7 +26,12 @@ assert(
   entry && binary && existsSync(entry) && existsSync(binary),
   "NOT RUN: explicit already-installed Playwright/Chromium assets required; never installs",
 );
-assert.equal(JSON.parse(readFileSync(join(dirname(entry), "package.json"), "utf8")).version, "1.63.0");
+const playwrightPackage = readFileSync(join(dirname(entry), "package.json"));
+assert.equal(JSON.parse(playwrightPackage.toString("utf8")).version, "1.65.1");
+const digest = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
+assert.equal(digest(playwrightPackage), "66a5c412c28b7fe15902da5cb5d7dd503d1c8604d0afe46797fe31aa7dc1a6e0");
+const browserSha256 = digest(readFileSync(binary));
+assert.equal(browserSha256, "045558b2f167db04624e36d952496705418a85d87ff9b5fb55a8c40cc59201ae");
 const playwright = await import(pathToFileURL(entry).href);
 const fixture = makeTerminalFixture();
 const home = fixture.fixture.home,
@@ -51,6 +57,10 @@ const result: Record<string, unknown> = {
   firefox: "NOT RUN",
   deviceIme: "NOT RUN",
   maintenance: "NOT RUN",
+  playwright: "1.65.1",
+  chromiumRevision: "1255",
+  browserSha256,
+  hardwareGpuEvidence: false,
   steps: [],
 };
 const steps = result.steps as string[],
@@ -59,6 +69,7 @@ const steps = result.steps as string[],
 let hub: RunningHub | undefined,
   sdk: Awaited<ReturnType<typeof createTerminalSdkAgent>> | undefined,
   browser: any,
+  page: any,
   ordinary: Awaited<ReturnType<typeof openSse>> | undefined;
 try {
   let initialized: Promise<void> | undefined;
@@ -126,13 +137,18 @@ try {
       return response;
     };
   });
-  const page = await context.newPage();
+  page = await context.newPage();
   page.on("pageerror", (error: Error) => errors.push(error.message.slice(0, 1024)));
   page.on("request", (req: any) => {
     const path = new URL(req.url()).pathname;
     if (path.startsWith("/api/terminal/")) ops.push(path.split("/").pop()!);
   });
   await page.goto(`${origin}/#t=${encodeURIComponent(token)}`, { waitUntil: "load" });
+  // Dashboard intentionally never auto-selects a session. Use the real user
+  // navigation before the explicit terminal intent; no UI/store injection.
+  await page.waitForSelector("a.agent-card", { timeout: 15000 });
+  assert.equal(await page.locator("a.agent-card").count(), 1);
+  await page.locator("a.agent-card").click();
   await page.waitForSelector('[data-fold="terminal"]', { timeout: 15000 });
   assert.deepEqual(ops, [], "terminal API before explicit click");
   const cookie = (await context.cookies(origin)).find((value: any) => value.name === "pwh_sid");
@@ -143,6 +159,15 @@ try {
   await page.waitForSelector('.terminal-v2-panel[data-writable="true"]', { timeout: 15000 });
   assert.equal(ops.filter((op) => op === "create").length, 1);
   steps.push("real SDK → matching status → explicit lazy open → real PTY ready");
+  result.webgl = await page.evaluate(() => {
+    const canvas = document.querySelector<HTMLCanvasElement>("canvas[data-terminal-webgl-canvas]")!;
+    const gl = canvas.getContext("webgl2")!;
+    const debug = gl.getExtension("WEBGL_debug_renderer_info");
+    return {
+      version: gl.getParameter(gl.VERSION),
+      renderer: debug ? gl.getParameter(debug.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER),
+    };
+  });
   const font = await terminalFontMetrics(page);
   result.font = font;
   await page.locator(".xterm-helper-textarea").focus();
@@ -216,6 +241,11 @@ try {
 } catch (error) {
   result.status = "FAIL";
   result.reason = error instanceof Error ? error.message : "probe failed";
+  result.pageErrors = errors;
+  if (page) {
+    await page.screenshot({ path: join(out, "terminal-v2-failure.png") }).catch(() => {});
+    writeFileSync(join(out, "terminal-v2-failure.html"), await page.content(), { mode: 0o600 });
+  }
   process.exitCode = 1;
 } finally {
   ordinary?.close();

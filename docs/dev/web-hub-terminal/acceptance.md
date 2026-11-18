@@ -43,17 +43,20 @@ former complete O=4e15 evidence does not prove T51 O=7239→N migration.
 - Extend real mixed/refusal coverage to any remaining browser/device/kernel failure windows. Actual O/O/O→N/N/N→O/O/O, fresh, N/O and O/N SDK/wire plus both exact pure-UI version gates, true-off, unreadable-v1 isolation, owned external-ledger/partial refusals are now executed. Old-kernel archive UUID tests remain simulated, not real reboot.
   No active shell migration/adoption/restart preservation claim. No version-floor lowering/old launch
   based merely on marker/empty ledger.
-- Finish remaining A1–A12 windows: external DB55s/hard
-  expiry, rotate original intent/token-written/revoke SIGKILL, failure-audit parity. Actual reserve/prune IO barriers × five mutation kinds, backend completion hold, real older-finally and saturation/receipt cases now execute. No auth
-  callback can await terminal fs/reaper or replace original transaction outcome.
-- Real Chromium seven-case CSP/WebGL gate plus manifest-verified full UI/SDK/PTY probe. Explicit offline
-  root-provided Playwright1.65.1/Chromium1255 assets are now available; WebGL2 uses SwiftShader software, not hardware GPU. No install/download by this run. Firefox,
-  true mobile/OS IME/system clipboard/drop,8-way sustained PTY+slow renderer, secure real mount,
-  real kernel reboot/powercut/real ENOSPC device are **NOT RUN**.
-- Recheck P4 panel CSS resource-load failure/deadline/geometry in the real browser; renderer/xterm
-  CSS paths AND the PanelV2 link now have bounded loading; happy-dom tests prove success/error/5s/
-  unmount/late-old-lifecycle behavior and no pre-ready requests. Actual browser CSS-failure/geometry
-  still requires its separate run, not a source-only claim.
+- A1–A12 scoped real matrix now executes original auth/SQLite/token/intent, actual8s IPC deadline,
+  true hub SIGKILL windows, post-commit HTTP/admin response loss, actual55s lookup-result-loss versus
+  public SSE and real original-DB hard-expiry timestamp fixture, failure/on-off/late-IO audit parity.
+  Fault locations and limits are explicit; no successful auth or physical proof stub.
+- Real Chromium seven-case CSP/WebGL PLUS panel CSS network-abort/deadline gate and manifest-verified
+  full UI/actual SDK/actual PTY path now PASS on root-provided PW1.65.1/Chromium1255. Explicit dashboard
+  selection is required; no injected UI state. Closed-tab cache resurrection was found/fixed with
+  private memory metadata only after exact proof+prune; unknown remains visible/charged. WebGL2
+  renderer is SwiftShader SOFTWARE, not hardware GPU. No install/download/site action.
+- Final full CURRENT membership tier1, latest committed source maintenance/matrix and build/schema/
+  boundary/fixture gates still require their final recorded rerun. Historical tier1 count is not
+  current-final evidence. P7 independently verifies rather than implementing remaining adapters.
+- Firefox, true mobile/OS IME/system clipboard/drop,8-way sustained PTY+slow renderer, secure real
+  mount, real kernel reboot/powercut/real ENOSPC device are **NOT RUN**. No deployment approval.
 
 ## Test removal/migration accounting
 

@@ -64,6 +64,7 @@ type Hot = {
   runtime?: TerminalRuntimeV2;
   changed: Set<() => void>;
   closeWork?: Promise<boolean>;
+  closeRequested?: boolean;
   reaper?: TerminalReaper;
   life?: TimerHandle;
   proof?: TerminalPhysicalResult;
@@ -93,7 +94,7 @@ export class HubTerminalServiceV2 implements TerminalServiceV2 {
   private readonly hot = new Map<string, Hot>();
   private readonly intents = new Map<string, Intent>();
   private readonly pendingScopes = new Map<string, Intent>();
-  private readonly completed = new Map<string, { scope: string; row: TerminalTabRowV2 }>();
+  private readonly completed = new Map<string, { scope: string; row: TerminalTabRowV2; hidden?: boolean }>();
   private readonly retired = new Set<string>();
   private ledger: LedgerV2 | undefined;
   private unavailable = false;
@@ -169,7 +170,9 @@ export class HubTerminalServiceV2 implements TerminalServiceV2 {
     const hotRows = [...this.hot.values()]
       .filter((h) => key(h.allocation.scope) === key(scope))
       .map((h) => ({ ...h.row }));
-    const completedRows = [...this.completed.values()].filter((c) => c.scope === key(scope)).map((c) => ({ ...c.row }));
+    const completedRows = [...this.completed.values()]
+      .filter((c) => c.scope === key(scope) && !c.hidden)
+      .map((c) => ({ ...c.row }));
     const remaining = Math.max(0, L.scopeRows - hotRows.length);
     const pending = this.pendingAllocationIds();
     return {
@@ -641,9 +644,18 @@ export class HubTerminalServiceV2 implements TerminalServiceV2 {
       if (!h || key(h.allocation.scope) !== key(input.scope)) {
         this.resources();
         const completed = this.completed.get(input.termId);
-        if (completed?.scope === key(input.scope)) return { ok: true, state: "closed", revision: this.revision };
+        if (completed?.scope === key(input.scope)) {
+          if (!completed.hidden) {
+            completed.hidden = true;
+            this.revision++;
+          }
+          return { ok: true, state: "closed", revision: this.revision };
+        }
         throw new TerminalFaultV2("E_NOT_FOUND");
       }
+      // Explicit close dismisses the tab ONLY after exact proof+durable prune.
+      // Keep bounded completed metadata for idempotent close, not as a visible tab.
+      h.closeRequested = true;
       const work = this.cleanup(h);
       const clean = await boundedV2(work, Date.now() + L.reapMs, signal);
       return { ok: true, state: clean ? "closed" : "closing", revision: this.revision };
@@ -686,7 +698,11 @@ export class HubTerminalServiceV2 implements TerminalServiceV2 {
       h.reaper?.stop();
       h.row.state = p.exitCode === undefined ? "failed" : "exited";
       if (p.exitCode !== undefined) h.exitCode = p.exitCode;
-      this.completed.set(h.row.termId, { scope: key(h.allocation.scope), row: { ...h.row } });
+      this.completed.set(h.row.termId, {
+        scope: key(h.allocation.scope),
+        row: { ...h.row },
+        hidden: h.closeRequested === true,
+      });
       const same = [...this.completed].filter(([, c]) => c.scope === key(h.allocation.scope));
       while (same.length > L.scopeRows) {
         this.completed.delete(same.shift()![0]);

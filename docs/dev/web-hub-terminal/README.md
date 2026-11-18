@@ -62,6 +62,9 @@ session/principal/total dimensions. An old epoch with the same sessionId cannot 
   unavailable **only for terminal**. Auth stays independent; known hot cleanup can still start.
 - Reservation durably commits before the only backend constructor/fork. Create requestId and accepted
   futures remain pinned through cancellation/ambiguous replies; no retry with a new ID to hide unknown.
+- Explicit tab close remains visible/charged until exact proof+prune, then is dismissed from list.
+  A bounded hidden completed record preserves idempotent close; natural exits stay visible until
+  explicitly dismissed. This is memory-only UI metadata, never a resource-release shortcut.
 - Exit/close200/PID absence/helper EOF do not release resources. Release requires original complete
   backend proof: spawn settled, PTY closed, helper actually waited, tracked identities/groups gone,
   then exact durable ledger prune/readback. Reaper retries retain unresolved slots and all deadlines.
@@ -307,7 +310,14 @@ these are not substituted for the separate real browser/CSP/geometry gate.
 
 Unlinked offline probe mounts real PanelV2 with an explicit contract fake (no backend/auth claim).
 `probe:terminal-e2e` now uses real SDK context, startHub, actual UI/login, isolated real PTY, independent
-view and physical prune; explicit external Playwright/Chromium assets only, never installs. Root has provided Playwright1.65.1/Chromium1255 (Chrome159); default headless WebGL2 is SwiftShader software, not hardware GPU. Private real-browser execution follows stable source; earlier missing-assets NOT RUN is historical. Source alone is not browser proof.
+view and physical prune; explicit external Playwright/Chromium assets only, never installs. Root has provided Playwright1.65.1/Chromium1255 (Chrome159); default headless WebGL2 is SwiftShader software, not hardware GPU. Actual Chromium full UI/SDK/PTY scenario now passes: explicit dashboard selection/open, real input/PID,
+one real WebGL loss/rebuild without new create, collapse/reload/reattach same PID, confirmed close/
+original physical proof+durable revision2 prune/PID gone/public SSE intact. The real browser caught
+explicitly closed completed tabs reappearing from the bounded metadata cache; the local hidden
+completion fix above preserves natural exits/idempotency and never hides unresolved resources.
+Seven CSP/WebGL component-browser cases PLUS panel CSS network-abort/deadline cases pass on those
+same assets; contract input sink there is explicitly fake, not a second PTY/auth claim. Earlier
+missing-assets NOT RUN is historical. Hardware GPU/Firefox/device/OS behavior is not proven.
 
 ## Verification and evidence limits
 
@@ -321,8 +331,8 @@ restart, user-shell termination, push or deployment is authorized by this work.
 - Archive/retirement IO tests are real private fs/guarded CAS but old boot UUIDs and drain adapters
   are simulated, not a real reboot/powercut. The separate fixed controlled executable integrations above supply real O/N adapter and O→N→O evidence (without a kernel reboot).
 - Full tier1 was executed as serial manifest shards; P6 report/commands log records initial failures, invocation corrections and reruns; shard
-  log files contain the final full run (some initial full logs were overwritten by same-name reruns). Browser, Firefox, device/OS IME, secure real mounts, real kernel
-  reboot/powercut and complete mixed/version maintenance matrix remain NOT RUN.
+  log files contain the final full run (some initial full logs were overwritten by same-name reruns). Real Chromium scenarios and exact mixed/version matrix are now executed as scoped evidence.
+  Firefox, device/OS IME, secure real mounts and real kernel reboot/powercut remain NOT RUN.
 - Tests for intentionally removed v1 execution/negotiation/authority/resource/SSE/UI semantics were
   removed with their implementation, not retained as hidden runtime just to compile. Shared off/auth/
   public-SSE/metadata/guards/drawer/provenance tests were migrated/retained. V1 compatibility/rollback

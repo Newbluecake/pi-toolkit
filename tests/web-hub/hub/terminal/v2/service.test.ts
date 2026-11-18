@@ -315,6 +315,8 @@ describe("hub v2 sole resource owner", () => {
     expect(await h.service.close(other, request, signal())).toMatchObject({ ok: true, state: "closed" });
     expect(h.disk.allocations).toEqual([]);
     expect(h.disk.revision).toBe(2);
+    const tabs = await h.service.list(other, scope, signal());
+    expect(tabs.ok && tabs.rows).toEqual([]); // metadata cache must not resurrect an explicitly closed tab
     expect(await runtime.runtime.write("eA==", "user", signal())).toEqual({
       ok: false,
       code: "E_VIEW_CHANGED",
@@ -557,4 +559,40 @@ describe("P6 scope invalidation versus permanent retirement", () => {
     expect(await h.create(id("y"))).toMatchObject({ ok: false, code: "E_SESSION_CHANGED" });
     await h.service.dispose();
   });
+});
+
+it("explicit close keeps its tab/charge while prune is pending, hides only after durable commit", async () => {
+  const h = harness();
+  await h.service.initialize(signal());
+  const created = await h.create();
+  if (!created.ok) throw new Error("create");
+  const gate = deferred<void>();
+  h.commitGate = gate.promise;
+  const closing = h.service.close(auth, { scope, hubInstance: id("h"), termId: created.termId }, signal());
+  const pending = await h.service.list(auth, scope, signal());
+  expect(pending.ok && pending.rows.some((row) => row.termId === created.termId)).toBe(true);
+  expect(h.disk.allocations).toHaveLength(1);
+  gate.resolve();
+  expect(await closing).toMatchObject({ ok: true, state: "closed" });
+  const after = await h.service.list(auth, scope, signal());
+  expect(after.ok && after.rows).toEqual([]);
+  expect(h.disk.allocations).toEqual([]);
+  await h.service.dispose();
+});
+it("natural exit remains visible until explicit completed-tab close, whose idempotent metadata stays bounded", async () => {
+  const h = harness();
+  await h.service.initialize(signal());
+  const created = await h.create();
+  if (!created.ok) throw new Error("create");
+  h.physical.resolve(proof);
+  for (let n = 0; n < 100; n++) await Promise.resolve();
+  expect(h.disk.allocations).toEqual([]);
+  const exited = await h.service.list(auth, scope, signal());
+  expect(exited.ok && exited.rows[0]?.state).toBe("exited");
+  const input = { scope, hubInstance: id("h"), termId: created.termId };
+  expect(await h.service.close(auth, input, signal())).toMatchObject({ ok: true, state: "closed" });
+  const hidden = await h.service.list(auth, scope, signal());
+  expect(hidden.ok && hidden.rows).toEqual([]);
+  expect(await h.service.close(auth, input, signal())).toMatchObject({ ok: true, state: "closed" });
+  await h.service.dispose();
 });

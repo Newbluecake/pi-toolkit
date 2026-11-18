@@ -4,7 +4,8 @@ import { readFile, readdir, writeFile, mkdir } from "node:fs/promises";
 import { resolve, extname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CSP } from "../../src/web-hub/hub/http.js";
-import { loadPlaywright, type PwPage, type PwBrowser } from "./lib/playwright.js";
+import type { PwPage, PwBrowser } from "./lib/playwright.js";
+import { loadTerminalPlaywright } from "./lib/terminal-playwright.js";
 import { terminalFontMetrics } from "./lib/terminal-font-metrics.js";
 import type { UiProvenance } from "./lib/ui-provenance.js";
 
@@ -117,7 +118,11 @@ export async function runTerminalProbe(selected = "chromium"): Promise<void> {
       .map(([p]) => `/${p}`),
     ...Object.keys(prov.terminal?.css ?? {}).map((p) => `/${p}`),
   ]);
-  const pw = await loadPlaywright();
+  const panelCss = Object.entries(prov.terminal?.css ?? {}).find(([, facts]) =>
+    facts.sourceModule.endsWith("v2/terminal-v2.css?url"),
+  )?.[0];
+  check(panelCss, "measured panel CSS asset missing");
+  const pw = await loadTerminalPlaywright();
   if (!pw.ok) {
     await writeFile(resolve(OUT, "report-r3.json"), JSON.stringify({ verdict: "NOT RUN", reason: pw.reason }, null, 2));
     process.exitCode = 2;
@@ -178,6 +183,18 @@ export async function runTerminalProbe(selected = "chromium"): Promise<void> {
       requests: string[] = [];
     const context = await browser.newContext({ viewport: { width: 1200, height: 800 } });
     await context.addInitScript(INIT + init);
+    if (id.startsWith("panel-css-")) {
+      await (context as unknown as { route(pattern: string, handler: (route: any) => unknown): Promise<void> }).route(
+        "**/*",
+        (route: any) => {
+          if (new URL(route.request().url()).pathname !== `/${panelCss}`) return route.continue();
+          if (id === "panel-css-error") return route.abort();
+          // Intentionally held ONLY owned stylesheet request. Context close cancels
+          // it; no timer/response can turn this into a successful load later.
+          return new Promise<void>(() => {});
+        },
+      );
+    }
     const page = await context.newPage();
     page.on("console", (message) => {
       const m = message as { type(): string; text(): string };
@@ -506,6 +523,38 @@ export async function runTerminalProbe(selected = "chromium"): Promise<void> {
       },
       true,
     );
+    for (const id of ["panel-css-error", "panel-css-deadline"]) {
+      await run(
+        browser,
+        id,
+        "",
+        async (page) => {
+          const started = Date.now();
+          await page.click("[data-terminal-open]");
+          const expected = id === "panel-css-error" ? "E_PANEL_CSS_LOAD" : "E_PANEL_CSS_DEADLINE";
+          await page.waitForFunction(
+            (code) => document.querySelector('.terminal-v2-panel [role="alert"]')?.textContent?.includes(code),
+            expected,
+            { timeout: 7000 },
+          );
+          const m = await metrics(page);
+          check(
+            m.xterms === 0 &&
+              m.sheets === 0 &&
+              m.ready !== "true" &&
+              JSON.parse(m.ops ?? "[]").length === 0 &&
+              JSON.parse(m.input ?? "[]").length === 0,
+            "CSS failure issued renderer/backend action",
+          );
+          check(m.violations.length === 0 && m.prototypeStable, "CSS gate caused CSP/prototype violation");
+          if (id === "panel-css-deadline")
+            check(Date.now() - started >= 4900 && Date.now() - started < 7000, "panel CSS deadline not bounded5s");
+          await screenshot(page, id);
+          return { expected, elapsed: Date.now() - started, metrics: m };
+        },
+        true,
+      ); // browser's expected network-abort console error is a negative control, not hidden
+    }
     await browser.close();
     browser = undefined;
     browser = await pw.chromium.launch({
@@ -529,7 +578,11 @@ export async function runTerminalProbe(selected = "chromium"): Promise<void> {
   const verdict = failed ? "FAIL" : blocked ? "BLOCKED" : "PASS";
   await writeFile(
     resolve(OUT, "report-r3.json"),
-    JSON.stringify({ verdict, playwright: pw.version, chromium: pw.executablePath, csp: CSP, results }, null, 2),
+    JSON.stringify(
+      { verdict, playwright: pw.version, chromium: pw.executablePath, hardwareGpuEvidence: false, csp: CSP, results },
+      null,
+      2,
+    ),
   );
   process.exitCode = failed ? 1 : blocked ? 2 : 0;
   console.log(`${verdict === "PASS" ? "✓" : "✗"} terminal WebGL-only P0 ${verdict}: ${OUT}/report-r3.json`);
