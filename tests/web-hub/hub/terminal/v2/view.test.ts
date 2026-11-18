@@ -151,6 +151,41 @@ describe("terminal v2 exact writer/rendered ACK/seq", () => {
     expect(await f.views.input(f.id, input, signal())).toEqual(await first);
     expect(f.runtime.write).toHaveBeenCalledOnce();
   });
+  it("32KiB pending input remains charged after logical timeout until the actual backend settles", async () => {
+    const f = setup();
+    const { writer } = await f.open();
+    await ready(f, writer);
+    const releases: Array<(value: { ok: true }) => void> = [];
+    vi.mocked(f.runtime.write).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          releases.push(resolve);
+        }),
+    );
+    const payload = Buffer.alloc(4096, 97).toString("base64");
+    const writing = Array.from({ length: 8 }, (_, seq) =>
+      f.views.input(f.id, { ...writer, seq, bytesB64: payload, kind: "user" }, signal()),
+    );
+    await vi.advanceTimersByTimeAsync(2001);
+    expect(
+      (await Promise.all(writing)).every(
+        (result) => !result.ok && result.code === "E_INPUT_UNKNOWN" && result.effect === "unknown",
+      ),
+    ).toBe(true);
+    expect(f.runtime.write).toHaveBeenCalledTimes(8);
+    const ninth = { ...writer, seq: 8, bytesB64: payload, kind: "user" as const };
+    expect(await f.views.input(f.id, ninth, signal())).toMatchObject({ code: "E_RATE", effect: "none" });
+    expect(f.runtime.write).toHaveBeenCalledTimes(8);
+    for (const release of releases) release({ ok: true });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    vi.mocked(f.runtime.write).mockResolvedValue({ ok: true });
+    expect(await f.views.input(f.id, ninth, signal())).toEqual({ ok: true, acceptedThrough: 8 });
+    expect(await f.views.input(f.id, { ...writer, seq: 0, queryOnly: true }, signal())).toMatchObject({
+      code: "E_INPUT_UNKNOWN",
+      effect: "unknown",
+    });
+    expect(f.runtime.write).toHaveBeenCalledTimes(9);
+  });
   it("revoke during runtime admission/write refuses late results and closes only matching view", async () => {
     const f = setup();
     let finish!: (result: Awaited<ReturnType<typeof f.service.runtime>>) => void;
