@@ -1100,131 +1100,150 @@ export const TERMINAL_V2_UI_SCHEMAS = {
     },
   },
   failure: {
-    additionalProperties: false,
-    type: "object",
-    required: ["ok", "code", "effect"],
-    properties: {
-      ok: {
-        const: false,
-        type: "boolean",
-      },
-      code: {
-        anyOf: [
-          {
-            const: "E_BAD_REQUEST",
-            type: "string",
+    anyOf: [
+      {
+        additionalProperties: false,
+        type: "object",
+        required: ["ok", "code", "effect"],
+        properties: {
+          ok: {
+            const: false,
+            type: "boolean",
           },
-          {
-            const: "E_IDEMPOTENCY_CONFLICT",
-            type: "string",
-          },
-          {
-            const: "E_AUTH",
-            type: "string",
-          },
-          {
-            const: "E_REVOKING",
-            type: "string",
-          },
-          {
-            const: "E_CSRF",
-            type: "string",
-          },
-          {
-            const: "E_OFF",
-            type: "string",
-          },
-          {
-            const: "E_NOT_FOUND",
-            type: "string",
-          },
-          {
-            const: "E_HUB_CHANGED",
-            type: "string",
-          },
-          {
-            const: "E_SESSION_CHANGED",
-            type: "string",
-          },
-          {
-            const: "E_WRITER_BUSY",
-            type: "string",
-          },
-          {
-            const: "E_VIEW_CHANGED",
-            type: "string",
-          },
-          {
-            const: "E_NOT_READY",
-            type: "string",
-          },
-          {
-            const: "E_PRIVACY",
-            type: "string",
-          },
-          {
-            const: "E_CLEANUP_UNKNOWN",
-            type: "string",
-          },
-          {
+          code: {
             const: "E_INPUT_UNKNOWN",
             type: "string",
           },
-          {
-            const: "E_LIMIT",
-            type: "string",
-          },
-          {
-            const: "E_RATE",
-            type: "string",
-          },
-          {
-            const: "E_UNAVAILABLE",
-            type: "string",
-          },
-          {
-            const: "E_RESOURCE_UNAVAILABLE",
-            type: "string",
-          },
-          {
-            const: "E_SETUP_REQUIRED",
-            type: "string",
-          },
-          {
-            const: "E_UNSUPPORTED",
-            type: "string",
-          },
-          {
-            const: "E_CWD",
-            type: "string",
-          },
-          {
-            const: "E_BACKEND",
-            type: "string",
-          },
-          {
-            const: "E_DB",
-            type: "string",
-          },
-          {
-            const: "E_DEADLINE",
-            type: "string",
-          },
-        ],
-      },
-      effect: {
-        anyOf: [
-          {
-            const: "none",
-            type: "string",
-          },
-          {
+          effect: {
             const: "unknown",
             type: "string",
           },
-        ],
+        },
       },
-    },
+      {
+        additionalProperties: false,
+        type: "object",
+        required: ["ok", "code", "effect"],
+        properties: {
+          ok: {
+            const: false,
+            type: "boolean",
+          },
+          code: {
+            anyOf: [
+              {
+                const: "E_BAD_REQUEST",
+                type: "string",
+              },
+              {
+                const: "E_IDEMPOTENCY_CONFLICT",
+                type: "string",
+              },
+              {
+                const: "E_AUTH",
+                type: "string",
+              },
+              {
+                const: "E_REVOKING",
+                type: "string",
+              },
+              {
+                const: "E_CSRF",
+                type: "string",
+              },
+              {
+                const: "E_OFF",
+                type: "string",
+              },
+              {
+                const: "E_NOT_FOUND",
+                type: "string",
+              },
+              {
+                const: "E_HUB_CHANGED",
+                type: "string",
+              },
+              {
+                const: "E_SESSION_CHANGED",
+                type: "string",
+              },
+              {
+                const: "E_WRITER_BUSY",
+                type: "string",
+              },
+              {
+                const: "E_VIEW_CHANGED",
+                type: "string",
+              },
+              {
+                const: "E_NOT_READY",
+                type: "string",
+              },
+              {
+                const: "E_PRIVACY",
+                type: "string",
+              },
+              {
+                const: "E_CLEANUP_UNKNOWN",
+                type: "string",
+              },
+              {
+                const: "E_LIMIT",
+                type: "string",
+              },
+              {
+                const: "E_RATE",
+                type: "string",
+              },
+              {
+                const: "E_UNAVAILABLE",
+                type: "string",
+              },
+              {
+                const: "E_RESOURCE_UNAVAILABLE",
+                type: "string",
+              },
+              {
+                const: "E_SETUP_REQUIRED",
+                type: "string",
+              },
+              {
+                const: "E_UNSUPPORTED",
+                type: "string",
+              },
+              {
+                const: "E_CWD",
+                type: "string",
+              },
+              {
+                const: "E_BACKEND",
+                type: "string",
+              },
+              {
+                const: "E_DB",
+                type: "string",
+              },
+              {
+                const: "E_DEADLINE",
+                type: "string",
+              },
+            ],
+          },
+          effect: {
+            anyOf: [
+              {
+                const: "none",
+                type: "string",
+              },
+              {
+                const: "unknown",
+                type: "string",
+              },
+            ],
+          },
+        },
+      },
+    ],
   },
   frame: {
     anyOf: [

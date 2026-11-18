@@ -148,6 +148,15 @@ describe("T51 P0 terminal v2 frozen contracts (no runtime)", () => {
     }
     expect(Value.Check(TerminalFailureV2Schema, { ok: false, code: "E_INPUT_UNKNOWN", effect: "unknown" })).toBe(true);
   });
+  it("requires unknown effect for E_INPUT_UNKNOWN without narrowing other error effects", () => {
+    expect(Value.Check(TerminalFailureV2Schema, { ok: false, code: "E_INPUT_UNKNOWN", effect: "none" })).toBe(false);
+    expect(Value.Check(TerminalFailureV2Schema, { ok: false, code: "E_INPUT_UNKNOWN", effect: "unknown" })).toBe(true);
+    for (const code of Object.keys(TERMINAL_V2_ERROR_STATUS)) {
+      if (code === "E_INPUT_UNKNOWN") continue;
+      for (const effect of ["none", "unknown"])
+        expect(Value.Check(TerminalFailureV2Schema, { ok: false, code, effect }), `${code}:${effect}`).toBe(true);
+    }
+  });
   it("uses canonical base64 and UTF-8/code-point name/cwd limits", () => {
     expect(terminalBase64BytesV2("")).toBe(0);
     expect(terminalBase64BytesV2("YQ==")).toBe(1);

@@ -99,6 +99,17 @@ describe("T51 browser v2 JSON projection", () => {
       effect: "unknown",
     });
   });
+  it("rejects E_INPUT_UNKNOWN with none in both validators and preserves every other error/effect pair", () => {
+    const invalid = { ok: false, code: "E_INPUT_UNKNOWN", effect: "none" };
+    expect(terminalSchemaCheck(TERMINAL_V2_UI_SCHEMAS.failure, invalid)).toBe(false);
+    expect(Value.Check(TerminalFailureV2Schema, invalid)).toBe(false);
+    parity(TerminalFailureV2Schema, TERMINAL_V2_UI_SCHEMAS.failure, { ...invalid, effect: "unknown" });
+    for (const code of Object.keys(TERMINAL_V2_ERROR_STATUS)) {
+      if (code === "E_INPUT_UNKNOWN") continue;
+      for (const effect of ["none", "unknown"])
+        parity(TerminalFailureV2Schema, TERMINAL_V2_UI_SCHEMAS.failure, { ok: false, code, effect });
+    }
+  });
   it("checks stream unions and leaves unknown schema extensions fail-closed", () => {
     parity(TerminalViewFrameV2Schema, TERMINAL_V2_UI_SCHEMAS.frame, {
       t: "attached",

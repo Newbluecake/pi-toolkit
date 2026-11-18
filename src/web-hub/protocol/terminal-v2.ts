@@ -191,17 +191,27 @@ export const TERMINAL_V2_ERROR_STATUS = Object.freeze({
   E_DEADLINE: 504,
 } as const);
 export type TerminalErrorCodeV2 = keyof typeof TERMINAL_V2_ERROR_STATUS;
-export const TerminalFailureV2Schema = closed({
-  ok: Type.Literal(false),
-  code: literals(Object.keys(TERMINAL_V2_ERROR_STATUS) as TerminalErrorCodeV2[]),
-  effect: literals(["none", "unknown"]),
-});
+const errorCodes = Object.keys(TERMINAL_V2_ERROR_STATUS) as TerminalErrorCodeV2[];
+/** Code-only consumers (creation/stream errors) must not couple to a failure branch shape. */
+export const TerminalErrorCodeV2Schema = literals(errorCodes);
+/** Input-result uncertainty can never prove no effect. Keep this correlation in the
+ * authoritative schema so Static types and the generated browser validator agree. */
+export const TerminalFailureV2Schema = Type.Union([
+  closed({ ok: Type.Literal(false), code: Type.Literal("E_INPUT_UNKNOWN"), effect: Type.Literal("unknown") }),
+  closed({
+    ok: Type.Literal(false),
+    code: literals(
+      errorCodes.filter((code): code is Exclude<TerminalErrorCodeV2, "E_INPUT_UNKNOWN"> => code !== "E_INPUT_UNKNOWN"),
+    ),
+    effect: literals(["none", "unknown"]),
+  }),
+]);
 export type TerminalFailureV2 = Static<typeof TerminalFailureV2Schema>;
 const success = { ok: Type.Literal(true) };
 export const TerminalCreationV2Schema = Type.Union([
   closed({ ...success, outcome: Type.Literal("pending") }),
   closed({ ...success, outcome: Type.Literal("created"), termId: id }),
-  closed({ ...success, outcome: Type.Literal("failed"), code: TerminalFailureV2Schema.properties.code }),
+  closed({ ...success, outcome: Type.Literal("failed"), code: TerminalErrorCodeV2Schema }),
   closed({ ...success, outcome: Type.Literal("unknown") }),
 ]);
 export const TERMINAL_V2_HTTP_SUCCESS_SCHEMAS = {
@@ -248,7 +258,7 @@ export const TerminalViewFrameV2Schema = Type.Union([
     exitCode: Type.Optional(Type.Integer({ minimum: 0, maximum: 255 })),
   }),
   closed({ t: Type.Literal("ping") }),
-  closed({ t: Type.Literal("error"), code: TerminalFailureV2Schema.properties.code }),
+  closed({ t: Type.Literal("error"), code: TerminalErrorCodeV2Schema }),
 ]);
 export type TerminalViewFrameV2 = Static<typeof TerminalViewFrameV2Schema>;
 

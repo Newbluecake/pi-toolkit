@@ -812,6 +812,7 @@ describe("LAN security P0 types", () => {
 import type {
   TerminalHttpRequestsV2,
   TerminalHttpResponseV2,
+  TerminalFailureV2,
   LedgerV2,
 } from "../../../src/web-hub/protocol/terminal-v2.js";
 import type {
@@ -836,6 +837,16 @@ describe("T51 v2 compile-time cross-package ownership", () => {
   });
   it("uses protocol aliases in the browser and keeps ledger resource-only", () => {
     expectTypeOf<BrowserRequestsV2>().toEqualTypeOf<TerminalHttpRequestsV2>();
+    expectTypeOf<Extract<TerminalFailureV2, { code: "E_INPUT_UNKNOWN" }>["effect"]>().toEqualTypeOf<"unknown">();
+    expectTypeOf<Exclude<TerminalFailureV2, { code: "E_INPUT_UNKNOWN" }>["effect"]>().toEqualTypeOf<
+      "none" | "unknown"
+    >();
+    // @ts-expect-error F1: input-result uncertainty can NEVER claim effect:none.
+    const invalidFailure: TerminalFailureV2 = { ok: false, code: "E_INPUT_UNKNOWN", effect: "none" };
+    // @ts-expect-error HTTP response aliases must preserve the same discriminated failure.
+    const invalidResponse: TerminalHttpResponseV2<"input"> = { ok: false, code: "E_INPUT_UNKNOWN", effect: "none" };
+    void invalidFailure;
+    void invalidResponse;
     expectTypeOf<TerminalHttpRequestsV2["create"]["mode"]>().toEqualTypeOf<"ensure-empty" | "new">();
     expectTypeOf<keyof Extract<TerminalHttpRequestsV2["input"], { queryOnly: true }>>().toEqualTypeOf<
       "scope" | "hubInstance" | "termId" | "viewId" | "seq" | "queryOnly"

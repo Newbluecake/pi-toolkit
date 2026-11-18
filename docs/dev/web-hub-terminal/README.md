@@ -48,6 +48,10 @@ P0 用户明确澄清：input 的另一个闭合互斥分支是 `{scope,hubInsta
 从未接受/已裁掉/不可证明结果统一 `E_INPUT_UNKNOWN effect:unknown`；旧 view 先按安全合同拒绝。
 查询零 PTY/创建/续期/writer acquisition。P4 unknown 后只查原 id/seq，不重发写分支或自动补写。
 结构测试只能证明分支互斥；查询零副作用/认证隔离/淘汰不重写须由 P2/P7 行为测试证明。
+F1 增量修复把 failure 本身设为判别 union：`E_INPUT_UNKNOWN` 只能配 `effect:"unknown"`，
+`effect:"none"` 在 TypeBox、浏览器 JSON 投影及 Static/HTTP response 类型中均非法；
+其它错误原有 effect 组合不变。仅需错误码的 creation/stream schema 使用独立的
+`TerminalErrorCodeV2Schema`，不得再依赖 `TerminalFailureV2Schema.properties.code`。
 
 合法 cold allocation 逐项 cleanup-unknown，按原 quotaSessionKey/principalKey/total 各占一次，
 不是全局封禁；余额可建，close 不释放未知槽。ledger 仅资源归因，拒绝 auth intent/epoch/repair/
