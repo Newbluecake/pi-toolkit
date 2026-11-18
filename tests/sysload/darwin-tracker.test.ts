@@ -78,6 +78,33 @@ describe("sysload darwin tracker (§4.2-T)", () => {
     expect(verdict.gating).toBe(true);
   });
 
+  it("an advisory switch after a REAL crit mem drops mem out of the level composition entirely (Major 2)", () => {
+    const tracker = createLoadTracker(settings);
+    // 非 advisory 时代：mem 真实升到 crit 并 gate
+    tracker.observe(darwinSample(0, { availPct: 3, memAdvisory: false }));
+    tracker.observe(darwinSample(5_000, { availPct: 3, memAdvisory: false }));
+    expect(tracker.verdict(5_000).metrics.mem.level).toBe("crit");
+    expect(tracker.verdict(5_000).gating).toBe(true);
+    // 同一 tracker 切到 advisory：存量 crit 等级与挂起窗口必须被清除，不再计入 overall/gate
+    const transition = tracker.observe(darwinSample(10_000, { availPct: 3 }));
+    expect(transition.gateCleared).toBe(true);
+    expect(transition.provenRecovered).toBe(false);
+    expect(transition.escalatedTo).toBeUndefined();
+    const verdict = tracker.verdict(10_000);
+    expect(verdict.metrics.mem.level).toBe("unknown");
+    expect(verdict.metrics.mem.availPct).toBe(3); // 显示值照常
+    expect(verdict.level).toBe("ok"); // overall 不再含 mem
+    expect(verdict.gating).toBe(false);
+    // 持续 advisory：保持 unknown
+    tracker.observe(darwinSample(15_000, { availPct: 3 }));
+    expect(tracker.verdict(15_000).metrics.mem.level).toBe("unknown");
+    expect(tracker.verdict(15_000).level).toBe("ok");
+    // 切回非 advisory（模拟 D1 启用）：从 unknown 重新正常升级
+    tracker.observe(darwinSample(20_000, { availPct: 3, memAdvisory: false }));
+    expect(tracker.verdict(20_000).metrics.mem.level).toBe("crit");
+    expect(tracker.verdict(20_000).gating).toBe(true);
+  });
+
   it("fail-open: all-invalid disks with advisory mem keep the overall level unknown and the gate closed", () => {
     const tracker = createLoadTracker(settings);
     tracker.observe(darwinSample(0, { availPct: 3, disks: [{ label: "/", reading: { kind: "invalid" } }] }));

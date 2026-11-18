@@ -125,6 +125,48 @@ describe("sysload darwin top scanner (§4.2-P)", () => {
     }
   });
 
+  it("takes the budget as ONE snapshot — a clock crossing the 50ms boundary mid-check never starts ps (Major 1)", async () => {
+    const queueNow = (values: readonly number[]) => {
+      let index = 0;
+      return () => values[Math.min(index++, values.length - 1)]!;
+    };
+
+    // Snapshot exactly 49 ⇒ no lease held, ps never started (and the lease is free afterwards).
+    const seen: number[] = [];
+    const host: Pick<SamplerHost, "listProcesses"> = {
+      listProcesses: async (opts) => {
+        seen.push(opts.timeoutMs);
+        return { procs: [], truncated: false };
+      },
+    };
+    const scanner = createHostTopScanner(host);
+    const ledger = freshLedger();
+    const rushed = await scanner(ledger, { deadlineMs: 300, now: queueNow([0, 251]) });
+    expect(seen).toEqual([]);
+    expect(rushed.partial).toBe(true);
+    expect(ledger.tryAcquire("top")).toBeDefined();
+
+    // Snapshot exactly 50, the NEXT clock read already 49: ps runs with timeoutMs 50 from the
+    // snapshot — never 49 (the pre-fix double-read computed 49 and still started the call).
+    const crossing = await scanner(freshLedger(), {
+      deadlineMs: 300,
+      now: queueNow([0, 250, 251]),
+    });
+    expect(seen).toEqual([50]);
+    expect(crossing.partial).toBeUndefined();
+
+    // Snapshot 51 ⇒ proceeds with 51.
+    await scanner(freshLedger(), { deadlineMs: 300, now: queueNow([0, 249, 249]) });
+    expect(seen).toEqual([50, 51]);
+
+    // A non-finite snapshot ⇒ no call at all.
+    const nanLedger = freshLedger();
+    const nan = await scanner(nanLedger, { deadlineMs: 300, now: queueNow([0, Number.NaN]) });
+    expect(seen).toEqual([50, 51]);
+    expect(nan.partial).toBe(true);
+    expect(nanLedger.tryAcquire("top")).toBeDefined();
+  });
+
   it("keeps the `top` lease until a hung listing really settles, and never calls onPrevious", async () => {
     let releaseListing!: (value: { procs: readonly HostProcess[]; truncated: boolean } | undefined) => void;
     const listing = new Promise<{ procs: readonly HostProcess[]; truncated: boolean } | undefined>((resolve) => {

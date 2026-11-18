@@ -179,7 +179,9 @@ async function resolvePath(
 
 /** darwin-plan §2.3 `hostBounded`：所有 host 调用的共用闸门。
  * 1. 预算/代际检查在取租约**之前**⇒ 预算耗尽不取租约、不启动进程；
- * 2. timeoutMs 必为 ≥HOST_MIN_BUDGET_MS 的有限正整数（≤HOST_MAX_TIMEOUT_MS）；
+ * 2. 预算取**单次快照**（S1 评审 Major 1：连续两次读 left() 会跨界——第二次可能跌破 50 甚至 ≤0
+ *    仍取租约/调 host），快照须为有限值且 ≥HOST_MIN_BUDGET_MS，timeoutMs 由同一快照计算，
+ *    必为 ≥HOST_MIN_BUDGET_MS 的有限正整数（≤HOST_MAX_TIMEOUT_MS）；
  * 3. 租约由 withIoLease 在底层 promise 真正 settle 后释放；
  * 4. beforeDeadline 只结束等待（该拍记缺失），不取消进程；返回后 !isCurrent() ⇒ 丢弃。 */
 async function hostBounded<T>(
@@ -189,8 +191,10 @@ async function hostBounded<T>(
   isCurrent: () => boolean,
   op: (timeoutMs: number) => Promise<T>,
 ): Promise<T | undefined> {
-  if (!isCurrent() || left() < HOST_MIN_BUDGET_MS) return undefined;
-  const timeoutMs = Math.floor(Math.min(HOST_MAX_TIMEOUT_MS, left()));
+  if (!isCurrent()) return undefined;
+  const budget = left();
+  if (!Number.isFinite(budget) || budget < HOST_MIN_BUDGET_MS) return undefined;
+  const timeoutMs = Math.floor(Math.min(HOST_MAX_TIMEOUT_MS, budget));
   const operation = withIoLease(ledger, `host:${kind}`, () => op(timeoutMs));
   if (operation === undefined) return undefined;
   try {
@@ -345,8 +349,10 @@ export async function sampleOnce(
       }
       const dev = await hostBounded(`dev:${resolvedPath}`, ledger, left, isCurrent, () => host.deviceOf(resolvedPath));
       if (dev === undefined) {
-        // 不能证明挂载身份就不冒充（与 resolvePath 未解析同口径）：unresolved，绝不调 statfs、不进 seenMounts。
-        disks.push({ label, reading: { kind: "unresolved" } });
+        // S1 评审 Minor：区分两种 dev 缺席——代际在调用期间失效 ⇒ 整拍已死 ⇒ invalid（方案步骤 4 口径）；
+        // deviceOf 真失败/账本满/等待超期 ⇒ 不能证明挂载身份就不冒充（与 resolvePath 同口径）⇒ unresolved。
+        // 两者都绝不调 statfs、不进 seenMounts。
+        disks.push({ label, reading: isCurrent() ? { kind: "unresolved" } : { kind: "invalid" } });
         continue;
       }
       if (!isCurrent() || left() <= 0) {
