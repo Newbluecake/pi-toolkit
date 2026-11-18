@@ -459,6 +459,7 @@ defineExpose({ open: openPanel, restore: restorePanel, collapse, focus });
     id="terminal-v2-panel"
     ref="root"
     class="terminal-v2-panel"
+    :data-writable="state.phase === 'ready'"
     :class="{ 'is-maximized': maximized }"
     role="complementary"
     aria-labelledby="terminal-v2-title"

@@ -22,12 +22,13 @@ function agent(): AgentState {
     session: { sessionId: "session", name: "Test", mode: "tui" },
     status: {
       busy: false,
-      terminalSession: {
-        v: 1,
+      terminalSessionV2: {
+        v: 2,
         enabled: true,
+        contextGeneration: 1,
         sessionId: "session",
         epoch: "epoch",
-        limits: { maxPerSession: 2, maxPerPrincipal: 2, maxTotal: 8, inputIdleMs: 3600000, maxLifetimeMs: 28800000 },
+        limits: { maxPerSession: 2, inputIdleMs: 3600000, maxLifetimeMs: 28800000 },
       },
     },
     down: false,
@@ -86,7 +87,7 @@ describe("terminal capability gates and off parity (§7.1/§7.2)", () => {
       props: { agent: a, now: 10000, narrow: false },
       global: {
         stubs: { DetailDock: true, DetailBody: true },
-        provide: { [HUB_CTX as symbol]: { state, control: {}, terminal: { request } } },
+        provide: { [HUB_CTX as symbol]: { state, control: {}, terminalV2: { request } } },
       },
     });
     wrappers.push(w);
@@ -101,7 +102,7 @@ describe("terminal capability gates and off parity (§7.1/§7.2)", () => {
     await nextTick();
     await nextTick();
     expect(w.find('[data-fold="terminal"]').exists()).toBe(false);
-    state.value = { ...state.value, hub: { caps: ["terminal.ui.v1", "terminal.session.v1"] } };
+    state.value = { ...state.value, hub: { caps: ["terminal.tabs.v2"] } };
     await flushPromises();
     await vi.waitFor(() => expect(w.find('[data-fold="terminal"]').exists()).toBe(true));
     expect(request).not.toHaveBeenCalled();
@@ -112,7 +113,7 @@ describe("terminal capability gates and off parity (§7.1/§7.2)", () => {
     const state = ref<any>({
       control: true,
       conn: "open",
-      hub: { caps: ["terminal.ui.v1", "terminal.session.v1", "privacy.v1"] },
+      hub: { caps: ["terminal.tabs.v2", "privacy.v1"] },
       privacy: { cap: true, ready: false, locked: new Set() },
     });
     const w = mount(AgentDetail, {
@@ -153,14 +154,14 @@ describe("terminal capability gates and off parity (§7.1/§7.2)", () => {
     wrappers.push(w);
     const off = w.html();
     expect(w.find('use[href="#i-terminal"]').exists()).toBe(true);
-    state.value = { hub: { caps: ["terminal.ui.v1"] } };
+    state.value = { hub: { caps: ["terminal.tabs.v2"] } };
     await nextTick();
     expect(w.find('use[href="#i-jobs-list"]').exists()).toBe(true);
     state.value = { hub: { caps: [] } };
     await nextTick();
     expect(w.html()).toBe(off);
   });
-  it("registers no extra SSE listeners off; a hub cap installs only the private direct events and preserves legacy events", () => {
+  it("registers no private SSE listeners off, v1 or v2; ordinary events remain unchanged", () => {
     class Source {
       static last: Source;
       listeners = new Map<string, (e: any) => void>();
@@ -195,16 +196,12 @@ describe("terminal capability gates and off parity (§7.1/§7.2)", () => {
     source.listeners.get("hub")!({ data: JSON.stringify({ caps: [] }), lastEventId: "" });
     expect(source.listeners.has("terminal")).toBe(false);
     source.listeners.get("hub")!({ data: JSON.stringify({ caps: ["terminal.ui.v1"] }), lastEventId: "" });
-    expect(source.listeners.has("terminal")).toBe(true);
+    expect(source.listeners.has("terminal")).toBe(false);
+    source.listeners.get("hub")!({ data: JSON.stringify({ caps: ["terminal.tabs.v2"] }), lastEventId: "" });
+    expect(source.listeners.has("terminal")).toBe(false);
+    expect(source.listeners.has("terminal_connection")).toBe(false);
     expect(source.listeners.has("status")).toBe(true);
-    source.listeners.get("terminal_connection")!({
-      data: JSON.stringify({ connectionInstance: "private", connectionToken: "token", expiresAt: 1000 }),
-      lastEventId: "44",
-    });
-    expect(onMessage.mock.calls.at(-1)?.[0]).toEqual({
-      event: "terminal_connection",
-      data: { connectionInstance: "private", connectionToken: "token", expiresAt: 1000 },
-    });
+    expect(onMessage.mock.calls.at(-1)?.[0]).toEqual({ event: "hub", data: { caps: ["terminal.tabs.v2"] } });
     stream.closeStream();
   });
 });

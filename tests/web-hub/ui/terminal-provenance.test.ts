@@ -52,10 +52,16 @@ function fixture(): UiProvenance {
           sourceModule,
           packages: [{ name: "@xterm/xterm", version: "6.0.0", license: "MIT", dir: "node_modules/@xterm/xterm" }],
         },
+        "assets/panel-v2-abcdefgh.css": {
+          sha256: sha256Hex(bytes),
+          sourceSha256: sha256Hex(bytes),
+          sourceModule: "terminal-v2.css?url",
+          packages: [],
+        },
         "assets/terminal-abcdefgh.css": {
           sha256: sha256Hex(bytes),
           sourceSha256: sha256Hex(bytes),
-          sourceModule: "terminal.css?url",
+          sourceModule: "renderer.css?url",
           packages: [],
         },
       },
@@ -69,11 +75,13 @@ function verify(prov: UiProvenance, firstScreen = new Set<string>(), html = "") 
     new Map([
       [cssPath, bytes],
       ["assets/terminal-abcdefgh.css", bytes],
+      ["assets/panel-v2-abcdefgh.css", bytes],
     ]),
     html,
     new Map([
       [sourceModule, bytes],
-      ["terminal.css?url", bytes],
+      ["renderer.css?url", bytes],
+      ["terminal-v2.css?url", bytes],
     ]),
   );
 }
@@ -121,7 +129,7 @@ describe("terminal P0 provenance gates", () => {
     expect(verify(fixture(), new Set(), `<link href="/${cssPath}">`).join()).toContain("first screen");
     const missing = fixture();
     delete missing.terminal!.css[cssPath];
-    expect(verify(missing).join()).toContain("exactly two");
+    expect(verify(missing).join()).toContain("exactly three");
   });
   it("rejects JS tampering through the shared SHA gate", () => {
     expect(verifyProvenance(fixture(), new Map([[path, Buffer.from("changed")]])).join()).toContain("sha256 differs");

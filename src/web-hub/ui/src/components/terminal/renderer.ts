@@ -3,7 +3,7 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import { FitAddon } from "@xterm/addon-fit";
 import { version } from "@xterm/xterm/package.json";
 import xtermCss from "@xterm/xterm/css/xterm.css?url";
-import terminalCss from "./terminal.css?url";
+import terminalCss from "./renderer.css?url";
 import { TERMINAL_FONT_FAMILY, terminalFontsReady, waitTerminalFonts, watchTerminalFonts } from "./fonts.js";
 import { captureTerminalStyles } from "./constructed-styles.js";
 import { createWebglLifecycle, type WebglUiState } from "./webgl-lifecycle.js";

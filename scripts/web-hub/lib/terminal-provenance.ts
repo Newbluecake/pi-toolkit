@@ -45,7 +45,7 @@ export function verifyTerminalProvenance(
   if (!prov.terminal?.implInGraph && exclusive.size) errors.push("terminal chunks without impl");
   if (prov.terminal?.implInGraph && hosts !== 1) errors.push("terminal host count mismatch");
   const assets = Object.entries(prov.terminal?.css ?? {});
-  if (prov.terminal?.implInGraph && assets.length !== 2) errors.push("terminal requires exactly two lazy CSS assets");
+  if (prov.terminal?.implInGraph && assets.length !== 3) errors.push("terminal requires exactly three lazy CSS assets");
   for (const [path, asset] of assets) {
     const bytes = cssFiles.get(path);
     if (!bytes || createHash("sha256").update(bytes).digest("hex") !== asset.sha256)

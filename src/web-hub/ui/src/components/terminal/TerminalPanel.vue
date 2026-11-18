@@ -25,7 +25,13 @@ import { loadTerminalFontSize, saveTerminalFontSize } from "./fonts.js";
 import terminalCss from "./terminal.css?url";
 import TerminalChrome from "./TerminalChrome.vue";
 import TerminalList from "./TerminalList.vue";
-const props = defineProps<{ hub: HubHandle; scope: TerminalScope }>();
+const props = defineProps<{
+  hub: HubHandle & {
+    terminal?: import("../../transport/terminal.js").TerminalTransport;
+    terminalEvents?(sink: (event: string, data: unknown) => void): () => void;
+  };
+  scope: TerminalScope;
+}>();
 const emit = defineEmits<{ background: [] }>();
 const { t } = useI18n();
 const root = ref<HTMLElement>();

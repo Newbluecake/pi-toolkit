@@ -1,15 +1,15 @@
-import { TERMINAL_SESSION_CAP } from "@protocol/version.js";
+import { TERMINAL_V2_CAP } from "@protocol/terminal-v2-paths.js";
 
 /** Browser hub capability only. Never infer support from an agent/version/status. */
 export function terminalUiEnabled(hub: unknown): boolean {
   const caps = (hub as { caps?: unknown } | null | undefined)?.caps;
-  return Array.isArray(caps) && caps.includes("terminal.ui.v1");
+  return Array.isArray(caps) && caps.includes(TERMINAL_V2_CAP);
 }
 
 /** Strict new-UI/old-hub downgrade; the hub-only gate above still owns shared bash icons. */
 export function terminalSessionSupported(hub: unknown): boolean {
   const caps = (hub as { caps?: unknown } | null | undefined)?.caps;
-  return terminalUiEnabled(hub) && Array.isArray(caps) && caps.includes(TERMINAL_SESSION_CAP);
+  return Array.isArray(caps) && caps.includes(TERMINAL_V2_CAP);
 }
 
 /** Optional negative hint only; legacy absence is not proof of readiness. */
@@ -34,11 +34,11 @@ export async function terminalSessionUiEnabled(
   if (!terminalSessionSupported(hub) || terminalUnavailableReason(hub) !== undefined) return false;
   const sessionId = (agent.session as { sessionId?: unknown } | undefined)?.sessionId;
   const epoch = (agent.card as { epoch?: unknown } | undefined)?.epoch;
-  const declaration = (agent.status as { terminalSession?: unknown } | undefined)?.terminalSession;
+  const declaration = (agent.status as { terminalSessionV2?: unknown } | undefined)?.terminalSessionV2;
   if (typeof sessionId !== "string" || typeof epoch !== "string" || !declaration) return false;
   try {
-    const { parseTerminalSession } = await import("@protocol/terminal-session.js");
-    return parseTerminalSession(declaration, { sessionId, epoch }) !== undefined;
+    const { parseTerminalSessionV2 } = await import("@protocol/terminal-v2.js");
+    return parseTerminalSessionV2(declaration, { sessionId, epoch }) !== undefined;
   } catch {
     return false;
   }

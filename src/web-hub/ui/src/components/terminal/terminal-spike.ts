@@ -1,5 +1,6 @@
 /** Isolated P0 WebGL-only host. Never imported by the SPA; no shell/transport. */
-import type { mountTerminalPanelProbe, WebglUiState } from "./terminal-feature.js";
+import type { mountTerminalPanelProbe } from "./v2/terminal-v2-feature.js";
+import type { WebglUiState } from "./webgl-lifecycle.js";
 
 type Spike = Awaited<ReturnType<typeof mountTerminalPanelProbe>>;
 const root = document.querySelector<HTMLElement>("[data-terminal-spike]");
@@ -83,7 +84,7 @@ if (root) {
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
         const module = await Promise.race([
-          import("./terminal-feature.js"),
+          import("./v2/terminal-v2-feature.js"),
           new Promise<never>((_, reject) => {
             timer = setTimeout(() => reject(new Error("终端组件加载超时，请重试。")), 5_000);
           }),

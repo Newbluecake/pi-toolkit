@@ -1,4 +1,4 @@
-import { createTerminalTransport } from "./terminal.js";
+import { createLazyTerminalTransportV2 } from "./terminal-v2-lazy.js";
 import { xsWebCommandArgs } from "@protocol/xs-web-command.js";
 /**
  * Password-mode (LAN) `HubTransport`/`PasswordTransport` adapter (vue-plan.md v2.1 §3.4, §5.2 —
@@ -152,7 +152,7 @@ export function createPasswordTransport(deps: PasswordTransportDeps): PasswordTr
   const client = createPasswordClient(wrappedDeps);
   return {
     mode: "password",
-    terminal: createTerminalTransport(deps),
+    terminalV2: createLazyTerminalTransportV2(deps),
     start: () => client.start(),
     close: () => client.close(),
     subscribe: (clientId, agentKey) => client.subscribe(clientId, agentKey),

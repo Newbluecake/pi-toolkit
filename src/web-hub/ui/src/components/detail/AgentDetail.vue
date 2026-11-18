@@ -111,9 +111,7 @@ const notices = computed<readonly Notice[]>(() => [
         {
           id: "terminal-unavailable",
           tone: "danger" as const,
-          title: ["sse-admission-timeout", "sse-public-pressure"].includes(terminalUnavailable.value)
-            ? t("detail.terminalAdmissionUnavailable")
-            : t("detail.terminalUnavailable", { reason: terminalUnavailable.value }),
+          title: t("detail.terminalUnavailable", { reason: terminalUnavailable.value }),
           persistent: true,
         },
       ]
@@ -207,16 +205,14 @@ function unmountTerminal() {
 }
 const terminalScope = computed(() => ({
   agentKey: props.agent.key,
-  expect: {
-    sessionId: String((props.agent.session as { sessionId?: unknown } | undefined)?.sessionId ?? ""),
-    epoch: String((props.agent.card as { epoch?: unknown }).epoch ?? ""),
-  },
+  sessionId: String((props.agent.session as { sessionId?: unknown } | undefined)?.sessionId ?? ""),
+  epoch: String((props.agent.card as { epoch?: unknown }).epoch ?? ""),
 }));
 // Stable across ordinary status ticks, but sensitive to every declaration field (including
 // limits/unknown fields). Malformed/cyclic input is still passed to the frozen closed parser.
 const terminalDeclarationRevision = computed(() => {
   try {
-    return JSON.stringify((props.agent.status as { terminalSession?: unknown } | undefined)?.terminalSession) ?? "";
+    return JSON.stringify((props.agent.status as { terminalSessionV2?: unknown } | undefined)?.terminalSessionV2) ?? "";
   } catch {
     return "invalid";
   }
@@ -671,12 +667,23 @@ const trigger = rail.trigger;
 // Closing/switching unmounts the view, whose controller only detaches the writer. The shell
 // remains in the terminal list; no hidden renderer or private metadata survives a revocation.
 const terminalOpen = computed(() => terminalAvailable.value && drawerOpen.value && drawerPanel.value === "terminal");
+const terminalExplicitIntent = ref(0);
+let terminalConsumedIntent = 0;
+function toggleActivityPanel(
+  kind: "agent" | "bash" | "terminal",
+  via: "pointer" | "keyboard",
+  element?: HTMLElement | null,
+) {
+  if (kind === "terminal" && !(terminalOpen.value && drawerPanel.value === kind)) terminalExplicitIntent.value++;
+  rail.toggle(kind, via, element);
+}
 provide(TERMINAL_ENTRY, {
   available: terminalAvailable,
   open: terminalOpen,
   show(event) {
     if (!terminalAvailable.value) return;
     terminalLoadError.value = "";
+    if (!terminalOpen.value) terminalExplicitIntent.value++;
     rail.show(
       "terminal",
       event?.detail === 0 || !event ? "keyboard" : "pointer",
@@ -686,13 +693,13 @@ provide(TERMINAL_ENTRY, {
 });
 
 watch(
-  [terminalAvailable, terminalOpen, () => JSON.stringify(terminalScope.value)],
+  [terminalAvailable, terminalOpen, () => JSON.stringify(terminalScope.value), terminalExplicitIntent],
   async ([available, open]) => {
     const scope = terminalScope.value;
     const mine = ++terminalLoadGeneration;
     unmountTerminal();
     if (!available || !open) return;
-    if (!hub?.terminal) {
+    if (!hub?.terminalV2) {
       rail.close();
       terminalLoadError.value = t("detail.terminalConnectionUnavailable");
       return;
@@ -700,7 +707,7 @@ watch(
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const module = await Promise.race([
-        import("../terminal/terminal-feature.js"),
+        import("../terminal/v2/terminal-v2-feature.js"),
         new Promise<never>((_, reject) => {
           timer = setTimeout(() => reject(new Error(t("detail.terminalLoadTimeout"))), 5000);
         }),
@@ -710,9 +717,16 @@ watch(
       terminalHost = document.createElement("div");
       terminalHost.className = "terminal-panel-host";
       terminalMount.value.append(terminalHost);
-      const vnode = h(module.TerminalPanel, {
-        hub,
+      const explicit = terminalExplicitIntent.value > terminalConsumedIntent;
+      terminalConsumedIntent = terminalExplicitIntent.value;
+      let panel: { open(): Promise<boolean>; restore(): Promise<boolean> } | undefined;
+      const panelProps = {
+        key: JSON.stringify(scope),
+        transport: hub.terminalV2,
         scope,
+        ref: (value: unknown) => {
+          panel = value as typeof panel;
+        },
         onBackground() {
           rail.close();
           void nextTick(() =>
@@ -722,9 +736,18 @@ watch(
             )?.focus(),
           );
         },
-      });
+      };
+      // A normal render owner is required for the SFC's public template ref.
+      // A ref on h() constructed directly inside this async watch has no owner.
+      const vnode = h({ name: "TerminalLazyHostV2", render: () => h(module.TerminalPanelV2, panelProps) });
       if (terminalAppContext) vnode.appContext = terminalAppContext;
       render(vnode, terminalHost);
+      await nextTick();
+      if (mine !== terminalLoadGeneration || !terminalAvailable.value || !terminalOpen.value) return;
+      // Only explicit header/rail clicks may create. Any lifecycle restoration is
+      // list/query/attach only, even if eligibility or persisted drawer state returns.
+      if (explicit) await panel?.open();
+      else await panel?.restore();
     } catch (error) {
       if (mine === terminalLoadGeneration) {
         rail.close();
@@ -843,7 +866,7 @@ function onCloseDrawer(): void {
             :omitted="agent.fleetOmitted"
             :open="drawerOpen"
             :panel="drawerPanel"
-            @toggle-panel="rail.toggle"
+            @toggle-panel="toggleActivityPanel"
           />
         </Teleport>
       </div>

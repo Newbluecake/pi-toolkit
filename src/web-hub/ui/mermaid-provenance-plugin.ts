@@ -318,9 +318,10 @@ export function mermaidProvenancePlugin(options: MermaidProvenanceOptions): Merm
         const lookup: ModuleLookup = (id) => this.getModuleInfo(id);
         exclusive = computeExclusiveSets(lookup, ids, implId).exclusive;
       }
-      terminalImplId = ids.find((id) => id.endsWith(`components${sep}terminal${sep}terminal-impl.ts`)) ?? null;
+      terminalImplId =
+        ids.find((id) => id.endsWith(`components${sep}terminal${sep}v2${sep}terminal-v2-impl.ts`)) ?? null;
       const terminalFeatureId =
-        ids.find((id) => id.endsWith(`components${sep}terminal${sep}terminal-feature.ts`)) ?? terminalImplId;
+        ids.find((id) => id.endsWith(`components${sep}terminal${sep}v2${sep}terminal-v2-feature.ts`)) ?? terminalImplId;
       terminalExclusive = terminalFeatureId
         ? computeExclusiveSets((id) => this.getModuleInfo(id), ids, terminalFeatureId).exclusive
         : new Set();

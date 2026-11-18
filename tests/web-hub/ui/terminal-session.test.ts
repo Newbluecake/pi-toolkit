@@ -6,7 +6,7 @@ import AgentDetail from "../../../src/web-hub/ui/src/components/detail/AgentDeta
 import { HUB_CTX } from "../../../src/web-hub/ui/src/components/control/controlContext.js";
 import { terminalSessionUiEnabled, terminalUiEnabled } from "../../../src/web-hub/ui/src/logic/terminalCapability.js";
 import { createStreamLifecycle } from "../../../src/web-hub/ui/src/logic/transport-core.js";
-import { createTerminalController } from "../../../src/web-hub/ui/src/components/terminal/controller.js";
+import { createTerminalControllerV2 } from "../../../src/web-hub/ui/src/components/terminal/v2/controller.js";
 import type { AgentState } from "../../../src/web-hub/ui/src/types.js";
 
 const lazy = vi.hoisted(() => {
@@ -16,19 +16,20 @@ const lazy = vi.hoisted(() => {
   });
   return { promise, resolve, loaded: vi.fn(), mounted: vi.fn(), disposed: vi.fn() };
 });
-vi.mock("../../../src/web-hub/ui/src/components/terminal/terminal-feature.js", async () => {
+vi.mock("../../../src/web-hub/ui/src/components/terminal/v2/terminal-v2-feature.js", async () => {
   lazy.loaded();
   return await lazy.promise;
 });
-const caps = ["terminal.ui.v1", "terminal.session.v1"];
+const caps = ["terminal.tabs.v2"];
 const hubInfo = { caps };
 function declaration(sessionId = "session", epoch = "epoch") {
   return {
-    v: 1,
+    v: 2,
     enabled: true,
+    contextGeneration: 1,
     sessionId,
     epoch,
-    limits: { maxPerSession: 2, maxPerPrincipal: 2, maxTotal: 8, inputIdleMs: 3600000, maxLifetimeMs: 28800000 },
+    limits: { maxPerSession: 2, inputIdleMs: 3600000, maxLifetimeMs: 28800000 },
   };
 }
 function agent(key = "agent", sessionId = "session", epoch = "epoch"): AgentState {
@@ -36,7 +37,7 @@ function agent(key = "agent", sessionId = "session", epoch = "epoch"): AgentStat
     key,
     card: { control: true, epoch, kind: "tui", state: "live" },
     session: { sessionId, name: "Test", mode: "tui" },
-    status: { busy: false, terminalSession: declaration(sessionId, epoch) },
+    status: { busy: false, terminalSessionV2: declaration(sessionId, epoch) },
     down: false,
     prompts: [],
     fleet: [],
@@ -69,7 +70,7 @@ function setup(a = agent(), hub = hubInfo) {
     props: { agent: a, now: 10000, narrow: false },
     global: {
       stubs: { DetailDock: true, DetailBody: true },
-      provide: { [HUB_CTX as symbol]: { state, control: {}, terminal: { request } } },
+      provide: { [HUB_CTX as symbol]: { state, control: {}, terminalV2: { request } } },
     },
   });
   wrappers.push(w);
@@ -88,7 +89,7 @@ describe("per-session terminal declaration gate (r2 §6)", () => {
     },
   );
   it("does not change the shared hub-only bash/sprite gate for old hubs or ineligible targets", async () => {
-    expect(terminalUiEnabled({ caps: ["terminal.ui.v1"] })).toBe(true);
+    expect(terminalUiEnabled({ caps: ["terminal.ui.v1"] })).toBe(false);
     expect(await terminalSessionUiEnabled(hubInfo, { ...agent(), status: { busy: true } })).toBe(false);
     expect(terminalUiEnabled(hubInfo)).toBe(true);
     expect(terminalUiEnabled({ caps: [] })).toBe(false);
@@ -98,7 +99,7 @@ describe("per-session terminal declaration gate (r2 §6)", () => {
     null,
     {},
     { ...declaration(), enabled: false },
-    { ...declaration(), v: 2 },
+    { ...declaration(), v: 1 },
     declaration("other"),
     declaration("session", "old-epoch"),
     { ...declaration(), limits: { ...declaration().limits, maxTotal: 33 } },
@@ -109,15 +110,18 @@ describe("per-session terminal declaration gate (r2 §6)", () => {
   it.each(invalid)(
     "rejects malformed/stale public declarations without inferring eligibility: %#",
     async (terminalSession) => {
-      expect(await terminalSessionUiEnabled(hubInfo, { ...agent(), status: { busy: true, terminalSession } })).toBe(
-        false,
-      );
+      expect(
+        await terminalSessionUiEnabled(hubInfo, {
+          ...agent(),
+          status: { busy: true, terminalSessionV2: terminalSession },
+        }),
+      ).toBe(false);
     },
   );
   it("uses the closed parser for cyclic input and validates both actual identity fields", async () => {
     const cyclic: any = declaration();
     cyclic.self = cyclic;
-    expect(await terminalSessionUiEnabled(hubInfo, { ...agent(), status: { terminalSession: cyclic } })).toBe(false);
+    expect(await terminalSessionUiEnabled(hubInfo, { ...agent(), status: { terminalSessionV2: cyclic } })).toBe(false);
     expect(await terminalSessionUiEnabled(hubInfo, agent())).toBe(true);
     expect(await terminalSessionUiEnabled(hubInfo, { ...agent(), session: undefined })).toBe(false);
     expect(await terminalSessionUiEnabled(hubInfo, { ...agent(), card: {} })).toBe(false);
@@ -140,9 +144,9 @@ describe("per-session terminal declaration gate (r2 §6)", () => {
   it("shows initial terminal unavailability without a declaration, API call or private panel load", async () => {
     const a = { ...agent(), status: { busy: false } } as unknown as AgentState;
     const { w, state, request } = setup(a);
-    state.value.hub = { ...hubInfo, terminal: { state: "unavailable", reason: "local-store-unavailable" } };
+    state.value.hub = { ...hubInfo, terminal: { state: "unavailable", reason: "resource-unavailable" } };
     await flushPromises();
-    expect(w.text()).toContain("local-store-unavailable");
+    expect(w.text()).toContain("resource-unavailable");
     expect(entry(w).exists()).toBe(false);
     expect(request).not.toHaveBeenCalled();
     expect(lazy.loaded).not.toHaveBeenCalled();
@@ -151,21 +155,21 @@ describe("per-session terminal declaration gate (r2 §6)", () => {
     state.value.hub = hubInfo;
     await w.setProps({ agent: agent() });
     await visible(w);
-    expect(w.text()).not.toContain("local-store-unavailable");
+    expect(w.text()).not.toContain("resource-unavailable");
     state.value.hub = { ...hubInfo, terminal: { state: "unavailable", reason: "privacy-unavailable" } };
     await nextTick();
     expect(entry(w).exists()).toBe(false);
     expect(w.text()).toContain("privacy-unavailable");
     expect(request).not.toHaveBeenCalled();
   });
-  it.each(["sse-admission-timeout", "sse-public-pressure"])(
-    "shows retryable %s hint and keeps terminal APIs and lazy code inert",
+  it.each(["resource-unavailable", "privacy-unavailable"])(
+    "shows terminal-local %s hint and keeps terminal APIs and lazy code inert",
     async (reason) => {
       const { w, state, request } = setup();
       state.value.hub = { ...hubInfo, terminal: { state: "unavailable", reason } };
       await flushPromises();
-      expect(w.text()).toContain("Terminal temporarily unavailable");
-      expect(w.text()).toContain("Refresh the page to retry");
+      expect(w.text()).toContain(reason);
+      expect(w.text()).toContain("Terminal unavailable");
       expect(w.text()).toContain("Chat and history remain available");
       expect(entry(w).exists()).toBe(false);
       expect(request).not.toHaveBeenCalled();
@@ -236,7 +240,7 @@ describe("per-session terminal declaration gate (r2 §6)", () => {
     await flushPromises();
     expect(entry(w).exists()).toBe(false);
   });
-  it("late lazy completion cannot mount after withdrawal; A→zero→B uses one existing private listener and never auto-opens", async () => {
+  it("late lazy completion cannot mount after withdrawal; A→zero→B registers no private listener and never auto-opens", async () => {
     const a = agent();
     const { w, state, request } = setup(a);
     const listeners = new Map<string, (event: any) => void>();
@@ -266,9 +270,10 @@ describe("per-session terminal declaration gate (r2 §6)", () => {
       await nextTick();
       expect(entry(w).exists()).toBe(false);
       lazy.resolve({
-        TerminalPanel: defineComponent({
+        TerminalPanelV2: defineComponent({
           props: ["scope"],
-          setup(props) {
+          setup(props, { expose }) {
+            expose({ open: vi.fn(async () => true), restore: vi.fn(async () => true) });
             lazy.mounted(props.scope);
             onBeforeUnmount(() => lazy.disposed());
             return () => h("section", { "data-test-panel": true }, props.scope.agentKey);
@@ -285,11 +290,11 @@ describe("per-session terminal declaration gate (r2 §6)", () => {
       expect(entry(w).attributes("aria-expanded")).toBe("false");
       await entry(w).trigger("click");
       await flushPromises();
-      expect(lazy.mounted).toHaveBeenCalledWith({ agentKey: "B", expect: { sessionId: "B", epoch: "B" } });
+      expect(lazy.mounted).toHaveBeenCalledWith({ agentKey: "B", sessionId: "B", epoch: "B" });
       expect(w.find("#fleet-drawer [data-test-panel]").exists()).toBe(true);
       expect(w.find(".detail-main [data-test-panel]").exists()).toBe(false);
       // Ordinary ticks with an equivalent declaration do not dispose/recreate an open panel.
-      send("status", { busy: true, terminalSession: declaration("B", "B") });
+      send("status", { busy: true, terminalSessionV2: declaration("B", "B") });
       await flushPromises();
       expect(lazy.mounted).toHaveBeenCalledOnce();
       expect(lazy.disposed).not.toHaveBeenCalled();
@@ -297,18 +302,13 @@ describe("per-session terminal declaration gate (r2 §6)", () => {
       await nextTick();
       expect(w.find("[data-test-panel]").exists()).toBe(false);
       expect(lazy.disposed).toHaveBeenCalledOnce();
-      send("status", { busy: false, terminalSession: declaration("B", "B") });
+      send("status", { busy: false, terminalSessionV2: declaration("B", "B") });
       await visible(w);
       expect(entry(w).attributes("aria-expanded")).toBe("false");
       expect(listeners.get("terminal")).toBe(privateListener);
-      expect(registered.mock.calls.filter(([name]) => name === "terminal")).toHaveLength(1);
-      expect(registered.mock.calls.filter(([name]) => name === "terminal_connection")).toHaveLength(1);
-      send("terminal_connection", {
-        connectionInstance: "existing",
-        connectionToken: "private",
-        expiresAt: Date.now() + 10000,
-      });
-      expect(frames.mock.calls.at(-1)?.[0].event).toBe("terminal_connection");
+      expect(registered.mock.calls.filter(([name]) => name === "terminal")).toHaveLength(0);
+      expect(registered.mock.calls.filter(([name]) => name === "terminal_connection")).toHaveLength(0);
+      expect(listeners.has("terminal_connection")).toBe(false);
       expect(state.value.conn).toBe("open");
       expect(request).not.toHaveBeenCalled();
     } finally {
@@ -322,27 +322,16 @@ describe("per-session terminal declaration gate (r2 §6)", () => {
     });
     const request = vi.fn(async () => pending); // deliberately ignores AbortSignal
     const make = (a: string) =>
-      createTerminalController({
+      createTerminalControllerV2({
         transport: { request } as any,
-        scope: { agentKey: a, expect: { sessionId: a, epoch: a } },
-        clientId: () => "client",
+        scope: { agentKey: a, sessionId: a, epoch: a },
         renderer: { write: async () => {}, reset() {}, dimensions: () => ({ cols: 80, rows: 24 }) },
       });
     const a = make("A");
-    a.event("terminal_connection", {
-      connectionInstance: "same",
-      connectionToken: "private",
-      expiresAt: Date.now() + 10000,
-    });
-    const flight = a.list().catch(() => {});
+    const flight = a.restore().catch(() => {});
     a.dispose();
     const b = make("B");
     try {
-      b.event("terminal_connection", {
-        connectionInstance: "same",
-        connectionToken: "private",
-        expiresAt: Date.now() + 10000,
-      });
       const before = JSON.stringify(b.state);
       resolve({ ok: true, revision: 1, rows: [{ termId: "old-A", ownerLabel: "private-A" }] });
       await flight;

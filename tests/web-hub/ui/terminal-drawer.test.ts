@@ -6,27 +6,19 @@ import AgentDetail from "../../../src/web-hub/ui/src/components/detail/AgentDeta
 import { HUB_CTX } from "../../../src/web-hub/ui/src/components/control/controlContext.js";
 import { TERMINAL_RENDERER_FACTORY } from "../../../src/web-hub/ui/src/components/terminal/renderer-port.js";
 import { resetLangForTests, setLangOverride } from "../../../src/web-hub/ui/src/composables/useI18n.js";
+import { attachedFrameV2, createTerminalMockV2 } from "./terminal-v2-fixtures.js";
 import type { AgentState } from "../../../src/web-hub/ui/src/types.js";
 
 const cleanups: Array<() => void> = [];
 afterEach(() => {
   cleanups.splice(0).forEach((fn) => fn());
   localStorage.clear();
+  sessionStorage.clear();
   document.body.textContent = "";
   vi.unstubAllGlobals();
   resetLangForTests();
 });
-const caps = ["terminal.ui.v1", "terminal.session.v1"];
-const row = {
-  termId: "term",
-  reservationId: "reservation",
-  revision: 1,
-  state: "live",
-  nextInputSeq: 0,
-  baseOffset: 0,
-  nextOffset: 0,
-  deadlines: { inputIdleAt: Date.now() + 60000, lifetimeAt: Date.now() + 120000, parentExpiresAt: Date.now() + 180000 },
-};
+const caps = ["terminal.tabs.v2"];
 function agent(activity = false): AgentState {
   return {
     key: "agent",
@@ -34,12 +26,13 @@ function agent(activity = false): AgentState {
     session: { sessionId: "session", name: "Test", mode: "tui" },
     status: {
       busy: false,
-      terminalSession: {
-        v: 1,
+      terminalSessionV2: {
+        v: 2,
         enabled: true,
+        contextGeneration: 1,
         sessionId: "session",
         epoch: "epoch",
-        limits: { maxPerSession: 2, maxPerPrincipal: 2, maxTotal: 8, inputIdleMs: 3600000, maxLifetimeMs: 28800000 },
+        limits: { maxPerSession: 2, inputIdleMs: 3600000, maxLifetimeMs: 28800000 },
       },
       ...(activity
         ? {
@@ -108,13 +101,12 @@ function setup(mode: "docked" | "overlay" | "fullscreen", activity = false, enab
     await flushPromises();
   }
   const state = ref<any>({ control: true, conn: "open", clientId: "client", hub: { caps: enabled ? caps : [] } });
-  const request = vi.fn(async (op: string) =>
-    op === "list"
-      ? { ok: true, revision: 1, rows: [row] }
-      : op === "attach"
-        ? { ok: true, ...row, attachmentId: "attachment", writerLease: "lease", replayMode: "cold", cwd: "/private" }
-        : { ok: true, revision: 2 },
-  );
+  const mock = createTerminalMockV2((op, body) => {
+    if (op === "ack" && "offset" in body && body.replayComplete)
+      queueMicrotask(() => mock.views.at(-1)?.emit({ t: "ready", offset: body.offset }));
+    return undefined;
+  });
+  const request = mock.request;
   const renderer = {
     terminal: {
       cols: 80,
@@ -127,10 +119,10 @@ function setup(mode: "docked" | "overlay" | "fullscreen", activity = false, enab
     focus: vi.fn(),
     dispose: vi.fn(),
     write: vi.fn(async () => {}),
+    setFontSize: vi.fn(),
   };
   const factory = vi.fn(async () => renderer);
   const selectRun = vi.fn();
-  const unsubscribe = vi.fn();
   const w = mount(AgentDetail, {
     props: { agent: agent(activity), now: 10000, narrow: mode === "fullscreen" },
     attachTo: document.body,
@@ -141,38 +133,33 @@ function setup(mode: "docked" | "overlay" | "fullscreen", activity = false, enab
         [HUB_CTX as symbol]: {
           state,
           control: {},
-          terminal: { request },
+          terminalV2: mock.transport,
           selectRun,
-          terminalEvents(fn: any) {
-            fn("terminal_connection", {
-              connectionInstance: "instance",
-              connectionToken: "token",
-              expiresAt: Date.now() + 60000,
-            });
-            return unsubscribe;
-          },
         },
       },
     },
   });
   cleanups.push(() => w.unmount());
   const terminalButton = () => w.get('.fleet-summary-bar[data-panel="terminal"]');
-  const panel = () => document.querySelector<HTMLElement>("#fleet-drawer .terminal-panel");
+  const panel = () => document.querySelector<HTMLElement>("#fleet-drawer .terminal-v2-panel");
   async function ready() {
     await vi.waitFor(() => expect(w.find('.fleet-summary-bar[data-panel="terminal"]').exists()).toBe(true));
     expect(request).not.toHaveBeenCalled();
     expect(factory).not.toHaveBeenCalled();
   }
   async function open() {
+    const count = mock.views.length;
     await terminalButton().trigger("click", { detail: 1 });
-    await vi.waitFor(() => expect(panel()?.querySelector(".terminal-list")).toBeTruthy());
+    await vi.waitFor(() => expect(mock.views.length).toBe(count + 1));
+    const view = mock.views.at(-1)!;
+    view.emit(attachedFrameV2(view.body.termId));
+    view.emit({ t: "replay-end", offset: 0 });
     await flushPromises();
+    await vi.waitFor(() => expect(panel()?.dataset.writable).toBe("true"));
   }
   async function attach() {
-    panel()!.querySelector<HTMLButtonElement>(".terminal-list li button")!.click();
-    await vi.waitFor(() => expect(request.mock.calls.some(([op]) => op === "attach")).toBe(true));
-    await flushPromises();
-    expect(panel()?.textContent).toContain("/private");
+    expect(mock.views.at(-1)?.signal.aborted).toBe(false);
+    expect(panel()?.textContent).toContain("/work");
   }
   return {
     w,
@@ -181,7 +168,7 @@ function setup(mode: "docked" | "overlay" | "fullscreen", activity = false, enab
     renderer,
     factory,
     selectRun,
-    unsubscribe,
+    mock,
     terminalButton,
     panel,
     ready,
@@ -195,7 +182,7 @@ describe("terminal is the third FleetDrawer panel, not transcript content", () =
   it.each(["docked", "overlay", "fullscreen"] as const)(
     "%s: terminal-only eligibility mounts a closed drawer; rail/header open it and close only detaches",
     async (mode) => {
-      const { w, request, renderer, unsubscribe, terminalButton, panel, ready, open, attach } = setup(mode);
+      const { w, request, renderer, mock, terminalButton, panel, ready, open, attach } = setup(mode);
       await ready();
       expect(w.get("#fleet-drawer").attributes("data-mode")).toBe(mode);
       expect(w.attributes("data-drawer-open")).toBeUndefined();
@@ -209,7 +196,7 @@ describe("terminal is the third FleetDrawer panel, not transcript content", () =
       if (mode === "fullscreen") expect((w.get(".detail-main").element as HTMLElement).inert).toBe(true);
       await attach();
       // Escape on chrome as well as TTY must preserve the terminal drawer and maximization.
-      panel()!.querySelector<HTMLButtonElement>(".terminal-chrome button[aria-pressed]")!.click();
+      panel()!.querySelector<HTMLButtonElement>(".terminal-v2-chrome button[aria-pressed]")!.click();
       await nextTick();
       expect(panel()?.classList.contains("is-maximized")).toBe(true);
       w.get(".drawer-close").element.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
@@ -221,8 +208,7 @@ describe("terminal is the third FleetDrawer panel, not transcript content", () =
       await flushPromises();
       expect(panel()).toBeNull();
       expect(renderer.dispose).toHaveBeenCalledOnce();
-      expect(unsubscribe).toHaveBeenCalledOnce();
-      expect(request.mock.calls.filter(([op]) => op === "detach")).toHaveLength(1);
+      expect(mock.views.filter((v) => v.signal.aborted)).toHaveLength(1);
       expect(request.mock.calls.some(([op]) => op === "close")).toBe(false);
       expect(w.attributes("data-drawer-open")).toBeUndefined();
       expect((w.get(".detail-main").element as HTMLElement).inert).not.toBe(true);
@@ -238,14 +224,14 @@ describe("terminal is the third FleetDrawer panel, not transcript content", () =
       await terminalButton().trigger("click", { detail: 1 });
       await flushPromises();
       expect(panel()).toBeNull();
-      expect(request.mock.calls.some(([op]) => ["close", "open", "prepare"].includes(op))).toBe(false);
+      expect(request.mock.calls.some(([op]) => ["close", "create"].includes(op))).toBe(false);
     },
   );
 
   it.each(["docked", "overlay", "fullscreen"] as const)(
     "%s: switching among three panels detaches without killing; return lists original termId",
     async (mode) => {
-      const { w, request, renderer, panel, ready, open, attach } = setup(mode, true);
+      const { w, request, renderer, mock, panel, ready, open, attach } = setup(mode, true);
       await ready();
       expect(w.findAll(".fleet-summary-bar")).toHaveLength(3);
       await open();
@@ -255,20 +241,20 @@ describe("terminal is the third FleetDrawer panel, not transcript content", () =
       expect(panel()).toBeNull();
       expect(w.find(".fleet-bash").exists()).toBe(true);
       expect(renderer.dispose).toHaveBeenCalledOnce();
-      expect(request.mock.calls.filter(([op]) => op === "detach")).toHaveLength(1);
+      expect(mock.views.filter((v) => v.signal.aborted)).toHaveLength(1);
       await w.get('.fleet-summary-bar[data-panel="agent"]').trigger("click", { detail: 1 });
       expect(w.find(".tree-scroll").exists()).toBe(true);
       await open();
       await attach();
-      expect(request.mock.calls.filter(([op]) => op === "attach")).toHaveLength(2);
-      expect(request.mock.calls.some(([op]) => ["close", "open", "prepare"].includes(op))).toBe(false);
+      expect(mock.views).toHaveLength(2);
+      expect(request.mock.calls.some(([op]) => ["close", "create"].includes(op))).toBe(false);
       expect(localStorage.getItem("webhub.fleetDrawer.panel")).toBe("agent");
     },
   );
 
   it("breakpoint resets preserve docked open memory and detach terminal writers on overlay/fullscreen entry", async () => {
     localStorage.setItem("webhub.fleetDrawer.open", "1");
-    const { w, request, panel, ready, open, attach, resize } = setup("docked");
+    const { w, request, mock, panel, ready, open, attach, resize } = setup("docked");
     await ready();
     await open();
     await attach();
@@ -283,11 +269,11 @@ describe("terminal is the third FleetDrawer panel, not transcript content", () =
     expect(panel()).toBeNull();
     expect(w.attributes("data-drawer-open")).toBeUndefined();
     expect(localStorage.getItem("webhub.fleetDrawer.open")).toBe("1");
-    expect(request.mock.calls.filter(([op]) => op === "detach")).toHaveLength(2);
+    expect(mock.views.filter((v) => v.signal.aborted)).toHaveLength(2);
     expect(request.mock.calls.some(([op]) => op === "close")).toBe(false);
     await resize("docked");
     expect(w.attributes("data-drawer-open")).toBeDefined();
-    await vi.waitFor(() => expect(panel()?.querySelector(".terminal-list")).toBeTruthy());
+    await vi.waitFor(() => expect(panel()?.querySelector(".terminal-v2-tabs")).toBeTruthy());
   });
 
   it("overlay outside close releases the renderer without a close API; revoked material cannot revive on re-eligibility", async () => {
@@ -306,7 +292,7 @@ describe("terminal is the third FleetDrawer panel, not transcript content", () =
     expect(panel()).toBeNull();
     await nextTick();
     expect(w.find("#fleet-drawer").exists()).toBe(false);
-    expect(w.text()).not.toContain("/private");
+    expect(w.text()).not.toContain("/work");
     state.value = { ...state.value, hub: { caps } };
     await vi.waitFor(() => expect(w.find('.fleet-summary-bar[data-panel="terminal"]').exists()).toBe(true));
     expect(panel()).toBeNull();

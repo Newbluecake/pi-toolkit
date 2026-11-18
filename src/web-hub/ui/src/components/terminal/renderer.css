@@ -1,0 +1,29 @@
+/* Retained WebGL renderer geometry; no v1 panel/list/authority styling. */
+.terminal-spike-viewport {
+  width: 100%;
+  height: 100%;
+}
+.terminal-spike-viewport.is-initializing {
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+/* Unlinked offline browser host only; not an eager SPA stylesheet. */
+.terminal-spike-surface {
+  width: 640px;
+  height: 320px;
+  max-width: 100%;
+}
+.terminal-spike-surface .xterm {
+  height: 100%;
+}
+.terminal-spike-surface.is-large {
+  width: 960px;
+  height: 480px;
+}
+.terminal-probe.terminal-spike-surface {
+  height: 540px;
+}
+.terminal-probe.terminal-spike-surface.is-large {
+  height: 720px;
+}

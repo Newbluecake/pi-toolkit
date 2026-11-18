@@ -304,19 +304,11 @@ export function useHub<TTimer = ReturnType<typeof setTimeout>>(opts: UseHubOptio
     else dispatch({ event: "route", data: { agentKey } });
   }
 
-  let terminalSinks: Set<(event: string, data: unknown) => void> | undefined;
-  let terminalConnection: unknown;
   function dispatch(msg: DispatchMsg): void {
     if (disposed) return;
-    if (msg.event === "terminal_connection") terminalConnection = msg.data;
-    if (msg.event === "terminal" || msg.event === "terminal_connection") {
-      for (const sink of terminalSinks ?? []) sink(msg.event, msg.data);
-      return;
-    }
-    if (msg.event === "conn" && (msg.data as { state?: string })?.state !== "open") {
-      terminalConnection = undefined;
-      for (const sink of terminalSinks ?? []) sink("disconnected", null);
-    }
+    // Reserved private terminal events from old peers are refused, never retained
+    // or delivered to a renderer/public transcript. V2 uses its own fetch stream.
+    if (msg.event === "terminal" || msg.event === "terminal_connection") return;
     const next = reduce(
       raw,
       msg.id === undefined
@@ -911,16 +903,7 @@ export function useHub<TTimer = ReturnType<typeof setTimeout>>(opts: UseHubOptio
     // PV4 (web-hub-preview plan v3 §4.6): the preview call surface rides the handle iff the
     // transport offers it — `usePreview`'s scope derivation treats its absence as "nothing
     // is clickable" (`previewScopeOf`'s `hasTransport`).
-    ...(transport.terminal === undefined ? {} : { terminal: transport.terminal }),
-    terminalEvents(sink: (event: string, data: unknown) => void) {
-      if (disposed) return () => {};
-      terminalSinks ??= new Set();
-      terminalSinks.add(sink);
-      if (terminalConnection) sink("terminal_connection", terminalConnection);
-      return () => {
-        terminalSinks?.delete(sink);
-      };
-    },
+    ...(transport.terminalV2 === undefined ? {} : { terminalV2: transport.terminalV2 }),
     ...(transport.preview === undefined ? {} : { preview: transport.preview }),
     // web-hub-avatar plan v2.1 §5: optional passthrough only; old/fake transports make no
     // avatar request and expose no avatar surface.
@@ -951,16 +934,6 @@ export function useHub<TTimer = ReturnType<typeof setTimeout>>(opts: UseHubOptio
     dispose() {
       if (disposed) return;
       disposed = true;
-      terminalConnection = undefined;
-      for (const sink of terminalSinks ?? []) {
-        try {
-          sink("disconnected", null);
-        } catch {
-          /* private consumer teardown */
-        }
-      }
-      terminalSinks?.clear();
-      terminalSinks = undefined;
       // D2/R2-1: queued (not yet executing) main ops die with the handle — their continuations
       // would otherwise fire transport calls into a closed client.
       for (const [, entry] of mainOps) entry.op.cancelled = true;

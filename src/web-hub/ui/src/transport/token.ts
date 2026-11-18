@@ -1,4 +1,4 @@
-import { createTerminalTransport } from "./terminal.js";
+import { createLazyTerminalTransportV2 } from "./terminal-v2-lazy.js";
 import { xsWebCommandArgs } from "@protocol/xs-web-command.js";
 /**
  * Token-mode `HubTransport` adapter (vue-plan.md v2.1 §3.4, §5.2 — P1). A thin wrapper around
@@ -114,7 +114,7 @@ export function createTokenTransport(deps: TokenTransportDeps): HubTransport {
   const client = createClient(wrappedDeps);
   return {
     mode: "token",
-    terminal: createTerminalTransport(deps),
+    terminalV2: createLazyTerminalTransportV2(deps),
     start: () => client.start(),
     close: () => client.close(),
     subscribe: async (clientId, agentKey) => {

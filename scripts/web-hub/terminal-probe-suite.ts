@@ -51,15 +51,16 @@ async function metrics(page: PwPage) {
     const width = screen?.getBoundingClientRect().width ?? 0,
       height = screen?.getBoundingClientRect().height ?? 0;
     return {
-      writable: document.querySelector<HTMLElement>(".terminal-panel")?.dataset["writable"],
+      writable: document.querySelector<HTMLElement>(".terminal-v2-panel")?.dataset["writable"],
       input: document.querySelector<HTMLElement>(".terminal-probe")?.dataset["probeInput"],
       ops: document.querySelector<HTMLElement>(".terminal-probe")?.dataset["probeOps"],
-      panelError: document.querySelector(".terminal-panel [role=alert]")?.textContent,
+      panelError: document.querySelector(".terminal-v2-panel [role=alert]")?.textContent,
       activeElement: document.activeElement?.outerHTML.slice(0, 300),
       phase: host?.dataset["state"],
       rebuilds: Number(host?.dataset["rebuilds"] ?? 0),
       renderer:
-        document.querySelector<HTMLElement>(".terminal-surface")?.dataset["renderer"] ?? surface?.dataset["renderer"],
+        document.querySelector<HTMLElement>(".terminal-v2-surface")?.dataset["renderer"] ??
+        surface?.dataset["renderer"],
       ready: host?.dataset["ready"],
       text: host?.dataset["bufferText"] ?? "",
       rows: Number(host?.dataset["rows"] ?? 0),
@@ -318,7 +319,7 @@ export async function runTerminalProbe(selected = "chromium"): Promise<void> {
       // Native Chromium key events drive the real SFC/xterm and contract input transport.
       // This is NOT a real PTY assertion (the same bytes must be checked against PTY in P3).
       const keyboard = (page as PwPage & { keyboard: { press(key: string): Promise<void> } }).keyboard;
-      await page.click(".terminal-chrome [data-terminal-focus]");
+      await page.click(".terminal-v2-chrome [data-terminal-focus]");
       for (const key of ["Escape", "Tab", "Control+c", "Control+z", "Control+Backquote"]) await keyboard.press(key);
       await wait(
         page,
@@ -336,7 +337,7 @@ export async function runTerminalProbe(selected = "chromium"): Promise<void> {
       await keyboard.press("Control+Shift+F6");
       check(
         await page.evaluate(
-          () => document.activeElement === document.querySelector(".terminal-chrome [data-terminal-focus]"),
+          () => document.activeElement === document.querySelector(".terminal-v2-chrome [data-terminal-focus]"),
         ),
         "reserved exit did not focus this panel chrome",
       );
@@ -355,14 +356,14 @@ export async function runTerminalProbe(selected = "chromium"): Promise<void> {
         JSON.stringify(afterExit) === JSON.stringify(inputBeforeExit),
         "reserved host exit leaked to the TTY input sink",
       );
-      await page.click(".terminal-chrome [aria-pressed]");
-      await page.click(".terminal-chrome [data-terminal-focus]");
+      await page.click(".terminal-v2-chrome [aria-pressed]");
+      await page.click(".terminal-v2-chrome [data-terminal-focus]");
       await keyboard.press("Escape");
       check(
-        await page.evaluate(() => !!document.querySelector(".terminal-panel.is-maximized")),
+        await page.evaluate(() => !!document.querySelector(".terminal-v2-panel.is-maximized")),
         "Escape closed/restored the terminal",
       );
-      await page.click(".terminal-chrome [aria-pressed]");
+      await page.click(".terminal-v2-chrome [aria-pressed]");
       check(
         await page.evaluate(() => document.querySelector("canvas[data-terminal-webgl-canvas]") !== null),
         "maximize rebuilt or disposed the renderer",

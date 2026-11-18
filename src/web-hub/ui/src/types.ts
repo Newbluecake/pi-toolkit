@@ -486,8 +486,7 @@ export interface ControlHandle {
   readonly uploads?: UploadsHandle;
 }
 export interface HubHandle {
-  readonly terminal?: import("./transport/terminal.js").TerminalTransport;
-  terminalEvents?(sink: (event: string, data: unknown) => void): () => void;
+  readonly terminalV2?: import("./transport/terminal-v2.js").TerminalTransportV2;
   readonly state: Readonly<Ref<HubState>>;
   readonly control?: ControlHandle;
   /** web-hub-spawn SP11: the `/api/headless*` call surface + the §3.2 new-session orchestrator.

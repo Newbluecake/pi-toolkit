@@ -536,3 +536,28 @@ link/declaration/privacy loss 使用 service-local `invalidateScope` 封原 hand
 passwd 回执、真实隔离 Python PTY/echo/PID、共享 rename/close、exact durable prune/PID gone、
 普通 SSE clientId/subscribe 不受 terminal 影响及坏账本/auth 独立、logout 故障 on/off。agent context
 响应器仍是显式模拟；不是 real pi SDK / browser / 可信维护 adapter / O→N→O 的通过证明。
+
+## T51 v2 集成中：UI 入口与实际 closure
+
+浏览器只认 `terminal.tabs.v2` + matching `status.terminalSessionV2`。缺 cap/旧状态/未知 privacy/
+离线/control-off 不主动探测。header/rail 明确点击才 lazy feature，正常 Vue render owner 下取得
+PanelV2 exposed ref，nextTick 后调用 `open()`；hydrate/断点恢复只能 `restore()`，资格恢复从不
+自动创建。完整 agentKey/sessionId/epoch 为 key，切换/收起卸载只 abort 私有 view，保留 shell。
+header 已打开时重复点击保持幂等，不重挂载。原公共 transport-core/useHub 的 v1 terminal SSE
+监听/缓存/分发已删除；v2 独立 fetch，不共用原 SSE clientId。
+
+token/password 只 eager 加载 type-only 的轻量 lazy facade，不在 off/首屏加载 feature/schema/
+renderer/CSS。验证 transport 与 panel 同属 v2 feature root，renderer 保留第二段 dynamic import。
+入口声明使用权威 closed v2 parser 的独立 lazy import，不手写另一套 wire。renderer 样式已从
+v1 terminal.css 提取为 `renderer.css?url`；实际三张 lazy CSS 为 v2 panel + renderer + xterm，
+总帽仍 16KiB（没有挪用普通 CSS/JS 预算）。Rollup 按新实际根做 E=M\A+SHA256，仍拒 escaped/
+mixed/xterm eager，不用改文件名假装 exclusive。离线 unlinked probe 已改为真实 PanelV2 + 明确
+contract fake，无真实后端/auth 声称；七案例 selectors 随 v2 改名，未因缺浏览器资产删门。
+
+集成期 build:web/check:web 实测：terminal JS135753B gzip /262144、CSS3044B /16384、probe host
+1739B /4096；ordinary lazy95010B /131072，first-screen411518B /524288，ordinary CSS40494B /
+65536（这些是本次构建证据，不是长期固定 snapshot）。595 定向 UI 测试通过，包含 v2 原152项、
+共享 cap/session/drawer 响应式门与普通383 transport合同。两处迁移中出现真实问题并已修正：
+manual async watch 中直接 h(component,{ref}) 没有 render owner（真实会拿不到 expose），现用正常
+render-owner wrapper；slot reconnect test 的旧错误 random DI 已改全 jitter 窗/真新 socket断言。
+实际 Chromium/Firefox 资产缺失，浏览器/CSP七案例及真页面跨层演练仍 NOT RUN，不借 happy-dom 绿代替。
