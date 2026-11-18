@@ -12,7 +12,16 @@ import { createTerminalContextProducer } from "../../../../../src/web-hub/agent/
 import type { TerminalBackend, TerminalPhysicalResult } from "../../../../../src/web-hub/hub/terminal/v2/backend.js";
 import type { LedgerV2 } from "../../../../../src/web-hub/protocol/terminal-v2.js";
 import type { TerminalAllocationLedgerPortV2 } from "../../../../../src/web-hub/hub/terminal-v2-ports.js";
-import { hubInstance, scope, identity, signal } from "./fixture.js";
+import type { AuthIdentity } from "../../../../../src/web-hub/hub/auth-identity.js";
+const hubInstance = "h".repeat(24);
+const scope = { agentKey: "a".repeat(24), sessionId: "session", epoch: "epoch" };
+const signal = () => new AbortController().signal;
+const identity = (): AuthIdentity => ({
+  listener: "loopback",
+  principal: "p",
+  sidTag: "s",
+  parentExpiresAt: Date.now() + 1_000_000,
+});
 function deferred<T>() {
   let resolve!: (value: T) => void, reject!: (error: Error) => void;
   const promise = new Promise<T>((yes, no) => {
@@ -200,11 +209,16 @@ describe("P7A original service/runtime/view resize integration", () => {
       });
       const at = Date.now();
       const first = views.resize(h.id, { ...old.writer, seq: 1, cols: 80, rows: 24 }, controller.signal);
+      let logicalSettled = false;
+      void first.then(() => {
+        logicalSettled = true;
+      });
       await flush();
       expect(backend.resize).toHaveBeenCalledOnce();
       if (end === "abort") controller.abort();
       if (end === "timeout") {
         await vi.advanceTimersByTimeAsync(1999);
+        expect(logicalSettled).toBe(false);
         expect(physicalSettled).toBe(false);
         await vi.advanceTimersByTimeAsync(1);
       }
@@ -215,9 +229,11 @@ describe("P7A original service/runtime/view resize integration", () => {
       old.view.detach();
       const replacement = end === "factory" ? h.makeViews() : views;
       const next = await h.attach(replacement);
+      const busyAt = Date.now();
       const second = await replacement.resize(h.id, { ...next.writer, seq: 1, cols: 90, rows: 24 }, signal());
+      expect(Date.now() - busyAt).toBeLessThan(2000);
       console.info("P7A physical barrier", { end, second, calls: backend.resize.mock.calls.length, physicalSettled });
-      expect(second).toMatchObject({ ok: false });
+      expect(second).toEqual({ ok: false, code: "E_NOT_READY", effect: "none" });
       expect(backend.resize).toHaveBeenCalledOnce();
       expect(physicalSettled).toBe(false);
       // Input and the other terminal do not wait behind a resize-only gate.
@@ -276,6 +292,24 @@ describe("P7A original service/runtime/view resize integration", () => {
       expect(await h.runtime.resize(130, 24, signal())).toEqual({ ok: true });
     },
   );
+  it("service dispose stays bounded and unresolved while the real resize future is pending", async () => {
+    const h = await setup(),
+      physical = deferred<void>();
+    h.backends[0]!.resize.mockImplementationOnce(() => physical.promise);
+    const first = h.runtime.resize(80, 24, signal());
+    const at = Date.now();
+    expect(await h.service.dispose()).toEqual({ clean: false, unresolved: 1 });
+    expect(Date.now() - at).toBeLessThanOrEqual(2000);
+    expect(h.disk().allocations).toHaveLength(1);
+    expect(await h.runtime.resize(90, 24, signal())).toMatchObject({ code: "E_VIEW_CHANGED", effect: "none" });
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(await first).toMatchObject({ ok: false, effect: "unknown" });
+    expect(h.service.maintenanceSnapshot()).toMatchObject({ stopped: true, allocationCount: 1, physicalPrunes: 0 });
+    physical.resolve();
+    await flush();
+    expect(h.service.maintenanceSnapshot()).toMatchObject({ allocationCount: 0, physicalPrunes: 1 });
+    expect(h.disk().allocations).toEqual([]);
+  });
   it("service invalidation retains resources until real resize settlement, rejects old runtime and allows a fresh same-scope lifecycle", async () => {
     const h = await setup(),
       physical = deferred<void>();

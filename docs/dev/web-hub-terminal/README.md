@@ -274,9 +274,16 @@ Only POST `/api/terminal/v2/*`; independent fetch NDJSON, never public SSE regis
 Public SSE now has only original aggregate FIFO/gzip/backpressure, no private per-source accounting or
 terminal admission/idle watcher. Ordinary hello/replay/history/subscribe ordering remains.
 
-One service-lifetime resize gate survives view factory disposal: only original physical Promise
-settlement releases it. Logical timeout cannot start an overlapping successor resize. One writer per
-term; replay bounded16KiB suffix, raw1MiB ring, live64KiB/128 items, input4KiB/pending32KiB, helper128KiB,
+Resize has two local layers without changing the frozen runtime port. The service-lifetime P2 gate
+survives view factory disposal, but observes the runtime's **logical** Promise: abort/2s timeout can
+settle it before the backend. P1 therefore retains the original `backend.resize` future on its exact
+hot runtime, independently of view/factory/gate identity. Until that future really resolves/rejects,
+new same-runtime resizes return `E_NOT_READY effect:none`; input and other runtimes remain independent.
+Logical abort/unknown is never cancellation proof. Only exact physical settlement clears that slot;
+late settle cannot unlock a successor or revive invalidated handles. Even complete close proof cannot
+prune while that future is outstanding; disposal stays bounded/unresolved, and actual settlement can
+resume exact proof+durable prune. No TTL, widened deadline, retries or automatic resize replay.
+One writer per term; replay bounded16KiB suffix, raw1MiB ring, live64KiB/128 items, input4KiB/pending32KiB, helper128KiB,
 per-view/hub fairness and net ACK stall deadlines remain. ACK only after renderer write callback;
 ready and replay ACK may arrive in either order, input/resize only after both. Unknown input queries
 original seq/queryOnly, never retries bytes/renews/acquires writer. Slow/failed view detaches, shell

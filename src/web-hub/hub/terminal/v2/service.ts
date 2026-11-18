@@ -70,6 +70,8 @@ type Hot = {
   proof?: TerminalPhysicalResult;
   inputSeq: number;
   resizeSeq: number;
+  /** Original backend future, never the bounded logical runtime reply. */
+  resizeWork?: Promise<void>;
   exitCode?: number;
   sealed: boolean;
 };
@@ -555,12 +557,25 @@ export class HubTerminalServiceV2 implements TerminalServiceV2 {
         if (!current() || signal.aborted) return { ok: false, code: "E_VIEW_CHANGED", effect: "none" };
         if (!Number.isInteger(cols) || cols < 2 || cols > 500 || !Number.isInteger(rows) || rows < 1 || rows > 200)
           return { ok: false, code: "E_BAD_REQUEST", effect: "none" };
+        // The frozen runtime port promises bounded replies, not physical cancellation.
+        // Keep single-flight at the sole backend owner, across every view/factory/gate.
+        if (h.resizeWork) return { ok: false, code: "E_NOT_READY", effect: "none" };
         if (!Number.isSafeInteger(++h.resizeSeq)) {
           void this.cleanup(h);
           return { ok: false, code: "E_LIMIT", effect: "none" };
         }
         try {
-          await boundedV2(h.backend!.resize(h.resizeSeq, cols, rows), Date.now() + L.contextMs, signal);
+          const physical = h.backend!.resize(h.resizeSeq, cols, rows);
+          h.resizeWork = physical;
+          const settled = () => {
+            if (h.resizeWork !== physical) return;
+            delete h.resizeWork;
+            // A physical close proof may arrive before this outstanding method settles.
+            // Only the exact backend future can remove that last cleanup barrier.
+            if (h.sealed && h.proof) void this.prune(h, h.proof);
+          };
+          void physical.then(settled, settled);
+          await boundedV2(physical, Date.now() + L.contextMs, signal);
           return { ok: true };
         } catch {
           return { ok: false, code: "E_BACKEND", effect: "unknown" };
@@ -678,6 +693,7 @@ export class HubTerminalServiceV2 implements TerminalServiceV2 {
   private async prune(h: Hot, p: TerminalPhysicalResult): Promise<boolean> {
     if (!this.proofComplete(p)) return false;
     h.proof = p;
+    if (h.resizeWork) return false;
     return this.mutate(async () => {
       const a = this.allocationsById.get(h.allocation.allocationId);
       if (!a) return !this.hot.has(h.row.termId);
