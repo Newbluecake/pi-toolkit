@@ -61,6 +61,34 @@ queue/held 镜像与空缓冲清扫）+ 路由层 `ctlCache`（`fleetCache` 同�
 终态不补 —— UI 侧已有自愈）。定向 send 不入 ring、无新 timer/模块态；同 tick 同步读保证补发不会
 旧于已收帧、也不会乱于后续实时帧。
 
+## 独立 hub loader 的宿主映射（T51）
+
+父 pi 的 jiti aliases / Node bundle hooks 不跨 `spawn`。正式 agent launcher 使用
+`realpath(argv1) → findPiPackageJson → createRequire(piPackageJson)` 同一宿主链，分别解析
+`typebox`、`typebox/value`、`typebox/compile` 为已验证的绝对文件。`resolveLauncherPlan`
+只在三者齐备时返回完整内部 `LauncherPlan.hostAliases`；旧 `@sinclair/typebox` spelling
+与新 spelling 共六键各自映到对应宿主入口，不拼接 root 子路径，不从 consumer/cwd 兜底。
+`webHub.nodeLoader` 只覆盖 jiti 可执行文件，不放宽宿主验证；无磁盘 pi 宿主的 Bun/SEA
+escape hatch 因此明确 unavailable，未宣称本修复覆盖该布局。
+
+`spawnHub` 保持 namespace veto 第一裁定、secure env/冻结 terminal-source 原语义，随后
+**完整覆盖**子 hub 的 `JITI_ALIAS`（不解析/合并继承值），并固定 `JITI_TSCONFIG_PATHS=false`
+（jiti paths 优先于 aliases）。不修改父环境。hub `main()` 最早阶段删除这两个私有 bootstrap
+环境键，后续 managed pi/shell 不继承它们；stock jiti 已 snapshot opts，嵌套/延迟 import
+继续复用同一映射。没有 runtime dependency、额外 bootstrap/hook、hub bundle、wire 或边界白名单变更。
+内核 argv 仍为 `[node, host-jiti-cli, consumer/src/web-hub/hub/main.ts]`；proc identity、
+cold recovery 和父 launcher fingerprint 均不变。
+
+定向回归 `tests/integration/hub-host-loader.test.ts`：真实 SDK RPC → 正式 wireWebHub auto-spawn
+原 main，HTTP/SSE、真实 `/proc` identity、restart 新 boot/重连、stop 正常退出；真实 managed
+pi 子进程环境验证 bootstrap 键已清除（不执行 shell/PTY）。另用产品生成 env 验证 native
+TypeBox 根/value/compile 成员身份、六 spelling、影子 consumer peer 与恶意 alias/paths，
+以及 scrub 后 lazy import。设置 `PI_TOOLKIT_HUB_LOADER_CONSUMER=<独立解包目录>` 可分片测
+无 node_modules 的 git/no-dist、正常 prepack npm 与 release ZIP；不在 consumer 安装/build。
+诊断正例是产品 spawn env 下缺配置精确 exit 2；**裸 stock jiti 缺 alias 的 exit 1 仍是反例**，
+不能给裸诊断塞测试 alias 后称生产通过。retained sealed launcher 的迁移/债务/restart 完整链
+由独立 stockrestart 验收，不被本 loader 门替代；这里 terminal 始终关闭。
+
 ## 会话终端 T51 v2 集成
 
 详见 [terminal README](../web-hub-terminal/README.md) 与 [验收矩阵](../web-hub-terminal/acceptance.md)。

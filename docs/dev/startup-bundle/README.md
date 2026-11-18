@@ -17,3 +17,16 @@
 重建不会自动更新正在运行的父 pi；需要 `/agent reload` 或重启。hub 是独立进程，`/webhub restart` 不更新父 pi。已实测 pi 1.5.0 / Node 22.22.1：先用 `477701ab` 的 dispatcher + bundle-entry 启动旧 bundle，再在同一安装路径换入修复后的 dispatcher/bridge/helper 并重建，真 Web `/agent reload` 即加载新行为、同 pid/key 换 epoch、版本到位且 completed 关联成功；该环境无需先重启一次 agent。实际部署仍需将 bridge 与 dispatcher 一起安装并完成 build；不对其他 pi/Node 版本作未验证保证，不曾操作现场会话。
 
 回归入口：`tests/integration/startup-bundle-reload.test.ts`（真 hub、真 pi RPC、私有 HOME/socket、跨 rebuild 与同构建预期、旧路径反例、修复前进程升级），最小 jiti/native probe 在 `tests/startup-bundle/`。布局/错误测试在 `dispatcher.test.ts`，内容标识测试在 `tests/core/bundle-entry.test.ts`。构建后执行 `tests/governance/bundle-parity.test.ts` 验证 identity 与 frozen activation/off/secure/child parity；不得重生 fixtures。
+
+## 独立 hub 仍走 source loader（T51）
+
+bundle hooks 和父 pi 的 jiti aliases 只属于父进程；独立 hub 不因父 bundle 已成功加载就拥有宿主映射。
+agent launcher 现在沿同一 realpath/pi package 链解析 TypeBox 根/value/compile，给 stock jiti-cli
+封闭六键 `JITI_ALIAS` 并禁用 tsconfig paths；hub main 随即 scrub 这两个私有环境键，避免传给
+后续 managed 子程序。细节与正反例见 [web-hub README](../web-hub/README.md#独立-hub-loader-的宿主映射t51)。
+不新增 hub bundle/bootstrap，不变三项内核 argv / proc identity / launcher fingerprint。
+
+修改 launcher 后 npm/ZIP 必须正常重建父 bundle（`npm pack` 的 prepack 或 `package.sh`），
+仅更换 hub 源码而继续用旧父 bundle 不会补上启动 aliases。git 无 dist 分发仍由 pi 加载 TS，
+不要求 consumer 安装 TypeBox/jiti/build 工具。缺宿主或目标时明确 launcher error，不回落 consumer。
+内部 `LauncherPlan` 不从根入口重导出、不是 package exports 的公共扩展合同。
