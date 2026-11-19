@@ -25,6 +25,9 @@ jobs:
           node-version: ${{ matrix.node-version }}
           cache: npm
 
+      - name: Private test HOME/cache/tmp
+        run: node scripts/ci/terminal-stock.mjs init >> "$GITHUB_ENV"
+
       - run: npm ci
 
       - name: Format check
@@ -39,12 +42,12 @@ jobs:
       # startup-bundle plan r3 §6.3: the bundle gates run BEFORE the test suite (the dispatcher
       # suite asserts the on-disk artifact matches a fresh build), and they enforce reproducibility,
       # the 6 MB budget, src-only inputs and zero dynamic imports.
-      - name: Build bundle (gated)
-        run: npm run build:bundle
+      - name: Build (gated bundle + maintenance, reused by stock packaging)
+        run: npm run build
 
       - name: Test (tier 1)
         id: tier1
-        run: npm run test:tier1
+        run: npm run test:tier1 -- --no-cache
         env:
           PWH_REQUIRE_UI_DIST: "1"
           # Fewer workers than the 4-vCPU runner allows: CI time is cheap, and the timing-sensitive
@@ -68,13 +71,33 @@ jobs:
       # real-mount secure suites keep self-skipping on runners without FUSE (status quo).
       - name: Test (tier 2 + secure)
         if: ${{ !cancelled() && (steps.tier1.outcome == 'success' || steps.tier1.outcome == 'failure') }}
-        run: npm run test:tier2
+        # Ownership remains tier2; ONLY this dedicated file is excluded here.
+        # All four stock cells below are required, not opt-in/continue-on-error.
+        run: node node_modules/vitest/vitest.mjs run --project tier2 --project secure --no-cache --exclude tests/integration/terminal-v2-retained-stock-restart.test.ts
         env:
           PWH_REQUIRE_UI_DIST: "1"
           PI_TOOLKIT_TEST_WORKERS: "2"
 
-      - name: Build
-        run: npm run build
+      - name: Provision current npm + release ZIP stock consumers
+        id: stock_prepare
+        if: ${{ !cancelled() && (steps.tier1.outcome == 'success' || steps.tier1.outcome == 'failure') }}
+        run: node scripts/ci/terminal-stock.mjs provision
+
+      - name: Stock npm restart (required L2, no observer)
+        if: ${{ !cancelled() && steps.stock_prepare.outcome == 'success' }}
+        run: node scripts/ci/terminal-stock.mjs cell npm restart
+
+      - name: Stock npm rollback (independent process, same checkpoint)
+        if: ${{ !cancelled() && steps.stock_prepare.outcome == 'success' }}
+        run: node scripts/ci/terminal-stock.mjs cell npm rollback
+
+      - name: Stock ZIP restart (required L2, no observer)
+        if: ${{ !cancelled() && steps.stock_prepare.outcome == 'success' }}
+        run: node scripts/ci/terminal-stock.mjs cell zip restart
+
+      - name: Stock ZIP rollback (independent process, same checkpoint)
+        if: ${{ !cancelled() && steps.stock_prepare.outcome == 'success' }}
+        run: node scripts/ci/terminal-stock.mjs cell zip rollback
 
   # The web UI toolchain (mermaid declares engines.node >=22.12.0, vite/rollup follow) must keep building on the
   # LOWEST supported Node. The runtime floor stays >=22 (pi installs with --omit=dev, so devDependencies never

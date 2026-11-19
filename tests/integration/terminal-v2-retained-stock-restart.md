@@ -14,10 +14,16 @@ test-backend seam, not a stock isolated passwd identity; it cannot close that re
 
 ## Provisioning / bounded independent phases
 
-Requires **real freshly rebuilt publication consumers** at `PI_TOOLKIT_STOCK_CONSUMERS/npm` and
-`PI_TOOLKIT_STOCK_CONSUMERS/zip`; neither may contain node_modules. Build them on the authorized
-integration tree via normal `npm pack` prepack and original `scripts/release/package.sh`, never by
-patching a consumer, injecting peers, or reusing the pre-loader-fix 7d3 artifacts.
+The required CI lane and the complete `npm test` / `npm run test:tier2` development
+entrypoints now provision both formats and run all four cells automatically; see
+[`scripts/ci/README.md`](../../scripts/ci/README.md) for executable bounded commands.
+Consumers are normal npm pack and original release ZIP payloads, reusing the same
+current checkout's already built and verified artifacts (no repeated prepack builds).
+`provision` binds current HEAD/source/maintenance input/output hashes, archive SHA256
+and all unpacked consumer bytes; each cell revalidates that binding. No old local
+artifact, consumer node_modules, peer injection, patch or checkout fallback exists.
+The stock file remains tier2; only the ordinary execution excludes its exact path,
+with required dedicated coverage, never a skip. Missing environment remains hard fail.
 
 Run each cell as a separate command with an outer 300s bound, private HOME/cache/tmp, workers 1 and
 no cache. The second phase is a NEW Vitest process reopening the SAME original S; run restart before
@@ -33,7 +39,7 @@ PI_TOOLKIT_STOCK_CONSUMERS=/absolute/private/consumers PI_TOOLKIT_STOCK_PHASE=ro
 # Repeat both commands with -t 'stock zip L2'.
 ```
 
-Restart writes `<format>-stock-checkpoint.json` and a terminal-only fixture descriptor. Reopen checks
+Restart writes `<format>-stock-checkpoint.json` (consumer binding digest and worker PID) and a terminal-only fixture descriptor. Reopen checks
 original journal/token hashes **in place**, preserved L and the selected consumer path; it does not
 copy/restore auth, manufacture an old history, recreate S or reset the ledger. No missing-resource
 skip or checkout fallback is provided. This explicitly provisioned acceptance gate is not permission

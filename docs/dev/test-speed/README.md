@@ -12,7 +12,10 @@
 - **分区只认显式元数据**，绝不按类名（`RealHarness` 之类）或标记推断归属；标记只用来强制登记。
   两个治理门钉住它：`tests/governance/test-tiers.test.ts`（登记反例）和
   `tests/integration/test-tiers-actual.test.ts`（`vitest list` 实际集合 = 常量推导、两两不相交、并集无漏）。
-- `npm test` 仍是全量（三 project 并集）；日常 `npm run test:tier1`；发版与 CI 走 tier1 → tier2；
+- `npm test` 仍覆盖全量（三 project 并集）；stock retained 专用文件归属仍为 tier2，
+  仅通用执行精确排除此一个路径，随后必需 provision + npm/ZIP restart/rollback 四格（各独立进程）。
+  `npm test` / `test:tier2` 完整开发入口也执行这同一专用门，不以缺环境 skip 冒充；命令与归档绑定详见
+  [`scripts/ci/README.md`](../../../scripts/ci/README.md)。日常 `npm run test:tier1`；发版与 CI 走 tier1 → tier2；
   secure 单跑 `npm run test:secure`。`test:tier2` = tier2 + secure 两个 project。
 
 ## 不变式

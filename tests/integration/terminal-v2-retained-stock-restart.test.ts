@@ -34,6 +34,11 @@ it.each([
     const saved = phase === "rollback" ? JSON.parse(readFileSync(checkpointPath, "utf8")) : undefined;
     const f = saved ? reopenStockRetained(saved.base) : await prepareStockRetained(join(root, format), count);
     expect(f.profile.newPackageRoot).toBe(join(root, format));
+    if (saved) {
+      expect(saved.consumer).toBe(join(root, format));
+      expect(saved.runnerPid).not.toBe(process.pid);
+      expect(saved.consumerBinding).toBe(process.env.PI_TOOLKIT_STOCK_BINDING ?? null);
+    }
     console.log(`stock retained ${phase} evidence: ${f.base}`);
     const ledger = () => JSON.parse(readFileSync(f.ledgerPath, "utf8"));
     const processes: Awaited<ReturnType<typeof stockProcess>>[] = [];
@@ -178,6 +183,8 @@ it.each([
               phase: "stock-N2-complete",
               base: f.base,
               consumer: f.profile.newPackageRoot,
+              runnerPid: process.pid,
+              consumerBinding: process.env.PI_TOOLKIT_STOCK_BINDING ?? null,
               lifecycle,
               observations,
               stockProcesses: processes.map((p) => p.evidence),

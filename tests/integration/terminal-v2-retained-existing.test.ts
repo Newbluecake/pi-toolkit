@@ -1,6 +1,7 @@
 /** Real preexisting ordinary O7239 independent process -> later standalone CLI ->
  * actual N SDK/native PTY. No ControlledScope, old observation patch, owner facts,
  * fake ACK/proof, signal, cgroup, inspector or history manufactured by the tool. */
+import { runRetainedFixtureCli } from "./helpers/terminal-retained-cli.js";
 import { execFileSync, fork, type ChildProcess } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
@@ -173,12 +174,10 @@ runOrdinaryTerminalHost({startHub,createHttpFrontend,wireWebHub,resolveHubPaths,
     copyFileSync(cli, join(output, "maintenance-cli.mjs"));
     copyFileSync(join(selectedN, "dist/maintenance/manifest.json"), join(output, "maintenance-manifest.json"));
     const run = (command: string, extra: string[] = [], stateFlag = true) =>
-      JSON.parse(
-        execFileSync(
-          process.execPath,
-          [cli, command, "--installation", installation, ...(stateFlag ? ["--state", paths.stateDir] : []), ...extra],
-          { cwd: base, env, timeout: 30000, encoding: "utf8" },
-        ),
+      runRetainedFixtureCli(
+        cli,
+        [command, "--installation", installation, ...(stateFlag ? ["--state", paths.stateDir] : []), ...extra],
+        { cwd: base, env },
       );
     const oldProcess = ordinaryProcess(artifact, env);
     let oldInfo: any, secondProcess: ReturnType<typeof ordinaryProcess> | undefined;
@@ -576,5 +575,5 @@ runOrdinaryTerminalHost({startHub,createHttpFrontend,wireWebHub,resolveHubPaths,
       await stopN();
     }
   },
-  120000,
+  180000,
 );

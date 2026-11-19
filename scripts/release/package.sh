@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Stage 9 of the git-release flow: build and package the distributable.
 #
-# Usage: scripts/release/package.sh [version] [outDir]
+# Usage: scripts/release/package.sh [version] [outDir] [--built]
 # Produces the installable total zip, the versioned web UI zip, checksums, and
 # CHANGELOG-<version>.md. Neither zip is published by this script.
 set -euo pipefail
@@ -20,9 +20,21 @@ echo "📦 packaging pi-toolkit v${VERSION}"
 # NODE_ENV=test, which makes @vue/compiler-sfc KEEP template comments and the UI bundle
 # grows ~4 KB gz past the check:web budget — field report 2026-10-08, tests/release/
 # package-zip.test.ts failing deterministically). Pin production explicitly.
-NODE_ENV=production npm run build
-NODE_ENV=production npm run build:web
-npm run check:web
+# CI acceptance may reuse the artifacts it just built and verified. Never silently
+# rebuild/fallback in this explicit mode; the caller binds all source/input hashes.
+case "${3:-}" in
+  "")
+    NODE_ENV=production npm run build
+    NODE_ENV=production npm run build:web
+    npm run check:web
+    ;;
+  --built)
+    for required in dist/index.js dist/bundle/index.js dist/maintenance/cli.mjs dist/maintenance/manifest.json dist/web-hub-ui/build-info.json; do
+      [[ -f "$required" ]] || { echo "missing prebuilt artifact: $required" >&2; exit 1; }
+    done
+    ;;
+  *) echo "unknown packaging mode" >&2; exit 1 ;;
+esac
 
 rm -rf "$OUT_DIR/stage"
 mkdir -p "$STAGE_DIR"

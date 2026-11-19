@@ -1,5 +1,6 @@
 /** Publication/SDK loading over explicit old-disk fixtures; live ordinary O history
  * and actual N PTY are separate gates, never inferred from this fixture. */
+import { runRetainedFixtureCli } from "./helpers/terminal-retained-cli.js";
 import { execFileSync, spawnSync } from "node:child_process";
 import { expect, it } from "vitest";
 import { join, resolve } from "node:path";
@@ -63,12 +64,10 @@ it("durable publication loads actual selected SDK package; independent off rollb
     token = readFileSync(join(state, "token"));
   const env = { ...process.env, HOME: home, PI_CODING_AGENT_DIR: agentDir, NODE_OPTIONS: "" };
   const run = (command: string, extra: string[] = [], stateFlag = true) =>
-    JSON.parse(
-      execFileSync(
-        process.execPath,
-        [cli, command, "--installation", h.evidenceDir, ...(stateFlag ? ["--state", state] : []), ...extra],
-        { cwd: h.base, env, timeout: 30000, encoding: "utf8" },
-      ),
+    runRetainedFixtureCli(
+      cli,
+      [command, "--installation", h.evidenceDir, ...(stateFlag ? ["--state", state] : []), ...extra],
+      { cwd: h.base, env },
     );
   const initialized = run("retained-initialize", ["--evidence", evidence]);
   const wrapper = join(h.base, "exit-before-probe.mjs");
@@ -128,4 +127,4 @@ it("durable publication loads actual selected SDK package; independent off rollb
     encoding: "utf8",
   });
   expect(version.trim()).toBe("1.5.0");
-}, 60000);
+}, 90000);

@@ -444,3 +444,21 @@ restart, user-shell termination, push or deployment is authorized by this work.
    hardware/kernel/device/fault limitations above still apply.
 3. Complete real maintenance/mixed/browser/device/failure-window matrix and independent P7 acceptance
    still pending. Do not deploy this integration checkpoint or label it all-stack PASS.
+
+## T51 CI fixture diagnostics
+
+The real oversized auth SQLite seed is test-only: bounded5s SQLite busy handling,
+`BEGIN IMMEDIATE` before reading/inserting all65 rows, one transaction, external8s
+bound. Non-busy errors propagate; original real64-delete/complete:false and ledger
+assertions remain unchanged. Dedicated fixture regression holds a real competing
+writer and checks atomic rollback on constraint failure.
+
+Retained existing/publication test CLIs now have a45s **outer test-only** envelope
+(original production CLI30s and probe20s/22s unchanged). Internal nonzero exits are
+consumed and reported as fixed error codes rather than hidden by outer ETIMEDOUT;
+no raw auth/exception payload is printed. Their finite per-test outer margins are
+180s/90s; internal startup/HTTP/proof/auth deadlines and assertions are unchanged.
+Independent and adjacent workers2 runs are separate evidence, not a relaxed product
+budget. The stock required CI and complete local entrypoint use actual fresh npm/
+release ZIP consumers and four independent L2 phases; see
+[`scripts/ci/README.md`](../../../scripts/ci/README.md). Stock L1 remains NOT RUN.

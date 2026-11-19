@@ -2,7 +2,7 @@
  * Partial bulk is an explicit oversized original DB fixture (> normal32 cap), not
  * a claim that ordinary admitted logins can naturally reach that defensive state.
  */
-import { execFileSync } from "node:child_process";
+import { seedOversizedSessions } from "./helpers/terminal-sqlite-seed.js";
 import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { request } from "node:http";
@@ -125,12 +125,7 @@ it("A5 original actual oversized SQLite bulk returns complete:false with real64 
     before = readFileSync(`${h.state}/terminal-v2/ledger.json`);
   const keep = hashSid(h.lanCookie.slice(h.lanCookie.indexOf("=") + 1));
   const hashes = Array.from({ length: 65 }, () => hashSid(randomBytes(32).toString("base64url")));
-  const script = `const{DatabaseSync}=require('node:sqlite');const db=new DatabaseSync(process.argv[1]);const keep=Buffer.from(process.argv[2],'base64url');const add=db.prepare('INSERT INTO sessions(sid_hash,user_id,epoch,bound_origin,created_at,last_seen_at,expires_at,absolute_expires_at,created_ip) SELECT ?,user_id,epoch,bound_origin,created_at,last_seen_at,expires_at,absolute_expires_at,created_ip FROM sessions WHERE sid_hash=?');for(const hash of JSON.parse(process.argv[3])){if(add.run(Buffer.from(hash,'base64url'),keep).changes!==1)throw new Error('owned oversized original fixture failed');}db.close();`;
-  execFileSync(
-    process.execPath,
-    ["--disable-warning=ExperimentalWarning", "-e", script, h.hub.paths.dbFile, keep, JSON.stringify(hashes)],
-    { stdio: "pipe" },
-  );
+  seedOversizedSessions(h.hub.paths.dbFile, keep, hashes);
   const actual = h.authStore.deleteSessionsExcept.bind(h.authStore),
     observed: any[] = [];
   vi.spyOn(h.authStore, "deleteSessionsExcept").mockImplementation(async (...args) => {
