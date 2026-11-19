@@ -1,7 +1,7 @@
 import { probeDiagnostics, formatProbeDiagnostics } from "../../../scripts/ci/safe-diagnostics.mjs";
 /** Private ordinary O setup copied from retained-existing: unpatched O, original
  * SDK, genuine journal. N runtime is deliberately NOT imported by this helper. */
-import { execFileSync, fork } from "node:child_process";
+import { execFileSync, fork, type ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -18,9 +18,9 @@ import {
 } from "../../../scripts/web-hub/terminal-v2-maintenance/http-client.js";
 import { makeTerminalFixture } from "../terminal-v2-backend-fixture.js";
 const id = () => randomBytes(24).toString("base64url");
-function consumerExec(...args: Parameters<typeof execFileSync>): ReturnType<typeof execFileSync> {
+function consumerExec(file: string, args: string[], options: ExecFileSyncOptionsWithStringEncoding): string {
   try {
-    return execFileSync(...args);
+    return execFileSync(file, args, options);
   } catch (error) {
     const failure = error as { stdout?: Buffer; stderr?: Buffer; status?: number; code?: string };
     const text = `${failure.stdout ?? ""}`;

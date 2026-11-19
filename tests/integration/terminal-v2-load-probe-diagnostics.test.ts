@@ -33,9 +33,9 @@ function fixture(body: string) {
 const sdk = (reload: string, extensions = "({errors:[],extensions:[{path:ENTRY}]})") => `
 export const SettingsManager={create(home,dir){if(home!==process.env.HOME||dir!==process.env.PI_CODING_AGENT_DIR)throw Error('wrong settings');return {}}};
 export class DefaultResourceLoader {
- constructor(options){if(options.noExtensions||!options.noSkills||!options.noThemes||!options.noPromptTemplates||!options.noContextFiles)throw Error('weakened loader');}
- async reload(){${reload}}
- getExtensions(){return ${extensions}}
+ constructor(options){this.reloaded=false;if(options.noExtensions||!options.noSkills||!options.noThemes||!options.noPromptTemplates||!options.noContextFiles)throw Error('weakened loader');}
+ async reload(){await Promise.resolve();${reload};this.reloaded=true;}
+ getExtensions(){if(!this.reloaded)throw Error('reload omitted or not awaited');return ${extensions}}
 }`;
 it("actual child completion requires reload and the exact original receipt, success emits no diagnostics", async () => {
   const f = fixture(sdk("", "({errors:[],extensions:[{path:process.argv[2]}]})"));
