@@ -123,3 +123,38 @@ parameter cells passed, none missing/skipped/failed. Evidence stays in an owned
 short directory without changing HOME/cache/TMPDIR; public output has only fixed
 counts/status and existing closed load-probe diagnostics. Any failure returns
 nonzero; synthetic controller/report negative tests are not business acceptance.
+
+## Optional T51 external lifecycle evidence (A′, default off)
+
+```sh
+PI_TOOLKIT_T51_EXTERNAL_DIAG=existing-zero-first-v1 \
+  timeout 300 node scripts/ci/retained-existing.mjs --diagnose-external-once
+```
+
+This is a separate optional entry, **not authorization to run a site experiment**
+and not a replacement for the required three-cell lane. It registers existing0
+only, first publish-new/first verify only. Missing permission/unknown arguments
+return closed not-armed/not-run without launching the lane. The ordinary required3
+entry strips both controls and retains its original schema/report assertions.
+No workflow enables A′; no stock schema or five-file artifact whitelist changes.
+
+The parent adds only passive exit/close observation and emits after the original
+product settlement/receipt validation/stop. Child PROGRAM, argv, FDs/flags, SDK,
+loader/reload, stop and deadlines are unchanged. The helper keeps the45s synchronous
+envelope. Only this optional controller uses default+JSON reporters (JSON-only
+loses successful console markers). It validates separate stdout/stderr/failure
+message streams, at most one `T51_EXTERNAL_V1` marker per stream, deduplicating only
+identical canonical copies. Malformed/extra keys, conflicts, oversize or missing
+reports/evidence fail closed. Secrets/raw logs stay private in an owned0700 HOME
+subdirectory, not an upload target. Report stat/16MiB bounds precede reading.
+
+One safe JSON line (at most2048 bytes) contains exactly `selection`, `product`,
+`asOfMs`, `exit`, `close`, `lastStage`, `reason`, `truncated`; event fields are
+`state/ms/code/signal`, all closed enums or bounded milliseconds. Exit75 does not
+mean timer-fired. Unseen exit does not mean running. Frozen unknowns stay unknown.
+The exit listener never settles the product and is detached on freeze; late close
+cannot mutate or re-emit evidence. The evidence exit status gates only exact
+selection/armed permission/complete schema, **not product pass, CPU/coverage or
+exit/close being seen**. `observed-pass` is always inconclusive; `observed-fail`
+remains a product failure even if evidence collection passes. H4 exit-versus-close
+is the only additional discriminant; this does not fix the remote root cause.

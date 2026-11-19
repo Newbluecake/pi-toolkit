@@ -65,9 +65,14 @@ function ordinaryProcess(artifact: string, env: NodeJS.ProcessEnv) {
     },
   };
 }
-it.each([0, 1, 2])(
+const externalSelected = process.env.PI_TOOLKIT_T51_EXTERNAL_DIAG === "existing-zero-first-v1";
+it.each(externalSelected ? [0] : [0, 1, 2])(
   "ordinary O (%i resources; two uses distinct SDK sessions) retains debt through N/restart/new CLI/off rollback",
   async (oldCount) => {
+    const externalOnce = externalSelected && oldCount === 0;
+    delete process.env.PI_TOOLKIT_T51_EXTERNAL_DIAG;
+    delete process.env.PI_TOOLKIT_T51_EXTERNAL_ONCE;
+    let externalPending = externalOnce;
     const native = makeTerminalFixture(),
       f = native.fixture,
       repo = resolve("."),
@@ -173,12 +178,15 @@ runOrdinaryTerminalHost({startHub,createHttpFrontend,wireWebHub,resolveHubPaths,
       cli = join(selectedN, "dist/maintenance/cli.mjs");
     copyFileSync(cli, join(output, "maintenance-cli.mjs"));
     copyFileSync(join(selectedN, "dist/maintenance/manifest.json"), join(output, "maintenance-manifest.json"));
-    const run = (command: string, extra: string[] = [], stateFlag = true) =>
-      runRetainedFixtureCli(
+    const run = (command: string, extra: string[] = [], stateFlag = true) => {
+      const observeExternal = externalPending && command === "publish-new";
+      if (observeExternal) externalPending = false;
+      return runRetainedFixtureCli(
         cli,
         [command, "--installation", installation, ...(stateFlag ? ["--state", paths.stateDir] : []), ...extra],
-        { cwd: base, env },
+        { cwd: base, env, ...(observeExternal ? { observeExternal: true } : {}) },
       );
+    };
     const oldProcess = ordinaryProcess(artifact, env);
     let oldInfo: any, secondProcess: ReturnType<typeof ordinaryProcess> | undefined;
     const oldTargets: any[] = [];

@@ -27,6 +27,8 @@ export function verifyExistingReport(report) {
 }
 export function runExisting(source = process.env, ports = {}) {
   const env = existingEnvironment(source);
+  delete env.PI_TOOLKIT_T51_EXTERNAL_DIAG;
+  delete env.PI_TOOLKIT_T51_EXTERNAL_ONCE;
   assert.deepEqual(listFiles("tier2", env), [EXISTING_FILE]);
   // Evidence directory only; never inject its nested path as HOME/TMPDIR.
   const root = mkdtempSync("/tmp/t51-existing-"),
@@ -91,4 +93,11 @@ export function runExisting(source = process.env, ports = {}) {
   console.log(JSON.stringify(summary));
   return passed ? 0 : 1;
 }
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) process.exitCode = runExisting();
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const args = process.argv.slice(2);
+  if (!args.length) process.exitCode = runExisting();
+  else {
+    const { runExternalExisting } = await import("./external-existing.mjs");
+    process.exitCode = runExternalExisting(process.env, {}, args);
+  }
+}

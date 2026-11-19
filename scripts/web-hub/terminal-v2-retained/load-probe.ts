@@ -1,6 +1,7 @@
 /** Actual installed SDK/package load, no bound session. Diagnostics contain ONLY
  * closed stage/status enums and bounded elapsed milliseconds, never paths, loader
  * errors, stderr, settings, tokens or environment. Original 20s/22s budgets stay. */
+import { observeExternalChild, emitExternal } from "./external-observer.mjs";
 import { spawn } from "node:child_process";
 import { join } from "node:path";
 import type { Readable } from "node:stream";
@@ -16,7 +17,7 @@ export const LOAD_PROBE_STAGES = [
   "receipt",
 ] as const;
 type Stage = (typeof LOAD_PROBE_STAGES)[number];
-const PROGRAM = `
+export const PROGRAM = `
 const {pathToFileURL}=require('node:url'); const {join,dirname}=require('node:path');
 const home=process.env.HOME,agentDir=process.env.PI_CODING_AGENT_DIR,piCli=process.argv[1],entry=process.argv[2];
 let aborted=false; const started=Date.now();
@@ -47,6 +48,7 @@ export async function runSelectedPackageProbe(
   home: string,
   env: NodeJS.ProcessEnv,
   deadline: number,
+  observeExternal = false,
 ): Promise<string> {
   const started = Date.now();
   const child = spawn(process.execPath, ["-e", PROGRAM, piCli, entry], {
@@ -55,6 +57,10 @@ export async function runSelectedPackageProbe(
     detached: true,
     stdio: ["pipe", "pipe", "ignore", "pipe"],
   });
+  const observer = observeExternal ? observeExternalChild(child) : undefined;
+  let product = "observed-fail",
+    reason = "unknown",
+    truncated = false;
   let stage: Stage = "starting",
     childMs = 0,
     pending = "",
@@ -63,7 +69,7 @@ export async function runSelectedPackageProbe(
     overflow = false;
   // Kill only the process group we just created. No name/ps lookup or site signal.
   const stop = () => {
-    child.stdin.end();
+    child.stdin!.end();
     if (child.exitCode === null && child.signalCode === null && child.pid) {
       try {
         process.kill(-child.pid, "SIGKILL");
@@ -72,15 +78,19 @@ export async function runSelectedPackageProbe(
       }
     }
   };
-  const diagnostic = (reason: "deadline" | "child-failed" | "spawn-error" | "receipt" | "output-limit") => {
+  const diagnostic = (cause: "deadline" | "child-failed" | "spawn-error" | "receipt" | "output-limit") => {
+    reason = cause;
     const elapsedMs = Math.min(30000, Math.max(0, Date.now() - started));
-    console.error(`T51_LOAD_PROBE stage=${stage} elapsedMs=${elapsedMs} childMs=${childMs} reason=${reason}`);
+    console.error(`T51_LOAD_PROBE stage=${stage} elapsedMs=${elapsedMs} childMs=${childMs} reason=${cause}`);
   };
-  child.stdin.on("error", () => undefined);
+  child.stdin!.on("error", () => undefined);
   (child.stdio[3] as Readable).on("data", (buffer: Buffer) => {
     // Separate inherited fd3: arbitrary/noisy SDK stderr cannot erase the last stage.
     bytes += buffer.length;
-    if (bytes > 8192) return;
+    if (bytes > 8192) {
+      truncated = true;
+      return;
+    }
     pending += buffer.toString();
     let newline: number;
     while ((newline = pending.indexOf("\n")) >= 0) {
@@ -103,7 +113,7 @@ export async function runSelectedPackageProbe(
       }
     }
   });
-  child.stdout.on("data", (buffer: Buffer) => {
+  child.stdout!.on("data", (buffer: Buffer) => {
     if (output.length + buffer.length > 8192) {
       overflow = true;
       stop();
@@ -129,7 +139,8 @@ export async function runSelectedPackageProbe(
         diagnostic("spawn-error");
         reject(new Error("E_RETAINED_LOAD_PROBE_FAILED"));
       });
-      child.once("close", (code) => {
+      child.once("close", (code, signal) => {
+        observer?.close(code, signal);
         clearTimeout(timer);
         if (settled) return;
         settled = true;
@@ -151,9 +162,12 @@ export async function runSelectedPackageProbe(
       diagnostic("receipt");
       throw new Error("E_RETAINED_LOAD_PROBE_RECEIPT");
     }
+    product = "observed-pass";
+    reason = "success";
     return output;
   } finally {
     stop();
+    if (observer) emitExternal(observer.freeze(product, stage, reason, truncated || overflow));
   }
 }
 export async function verifySelectedPackageLoad(
@@ -161,6 +175,9 @@ export async function verifySelectedPackageLoad(
   mode: "new" | "old-off",
   deadline: number,
 ): Promise<{ entry: string; sha256: string }> {
+  const observeExternal = mode === "new" && process.env.PI_TOOLKIT_T51_EXTERNAL_ONCE === "existing-zero-first-v1";
+  delete process.env.PI_TOOLKIT_T51_EXTERNAL_ONCE;
+  delete process.env.PI_TOOLKIT_T51_EXTERNAL_DIAG;
   lease.revalidate();
   const profile = lease.profile,
     entry = join(mode === "new" ? profile.newPackageRoot : profile.oldPackageRoot, "index.ts");
@@ -178,7 +195,7 @@ export async function verifySelectedPackageLoad(
   delete env.NODE_PATH;
   if (profile.xdgRuntimeDir) env.XDG_RUNTIME_DIR = profile.xdgRuntimeDir;
   else delete env.XDG_RUNTIME_DIR;
-  const output = await runSelectedPackageProbe(profile.piCli, entry, profile.home, env, deadline);
+  const output = await runSelectedPackageProbe(profile.piCli, entry, profile.home, env, deadline, observeExternal);
   lease.revalidate();
   const { createHash } = await import("node:crypto");
   return { entry, sha256: createHash("sha256").update(output).digest("hex") };

@@ -484,3 +484,31 @@ safe stages before any further loading/production change. Stock failure reports
 forward only validated diagnostic records; required always-upload artifacts have
 an exact five-file/8KiB-per-file whitelist. Raw stock logs/reports and checkpoint/
 auth material remain private. See [`scripts/ci/README.md`](../../../scripts/ci/README.md).
+
+## T51 optional A′ parent lifecycle evidence
+
+The optional `--diagnose-external-once` entry in `scripts/ci/retained-existing.mjs`
+requires `PI_TOOLKIT_T51_EXTERNAL_DIAG=existing-zero-first-v1`. It selects only the
+existing0 test and arms only its first publish-new/first verify. The required3
+runner strips both control variables; default off adds no listener or output.
+The helper consumes permission before SDK environment construction. Child PROGRAM
+is byte-identical to the original baseline; argv, four FDs, flags, 20/22/30/45s
+budgets, settings/reload/receipt and original stop/settlement order do not change.
+
+An on-only parent exit listener records bounded monotonic elapsed time. Close is
+observed inside the original close callback, never used as a new settlement gate.
+After original receipt validation/product settlement and original stop, one deeply
+frozen snapshot is emitted (at most2048 bytes), through the existing CLI/helper/
+Vitest/controller chain. No wait/flush, CPU, Inspector, Worker, child writes, timer
+firing marker or extra FD is introduced. Late events cannot amend the snapshot.
+`probe75` is only an observed exit code, **not evidence the timer fired**;
+`not-seen-as-of` does not assert a process is running.
+
+This observes H4 only: exit can be seen while close remains unknown. In particular,
+the original close-only contract still deadlines when an exited leader's inherited
+pipe is held open. The original stop skips a group kill once the leader has exited;
+this instrumentation does not repair or generalize that behavior. Owned synthetic
+pipe holders are independently bounded and reaped by their normal lifetime.
+Success is always inconclusive; CPU and inner SDK/reload stages remain unknown,
+remote evidence and root-cause closure remain separate gates. The rejected earlier
+child-transport candidate/red evidence is not replaced by these new tests.
