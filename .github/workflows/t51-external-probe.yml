@@ -1,0 +1,113 @@
+name: T51 external lifecycle evidence (manual only)
+
+on:
+  workflow_dispatch:
+    inputs:
+      permission:
+        description: Explicit one-run H4 evidence permission (not product acceptance)
+        required: true
+        type: choice
+        default: deny
+        options:
+          - deny
+          - existing-zero-first-v1
+      sourceRef:
+        description: fix/t51-external-probe-lifecycle or the exact sourceSha
+        required: true
+        type: string
+        default: fix/t51-external-probe-lifecycle
+      sourceSha:
+        description: Full reviewed workflow candidate SHA; must equal this dispatch SHA
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash --noprofile --norc -euo pipefail {0}
+
+jobs:
+  evidence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Validate explicit permission and immutable source before checkout
+        env:
+          REQUESTED_PERMISSION: ${{ inputs.permission }}
+          REQUESTED_REF: ${{ inputs.sourceRef }}
+          REQUESTED_SHA: ${{ inputs.sourceSha }}
+        run: |
+          refuse() { printf '%s\n' 'T51_EXTERNAL_WORKFLOW_REFUSED' >&2; exit 1; }
+          branch=fix/t51-external-probe-lifecycle
+          [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$GITHUB_REF" == "refs/heads/$branch" ]] || refuse
+          [[ "$GITHUB_RUN_ATTEMPT" == 1 ]] || refuse
+          [[ "$REQUESTED_PERMISSION" == existing-zero-first-v1 ]] || refuse
+          [[ "$REQUESTED_SHA" =~ ^[0-9a-f]{40}$ && "$REQUESTED_SHA" == "$GITHUB_SHA" ]] || refuse
+          [[ "$REQUESTED_REF" == "$branch" || "$REQUESTED_REF" == "$REQUESTED_SHA" ]] || refuse
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.sourceRef }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify checked-out HEAD and independently accepted runtime tree
+        env:
+          REQUESTED_SHA: ${{ inputs.sourceSha }}
+        run: |
+          [[ "$(git rev-parse HEAD)" == "$REQUESTED_SHA" && "$REQUESTED_SHA" == "$GITHUB_SHA" ]]
+          baseline=7d24e281f8c9c5d15190b5a2472d44856b604188
+          git merge-base --is-ancestor "$baseline" HEAD
+          # Only this workflow and its documentation may differ from accepted A′.
+          git diff --quiet "$baseline" HEAD -- . \
+            ':(exclude).github/workflows/t51-external-probe.yml' \
+            ':(exclude)scripts/ci/README.md'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.22.1
+
+      - name: Allocate private runner HOME and cache (fixture TMPDIR stays short)
+        run: |
+          umask 077
+          root=$(mktemp -d /tmp/t51e-XXXXXX)
+          mkdir -m700 "$root/h" "$root/c"
+          {
+            printf 'HOME=%s/h\n' "$root"
+            printf 'XDG_CACHE_HOME=%s/c\n' "$root"
+            printf 'npm_config_cache=%s/c/npm\n' "$root"
+            printf 'PI_CODING_AGENT_DIR=%s/h/.pi/agent\n' "$root"
+            printf 'TMPDIR=/tmp\nTMP=/tmp\nTEMP=/tmp\n'
+          } >> "$GITHUB_ENV"
+
+      - name: Prepare ephemeral runner system rc permissions for the original fixture
+        run: |
+          # Same permission precondition as CI; never source/copy a real user's rc.
+          # Missing optional files are fine; the unchanged fixture still audits before exec.
+          sudo find -L /etc/profile /etc/bashrc /etc/bash.bashrc /etc/zsh /etc/zshenv /etc/zshrc /etc/zprofile /etc/zlogin /etc/locale.conf /etc/profile.d -maxdepth 1 -type f -perm /022 -exec chmod go-w {} + 2>/dev/null || true
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Verify locked Node and pi SDK profile
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { readFileSync } from 'node:fs';
+          assert.equal(process.versions.node, '22.22.1');
+          for (const name of ['pi-ai', 'pi-coding-agent', 'pi-tui']) {
+            const pkg = JSON.parse(readFileSync(`node_modules/@earendil-works/${name}/package.json`, 'utf8'));
+            assert.equal(pkg.name, `@earendil-works/${name}`);
+            assert.equal(pkg.version, '1.5.0');
+          }
+          NODE
+
+      - name: Build the verified candidate
+        run: npm run build
+
+      - name: Collect once (exit0 means complete evidence, NOT product PASS)
+        env:
+          PI_TOOLKIT_TEST_WORKERS: "1"
+        run: PI_TOOLKIT_T51_EXTERNAL_DIAG=existing-zero-first-v1 timeout 300 node scripts/ci/retained-existing.mjs --diagnose-external-once

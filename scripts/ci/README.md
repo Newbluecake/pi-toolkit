@@ -136,7 +136,9 @@ and not a replacement for the required three-cell lane. It registers existing0
 only, first publish-new/first verify only. Missing permission/unknown arguments
 return closed not-armed/not-run without launching the lane. The ordinary required3
 entry strips both controls and retains its original schema/report assertions.
-No workflow enables A′; no stock schema or five-file artifact whitelist changes.
+No automatic workflow enables A′; the separate manual-only entry below requires
+explicit permission and a reviewed immutable HEAD. No stock schema or five-file
+artifact whitelist changes.
 
 The parent adds only passive exit/close observation and emits after the original
 product settlement/receipt validation/stop. Child PROGRAM, argv, FDs/flags, SDK,
@@ -158,3 +160,69 @@ selection/armed permission/complete schema, **not product pass, CPU/coverage or
 exit/close being seen**. `observed-pass` is always inconclusive; `observed-fail`
 remains a product failure even if evidence collection passes. H4 exit-versus-close
 is the only additional discriminant; this does not fix the remote root cause.
+
+### One-shot remote preparation (manual-only workflow)
+
+A′ implementation `7d24e281f8c9c5d15190b5a2472d44856b604188` received independent
+kimi `r_MZ19MTDC` **conditional PASS, zero blockers** for this exact single H4
+experiment. This is not remote evidence or product acceptance. Remote remains
+**NOT RUN** until root performs and inspects the separately reviewed dispatch.
+
+`.github/workflows/t51-external-probe.yml` is an optional manual-only workflow,
+not an alteration of `ci.yml` or a new required product gate. It has one Ubuntu
+job, no matrix, automatic event, retry, full suite or artifact upload. It refuses
+reruns (`GITHUB_RUN_ATTEMPT != 1`). Root must dispatch once only, not submit another
+dispatch to retry a failure. Only `fix/t51-external-probe-lifecycle` may dispatch;
+`sourceRef` must be that branch or exactly `sourceSha`. The full40-character SHA
+must equal the dispatch's immutable `GITHUB_SHA` and checked-out HEAD. The accepted
+A′ must be an ancestor, and only this workflow plus this README may differ from
+it. Thus input cannot select an unrelated branch or supply arbitrary test/script
+commands. Moving the branch after dispatch fails the HEAD check rather than
+silently executing newer code. Permission defaults to `deny`; the only accepted
+value is `existing-zero-first-v1`. Checkout credentials are not persisted; token
+permissions are contents-read only.
+
+The workflow pins Node22.22.1, uses unchanged `package-lock.json` via `npm ci`,
+checks the three pi SDK packages are exactly1.5.0, then runs `npm run build` and
+exactly once:
+
+```sh
+PI_TOOLKIT_T51_EXTERNAL_DIAG=existing-zero-first-v1 \
+  timeout 300 node scripts/ci/retained-existing.mjs --diagnose-external-once
+```
+
+No local install or actual diagnostic invocation is part of workflow preparation.
+The remote runner gets a fresh owned0700 short HOME/cache. TMPDIR remains `/tmp`
+so the original fixture's own0700 scratch homes keep their original socket paths;
+no stock HOME/consumer or user's shell rc is imported. The Actions shell uses
+`--noprofile --norc`. Only on the disposable runner, the existing CI system-rc mode
+precondition is applied; the original fixture still audits trusted system files
+before exec and constructs its own private rc. No fixture/observer semantics or
+budget changes are made. This selects only existing0, but its original test may
+continue past the first publication into its private-fixture PTY steps if the
+probe succeeds; it is not a new early-stop transport or test primitive.
+
+The controller's existing closed console JSON is the only diagnostic publication.
+It prints a safe snapshot even when the evidence gate returns nonzero; valid
+`observed-fail` evidence may return0. **Exit0 means complete evidence, never product
+PASS or root-cause closure.** Setup/cancellation/runner loss before the controller
+can emit a summary means missing evidence/NOT RUN, not a fabricated pass. Raw logs,
+reports, auth and credentials stay on the disposable runner and are not uploaded.
+
+After root's fast independent review of the workflow increment and push of this
+branch, use the immutable reviewed **workflow-increment** SHA (not the older7d24
+implementation-only SHA) in this command; preparation does not run it:
+
+```sh
+candidate='<full-reviewed-workflow-increment-SHA>'
+gh workflow run t51-external-probe.yml --repo Newbluecake/pi-toolkit \
+  --ref fix/t51-external-probe-lifecycle \
+  -f permission=existing-zero-first-v1 \
+  -f sourceRef="$candidate" -f sourceSha="$candidate"
+```
+
+Workflow discovery/dispatch eligibility for a newly added branch-only file is a
+GitHub control-plane precondition, **not locally verified**. If GitHub cannot
+resolve this workflow (for example, it requires default-branch registration),
+stop and report NOT RUN to root. Do not fall back to dispatching `ci.yml`, change
+the default branch, merge the workflow elsewhere, retry or claim A′ executed.
