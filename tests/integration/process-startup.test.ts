@@ -191,35 +191,13 @@ describe("shared real-process startup barrier", () => {
 // Independent cold-start inventory: serial boots add; hub + concurrent agents count as
 // two paths, not three. A launcher parent contains its grandchild within the same boot.
 // Legacy headless hub startup is 15s * SLOW(3); it is not silently reduced to 30s.
+// T51 removed the four v1 terminal suites and their 26 nonexistent registrations.
+// Keep all 31 surviving paths/budgets unchanged; v2 in-process SDK/CLI fixtures
+// do not use this ProcessStartup inventory and are not invented v1 boot aliases.
 const startupCases: Array<
   [file: string, titlePrefix: string, boots: number, margin: number, legacy45s: number, otherColdMs: number]
 > = [
   ["process-startup.test.ts", "a singleton loser", 1, 30000, 0, 0],
-  ["web-hub-terminal-per-session.test.ts", "T1/T4:", 3, 30000, 0, 0],
-  ["web-hub-terminal-per-session.test.ts", "T2: machine-on", 2, 30000, 0, 0],
-  ["web-hub-terminal-per-session.test.ts", "T3 conflict:", 1, 30000, 0, 0],
-  ["web-hub-terminal-per-session.test.ts", "T5:", 2, 90000, 0, 0],
-  ["web-hub-terminal-per-session.test.ts", "T6: first", 3, 30000, 0, 0],
-  ["web-hub-terminal-per-session.test.ts", "T7:", 3, 30000, 0, 0],
-  ["web-hub-terminal-per-session.test.ts", "T9/T11:", 3, 30000, 0, 0],
-  ["web-hub-terminal-per-session.test.ts", "T10: one", 3, 30000, 0, 0],
-  ["web-hub-terminal-per-session.test.ts", "T14:", 2, 30000, 0, 0],
-  ["web-hub-terminal-per-session.test.ts", "privacy=false", 2, 30000, 0, 0],
-  ["web-hub-terminal-per-session.test.ts", "T1 actual", 2, 30000, 0, 0],
-  ["web-hub-terminal-per-session.test.ts", "T3 unavailable", 1, 30000, 0, 0],
-  ["web-hub-terminal-per-session.test.ts", "T6 generic", 3, 30000, 0, 0],
-  ["web-hub-terminal-per-session.test.ts", "T10 two", 4, 30000, 0, 0],
-  ["web-hub-terminal-per-session.test.ts", "T11 real", 2, 30000, 0, 0],
-  ["web-hub-terminal-per-session.test.ts", "T6/T11 new", 4, 30000, 0, 0],
-  ["web-hub-terminal-per-session.test.ts", "T2 actual", 2, 30000, 0, 0],
-  ["web-hub-terminal-compat.test.ts", "O/O/O", 2, 120000, 0, 0],
-  ["web-hub-terminal-compat.test.ts", "${cell.label}", 2, 120000, 0, 0],
-  ["web-hub-terminal-compat.test.ts", "O/N/%s", 2, 120000, 0, 0],
-  ["web-hub-terminal-compat.test.ts", "T3 true off:", 4, 120000, 0, 0],
-  ["web-hub-terminal-compat.test.ts", "N from O launcher", 3, 30000, 0, 0],
-  ["web-hub-terminal-rollback.test.ts", "T13 clean:", 4, 60000, 0, 0],
-  ["web-hub-terminal-rollback.test.ts", "T13 dirty:", 4, 100000, 0, 0],
-  ["web-hub-terminal-rollback.test.ts", "T13 poison:", 2, 30000, 0, 0],
   ["web-hub-headless.test.ts", "web-hub-delete-session", 1, 65000, 2, 0],
   ["web-hub-headless.test.ts", "closure:", 1, 60000, 0, 0],
   ["web-hub-headless.test.ts", "browser-off delivery:", 1, 30000, 0, 0],
@@ -238,7 +216,6 @@ const startupCases: Array<
   ["fabric-thread-rebind-e2e.test.ts", "A18 degrade", 2, 60000, 0, 0],
   ["fabric-thread-rebind-e2e.test.ts", "A13 full", 2, 60000, 0, 0],
   ["fabric-thread-rebind-e2e.test.ts", "A10 full", 2, 60000, 0, 0],
-  ["web-hub-terminal-wiring.test.ts", "crosses real agent", 1, 270000, 0, 0],
   ["web-hub-headless.test.ts", "HH7:", 0, 65000, 2, 0],
   ["web-hub-headless.test.ts", "H1:", 0, 49000, 1, 0],
   ["web-hub-headless.test.ts", "H2:", 0, 78000, 1, 0],

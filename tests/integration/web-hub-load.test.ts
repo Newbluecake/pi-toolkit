@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { realpathSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FakeClock } from "../../src/core/clock.js";
@@ -246,7 +246,8 @@ describe.skipIf(!IS_LINUX)("web-hub P3 load enable/disable matrix (real buildHub
       env: { HOME: dir },
       paths: pathsIn(dir),
       buildInfo: async () => ({ pluginVersion: "1.2.3", buildId: "1.2.3@test" }),
-      argv1: "/nonexistent/pi",
+      // Loader overrides still resolve aliases from the original on-disk pi host.
+      argv1: realpathSync(new URL("../../node_modules/@earendil-works/pi-coding-agent/dist/cli.js", import.meta.url)),
       load: { port: () => undefined, settings: { ...loadSettings, enabled: opts.loadEnabled } },
       netConnect: enoentConnect(),
       spawnImpl,

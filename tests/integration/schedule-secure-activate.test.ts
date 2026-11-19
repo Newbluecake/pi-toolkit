@@ -1,5 +1,5 @@
 /** Actual activate(), not schedule mode/wire mocks. Only transport/launcher IO is injected. */
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import activate from "../../src/index.js";
@@ -68,7 +68,10 @@ describe("schedule P1 secure registration hard gate", () => {
               settings: { ...deps.settings, autoStart: true, nodeLoader },
               paths: { ...pathsIn(sb.home), stoppedFile: join(sb.home, "stopped") },
               env: { HOME: sb.home },
-              argv1: "/nonexistent/pi",
+              // Loader overrides still resolve aliases from the original on-disk pi host.
+              argv1: realpathSync(
+                new URL("../../node_modules/@earendil-works/pi-coding-agent/dist/cli.js", import.meta.url),
+              ),
               netConnect: net.netConnect,
               buildInfo: async () => ({ pluginVersion: "0.0.0-secure-test", buildId: "secure-test" }),
               spawnImpl: ((_e: string, _a: string[], opts: { env: NodeJS.ProcessEnv }) => {

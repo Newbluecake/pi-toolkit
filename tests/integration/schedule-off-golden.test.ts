@@ -26,6 +26,25 @@ import {
   systemPromptFor,
 } from "./helpers/schedule-activate.js";
 
+// Preserve the frozen public launcher fingerprint; only the internal host-resolution
+// input uses its existing realpath seam to select the real SDK. The production
+// resolver still validates aliases/loader; spawn/network stay isolated below.
+vi.mock("../../src/web-hub/agent/launcher.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../src/web-hub/agent/launcher.js")>();
+  const { realpathSync } = await import("node:fs");
+  const hostCli = realpathSync(
+    new URL("../../node_modules/@earendil-works/pi-coding-agent/dist/cli.js", import.meta.url),
+  );
+  return {
+    ...actual,
+    resolveLauncherPlan: (opts: Parameters<typeof actual.resolveLauncherPlan>[0]) =>
+      actual.resolveLauncherPlan({
+        ...opts,
+        realpath: (path) => (path === "/nonexistent/pi" ? hostCli : realpathSync(path)),
+      }),
+  };
+});
+
 /**
  * scheduled-reports I1 (plan r3 §14 「off golden」): what the toolkit looks like while `schedule` is OFF
  * (the default). Pinned byte for byte:

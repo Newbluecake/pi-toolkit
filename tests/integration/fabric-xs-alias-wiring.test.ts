@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -138,7 +138,8 @@ async function boot(opts: BootOpts) {
     env: { HOME: home.home },
     paths: { ...pathsIn(home.home), stoppedFile: join(home.home, "stopped") },
     buildInfo: async () => ({ pluginVersion: "0.0.0-alw", buildId: "alw-build" }),
-    argv1: "/nonexistent/pi",
+    // Loader overrides still resolve aliases from the original on-disk pi host.
+    argv1: realpathSync(new URL("../../node_modules/@earendil-works/pi-coding-agent/dist/cli.js", import.meta.url)),
     netConnect: net.netConnect,
     spawnImpl: ((_exe: string, _argv: string[], o: { env: NodeJS.ProcessEnv }) => {
       spawnEnv.push(o.env);

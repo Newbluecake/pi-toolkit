@@ -24,6 +24,25 @@ import {
 } from "../web-hub/agent/helpers.js";
 import { resetSettingsFiles, sandboxHome } from "./helpers/home-sandbox.js";
 
+// Preserve the frozen public launcher fingerprint; only the internal host-resolution
+// input uses its existing realpath seam to select the real SDK. The production
+// resolver still validates aliases/loader; spawn/network stay isolated below.
+vi.mock("../../src/web-hub/agent/launcher.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../src/web-hub/agent/launcher.js")>();
+  const { realpathSync } = await import("node:fs");
+  const hostCli = realpathSync(
+    new URL("../../node_modules/@earendil-works/pi-coding-agent/dist/cli.js", import.meta.url),
+  );
+  return {
+    ...actual,
+    resolveLauncherPlan: (opts: Parameters<typeof actual.resolveLauncherPlan>[0]) =>
+      actual.resolveLauncherPlan({
+        ...opts,
+        realpath: (path) => (path === "/nonexistent/pi" ? hostCli : realpathSync(path)),
+      }),
+  };
+});
+
 /**
  * fabric-thread rebind plan r3 §7 A16 (P0b): the threads-ON × rebind-OFF golden. Captured BEFORE any
  * rebind wire/settings/cap change, with `fabric.enabled: true` + `fabric.threads.enabled: true` and
