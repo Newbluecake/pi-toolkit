@@ -14,6 +14,7 @@ import { hasNodeSqlite } from "../../../src/web-hub/hub/db.js";
 import { WRITER_SOAK_MS } from "../../../src/web-hub/hub/hardening.js";
 import { createKdf, newKdfParams, validateKdfParams, KDF_LEGACY, KDF_PHASE2 } from "../../../src/web-hub/hub/kdf.js";
 import { memLog } from "./helpers.js";
+import { observeDbExit } from "./db-exit-diagnostic.js";
 import { createKdfUpgrader } from "../../../src/web-hub/hub/kdf-upgrade.js";
 import { hashSid } from "../../../src/web-hub/hub/sid-hash.js";
 import { vi } from "vitest";
@@ -38,10 +39,17 @@ function tmp(): { dir: string; dbFile: string; cleanup: () => void } {
 skipIfNoSqlite("lan-store.ts (plan §4 LanStorePort contract)", () => {
   let dir: { dir: string; dbFile: string; cleanup: () => void };
   let store: LanStore;
+  let queryExit: ReturnType<typeof observeDbExit>;
 
   beforeEach(async () => {
     dir = tmp();
-    const res = await createLanStore({ dbFile: dir.dbFile, log: memLog(), test: true });
+    queryExit = observeDbExit();
+    const res = await createLanStore({
+      dbFile: dir.dbFile,
+      log: memLog(),
+      test: true,
+      dbClient: { spawnFn: queryExit.spawnFn },
+    });
     if (!res.ok) throw new Error(`createLanStore failed: ${res.reason} ${res.detail ?? ""}`);
     store = res.store;
   });
@@ -325,7 +333,11 @@ skipIfNoSqlite("lan-store.ts (plan §4 LanStorePort contract)", () => {
       const db = new DatabaseSync(dir.dbFile);
       db.prepare("UPDATE users SET initial_login_at=7, initial_login_ip='9.9.9.9' WHERE username=?").run(USERNAME);
       db.close();
-      expect(await store.markInitialLogin(USERNAME, "10.0.0.5", 42)).toEqual({ cleared: true });
+      try {
+        expect(await store.markInitialLogin(USERNAME, "10.0.0.5", 42)).toEqual({ cleared: true });
+      } catch (error) {
+        throw queryExit.annotate(error, "markInitialLogin");
+      }
       const row = await rawRow();
       expect(row).toMatchObject({ pw: null, at: 7, ip: "9.9.9.9" });
     });

@@ -71,12 +71,19 @@ jobs:
       # real-mount secure suites keep self-skipping on runners without FUSE (status quo).
       - name: Test (tier 2 + secure)
         if: ${{ !cancelled() && (steps.tier1.outcome == 'success' || steps.tier1.outcome == 'failure') }}
-        # Ownership remains tier2; ONLY this dedicated file is excluded here.
+        # Ownership remains tier2; only stock and retained-existing move to required lanes.
         # All four stock cells below are required, not opt-in/continue-on-error.
         run: node scripts/ci/ordinary-tests.mjs run --project tier2 --project secure --no-cache
         env:
           PWH_REQUIRE_UI_DIST: "1"
           PI_TOOLKIT_TEST_WORKERS: "2"
+
+      - name: Retained existing (required isolated workers1, load isolation not root-cause proof)
+        if: ${{ !cancelled() && (steps.tier1.outcome == 'success' || steps.tier1.outcome == 'failure') }}
+        run: node scripts/ci/retained-existing.mjs
+        env:
+          PWH_REQUIRE_UI_DIST: "1"
+          PI_TOOLKIT_TEST_WORKERS: "1"
 
       - name: Allocate dedicated stock root only (no ordinary HOME/TMPDIR changes)
         if: ${{ !cancelled() && (steps.tier1.outcome == 'success' || steps.tier1.outcome == 'failure') }}

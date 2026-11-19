@@ -4,28 +4,34 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import {
   assertSelection,
   checkSelection,
   listFiles,
   ordinaryEnvironment,
   STOCK_FILE,
+  EXISTING_FILE,
 } from "../../scripts/ci/ordinary-tests.mjs";
 import { privateEnvironment } from "../../scripts/ci/terminal-stock.mjs";
 import { failureSummary, probeDiagnostics, SAFE_LIMIT, writeSafeSummary } from "../../scripts/ci/safe-diagnostics.mjs";
-it("real ordinary selection equals baseline minus ONE stock file for all 3 projects; real old CLI exclude is rejected", () => {
-  const { baseline, ordinary } = checkSelection();
+it("real ordinary plus required existing/stock lanes equals baseline for all 3 projects; real old CLI exclude is rejected", () => {
+  const { baseline, ordinary, existing } = checkSelection();
   expect(ordinary.tier2).not.toContain(STOCK_FILE);
+  expect(ordinary.tier2).not.toContain(EXISTING_FILE);
+  expect(existing).toEqual([EXISTING_FILE]);
   expect(ordinary.tier1).toEqual(baseline.tier1);
   expect(ordinary.secure).toEqual(baseline.secure);
   const env = { ...process.env };
   delete env.PI_TOOLKIT_TEST_LANE;
   const old = listFiles("tier2", env, ["--exclude", STOCK_FILE]);
   expect(old).toContain(STOCK_FILE); // The precise observed e393 failure mechanism.
-  expect(() => assertSelection(baseline, { ...ordinary, tier2: old })).toThrow();
-  expect(() => assertSelection(baseline, { ...ordinary, tier1: ordinary.tier1.slice(1) })).toThrow();
-  expect(() => assertSelection(baseline, { ...ordinary, secure: [] })).toThrow();
+  expect(() => assertSelection(baseline, { ...ordinary, tier2: old }, existing)).toThrow();
+  expect(() => assertSelection(baseline, { ...ordinary, tier1: ordinary.tier1.slice(1) }, existing)).toThrow();
+  expect(() => assertSelection(baseline, { ...ordinary, secure: [] }, existing)).toThrow();
+  expect(() => assertSelection(baseline, ordinary, [])).toThrow();
+  expect(() => assertSelection(baseline, ordinary, [EXISTING_FILE, STOCK_FILE])).toThrow();
+  expect(() => assertSelection(baseline, ordinary, [EXISTING_FILE, EXISTING_FILE])).toThrow();
 }, 20000);
 it("ordinary paths are inherited, stock env is allocated separately and cannot leak back", () => {
   const inherited = {
@@ -166,6 +172,12 @@ it("complete local controller keeps build/ordinary env separate and propagates r
         expect(env.PI_TOOLKIT_TEST_LANE).toBeUndefined();
         seen.push("provision");
       },
+      existing(env: any) {
+        expect(env.HOME).toBe(source.HOME);
+        expect(env.TMPDIR).toBe("/tmp");
+        seen.push("existing");
+        return 0;
+      },
       cell(env: any, format: string, phase: string) {
         expect(env.TMPDIR).toBe(join(root, "t"));
         seen.push(`${format}-${phase}`);
@@ -179,6 +191,7 @@ it("complete local controller keeps build/ordinary env separate and propagates r
       "build:web",
       "check:web",
       "ordinary",
+      "existing",
       "provision",
       "npm-restart",
       "npm-rollback",
@@ -188,4 +201,102 @@ it("complete local controller keeps build/ordinary env separate and propagates r
     expect(source.HOME).toBe("/ordinary/home");
     expect(source.TMPDIR).toBe("/tmp");
   }
+});
+
+it("required existing lane rejects skipped/missing cells and its failure cannot be canceled by green ordinary/stock", async () => {
+  const { verifyExistingReport, runExisting } = await import("../../scripts/ci/retained-existing.mjs");
+  const output = vi.spyOn(console, "log").mockImplementation(() => undefined);
+  try {
+    const secret = "FAKE_LANE_TOKEN_NEVER_PRINT";
+    const failed = runExisting(process.env, {
+      spawnSync(_file: unknown, args: string[], options: any) {
+        expect(args).toContain("--maxWorkers=1");
+        expect(options.env.PI_TOOLKIT_TEST_LANE).toBe("retained-existing");
+        return { status: 1, stdout: `${secret} E_RETAINED_LOAD_PROBE_DEADLINE`, stderr: secret };
+      },
+    });
+    expect(failed).toBe(1);
+    const summary = JSON.parse(String(output.mock.calls.at(-1)![0]));
+    expect(summary.result).toBe("failed");
+    expect(summary.codes).toEqual(["E_RETAINED_LOAD_PROBE_DEADLINE"]);
+    expect(JSON.stringify(summary)).not.toContain(secret);
+  } finally {
+    output.mockRestore();
+  }
+  const report = {
+    success: true,
+    numPassedTests: 3,
+    numFailedTests: 0,
+    testResults: [
+      {
+        name: `${process.cwd()}/${EXISTING_FILE}`,
+        assertionResults: [0, 1, 2].map((n) => ({
+          status: "passed",
+          fullName: `ordinary O (${n} resources; two uses distinct SDK sessions) retains debt through N/restart/new CLI/off rollback`,
+        })),
+      },
+    ],
+  };
+  expect(verifyExistingReport(report)).toBeUndefined();
+  for (const mutate of [
+    (r: any) => {
+      r.numPassedTests = 0;
+    },
+    (r: any) => {
+      r.testResults[0].assertionResults[1].status = "skipped";
+    },
+    (r: any) => {
+      r.testResults[0].assertionResults.pop();
+    },
+    (r: any) => {
+      r.success = false;
+    },
+  ]) {
+    const bad = structuredClone(report);
+    mutate(bad);
+    expect(() => verifyExistingReport(bad)).toThrow();
+  }
+  const { runCompleteSuite } = await import("../../scripts/ci/test-with-stock.mjs");
+  const root = mkdtempSync(join(tmpdir(), "serial-fail-"));
+  const order: string[] = [];
+  const status = runCompleteSuite(
+    ["--tier2"],
+    { HOME: "/ordinary", TMPDIR: "/tmp", PI_TOOLKIT_TEST_PRIVATE_ROOT: root },
+    {
+      checkSelection() {},
+      command() {},
+      spawnSync() {
+        order.push("ordinary");
+        return { status: 0 };
+      },
+      existing() {
+        order.push("existing");
+        return 1;
+      },
+      provision() {
+        order.push("provision");
+      },
+      cell(_env: unknown, format: string, phase: string) {
+        order.push(`${format}-${phase}`);
+      },
+    },
+  );
+  expect(status).toBe(1);
+  expect(order).toEqual([
+    "ordinary",
+    "existing",
+    "provision",
+    "npm-restart",
+    "npm-rollback",
+    "zip-restart",
+    "zip-rollback",
+  ]);
+  const workflow = readFileSync(".github/workflows/ci.yml", "utf8");
+  const lane = workflow.slice(
+    workflow.indexOf("- name: Retained existing"),
+    workflow.indexOf("- name: Allocate dedicated stock root"),
+  );
+  expect(lane).toContain("steps.tier1.outcome == 'failure'");
+  expect(lane).toContain("run: node scripts/ci/retained-existing.mjs");
+  expect(lane).not.toContain("continue-on-error");
 });

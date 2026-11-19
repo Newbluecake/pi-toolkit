@@ -7,6 +7,7 @@ import { mkdtempSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { cell, command, privateEnvironment, provision } from "./terminal-stock.mjs";
+import { runExisting } from "./retained-existing.mjs";
 import { checkSelection, ordinaryEnvironment } from "./ordinary-tests.mjs";
 export function runCompleteSuite(args, source = process.env, ports = {}) {
   assert(
@@ -18,6 +19,7 @@ export function runCompleteSuite(args, source = process.env, ports = {}) {
   const spawn = ports.spawnSync ?? spawnSync;
   const prepare = ports.provision ?? provision;
   const runCell = ports.cell ?? cell;
+  const runSerial = ports.existing ?? runExisting;
   const ordinaryEnv = ordinaryEnvironment(source);
   check(ordinaryEnv);
   for (const script of ["build", "build:web", "check:web"])
@@ -34,6 +36,8 @@ export function runCompleteSuite(args, source = process.env, ports = {}) {
     { env: ordinaryEnv, stdio: "inherit" },
   );
   let failed = Boolean(ordinary.error || ordinary.status !== 0 || ordinary.signal);
+  // An ordinary failure must not prevent the independent required evidence lane.
+  if (runSerial(source) !== 0) failed = true;
   const env = privateEnvironment(source.PI_TOOLKIT_TEST_PRIVATE_ROOT ?? mkdtempSync("/tmp/t51-"));
   console.log(`Dedicated stock evidence root: ${env.PI_TOOLKIT_TEST_PRIVATE_ROOT}`);
   prepare(env);

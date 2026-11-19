@@ -24,6 +24,7 @@ import { createHmac } from "node:crypto";
 import { buildMaintScript } from "../../../src/web-hub/hub/db-child.js";
 import { hasNodeSqlite } from "../../../src/web-hub/hub/db.js";
 import { memLog } from "./helpers.js";
+import { observeDbExit } from "./db-exit-diagnostic.js";
 
 const execFileP = promisify(execFileCb);
 const skipIfNoSqlite = (await hasNodeSqlite()) ? describe : describe.skip;
@@ -59,6 +60,127 @@ skipIfNoSqlite("createDbClient (plan §4.2 real subprocess)", () => {
     clients.push(c);
     return c;
   }
+
+  it.each(["code", "signal"] as const)(
+    "test observer forwards real spawn/stdio and adds only safe %s exit metadata",
+    async (kind) => {
+      const t = tmp(),
+        secret = "FAKE_DB_TOKEN_NEVER_LOG",
+        log = memLog();
+      const realSpawn = (await import("node:child_process")).spawn;
+      let spawned: ReturnType<typeof realSpawn> | undefined;
+      let forwarded: Parameters<typeof realSpawn> | undefined;
+      let exits = 0;
+      const observed = observeDbExit(((...args: Parameters<typeof realSpawn>) => {
+        forwarded = args;
+        const options = args[2];
+        spawned = realSpawn(
+          process.execPath,
+          [
+            "-e",
+            `
+        process.stdin.once('data',()=>{
+          process.stderr.write(${JSON.stringify(secret)});
+          ${kind === "code" ? "process.exit(1)" : "process.kill(process.pid,'SIGKILL')"};
+        }); process.stdin.resume();`,
+          ],
+          options,
+        );
+        spawned.on("exit", () => {
+          exits++;
+        });
+        return spawned;
+      }) as typeof realSpawn);
+      let returned: ReturnType<typeof realSpawn> | undefined;
+      const c = make(t.dbFile, {
+        log,
+        interactiveSlots: 1,
+        backoffMs: [1000],
+        test: false,
+        spawnFn: ((...args: Parameters<typeof realSpawn>) => {
+          returned = observed.spawnFn(...args);
+          return returned;
+        }) as typeof realSpawn,
+      });
+      try {
+        expect(returned).toBe(spawned);
+        expect(forwarded![0]).toBe(process.execPath);
+        expect(forwarded![2]).toMatchObject({ stdio: ["pipe", "pipe", "pipe"] });
+        expect(returned!.stdin).toBe(spawned!.stdin);
+        expect(returned!.stdout).toBe(spawned!.stdout);
+        expect(returned!.stderr).toBe(spawned!.stderr);
+        const first = c
+          .call("markInitialLogin", { username: secret, ip: secret })
+          .catch((e: unknown) => observed.annotate(e, "markInitialLogin"));
+        const second = c
+          .call(`SELECT ${secret}`, { token: secret })
+          .catch((e: unknown) => observed.annotate(e, secret));
+        const [active, queued] = (await Promise.all([first, second])) as Array<DbClientError & { childExit: object }>;
+        expect(exits).toBe(1); // original listener is still delivered, not consumed.
+        expect(active).toBeInstanceOf(DbClientError);
+        expect(queued).toBeInstanceOf(DbClientError);
+        expect(active!.code).toBe("E_DB");
+        expect(queued!.code).toBe("E_DB");
+        const expected = {
+          childCode: kind === "code" ? 1 : null,
+          childSignal: kind === "code" ? null : "SIGKILL",
+          lifecycle: "exited",
+        };
+        expect(active!.childExit).toEqual({ ...expected, operation: "markInitialLogin" });
+        expect(queued!.childExit).toEqual({ ...expected, operation: "other" });
+        expect(active!.message).toContain("op=markInitialLogin");
+        expect(queued!.message).toContain("op=other");
+        expect(JSON.stringify([active, queued, log.lines])).not.toContain(secret);
+        const unrelated = new Error(secret);
+        expect(observed.annotate(unrelated, "markInitialLogin")).toBe(unrelated);
+      } finally {
+        await c.close();
+        t.cleanup();
+      }
+    },
+  );
+
+  it("test observer delegates original argv/options by identity and leaves real child stdin/stdout/stderr/exit intact", async () => {
+    const argv = [
+      "-e",
+      `process.stderr.write('private-observer-fixture');process.stdin.on('data',b=>process.stdout.write(b));process.stdin.on('end',()=>process.exit(0));`,
+    ];
+    const options = { env: { ...process.env }, stdio: ["pipe", "pipe", "pipe"] as ["pipe", "pipe", "pipe"] };
+    let delegated: Parameters<typeof spawn> | undefined, original: ReturnType<typeof spawn> | undefined;
+    const observed = observeDbExit(((...args: Parameters<typeof spawn>) => {
+      delegated = args;
+      original = spawn(...args);
+      return original;
+    }) as typeof spawn);
+    const child = observed.spawnFn(process.execPath, argv, options);
+    expect(delegated![0]).toBe(process.execPath);
+    expect(delegated![1]).toBe(argv);
+    expect(delegated![2]).toBe(options);
+    expect(child).toBe(original);
+    expect(child.stdin).toBe(original!.stdin);
+    expect(child.stdout).toBe(original!.stdout);
+    expect(child.stderr).toBe(original!.stderr);
+    let out = "",
+      stderr = "",
+      exits = 0;
+    child.stdout!.on("data", (b: Buffer) => {
+      out += b.toString();
+    });
+    child.stderr!.on("data", (b: Buffer) => {
+      stderr += b.toString();
+    });
+    child.on("exit", () => {
+      exits++;
+    });
+    const closed = new Promise<void>((resolve) => child.once("close", () => resolve()));
+    child.stdin!.end("exact-private-payload");
+    await closed;
+    expect(out).toBe("exact-private-payload");
+    expect(stderr).toBe("private-observer-fixture");
+    expect(exits).toBe(1);
+    expect(child.exitCode).toBe(0);
+    expect(child.signalCode).toBeNull();
+  });
 
   it("basic round trip: call() resolves with the child's result", async () => {
     const t = tmp();

@@ -150,3 +150,17 @@ injection before ordinary tests. The complete local wrapper follows the same
 ordering. See [`scripts/ci/README.md`](../../../scripts/ci/README.md) for real
 selection commands and closed-schema failure-only artifact limits. No frozen
 fixture regeneration is permitted to normalize nested temporary paths.
+
+## T51 retained-existing isolation (r3)
+
+The ordinary lane now subtracts exactly two tier2 files: stock and retained-existing.
+Stock four-grid coverage is unchanged; retained-existing is a NEW required singleton
+workers1 lane, selected by the real workspace and checked with `vitest list`. Its
+three original real-SDK/safe-fixture cells must all actually pass. The census proves
+ordinary + required-existing + stock equals the unchanged tier2 ownership set,
+and negative gates reject a missing/duplicate serial lane or any unrelated loss.
+CI and complete local wrappers always attempt it after ordinary, propagating every
+failure; isolated green cannot cancel ordinary red. This is load isolation based
+on two stable controlled workers1 runs, not proof that load is the unique remote
+reload-deadline root cause. Production20/22/30s, outer CLI45s and test180s remain.
+The lan-store file remains a hard Tier1 gate; no timing reclassification/skip.

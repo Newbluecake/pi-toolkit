@@ -1277,3 +1277,18 @@ gzip 会跨帧保留字典，压缩长度侧信道及明文 LAN
 `tests/web-hub/http/{sse,gzip-negotiation}.test.ts`、
 `tests/integration/web-hub-sse-output.test.ts`（真实 socket、逐帧可解码/精确字节、bootstrap
 突发、真实 runSnapshot 顺序、LAN 协商、真不读客户端有界断开）。fixtures 不重生。
+
+## Query-child target-test exit diagnostics (T51 CI r3)
+
+Production DB client, query child, first-login transaction, deadlines and restart
+behavior remain unchanged. The original lan-store test uses the existing real
+spawnFn seam with a passive observer: arguments/return object/stdio are forwarded,
+exit listeners are not consumed, no retry or timing change is injected. Only the
+legacy FIRST-record target's original generic query-exit error is annotated with
+bounded code, closed signal/op and observed-exit state; original success assertions
+stay identical. No SQL/args/env/stderr are emitted. Real exit1/SIGKILL tests verify
+pass-through and secret non-disclosure. This is TARGETED TEST evidence, not global
+DB diagnostics; another file/op failing elsewhere is not covered. The remote
+failure has not reproduced in repeated original file/target runs and remains
+NOT FIXED, not a timing-tier/flake/skip. New CI must supply actual exit evidence
+before any production behavior fix.

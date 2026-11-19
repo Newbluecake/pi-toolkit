@@ -19,19 +19,19 @@ dedicated stock environment rather than silently falling back.
 
 Vitest 2's CLI `--exclude` does **not** subtract a file from inline workspace
 projects. `ordinary-tests.mjs run` sets the explicit `PI_TOOLKIT_TEST_LANE=ordinary`;
-the tier2 workspace's exclude then subtracts ONLY the stock file. Ownership in
-`tests/tiers.ts` is unchanged. No lane means the full original workspace, so a
+the tier2 workspace's exclude subtracts ONLY stock plus retained-existing. Ownership in
+`tests/tiers.ts` is unchanged. The retained-existing lane selects exactly that original file at workers1; no lane means the full original workspace, so a
 direct unprovisioned stock test still hard-fails. Dedicated cells remove the lane.
 
 ```sh
 # List only: does not execute tests or secure globalSetup/mounts.
 timeout 300 node scripts/ci/ordinary-tests.mjs check
-# Ordinary CI gate. Only stock is subtracted; dedicated coverage below is REQUIRED.
+# Ordinary CI gate. Only stock + retained-existing are subtracted; both lanes REQUIRED.
 node scripts/ci/ordinary-tests.mjs run --project tier2 --project secure --maxWorkers=2 --no-cache
 ```
 
 `check` executes real `vitest list --filesOnly` for baseline and ordinary across
-**all three projects** and requires exact set equality minus one stock file, with
+**all three projects** plus the real retained-existing lane, and requires exact set equality minus the two required files, with
 nonempty projects and no baseline duplicates. The integration regression also
 runs the old CLI-only exclude, observes stock STILL selected and verifies the gate
 rejects it; losing a real tier1 or secure file must also fail. The original
@@ -46,7 +46,7 @@ PI_TOOLKIT_TEST_WORKERS=2 npm run test:tier2 -- --maxWorkers=2 --no-cache
 ```
 
 Both check real selection, build once + build/check web UI in the **ordinary**
-environment, run ordinary selected projects, and only THEN allocate the private
+environment, run ordinary selected projects, then REQUIRED retained-existing at workers1, and only THEN allocate the private
 stock environment, provision and attempt all four cells. The full command still
 covers tier1+tier2+secure plus every stock phase. The tier2 command covers
 tier2+secure plus every stock phase. Ordinary or dedicated failure makes the
@@ -101,3 +101,25 @@ not a wildcard directory; max total content40KiB, retention7days. Success record
 contain only cell/pass count; diagnostic details print only on failure. Invalid
 schema, unsafe directory or oversize summary fails closed. Missing all files is an
 artifact-step error, not a green diagnostic claim.
+
+## Retained-existing required load-isolation lane (r3)
+
+```sh
+timeout 300 node scripts/ci/retained-existing.mjs
+```
+
+Two controlled full-file workers1 runs of the unchanged real-SDK/safe fixture
+passed under the same20/22/30/45/180s budgets. This justifies isolation from the
+ordinary workers2 load, **not proof of the unique remote loader.reload root cause**.
+No product/test budget, reload/await/receipt, fixture or assertion is relaxed.
+CI runs this lane after ordinary tier2, even if ordinary failed; local full wrappers
+do the same. A later green lane cannot cancel an earlier red. Stock's already-green
+provision/four required cells and five-file artifact contract are unchanged.
+
+The workspace lane selects exactly retained-existing; real list census asserts
+ordinary tier2 + singleton existing + stock equals original tier2 with no losses or
+duplicates. The lane verifies real Vitest JSON: exactly this file, all three named
+parameter cells passed, none missing/skipped/failed. Evidence stays in an owned
+short directory without changing HOME/cache/TMPDIR; public output has only fixed
+counts/status and existing closed load-probe diagnostics. Any failure returns
+nonzero; synthetic controller/report negative tests are not business acceptance.
