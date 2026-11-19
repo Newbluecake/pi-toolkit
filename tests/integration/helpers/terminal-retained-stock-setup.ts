@@ -1,3 +1,4 @@
+import { probeDiagnostics, formatProbeDiagnostics } from "../../../scripts/ci/safe-diagnostics.mjs";
 /** Private ordinary O setup copied from retained-existing: unpatched O, original
  * SDK, genuine journal. N runtime is deliberately NOT imported by this helper. */
 import { execFileSync, fork } from "node:child_process";
@@ -17,6 +18,20 @@ import {
 } from "../../../scripts/web-hub/terminal-v2-maintenance/http-client.js";
 import { makeTerminalFixture } from "../terminal-v2-backend-fixture.js";
 const id = () => randomBytes(24).toString("base64url");
+function consumerExec(...args: Parameters<typeof execFileSync>): ReturnType<typeof execFileSync> {
+  try {
+    return execFileSync(...args);
+  } catch (error) {
+    const failure = error as { stdout?: Buffer; stderr?: Buffer; status?: number; code?: string };
+    const text = `${failure.stdout ?? ""}`;
+    const internal = /"error":"(E_RETAINED_LOAD_PROBE_(?:DEADLINE|FAILED|RECEIPT))"/.exec(text)?.[1] ?? "unavailable";
+    const outer = ["ETIMEDOUT", "EACCES", "ENOENT"].includes(failure.code ?? "") ? failure.code : "none";
+    const status = Number.isInteger(failure.status) ? failure.status : "unknown";
+    throw new Error(
+      `consumer CLI failed status=${status} outer=${outer} internal=${internal} ${formatProbeDiagnostics(probeDiagnostics(String(failure.stderr ?? "")))}`,
+    );
+  }
+}
 const sha = (b: Buffer) => createHash("sha256").update(b).digest("hex");
 const put = (p: string, value: unknown) => writeFileSync(p, JSON.stringify(value), { mode: 0o600 });
 function ordinaryProcess(artifact: string, env: NodeJS.ProcessEnv) {
@@ -176,7 +191,7 @@ runOrdinaryTerminalHost({startHub,createHttpFrontend,wireWebHub,resolveHubPaths,
   copyFileSync(join(selectedN, "dist/maintenance/manifest.json"), join(output, "maintenance-manifest.json"));
   const run = (command: string, extra: string[] = [], stateFlag = true) =>
     JSON.parse(
-      execFileSync(
+      consumerExec(
         process.execPath,
         [cli, command, "--installation", installation, ...(stateFlag ? ["--state", paths.stateDir] : []), ...extra],
         { cwd: base, env, timeout: 30000, encoding: "utf8" },
@@ -359,7 +374,7 @@ export function reopenStockRetained(base: string): Awaited<ReturnType<typeof pre
   const cli = join(saved.profile.newPackageRoot, "dist/maintenance/cli.mjs");
   const run = (command: string, extra: string[] = [], stateFlag = true) =>
     JSON.parse(
-      execFileSync(
+      consumerExec(
         process.execPath,
         [
           cli,

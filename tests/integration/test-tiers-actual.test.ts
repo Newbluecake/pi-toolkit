@@ -24,10 +24,13 @@ const REPO = fileURLToPath(new URL("../..", import.meta.url));
 const PROJECTS: ProjectName[] = ["tier1", "tier2", "secure"];
 
 function listActualFiles(project: ProjectName): string[] {
+  // Ownership baseline is independent of the current execution lane.
+  const env = { ...process.env };
+  delete env.PI_TOOLKIT_TEST_LANE;
   const res = spawnSync(
     process.execPath,
     ["node_modules/vitest/vitest.mjs", "list", "--filesOnly", "--project", project],
-    { encoding: "utf8", timeout: 120_000, maxBuffer: 16 * 1024 * 1024 },
+    { env, encoding: "utf8", timeout: 120_000, maxBuffer: 16 * 1024 * 1024 },
   );
   expect(res.error, String(res.error)).toBeUndefined();
   expect(res.status, res.stderr).toBe(0);

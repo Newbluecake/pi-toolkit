@@ -1,5 +1,6 @@
 /** Test-only diagnostic envelope. The actual maintenance CLI keeps its original
  * 30s deadline; allow 15s for its structured failure/lease cleanup to reach us. */
+import { probeDiagnostics, formatProbeDiagnostics } from "../../../scripts/ci/safe-diagnostics.mjs";
 import { spawnSync } from "node:child_process";
 export const RETAINED_FIXTURE_CLI_MS = 45000;
 export function runRetainedFixtureCli(
@@ -22,8 +23,9 @@ export function runRetainedFixtureCli(
   if (result.error || result.status !== 0 || result.signal) {
     const internal =
       typeof value?.error === "string" && /^E_[A-Z0-9_]+$/.test(value.error) ? value.error : "unavailable";
+    const probe = probeDiagnostics(result.stderr ?? "");
     throw new Error(
-      `retained fixture CLI ${args[0]}: status=${result.status} signal=${result.signal} outer=${result.error?.code ?? "none"} internal=${internal}`,
+      `retained fixture CLI ${args[0]}: status=${result.status} signal=${result.signal} outer=${result.error?.code ?? "none"} internal=${internal} ${formatProbeDiagnostics(probe)}`,
     );
   }
   if (value === undefined) throw new Error("retained fixture CLI: invalid JSON success");

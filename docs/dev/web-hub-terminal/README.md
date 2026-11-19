@@ -462,3 +462,25 @@ Independent and adjacent workers2 runs are separate evidence, not a relaxed prod
 budget. The stock required CI and complete local entrypoint use actual fresh npm/
 release ZIP consumers and four independent L2 phases; see
 [`scripts/ci/README.md`](../../../scripts/ci/README.md). Stock L1 remains NOT RUN.
+
+## T51 retained load-probe failure diagnostics (CI r2)
+
+Maintenance package-load verification still uses the SAME actual installedSDK1.5,
+settings-backed DefaultResourceLoader, reload and exact selected-extension receipt;
+no session, `noExtensions`, fake load success, resource reduction or alias/permission
+bypass is added. Original CLI30s / child20s / parent22s budgets are unchanged.
+A private inherited fd3 carries bounded closed stage/millisecond records, separate
+from arbitrary SDK stderr. Failures expose only last observed stage (`sdk-import`
+vs `loader-reload`, etc), parent elapsed and child stage-start milliseconds plus a
+fixed reason, not raw error/paths/settings/env. Parent deadline/output overflow
+terminates only the owned newly spawned process group; blocked synchronous import
+or reload cannot keep the probe child alive after its parent deadline. Synthetic
+real-child tests prove both stages and actual child exit; they are not real-SDK
+acceptance. Successful receipts remain byte-identical and print no diagnostics.
+
+The four CI load-probe deadlines are NOT claimed fixed by diagnostic instrumentation.
+If local actual SDK publication cannot reproduce them, new CI must collect these
+safe stages before any further loading/production change. Stock failure reports
+forward only validated diagnostic records; required always-upload artifacts have
+an exact five-file/8KiB-per-file whitelist. Raw stock logs/reports and checkpoint/
+auth material remain private. See [`scripts/ci/README.md`](../../../scripts/ci/README.md).

@@ -16,6 +16,7 @@
  */
 import { configDefaults, defineWorkspace } from "vitest/config";
 import { secureInclude, tier1Exclude, tier1Include, tier2Exclude, tier2Include } from "./tests/tiers.js";
+import { ordinaryExcludes } from "./scripts/ci/ordinary-tests.mjs";
 import { baseProject } from "./vitest.config.js";
 
 export default defineWorkspace([
@@ -34,7 +35,7 @@ export default defineWorkspace([
       ...baseProject.test,
       name: "tier2",
       include: tier2Include(),
-      exclude: [...configDefaults.exclude, ...tier2Exclude()],
+      exclude: [...configDefaults.exclude, ...tier2Exclude(), ...ordinaryExcludes()],
     },
   },
   {

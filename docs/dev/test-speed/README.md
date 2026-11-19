@@ -131,3 +131,22 @@ npm test                                            # 全量（发版/CI 语义�
 ## Required corresponding-directory gate
 
 Before committing changes under `src/fabric/**`, `src/memory/**`, `src/web-hub/**`, or `src/schedule/**`, run the entire corresponding `tests/fabric`, `tests/memory`, `tests/web-hub`, or `tests/schedule` directory, respectively. Running only individual test files does not satisfy this gate.
+
+## T51 ordinary / dedicated execution lanes
+
+Tier ownership remains exclusively `tests/tiers.ts`; the explicit ordinary lane
+subtracts only `terminal-v2-retained-stock-restart.test.ts` from tier2 at workspace
+resolution time. Vitest2 CLI-only `--exclude` was experimentally ineffective for
+inline projects and is no longer used as evidence. `scripts/ci/ordinary-tests.mjs
+check` lists baseline + ordinary for tier1/tier2/secure and verifies exact sets;
+real negative tests reject the old CLI result and any unrelated file loss.
+`test-tiers-actual` clears the lane only for its ownership census. No-lane direct
+Vitest selection stays unchanged. Required dedicated npm/ZIP restart/rollback
+coverage replaces the one subtraction, never an opt-in skip.
+
+Ordinary CI keeps its original legitimate environment and `/tmp`; dedicated stock
+HOME/cache/tmp is constructed only inside provision/cell, never via global env
+injection before ordinary tests. The complete local wrapper follows the same
+ordering. See [`scripts/ci/README.md`](../../../scripts/ci/README.md) for real
+selection commands and closed-schema failure-only artifact limits. No frozen
+fixture regeneration is permitted to normalize nested temporary paths.

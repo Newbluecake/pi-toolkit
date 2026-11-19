@@ -25,9 +25,6 @@ jobs:
           node-version: ${{ matrix.node-version }}
           cache: npm
 
-      - name: Private test HOME/cache/tmp
-        run: node scripts/ci/terminal-stock.mjs init >> "$GITHUB_ENV"
-
       - run: npm ci
 
       - name: Format check
@@ -45,9 +42,12 @@ jobs:
       - name: Build (gated bundle + maintenance, reused by stock packaging)
         run: npm run build
 
+      - name: Verify actual ordinary selection (all projects, list only)
+        run: node scripts/ci/ordinary-tests.mjs check
+
       - name: Test (tier 1)
         id: tier1
-        run: npm run test:tier1 -- --no-cache
+        run: node scripts/ci/ordinary-tests.mjs run --project tier1 --no-cache
         env:
           PWH_REQUIRE_UI_DIST: "1"
           # Fewer workers than the 4-vCPU runner allows: CI time is cheap, and the timing-sensitive
@@ -73,10 +73,14 @@ jobs:
         if: ${{ !cancelled() && (steps.tier1.outcome == 'success' || steps.tier1.outcome == 'failure') }}
         # Ownership remains tier2; ONLY this dedicated file is excluded here.
         # All four stock cells below are required, not opt-in/continue-on-error.
-        run: node node_modules/vitest/vitest.mjs run --project tier2 --project secure --no-cache --exclude tests/integration/terminal-v2-retained-stock-restart.test.ts
+        run: node scripts/ci/ordinary-tests.mjs run --project tier2 --project secure --no-cache
         env:
           PWH_REQUIRE_UI_DIST: "1"
           PI_TOOLKIT_TEST_WORKERS: "2"
+
+      - name: Allocate dedicated stock root only (no ordinary HOME/TMPDIR changes)
+        if: ${{ !cancelled() && (steps.tier1.outcome == 'success' || steps.tier1.outcome == 'failure') }}
+        run: node scripts/ci/terminal-stock.mjs init >> "$GITHUB_ENV"
 
       - name: Provision current npm + release ZIP stock consumers
         id: stock_prepare
@@ -98,6 +102,22 @@ jobs:
       - name: Stock ZIP rollback (independent process, same checkpoint)
         if: ${{ !cancelled() && steps.stock_prepare.outcome == 'success' }}
         run: node scripts/ci/terminal-stock.mjs cell zip rollback
+
+      - name: Upload bounded sanitized stock diagnostics
+        if: ${{ always() && env.PI_TOOLKIT_CI_DIAGNOSTICS != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: terminal-stock-safe-diagnostics
+          # Only schema-filtered summaries (4 cells + provision), never raw logs,
+          # reports, checkpoints, profiles, tokens, cookies or environment dumps.
+          path: |
+            ${{ env.PI_TOOLKIT_CI_DIAGNOSTICS }}/provision.safe.json
+            ${{ env.PI_TOOLKIT_CI_DIAGNOSTICS }}/npm-restart.safe.json
+            ${{ env.PI_TOOLKIT_CI_DIAGNOSTICS }}/npm-rollback.safe.json
+            ${{ env.PI_TOOLKIT_CI_DIAGNOSTICS }}/zip-restart.safe.json
+            ${{ env.PI_TOOLKIT_CI_DIAGNOSTICS }}/zip-rollback.safe.json
+          if-no-files-found: error
+          retention-days: 7
 
   # The web UI toolchain (mermaid declares engines.node >=22.12.0, vite/rollup follow) must keep building on the
   # LOWEST supported Node. The runtime floor stays >=22 (pi installs with --omit=dev, so devDependencies never

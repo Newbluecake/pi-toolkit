@@ -1,44 +1,51 @@
-/** Complete local npm test/test:tier2 entry. Partition ownership is unchanged;
- * only the explicitly provisioned stock file moves to its mandatory four cells. */
+/** Complete local entry: ordinary environment first, dedicated stock env ONLY
+ * at provision/cell. Ports below are test-only orchestration seams, not CLI/env
+ * bypasses; default execution always invokes the real selection/build/four cells. */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync } from "node:fs";
-import { cell, command, privateEnvironment, provision, STOCK_FILE } from "./terminal-stock.mjs";
-const args = process.argv.slice(2),
-  tier2 = args.includes("--tier2");
-assert(
-  args.every((arg) => arg === "--tier2" || arg === "--no-cache" || /^--maxWorkers=[12]$/.test(arg)),
-  "full-suite entry accepts only --tier2/--no-cache/--maxWorkers=1|2; use vitest directly for directed tests",
-);
-const env = privateEnvironment(process.env.PI_TOOLKIT_TEST_PRIVATE_ROOT ?? mkdtempSync("/tmp/t51-"));
-console.log(`Complete suite private evidence root: ${env.PI_TOOLKIT_TEST_PRIVATE_ROOT}`);
-// These are the same builds CI performs, ONCE; pack/release reuse their outputs.
-for (const script of ["build", "build:web", "check:web"])
-  command("npm", ["run", script], { ...env, NODE_ENV: "production" }, { stdio: "inherit" });
-const ordinary = spawnSync(
-  process.execPath,
-  [
-    "node_modules/vitest/vitest.mjs",
-    "run",
-    ...(tier2 ? ["--project", "tier2", "--project", "secure"] : []),
-    "--exclude",
-    STOCK_FILE,
-    "--no-cache",
-    args.find((arg) => arg.startsWith("--maxWorkers=")) ?? "--maxWorkers=2",
-  ],
-  { env, stdio: "inherit" },
-);
-// Run required dedicated coverage even when the ordinary suite is red. Never
-// convert either failure to success; all cells are attempted in independent OS processes.
-let failed = Boolean(ordinary.error || ordinary.status !== 0 || ordinary.signal);
-provision(env);
-for (const format of ["npm", "zip"])
-  for (const phase of ["restart", "rollback"]) {
-    try {
-      cell(env, format, phase);
-    } catch (error) {
-      console.error(error.message);
-      failed = true;
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { cell, command, privateEnvironment, provision } from "./terminal-stock.mjs";
+import { checkSelection, ordinaryEnvironment } from "./ordinary-tests.mjs";
+export function runCompleteSuite(args, source = process.env, ports = {}) {
+  assert(
+    args.every((arg) => arg === "--tier2" || arg === "--no-cache" || /^--maxWorkers=[12]$/.test(arg)),
+    "full-suite entry accepts only --tier2/--no-cache/--maxWorkers=1|2; use vitest directly for directed tests",
+  );
+  const check = ports.checkSelection ?? checkSelection;
+  const execute = ports.command ?? command;
+  const spawn = ports.spawnSync ?? spawnSync;
+  const prepare = ports.provision ?? provision;
+  const runCell = ports.cell ?? cell;
+  const ordinaryEnv = ordinaryEnvironment(source);
+  check(ordinaryEnv);
+  for (const script of ["build", "build:web", "check:web"])
+    execute("npm", ["run", script], { ...ordinaryEnv, NODE_ENV: "production" }, { stdio: "inherit" });
+  const ordinary = spawn(
+    process.execPath,
+    [
+      "node_modules/vitest/vitest.mjs",
+      "run",
+      ...(args.includes("--tier2") ? ["--project", "tier2", "--project", "secure"] : []),
+      "--no-cache",
+      args.find((arg) => arg.startsWith("--maxWorkers=")) ?? "--maxWorkers=2",
+    ],
+    { env: ordinaryEnv, stdio: "inherit" },
+  );
+  let failed = Boolean(ordinary.error || ordinary.status !== 0 || ordinary.signal);
+  const env = privateEnvironment(source.PI_TOOLKIT_TEST_PRIVATE_ROOT ?? mkdtempSync("/tmp/t51-"));
+  console.log(`Dedicated stock evidence root: ${env.PI_TOOLKIT_TEST_PRIVATE_ROOT}`);
+  prepare(env);
+  for (const format of ["npm", "zip"])
+    for (const phase of ["restart", "rollback"]) {
+      try {
+        runCell(env, format, phase);
+      } catch {
+        failed = true;
+      } // cell emits ONLY its schema-filtered failure summary.
     }
-  }
-process.exitCode = failed ? 1 : 0;
+  return failed ? 1 : 0;
+}
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url))
+  process.exitCode = runCompleteSuite(process.argv.slice(2));

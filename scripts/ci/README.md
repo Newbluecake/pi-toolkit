@@ -1,59 +1,69 @@
 # Terminal retained stock CI preparation
 
-These are **test/CI entrypoints only**, not maintenance/deployment permission. Read
-`docs/dev/web-hub-terminal/README.md` and
-`tests/integration/terminal-v2-retained-stock-restart.md` first. Node >=22.19 and the
-already installed locked dev tools, git history (including O7239), tar/zip/unzip,
-Python and an audited system shell startup environment are required. No install,
-user rc, observer, stock L1 PTY or live profile access is performed by this gate.
-The old ordinary fixture uses the existing explicit isolated test backend; stock N
-is L2 only and its genuine create requests must fail E_LIMIT before backend fork.
+Test/CI entrypoints only, never deployment permission. Read
+`docs/dev/web-hub-terminal/README.md` and the stock test's companion Markdown.
+Requires existing locked Node >=22.19/dev tools, git history including O7239,
+tar/zip/unzip and the authorized test backend/OS prerequisites. No installs or
+user rc access are added. Stock N is L2 only; L1 stock PTY is NOT covered.
 
-## Complete development entrypoints
+## Ordinary environment and real file selection
+
+**Ordinary builds/tier1/tier2/secure inherit their original caller environment.**
+No dedicated stock HOME/cache/tmp is exported into them. In CI this preserves the
+runner's legitimate original `/tmp`; path-sensitive golden/memory budgets must not
+see a nested dedicated TMPDIR. Local path-sensitive gates should use an explicitly
+private HOME/cache and `TMPDIR=/tmp` (the individual fixtures create owned private
+scratch); never point them at site profiles. `ordinaryEnvironment()` does not
+mutate its input, removes stock-only control variables and rejects a fully leaked
+dedicated stock environment rather than silently falling back.
+
+Vitest 2's CLI `--exclude` does **not** subtract a file from inline workspace
+projects. `ordinary-tests.mjs run` sets the explicit `PI_TOOLKIT_TEST_LANE=ordinary`;
+the tier2 workspace's exclude then subtracts ONLY the stock file. Ownership in
+`tests/tiers.ts` is unchanged. No lane means the full original workspace, so a
+direct unprovisioned stock test still hard-fails. Dedicated cells remove the lane.
 
 ```sh
-# Run from the checkout root. They create a fresh owned short private HOME/cache/tmp
-# unless PI_TOOLKIT_TEST_PRIVATE_ROOT explicitly names an owned physical 0700 root.
-# No shared cache/tmp fallback; evidence is retained, not automatically removed.
+# List only: does not execute tests or secure globalSetup/mounts.
+timeout 300 node scripts/ci/ordinary-tests.mjs check
+# Ordinary CI gate. Only stock is subtracted; dedicated coverage below is REQUIRED.
+node scripts/ci/ordinary-tests.mjs run --project tier2 --project secure --maxWorkers=2 --no-cache
+```
+
+`check` executes real `vitest list --filesOnly` for baseline and ordinary across
+**all three projects** and requires exact set equality minus one stock file, with
+nonempty projects and no baseline duplicates. The integration regression also
+runs the old CLI-only exclude, observes stock STILL selected and verifies the gate
+rejects it; losing a real tier1 or secure file must also fail. The original
+`test-tiers-actual` suite explicitly clears the lane only for its ownership census.
+
+## Complete local development entrypoints
+
+```sh
+# Run from checkout root, in the caller's legitimate ordinary environment.
 PI_TOOLKIT_TEST_WORKERS=2 npm test -- --maxWorkers=2 --no-cache
 PI_TOOLKIT_TEST_WORKERS=2 npm run test:tier2 -- --maxWorkers=2 --no-cache
 ```
 
-Both build once (production build + web UI + UI check), run the ordinary selected
-projects with **only** the exact stock file excluded, then provision new consumers
-and execute all four stock cells. The full `npm test` still covers tier1+tier2+secure
-and all stock phases. `test:tier2` covers tier2+secure and all stock phases. Either
-ordinary failure or any dedicated failure makes the entry nonzero; a failed
-restart cannot make rollback green. Targeted tests use `node
-node_modules/vitest/vitest.mjs run --project tier2 --maxWorkers=1 --no-cache <file>`
-in an explicitly private environment. The full-suite wrapper rejects file filters
-rather than accidentally applying a filter to the stock acceptance gate.
+Both check real selection, build once + build/check web UI in the **ordinary**
+environment, run ordinary selected projects, and only THEN allocate the private
+stock environment, provision and attempt all four cells. The full command still
+covers tier1+tier2+secure plus every stock phase. The tier2 command covers
+tier2+secure plus every stock phase. Ordinary or dedicated failure makes the
+entry nonzero. File filters are rejected at these complete-suite entrypoints;
+use direct Vitest for directed tests. No opt-in skip or checkout fallback exists.
 
-Tier ownership and the workspace partition are **unchanged**. Direct `vitest` on
-the stock file without consumers still hard-fails. No opt-in skip or checkout
-fallback is provided. An unavailable prerequisite is an error, not coverage.
+## Dedicated provision and four independent cells
 
-## CI / bounded individual commands
-
-The workflow builds once before tests, reusing those outputs for ordinary tests,
-normal `npm pack --ignore-scripts` (prepack already fulfilled), and the original
-release ZIP packager's explicit `--built` mode. That mode requires built outputs
-and never silently rebuilds. `provision` verifies the maintenance builder, every
-maintenance input, selected-source profile and output hash against the current
-checkout and HEAD. Both archives' checksums and **every** unpacked consumer byte
-are bound to the same checkout in private `consumers/binding.json`. npm and ZIP
-payload sets must agree; no consumer `node_modules`, links, peer injection or
-consumer patch is allowed. Every cell revalidates that binding before and after.
-Missing/stale build data fails; no old local artifacts are referenced.
+`init` prints ONLY `PI_TOOLKIT_TEST_PRIVATE_ROOT` and the safe-artifact directory,
+not HOME/cache/tmp. In Actions these two handles go to `$GITHUB_ENV` **after** the
+ordinary tests. `provision`/`cell` construct private HOME/cache/tmp internally. A
+new owned physical0700 short root is required; no shared fallback or automatic
+cleanup. An explicitly supplied root can also be used by the local full wrapper.
 
 ```sh
-# First create private env. In Actions append to $GITHUB_ENV; in a developer shell
-# export these generated KEY=value lines (only newly generated private paths).
-node scripts/ci/terminal-stock.mjs init
-# After exporting the printed env and using it for these builds:
-timeout 300 npm run build
-timeout 300 npm run build:web
-timeout 300 npm run check:web
+node scripts/ci/terminal-stock.mjs init # export the two printed handles only
+# Existing current build/build:web/check:web artifacts are REQUIRED, not rebuilt:
 timeout 300 node scripts/ci/terminal-stock.mjs provision
 timeout 300 node scripts/ci/terminal-stock.mjs cell npm restart
 timeout 300 node scripts/ci/terminal-stock.mjs cell npm rollback
@@ -61,14 +71,33 @@ timeout 300 node scripts/ci/terminal-stock.mjs cell zip restart
 timeout 300 node scripts/ci/terminal-stock.mjs cell zip rollback
 ```
 
-Provision is mandatory in CI after tier1 actually ran, even if the ordinary tests
-failed; four individually named required steps follow. There is no
-`continue-on-error`. Build/preparation failure already makes the job red. Each
-cell runs a separate Vitest process (workers1/no-cache, outer 290s), checks real
-JSON report selection (exact one passed named cell / no failures), and retains
-exit metadata and private logs. The other parameter is deliberately unselected,
-not claimed as passed/skipped coverage. Restart checkpoints bind consumer path,
-consumer binding digest and actual Vitest worker PID; rollback checks a different
-worker, reopens the **same** checkpoint/installation and verifies the terminal-only
-result. Its original auth/token hash checks remain in place; no auth data is
-copied into CI logs. No signal/observer/PTY L1 claim is added.
+Provision uses normal npm pack (`--ignore-scripts` only because builds already
+ran) and the original release packager's explicit `--built` mode. Missing/stale
+builds fail. Current HEAD, maintenance inputs/profile/output, archive SHA256 and
+every consumer file are verified before/after cells. npm/ZIP payload sets match;
+no consumer node_modules/links/patches/peer injection/old local artifacts.
+
+Each cell runs its own real Vitest process workers1/no-cache/290s, verifies exact
+one passed named cell and no failures. The other format is unselected, not claimed
+as coverage. Restart writes a consumer/binding/worker-bound checkpoint; rollback
+must reopen that same checkpoint in a different worker and preserve the original
+auth/token-in-place hashes and sealed chain. Missing restart checkpoint is a
+visible cascading FAILURE, never recreated or replaced by a synthetic checkpoint.
+All four CI steps remain required with failure propagation even if ordinary red.
+
+## Failure-only output and bounded artifact whitelist
+
+Raw Vitest stdout/stderr/report/checkpoint/profile stay private and are **never**
+upload targets. Each failure emits a schema-filtered summary containing only fixed
+cell/step/category/code enums, whitelisted source coordinates and bounded probe
+stage/milliseconds. No arbitrary test names, error text, expected/actual values,
+paths, token/cookie material or complete environment are forwarded. A regression
+runs a real failing synthetic Vitest child with a fake secret in its name/error,
+then proves the resulting public summary retains fixed probe cause but not secret.
+
+Each dedicated invocation writes one `safe/<cell>.safe.json`, at most8192 bytes.
+CI's `always()` upload lists exactly five filenames (provision plus four cells),
+not a wildcard directory; max total content40KiB, retention7days. Success records
+contain only cell/pass count; diagnostic details print only on failure. Invalid
+schema, unsafe directory or oversize summary fails closed. Missing all files is an
+artifact-step error, not a green diagnostic claim.

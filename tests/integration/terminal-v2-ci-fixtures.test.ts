@@ -111,7 +111,10 @@ it("stock report gate rejects zero-selected, wrong phase, skipped and failed cel
   }
   const workflow = readFileSync(".github/workflows/ci.yml", "utf8");
   expect(workflow).not.toMatch(/^\s+continue-on-error:/m);
-  expect(workflow.match(/--exclude tests\/integration\/terminal-v2-retained-stock-restart.test.ts/g)).toHaveLength(1);
+  expect(workflow).toContain("run: node scripts/ci/ordinary-tests.mjs run --project tier2 --project secure --no-cache");
+  expect(workflow.indexOf("Allocate dedicated stock root only")).toBeGreaterThan(
+    workflow.indexOf("- name: Test (tier 2 + secure)"),
+  );
   for (const format of ["npm", "zip"])
     for (const phase of ["restart", "rollback"])
       expect(workflow).toContain(`run: node scripts/ci/terminal-stock.mjs cell ${format} ${phase}`);

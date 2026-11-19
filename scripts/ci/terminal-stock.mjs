@@ -16,7 +16,9 @@ import {
 } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-export const STOCK_FILE = "tests/integration/terminal-v2-retained-stock-restart.test.ts";
+import { STOCK_FILE } from "./ordinary-tests.mjs";
+export { STOCK_FILE };
+import { failureSummary, privateReportText, writeSafeSummary } from "./safe-diagnostics.mjs";
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const sha = (value) => createHash("sha256").update(value).digest("hex");
 const json = (path) => JSON.parse(readFileSync(path, "utf8"));
@@ -53,6 +55,7 @@ export function privateEnvironment(root) {
     PI_TOOLKIT_TEST_WORKERS: "1",
   };
   for (const key of [
+    "PI_TOOLKIT_TEST_LANE",
     "NODE_PATH",
     "XDG_RUNTIME_DIR",
     "PI_CODING_AGENT_DIR",
@@ -125,7 +128,7 @@ function validateBuild(env) {
     assert(existsSync(join(repo, path)), `missing ${path}; build first`);
   return head;
 }
-export function provision(env) {
+function provisionConsumers(env) {
   const head = validateBuild(env),
     root = env.PI_TOOLKIT_STOCK_CONSUMERS;
   assert(!existsSync(root), "fresh consumers directory required (never reuse old checkpoints)");
@@ -199,90 +202,115 @@ function verifyBinding(env) {
   assert.equal(sha(readFileSync(join(root, "archives", `pi-toolkit-${version}.zip`))), binding.archives.zip);
   return sha(readFileSync(join(root, "binding.json")));
 }
+export function provision(env) {
+  try {
+    const binding = provisionConsumers(env);
+    writeSafeSummary(env, "provision", { v: 1, cell: "provision", result: "passed" });
+    return binding;
+  } catch (error) {
+    const summary = failureSummary("provision", "provision", String(error));
+    console.error(writeSafeSummary(env, "provision", summary));
+    throw new Error("stock provision failed (bounded safe diagnostics emitted)");
+  }
+}
 export function cell(env, format, phase) {
   assert(["npm", "zip"].includes(format) && ["restart", "rollback"].includes(phase), "unknown stock cell");
-  const root = env.PI_TOOLKIT_STOCK_CONSUMERS,
-    binding = verifyBinding(env);
-  const checkpoint = join(root, `${format}-stock-checkpoint.json`);
-  let before;
-  if (phase === "restart") assert(!existsSync(checkpoint), "restart requires a fresh checkpoint");
-  else {
-    before = sha(readFileSync(checkpoint));
-    assert.equal(json(checkpoint).consumer, join(root, format));
-    assert.equal(json(checkpoint).consumerBinding, binding);
-  }
-  const reportPath = join(root, `${format}-${phase}.json`),
-    log = join(root, `${format}-${phase}.log`);
-  const result = spawnSync(
-    process.execPath,
-    [
-      "node_modules/vitest/vitest.mjs",
-      "run",
-      "--project",
-      "tier2",
-      "--maxWorkers=1",
-      "--no-cache",
-      STOCK_FILE,
-      "-t",
-      `stock ${format} L2: sealed consumer ${phase} phase preserves retained debt`,
-      "--reporter=json",
-      `--outputFile=${reportPath}`,
-    ],
-    {
-      cwd: repo,
-      env: { ...env, PI_TOOLKIT_STOCK_PHASE: phase, PI_TOOLKIT_STOCK_BINDING: binding },
-      encoding: "utf8",
-      timeout: 290000,
-      maxBuffer: 16 * 1024 * 1024,
-    },
-  );
-  writeFileSync(log, `${result.stdout ?? ""}\n${result.stderr ?? ""}`, { mode: 0o600 });
-  put(join(root, `${format}-${phase}-exit.json`), {
-    pid: result.pid,
-    status: result.status,
-    signal: result.signal,
-    error: result.error?.code ?? null,
-  });
-  assert(!result.error && result.status === 0 && !result.signal, `${format}/${phase} failed; private log: ${log}`);
-  verifyStockReport(json(reportPath), format, phase);
-  const saved = json(checkpoint);
-  assert.equal(saved.phase, "stock-N2-complete");
-  assert.equal(saved.consumer, join(root, format));
-  assert.equal(saved.consumerBinding, binding);
-  assert(Number.isSafeInteger(saved.runnerPid));
-  if (phase === "rollback") {
-    assert.equal(sha(readFileSync(checkpoint)), before, "rollback must reopen SAME checkpoint");
-    const evidence = json(join(saved.base, "stock-restart-result.json"));
-    assert.equal(evidence.consumer, saved.consumer);
-    assert.equal(evidence.independentVitestPhases, true);
-    assert.deepEqual(
-      evidence.lifecycle.map((p) => p.label),
-      ["N1", "N2", "N-return"],
+  const name = `${format}-${phase}`;
+  let step = "binding",
+    raw = "",
+    exit = {};
+  const root = env.PI_TOOLKIT_STOCK_CONSUMERS;
+  const reportPath = join(root, `${name}.json`);
+  try {
+    const binding = verifyBinding(env);
+    step = "checkpoint";
+    const checkpoint = join(root, `${format}-stock-checkpoint.json`);
+    let before;
+    if (phase === "restart") assert(!existsSync(checkpoint), "restart requires a fresh checkpoint");
+    else {
+      before = sha(readFileSync(checkpoint));
+      assert.equal(json(checkpoint).consumer, join(root, format));
+      assert.equal(json(checkpoint).consumerBinding, binding);
+    }
+    const log = join(root, `${format}-${phase}.log`);
+    step = "vitest";
+    const result = spawnSync(
+      process.execPath,
+      [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "--project",
+        "tier2",
+        "--maxWorkers=1",
+        "--no-cache",
+        STOCK_FILE,
+        "-t",
+        `stock ${format} L2: sealed consumer ${phase} phase preserves retained debt`,
+        "--reporter=json",
+        `--outputFile=${reportPath}`,
+      ],
+      {
+        cwd: repo,
+        env: { ...env, PI_TOOLKIT_STOCK_PHASE: phase, PI_TOOLKIT_STOCK_BINDING: binding },
+        encoding: "utf8",
+        timeout: 290000,
+        maxBuffer: 16 * 1024 * 1024,
+      },
     );
-    assert.deepEqual(evidence.beforeLegacy, evidence.afterLegacy);
+    raw = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+    exit = result;
+    writeFileSync(log, raw, { mode: 0o600 });
+    put(join(root, `${format}-${phase}-exit.json`), {
+      pid: result.pid,
+      status: result.status,
+      signal: result.signal,
+      error: result.error?.code ?? null,
+    });
+    assert(!result.error && result.status === 0 && !result.signal, `${format}/${phase} failed; private log: ${log}`);
+    step = "report";
+    verifyStockReport(json(reportPath), format, phase);
+    step = "evidence";
+    const saved = json(checkpoint);
+    assert.equal(saved.phase, "stock-N2-complete");
+    assert.equal(saved.consumer, join(root, format));
+    assert.equal(saved.consumerBinding, binding);
+    assert(Number.isSafeInteger(saved.runnerPid));
+    if (phase === "rollback") {
+      assert.equal(sha(readFileSync(checkpoint)), before, "rollback must reopen SAME checkpoint");
+      const evidence = json(join(saved.base, "stock-restart-result.json"));
+      assert.equal(evidence.consumer, saved.consumer);
+      assert.equal(evidence.independentVitestPhases, true);
+      assert.deepEqual(
+        evidence.lifecycle.map((p) => p.label),
+        ["N1", "N2", "N-return"],
+      );
+      assert.deepEqual(evidence.beforeLegacy, evidence.afterLegacy);
+    }
+    verifyBinding(env);
+    writeSafeSummary(env, name, { v: 1, cell: name, result: "passed", passed: 1 });
+    console.log(`PASS stock ${format}/${phase}: exactly 1 executed cell, same bound consumer`);
+  } catch (error) {
+    const summary = failureSummary(name, step, `${raw}\n${privateReportText(reportPath)}\n${String(error)}`, exit);
+    console.error(writeSafeSummary(env, name, summary));
+    throw new Error(`stock ${name} failed (bounded safe diagnostics emitted)`);
   }
-  verifyBinding(env);
-  console.log(`PASS stock ${format}/${phase}: exactly 1 executed cell, same bound consumer`);
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const [mode, format, phase] = process.argv.slice(2);
   if (mode === "init") {
     const env = privateEnvironment(mkdtempSync("/tmp/t51-"));
-    for (const key of [
-      "PI_TOOLKIT_TEST_PRIVATE_ROOT",
-      "PI_TOOLKIT_STOCK_CONSUMERS",
-      "HOME",
-      "XDG_CACHE_HOME",
-      "npm_config_cache",
-      "TMPDIR",
-      "TMP",
-      "TEMP",
-    ])
-      console.log(`${key}=${env[key]}`);
+    // Export only the opaque private root. HOME/cache/tmp are scoped INSIDE
+    // provision/cell; never contaminate subsequent ordinary/build processes.
+    console.log(`PI_TOOLKIT_TEST_PRIVATE_ROOT=${env.PI_TOOLKIT_TEST_PRIVATE_ROOT}`);
+    console.log(`PI_TOOLKIT_CI_DIAGNOSTICS=${join(env.PI_TOOLKIT_TEST_PRIVATE_ROOT, "safe")}`);
   } else {
     const env = privateEnvironment(process.env.PI_TOOLKIT_TEST_PRIVATE_ROOT);
-    if (mode === "provision") provision(env);
-    else if (mode === "cell") cell(env, format, phase);
-    else throw new Error("usage: terminal-stock.mjs init|provision|cell npm|zip restart|rollback");
+    try {
+      if (mode === "provision") provision(env);
+      else if (mode === "cell") cell(env, format, phase);
+      else throw new Error("unknown stock command");
+    } catch {
+      process.exitCode = 1;
+    }
   }
 }
