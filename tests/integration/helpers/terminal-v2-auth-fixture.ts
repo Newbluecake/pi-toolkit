@@ -24,6 +24,9 @@ export async function terminalV2AuthFixture(
   options: {
     awaitTerminal?: boolean;
     retain?: boolean;
+    /** Exercise real enabled-only first-use construction; never write contract files. */
+    fresh?: boolean;
+    beforeStart?(state: string): void;
     backendDoneBarrier?: Promise<void>;
     existing?: { privatePty: ReturnType<typeof makeTerminalFixture>; lanPort: number; password: string };
   } = {},
@@ -41,17 +44,20 @@ export async function terminalV2AuthFixture(
       JSON.stringify({ webHub: { terminal: { enabled: terminalEnabled } } }),
       { mode: 0o600 },
     );
-    // Contract fixture initialization, NOT a trusted fresh maintenance history claim.
-    const marker = { v: 2, storeId: "s".repeat(24), initialization: "fresh", checkpointId: "c".repeat(24) };
-    mkdirSync(join(state, "terminal-v2"), { mode: 0o700 });
-    const put = (path: string, value: unknown) => writeFileSync(path, JSON.stringify(value), { mode: 0o600 });
-    put(join(state, ".terminal-initialized-v2"), marker);
-    put(join(state, "terminal-v2/marker.json"), marker);
-    put(
-      join(state, "terminal-v2/ledger.json"),
-      corrupt ? { broken: true } : { v: 2, storeId: marker.storeId, revision: 0, allocations: [] },
-    );
+    if (!options.fresh) {
+      // Contract fixture initialization, NOT a trusted fresh maintenance history claim.
+      const marker = { v: 2, storeId: "s".repeat(24), initialization: "fresh", checkpointId: "c".repeat(24) };
+      mkdirSync(join(state, "terminal-v2"), { mode: 0o700 });
+      const put = (path: string, value: unknown) => writeFileSync(path, JSON.stringify(value), { mode: 0o600 });
+      put(join(state, ".terminal-initialized-v2"), marker);
+      put(join(state, "terminal-v2/marker.json"), marker);
+      put(
+        join(state, "terminal-v2/ledger.json"),
+        corrupt ? { broken: true } : { v: 2, storeId: marker.storeId, revision: 0, allocations: [] },
+      );
+    }
   }
+  if (!options.existing) options.beforeStart?.(state);
   vi.stubEnv("HOME", home);
   vi.stubEnv("PI_CODING_AGENT_DIR", join(home, ".pi/agent"));
   vi.stubEnv("PI_WEBHUB_TERMINAL_SOURCE", "plain");

@@ -8,7 +8,73 @@
 > and provided Chromium UI/SDK/PTY/CSP/CSS gates are implemented and exercised. P7 is independent
 > acceptance, not adapter implementation. Device/Firefox/real kernel/powercut/mount limits remain explicit. Root approved obsolete v1 shared declaration deletion on 2026-11-18; the shared execution schemas/exports are now removed. Component/test greens do not imply full T51 acceptance.
 
-## Retained-unknown contract update (implementation in progress)
+## Fresh enablement / normal restart (declared contract, 2026-11-20)
+
+The current user scope is **first enablement and normal hub restart only**, not an upgrade/site
+migration platform. With terminal enabled, production now constructs a genuinely absent v2 store
+itself; no maintenance CLI is a prerequisite for this normal path. The existing maintenance/retained
+CLI below is left intact but is outside this scope. Its historical gates are not fresh/restart gates.
+No v1 parser/tool import, settings/wire/schema/PROTO change, or frozen artifact update is involved.
+
+`assembly-terminal.ts` keeps one terminal-only six-second initialization flight; HTTP, both original
+auth listeners and rotate recovery never await it. `fresh.ts` runs **before** retirement (which first
+loads the ledger), strictly loads the SAME ledger, then the existing retirement and service initialize
+run. Admission cannot fork until that service has actually loaded. The original singleton owner,
+listening socket and directory identities, original state-parent inode, startup/init signal, absolute
+deadline and lifetime remain authoritative across every awaited publication. Held FDs and synchronous
+physical checks fence publication; ownership used for original proof/prune survives admission sealing
+only until the ORIGINAL singleton is released. A later singleton cannot authorize an old writer.
+
+Fresh requires v2 root, witness, archive and fixed `.terminal-initializing-v2` staging all absent,
+and **only** these four legacy names all returning `lstat` ENOENT:
+`terminal-v1`, `.terminal-initialized-v1`, `terminal-resource-fence-v1.json`,
+`.terminal-authority-archive-v1`. Presence refuses as `legacy-unsupported` without opening/parsing old
+data. EACCES/ENOTDIR, invalid/replaced parents and links are never evidence of absence. A complete
+existing-v2 path has no new legacy probes/dependency: strict loading preserves original marker/witness/
+ledger bytes, nonzero revisions and nonempty allocations. No initial-empty validator runs on restart.
+
+Publication order: exclusive fixed staging mkdir0700 → parent fsync → exclusive marker and empty
+ledger0600, each file fsync → staging-directory fsync → exclusive witness0600 and file fsync →
+state-parent fsync → final live/identity/absence guard and staging-to-root rename → parent fsync →
+strict load through that same store. The fixed staging and every partial remain on error: no unlink,
+reset, reinitialization, repair or background retry. Logical abort/timeout withdraws success and forbids
+later publication steps; it does **not** claim an already-entered syscall was cancelled. Owned FD close
+is the only permitted cleanup after cancellation.
+
+| Observed state                                                                                       | Result                                                                                                                       |
+| ---------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| All named v2/legacy paths absent under the original pinned parent                                    | First-use transaction above                                                                                                  |
+| Any fixed legacy sentinel present, including malformed content                                       | Unsupported, no old-data read                                                                                                |
+| Residual staging, root-only/witness-only, archive without root/witness, or malformed/inconsistent v2 | Refuse and retain evidence                                                                                                   |
+| Complete strict existing v2, including revision>0/nonempty allocations                               | Load byte-idempotently; never attach/adopt cold shells                                                                       |
+| Timeout/close after rename entered, before its result/durability is known                            | Original flight fails; no later fsync/load/success; complete disk may ONLY be accepted by a successor's strict existing load |
+
+Normal close starts original `service.dispose()` synchronously (seals creates/hot handles and begins
+original cleanup) alongside routes disposal. A two-second, idempotent observer is earlier than the
+hub's original three-second per-step bound; neither that bound nor the overall close budget is
+extended. `clean:false`, result rejection/synchronous throw or observer timeout emits exactly one
+fixed `web-hub terminal cleanup unresolved` / `result:unknown` warning before the original log closes.
+A genuinely clean result records fixed `web-hub terminal cleanup complete` / `result:clean` before
+log close. There is no fabricated unresolved:0, late success rewrite, or proof/prune shortcut. Successful physical
+proof plus exact durable prune frees slots normally. Current-kernel cold unknown rows still charge
+individually; remaining quota may create, exhaustion is E_LIMIT, never attach/TTL-release/reset.
+Original auth, multi-tab/single-writer behavior, one-hour input-idle/eight-hour terminal lifetime and
+#57 managed-session age-timer removal are unchanged.
+
+`tests/integration/terminal-v2-fresh.test.ts` uses real startHub/auth/private-native-rc backend with
+NO hand-written v2 initialization files: two tabs, real NDJSON input/PID, normal close/proof/prune,
+same-kernel restart/new; held original backend.done/prune IO, honest close warning/log ordering, exact
+cold quota and old-writer/successor isolation. Real rename is executed before withholding its return;
+actual six-second timeout and dispose are exercised, then a different hub strictly loads complete disk.
+Real filesystem stages have injected ENOSPC at every file/directory fsync and rename boundary;
+legacy/partials/links/non-ENOENT errors and parent/stage replacement refuse without deleting evidence.
+All created async FDs are checked closed after late work settles. These injections are not powercut,
+full-device, malicious same-uid or kernel-reboot proofs; metadata responder is simulated, not a browser/
+SDK claim. Existing actual SDK/auth/PTY tests remain separate regression evidence. True-off is also
+checked for unchanged terminal bytes and no terminal-path IO/backend. Independent acceptance remains
+a separate gate; no site operation/install/restart or old-upgrade acceptance follows from these tests.
+
+## Retained-unknown contract update (historical separate maintenance scope)
 
 User/root approval2026-11-18 replaces the existing-installation requirement to reconstruct live O
 ACK/drain or prove all resources gone: stop old resource publishers/writers, pin and back up ONLY
@@ -132,8 +198,8 @@ owner object, listening socket and original socket/directory identity fence ever
 no second lifecycle lock is invented. Admission stops on close, but original ownership remains usable
 for proof/prune until teardown releases the singleton.
 
-Production only verifies tool-created v2 marker/witness/ledger. Missing/partial/unknown never means
-fresh and is never healed. Initialization compares marker/witness as closed semantic objects, then
+Production strictly verifies existing v2 marker/witness/ledger. The narrowly declared all-absent
+first-use path above is the only runtime constructor; partial/unknown never means fresh and is never healed. Initialization compares marker/witness as closed semantic objects, then
 pins original bytes/inodes/directories. One `allocationsById` set includes hot and cold rows, no double
 counting. Defaults 2/session, 2/principal, 8/total, hard total32; unknown occupies its exact original
 session/principal/total dimensions. An old epoch with the same sessionId cannot bypass quota.
