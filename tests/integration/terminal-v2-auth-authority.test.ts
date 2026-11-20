@@ -108,8 +108,10 @@ it.each([false, true])(
     closers.push(() => {
       clearInterval(heartbeat);
     });
-    const live = corrupt ? undefined : await nativeView(h),
-      ledger = readFileSync(`${h.state}/terminal-v2/ledger.json`);
+    // Isolate the one-shot ordinary lookup fault BEFORE starting the private ACK
+    // producer. NDJSON ready does not drain its HTTP ACK chain, and same-SID
+    // requests share an in-flight touch: an ACK could consume this fault or let
+    // list reuse a healthy pre-fault lookup instead of exercising E_DB.
     const originalTouch = h.authStore.touchSession.bind(h.authStore);
     const fail = vi.spyOn(h.authStore, "touchSession").mockImplementationOnce(async (...args) => {
       await originalTouch(...args);
@@ -119,7 +121,10 @@ it.each([false, true])(
     expect(denied.status).toBe(503);
     expect(denied.body.code).toBe("E_DB");
     expect(fail).toHaveBeenCalled();
+    expect(fail).toHaveBeenCalledTimes(1);
     fail.mockRestore();
+    const live = corrupt ? undefined : await nativeView(h),
+      ledger = readFileSync(`${h.state}/terminal-v2/ledger.json`);
     // Heartbeat ACKs still use actual normal authentication. ONLY the original
     // reserved expiry-query results are lost, so the real55s check is causal,
     // not an earlier15s missing-heartbeat detach masquerading as revalidation.
