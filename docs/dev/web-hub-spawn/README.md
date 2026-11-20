@@ -24,6 +24,37 @@ child processes + `fixtures/fake-rpc-pi.mjs`) and `tests/conformance/rpc-spawn.t
 S1 merge gates — design: `docs/dev/web-hub-spawn/{arch,plan,acceptance}.md`. 出厂默认 2026-11-04 起
 `maxProcesses=10, maxPerPrincipal=10`（原 4/2，见 arch §6.2 表）。
 
+## Managed-session age policy (T57, user ruling 2026-11-20)
+
+New hubs impose **no managed-session age limit**, for fresh spawn, boot restore or explicit
+relaunch. There is no lifetime timer/anchor, and old `createdAt` alone never rejects a restore.
+`webHub.spawn.maxLifetimeMinutes` is deprecated and ignored by new hubs, but its default 720,
+settings clamp 10..10080, strict hub parser, buildHubConfig and numeric policy/wire projection
+remain unchanged for compatibility. **0 is not an unlimited switch**: settings still clamp it
+and the hub parser rejects it. No wire enum/PROTO or spawns v2 migration: historical
+`endReason:"lifetime"` / `restore.failure:"lifetime"` still round-trip; old terminal records do
+not auto-revive. `RESTORE_MIN_LIFETIME_MS` had no wire consumers and is removed.
+
+Explicit user stop, hub shutdown, crash/orphan/reaper cleanup, registration timeout, restore
+attempt/identity/removeIntent/veto/session safety gates, secure guards, count/rate limits and
+all non-age deadlines remain. Live managed children still keep the hub alive, now without an
+age backstop; an unattended or runaway session can consume resources until explicitly stopped,
+exited or cleaned up by those existing safety paths. Terminal PTY, subagent and workflow
+budgets are separate and unchanged.
+
+This behavior belongs to the **hub executable**, not a setting/agent/UI toggle. New agent ×
+old hub still has the old age policy; only a newly running new hub removes it. Rolling back
+the hub restores the old behavior, including the createdAt restore-age filter. Source edits,
+agent reload or changing the numeric shell cannot cancel a timer already armed in a running
+old hub. No deployment/restart/stop/reload of the current site was authorized for T57.
+
+Regression evidence: supervisor fake-clock tests cross multiple old periods on fresh,
+ancient restore and relaunch records, assert live/no EOF/no signals/no lifetime reason, then
+explicit stop succeeds. Ancient candidates retain all other safety gates; real store load/save
+keeps both historical lifetime values. H6 retains its existing short legacy in-process seam,
+waits across periods and explicitly stops; the production parser floor is not relaxed.
+Retained exited discovery uses explicit stop rather than age expiry to produce its terminal.
+
 ## Created dirs
 
 **Created dirs (created-dirs plan r2)**: a folder made through `POST /api/headless/mkdir` inside `spawn.roots` is recorded (`hub/spawn/created-dirs.ts`, `<stateDir>/spawn/created-dirs.json`) as known source ④ — fully `known:true` (skips the unknown-dir confirm; `lan:"known"`/Feishu `spawnScope:"known"` widen the same way; LAN `confirm:"always"` unchanged), admission re-checks TTL/identity/fresh roots and the fresh-start pin adds `{canonical:true}`; plaintext-LAN scope cap stays (accepted cookie-sniff residual, arch §6.1); LAN-only `E_DIR{not-allowed}.detail` (`plaintext-lan|lan-known|outside-roots`, loopback byte-identical). Design: `docs/dev/web-hub-spawn/created-dirs-plan.md`; golden deltas: `created-dirs-golden-delta.md`.
@@ -53,8 +84,7 @@ Refusals: unknown spawnId or restore-off ⇒ 404; death not `confirmed` ⇒ 409
 provable ordinary default-tree `sessionFile`; custom/unknown/id-only targets are rejected
 with `410 E_SPAWN_GONE{session-invalid}`, without locate-by-id or content scanning (Q1=1).
 Unmarked nonterminal live/custom boot restores retain their legacy D7 contract. Idempotent: a non-terminal record ⇒ 202 `dup:true`, never
-a second fork. A relaunch re-anchors the lifetime (`lifetimeAnchorAt`, runtime-only — restore
-D14's createdAt anchor stays untouched for boot restores). UI: `logic/spawn.js`'s
+a second fork. A relaunch has no age timer or lifetime anchor (T57). UI: `logic/spawn.js`'s
 `relaunchableFor` gates the affordance on the cap; the whole stale card becomes the action
 (capture-phase intercept, the × / rename buttons pass through), success navigates to the old
 key's detail where the existing `successorOf` follow lands on the new live card.

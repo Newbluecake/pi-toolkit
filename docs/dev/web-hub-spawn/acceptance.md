@@ -21,23 +21,29 @@
 `tests/integration/fixtures/fake-rpc-pi.mjs`）与 `tests/conformance/rpc-spawn.test.ts`（真实 pi）。
 断言边界相对 wire 常量放宽（真实调度器），如 L3 的 12s 界断言为 ≤14s。
 
-| #   | 自动化断言（已全绿）                                                                                                                                                                                                                                                              | 载体                       | 真机仍需（终裁）      |
-| --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------- | --------------------- |
-| H1  | hub `kill -9` ⇒ 响应 EOF 的子进程 ≤4s 退出                                                                                                                                                                                                                                        | 集成（jiti 子进程 hub）    | A1 步 1–4（真 pi）    |
-| H2  | hub `kill -9` + 子进程 ignore-eof/ignore-term + 不再启动 hub ⇒ 孤儿 ≤14s 消失（reaper 5s 宽限 + TERM +3s KILL），reaper 自身 ≤11s 退出（硬顶 10s）                                                                                                                                | 集成                       | —                     |
-| H3  | hub+reaper 同时 `kill -9` ⇒ 新 hub 启动回收：记录 `exited{orphan}`，孤儿经 TERM→KILL ≤12s 死亡；把 spawns.json 的 starttime 改错再跑 ⇒ 不发任何信号（孤儿存活），记录仍终态                                                                                                       | 集成（两轮）               | —                     |
-| H4  | 真实 `pi --mode rpc`（临时 HOME、settings 列本包）：`kind:"rpc"` + 自身 pid + 钉住 cwd 的 hello、session 帧、cmdline 无 `--mode`、`verifySpawnedIdentity` ok（另钉 pgrp-mismatch 退化）、EOF ≤8s 退出、V1 帧序（实测帧 + 源码双钉）                                               | conformance                | —                     |
-| H5  | 1 MiB 的 select/confirm/editor 单行 ⇒ 头部 ≤512B 立即回 `cancelled`（实测延迟 ≤1.5s）且会话继续；坏头（无可提取 id）⇒ 记录终态 `endReason:"protocol_error"` + `hint:"protocol-error"`，子进程被停                                                                                 | 集成                       | A5 步 2–3（真对话框） |
-| H6  | `maxPerPrincipal=1` ⇒ 第二次确认后 POST 409 `E_LIMIT{principal}`；`maxProcesses=2` ⇒ 第三次 409 `E_LIMIT{global,max:2}`；运行时限（测试钩子 3s）⇒ `exited{lifetime}`；50 MiB stderr 洪泛 ⇒ 日志文件 ≤256KiB+截断标记，真实 hub 进程 VmRSS 边际增长 <32MiB（预热基线法，见 §6 注） | 集成（两段）               | A6 步 1–2（速率）     |
-| H7  | LAN 双用户：B 对 A 的记录只见 Public 投影 + §6.4 豁免的 cwd（live 绑卡后卡片本就公开的值），`stderrTail`/`hintDetail`/`origin.user`/`firstPrompt.textLen` 不可见；B 停 A 的会话 ⇒ 202；首条消息正文不出现在 SSE、GET、hub.log、spawns.json、子进程 stderr 日志                    | 集成（真实 SQLite LAN 栈） | A7（浏览器双开）      |
-| H8  | 未启用矩阵在真实装配 hub 上：loopback GET 401(未登录)/404(登录)/404(无 X-PWH)；POST 401/501 `{"error":"E_NOT_IMPLEMENTED"}`；SSE 无 `spawns` 帧；`hub` 帧 caps 与 `HubInfo.caps` 均无 `spawn.v1`；stateDir 无 spawns.json。LAN 列与 SP9 `headless-matrix.test.ts` 同表（前端层）  | 集成 + SP9 单测            | A8 步 1–3             |
+| #   | 自动化断言（已全绿）                                                                                                                                                                                                                                                                                | 载体                       | 真机仍需（终裁）      |
+| --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------- | --------------------- |
+| H1  | hub `kill -9` ⇒ 响应 EOF 的子进程 ≤4s 退出                                                                                                                                                                                                                                                          | 集成（jiti 子进程 hub）    | A1 步 1–4（真 pi）    |
+| H2  | hub `kill -9` + 子进程 ignore-eof/ignore-term + 不再启动 hub ⇒ 孤儿 ≤14s 消失（reaper 5s 宽限 + TERM +3s KILL），reaper 自身 ≤11s 退出（硬顶 10s）                                                                                                                                                  | 集成                       | —                     |
+| H3  | hub+reaper 同时 `kill -9` ⇒ 新 hub 启动回收：记录 `exited{orphan}`，孤儿经 TERM→KILL ≤12s 死亡；把 spawns.json 的 starttime 改错再跑 ⇒ 不发任何信号（孤儿存活），记录仍终态                                                                                                                         | 集成（两轮）               | —                     |
+| H4  | 真实 `pi --mode rpc`（临时 HOME、settings 列本包）：`kind:"rpc"` + 自身 pid + 钉住 cwd 的 hello、session 帧、cmdline 无 `--mode`、`verifySpawnedIdentity` ok（另钉 pgrp-mismatch 退化）、EOF ≤8s 退出、V1 帧序（实测帧 + 源码双钉）                                                                 | conformance                | —                     |
+| H5  | 1 MiB 的 select/confirm/editor 单行 ⇒ 头部 ≤512B 立即回 `cancelled`（实测延迟 ≤1.5s）且会话继续；坏头（无可提取 id）⇒ 记录终态 `endReason:"protocol_error"` + `hint:"protocol-error"`，子进程被停                                                                                                   | 集成                       | A5 步 2–3（真对话框） |
+| H6  | `maxPerPrincipal=1` ⇒ 第二次确认后 POST 409 `E_LIMIT{principal}`；`maxProcesses=2` ⇒ 第三次 409 `E_LIMIT{global,max:2}`；旧 3s 数值钩子跨多个周期仍 live，再显式 stop ⇒ `exited{user}`；50 MiB stderr 洪泛 ⇒ 日志文件 ≤256KiB+截断标记，真实 hub 进程 VmRSS 边际增长 <32MiB（预热基线法，见 §6 注） | 集成（两段）               | A6 步 1–2（速率）     |
+| H7  | LAN 双用户：B 对 A 的记录只见 Public 投影 + §6.4 豁免的 cwd（live 绑卡后卡片本就公开的值），`stderrTail`/`hintDetail`/`origin.user`/`firstPrompt.textLen` 不可见；B 停 A 的会话 ⇒ 202；首条消息正文不出现在 SSE、GET、hub.log、spawns.json、子进程 stderr 日志                                      | 集成（真实 SQLite LAN 栈） | A7（浏览器双开）      |
+| H8  | 未启用矩阵在真实装配 hub 上：loopback GET 401(未登录)/404(登录)/404(无 X-PWH)；POST 401/501 `{"error":"E_NOT_IMPLEMENTED"}`；SSE 无 `spawns` 帧；`hub` 帧 caps 与 `HubInfo.caps` 均无 `spawn.v1`；stateDir 无 spawns.json。LAN 列与 SP9 `headless-matrix.test.ts` 同表（前端层）                    | 集成 + SP9 单测            | A8 步 1–3             |
 
 已知实现口径（非缺陷，验收时按此判读）：
 
 - **H5 坏头的终态**是 `exited{protocol_error}`（会话已 live 过）而非 `failed`——SP7 的
   terminalState 语义（`failed` 保留给从未 live 的记录）。
-- **H6 运行时限**的真实 hub 子进程形态按配置下限要等 ≥10 分钟，自动化用 in-process 装配的
-  sub-floor 钩子（`maxLifetimeMinutes: 0.05`）覆盖同一状态机路径（真实 fork、真实信号、真实时限）。
+- **H6 无年龄上限（T57）**：保留 in-process 装配已有 sub-floor 数值钩子
+  `maxLifetimeMinutes: 0.05`，等待 10s 跨多个旧周期后断言仍 live、无 lifetime endReason，
+  再显式 stop ⇒ `exited{user}`。这是旧数值被忽略的真实 fork 回归，不放宽严格 production parser。
+- **T57 定向单测**：fresh / 古老 createdAt restore / relaunch 经多个旧周期仍 live、无 EOF/信号，
+  随后显式 stop 生效；古老 restore 仍受 veto/off/removeIntent/attempt/identity 门控制；真实
+  spawns v2 load/save 保留历史 endReason/restore.failure 的 `lifetime`，旧终态不自动复活。
+- **混版/现场边界**：new agent × old hub 仍受旧规则；仅运行新 hub 后取消，回滚旧 hub 旧行为回来。
+  本验收不授权部署，不会立即取消当前旧进程已 armed 的 timer；terminal/subagent/workflow 不变。
 - **H6 stderr 洪泛**的「吸收完成」信号是 sink 自己的 `[truncated N bytes]` 截断标记——fake 的
   收尾行永远写不进被截断的文件。
 - **H7 的 cwd**：live 记录绑定 agent 卡片后，非 owner 也能看到 cwd（arch §6.4 豁免行：卡片本就
@@ -116,11 +122,11 @@
 
 ### A6 资源上限
 
-| 步  | 操作                                                              | 超时 | 预期                                                                                                                                                   |
-| --- | ----------------------------------------------------------------- | ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 1   | 同一浏览器连续创建 3 个会话（`maxPerPrincipal=2`）                | 10s  | 第 3 个返回 409 `E_LIMIT{limit:"principal"}`，界面提示上限；已有 2 个会话不受影响                                                                      |
-| 2   | 1 分钟内第 4 次提交（`ratePerMinute=3`）                          | 2s   | 429，带 `Retry-After`                                                                                                                                  |
-| 3   | `npx vitest run tests/integration/web-hub-headless.test.ts -t H6` | 90s  | 全局上限（409 principal/global）、运行时限（测试钩子 3s ⇒ `exited{lifetime}`）、stderr 洪泛（日志 ≤256 KiB、真实 hub 进程 RSS 边际增长 <32 MiB）均通过 |
+| 步  | 操作                                                              | 超时 | 预期                                                                                                                                                         |
+| --- | ----------------------------------------------------------------- | ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 1   | 同一浏览器连续创建 3 个会话（`maxPerPrincipal=2`）                | 10s  | 第 3 个返回 409 `E_LIMIT{limit:"principal"}`，界面提示上限；已有 2 个会话不受影响                                                                            |
+| 2   | 1 分钟内第 4 次提交（`ratePerMinute=3`）                          | 2s   | 429，带 `Retry-After`                                                                                                                                        |
+| 3   | `npx vitest run tests/integration/web-hub-headless.test.ts -t H6` | 90s  | 全局上限（409 principal/global）、旧 3s 数值钩子跨周期不自动停止、随后显式 stop 有效、stderr 洪泛（日志 ≤256 KiB、真实 hub 进程 RSS 边际增长 <32 MiB）均通过 |
 
 ### A7 权限与可见性（LAN）
 

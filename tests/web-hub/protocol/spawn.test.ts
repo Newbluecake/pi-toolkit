@@ -379,7 +379,6 @@ describe("web-hub-spawn-restore plan §10.1: restore constants + session coordin
   it("constants carry the plan's values (§14.2 ③: not settings)", () => {
     expect(m.RESTORE_MAX_ATTEMPTS).toBe(3);
     expect(m.RESTORE_STABLE_MS).toBe(120_000);
-    expect(m.RESTORE_MIN_LIFETIME_MS).toBe(300_000);
     expect(m.RESTORE_TERM_WAIT_MS).toBe(3_000);
     expect(m.RESTORE_KILL_WAIT_MS).toBe(2_000);
     expect(m.RESTORE_POLL_MS).toBe(100);

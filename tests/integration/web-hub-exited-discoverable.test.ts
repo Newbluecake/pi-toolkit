@@ -441,7 +441,7 @@ afterEach(async () => {
 });
 
 describe.skipIf(process.platform !== "linux")("retained exited — real assembly/store/process lifecycle", () => {
-  it.each(["normal exit", "lifetime", "fence orphan"])(
+  it.each(["normal exit", "explicit stop", "fence orphan"])(
     "%s -> disk -> second hub SSE -> explicit same-session relaunch, never automatic fork",
     async (ending) => {
       sandbox = sandboxHome();
@@ -452,7 +452,7 @@ describe.skipIf(process.platform !== "linux")("retained exited — real assembly
           ? ["--write-session", "--default-session-tree", "--ignore-eof", "--ignore-term"]
           : undefined,
       );
-      let h = await boot(home, ending === "lifetime" ? { maxLifetimeMinutes: 0.05 } : {});
+      let h = await boot(home);
       const first = await fresh(h, cwd);
       await stored(h, first.spawnId, (r) => r.sessionPersisted === true, "file observed");
       if (ending === "normal exit") {
@@ -460,9 +460,9 @@ describe.skipIf(process.platform !== "linux")("retained exited — real assembly
         const ended = await stored(h, first.spawnId, (r) => r.state === "exited", "normal terminal");
         expect(ended.exit?.code).toBe(0);
         await close(h);
-      } else if (ending === "lifetime") {
-        const ended = await stored(h, first.spawnId, (r) => r.state === "exited", "lifetime terminal");
-        expect(ended.endReason).toBe("lifetime");
+      } else if (ending === "explicit stop") {
+        const ended = await stop(h, first);
+        expect(ended.endReason).toBe("user");
         await close(h);
       } else {
         await close(h, "fence"); // production terminate mode, leaves stopping with no intent

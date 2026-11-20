@@ -232,7 +232,7 @@ export const WEBHUB_SETTING_SPECS: Record<string, SettingSpec> = {
     ...count(
       "webHub.spawn.maxLifetimeMinutes",
       10,
-      "web-hub spawn: absolute lifetime of a spawned session in minutes, 10-10080 (change: /reload then /webhub restart)",
+      "web-hub spawn: deprecated compatibility value, 10-10080; ignored by new hubs (no managed-session age limit); old hubs still enforce it",
     ),
     max: 10_080,
   } as SettingSpec,

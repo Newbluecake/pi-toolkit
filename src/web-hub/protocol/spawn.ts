@@ -27,6 +27,7 @@ import { isValidSessionKey, SESSION_KEY_MAX_BYTES, type SessionRefWire } from ".
 
 export type SpawnState = "starting" | "live" | "stopping" | "exited" | "failed";
 
+/** `lifetime` is retained for historical records / old hubs; new hubs do not emit it for age. */
 export type SpawnEndReason =
   | "user"
   | "lifetime"
@@ -65,7 +66,7 @@ export type FirstPromptState = "pending" | "sending" | "delivered" | "failed" | 
 /** Where a restoring record is: reaping the old identity → fork intent written → registering. */
 export type RestorePhase = "reaping" | "forking" | "registering";
 
-/** Why a restore did not happen / did not finish (rides next to an EXISTING endReason, D11). */
+/** Why a restore did not happen / finish (D11). `lifetime` is historical/old-hub only. */
 export type RestoreFailure =
   | "session-missing"
   | "session-invalid"
@@ -114,8 +115,6 @@ export interface SpawnRestoreWire {
 export const RESTORE_MAX_ATTEMPTS = 3;
 /** D15: a restored record live this long clears its `restore` field (attempt counter reset). */
 export const RESTORE_STABLE_MS = 120_000;
-/** D14: a candidate needs at least this much of its createdAt-anchored lifetime left. */
-export const RESTORE_MIN_LIFETIME_MS = 300_000;
 /** §6.5 reaping: verified SIGTERM → poll for confirmed death at most this long. */
 export const RESTORE_TERM_WAIT_MS = 3_000;
 /** §6.5 reaping: verified SIGKILL → poll for confirmed death at most this long. */
@@ -204,6 +203,7 @@ export interface SpawnPolicyWire {
   active: number;
   activeMine: number;
   registerTimeoutS: number;
+  /** @deprecated Compatibility value only; new hubs do not enforce a managed-session age limit. */
   maxLifetimeMinutes: number;
 }
 
@@ -271,6 +271,7 @@ export interface HubSpawnConfig {
   maxProcesses: number;
   maxPerPrincipal: number;
   ratePerMinute: number;
+  /** @deprecated Compatibility value only; new hubs do not enforce a managed-session age limit. */
   maxLifetimeMinutes: number;
   registerTimeoutS: number;
   lan: "off" | "known" | "roots";

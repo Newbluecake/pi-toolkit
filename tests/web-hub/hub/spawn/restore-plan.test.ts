@@ -1,6 +1,6 @@
 /**
  * web-hub-spawn-restore plan v1 §6.4/§6.5 (RS5): the pure decision half — `classifyForRestore`
- * (§6.4's boot table, row by row × restore on/off × veto, plus the three filters) and
+ * (§6.4's boot table, row by row × restore on/off × veto, plus the non-age safety filters) and
  * `planSessionArgv` (D7's every branch).
  */
 import { describe, expect, it } from "vitest";
@@ -22,8 +22,6 @@ const NOW = 1_800_000_000_000;
 const ctx = (over: Partial<RestoreClassifyContext> = {}): RestoreClassifyContext => ({
   restoreOn: true,
   vetoed: false,
-  now: NOW,
-  maxLifetimeMs: 720 * 60_000,
   ...over,
 });
 
@@ -103,19 +101,29 @@ describe("classifyForRestore — §6.4 table", () => {
     ).toEqual({ kind: "scan", forkIntentAt: 5 });
   });
 
-  it("filters: <5min lifetime left ⇒ lifetime; attempts ≥3 ⇒ exhausted; incomplete identity ⇒ prev-unknown", () => {
-    expect(classifyForRestore(rec({ createdAt: NOW - 716 * 60_000 }), ctx())).toEqual({
-      kind: "skip",
-      failure: "lifetime",
-    });
-    expect(classifyForRestore(rec({ createdAt: NOW - 715 * 60_000 }), ctx()).kind).toBe("candidate"); // exactly 5min
-    expect(classifyForRestore(rec({ restore: { attempts: 3, lastAt: 1 } }), ctx())).toEqual({
-      kind: "skip",
-      failure: "exhausted",
-    });
-    expect(classifyForRestore(rec({ restore: { attempts: 2, lastAt: 1 } }), ctx()).kind).toBe("candidate");
-    expect(classifyForRestore(rec({ uid: undefined }), ctx())).toEqual({ kind: "skip", failure: "prev-unknown" });
-  });
+  it.each([NOW - 716 * 60_000, NOW - 715 * 60_000, 1])(
+    "age %s does not filter candidates or bypass safety gates",
+    (createdAt) => {
+      const old = rec({ createdAt });
+      expect(classifyForRestore(old, ctx())).toEqual({ kind: "candidate" });
+      expect(classifyForRestore(old, ctx({ restoreOn: false }))).toEqual({ kind: "legacy" });
+      expect(classifyForRestore(old, ctx({ vetoed: true }))).toEqual({ kind: "legacy" });
+      expect(classifyForRestore({ ...old, removeIntent: true }, ctx())).toEqual({ kind: "legacy" });
+      expect(classifyForRestore({ ...old, state: "exited", endReason: "lifetime" }, ctx())).toEqual({ kind: "legacy" });
+      expect(
+        classifyForRestore(
+          { ...old, state: "failed", restore: { attempts: 1, lastAt: 1, failure: "lifetime" } },
+          ctx(),
+        ),
+      ).toEqual({ kind: "legacy" });
+      expect(classifyForRestore({ ...old, restore: { attempts: 3, lastAt: 1 } }, ctx())).toEqual({
+        kind: "skip",
+        failure: "exhausted",
+      });
+      expect(classifyForRestore({ ...old, restore: { attempts: 2, lastAt: 1 } }, ctx()).kind).toBe("candidate");
+      expect(classifyForRestore({ ...old, uid: undefined }, ctx())).toEqual({ kind: "skip", failure: "prev-unknown" });
+    },
+  );
 });
 
 function fsOf(

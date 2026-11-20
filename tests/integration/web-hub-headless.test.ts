@@ -17,8 +17,9 @@
  *     in this process, but every spawn still forks a REAL fake-pi child (real /proc identity,
  *     real signals, real timing — only relaxed assertion bounds). The in-process mode alone
  *     skips `hub/main.ts`'s strict `parseHubSpawnConfig` re-validation, so these tests use
- *     sub-floor tunings (`registerTimeoutS: 2-3`, a 3s lifetime) as the H6 test hooks the
- *     plan intended; the production floor (10s / 10min) is enforced by SP2's own tests.
+ *     existing sub-floor test hooks (`registerTimeoutS: 2-3`, legacy 3s age value). H6 now
+ *     verifies that age value is ignored. The production parser remains strict (10s / 10min
+ *     numeric floors, tested by SP2); no test seam is reachable via production config.
  *
  * Per-child behavior switches ride `.fake-pi-switches` in the spawn cwd (the hub's fork argv
  * and env stay byte-identical to production — see the fixture's header). Assertion bounds are
@@ -1125,7 +1126,7 @@ describe.skipIf(!IS_LINUX)("web-hub headless e2e — real assembly × real fake-
     startupBudget(4) + 150_000,
   );
 
-  it("H6: principal/global limits 409, lifetime ⇒ exited{lifetime}, stderr flood capped, hub RSS bounded", async () => {
+  it("H6: principal/global limits 409, legacy lifetime ignored until explicit stop, stderr flood capped, hub RSS bounded", async () => {
     // -- principal limit: maxPerPrincipal=1 ⇒ second same-principal POST 409 --------------
     let h = await bringUp((home) => procSpawnCfg({ roots: [home], maxPerPrincipal: 1, registerTimeoutS: 10 }));
     const cwdA = projDir(sandbox!.home, "projA");
@@ -1141,8 +1142,8 @@ describe.skipIf(!IS_LINUX)("web-hub headless e2e — real assembly × real fake-
     procHubs.splice(procHubs.indexOf(h.hub), 1);
     await waitChildrenGone();
 
-    // -- global limit + lifetime + stderr flood + RSS on a fresh hub ----------------------
-    h = await bringUp((home) => procSpawnCfg({ roots: [home], maxProcesses: 2, maxLifetimeMinutes: 0.05 })); // 3s lifetime (test hook)
+    // -- global limit + ignored legacy lifetime + stderr flood + RSS on a fresh hub ----------------------
+    h = await bringUp((home) => procSpawnCfg({ roots: [home], maxProcesses: 2, maxLifetimeMinutes: 0.05 })); // legacy 3s value (existing in-process test hook)
     const cwd = projDir(sandbox!.home, "projB");
     const ids: string[] = [];
     for (let i = 0; i < 2; i++) {
@@ -1154,10 +1155,17 @@ describe.skipIf(!IS_LINUX)("web-hub headless e2e — real assembly × real fake-
     expect(third.status).toBe(409);
     expect(JSON.parse(third.body)).toMatchObject({ error: "E_LIMIT", limit: "global", max: 2 });
 
-    // lifetime: 3s after createdAt the records go terminal via the stop escalation
+    // Cross several legacy 3s periods; no automatic EOF/signal/terminal transition.
+    for (const sid of ids)
+      await waitRecord(h.stateDir, sid, (r) => r.state === "live", 20_000, "live before age check");
+    await new Promise((resolve) => setTimeout(resolve, 10_000));
     for (const sid of ids) {
-      const rec = await waitRecord(h.stateDir, sid, (r) => r.state === "exited", 20_000, `lifetime expiry ${sid}`);
-      expect(rec.endReason).toBe("lifetime");
+      const live = recordOf(h.stateDir, sid);
+      expect(live?.state).toBe("live");
+      expect(live?.endReason ?? null).toBeNull();
+      expect(await stopSpawn(h, sid)).toBe(202);
+      const rec = await waitRecord(h.stateDir, sid, (r) => r.state === "exited", 20_000, `explicit stop ${sid}`);
+      expect(rec.endReason).toBe("user");
     }
 
     // (the stderr-flood + hub-RSS cells live in the child-process describe below: the gate's

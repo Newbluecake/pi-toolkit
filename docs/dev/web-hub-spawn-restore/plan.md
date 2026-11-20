@@ -1,5 +1,12 @@
 # web-hub 受管会话跨 hub 重启恢复（spawn restore）— 设计与施工方案 v1
 
+> **历史方案覆盖声明（T57，用户裁决 2026-11-20）**：本文保留原设计记录；其中绝对
+> `maxLifetimeMinutes` 运行时限、lifetime anchor/timer、restore D14 剩余 ≥5min 过滤及相关
+> 旧验收预期均已被明确取消，不是当前实现要求。现行契约见 web-hub-spawn README/arch/acceptance：
+> 新 hub 不设 managed 会话年龄上限，配置默认/范围/parser/数值 wire 与历史 lifetime 枚举保留；
+> 所有非年龄安全门不变。new agent × old hub 仍按旧规则；回滚旧 hub 恢复旧行为；
+> 当前运行旧 timer 不会因代码或配置壳变化自动取消，未授权部署/现场操作。
+
 > 上游契约：`docs/dev/web-hub-spawn/arch.md`（v2，下称 arch；重点 §4.2、§7.2–§7.7）、`docs/dev/web-hub-spawn/plan.md`（plan v2，下称 spawn-plan；§3.1 状态机、SP5/SP7/SP13）、
 > `docs/dev/web-hub-delete-session/plan.md`（v2，下称 delete-plan；B-alive / B-fork / B-stream 三条底线、`removeIntent`）。
 > 代码坐标以 `547635d`（master HEAD）为准，并附符号名；pi 源码坐标相对 `~/.nvm/versions/node/v22.22.1/lib/node_modules/@earendil-works/pi-coding-agent/dist/`（**1.0.2**，arch 写的 0.87 已过时）。

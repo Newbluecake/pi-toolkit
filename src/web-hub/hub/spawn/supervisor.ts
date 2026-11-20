@@ -24,12 +24,12 @@
  *                  `agent.cwd === realpath` — mismatch ⇒ stop-escalation +
  *                  `failed{cwd_mismatch}`.
  *   ⑦ session      bus `session` (or a session already present at bind) ⇒ `live`: breaker
- *                  cleared, lifetime deadline armed, `onLive` bridge fired (SP8). The shared
+ *                  cleared, `onLive` bridge fired (SP8). The shared
  *                  register deadline (⑥+⑦ = createdAt + registerTimeoutS) expiring ⇒
  *                  `failed{register_timeout}` + hint `…-hello` (unbound) / `…-session`.
  *   ⑧ first prompt owned by SP8's forwarder; this module only bridges onLive/onLink/onTerminal
  *                  and re-pushes on `noteSpawnChanged` (the forwarder's `onChange` landing).
- *   ⑨ lifetime     `createdAt + maxLifetimeMinutes*60s` ⇒ stop-escalation ⇒ `exited{lifetime}`.
+ *   ⑨ age          No managed-session age limit; maxLifetimeMinutes is a compatibility-only field.
  *   ⑩ escalation   `stdin.end()` → +STOP_TERM_MS SIGTERM(-pgid) → +STOP_KILL_MS SIGKILL(-pgid)
  *                  → +EXIT_GUARD_MS fallback terminal (`exit.unconfirmed`). EVERY signal is
  *                  preceded by a synchronous identity re-verify (L5); a failed verify sends
@@ -403,10 +403,8 @@ interface Supervised extends InternalRecord {
   /** §3.1 ②'s exemption: pin-changed failures carry endReason spawn_error but never trip the breaker. */
   breakerExempt: boolean;
   registerDeadlineAt: number | undefined;
-  lifetimeDeadlineAt: number | undefined;
   spawnEventTimer: NodeJS.Timeout | undefined;
   registerTimer: NodeJS.Timeout | undefined;
-  lifetimeTimer: NodeJS.Timeout | undefined;
   stopTimer: NodeJS.Timeout | undefined;
   lastOpenCount: number;
   stop: StopState | undefined;
@@ -416,10 +414,6 @@ interface Supervised extends InternalRecord {
   lastBusy: boolean;
   /** D17: releases this record's restore-job concurrency slot (live / terminal / stopping / close). */
   restoreSlot: (() => void) | undefined;
-  /** spawn-relaunch: a user-triggered relaunch re-anchors the lifetime to the relaunch moment
-   *  (restore D14's createdAt anchor would expire a long-dead session immediately at goLive).
-   *  Runtime-only — a hub crash mid-relaunch falls back to the createdAt anchor at boot (safe). */
-  lifetimeAnchorAt: number | undefined;
 }
 
 /** web-hub-spawn-restore plan §10.2: `shutdown`'s mode — `restore` only tags + parks, the
@@ -724,7 +718,6 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
   function clearRecordTimers(rec: Supervised): void {
     rec.spawnEventTimer = clearHandle(rec.spawnEventTimer);
     rec.registerTimer = clearHandle(rec.registerTimer);
-    rec.lifetimeTimer = clearHandle(rec.lifetimeTimer);
     rec.stopTimer = clearHandle(rec.stopTimer);
     rec.stableTimer = clearHandle(rec.stableTimer);
   }
@@ -776,18 +769,6 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
         return;
       }
       onRegisterDeadline(rec);
-    });
-  }
-
-  function armLifetimeTimer(rec: Supervised): void {
-    const at = rec.lifetimeDeadlineAt;
-    if (at === undefined) return;
-    rec.lifetimeTimer = arm(at - now(), () => {
-      if (at - now() > 0) {
-        armLifetimeTimer(rec);
-        return;
-      }
-      onLifetimeDeadline(rec);
     });
   }
 
@@ -1340,7 +1321,6 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
     releaseRestoreSlot(rec);
     rec.updatedAt = now();
     rec.registerTimer = clearHandle(rec.registerTimer);
-    rec.lifetimeTimer = clearHandle(rec.lifetimeTimer);
     rec.spawnEventTimer = clearHandle(rec.spawnEventTimer);
     auditState(rec);
     persistDebounced();
@@ -1428,17 +1408,12 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
     finalizeTerminal(rec);
   }
 
-  // ----------------------------------------------------------------- ⑥⑦⑨ deadlines
+  // ----------------------------------------------------------------- ⑥⑦ registration deadline
 
   function onRegisterDeadline(rec: Supervised): void {
     if (isTerminalSpawnState(rec.state) || rec.state === "live" || rec.state === "stopping") return;
     rec.hint = rec.agentKey === undefined ? "register-timeout-hello" : "register-timeout-session";
     enterStopping(rec, "register_timeout");
-  }
-
-  function onLifetimeDeadline(rec: Supervised): void {
-    if (isTerminalSpawnState(rec.state) || rec.state !== "live") return;
-    enterStopping(rec, "lifetime");
   }
 
   /** RS3: does the session file exist right now (lstat, never follows)? Any error ⇒ false. */
@@ -1710,10 +1685,6 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
     rec.control = rec.agentKey !== undefined && (registry.getCaps(rec.agentKey) ?? []).includes("cmd.v1");
     if (rec.control !== true) rec.hint = "control-off";
     rec.registerTimer = clearHandle(rec.registerTimer);
-    // spawn-relaunch: a relaunched record's lifetime re-anchors at the relaunch moment
-    // (`lifetimeAnchorAt`); every other path keeps restore D14's createdAt anchor verbatim.
-    rec.lifetimeDeadlineAt = (rec.lifetimeAnchorAt ?? rec.createdAt) + cfg.maxLifetimeMinutes * 60_000;
-    armLifetimeTimer(rec);
     clearBreaker(); // §3.1 ⑦: live ⇒ 熔断计数清零
     rec.updatedAt = now();
     auditState(rec);
@@ -1994,10 +1965,8 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
       everLive: false,
       breakerExempt: false,
       registerDeadlineAt: undefined,
-      lifetimeDeadlineAt: undefined,
       spawnEventTimer: undefined,
       registerTimer: undefined,
-      lifetimeTimer: undefined,
       stopTimer: undefined,
       lastOpenCount: 0,
       stop: undefined,
@@ -2005,7 +1974,6 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
       stableTimer: undefined,
       lastBusy: false,
       restoreSlot: undefined,
-      lifetimeAnchorAt: undefined,
       coordsRevision: 0,
       ...(sessionTarget === undefined ? {} : { sessionTarget }),
       ...(sessionFrom === undefined ? {} : { from: sessionFrom }),
@@ -2223,10 +2191,8 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
       everLive: stored.state === "live" || stored.state === "stopping",
       breakerExempt: true, // recovered records never re-trip the breaker
       registerDeadlineAt: undefined,
-      lifetimeDeadlineAt: undefined,
       spawnEventTimer: undefined,
       registerTimer: undefined,
-      lifetimeTimer: undefined,
       stopTimer: undefined,
       lastOpenCount: 0,
       stop: undefined,
@@ -2234,7 +2200,6 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
       stableTimer: undefined,
       lastBusy: false,
       restoreSlot: undefined,
-      lifetimeAnchorAt: undefined,
       coordsRevision: 0,
     };
     return rec;
@@ -2370,8 +2335,6 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
     const classifyCtx = {
       restoreOn,
       vetoed,
-      now: now(),
-      maxLifetimeMs: cfg.maxLifetimeMinutes * 60_000,
     };
 
     let mutated = false;
@@ -3085,7 +3048,6 @@ export function createSpawnSupervisor(deps: SpawnSupervisorDeps): SpawnSuperviso
     rec.linked = false;
     rec.control = undefined;
     rec.breakerExempt = true; // D16: a relaunch failure (session gone, register timeout…) never trips the breaker
-    rec.lifetimeAnchorAt = t; // user-triggered relaunch re-anchors the lifetime (see goLive)
     rec.restore = {
       attempts: 0,
       lastAt: t,

@@ -8,7 +8,7 @@
  *     first; they always win). Verdicts:
  *       `legacy`    — not a restore candidate at all: the pre-restore recovery path, untouched.
  *       `skip`      — WAS a candidate but a §6.4 filter failed: pre-restore recovery path +
- *                     `restore.failure` annotation (`lifetime` / `exhausted` / `prev-unknown`).
+ *                     `restore.failure` annotation (`exhausted` / `prev-unknown`).
  *       `scan`      — `starting{restore.phase:"forking"}` (a crash between the fork intent and
  *                     the identity write): environ scan with `forkIntentAt - 1s` as the lower
  *                     bound (§7 L1 — the spawnId is reused, `createdAt` would be too wide).
@@ -20,12 +20,7 @@
  *
  * Zero-`as` module (`hub/spawn/**` contract, `tests/web-hub/hub/spawn/source-scan.test.ts`).
  */
-import {
-  RESTORE_MAX_ATTEMPTS,
-  RESTORE_MIN_LIFETIME_MS,
-  RESTORE_SESSION_ID_RE,
-  type RestoreFailure,
-} from "../../protocol/spawn.js";
+import { RESTORE_MAX_ATTEMPTS, RESTORE_SESSION_ID_RE, type RestoreFailure } from "../../protocol/spawn.js";
 import type { SpawnRestoreWire } from "../../protocol/spawn.js";
 import { checkSessionHeader } from "./history/head.js";
 import type { StoredRecord, StoredRestore } from "./store.js";
@@ -54,10 +49,6 @@ export interface RestoreClassifyContext {
   restoreOn: boolean;
   /** The one-shot `restore.veto` file was present at this boot (D13). */
   vetoed: boolean;
-  /** Current time (ms). */
-  now: number;
-  /** `cfg.maxLifetimeMinutes * 60_000` — the createdAt-anchored lifetime (D14). */
-  maxLifetimeMs: number;
 }
 
 export type RestoreClassification =
@@ -84,10 +75,7 @@ export function isRestoreCandidateShape(r: StoredRecord): boolean {
 export function classifyForRestore(stored: StoredRecord, ctx: RestoreClassifyContext): RestoreClassification {
   if (!ctx.restoreOn || ctx.vetoed) return { kind: "legacy" };
   if (!isRestoreCandidateShape(stored)) return { kind: "legacy" };
-  // D14: lifetime is anchored at the ORIGINAL createdAt — restores neither extend nor shorten it.
-  if (stored.createdAt + ctx.maxLifetimeMs - ctx.now < RESTORE_MIN_LIFETIME_MS) {
-    return { kind: "skip", failure: "lifetime" };
-  }
+  // T57: age is not a restore filter; all non-age safety gates remain.
   // D15: attempts counts restore forks already started (incremented before each fork).
   if ((stored.restore?.attempts ?? 0) >= RESTORE_MAX_ATTEMPTS) return { kind: "skip", failure: "exhausted" };
   if (stored.state === "starting" && stored.restore?.phase === "forking") {

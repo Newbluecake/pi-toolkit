@@ -89,6 +89,9 @@ describe("parseHubSpawnConfig (web-hub-spawn §SP2, hub-side strict re-validatio
       ["maxPerPrincipal", 99, "maxPerPrincipal=99"],
       ["ratePerMinute", 0, "ratePerMinute=0"],
       ["ratePerMinute", 31, "ratePerMinute=31"],
+      ["maxLifetimeMinutes", 0, "maxLifetimeMinutes=0"], // deprecated is NOT a zero/unlimited switch
+      ["maxLifetimeMinutes", 0.05, "maxLifetimeMinutes=0.05"], // H6 seam never relaxes production parser
+      ["maxLifetimeMinutes", "720", "maxLifetimeMinutes=720"],
       ["maxLifetimeMinutes", 9, "maxLifetimeMinutes=9"],
       ["maxLifetimeMinutes", 10_081, "maxLifetimeMinutes=10081"],
       ["registerTimeoutS", 9, "registerTimeoutS=9"],

@@ -733,6 +733,13 @@ describe("webHub.spawn.* (web-hub-spawn plan §SP2 / arch §6.2)", () => {
     expect(mid.registerTimeoutS).toBe(60);
   });
 
+  it("deprecated maxLifetimeMinutes keeps its default/clamp; zero is not an unlimited switch", () => {
+    expect(spawnDefaults.maxLifetimeMinutes).toBe(720);
+    expect(parseWebHubSettings({ spawn: { maxLifetimeMinutes: 0 } }).spawn?.maxLifetimeMinutes).toBe(10);
+    expect(parseWebHubSettings({ spawn: { maxLifetimeMinutes: 10081 } }).spawn?.maxLifetimeMinutes).toBe(10080);
+    expect(loadSettings({ webHub: { spawn: { maxLifetimeMinutes: 0 } } }).webHub.spawn?.maxLifetimeMinutes).toBe(10);
+  });
+
   it("numeric fields fall back to defaults for non-finite / non-number garbage", () => {
     for (const garbage of ["4", NaN, Infinity, -Infinity, null, undefined, [], {}]) {
       const s = parseWebHubSettings({ spawn: { maxProcesses: garbage } }).spawn!;
@@ -832,9 +839,13 @@ describe("webHub.spawn.* (web-hub-spawn plan §SP2 / arch §6.2)", () => {
     expect(defaultOf(SETTING_SPECS["webHub.spawn.roots"]!)).toBe("");
     expect(defaultOf(SETTING_SPECS["webHub.spawn.maxProcesses"]!)).toBe(10);
     expect(defaultOf(SETTING_SPECS["webHub.spawn.lan"]!)).toBe("off");
-    // every description notes the /reload + /webhub restart dance (plan §SP2)
+    // Active knobs retain restart advice; the deprecated compatibility shell explicitly does not.
     for (const key of keys) {
-      expect(SETTING_SPECS[key]!.description, key).toContain("/webhub restart");
+      if (key === "webHub.spawn.maxLifetimeMinutes") {
+        expect(SETTING_SPECS[key]!.description).toBe(
+          "web-hub spawn: deprecated compatibility value, 10-10080; ignored by new hubs (no managed-session age limit); old hubs still enforce it",
+        );
+      } else expect(SETTING_SPECS[key]!.description, key).toContain("/webhub restart");
     }
   });
 

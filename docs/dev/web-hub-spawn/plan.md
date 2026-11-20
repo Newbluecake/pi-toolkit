@@ -1,5 +1,12 @@
 # web-hub「选择工作目录建会话」施工方案（plan v2）
 
+> **历史方案覆盖声明（T57，用户裁决 2026-11-20）**：本文保留原设计记录；其中绝对
+> `maxLifetimeMinutes` 运行时限、lifetime anchor/timer、restore D14 剩余 ≥5min 过滤及相关
+> 旧验收预期均已被明确取消，不是当前实现要求。现行契约见 web-hub-spawn README/arch/acceptance：
+> 新 hub 不设 managed 会话年龄上限，配置默认/范围/parser/数值 wire 与历史 lifetime 枚举保留；
+> 所有非年龄安全门不变。new agent × old hub 仍按旧规则；回滚旧 hub 恢复旧行为；
+> 当前运行旧 timer 不会因代码或配置壳变化自动取消，未授权部署/现场操作。
+
 > 上游定稿：`docs/dev/web-hub-spawn/arch.md`（v2，下称 arch）。真机验收：`docs/dev/web-hub-spawn/acceptance.md`。
 > 代码行号以 `0d81592`（master HEAD）为准，并附**符号名**。upload U1 正在工作区施工（`http.ts` `toCard()` 之后 +4 行、`API_ERRORS`/`AgentCard`/`version.ts`/`agent/index.ts`/`settings.ts` 均有追加）；
 > spawn 在 upload 之后合入（§2.3），每个包开工前按 §2.3 的闸门以符号名重核行号。本文只写方案，不改实现。

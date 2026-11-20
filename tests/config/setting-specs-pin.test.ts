@@ -85,10 +85,21 @@ if (process.env.GOV_SPECS_GENERATE === "1") {
                 ...spec,
                 description: "P50 incremental trigger aggregation; default off, requires a live scopes activity owner",
               }
-            : spec,
+            : key === "webHub.spawn.maxLifetimeMinutes"
+              ? {
+                  ...spec,
+                  description:
+                    "web-hub spawn: absolute lifetime of a spawned session in minutes, 10-10080 (change: /reload then /webhub restart)",
+                }
+              : spec,
       ]),
   );
   describe("SETTING_SPECS pin (order + content)", () => {
+    it("declares only the managed lifetime description deprecated, without a blanket pin exemption", () => {
+      expect(SETTING_SPECS["webHub.spawn.maxLifetimeMinutes"]?.description).toBe(
+        "web-hub spawn: deprecated compatibility value, 10-10080; ignored by new hubs (no managed-session age limit); old hubs still enforce it",
+      );
+    });
     it("adds exactly declared Fast/scopes/decision keys with non-live defaults and keeps old ordering", () => {
       const oldKeys = pin.specs.map(([key]) => key);
       const minAnchor = oldKeys.indexOf("budget.totalS");

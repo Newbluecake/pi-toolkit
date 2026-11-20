@@ -267,6 +267,26 @@ describe("web-hub-spawn-restore plan §5.1/§5.2/D11: restore fields", () => {
     expect(loaded.records[0]?.sessionFile).toBe(sessionFile);
   });
 
+  it("v2 historical lifetime endReason and restore.failure survive real load/save without revival", () => {
+    const historical = [
+      rec({ spawnId: "sp_lifetime_exit", state: "exited", endReason: "lifetime" }),
+      rec({
+        spawnId: "sp_lifetime_restore",
+        state: "failed",
+        restore: { attempts: 1, lastAt: 1500, failure: "lifetime" },
+      }),
+    ];
+    writeFileSync(file(), JSON.stringify({ v: 2, records: historical }), { mode: 0o600 });
+    const store = createSpawnStore({ file: file(), log, now: () => 2000 });
+    const loaded = store.load(d());
+    expect(loaded.corrupt).toBeUndefined();
+    expect(loaded.records).toEqual(historical);
+    expect(store.saveNow(loaded.records)).toEqual({ ok: true });
+    expect(readJson(file()).v).toBe(2);
+    const reloaded = createSpawnStore({ file: file(), log, now: () => 3000 }).load(d());
+    expect(reloaded.records).toEqual(historical);
+  });
+
   it("D11 rollback pin: the persisted enum sets are exactly the 547635d ones (state / endReason / hint)", () => {
     expect([...ALL_STATES].sort()).toEqual(["exited", "failed", "launching", "live", "starting", "stopping"]);
     expect([...END_REASONS].sort()).toEqual(

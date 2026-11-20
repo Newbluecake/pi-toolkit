@@ -314,7 +314,7 @@ export function startRuntimeMonitors(
       // web-hub-proxy §3.4 (X1c): a working proxy tab (open sockets) keeps the hub alive.
       sse: ctx.fe.clientCount() + (ctx.proxyService?.activeConnections() ?? 0),
       // web-hub-spawn plan §SP10 (arch §7.8 "idle 自退"): a live managed child keeps the
-      // hub alive — the absolute lifetime deadline (§6.5 maxLifetimeMinutes) is the backstop.
+      // hub alive — no age backstop; explicit stop/shutdown and orphan/reaper safety remain.
       headless: ctx.spawnSup?.liveCount() ?? 0,
       ...(ctx.bot === undefined ? {} : { bot: ctx.bot.keepalive() ? 1 : 0 }),
     }),

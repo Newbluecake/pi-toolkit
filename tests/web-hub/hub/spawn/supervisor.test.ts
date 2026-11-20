@@ -878,10 +878,10 @@ describe("supervisor ⑤⑥⑦: spawn event, hello bind, session live (plan §3.
 });
 
 // ---------------------------------------------------------------------------
-// ⑨⑩ lifetime & stop escalation
+// ⑨⑩ no age limit & stop escalation
 // ---------------------------------------------------------------------------
 
-describe("supervisor ⑨⑩: lifetime & stop escalation (plan §3.1 rows 9–10)", () => {
+describe("supervisor ⑨⑩: no age limit & stop escalation (plan §3.1 rows 9–10)", () => {
   it("⑩ timeline 0/5/8/13s: stdin.end → TERM → KILL → guard terminal; identity verified before each signal", async () => {
     const h = makeHarness();
     await h.sup.init(deadline());
@@ -945,17 +945,22 @@ describe("supervisor ⑨⑩: lifetime & stop escalation (plan §3.1 rows 9–10)
     });
   });
 
-  it("⑨ lifetime deadline ⇒ exited{lifetime} via escalation", async () => {
+  it("⑨ fresh spawn ignores legacy lifetime across multiple cycles; explicit stop still works", async () => {
     const h = makeHarness({ cfg: baseCfg({ maxLifetimeMinutes: 1 }) });
     await h.sup.init(deadline());
     const r = req();
     h.sup.start(r, deadline());
-    await driveToLive(h, "k1000");
-    await vi.advanceTimersByTimeAsync(60_000);
-    expect(rec0(h)).toMatchObject({ state: "stopping", endReason: "lifetime" });
-    h.children[0]?.emit("exit", null, "SIGTERM");
+    const child = await driveToLive(h, "k1000");
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    expect(rec0(h)).toMatchObject({ state: "live" });
+    expect(rec0(h)?.endReason ?? null).toBeNull();
+    expect(child.stdin.writableEnded).toBe(false);
+    expect(h.kills).toHaveLength(0);
+    expect(h.sup.stop(r.spawnId, false)).toMatchObject({ ok: true });
+    expect(child.stdin.writableEnded).toBe(true);
+    child.emit("exit", 0, null);
     await vi.advanceTimersByTimeAsync(0);
-    expect(rec0(h)).toMatchObject({ state: "exited", endReason: "lifetime" });
+    expect(rec0(h)).toMatchObject({ state: "exited", endReason: "user" });
   });
 
   it("live exit without stop ⇒ exited{crash}; stop after terminal is idempotent; unknown id 404", async () => {
@@ -3345,11 +3350,16 @@ describe("spawn restore RS5: boot classification + restore jobs (L1/L5/L6)", () 
     expect(h.spawnCalls).toHaveLength(1);
   });
 
-  it("goLive of a restore: phase cleared, restoredAt set; register deadline from FORK time; lifetime anchored at createdAt; stable window drops `restore`", async () => {
+  it("goLive of a restore: phase cleared, restoredAt set; register deadline from FORK time; no age limit; stable window drops `restore`", async () => {
     const kit = restoreKit({ restoreStableMs: 5_000 });
     const { h } = kit;
     kit.files.set(SESS_FILE, { head: sessHeader() });
-    const stored = liveStored({ state: "stopping", restoreIntent: true, exit: { code: 0, signal: null } });
+    const stored = liveStored({
+      createdAt: 1,
+      state: "stopping",
+      restoreIntent: true,
+      exit: { code: 0, signal: null },
+    });
     loadInto(kit, [stored]);
     await h.sup.init(deadline());
     await vi.advanceTimersByTimeAsync(0);
@@ -3383,12 +3393,16 @@ describe("spawn restore RS5: boot classification + restore jobs (L1/L5/L6)", () 
     expect(h.onLive).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(5_001);
     expect(h.sup.records()[0]!.restore).toBeUndefined();
-    // lifetime: createdAt + 720min (not restoredAt + …)
-    const lifetimeLeft = stored.createdAt + 720 * 60_000 - Date.now();
-    await vi.advanceTimersByTimeAsync(lifetimeLeft - 1_000);
+    await vi.advanceTimersByTimeAsync(3 * 720 * 60_000);
     expect(h.sup.records()[0]!.state).toBe("live");
-    await vi.advanceTimersByTimeAsync(2_000);
-    expect(h.sup.records()[0]!.state).toBe("stopping");
+    expect(h.sup.records()[0]!.endReason ?? null).toBeNull();
+    expect(child.stdin.writableEnded).toBe(false);
+    expect(h.kills).toHaveLength(0);
+    expect(h.sup.stop(stored.spawnId, false)).toMatchObject({ ok: true });
+    expect(child.stdin.writableEnded).toBe(true);
+    child.emit("exit", 0, null);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.sup.records()[0]).toMatchObject({ state: "exited", endReason: "user" });
   });
 
   it("restore register deadline = forkAt + min(2×registerTimeoutS, 240s) ⇒ failed{register_timeout} + failure register-timeout, breaker untouched", async () => {
@@ -3455,7 +3469,7 @@ describe("spawn restore RS5: boot classification + restore jobs (L1/L5/L6)", () 
     expect(kit2.h.sup.records()[0]).toMatchObject({ state: "failed", restore: { failure: "session-invalid" } });
   });
 
-  it("§6.4 filters: lifetime <5min left / attempts exhausted ⇒ legacy orphan recovery + failure; veto / restore off / removeIntent ⇒ pure legacy", async () => {
+  it("§6.4 filters: attempts exhausted ⇒ legacy orphan recovery + failure; veto / restore off / removeIntent ⇒ pure legacy", async () => {
     const cases: Array<{
       name: string;
       stored: Partial<StoredRecord>;
@@ -3463,7 +3477,6 @@ describe("spawn restore RS5: boot classification + restore jobs (L1/L5/L6)", () 
       veto?: boolean;
       failure?: string;
     }> = [
-      { name: "lifetime", stored: { createdAt: Date.now() - (720 - 4) * 60_000 }, failure: "lifetime" },
       { name: "exhausted", stored: { restore: { attempts: 3, lastAt: 1 } }, failure: "exhausted" },
       { name: "veto", stored: {}, veto: true },
       { name: "off", stored: {}, cfg: { restore: false } },
@@ -3753,11 +3766,11 @@ describe("spawn-relaunch: supervisor.relaunch()", () => {
     expect(h.onLive).toHaveLength(1);
   });
 
-  it("lifetime re-anchors at the relaunch moment (not the original createdAt — D14 is restore-only)", async () => {
+  it("relaunch of an ancient terminal record ignores legacy lifetime across multiple cycles; explicit stop works", async () => {
     const kit = restoreKit({}, { maxLifetimeMinutes: 10 });
     const { h } = kit;
     kit.files.set(SESS_FILE, { head: sessHeader() });
-    loadInto(kit, [terminalStored({ createdAt: Date.now() - 9 * 60_000 })]);
+    loadInto(kit, [terminalStored({ createdAt: 1 })]);
     await h.sup.init(deadline());
     expect(h.sup.relaunch("sprestore0000001", deadline())).toMatchObject({ ok: true });
     await vi.advanceTimersByTimeAsync(0);
@@ -3784,13 +3797,16 @@ describe("spawn-relaunch: supervisor.relaunch()", () => {
     });
     await vi.advanceTimersByTimeAsync(0);
     expect(h.sup.records()[0]!.state).toBe("live");
-    // createdAt anchor would already have expired the session (~1min left); the relaunch anchor
-    // gives it the full 10min from the relaunch.
-    await vi.advanceTimersByTimeAsync(9 * 60_000 + 30_000);
+    await vi.advanceTimersByTimeAsync(5 * 10 * 60_000);
     expect(h.sup.records()[0]!.state).toBe("live");
-    await vi.advanceTimersByTimeAsync(1 * 60_000);
-    // past the relaunch anchor: the lifetime stop ladder has run to completion
-    expect(h.sup.records()[0]!).toMatchObject({ state: "exited", endReason: "lifetime" });
+    expect(h.sup.records()[0]!.endReason ?? null).toBeNull();
+    expect(child.stdin.writableEnded).toBe(false);
+    expect(h.kills).toHaveLength(0);
+    expect(h.sup.stop("sprestore0000001", false)).toMatchObject({ ok: true });
+    expect(child.stdin.writableEnded).toBe(true);
+    child.emit("exit", 0, null);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.sup.records()[0]).toMatchObject({ state: "exited", endReason: "user" });
   });
 
   it("idempotent: a non-terminal record (relaunch in flight, or simply live) ⇒ ok+dup, no state change, no fork", async () => {
