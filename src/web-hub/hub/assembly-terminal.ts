@@ -1,13 +1,14 @@
-/** Enabled-only v2 composition. One hub PTY/ring/ledger owner; no v1 IO/import.
+/** Enabled-only v2 composition. One hub PTY/ring/ledger owner; no v1 reader/parser.
  * Construction is synchronous and auth never awaits terminal initialization/reapers. */
 import { randomBytes } from "node:crypto";
-import { lstatSync } from "node:fs";
+import { lstatSync, realpathSync } from "node:fs";
 import type { HubAssembly } from "./assembly.js";
 import { identityEquals, verifyBoundSocket } from "../protocol/paths.js";
 import type { TerminalContextPort, TerminalContextSnapshotV2 } from "./terminal-v2-ports.js";
 import type { TerminalScopeV2 } from "../protocol/terminal-v2.js";
 import { HubTerminalServiceV2 } from "./terminal/v2/service.js";
 import { createTerminalAllocationLedgerV2 } from "./terminal/v2/ledger.js";
+import { ensureTerminalStoreV2, TerminalFreshUnsupportedV2 } from "./terminal/v2/fresh.js";
 import { retireOldKernelAllocationsV2 } from "./terminal/v2/retirement.js";
 import { createHubTerminalContextV2 } from "./terminal/v2/context.js";
 import { TerminalRevocationFenceV2, matchesTerminalAuthV2 } from "./terminal/v2/revocation-fence.js";
@@ -15,7 +16,7 @@ import { createTerminalResizeGateV2 } from "./terminal/v2/resize-gate.js";
 import { createTerminalViewsV2, type TerminalRevalidateV2 } from "./terminal/v2/view.js";
 import { createTerminalRoutesV2 } from "./terminal/v2/routes.js";
 import type { TerminalFrontendV2 } from "./terminal/v2/frontend.js";
-import { TerminalV2Fault, deadline } from "./terminal/v2/local.js";
+import { TerminalV2Fault, clampSpanMs, deadline } from "./terminal/v2/local.js";
 import { TerminalFaultV2 } from "./terminal/v2/timing.js";
 
 export function assembleTerminal(ctx: HubAssembly) {
@@ -28,6 +29,14 @@ export function assembleTerminal(ctx: HubAssembly) {
     available = false;
   let reason = "initializing";
   const lifetime = new AbortController();
+  // Pin the original state parent before the first await, not a later replacement.
+  const stateIdentity = (() => {
+    try {
+      return lstatSync(ctx.paths.stateDir);
+    } catch {
+      return undefined;
+    }
+  })();
   const ownershipCurrent = () =>
     owner !== undefined &&
     ctx.singletonOwner === owner &&
@@ -42,8 +51,16 @@ export function assembleTerminal(ctx: HubAssembly) {
     if (!ownershipCurrent() || !identity) return false;
     try {
       const dir = lstatSync(ctx.paths.socketDir),
-        socket = lstatSync(ctx.paths.socketPath);
+        socket = lstatSync(ctx.paths.socketPath),
+        state = lstatSync(ctx.paths.stateDir);
       return (
+        stateIdentity !== undefined &&
+        state.isDirectory() &&
+        !state.isSymbolicLink() &&
+        state.uid === process.getuid?.() &&
+        (state.mode & 0o777) === 0o700 &&
+        identityEquals(state, stateIdentity) &&
+        realpathSync(ctx.paths.stateDir) === ctx.paths.stateDir &&
         dir.isDirectory() &&
         dir.uid === process.getuid?.() &&
         (dir.mode & 0o777) === 0o700 &&
@@ -153,6 +170,7 @@ export function assembleTerminal(ctx: HubAssembly) {
   // No startupStep/await: auth, rotate recovery and both listeners are independent.
   // One bounded terminal-only initialization task and one guarded ledger factory.
   const initialized = (async () => {
+    const at = Date.now() + clampSpanMs(6000);
     const wait = deadline(ctx.now, 6000, [ctx.startup.signal, lifetime.signal]);
     try {
       if (!memoryCurrent() || !identity) throw new Error();
@@ -163,6 +181,18 @@ export function assembleTerminal(ctx: HubAssembly) {
         !identityEquals(actual.dir, identity.dir)
       )
         throw new Error();
+      await wait.wait(
+        ensureTerminalStoreV2(
+          {
+            stateDir: ctx.paths.stateDir,
+            ledger,
+            current: () => memoryCurrent() && resourceCurrent(),
+            at,
+          },
+          wait.signal,
+        ),
+      );
+      if (!memoryCurrent() || !resourceCurrent()) throw new Error();
       const retired = await wait.wait(
         retireOldKernelAllocationsV2({ stateDir: ctx.paths.stateDir, ledger, current: resourceCurrent }, wait.signal),
       );
@@ -170,9 +200,9 @@ export function assembleTerminal(ctx: HubAssembly) {
       available = await wait.wait(service.initialize(wait.signal));
       if (!available || !resourceCurrent()) throw new Error();
       reason = "";
-    } catch {
+    } catch (error) {
       available = false;
-      reason = "resource-unavailable";
+      reason = error instanceof TerminalFreshUnsupportedV2 ? "legacy-unsupported" : "resource-unavailable";
       ctx.log.warn("web-hub terminal unavailable", { reason });
     } finally {
       wait.dispose();
@@ -191,9 +221,27 @@ export function assembleTerminal(ctx: HubAssembly) {
     context.dispose();
     off();
     offFlights();
+    // Seal service admission and start original physical cleanup synchronously. Observe
+    // its honest result BEFORE the hub's outer 3s step/log close; never extend that step.
+    const wait = deadline(ctx.now, 2000);
+    const serviceStopped = (() => {
+      try {
+        return service.dispose();
+      } catch {
+        return Promise.reject(new Error("E_CLEANUP"));
+      }
+    })();
     disposeWork = (async () => {
-      await routes.dispose();
-      await service.dispose();
+      try {
+        const [result] = await wait.wait(Promise.all([serviceStopped, routes.dispose()]));
+        if (result.clean) ctx.log.info("web-hub terminal cleanup complete", { result: "clean" });
+        else ctx.log.warn("web-hub terminal cleanup unresolved", { result: "unknown" });
+      } catch {
+        // Timeout/rejection is not unresolved:0, and no late success revises this record.
+        ctx.log.warn("web-hub terminal cleanup unresolved", { result: "unknown" });
+      } finally {
+        wait.dispose();
+      }
     })();
     return disposeWork;
   };
