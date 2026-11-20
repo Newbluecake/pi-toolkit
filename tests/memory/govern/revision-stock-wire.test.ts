@@ -9,7 +9,7 @@ it("default resolver → stock SDK → original scheduler/client/D/C/review, 2R+
   await h.writePair();
   const before = ["rules.001", "rules.002"].map((id) => fs.readFileSync(join(h.blocks, `${id}.md`)));
   const start = h.calls.length;
-  await h.natural();
+  await h.natural(h.whenNextBatch());
   expect(h.calls.slice(start).map((c) => c.kind)).toEqual(["relation", "relation", "generation", "coverage"]);
   expect(h.ask!.mock.calls.filter(([r]) => r.jobId)).toHaveLength(2);
   expect(h.generate).toHaveBeenCalledTimes(1);
@@ -89,7 +89,7 @@ it.each(["http", "json", "validator", "lease", "digest"] as const)(
           : out;
       });
     }
-    await h.natural();
+    await h.natural(h.whenNextBatch());
     const kinds = h.calls.slice(start).map((c) => c.kind);
     expect(h.suggestions()).toEqual([]);
     expect(fs.existsSync(join(h.blocks, ".jev/revisions"))).toBe(false);
@@ -106,7 +106,7 @@ it("legal C verdict unknown may persist a suggestion, unlike C transport/JSON er
   const h = await wireFixture({ stock: true });
   await h.writePair();
   h.state.coverageVerdict = "unknown";
-  await h.natural();
+  await h.natural(h.whenNextBatch());
   expect(h.coverage).toHaveBeenCalledTimes(1);
   expect(h.suggestions()).toHaveLength(1);
   expect(h.suggestions()[0]!.revision!.autoEligible).toBe(false);
@@ -117,7 +117,7 @@ it.each([429, 500, 400])("stock R HTTP %s has no retries, splits or second tier"
   const start = h.calls.length,
     calls = h.client!.usage().calls;
   h.state.classifierStatus = status;
-  await h.natural();
+  await h.natural(h.whenNextBatch());
   expect(h.calls.slice(start).map((c) => c.kind)).toEqual(["relation"]);
   expect(h.client!.usage().calls - calls).toBe(1);
   expect(h.generate).not.toHaveBeenCalled();
@@ -149,7 +149,7 @@ it.each([
     if (fault === "revoke") h.client!.dispose();
     else h.registry.getRegisteredProviderConfig("p50-wire-offline")!.models![0]!.baseUrl = "https://changed.invalid";
   };
-  await h.natural();
+  await h.natural(h.whenNextBatch());
   expect(h.calls).toHaveLength(start);
   expect(h.suggestions()).toEqual([]);
 });
@@ -159,7 +159,7 @@ it("failed host with budget left → new host on same client cannot reclaim same
   const h = await wireFixture({ stock: true });
   await h.writePair();
   h.state.coverageStatus = 500;
-  await h.natural();
+  await h.natural(h.whenNextBatch());
   const [batch] = vi.mocked(h.host!.handle).mock.calls[0]!;
   expect(h.suggestions()).toEqual([]);
   expect(h.client!.usage().costUsd).toBeLessThan(0.1);
@@ -193,7 +193,7 @@ it.each([false, true])(
         else
           h.registry.getRegisteredProviderConfig("p50-wire-offline")!.models![0]!.baseUrl = "https://changed.invalid";
       };
-      await h.natural();
+      await h.natural(h.whenNextBatch());
       expect(h.calls.slice(start).map((c) => c.kind)).toEqual(["relation", "relation"]);
       expect(h.generate).toHaveBeenCalledTimes(1);
       expect(h.coverage).not.toHaveBeenCalled();
@@ -207,7 +207,7 @@ it.each(["prepare", "payload", "http"] as const)(
     const { prepareRevisionOutbound, revisionRequestDigests } = await import("../../../src/memory/jev/client.js");
     const h = await wireFixture({ stock: true });
     await h.writePair();
-    await h.natural();
+    await h.natural(h.whenNextBatch());
     const req = { ...h.generate!.mock.calls[0]![0], jobId: "e".repeat(64), signal: new AbortController().signal };
     const dto = prepareRevisionOutbound(req, "generate")!;
     const prepared = h.binding.revision.transport.prepare({
@@ -240,7 +240,7 @@ it("stock observed over-reserve is fully charged, latches both channels, no R2/G
   const before = h.client!.usage(),
     start = h.calls.length;
   h.state.rawUsage = { input_tokens: 10000, output_tokens: 10000 };
-  await h.natural();
+  await h.natural(h.whenNextBatch());
   expect(h.calls.slice(start).map((c) => c.kind)).toEqual(["relation"]);
   expect(h.client!.usage().costUsd - before.costUsd).toBeCloseTo(0.02, 12);
   expect(h.client!.usage().budget).toMatchObject({ exhausted: true, outstanding: 0 });
@@ -264,7 +264,7 @@ it.each(["missing", "zero", "malformed"] as const)(
       h.state.chatUsage = { prompt_tokens: -1, completion_tokens: 5, total_tokens: 4 };
     }
     const before = h.client!.usage().costUsd;
-    await h.natural();
+    await h.natural(h.whenNextBatch());
     expect(h.suggestions()).toHaveLength(1);
     expect(h.suggestions()[0]!.revision!.generationProvenance).toMatchObject({
       provider: "",
@@ -284,7 +284,7 @@ it("stock SDK length stop is terminal rather than a usable candidate", async () 
   await h.writePair();
   const start = h.calls.length;
   h.state.finishReason = "length";
-  await h.natural();
+  await h.natural(h.whenNextBatch());
   expect(h.calls.slice(start).map((c) => c.kind)).toEqual(["relation", "relation", "generation"]);
   expect(h.suggestions()).toEqual([]);
   expect(h.coverage).not.toHaveBeenCalled();
@@ -296,7 +296,7 @@ it("stock context error does not unlock the old pre-reserved split plan or secon
   h.state.classifierError = "context length exceeded";
   const start = h.calls.length,
     before = h.client!.usage();
-  await h.natural();
+  await h.natural(h.whenNextBatch());
   expect(h.calls.slice(start).map((c) => c.kind)).toEqual(["relation"]);
   expect(h.client!.usage().calls - before.calls).toBe(1);
   expect(h.client!.usage().budget!.reservedCalls).toBe(0);

@@ -7,7 +7,7 @@ it("parsed positive budget → actual wireMemory/wireJev scheduler → sole SDK 
   const h = await wireFixture();
   await h.writePair();
   expect(h.suggestions()).toEqual([]);
-  await h.natural();
+  await h.natural(h.whenNextBatch());
   const suggestions = h.suggestions();
   expect(suggestions).toHaveLength(1);
   const p = suggestions[0]!.revision!;
@@ -87,7 +87,7 @@ it("positive parsed auto/cap wire discovers a real committed source, fresh R/C a
   // touching either source-bound old/survivor revision.
   await h.create("An external durable lock convention.");
   await h.create("Another external durable budget convention.");
-  await h.natural();
+  await h.natural(h.whenNextBatch());
   expect(h.observed).toHaveLength(1);
   expect(h.generate).not.toHaveBeenCalled();
   expect(h.coverage).toHaveBeenCalledTimes(1);
@@ -118,7 +118,7 @@ it("positive parsed auto/cap wire discovers a real committed source, fresh R/C a
 it("missing exact quote leaves ordinary tagging on legacy but never sends named P50 jobs unbounded", async () => {
   const h = await wireFixture({ noQuote: true });
   await h.writePair();
-  await h.natural();
+  await h.natural(h.whenNextBatch());
   expect(h.calls.length).toBeGreaterThan(0);
   expect(h.calls.every((c) => c.payload.max_output_tokens === undefined)).toBe(true);
   expect(h.ask!.mock.calls.some(([r]) => r.jobId !== undefined)).toBe(true);
@@ -240,7 +240,7 @@ it("raw actual identity is required independently of raw usage; SDK requested id
   const h = await wireFixture();
   await h.writePair();
   h.state.missingRaw = true;
-  await h.natural();
+  await h.natural(h.whenNextBatch());
   expect(h.ask!.mock.calls.filter(([r]) => r.jobId)).toHaveLength(2);
   expect(h.generate).not.toHaveBeenCalled();
   expect(h.suggestions()).toEqual([]);
@@ -251,7 +251,7 @@ it("missing raw usage retains reserve while verified raw identity remains usable
   await h.writePair();
   h.state.missingUsage = true;
   const before = h.client!.usage().costUsd;
-  await h.natural();
+  await h.natural(h.whenNextBatch());
   expect(h.suggestions()).toHaveLength(1);
   expect(h.suggestions()[0]!.revision!.generationProvenance!.trusted).toBe(true);
   expect(h.client!.usage().budget?.costSource).toBe("mixed");
@@ -262,7 +262,7 @@ it("a positive but insufficient job cap cannot bypass A by falling back to legac
   const h = await wireFixture({ cap: 0.000001 });
   await h.writePair();
   const before = h.calls.length;
-  await h.natural();
+  await h.natural(h.whenNextBatch());
   expect(h.ask!.mock.calls.filter(([r]) => r.jobId)).toHaveLength(1);
   expect(h.calls).toHaveLength(before);
   expect(h.generate).not.toHaveBeenCalled();
@@ -274,7 +274,7 @@ it("last SDK payload is recounted against its reservation; an underquote sends z
   await h.writePair();
   const before = h.calls.length;
   h.state.underquote = true; // intentionally INVALID synthetic certificate, not a successful tokenizer
-  await h.natural();
+  await h.natural(h.whenNextBatch());
   expect(h.ask!.mock.calls.filter(([r]) => r.jobId)).toHaveLength(1);
   expect(h.calls).toHaveLength(before);
   expect(h.generate).not.toHaveBeenCalled();
@@ -286,7 +286,7 @@ it("SDK bounded classifier transient response has no hidden retry", async () => 
   await h.writePair();
   const before = h.calls.length;
   h.state.classifierStatus = 429;
-  await h.natural();
+  await h.natural(h.whenNextBatch());
   expect(h.ask!.mock.calls.filter(([r]) => r.jobId)).toHaveLength(1);
   expect(h.calls).toHaveLength(before + 1);
   expect(h.generate).not.toHaveBeenCalled();
@@ -395,7 +395,7 @@ it("actual scopes owner signal revokes an old flight on manager-context rebind, 
     h.create("A new current-owner durable lock rule."),
     h.create("A new current-owner durable budget rule."),
   ]);
-  await h.natural();
+  await h.natural(h.whenNextBatch());
   expect(h.suggestions().length).toBeGreaterThan(0);
   expect(h.generate!.mock.calls.length).toBeGreaterThan(1);
   expect(h.observed).toHaveLength(1);
@@ -424,11 +424,124 @@ it("an E effect followed by synchronous abort still invalidates the original cwd
     }
     return result;
   });
-  await h.natural();
+  await h.natural(h.whenNextBatch());
   expect(effect).toBe(true);
   expect(fs.readFileSync(join(h.blocks, "rules.002.md"), "utf8")).toContain("status: superseded");
   expect(invalidation.mock.calls.some(([dir]) => dir === h.dir)).toBe(true);
   const count = h.calls.length;
   await vi.advanceTimersByTimeAsync(2000);
   expect(h.calls).toHaveLength(count);
+});
+
+it("next-batch completion covers a deterministic detached pre-host delay", async () => {
+  const h = await wireFixture();
+  const port = h.observed[0]!.p50!;
+  const original = port.handle;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  vi.spyOn(port, "handle").mockImplementation(async (...args) => {
+    await gate;
+    return original(...args);
+  });
+  await h.writePair();
+  // Observe clock completion independently of natural's completion barrier.
+  const advance = vi.advanceTimersByTimeAsync.bind(vi);
+  let advanced!: () => void;
+  const clockAdvanced = new Promise<void>((resolve) => {
+    advanced = resolve;
+  });
+  vi.spyOn(vi, "advanceTimersByTimeAsync").mockImplementation(async (ms) => {
+    await advance(ms);
+    advanced();
+  });
+  const done = h.whenNextBatch(); // registered before the scheduler can dispatch
+  let settled = false;
+  const opportunity = h.natural(done).then(() => {
+    settled = true;
+  });
+  try {
+    await clockAdvanced;
+    await advance(0); // drain continuations without advancing the quiet clock again
+    expect(port.handle).toHaveBeenCalledTimes(1);
+    expect(h.host!.handle).not.toHaveBeenCalled();
+    expect(settled).toBe(false);
+    expect(h.suggestions()).toHaveLength(0);
+    release();
+    await opportunity;
+    expect(await done).toMatchObject({ kind: "settled", reason: "done", saved: 1 });
+    expect(settled).toBe(true);
+    expect(h.suggestions()).toHaveLength(1);
+    expect(h.generate).toHaveBeenCalledTimes(1);
+    expect(h.coverage).toHaveBeenCalledTimes(1);
+  } finally {
+    release();
+    await opportunity;
+  }
+});
+
+it("no-batch natural returns, and a waiter registered during a held flight belongs only to the next batch", async () => {
+  const h = await wireFixture();
+  await h.create("Keep the budget and directory lock.");
+  await h.natural(); // below threshold: no completion wait must be invented
+  expect(h.host!.handle).not.toHaveBeenCalled();
+  await h.create("Preserve valid constraints with the directory lock.");
+  let release!: () => void;
+  h.state.heldKind = "generation";
+  h.state.hold = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const first = h.whenNextBatch();
+  try {
+    await h.natural(); // must return at HTTP start, not deadlock on first
+    expect(h.generate).toHaveBeenCalledTimes(1);
+    expect(h.suggestions()).toHaveLength(0);
+    const next = h.whenNextBatch();
+    let nextSettled = false;
+    void next.then(() => {
+      nextSettled = true;
+    });
+    release();
+    const firstResult = await first;
+    expect(firstResult).toMatchObject({ kind: "settled", reason: "done" });
+    expect(nextSettled).toBe(false); // first's settlement must not claim next
+    h.state.heldKind = "";
+    await h.natural(); // cooldown, no new writes: do not wait on next
+    expect(nextSettled).toBe(false);
+    await h.create("A new durable budget convention.");
+    await h.create("A new durable directory lock convention.");
+    await h.natural(next);
+    const nextResult = await next;
+    expect(nextSettled).toBe(true);
+    expect(h.host!.handle).toHaveBeenCalledTimes(2);
+    const handled = vi.mocked(h.host!.handle);
+    // Compare the exact second invocation's result, not the previous result or
+    // a fabricated "success" (the original host may fence repeated menu work).
+    expect(nextResult).toBe(await handled.mock.results[1]!.value);
+    expect(handled.mock.calls[1]![0].batchId).not.toBe(handled.mock.calls[0]![0].batchId);
+  } finally {
+    release();
+    await first;
+  }
+});
+
+it("next-batch completion rejects with the actual host error instead of stranding the waiter", async () => {
+  const h = await wireFixture();
+  await h.writePair();
+  const error = new Error("controlled host rejection");
+  const binding = { ...h.hostDeps!.binding()! };
+  Object.defineProperty(binding, "accountingProfile", {
+    get() {
+      throw error;
+    },
+  });
+  vi.spyOn(h.hostDeps!, "binding").mockReturnValue(binding);
+  const done = h.whenNextBatch();
+  const rejected = expect(done).rejects.toBe(error);
+  await h.natural();
+  await rejected;
+  expect(h.host!.handle).toHaveBeenCalledTimes(1);
+  expect(h.suggestions()).toHaveLength(0);
+  expect(h.generate).not.toHaveBeenCalled();
 });

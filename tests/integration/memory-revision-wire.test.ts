@@ -5,7 +5,7 @@ it("actual root activate consumes parsed positive cap and native provider capabi
   const h = await wireFixture({ root: true });
   expect(h.settings.incremental).toMatchObject({ enabled: true, auto: false, jobCostCapUsd: 0.1 });
   await h.writePair();
-  await h.natural();
+  await h.natural(h.whenNextBatch());
   expect(h.observed).toHaveLength(1);
   expect(h.suggestions()).toHaveLength(1);
   expect(h.generate).toHaveBeenCalledTimes(1);

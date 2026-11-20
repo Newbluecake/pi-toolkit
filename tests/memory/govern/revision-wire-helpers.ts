@@ -433,13 +433,68 @@ export async function wireFixture(
   const observed: jevWire.WireJevResult[] = [];
   let hostDeps: revisionHostModule.RevisionHostDeps | undefined;
   let host: ReturnType<typeof revisionHostModule.createRevisionHost> | undefined;
-  let batchDone: Promise<revisionHostModule.RevisionHostResult> | undefined;
+  type BatchWaiter = {
+    resolve(result: revisionHostModule.RevisionHostResult): void;
+    reject(reason: unknown): void;
+  };
+  const nextBatch: BatchWaiter[] = [];
+  const pendingBatches = new Set<BatchWaiter>();
+  let fixtureDisposed = false;
+  const cancelBatchWaits = () => {
+    fixtureDisposed = true;
+    for (const waiter of pendingBatches) waiter.reject(new Error("wire fixture disposed before batch completion"));
+    pendingBatches.clear();
+    nextBatch.length = 0;
+  };
+  const whenNextBatch = () => {
+    const done = new Promise<revisionHostModule.RevisionHostResult>((resolve, reject) => {
+      if (fixtureDisposed) {
+        reject(new Error("wire fixture disposed before batch completion"));
+        return;
+      }
+      const waiter: BatchWaiter = {
+        resolve: (result) => {
+          pendingBatches.delete(waiter);
+          resolve(result);
+        },
+        reject: (reason) => {
+          pendingBatches.delete(waiter);
+          reject(reason);
+        },
+      };
+      nextBatch.push(waiter);
+      pendingBatches.add(waiter);
+    });
+    // A failed assertion may skip the caller's await; teardown still rejects
+    // outstanding waits without creating an unhandled rejection.
+    void done.catch(() => {});
+    return done;
+  };
   const realCreateHost = revisionHostModule.createRevisionHost;
   vi.spyOn(revisionHostModule, "createRevisionHost").mockImplementation((deps) => {
     hostDeps = deps;
     host = realCreateHost(deps);
     const handle = host.handle;
-    vi.spyOn(host, "handle").mockImplementation((...args) => (batchDone = handle(...args)));
+    vi.spyOn(host, "handle").mockImplementation((...args) => {
+      // Claim BEFORE calling handle: later registrations belong to a later
+      // batch, even if this one is still held in SDK/auth/HTTP work.
+      const waiters = nextBatch.splice(0);
+      try {
+        const done = handle(...args);
+        void done.then(
+          (result) => {
+            for (const waiter of waiters) waiter.resolve(result);
+          },
+          (error: unknown) => {
+            for (const waiter of waiters) waiter.reject(error);
+          },
+        );
+        return done;
+      } catch (error) {
+        for (const waiter of waiters) waiter.reject(error);
+        throw error;
+      }
+    });
     return host;
   });
   const realWire = jevWire.wireJev;
@@ -482,6 +537,8 @@ export async function wireFixture(
   cleanups.push(async () => {
     await emit("session_shutdown", { reason: "shutdown" });
   });
+  // Reverse-order teardown cancels waits before shutdown can itself fail.
+  cleanups.push(cancelBatchWaits);
   await emit("session_start", { reason: "startup" });
   await vi.advanceTimersByTimeAsync(0);
   const client = observed[0]?.client as JevClientHandle | undefined;
@@ -529,19 +586,20 @@ export async function wireFixture(
     calls,
     proxyRequests,
     whenHTTP,
+    whenNextBatch,
     emit,
     create,
     writePair,
     suggestions,
     warning,
     ctx,
-    natural: async () => {
-      // Advancing the scheduler clock is not a completion barrier for the SDK's
-      // real async auth/I/O. Held-flight tests stop at the actual HTTP start;
-      // ordinary opportunities wait for the original host task to settle.
+    natural: async (completed?: Promise<revisionHostModule.RevisionHostResult>) => {
+      // Callers expecting a batch register whenNextBatch BEFORE natural().
+      // No-batch paths only advance the clock; held-flight paths stop at HTTP
+      // start, never implicitly wait on an old or deliberately held batch.
       const started = state.heldKind ? whenHTTP(state.heldKind) : undefined;
       await vi.advanceTimersByTimeAsync(1000);
-      await (started ?? batchDone);
+      await (started ?? completed);
     },
   };
 }

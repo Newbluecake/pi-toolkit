@@ -101,7 +101,7 @@ it("approved OFFLINE manifest → actual default wire/SDK fakeHTTP 2R+G+C → or
   const reference = await wireFixture({ stock: true });
   await reference.writePair();
   const start = reference.calls.length;
-  await reference.natural();
+  await reference.natural(reference.whenNextBatch());
   const payloads = reference.calls.slice(start).map((c) => c.payload);
   expect(payloads).toHaveLength(4);
   const h = await wireFixture({ stock: true });
@@ -117,7 +117,7 @@ it("approved OFFLINE manifest → actual default wire/SDK fakeHTTP 2R+G+C → or
       const stage = (["R1", "R2", "G1", "C1"] as ProbeStage[])[n++]!;
       ctx.beforeHttp(stage, `https://p50-wire.invalid/v1/${n <= 2 ? "systemone" : "chat/completions"}`, call.payload);
     };
-    await h.natural();
+    await h.natural(h.whenNextBatch());
     const p = h.suggestions()[0]!.revision!;
     const audit = JSON.parse(
       readFileSync(join(h.blocks, ".jev/revisions", p.batchId, p.actionId, "audit.json"), "utf8"),
